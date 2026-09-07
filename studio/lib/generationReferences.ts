@@ -71,6 +71,15 @@ export type GenerationReference =
       channels: number;
       /** Exact decoded samples per channel, supplied by canonical ingress. */
       sample_count?: number | null;
+    })
+  | (GenerationReferenceBase & {
+      kind: "mesh";
+      format: "glb" | "obj";
+      byte_length: number;
+      coordinates: {
+        up_axis: "y" | "z";
+        meters_per_unit: number;
+      };
     });
 
 export interface GenerationReferenceMetadata {
@@ -93,6 +102,12 @@ export interface GenerationReferenceMetadata {
   sample_rate?: number | null;
   channels?: number | null;
   sample_count?: number | null;
+  mesh_format?: "glb" | "obj" | null;
+  byte_length?: number | null;
+  coordinates?: {
+    up_axis: "y" | "z";
+    meters_per_unit: number;
+  } | null;
   prepared_shape?: GenerationReferencePreparedShape | null;
   /** The crop an image reference carried; absent for every other reference. */
   crop?: GenerationReferenceCrop | null;

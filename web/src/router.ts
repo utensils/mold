@@ -4,6 +4,7 @@ import {
   type RouteRecordRaw,
 } from "vue-router";
 import CreatePage from "./pages/CreatePage.vue";
+import MeshWorkflowPage from "./pages/MeshWorkflowPage.vue";
 import LibraryPage from "./pages/LibraryPage.vue";
 import ModelsPage from "./pages/ModelsPage.vue";
 import MachinesPage from "./pages/MachinesPage.vue";
@@ -16,6 +17,7 @@ import NotFoundPage from "./pages/NotFoundPage.vue";
 export const routes: RouteRecordRaw[] = [
   { path: "/", redirect: { name: "create" } },
   { path: "/create", name: "create", component: CreatePage },
+  { path: "/create/3d", name: "mesh-workflow", component: MeshWorkflowPage },
   { path: "/library", name: "library", component: LibraryPage },
   { path: "/models", name: "models", component: ModelsPage },
   { path: "/machines", name: "machines", component: MachinesPage },

@@ -320,6 +320,10 @@ subagents; the user subsequently requested subagent peer review before the final
   shape recipe, prompt routed only to the image model, then optional matting,
   delight and paint. Resolve dependencies/capacity before starting; persist the
   generated image so a resumed paint failure never reruns successful text-to-image.
+- Execute the same typed workflow through every qualified shape tier, including
+  2.0 dense, mini/Turbo/Fast, 2.1 dense and quantized, and 2mv normal/Turbo.
+  Workflow admission is capability-driven: it must not special-case one dense
+  checkpoint or silently replace a selected distilled/quantized recipe.
 - Add mesh-input texturing through P1/P3: GLB/OBJ plus a reference appearance image,
   bypassing shape inference entirely. Define existing-UV versus regenerate policy,
   material replacement and normalized coordinate handling in the profile.
@@ -331,7 +335,8 @@ subagents; the user subsequently requested subagent peer review before the final
   point/sharp-edge sampling, farthest-point sampling and PointCrossAttention with
   separate oracle fixtures and loss/geometry validation.
 - Exit: prompt → final GLB and supplied mesh → textured GLB both resume durably;
-  a supplied mesh never loads a shape model.
+  a supplied mesh never loads a shape model. Every advertised dense, distilled,
+  and quantized shape tier passes the same workflow/restart contract.
 
 ### P12 — Delight pre-stage (#1496.7)
 
@@ -358,9 +363,17 @@ subagents; the user subsequently requested subagent peer review before the final
   over the campaign fixture set; measure actual VRAM and runtime benefits. Establish
   tolerances before inspecting candidate quant results. Do not hide failure with
   a silent full-model dense fallback.
-- Exit: at least the 2.1 Q8 path is measured and usable through a documented local
-  conversion workflow. Qualify 2.0 separately; advertise only passing tiers. Qualify
-  FP8 and lower-bit policies against the dense baseline before advertising them.
+- Ship measured Q8 variants for both 2.1 and 2.0 where their separate dense
+  baselines pass. Qualify FP8 and lower-bit policies independently before exposing
+  them, and retain an explicit unsupported result with measurements when a policy
+  cannot meet the established geometry tolerance; absence is never called support.
+- Run every passing quantized tier through direct image-to-mesh, durable
+  text-to-mesh, cold/warm model switching, offload and restart/resume qualification.
+  Distilled 2.0 and 2mv Turbo tiers remain first-class workflow choices and receive
+  the same regression matrix against their own upstream schedules.
+- Exit: passing 2.0 and 2.1 quantized variants are usable through documented local
+  conversion and appear on all capability-driven surfaces; dense and distilled
+  variants remain selectable and no request is silently upgraded or downgraded.
 
 ### P14 — Generation assets, exports and complete surfaces (#1496.8)
 
@@ -407,13 +420,13 @@ subagents; the user subsequently requested subagent peer review before the final
 
 | Area | Required evidence |
 | --- | --- |
-| Existing geometry | 2.0 baseline, mini/Turbo regression where affected; fixed framing, axes, occupancy and fp16 behavior |
+| Existing geometry | 2.0 dense and mini/Turbo/Fast regressions; fixed framing, axes, occupancy, schedules and fp16 behavior |
 | Paint components | DINO/VAE/reference cache/UNet block/three CFG branches/UniPC step fixtures; finite tensors and layout checks |
 | Texture output | 1024, 2048, 4096 maps; UV coverage/seams; correct GLB PBR channels/factors; independent renderer and glTF validator |
-| Shape extensions | 2.1 MoE + DINO-large; 2mv and Turbo; all nonempty view subsets in contract tests |
+| Shape extensions | 2.1 MoE + DINO-large; 2mv normal/Turbo; all nonempty view subsets and every advertised workflow tier in contract tests |
 | Image preprocessing | alpha/no-alpha, fine detail, empty foreground, delight bright/specular/flat-color cases |
 | Mesh inputs | GLB/OBJ; valid/invalid UVs, multi-primitive/transforms, malformed/oversized/degenerate inputs |
-| Quantization | dense vs Q8 metrics, finite outputs, peak memory/runtime, cold/warm/offload transitions |
+| Quantization | separate 2.0/2.1 dense vs Q8/FP8/lower-bit metrics; finite outputs, peak memory/runtime, cold/warm/offload/restart transitions; only passing tiers advertised |
 | Scheduling | same-device image progress during mesh CPU work; no simultaneous shape/paint residency; multi-GPU placement/cancel |
 | Durability | restart at every stage and publication window; disconnect; cancellation; interrupted explicit resume; idempotent gallery |
 | Assets/security | authorized downloads, retained sources, no paths/secrets, trash/restore, isolated permanent-delete copies, sibling independence |

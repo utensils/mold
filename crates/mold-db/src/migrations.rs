@@ -660,6 +660,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 35,
         kind: MigrationKind::Sql(V35_GENERATION_QUEUE_DERIVED_MEDIA),
     },
+    Migration {
+        version: 36,
+        kind: MigrationKind::Sql(V36_MESH_WORKFLOW_JOBS),
+    },
 ];
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY
@@ -766,6 +770,40 @@ BEGIN
 END;
 "#;
 
+/// Transactional execution authority for portable, durable mesh workflows.
+/// The manifest in `work_dir` is refreshed from these rows and remains the
+/// portable recovery record for inspection and future import/export.
+const V36_MESH_WORKFLOW_JOBS: &str = r#"
+CREATE TABLE mesh_workflow_jobs (
+    id              TEXT PRIMARY KEY,
+    state           TEXT NOT NULL CHECK (state IN
+                       ('queued','running','paused','completed','failed','cancelled')),
+    request_json    TEXT NOT NULL,
+    work_dir        TEXT NOT NULL,
+    stage_count     INTEGER NOT NULL CHECK (stage_count > 0),
+    current_stage   INTEGER NOT NULL DEFAULT 0 CHECK (current_stage >= 0),
+    output_filename TEXT,
+    error           TEXT,
+    created_at_ms   INTEGER NOT NULL,
+    updated_at_ms   INTEGER NOT NULL
+);
+CREATE INDEX mesh_workflow_jobs_state_created
+    ON mesh_workflow_jobs(state, created_at_ms);
+
+CREATE TABLE mesh_workflow_stages (
+    job_id          TEXT NOT NULL REFERENCES mesh_workflow_jobs(id) ON DELETE CASCADE,
+    stage_index     INTEGER NOT NULL CHECK (stage_index >= 0),
+    kind            TEXT NOT NULL CHECK (kind IN
+                       ('image','matting','delight','shape','paint','finalize')),
+    state           TEXT NOT NULL CHECK (state IN
+                       ('pending','running','completed','failed')),
+    execution_batch_id TEXT,
+    artifacts_json  TEXT NOT NULL DEFAULT '[]',
+    error           TEXT,
+    updated_at_ms   INTEGER NOT NULL,
+    PRIMARY KEY (job_id, stage_index)
+);
+"#;
 /// Repairable SQLite projection of encrypted gallery-owned source-media
 /// pins. The committed gallery checkpoint remains lifecycle authority.
 const V33_GALLERY_RETAINED_MEDIA: &str = r#"
@@ -867,7 +905,7 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 35;
+pub const SCHEMA_VERSION: i64 = 36;
 
 /// Opaque staged-media ownership for durable queue rows.
 ///
@@ -1569,8 +1607,10 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 35);
+        assert_eq!(SCHEMA_VERSION, 36);
         assert!(table_exists(&conn, "device_preferences"));
+        assert!(table_exists(&conn, "mesh_workflow_jobs"));
+        assert!(table_exists(&conn, "mesh_workflow_stages"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
             vec!["device_id", "desired_enabled", "updated_at"]
@@ -1723,7 +1763,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 35);
+        assert_eq!(SCHEMA_VERSION, 36);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1860,7 +1900,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 35);
+        assert_eq!(SCHEMA_VERSION, 36);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -2122,7 +2162,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 35);
+        assert_eq!(SCHEMA_VERSION, 36);
     }
 
     #[test]

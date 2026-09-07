@@ -240,6 +240,16 @@ cat chair.png | mold run hunyuan3d-mini-turbo --image - -o chair.glb
 The web SPA, the desktop app, and the iPhone app all generate and view meshes
 now — not only the CLI, TUI, and Discord.
 
+Web and desktop include a dedicated **3-D Studio** at `/create/3d`. **Text to
+3-D** first renders a source image with any installed image model, then removes
+its background and builds the Hunyuan3D mesh; it can optionally paint PBR
+materials. **Texture a mesh** accepts GLB or OBJ plus an appearance image and
+publishes a textured GLB. These are durable server workflows: image, matting,
+shape, paint, and finalization are checkpointed, a shutdown parks unfinished
+work, and **Resume** continues the same child job after restart. Settled
+workflow-owned inputs and stage copies remain available until **Delete workflow
+data** releases them; deleting the Library print remains a separate action.
+
 1. **Pick a Hunyuan3D model** in Create. The form reshapes itself from the
    model's own generation profile: Shape, Resolution, exact-size, Fit to
    canvas, Strength, Mask, and Negative all disappear, because the profile is

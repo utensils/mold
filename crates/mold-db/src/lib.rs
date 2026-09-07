@@ -17,6 +17,7 @@ pub mod generation_batches;
 pub mod generation_queue;
 pub mod generation_queue_derived_media;
 pub mod generation_queue_media;
+pub mod mesh_workflow_jobs;
 pub mod metadata_io;
 pub mod migrations;
 mod model_prefs;

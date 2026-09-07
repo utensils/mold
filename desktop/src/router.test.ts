@@ -10,6 +10,7 @@ import { router } from "./router";
 // imported destination: each view has its own suite that mounts it for real.
 vi.mock("./views/GenerateView.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("./views/QueueView.vue", () => ({ default: { template: "<div />" } }));
+vi.mock("./views/MeshWorkflowView.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("./views/LibraryView.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("./views/ModelsView.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("./views/MachinesView.vue", () => ({ default: { template: "<div />" } }));
@@ -22,6 +23,7 @@ describe("router — five-destination IA", () => {
     for (const [path, title] of [
       ["/create", "New image"],
       ["/queue", "Queue"],
+      ["/create/3d", "3-D studio"],
       ["/library", "My images"],
       ["/models", "Styles"],
       ["/machines", "Machines"],

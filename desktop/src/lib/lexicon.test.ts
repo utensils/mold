@@ -54,12 +54,15 @@ function templateText(source: string): string {
 describe("lexicon — destinations", () => {
   it("titles every route in the lexicon", () => {
     const titles = [...routerSource.matchAll(/meta: \{ title: "([^"]+)" \}/g)].map((m) => m[1]);
-    expect(titles).toEqual([...DESTINATIONS, "Settings"]);
+    expect(titles).toEqual([...DESTINATIONS, "3-D studio", "Settings"]);
   });
 
   it("labels the sidebar's five destinations in the lexicon, in ⌘1–⌘5 order", () => {
     const labels = [...sidebarSource.matchAll(/label: "([^"]+)"/g)].map((m) => m[1]);
-    expect(labels.slice(0, DESTINATIONS.length)).toEqual([...DESTINATIONS]);
+    expect(labels.filter((label) => DESTINATIONS.includes(label as never))).toEqual([
+      ...DESTINATIONS,
+    ]);
+    expect(labels).toContain("3-D studio");
   });
 
   it("names the native View menu's destinations exactly like the sidebar", () => {

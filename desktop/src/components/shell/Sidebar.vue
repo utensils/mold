@@ -41,6 +41,7 @@ interface Destination {
 /** MAKE: the things a person came to do. SETUP: what makes them possible. */
 const MAKE: Destination[] = [
   { route: "/create", label: "New image", icon: "create" },
+  { route: "/create/3d", label: "3-D studio", icon: "create" },
   { route: "/queue", label: "Queue", icon: "list" },
   { route: "/library", label: "My images", icon: "library" },
 ];
@@ -71,7 +72,10 @@ function onReset() {
 }
 
 function isActive(path: string): boolean {
-  return route.path === path || (path !== "/create" && route.path.startsWith(`${path}/`));
+  return (
+    route.path === path ||
+    (!["/create", "/create/3d"].includes(path) && route.path.startsWith(`${path}/`))
+  );
 }
 
 // Trailing readouts: prints developed since the last visit badge My images,

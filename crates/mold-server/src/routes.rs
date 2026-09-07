@@ -384,6 +384,13 @@ use crate::queue::clean_error_message;
         crate::routes_chain_jobs::chain_job_stage_media,
         crate::routes_chain_jobs::create_chain_job_stage_media_token,
         crate::routes_activity::list_active_work,
+        crate::routes_mesh_workflows::create_mesh_workflow,
+        crate::routes_mesh_workflows::list_mesh_workflows,
+        crate::routes_mesh_workflows::get_mesh_workflow,
+        crate::routes_mesh_workflows::mesh_workflow_events,
+        crate::routes_mesh_workflows::resume_mesh_workflow,
+        crate::routes_mesh_workflows::cancel_mesh_workflow,
+        crate::routes_mesh_workflows::delete_mesh_workflow,
     ),
     components(schemas(
         mold_core::GenerateRequest,
@@ -544,12 +551,24 @@ use crate::queue::clean_error_message;
         mold_core::RetainedSourceMediaAvailability,
         mold_core::RetainedSourceMediaMember,
         mold_core::RetainedSourceMediaInventory,
+        mold_core::mesh_workflow::CreateMeshWorkflowRequest,
+        mold_core::mesh_workflow::CreateMeshWorkflowResponse,
+        mold_core::mesh_workflow::MeshWorkflowJobState,
+        mold_core::mesh_workflow::MeshWorkflowStageKind,
+        mold_core::mesh_workflow::MeshWorkflowStageState,
+        mold_core::mesh_workflow::MeshWorkflowArtifact,
+        mold_core::mesh_workflow::MeshWorkflowStageRecord,
+        mold_core::mesh_workflow::MeshWorkflowJobSummary,
+        mold_core::mesh_workflow::MeshWorkflowJobDetail,
+        mold_core::mesh_workflow::MeshWorkflowJobListing,
+        mold_core::mesh_workflow::MeshWorkflowEvent,
     )),
     tags(
         (name = "generation", description = "Image generation"),
         (name = "models", description = "Model management"),
         (name = "server", description = "Server status and health"),
         (name = "chain-jobs", description = "Durable chained video jobs"),
+        (name = "mesh-workflows", description = "Durable multi-stage 3D generation jobs"),
     ),
     info(
         title = "mold",
@@ -587,6 +606,28 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/generation-batches/:id/events",
             get(generation_batch_events),
+        )
+        .route(
+            "/api/mesh-workflows",
+            post(crate::routes_mesh_workflows::create_mesh_workflow)
+                .get(crate::routes_mesh_workflows::list_mesh_workflows),
+        )
+        .route(
+            "/api/mesh-workflows/:id",
+            get(crate::routes_mesh_workflows::get_mesh_workflow)
+                .delete(crate::routes_mesh_workflows::delete_mesh_workflow),
+        )
+        .route(
+            "/api/mesh-workflows/:id/events",
+            get(crate::routes_mesh_workflows::mesh_workflow_events),
+        )
+        .route(
+            "/api/mesh-workflows/:id/resume",
+            post(crate::routes_mesh_workflows::resume_mesh_workflow),
+        )
+        .route(
+            "/api/mesh-workflows/:id/cancel",
+            post(crate::routes_mesh_workflows::cancel_mesh_workflow),
         )
         .route(
             "/api/generate/reference-upload-sessions",
@@ -2774,6 +2815,7 @@ pub(crate) fn generation_batch_status(
                     "accepted" | "queued" => (State::Accepted, None),
                     "cancelling" => (State::Cancelling, None),
                     "running" => (State::Running, None),
+                    "paused" => (State::Paused, None),
                     "complete" => (State::Complete, None),
                     "failed" => (State::Failed, None),
                     "cancelled" => (State::Cancelled, None),
@@ -2995,9 +3037,31 @@ async fn cancel_generation_batch(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<mold_core::GenerationBatchStatus>, ApiError> {
+    cancel_generation_batch_children(&state, &id).await?;
+    let journal = state.queue_journal.clone();
+    let detail = spawn_queue_read(move || {
+        journal
+            .durable_generation_batch(&id)
+            .map_err(anyhow::Error::msg)
+    })
+    .await?
+    .ok_or_else(|| {
+        ApiError::with_code(
+            "generation batch not found",
+            "GENERATION_BATCH_NOT_FOUND",
+            StatusCode::NOT_FOUND,
+        )
+    })?;
+    Ok(Json(generation_batch_status(&state.instance_id, detail)))
+}
+
+pub(crate) async fn cancel_generation_batch_children(
+    state: &AppState,
+    id: &str,
+) -> Result<(), ApiError> {
     let _durable_transition = state.queue_journal.lock_durable_transition().await;
     let journal = state.queue_journal.clone();
-    let probe_id = id.clone();
+    let probe_id = id.to_string();
     let detail = spawn_queue_read(move || {
         journal
             .durable_generation_batch(&probe_id)
@@ -3018,23 +3082,9 @@ async fn cancel_generation_batch(
         .map(|child| child.job_id.clone())
         .collect();
     for job_id in pending {
-        cancel_one_queue_job(&state, &job_id).await?;
+        cancel_one_queue_job(state, &job_id).await?;
     }
-    let journal = state.queue_journal.clone();
-    let detail = spawn_queue_read(move || {
-        journal
-            .durable_generation_batch(&id)
-            .map_err(anyhow::Error::msg)
-    })
-    .await?
-    .ok_or_else(|| {
-        ApiError::with_code(
-            "generation batch not found",
-            "GENERATION_BATCH_NOT_FOUND",
-            StatusCode::NOT_FOUND,
-        )
-    })?;
-    Ok(Json(generation_batch_status(&state.instance_id, detail)))
+    Ok(())
 }
 
 /// Live authoritative state for one durable batch.
@@ -7410,7 +7460,7 @@ async fn resume_queue_job(
 /// Change one row's lifecycle without touching `QueuePause`, the host-wide
 /// dispatch gate. The existing PATCH token is the scheduler fence: while the
 /// SQLite transition runs, only this hydrated row is excluded from grants.
-async fn set_one_queue_job_paused(
+pub(crate) async fn set_one_queue_job_paused(
     state: &AppState,
     id: &str,
     paused: bool,
@@ -12470,6 +12520,42 @@ mod tests {
             mold_core::GenerationBatchChildState::Cancelling
         );
         assert_eq!(status.children[0].completed_at_ms, None);
+    }
+
+    #[test]
+    fn durable_status_projects_restart_paused_children_without_corruption() {
+        let detail = mold_db::generation_batches::DurableGenerationBatchDetail {
+            batch: mold_db::generation_batches::GenerationBatchRow {
+                id: "batch-id".to_string(),
+                client_batch_id: "client-id".to_string(),
+                owner_uuid: "owner-id".to_string(),
+                request_sha256: "receipt".to_string(),
+                created_at_ms: 10,
+            },
+            children: vec![
+                mold_db::generation_batches::DurableGenerationBatchChildRow {
+                    batch_id: "batch-id".to_string(),
+                    job_id: "job-id".to_string(),
+                    batch_index: 0,
+                    state: "paused".to_string(),
+                    error: None,
+                    retryable: false,
+                    error_code: None,
+                    updated_at_ms: 20,
+                    revision: 3,
+                    terminal_error_json: None,
+                    result_json: None,
+                    completed_at_ms: None,
+                },
+            ],
+        };
+
+        let status = super::generation_batch_status("instance-id", detail);
+        assert_eq!(
+            status.children[0].state,
+            mold_core::GenerationBatchChildState::Paused
+        );
+        assert_eq!(status.children[0].error, None);
     }
 
     /// A batch child carries its parent's identity advisory, so the same text

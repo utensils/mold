@@ -83,6 +83,7 @@ interface CapturedReference {
   descriptor: GenerationReference;
   byteLength: number | null;
   inlineData: string | null;
+  uploadBody: Blob | null;
 }
 
 interface ReferenceUploadSession {
@@ -313,11 +314,15 @@ function cloneWireRecord(
 function captureReferences(
   request: ReferenceUploadRequest,
   capabilities: ReferenceUploadCapabilities,
+  uploadBodies: ReadonlyMap<number, Blob>,
 ): CapturedReference[] {
-  if (minimaxH3TaskForModel(request.model) !== "ref2va") {
+  const meshRequest =
+    request.model.toLowerCase().startsWith("hunyuan3d") &&
+    request.references?.every((reference) => reference.kind === "mesh");
+  if (minimaxH3TaskForModel(request.model) !== "ref2va" && !meshRequest) {
     protocolError(
       "REFERENCE_UPLOAD_REQUEST_INVALID",
-      "Reference uploads require an explicit MiniMax H3 Ref2VA model.",
+      "Reference uploads require a supported reference-bearing model.",
     );
   }
   if (
@@ -344,7 +349,7 @@ function captureReferences(
     if (
       !reference ||
       typeof reference !== "object" ||
-      !["image", "video", "audio"].includes(reference.kind) ||
+      !["image", "video", "audio", "mesh"].includes(reference.kind) ||
       typeof reference.mime_type !== "string" ||
       reference.mime_type.trim().length === 0
     ) {
@@ -355,13 +360,18 @@ function captureReferences(
     }
     const media = asRecord(reference.media);
     const authority = media?.authority;
-    if (authority === "upload" || authority === "descriptor") {
+    const uploadBody = uploadBodies.get(oneBased) ?? null;
+    if (authority === "upload" || (authority === "descriptor" && !uploadBody)) {
       protocolError(
         "REFERENCE_UPLOAD_REQUEST_INVALID",
         `Reference ${oneBased} must be prepared from its original media authority.`,
       );
     }
-    if (authority !== "inline" && authority !== "server_path") {
+    if (
+      authority !== "inline" &&
+      authority !== "server_path" &&
+      authority !== "descriptor"
+    ) {
       protocolError(
         "REFERENCE_UPLOAD_REQUEST_INVALID",
         `Reference ${oneBased} has an unsupported media authority.`,
@@ -417,6 +427,43 @@ function captureReferences(
         descriptor,
         byteLength: null,
         inlineData: null,
+        uploadBody: null,
+      };
+    }
+
+    if (uploadBody) {
+      if (
+        uploadBody.size === 0 ||
+        uploadBody.size > capabilities.max_file_bytes
+      ) {
+        protocolError(
+          "REFERENCE_UPLOAD_TOO_LARGE",
+          `Reference ${oneBased} exceeds this host's per-file upload limit.`,
+        );
+      }
+      if (
+        reference.kind === "mesh" &&
+        reference.byte_length !== uploadBody.size
+      ) {
+        protocolError(
+          "REFERENCE_UPLOAD_MEDIA_INVALID",
+          `Reference ${oneBased} does not match its declared byte length.`,
+        );
+      }
+      sessionBytes += uploadBody.size;
+      if (sessionBytes > capabilities.max_session_bytes) {
+        protocolError(
+          "REFERENCE_UPLOAD_TOO_LARGE",
+          "The ordered references exceed this host's upload-session limit.",
+        );
+      }
+      return {
+        oneBased,
+        original: copy,
+        descriptor,
+        byteLength: uploadBody.size,
+        inlineData: null,
+        uploadBody,
       };
     }
 
@@ -455,9 +502,12 @@ function captureReferences(
       descriptor,
       byteLength,
       inlineData: data,
+      uploadBody: new Blob([decodeBase64(data, oneBased)], {
+        type: reference.mime_type,
+      }),
     };
   });
-  if (!captured.some((entry) => entry.inlineData !== null)) {
+  if (!captured.some((entry) => entry.uploadBody !== null)) {
     protocolError(
       "REFERENCE_UPLOAD_REQUEST_INVALID",
       "The request has no inline reference media to upload.",
@@ -594,8 +644,9 @@ function canonicalDescriptorFromMetadata(
     metadata.index !== oneBased ||
     metadata.kind !== reference.kind ||
     typeof metadata.mime_type !== "string" ||
-    String(metadata.sha256 ?? "").toLowerCase() !==
-      reference.provenance?.sha256?.toLowerCase() ||
+    (reference.provenance?.sha256 != null &&
+      String(metadata.sha256 ?? "").toLowerCase() !==
+        reference.provenance.sha256.toLowerCase()) ||
     normalizedOptional(metadata.name) !==
       normalizedOptional(reference.provenance?.name)
   ) {
@@ -644,6 +695,29 @@ function canonicalDescriptorFromMetadata(
       sample_rate: metadata.sample_rate,
       channels: metadata.channels,
       sample_count: metadata.sample_count,
+    };
+  }
+  if (reference.kind === "mesh") {
+    if (
+      metadata.mime_type !== reference.mime_type ||
+      metadata.mesh_format !== reference.format ||
+      metadata.byte_length !== reference.byte_length ||
+      JSON.stringify(metadata.coordinates) !==
+        JSON.stringify(reference.coordinates)
+    ) {
+      return null;
+    }
+    return {
+      kind: "mesh",
+      media: { authority: "descriptor" },
+      provenance,
+      mime_type: metadata.mime_type,
+      format: metadata.mesh_format as "glb" | "obj",
+      byte_length: metadata.byte_length as number,
+      coordinates: metadata.coordinates as {
+        up_axis: "y" | "z";
+        meters_per_unit: number;
+      },
     };
   }
   if (
@@ -747,6 +821,9 @@ export async function prepareReferenceUploads<
   request: T;
   signal?: AbortSignal | undefined;
   now?: (() => number) | undefined;
+  /** Original browser blobs keyed by one-based reference index. This keeps
+   * large files out of base64 strings and uploads each Blob without copying. */
+  uploadBodies?: ReadonlyMap<number, Blob> | undefined;
 }): Promise<ReferenceUploadLease<T>> {
   throwIfAborted(options.signal);
   const capabilities = validateCapabilities(options.capabilities);
@@ -762,7 +839,11 @@ export async function prepareReferenceUploads<
       "Reference uploads require an exact Mold instance identity.",
     );
   }
-  const captured = captureReferences(options.request, capabilities);
+  const captured = captureReferences(
+    options.request,
+    capabilities,
+    options.uploadBodies ?? new Map(),
+  );
   await bindReferenceDigests(captured, options.signal);
   throwIfAborted(options.signal);
 
@@ -773,7 +854,7 @@ export async function prepareReferenceUploads<
     references: captured.map((entry) => entry.descriptor),
   }) as T;
   const uploadReferences = captured
-    .filter((entry) => entry.inlineData !== null)
+    .filter((entry) => entry.uploadBody !== null)
     .map((entry) => entry.oneBased);
   const signal = options.signal ? { signal: options.signal } : {};
   const sessionValue = await apiJsonTo<unknown>(
@@ -829,7 +910,7 @@ export async function prepareReferenceUploads<
   let canonicalScopeSha256 = session.requestScopeSha256;
   try {
     for (const entry of captured) {
-      if (entry.inlineData === null || entry.byteLength === null) continue;
+      if (entry.uploadBody === null || entry.byteLength === null) continue;
       throwIfAborted(options.signal);
       const handle = session.uploads.get(entry.oneBased);
       if (!handle) {
@@ -838,8 +919,7 @@ export async function prepareReferenceUploads<
           "The host omitted a required reference-upload slot.",
         );
       }
-      const bytes = decodeBase64(entry.inlineData, entry.oneBased);
-      if (bytes.byteLength !== entry.byteLength) {
+      if (entry.uploadBody.size !== entry.byteLength) {
         protocolError(
           "REFERENCE_UPLOAD_MEDIA_INVALID",
           `Reference ${entry.oneBased} changed while preparing its upload.`,
@@ -854,7 +934,7 @@ export async function prepareReferenceUploads<
             "content-type": entry.original.mime_type,
             [capabilities.upload_handle_header]: handle,
           },
-          body: new Blob([bytes], { type: entry.original.mime_type }),
+          body: entry.uploadBody,
           ...signal,
         },
       );
@@ -887,7 +967,7 @@ export async function prepareReferenceUploads<
   const finalRequest = cloneWireRecord({
     ...scopedRequest,
     references: captured.map((entry) => {
-      if (entry.inlineData === null) return entry.original;
+      if (entry.uploadBody === null) return entry.original;
       const handle = session.uploads.get(entry.oneBased);
       if (!handle) {
         protocolError(
@@ -920,7 +1000,10 @@ export function requestNeedsReferenceUpload(
   request: ReferenceUploadRequest,
 ): boolean {
   return (
-    minimaxH3TaskForModel(request.model) === "ref2va" &&
+    (minimaxH3TaskForModel(request.model) === "ref2va" ||
+      (request.model.toLowerCase().startsWith("hunyuan3d") &&
+        request.references?.every((reference) => reference.kind === "mesh") ===
+          true)) &&
     Array.isArray(request.references) &&
     request.references.some(
       (reference) => reference.media.authority === "inline",

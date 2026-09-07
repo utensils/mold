@@ -42,7 +42,11 @@ pub const SESSION_HANDLE_HEADER: &str = "x-mold-reference-upload-session";
 pub const MAX_REFERENCE_UPLOAD_FILE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_REFERENCE_UPLOAD_SESSION_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_REFERENCE_UPLOAD_HOST_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-pub const MAX_REFERENCE_UPLOAD_SESSION_REQUEST_BYTES: usize = 256 * 1024;
+// A mesh-texture session binds the appearance image in `source_image` while
+// the much larger mesh is streamed through the upload slot. Keep the session
+// request under the server's ordinary generation-body ceiling so realistic
+// appearance images do not fail before the mesh upload begins.
+pub const MAX_REFERENCE_UPLOAD_SESSION_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_REFERENCE_UPLOAD_SESSIONS_PER_IDENTITY: usize = 4;
 pub const MAX_CONCURRENT_REFERENCE_UPLOADS: usize = 4;
 pub const REFERENCE_UPLOAD_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
@@ -879,7 +883,6 @@ impl ReferenceUploadStore {
                 Some("references".to_string()),
             )
         })?;
-        minimax_h3::validate_reference_descriptors(references).map_err(ApiError::reference)?;
         let requested_count = payload.upload_references.len();
         let requested = payload
             .upload_references
@@ -909,6 +912,7 @@ impl ReferenceUploadStore {
                 Some("upload_references".to_string()),
             ));
         }
+        validate_session_descriptors(&payload.request, Some(&requested))?;
 
         self.ensure_roots().await?;
         let session_handle = random_handle("mrs_")?;
@@ -1140,8 +1144,7 @@ impl ReferenceUploadStore {
                 digest == &upload_digest || matches!(slot.state, UploadState::Complete { .. })
             });
             if session_complete {
-                minimax_h3::validate_reference_descriptors(references)
-                    .map_err(ApiError::reference)?;
+                validate_session_descriptors(&canonical_request, None)?;
             }
             let request_scope_sha256 = request_scope_sha256(&canonical_request)?;
 
@@ -1588,6 +1591,66 @@ fn request_scope_sha256(request: &mold_core::GenerateRequest) -> Result<String, 
     digest.update(b"mold.reference-upload.request-scope.v1\0");
     digest.update(wire);
     Ok(format!("{:x}", digest.finalize()))
+}
+
+fn validate_session_descriptors(
+    request: &mold_core::GenerateRequest,
+    provisional_uploads: Option<&HashSet<u32>>,
+) -> Result<(), ApiError> {
+    request.references.as_deref().ok_or_else(|| {
+        ApiError::validation("reference upload session requires ordered reference descriptors")
+    })?;
+    // A browser can stream a Blob without copying it into JS memory, but Web
+    // Crypto has no streaming digest API. Uploaded slots may therefore omit
+    // their digest until the server has read and probed the bytes. Supply a
+    // validation-only placeholder; it never enters the request scope or the
+    // persisted canonical request, and completion validates the real digest.
+    let mut provisional_request = request.clone();
+    if let (Some(selected), Some(references)) =
+        (provisional_uploads, provisional_request.references.as_mut())
+    {
+        for (index, reference) in references.iter_mut().enumerate() {
+            if !selected.contains(&((index + 1) as u32)) || reference.provenance().sha256.is_some()
+            {
+                continue;
+            }
+            let provenance = match reference {
+                GenerationReference::Image { provenance, .. }
+                | GenerationReference::NamedImage { provenance, .. }
+                | GenerationReference::Video { provenance, .. }
+                | GenerationReference::Audio { provenance, .. }
+                | GenerationReference::Mesh { provenance, .. } => provenance,
+            };
+            provenance.sha256 = Some("0".repeat(64));
+        }
+    }
+    let request = &provisional_request;
+    let references = request.references.as_deref().expect("cloned above");
+    if minimax_h3::task_for_model(&request.model).is_some() {
+        return minimax_h3::validate_reference_descriptors(references).map_err(ApiError::reference);
+    }
+    let canonical = mold_core::manifest::resolve_model_name(&request.model);
+    if mold_core::manifest::find_manifest(&canonical)
+        .is_some_and(|model| model.family == mold_core::manifest::HUNYUAN3D_FAMILY)
+    {
+        return mold_core::validate_resolved_generate_request_with_family(
+            request,
+            Some(mold_core::manifest::HUNYUAN3D_FAMILY),
+        )
+        .map_err(ApiError::validation);
+    }
+    Err(ApiError::validation(
+        "reference uploads require a supported reference-bearing model",
+    ))
+}
+
+fn supports_reference_upload_session(model: &str) -> bool {
+    if minimax_h3::resolve_model_name(model).is_some() {
+        return true;
+    }
+    let canonical = mold_core::manifest::resolve_model_name(model);
+    mold_core::manifest::find_manifest(&canonical)
+        .is_some_and(|model| model.family == mold_core::manifest::HUNYUAN3D_FAMILY)
 }
 
 fn reference_as_descriptor(reference: &GenerationReference) -> GenerationReference {
@@ -2457,9 +2520,9 @@ pub(crate) async fn create_reference_upload_session(
     // Activation policy must run before directory/session allocation or download.
     crate::routes::require_server_generation_request_activation(&state, &payload.request, None)
         .await?;
-    if minimax_h3::resolve_model_name(&payload.request.model).is_none() {
+    if !supports_reference_upload_session(&payload.request.model) {
         return Err(ApiError::validation(
-            "reference upload sessions are only valid for MiniMax H3",
+            "reference upload sessions require a supported reference-bearing model",
         ));
     }
     let response = state
@@ -2940,6 +3003,45 @@ mod tests {
         request_with_references(vec![reference])
     }
 
+    #[cfg(feature = "mesh-texture")]
+    fn mesh_upload_request(
+        bytes: &[u8],
+        authority: GenerationReferenceAuthority,
+    ) -> mold_core::GenerateRequest {
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "",
+            "model": "hunyuan3d:fp16",
+            "width": 0,
+            "height": 0,
+            "steps": 1,
+            "guidance": 5.0,
+            "seed": 1,
+            "batch_size": 1,
+            "output_format": "glb",
+            "source_image": "iVBORw==",
+            "mesh": { "texture": true, "texture_resolution": 1024 }
+        }))
+        .unwrap();
+        request.references = Some(vec![GenerationReference::Mesh {
+            media: authority,
+            provenance: GenerationReferenceProvenance {
+                name: Some("mesh.glb".into()),
+                // Browser Blob uploads deliberately let the server compute
+                // and bind this digest without materializing the mesh in JS.
+                sha256: None,
+                crop: None,
+            },
+            mime_type: "model/gltf-binary".into(),
+            format: mold_core::MeshReferenceFormat::Glb,
+            byte_length: bytes.len() as u64,
+            coordinates: mold_core::MeshReferenceCoordinates {
+                up_axis: mold_core::MeshUpAxis::Y,
+                meters_per_unit: 1.0,
+            },
+        }]);
+        request
+    }
+
     fn with_media(
         mut reference: GenerationReference,
         authority: GenerationReferenceAuthority,
@@ -3180,6 +3282,51 @@ mod tests {
             inner.sessions[&session_digest].request.model,
             minimax_h3::REF2VA_COMFY
         );
+    }
+
+    #[cfg(feature = "mesh-texture")]
+    #[tokio::test]
+    async fn hunyuan3d_mesh_upload_session_accepts_and_canonicalizes_glb() {
+        let mesh = mold_inference::hunyuan3d::mesh::Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            faces: vec![[0, 1, 2]],
+            ..Default::default()
+        };
+        let bytes = mold_inference::hunyuan3d::glb::write_glb(
+            &mesh,
+            &mold_inference::hunyuan3d::glb::GlbMaterial::default(),
+            None,
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(dir.path().join("cache"));
+        let session = store
+            .create_session(
+                "auth-a",
+                "instance-a",
+                ReferenceUploadSessionRequest {
+                    request: mesh_upload_request(&bytes, GenerationReferenceAuthority::Descriptor),
+                    upload_references: vec![1],
+                },
+            )
+            .await
+            .unwrap();
+        let complete = store
+            .upload(
+                "auth-a",
+                "instance-a",
+                &session.uploads[0].handle,
+                "model/gltf-binary",
+                bytes.len() as u64,
+                Body::from(bytes),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            complete.metadata.mesh_format,
+            Some(mold_core::MeshReferenceFormat::Glb)
+        );
+        assert_eq!(complete.request_scope_sha256.len(), 64);
     }
 
     /// A staged set is what admission seals; a resolved set is what every

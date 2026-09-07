@@ -429,6 +429,9 @@ pub struct AppState {
     /// Durable chain-job runner handle. `None` when DB-backed chain jobs are
     /// unavailable; chain-job API handlers return 503 in that state.
     pub chain_jobs: Option<Arc<crate::chain_job_runner::ChainJobRunnerHandle>>,
+    /// Durable mesh workflow runner. Absent when SQLite persistence or GPU
+    /// generation is unavailable.
+    pub mesh_workflows: Option<Arc<crate::mesh_workflow_runner::MeshWorkflowRunnerHandle>>,
     // ── Downloads UI (Agent A) ──────────────────────────────────────────────
     /// Bounded-parallel download queue.
     pub downloads: Arc<DownloadQueue>,
@@ -727,6 +730,7 @@ impl AppState {
             generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
+            mesh_workflows: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
             events,
@@ -802,6 +806,7 @@ impl AppState {
             generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
+            mesh_workflows: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
             events,
@@ -890,6 +895,7 @@ impl AppState {
             generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
+            mesh_workflows: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
             events,
@@ -945,6 +951,7 @@ impl AppState {
             generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
+            mesh_workflows: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
             events,
@@ -997,6 +1004,7 @@ impl AppState {
             generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
+            mesh_workflows: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
             events,
