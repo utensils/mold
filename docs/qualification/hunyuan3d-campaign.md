@@ -1541,3 +1541,23 @@ the remaining P8-P15 features, and every client surface.
   Discord's 25-option ceiling; the focused command accepts one single-view
   source or any named-view subset plus the mesh controls and uses the same
   generation streaming and delivery path as `/generate`.
+
+### Required dense, distilled, and quantized workflow matrix
+
+The campaign remains incomplete until the following model classes have an
+explicit qualification outcome. A row may be advertised only after direct
+image-to-mesh and durable text-to-mesh execution, cold/warm activation,
+offload/model-switch, cancellation, and restart/resume pass with retained GLB
+and geometry evidence. Unsupported quantization policies require a recorded
+measured failure against the row's own dense baseline; they may not disappear
+from the audit as untested.
+
+| Shape class | Required variants | Baseline/oracle | Required outcome |
+| --- | --- | --- | --- |
+| Hunyuan3D 2.0 single-view | dense, mini/Turbo/Fast, Q8, FP8 and evaluated lower-bit policies | pinned 2.0 dense and each distilled upstream schedule | every passing tier advertised on all surfaces; failing quant policies retained with metrics |
+| Hunyuan3D 2.1 single-view | dense, Q8, FP8 and evaluated lower-bit policies | pinned 2.1 dense MoE geometry corpus | separate layer, trajectory, mesh, VRAM and runtime comparison per policy |
+| Hunyuan3D 2mv | normal and Turbo | pinned Tencent normal/Turbo checkpoints and semantic-view fixtures | both remain first-class workflow selections with no schedule substitution |
+
+The final report records exact model identity, source digest, conversion policy,
+artifact digest, peak board memory, runtime, finite checks, geometry comparison,
+Khronos validation, and client/profile visibility for each advertised row.
