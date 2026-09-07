@@ -162,13 +162,14 @@ async fn drive_job(
         let stages = mesh_workflow_jobs::stages_for_job(db, &job.id)?;
         let request: CreateMeshWorkflowRequest = serde_json::from_str(&current.request_json)?;
         match next_action(&request, &stages)? {
-            NextAction::SubmitImage => {
+            NextAction::SubmitImage { attempt_epoch } => {
                 let request = crate::mesh_workflow_media::hydrate_for_admission(
                     workflows_root,
                     &current.work_dir,
                     "image",
                 )?;
-                let batch_id = admit_child(state, &current.id, "image", request).await?;
+                let batch_id =
+                    admit_child(state, &current.id, "image", attempt_epoch, request).await?;
                 attach_batch(
                     db,
                     &current.id,
@@ -200,7 +201,7 @@ async fn drive_job(
                 )?;
                 update_manifest_from_db(db, &current)?;
             }
-            NextAction::SubmitMesh => {
+            NextAction::SubmitMesh { attempt_epoch } => {
                 let label = if matches!(request, CreateMeshWorkflowRequest::TextToMesh { .. }) {
                     "mesh"
                 } else {
@@ -219,7 +220,8 @@ async fn drive_job(
                     child.source_image =
                         Some(std::fs::read(current.work_dir.join(&image.relative_path))?);
                 }
-                let batch_id = admit_child(state, &current.id, "mesh", child).await?;
+                let batch_id =
+                    admit_child(state, &current.id, "mesh", attempt_epoch, child).await?;
                 let kinds = mesh_execution_kinds(&stages);
                 attach_batch(db, &current.id, &stages, &kinds, &batch_id)?;
                 update_manifest_from_db(db, &current)?;
@@ -281,9 +283,9 @@ async fn drive_job(
 }
 
 enum NextAction {
-    SubmitImage,
+    SubmitImage { attempt_epoch: i64 },
     WaitImage { batch_id: String },
-    SubmitMesh,
+    SubmitMesh { attempt_epoch: i64 },
     WaitMesh { batch_id: String },
     Finalize { batch_id: String },
     Done,
@@ -299,7 +301,11 @@ fn next_action(
             .find(|stage| stage.kind == MeshWorkflowStageKind::Image)
             .context("text-to-mesh workflow has no image stage")?;
         match image.state {
-            MeshWorkflowStageState::Pending => return Ok(NextAction::SubmitImage),
+            MeshWorkflowStageState::Pending => {
+                return Ok(NextAction::SubmitImage {
+                    attempt_epoch: image.updated_at_ms,
+                })
+            }
             MeshWorkflowStageState::Running => {
                 return Ok(NextAction::WaitImage {
                     batch_id: image
@@ -350,7 +356,12 @@ fn next_action(
     {
         return Ok(NextAction::WaitMesh { batch_id });
     }
-    Ok(NextAction::SubmitMesh)
+    let attempt_epoch = mesh_stages
+        .iter()
+        .find(|stage| stage.state == MeshWorkflowStageState::Pending)
+        .map(|stage| stage.updated_at_ms)
+        .context("pending mesh stage group has no attempt epoch")?;
+    Ok(NextAction::SubmitMesh { attempt_epoch })
 }
 
 fn mesh_artifact(stages: &[MeshWorkflowStageRow]) -> anyhow::Result<&MeshWorkflowArtifact> {
@@ -369,6 +380,7 @@ async fn admit_child(
     state: &AppState,
     workflow_id: &str,
     stage: &str,
+    attempt_epoch: i64,
     request: mold_core::GenerateRequest,
 ) -> anyhow::Result<String> {
     let admission = state
@@ -383,7 +395,7 @@ async fn admit_child(
                 instance_id: state.instance_id.to_string(),
             }),
             GenerationBatchAdmissionRequest {
-                client_batch_id: deterministic_batch_id(workflow_id, stage),
+                client_batch_id: deterministic_batch_id(workflow_id, stage, attempt_epoch),
                 requests: vec![request],
             },
             None,
@@ -563,9 +575,9 @@ pub(crate) fn update_manifest_from_db(
     Ok(())
 }
 
-fn deterministic_batch_id(workflow_id: &str, stage: &str) -> String {
+fn deterministic_batch_id(workflow_id: &str, stage: &str, attempt_epoch: i64) -> String {
     let digest = Sha256::digest(format!(
-        "mold.mesh-workflow.batch.v1\0{workflow_id}\0{stage}"
+        "mold.mesh-workflow.batch.v1\0{workflow_id}\0{stage}\0{attempt_epoch}"
     ));
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
@@ -615,9 +627,10 @@ mod tests {
 
     #[test]
     fn child_batch_identity_is_stable_and_stage_scoped() {
-        let first = deterministic_batch_id("workflow", "image");
-        assert_eq!(first, deterministic_batch_id("workflow", "image"));
-        assert_ne!(first, deterministic_batch_id("workflow", "mesh"));
+        let first = deterministic_batch_id("workflow", "image", 10);
+        assert_eq!(first, deterministic_batch_id("workflow", "image", 10));
+        assert_ne!(first, deterministic_batch_id("workflow", "mesh", 10));
+        assert_ne!(first, deterministic_batch_id("workflow", "image", 11));
         assert!(uuid::Uuid::parse_str(&first).is_ok());
     }
 

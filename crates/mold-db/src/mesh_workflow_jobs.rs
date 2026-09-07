@@ -387,7 +387,8 @@ pub fn resume_job(db: &MetadataDb, id: &str, now_ms: i64) -> Result<bool> {
         };
         transaction.execute(
             "UPDATE mesh_workflow_stages
-             SET state='pending',execution_batch_id=NULL,error=NULL,updated_at_ms=?3
+             SET state='pending',execution_batch_id=NULL,error=NULL,
+                 updated_at_ms=MAX(updated_at_ms + 1, ?3)
              WHERE job_id=?1 AND stage_index>=?2 AND state='failed'",
             params![id, current_stage, now_ms],
         )?;
@@ -618,6 +619,13 @@ mod tests {
             get_job(&db, &job.id).unwrap().unwrap().state,
             MeshWorkflowJobState::Failed
         );
+        assert!(resume_job(&db, &job.id, 4).unwrap());
+        let retried = stages_for_job(&db, &job.id).unwrap();
+        assert!(retried.iter().all(|stage| {
+            stage.state == MeshWorkflowStageState::Pending
+                && stage.execution_batch_id.is_none()
+                && stage.updated_at_ms == 5
+        }));
     }
 
     #[test]
