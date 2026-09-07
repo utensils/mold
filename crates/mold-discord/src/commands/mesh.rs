@@ -155,6 +155,7 @@ pub async fn mesh(
             texture,
             texture_resolution: None,
             matting,
+            delight: None,
         });
         handler::run_generation(ctx, request).await
     }

@@ -501,7 +501,7 @@ impl Hunyuan3dEngine {
             }
             views.sort_by_key(|(role, _)| super::multiview::view_slot(*role));
             #[cfg(feature = "mesh-matting")]
-            let mut derived_media = matte_images(
+            let derived_media = matte_images(
                 views.iter_mut().map(|(role, image)| (Some(*role), image)),
                 options.matting.unwrap_or_default(),
                 self.matting_asset.as_deref(),
@@ -509,15 +509,17 @@ impl Hunyuan3dEngine {
                 &self.base.progress,
             )?;
             #[cfg(feature = "mesh-delight")]
-            if options.delight == Some(true) {
-                derived_media = delight_images(
+            let derived_media = if options.delight == Some(true) {
+                delight_images(
                     views.iter_mut().map(|(role, image)| (Some(*role), image)),
                     true,
                     self.delight_paths.as_ref(),
                     self.base.gpu_ordinal,
                     &self.base.progress,
-                )?;
-            }
+                )?
+            } else {
+                derived_media
+            };
             #[cfg(not(feature = "mesh-matting"))]
             let derived_media = Vec::new();
             (DecodedConditioning::Multi(views), derived_media)
@@ -536,7 +538,7 @@ impl Hunyuan3dEngine {
             #[cfg(feature = "mesh-matting")]
             let (image, derived_media) = {
                 let mut image = image;
-                let mut derived_media = matte_images(
+                let derived_media = matte_images(
                     std::iter::once((None, &mut image)),
                     options.matting.unwrap_or_default(),
                     self.matting_asset.as_deref(),
@@ -544,15 +546,17 @@ impl Hunyuan3dEngine {
                     &self.base.progress,
                 )?;
                 #[cfg(feature = "mesh-delight")]
-                if options.delight == Some(true) {
-                    derived_media = delight_images(
+                let derived_media = if options.delight == Some(true) {
+                    delight_images(
                         std::iter::once((None, &mut image)),
                         true,
                         self.delight_paths.as_ref(),
                         self.base.gpu_ordinal,
                         &self.base.progress,
-                    )?;
-                }
+                    )?
+                } else {
+                    derived_media
+                };
                 (image, derived_media)
             };
             #[cfg(not(feature = "mesh-matting"))]
@@ -782,7 +786,7 @@ impl Hunyuan3dEngine {
         #[cfg(feature = "mesh-matting")]
         let (source_rgba, derived_media) = {
             let mut source_rgba = source_rgba;
-            let mut derived_media = matte_images(
+            let derived_media = matte_images(
                 std::iter::once((None, &mut source_rgba)),
                 options.matting.unwrap_or_default(),
                 self.matting_asset.as_deref(),
@@ -790,15 +794,17 @@ impl Hunyuan3dEngine {
                 &self.base.progress,
             )?;
             #[cfg(feature = "mesh-delight")]
-            if options.delight == Some(true) {
-                derived_media = delight_images(
+            let derived_media = if options.delight == Some(true) {
+                delight_images(
                     std::iter::once((None, &mut source_rgba)),
                     true,
                     self.delight_paths.as_ref(),
                     self.base.gpu_ordinal,
                     &self.base.progress,
-                )?;
-            }
+                )?
+            } else {
+                derived_media
+            };
             (source_rgba, derived_media)
         };
         #[cfg(not(feature = "mesh-matting"))]

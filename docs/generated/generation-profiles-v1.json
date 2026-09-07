@@ -3303,7 +3303,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-2.1",
-        "profile_hash": "5598f25cd669551b77c2ebef754d7de3a5fa8395257607809877f32a8b9ae0c0",
+        "profile_hash": "b97d45c55281c198506f0b7603477f18ee6d404016446b7188891feb8d91700f",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3491,7 +3491,7 @@
                 "delight": {
                   "mode": "hidden",
                   "required": false,
-                  "reason": "Delighting is not executable by this build"
+                  "reason": "Delighting requires the mesh-delight build feature"
                 },
                 "workflow_modes": [
                   "image_to_mesh",
@@ -3522,7 +3522,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-2mv-turbo",
-        "profile_hash": "28eec0c16ab830163f7ea9569a022f9310d88b8e1b440b52e73ca367e7c7b605",
+        "profile_hash": "0964cd58d238ac1b8d71579fa6e91d75a67cf39e7ad3c4d420032d9bd506514b",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3709,7 +3709,7 @@
                 "delight": {
                   "mode": "hidden",
                   "required": false,
-                  "reason": "Delighting is not executable by this build"
+                  "reason": "Delighting requires the mesh-delight build feature"
                 },
                 "workflow_modes": [
                   "multiview_to_mesh"
@@ -3739,7 +3739,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-2mv",
-        "profile_hash": "34150d6c110ffc5511825a81a85912b8547472c46b8f97d7b63e867339a9bb47",
+        "profile_hash": "f09463bb4fda26fe9a4657d9252a05f9f7baac667d9771fa5c0c43d06694cea4",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -3926,7 +3926,7 @@
                 "delight": {
                   "mode": "hidden",
                   "required": false,
-                  "reason": "Delighting is not executable by this build"
+                  "reason": "Delighting requires the mesh-delight build feature"
                 },
                 "workflow_modes": [
                   "multiview_to_mesh"
@@ -3956,7 +3956,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-mini-turbo",
-        "profile_hash": "6c898b5588043a933e1a1e3b1a7d4d13c7d081f49a56ccf5b3f27ff4c45e2ce7",
+        "profile_hash": "6bc4e0a2d418b2ed8100839ba1f33b0da0467434345419b66848392b5c7cb05d",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -4144,7 +4144,7 @@
                 "delight": {
                   "mode": "hidden",
                   "required": false,
-                  "reason": "Delighting is not executable by this build"
+                  "reason": "Delighting requires the mesh-delight build feature"
                 },
                 "workflow_modes": [
                   "image_to_mesh",
@@ -4175,7 +4175,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d-turbo",
-        "profile_hash": "c289d84922b4f486350a9ddde7074d2043b426941a4b2a29a744c52655650288",
+        "profile_hash": "c9935625530299be771196f7301a41224649245c056b632c3442daa5a734ee5f",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -4363,7 +4363,7 @@
                 "delight": {
                   "mode": "hidden",
                   "required": false,
-                  "reason": "Delighting is not executable by this build"
+                  "reason": "Delighting requires the mesh-delight build feature"
                 },
                 "workflow_modes": [
                   "image_to_mesh",
@@ -4394,7 +4394,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "hunyuan3d.hunyuan3d",
-        "profile_hash": "c87d8efd9185f742d96311278313707fbcfd0bf97ef593b061d8fbbeeedeb9bf",
+        "profile_hash": "250ec0726c11db4aca825877e3f8e1d05235f6a9a279faa3354d73393bc43057",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -4582,12 +4582,293 @@
                 "delight": {
                   "mode": "hidden",
                   "required": false,
-                  "reason": "Delighting is not executable by this build"
+                  "reason": "Delighting requires the mesh-delight build feature"
                 },
                 "workflow_modes": [
                   "image_to_mesh",
                   "text_to_mesh"
                 ]
+              }
+            },
+            "provenance": [
+              {
+                "kind": "mold-policy",
+                "source": "mold-qualified compatibility profile",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "models": [
+        {
+          "model": "hunyuan3d-delight:fp16",
+          "family": "hunyuan3d-delight",
+          "hidden": true
+        }
+      ],
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "hunyuan3d-delight.hunyuan3d-delight",
+        "profile_hash": "5d08077eb9856705a70d112416f74081a2fe595ab28a26deefffdd20cd6bf1dc",
+        "default_recipe_id": "default",
+        "recipes": [
+          {
+            "id": "default",
+            "label": "Default",
+            "request_selector": {},
+            "defaults": {
+              "width": 512,
+              "height": 512,
+              "steps": 50,
+              "guidance": 1.0
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 16,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 1800000,
+              "aspect_groups": []
+            },
+            "steps": {
+              "default": 50,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                25,
+                50,
+                75
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "required",
+              "supports_lora": false,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": false,
+              "supports_extend": false,
+              "supports_audio": false,
+              "source_video": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept a source video."
+              },
+              "mask": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "keyframes": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept keyframes."
+              },
+              "audio": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept source audio."
+              },
+              "lora": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "This model does not accept LoRA adapters."
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "png",
+                "formats": [
+                  "png",
+                  "jpeg",
+                  "webp"
+                ],
+                "audio_requires_mp4": false
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              },
+              "schedulers": [
+                "euler-ancestral"
+              ],
+              "prompt": {
+                "mode": "ignored",
+                "reason": "This model has no text encoder; the prompt is saved as a note."
+              },
+              "supports_strength": false,
+              "reference_images": {
+                "mode": "hidden",
+                "required": false,
+                "max_count": 0,
+                "primary_is_target": false,
+                "source_relation": "replaces",
+                "reason": "This model does not accept reference images (edit_images)."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "mold-policy",
+                "source": "mold-qualified compatibility profile",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "models": [
+        {
+          "model": "hunyuan3d-matting",
+          "family": "hunyuan3d-matting",
+          "hidden": true
+        },
+        {
+          "model": "hunyuan3d-matting:on",
+          "family": "hunyuan3d-matting",
+          "hidden": true
+        }
+      ],
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "hunyuan3d-matting.hunyuan3d-matting",
+        "profile_hash": "a5bb98788a3138c7bab8fd03f403e43a954f9cabf2ad16cddb7013dececb0643",
+        "default_recipe_id": "default",
+        "recipes": [
+          {
+            "id": "default",
+            "label": "Default",
+            "request_selector": {},
+            "defaults": {
+              "width": 512,
+              "height": 512,
+              "steps": 1,
+              "guidance": 1.0
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 16,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 1800000,
+              "aspect_groups": []
+            },
+            "steps": {
+              "default": 1,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                1,
+                2
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "required",
+              "supports_lora": false,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": false,
+              "supports_extend": false,
+              "supports_audio": false,
+              "source_video": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept a source video."
+              },
+              "mask": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "keyframes": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept keyframes."
+              },
+              "audio": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept source audio."
+              },
+              "lora": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "This model does not accept LoRA adapters."
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "png",
+                "formats": [
+                  "png",
+                  "jpeg",
+                  "webp"
+                ],
+                "audio_requires_mp4": false
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              },
+              "prompt": {
+                "mode": "ignored",
+                "reason": "This model has no text encoder; the prompt is saved as a note."
+              },
+              "supports_strength": false,
+              "reference_images": {
+                "mode": "hidden",
+                "required": false,
+                "max_count": 0,
+                "primary_is_target": false,
+                "source_relation": "replaces",
+                "reason": "This model does not accept reference images (edit_images)."
               }
             },
             "provenance": [
