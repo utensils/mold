@@ -6,11 +6,16 @@
 //! intact lets each stage use the same validation, scheduling, provenance, and
 //! publication contracts as a direct generation.
 
+use std::fs;
+use std::path::{Component, Path};
+
 use serde::{Deserialize, Serialize};
 
-use crate::{GenerateRequest, GenerationReference, OutputFormat};
+use crate::{GenerateRequest, GenerationReference, MoldError, MoldResult, OutputFormat};
 
 pub const MESH_WORKFLOW_CONTRACT_VERSION: u32 = 1;
+pub const MESH_WORKFLOW_MANIFEST_SCHEMA: &str = "mold.mesh-workflow.v1";
+pub const MESH_WORKFLOW_MANIFEST_FILE: &str = "manifest.toml";
 
 /// User-authored work accepted by `POST /api/mesh-workflows`.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -75,6 +80,238 @@ pub enum MeshWorkflowStageState {
     Running,
     Completed,
     Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshWorkflowArtifact {
+    /// Stable semantic role such as `generated_image`, `processed_image`,
+    /// `normalized_mesh`, or `final_glb`.
+    pub role: String,
+    /// Portable path relative to the workflow directory.
+    pub relative_path: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub byte_length: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshWorkflowStageRecord {
+    pub index: u32,
+    pub kind: MeshWorkflowStageKind,
+    pub state: MeshWorkflowStageState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<MeshWorkflowArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Portable authority for restart and cross-host workflow recovery. SQLite is
+/// only a queryable index; this manifest wins during reconciliation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshWorkflowManifest {
+    pub schema: String,
+    pub contract_version: u32,
+    pub job_id: String,
+    pub created_at_ms: i64,
+    /// Canonical JSON of [`CreateMeshWorkflowRequest`] after request media has
+    /// been sealed separately. No upload handles, paths, or inline bytes are
+    /// allowed in this value.
+    pub request_json: String,
+    pub stages: Vec<MeshWorkflowStageRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_filename: Option<String>,
+}
+
+impl MeshWorkflowManifest {
+    pub fn new(
+        job_id: impl Into<String>,
+        created_at_ms: i64,
+        persisted_request: &CreateMeshWorkflowRequest,
+        stages: Vec<MeshWorkflowStageRecord>,
+    ) -> MoldResult<Self> {
+        ensure_request_media_is_sealed(persisted_request)?;
+        let request_json = serde_json::to_string(persisted_request).map_err(|error| {
+            MoldError::Other(anyhow::anyhow!(
+                "mesh workflow request JSON serialise failed: {error}"
+            ))
+        })?;
+        Ok(Self {
+            schema: MESH_WORKFLOW_MANIFEST_SCHEMA.into(),
+            contract_version: MESH_WORKFLOW_CONTRACT_VERSION,
+            job_id: job_id.into(),
+            created_at_ms,
+            request_json,
+            stages,
+            output_filename: None,
+        })
+    }
+
+    pub fn request(&self) -> MoldResult<CreateMeshWorkflowRequest> {
+        serde_json::from_str(&self.request_json).map_err(|error| {
+            MoldError::Validation(format!("mesh workflow request JSON parse failed: {error}"))
+        })
+    }
+
+    pub fn to_toml(&self) -> MoldResult<String> {
+        self.validate()?;
+        toml::to_string(self).map_err(|error| {
+            MoldError::Other(anyhow::anyhow!(
+                "mesh workflow manifest TOML serialise failed: {error}"
+            ))
+        })
+    }
+
+    pub fn from_toml(body: &str) -> MoldResult<Self> {
+        #[derive(Deserialize)]
+        struct Header {
+            schema: Option<String>,
+            contract_version: Option<u32>,
+        }
+        let header: Header = toml::from_str(body).map_err(|error| {
+            MoldError::Validation(format!("mesh workflow manifest TOML parse failed: {error}"))
+        })?;
+        if header.schema.as_deref() != Some(MESH_WORKFLOW_MANIFEST_SCHEMA)
+            || header.contract_version != Some(MESH_WORKFLOW_CONTRACT_VERSION)
+        {
+            return Err(MoldError::Validation(format!(
+                "unsupported mesh workflow manifest; expected schema '{MESH_WORKFLOW_MANIFEST_SCHEMA}' version {MESH_WORKFLOW_CONTRACT_VERSION}"
+            )));
+        }
+        let manifest: Self = toml::from_str(body).map_err(|error| {
+            MoldError::Validation(format!("mesh workflow manifest TOML parse failed: {error}"))
+        })?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn write_atomic(&self, workflow_dir: &Path) -> MoldResult<()> {
+        fs::create_dir_all(workflow_dir).map_err(|error| {
+            MoldError::Other(anyhow::anyhow!(
+                "creating mesh workflow directory '{}': {error}",
+                workflow_dir.display()
+            ))
+        })?;
+        let destination = workflow_dir.join(MESH_WORKFLOW_MANIFEST_FILE);
+        let temporary = workflow_dir.join(format!("{MESH_WORKFLOW_MANIFEST_FILE}.tmp"));
+        fs::write(&temporary, self.to_toml()?).map_err(|error| {
+            MoldError::Other(anyhow::anyhow!(
+                "writing mesh workflow manifest '{}': {error}",
+                temporary.display()
+            ))
+        })?;
+        fs::rename(&temporary, &destination).map_err(|error| {
+            MoldError::Other(anyhow::anyhow!(
+                "committing mesh workflow manifest '{}': {error}",
+                destination.display()
+            ))
+        })?;
+        Ok(())
+    }
+
+    pub fn read_from_dir(workflow_dir: &Path) -> MoldResult<Self> {
+        let path = workflow_dir.join(MESH_WORKFLOW_MANIFEST_FILE);
+        let body = fs::read_to_string(&path).map_err(|error| {
+            MoldError::Other(anyhow::anyhow!(
+                "reading mesh workflow manifest '{}': {error}",
+                path.display()
+            ))
+        })?;
+        Self::from_toml(&body)
+    }
+
+    fn validate(&self) -> MoldResult<()> {
+        if self.job_id.trim().is_empty() {
+            return Err(MoldError::Validation(
+                "mesh workflow manifest job_id must not be empty".into(),
+            ));
+        }
+        let request = self.request()?;
+        ensure_request_media_is_sealed(&request)?;
+        for (position, stage) in self.stages.iter().enumerate() {
+            if stage.index as usize != position {
+                return Err(MoldError::Validation(
+                    "mesh workflow stage indexes must be contiguous from zero".into(),
+                ));
+            }
+            for artifact in &stage.artifacts {
+                validate_relative_artifact_path(&artifact.relative_path)?;
+                if artifact.role.trim().is_empty()
+                    || artifact.media_type.trim().is_empty()
+                    || artifact.sha256.len() != 64
+                    || !artifact.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(MoldError::Validation(
+                        "mesh workflow artifact metadata is incomplete".into(),
+                    ));
+                }
+            }
+        }
+        if self.output_filename.as_deref().is_some_and(|filename| {
+            filename.trim().is_empty()
+                || filename.contains('/')
+                || filename.contains('\\')
+                || matches!(filename, "." | "..")
+        }) {
+            return Err(MoldError::Validation(
+                "mesh workflow output_filename must be one gallery filename".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn ensure_request_media_is_sealed(request: &CreateMeshWorkflowRequest) -> MoldResult<()> {
+    let requests: Vec<&GenerateRequest> = match request {
+        CreateMeshWorkflowRequest::TextToMesh {
+            image_request,
+            mesh_request,
+        } => vec![image_request, mesh_request],
+        CreateMeshWorkflowRequest::MeshTexture { texture_request } => vec![texture_request],
+    };
+    for request in requests {
+        if request.source_image.is_some()
+            || request.id_image.is_some()
+            || request.id_images.is_some()
+            || request.edit_images.is_some()
+            || request.mask_image.is_some()
+            || request.control_image.is_some()
+            || request.audio_file.is_some()
+            || request.source_video.is_some()
+            || request.extend_video.is_some()
+            || request.references.as_deref().is_some_and(|references| {
+                references.iter().any(|reference| {
+                    !matches!(
+                        reference.media(),
+                        crate::GenerationReferenceAuthority::Descriptor
+                    )
+                })
+            })
+        {
+            return Err(MoldError::Validation(
+                "mesh workflow manifest request media must be sealed outside request_json".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_relative_artifact_path(value: &str) -> MoldResult<()> {
+    let path = Path::new(value);
+    if value.trim().is_empty()
+        || value.contains('\\')
+        || value.starts_with('/')
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(MoldError::Validation(format!(
+            "mesh workflow artifact path '{value}' must be a portable relative path"
+        )));
+    }
+    Ok(())
 }
 
 /// Validate invariants that do not require model discovery. The server runs
@@ -261,5 +498,75 @@ mod tests {
         assert!(MeshWorkflowJobState::Completed.is_settled());
         assert!(MeshWorkflowJobState::Failed.is_settled());
         assert!(!MeshWorkflowJobState::Paused.is_settled());
+    }
+
+    #[test]
+    fn manifest_round_trips_only_sealed_media_and_relative_artifacts() {
+        let mut image = image_request();
+        image.source_image = None;
+        let request = CreateMeshWorkflowRequest::TextToMesh {
+            image_request: Box::new(image),
+            mesh_request: Box::new(mesh_request()),
+        };
+        let stage = MeshWorkflowStageRecord {
+            index: 0,
+            kind: MeshWorkflowStageKind::Image,
+            state: MeshWorkflowStageState::Completed,
+            artifacts: vec![MeshWorkflowArtifact {
+                role: "generated_image".into(),
+                relative_path: "stages/000/generated.png".into(),
+                media_type: "image/png".into(),
+                sha256: "a".repeat(64),
+                byte_length: 123,
+            }],
+            error: None,
+        };
+        let manifest = MeshWorkflowManifest::new("01WORKFLOW", 42, &request, vec![stage]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        manifest.write_atomic(dir.path()).unwrap();
+        let restored = MeshWorkflowManifest::read_from_dir(dir.path()).unwrap();
+        assert_eq!(restored.job_id, "01WORKFLOW");
+        assert_eq!(restored.stages[0].artifacts[0].byte_length, 123);
+        assert!(matches!(
+            restored.request().unwrap(),
+            CreateMeshWorkflowRequest::TextToMesh { .. }
+        ));
+    }
+
+    #[test]
+    fn manifest_rejects_inline_media_and_path_escape() {
+        let mut texture = mesh_request();
+        texture.source_image = Some(vec![1, 2, 3]);
+        texture.references = Some(vec![mesh_reference()]);
+        let request = CreateMeshWorkflowRequest::MeshTexture {
+            texture_request: Box::new(texture),
+        };
+        assert!(matches!(
+            MeshWorkflowManifest::new("job", 1, &request, vec![]),
+            Err(MoldError::Validation(message)) if message.contains("must be sealed")
+        ));
+
+        let request = CreateMeshWorkflowRequest::TextToMesh {
+            image_request: Box::new(image_request()),
+            mesh_request: Box::new(mesh_request()),
+        };
+        let stage = MeshWorkflowStageRecord {
+            index: 0,
+            kind: MeshWorkflowStageKind::Image,
+            state: MeshWorkflowStageState::Completed,
+            artifacts: vec![MeshWorkflowArtifact {
+                role: "generated_image".into(),
+                relative_path: "../stolen.png".into(),
+                media_type: "image/png".into(),
+                sha256: "b".repeat(64),
+                byte_length: 1,
+            }],
+            error: None,
+        };
+        let manifest = MeshWorkflowManifest::new("job", 1, &request, vec![stage]).unwrap();
+        assert!(matches!(
+            manifest.to_toml(),
+            Err(MoldError::Validation(message)) if message.contains("portable relative path")
+        ));
     }
 }
