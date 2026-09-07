@@ -31,6 +31,7 @@ pub struct MeshWorkflowStageRow {
     pub stage_index: u32,
     pub kind: MeshWorkflowStageKind,
     pub state: MeshWorkflowStageState,
+    pub execution_batch_id: Option<String>,
     pub artifacts: Vec<MeshWorkflowArtifact>,
     pub error: Option<String>,
     pub updated_at_ms: i64,
@@ -57,6 +58,64 @@ pub fn insert_job(db: &MetadataDb, row: &MeshWorkflowJobRow) -> Result<()> {
                 row.updated_at_ms,
             ],
         )?;
+        Ok(())
+    })
+}
+
+/// Insert the parent and its complete stage graph in one transaction. A
+/// durable workflow is never visible without every stage it will execute.
+pub fn insert_job_with_stages(
+    db: &MetadataDb,
+    job: &MeshWorkflowJobRow,
+    stages: &[MeshWorkflowStageRow],
+) -> Result<()> {
+    if stages.len() != job.stage_count as usize
+        || stages
+            .iter()
+            .enumerate()
+            .any(|(index, stage)| stage.job_id != job.id || stage.stage_index != index as u32)
+    {
+        anyhow::bail!("mesh workflow stage graph does not match its parent");
+    }
+    db.with_conn(|connection| {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO mesh_workflow_jobs
+             (id,state,request_json,work_dir,stage_count,current_stage,output_filename,error,created_at_ms,updated_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                job.id,
+                job.state.as_str(),
+                job.request_json,
+                job.work_dir.to_string_lossy(),
+                job.stage_count,
+                job.current_stage,
+                job.output_filename,
+                job.error,
+                job.created_at_ms,
+                job.updated_at_ms,
+            ],
+        )?;
+        for stage in stages {
+            let artifacts = serde_json::to_string(&stage.artifacts)
+                .context("serializing mesh workflow stage artifacts")?;
+            transaction.execute(
+                "INSERT INTO mesh_workflow_stages
+                 (job_id,stage_index,kind,state,execution_batch_id,artifacts_json,error,updated_at_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    stage.job_id,
+                    stage.stage_index,
+                    stage.kind.as_str(),
+                    stage.state.as_str(),
+                    stage.execution_batch_id,
+                    artifacts,
+                    stage.error,
+                    stage.updated_at_ms,
+                ],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     })
 }
@@ -160,6 +219,76 @@ pub fn set_current_stage(db: &MetadataDb, id: &str, stage_index: u32, now_ms: i6
     })
 }
 
+pub fn attach_stage_execution(
+    db: &MetadataDb,
+    id: &str,
+    stage_index: u32,
+    batch_id: &str,
+    now_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|connection| {
+        Ok(connection.execute(
+            "UPDATE mesh_workflow_stages
+             SET state='running',execution_batch_id=?3,error=NULL,updated_at_ms=?4
+             WHERE job_id=?1 AND stage_index=?2 AND state='pending' AND execution_batch_id IS NULL",
+            params![id, stage_index, batch_id, now_ms],
+        )? == 1)
+    })
+}
+
+pub fn complete_stage(
+    db: &MetadataDb,
+    id: &str,
+    stage_index: u32,
+    artifacts: &[MeshWorkflowArtifact],
+    now_ms: i64,
+) -> Result<bool> {
+    let artifacts =
+        serde_json::to_string(artifacts).context("serializing mesh workflow stage artifacts")?;
+    db.with_conn(|connection| {
+        Ok(connection.execute(
+            "UPDATE mesh_workflow_stages
+             SET state='completed',artifacts_json=?3,error=NULL,updated_at_ms=?4
+             WHERE job_id=?1 AND stage_index=?2 AND state='running'",
+            params![id, stage_index, artifacts, now_ms],
+        )? == 1)
+    })
+}
+
+pub fn fail_stage_and_job(
+    db: &MetadataDb,
+    id: &str,
+    stage_index: u32,
+    error: &str,
+    now_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|connection| {
+        let transaction = connection.unchecked_transaction()?;
+        let stage_changed = transaction.execute(
+            "UPDATE mesh_workflow_stages SET state='failed',error=?3,updated_at_ms=?4
+             WHERE job_id=?1 AND state='running'
+               AND execution_batch_id = (
+                   SELECT execution_batch_id FROM mesh_workflow_stages
+                    WHERE job_id=?1 AND stage_index=?2
+               )",
+            params![id, stage_index, error, now_ms],
+        )? == 1;
+        if !stage_changed {
+            return Ok(false);
+        }
+        let job_changed = transaction.execute(
+            "UPDATE mesh_workflow_jobs SET state='failed',error=?2,updated_at_ms=?3
+             WHERE id=?1 AND state='running'",
+            params![id, error, now_ms],
+        )? == 1;
+        if !job_changed {
+            return Ok(false);
+        }
+        transaction.commit()?;
+        Ok(true)
+    })
+}
+
 pub fn complete_job(db: &MetadataDb, id: &str, output_filename: &str, now_ms: i64) -> Result<bool> {
     db.with_conn(|connection| {
         Ok(connection.execute(
@@ -183,22 +312,69 @@ pub fn pause_unfinished_for_recovery(db: &MetadataDb, now_ms: i64) -> Result<usi
     })
 }
 
+pub fn resume_job(db: &MetadataDb, id: &str, now_ms: i64) -> Result<bool> {
+    db.with_conn(|connection| {
+        let transaction = connection.unchecked_transaction()?;
+        let current_stage = transaction
+            .query_row(
+                "SELECT current_stage FROM mesh_workflow_jobs
+                 WHERE id=?1 AND state IN ('paused','failed')",
+                [id],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?;
+        let Some(current_stage) = current_stage else {
+            return Ok(false);
+        };
+        transaction.execute(
+            "UPDATE mesh_workflow_stages
+             SET state='pending',execution_batch_id=NULL,error=NULL,updated_at_ms=?3
+             WHERE job_id=?1 AND stage_index>=?2 AND state='failed'",
+            params![id, current_stage, now_ms],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE mesh_workflow_jobs SET state='queued',error=NULL,updated_at_ms=?2
+             WHERE id=?1 AND state IN ('paused','failed')",
+            params![id, now_ms],
+        )? == 1;
+        transaction.commit()?;
+        Ok(changed)
+    })
+}
+
+pub fn cancel_job(db: &MetadataDb, id: &str, now_ms: i64) -> Result<bool> {
+    transition(
+        db,
+        id,
+        &[
+            MeshWorkflowJobState::Queued,
+            MeshWorkflowJobState::Running,
+            MeshWorkflowJobState::Paused,
+            MeshWorkflowJobState::Failed,
+        ],
+        MeshWorkflowJobState::Cancelled,
+        None,
+        now_ms,
+    )
+}
+
 pub fn upsert_stage(db: &MetadataDb, row: &MeshWorkflowStageRow) -> Result<()> {
     let artifacts = serde_json::to_string(&row.artifacts)
         .context("serializing mesh workflow stage artifacts")?;
     db.with_conn(|connection| {
         connection.execute(
             "INSERT INTO mesh_workflow_stages
-             (job_id,stage_index,kind,state,artifacts_json,error,updated_at_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)
+             (job_id,stage_index,kind,state,execution_batch_id,artifacts_json,error,updated_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(job_id,stage_index) DO UPDATE SET
-               kind=excluded.kind,state=excluded.state,artifacts_json=excluded.artifacts_json,
+               kind=excluded.kind,state=excluded.state,execution_batch_id=excluded.execution_batch_id,artifacts_json=excluded.artifacts_json,
                error=excluded.error,updated_at_ms=excluded.updated_at_ms",
             params![
                 row.job_id,
                 row.stage_index,
                 row.kind.as_str(),
                 row.state.as_str(),
+                row.execution_batch_id,
                 artifacts,
                 row.error,
                 row.updated_at_ms,
@@ -211,7 +387,7 @@ pub fn upsert_stage(db: &MetadataDb, row: &MeshWorkflowStageRow) -> Result<()> {
 pub fn stages_for_job(db: &MetadataDb, id: &str) -> Result<Vec<MeshWorkflowStageRow>> {
     db.with_conn(|connection| {
         let mut statement = connection.prepare(
-            "SELECT job_id,stage_index,kind,state,artifacts_json,error,updated_at_ms
+            "SELECT job_id,stage_index,kind,state,execution_batch_id,artifacts_json,error,updated_at_ms
              FROM mesh_workflow_stages WHERE job_id=?1 ORDER BY stage_index ASC",
         )?;
         let rows = statement
@@ -238,18 +414,19 @@ fn job_from_row(row: &Row<'_>) -> rusqlite::Result<MeshWorkflowJobRow> {
 }
 
 fn stage_from_row(row: &Row<'_>) -> rusqlite::Result<MeshWorkflowStageRow> {
-    let artifacts_json = row.get::<_, String>(4)?;
+    let artifacts_json = row.get::<_, String>(5)?;
     let artifacts = serde_json::from_str(&artifacts_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error))
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
     })?;
     Ok(MeshWorkflowStageRow {
         job_id: row.get(0)?,
         stage_index: row.get(1)?,
         kind: parse_text(row, 2, "stage kind")?,
         state: parse_text(row, 3, "stage state")?,
+        execution_batch_id: row.get(4)?,
         artifacts,
-        error: row.get(5)?,
-        updated_at_ms: row.get(6)?,
+        error: row.get(6)?,
+        updated_at_ms: row.get(7)?,
     })
 }
 
@@ -303,6 +480,7 @@ mod tests {
             stage_index: 0,
             kind: MeshWorkflowStageKind::Image,
             state: MeshWorkflowStageState::Completed,
+            execution_batch_id: Some("batch-image".into()),
             artifacts: vec![MeshWorkflowArtifact {
                 role: "generated_image".into(),
                 relative_path: "stages/000/generated.png".into(),

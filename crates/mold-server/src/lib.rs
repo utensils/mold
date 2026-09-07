@@ -60,6 +60,8 @@ mod matting_dependencies;
 #[cfg(feature = "mdns")]
 pub mod mdns;
 mod memory_preflight;
+mod mesh_workflow_media;
+mod mesh_workflow_runner;
 #[cfg(feature = "metrics")]
 pub mod metrics;
 pub mod model_cache;
@@ -73,6 +75,7 @@ mod queue_media_ingress;
 mod queue_media_lifecycle;
 pub mod queue_media_runtime;
 mod queue_retention;
+mod routes_mesh_workflows;
 // This dependency-free policy seam lands default-dark. The concrete
 // schema/store adapter activates it atomically with queue-media admission.
 #[allow(dead_code)]
@@ -110,7 +113,7 @@ mod resources_test;
 #[cfg(test)]
 mod routes_test;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{extract::DefaultBodyLimit, middleware};
 use mold_core::types::GpuSelection;
 use mold_core::{Config, ModelPaths};
@@ -898,6 +901,32 @@ pub async fn run_server(
         } else {
             info!("durable chain runner disabled while generation is unavailable");
         }
+
+        let mesh_root = Config::mold_dir()
+            .expect("metadata DB already proved MOLD_HOME is available")
+            .join("mesh-workflows");
+        let mesh_db = state.metadata_db.clone();
+        let reconcile_root = mesh_root.clone();
+        let (paused, repaired) = tokio::task::spawn_blocking(move || {
+            let db = mesh_db
+                .as_ref()
+                .as_ref()
+                .context("metadata DB disappeared before mesh workflow reconcile")?;
+            mesh_workflow_runner::startup_reconcile(db, &reconcile_root)
+        })
+        .await??;
+        info!(
+            paused,
+            repaired,
+            workflows_root = %mesh_root.display(),
+            "mesh workflow startup reconcile complete"
+        );
+        if startup.start_chain_runner {
+            state.mesh_workflows = Some(std::sync::Arc::new(mesh_workflow_runner::spawn_runner(
+                state.clone(),
+                mesh_root,
+            )));
+        }
     }
 
     // Spawn the generation queue worker — processes jobs sequentially (single GPU).
@@ -1151,6 +1180,7 @@ pub async fn run_server(
     *state.shutdown_tx.lock().await = Some(shutdown_tx);
     let shutdown_scheduler = scheduler_shutdown.clone();
     let shutdown_chain_jobs = state.chain_jobs.clone();
+    let shutdown_mesh_workflows = state.mesh_workflows.clone();
     let shutdown_metadata_db = state.metadata_db.clone();
     let shutdown_journal = state.queue_journal.clone();
     let shutdown_generation_cancel = state.generation_cancel.clone();
@@ -1164,6 +1194,7 @@ pub async fn run_server(
         arm_shutdown_deadline(shutdown_fatal_cuda);
         begin_runtime_shutdown(
             shutdown_chain_jobs.as_deref(),
+            shutdown_mesh_workflows.as_deref(),
             shutdown_metadata_db.as_ref().as_ref(),
             &shutdown_scheduler,
             &shutdown_journal,
@@ -1713,6 +1744,7 @@ fn arm_shutdown_deadline(fatal_cuda: std::sync::Arc<AtomicBool>) {
 /// of the ~20 discard sites has to know durability exists.
 fn begin_runtime_shutdown(
     chain_jobs: Option<&chain_job_runner::ChainJobRunnerHandle>,
+    mesh_workflows: Option<&mesh_workflow_runner::MeshWorkflowRunnerHandle>,
     metadata_db: Option<&mold_db::MetadataDb>,
     scheduler_shutdown: &tokio_util::sync::CancellationToken,
     queue_journal: &queue_journal::QueueJournal,
@@ -1727,14 +1759,14 @@ fn begin_runtime_shutdown(
             "aborting in-flight generations; they stay queued and are replayed after restart"
         );
     }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX);
     if let Some(chain_jobs) = chain_jobs {
         if let Some(db) = metadata_db {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                .try_into()
-                .unwrap_or(i64::MAX);
             match mold_db::chain_jobs::pause_queued_for_shutdown(db, now_ms) {
                 Ok(paused) if paused > 0 => {
                     tracing::info!(paused, "parked queued chain jobs for restart");
@@ -1750,6 +1782,18 @@ fn begin_runtime_shutdown(
             active_chains,
             "interrupted parked chain work before HTTP drain"
         );
+    }
+    if let Some(mesh_workflows) = mesh_workflows {
+        if let Some(db) = metadata_db {
+            match mold_db::mesh_workflow_jobs::pause_unfinished_for_recovery(db, now_ms) {
+                Ok(paused) if paused > 0 => {
+                    tracing::info!(paused, "parked mesh workflows for restart");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::error!(%error, "failed to park mesh workflows for restart"),
+            }
+        }
+        mesh_workflows.shutdown();
     }
     event_streams.shutdown();
     scheduler_shutdown.cancel();
@@ -1890,6 +1934,7 @@ mod tests {
         let event_streams = crate::events::EventBroadcaster::new();
         begin_runtime_shutdown(
             Some(&chains),
+            None,
             Some(&db),
             &scheduler,
             &journal,
@@ -1932,6 +1977,7 @@ mod tests {
         };
 
         begin_runtime_shutdown(
+            None,
             None,
             None,
             &scheduler,
@@ -2081,6 +2127,7 @@ mod tests {
         assert!(!running.is_cancelled());
 
         begin_runtime_shutdown(
+            None,
             None,
             None,
             &scheduler,

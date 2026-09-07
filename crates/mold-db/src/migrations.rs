@@ -797,6 +797,7 @@ CREATE TABLE mesh_workflow_stages (
                        ('image','matting','delight','shape','paint','finalize')),
     state           TEXT NOT NULL CHECK (state IN
                        ('pending','running','completed','failed')),
+    execution_batch_id TEXT,
     artifacts_json  TEXT NOT NULL DEFAULT '[]',
     error           TEXT,
     updated_at_ms   INTEGER NOT NULL,

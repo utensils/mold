@@ -1,0 +1,478 @@
+use std::convert::Infallible;
+use std::path::PathBuf;
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::extract::{Extension, Path, State};
+use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive};
+use axum::response::Sse;
+use axum::Json;
+use mold_core::generation_profile::MeshWorkflowMode;
+use mold_core::mesh_workflow::{
+    validate_create_mesh_workflow, CreateMeshWorkflowRequest, CreateMeshWorkflowResponse,
+    MeshWorkflowEvent, MeshWorkflowJobDetail, MeshWorkflowJobListing, MeshWorkflowJobState,
+    MeshWorkflowJobSummary, MeshWorkflowManifest, MeshWorkflowStageRecord, MeshWorkflowStageState,
+    MESH_WORKFLOW_CONTRACT_VERSION,
+};
+use mold_db::mesh_workflow_jobs::{self, MeshWorkflowJobRow, MeshWorkflowStageRow};
+
+use crate::routes::ApiError;
+use crate::state::AppState;
+
+const UNAVAILABLE: &str = "MESH_WORKFLOWS_UNAVAILABLE";
+const NOT_FOUND: &str = "MESH_WORKFLOW_NOT_FOUND";
+
+fn workflows_root() -> Result<PathBuf, ApiError> {
+    mold_core::Config::mold_dir()
+        .map(|home| home.join("mesh-workflows"))
+        .ok_or_else(|| {
+            ApiError::with_code(
+                "MOLD_HOME is unavailable",
+                UNAVAILABLE,
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+        })
+}
+
+fn db(state: &AppState) -> Result<&mold_db::MetadataDb, ApiError> {
+    state.metadata_db.as_ref().as_ref().ok_or_else(|| {
+        ApiError::with_code(
+            "durable mesh workflows require the metadata database",
+            UNAVAILABLE,
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+}
+
+fn mode(request: &CreateMeshWorkflowRequest) -> MeshWorkflowMode {
+    match request {
+        CreateMeshWorkflowRequest::TextToMesh { .. } => MeshWorkflowMode::TextToMesh,
+        CreateMeshWorkflowRequest::MeshTexture { .. } => MeshWorkflowMode::MeshTexture,
+    }
+}
+
+fn stage_records(rows: Vec<MeshWorkflowStageRow>) -> Vec<MeshWorkflowStageRecord> {
+    rows.into_iter()
+        .map(|row| MeshWorkflowStageRecord {
+            index: row.stage_index,
+            kind: row.kind,
+            state: row.state,
+            execution_batch_id: row.execution_batch_id,
+            artifacts: row.artifacts,
+            error: row.error,
+        })
+        .collect()
+}
+
+fn detail_from_rows(
+    row: MeshWorkflowJobRow,
+    stages: Vec<MeshWorkflowStageRow>,
+) -> Result<MeshWorkflowJobDetail, ApiError> {
+    let request: CreateMeshWorkflowRequest =
+        serde_json::from_str(&row.request_json).map_err(|error| {
+            ApiError::internal(format!("mesh workflow request is corrupt: {error}"))
+        })?;
+    let current_stage_kind = stages
+        .get(row.current_stage as usize)
+        .map(|stage| stage.kind);
+    Ok(MeshWorkflowJobDetail {
+        summary: MeshWorkflowJobSummary {
+            contract_version: MESH_WORKFLOW_CONTRACT_VERSION,
+            id: row.id,
+            state: row.state,
+            mode: mode(&request),
+            stage_count: row.stage_count,
+            current_stage: row.current_stage,
+            current_stage_kind,
+            output_filename: row.output_filename,
+            error: row.error,
+            created_at_ms: row.created_at_ms,
+            updated_at_ms: row.updated_at_ms,
+        },
+        request,
+        stages: stage_records(stages),
+    })
+}
+
+fn load_detail(state: &AppState, id: &str) -> Result<MeshWorkflowJobDetail, ApiError> {
+    let db = db(state)?;
+    let row = mesh_workflow_jobs::get_job(db, id)
+        .map_err(|error| ApiError::internal(format!("mesh workflow lookup failed: {error:#}")))?
+        .ok_or_else(|| {
+            ApiError::with_code("mesh workflow not found", NOT_FOUND, StatusCode::NOT_FOUND)
+        })?;
+    let stages = mesh_workflow_jobs::stages_for_job(db, id).map_err(|error| {
+        ApiError::internal(format!("mesh workflow stage lookup failed: {error:#}"))
+    })?;
+    detail_from_rows(row, stages)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/mesh-workflows",
+    tag = "mesh-workflows",
+    request_body = mold_core::mesh_workflow::CreateMeshWorkflowRequest,
+    responses((status = 202, description = "Mesh workflow accepted", body = mold_core::mesh_workflow::CreateMeshWorkflowResponse))
+)]
+pub(crate) async fn create_mesh_workflow(
+    State(state): State<AppState>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
+    Json(request): Json<CreateMeshWorkflowRequest>,
+) -> Result<(StatusCode, Json<CreateMeshWorkflowResponse>), ApiError> {
+    validate_create_mesh_workflow(&request).map_err(ApiError::validation)?;
+    let database = db(&state)?;
+    let root = workflows_root()?;
+    std::fs::create_dir_all(&root).map_err(|error| {
+        ApiError::internal(format!("creating mesh workflow root failed: {error}"))
+    })?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let workflow_dir = root.join(&id);
+    std::fs::create_dir_all(&workflow_dir).map_err(|error| {
+        ApiError::internal(format!("creating mesh workflow directory failed: {error}"))
+    })?;
+    let rollback = crate::mesh_workflow_media::CreateRollback::new(&root, &workflow_dir);
+    let identity = crate::reference_uploads::ReferenceIdentity::resolve(
+        authenticated.as_ref().map(|Extension(value)| value),
+        auth_state.as_ref().map(|Extension(value)| value),
+        state.instance_id.as_str(),
+    );
+    let media_roots = state.config.read().await.resolved_media_roots();
+
+    let persisted = match request {
+        CreateMeshWorkflowRequest::TextToMesh {
+            mut image_request,
+            mut mesh_request,
+        } => {
+            let image_staged = state
+                .reference_uploads
+                .resolve_request(
+                    identity.as_ref(),
+                    image_request.as_mut(),
+                    &media_roots,
+                    None,
+                )
+                .await?;
+            let image = crate::mesh_workflow_media::persist_request(
+                &root,
+                &workflow_dir,
+                &id,
+                "image",
+                *image_request,
+                image_staged.as_ref(),
+            )
+            .map_err(|error| {
+                ApiError::internal(format!("persisting image stage failed: {error:#}"))
+            })?;
+            let mesh_staged = state
+                .reference_uploads
+                .resolve_request(identity.as_ref(), mesh_request.as_mut(), &media_roots, None)
+                .await?;
+            let mesh = crate::mesh_workflow_media::persist_request(
+                &root,
+                &workflow_dir,
+                &id,
+                "mesh",
+                *mesh_request,
+                mesh_staged.as_ref(),
+            )
+            .map_err(|error| {
+                ApiError::internal(format!("persisting mesh stage failed: {error:#}"))
+            })?;
+            CreateMeshWorkflowRequest::TextToMesh {
+                image_request: Box::new(image),
+                mesh_request: Box::new(mesh),
+            }
+        }
+        CreateMeshWorkflowRequest::MeshTexture {
+            mut texture_request,
+        } => {
+            let staged = state
+                .reference_uploads
+                .resolve_request(
+                    identity.as_ref(),
+                    texture_request.as_mut(),
+                    &media_roots,
+                    None,
+                )
+                .await?;
+            let texture = crate::mesh_workflow_media::persist_request(
+                &root,
+                &workflow_dir,
+                &id,
+                "texture",
+                *texture_request,
+                staged.as_ref(),
+            )
+            .map_err(|error| {
+                ApiError::internal(format!("persisting texture stage failed: {error:#}"))
+            })?;
+            CreateMeshWorkflowRequest::MeshTexture {
+                texture_request: Box::new(texture),
+            }
+        }
+    };
+
+    let created_at_ms = now_ms();
+    let stages = persisted
+        .planned_stage_kinds()
+        .into_iter()
+        .enumerate()
+        .map(|(index, kind)| MeshWorkflowStageRecord {
+            index: index as u32,
+            kind,
+            state: MeshWorkflowStageState::Pending,
+            execution_batch_id: None,
+            artifacts: Vec::new(),
+            error: None,
+        })
+        .collect::<Vec<_>>();
+    let manifest = MeshWorkflowManifest::new(id.clone(), created_at_ms, &persisted, stages.clone())
+        .map_err(|error| {
+            ApiError::internal(format!("creating mesh workflow manifest failed: {error}"))
+        })?;
+    manifest.write_atomic(&workflow_dir).map_err(|error| {
+        ApiError::internal(format!("writing mesh workflow manifest failed: {error}"))
+    })?;
+    let request_json = serde_json::to_string(&persisted).map_err(|error| {
+        ApiError::internal(format!("serializing mesh workflow failed: {error}"))
+    })?;
+    let row = MeshWorkflowJobRow {
+        id: id.clone(),
+        state: MeshWorkflowJobState::Queued,
+        request_json,
+        work_dir: workflow_dir.clone(),
+        stage_count: stages.len() as u32,
+        current_stage: 0,
+        output_filename: None,
+        error: None,
+        created_at_ms,
+        updated_at_ms: created_at_ms,
+    };
+    let db_stages = stages
+        .into_iter()
+        .map(|stage| MeshWorkflowStageRow {
+            job_id: id.clone(),
+            stage_index: stage.index,
+            kind: stage.kind,
+            state: stage.state,
+            execution_batch_id: None,
+            artifacts: Vec::new(),
+            error: None,
+            updated_at_ms: created_at_ms,
+        })
+        .collect::<Vec<_>>();
+    mesh_workflow_jobs::insert_job_with_stages(database, &row, &db_stages).map_err(|error| {
+        ApiError::internal(format!("persisting mesh workflow failed: {error:#}"))
+    })?;
+    rollback.commit();
+    if let Some(runner) = state.mesh_workflows.as_ref() {
+        runner.kick();
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(CreateMeshWorkflowResponse {
+            job_id: id,
+            request_warnings: Vec::new(),
+        }),
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/mesh-workflows",
+    tag = "mesh-workflows",
+    responses((status = 200, description = "Mesh workflows", body = mold_core::mesh_workflow::MeshWorkflowJobListing))
+)]
+pub(crate) async fn list_mesh_workflows(
+    State(state): State<AppState>,
+) -> Result<Json<MeshWorkflowJobListing>, ApiError> {
+    let database = db(&state)?;
+    let rows = mesh_workflow_jobs::list_jobs(database)
+        .map_err(|error| ApiError::internal(format!("listing mesh workflows failed: {error:#}")))?;
+    let mut jobs = Vec::with_capacity(rows.len());
+    for row in rows {
+        let stages = mesh_workflow_jobs::stages_for_job(database, &row.id).map_err(|error| {
+            ApiError::internal(format!("listing mesh workflow stages failed: {error:#}"))
+        })?;
+        jobs.push(detail_from_rows(row, stages)?.summary);
+    }
+    Ok(Json(MeshWorkflowJobListing { jobs }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/mesh-workflows/{id}",
+    tag = "mesh-workflows",
+    params(("id" = String, Path, description = "Mesh workflow id")),
+    responses((status = 200, description = "Mesh workflow detail", body = mold_core::mesh_workflow::MeshWorkflowJobDetail))
+)]
+pub(crate) async fn get_mesh_workflow(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<MeshWorkflowJobDetail>, ApiError> {
+    Ok(Json(load_detail(&state, &id)?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/mesh-workflows/{id}/events",
+    tag = "mesh-workflows",
+    params(("id" = String, Path, description = "Mesh workflow id")),
+    responses((status = 200, description = "Mesh workflow event stream"))
+)]
+pub(crate) async fn mesh_workflow_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let _ = load_detail(&state, &id)?;
+    let stream = async_stream::stream! {
+        let mut revision = None;
+        loop {
+            match load_detail(&state, &id) {
+                Ok(detail) => {
+                    let current = (detail.summary.updated_at_ms, detail.summary.state);
+                    if revision != Some(current) {
+                        revision = Some(current);
+                        let settled = detail.summary.state.is_settled();
+                        let event = Event::default()
+                            .event("mesh_workflow")
+                            .json_data(MeshWorkflowEvent::Snapshot { job: detail })
+                            .unwrap_or_else(|error| Event::default().event("error").data(error.to_string()));
+                        yield Ok(event);
+                        if settled {
+                            break;
+                        }
+                    }
+                }
+                Err(error) => {
+                    yield Ok(Event::default().event("error").data(error.error));
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/mesh-workflows/{id}/resume",
+    tag = "mesh-workflows",
+    params(("id" = String, Path, description = "Mesh workflow id")),
+    responses((status = 202, description = "Mesh workflow queued"))
+)]
+pub(crate) async fn resume_mesh_workflow(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if mesh_workflow_jobs::resume_job(db(&state)?, &id, now_ms())
+        .map_err(|error| ApiError::internal(format!("resuming mesh workflow failed: {error:#}")))?
+    {
+        if let Some(runner) = state.mesh_workflows.as_ref() {
+            runner.kick();
+        }
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        let detail = load_detail(&state, &id)?;
+        Err(ApiError::validation(format!(
+            "mesh workflow cannot resume from {:?}",
+            detail.summary.state
+        )))
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/mesh-workflows/{id}/cancel",
+    tag = "mesh-workflows",
+    params(("id" = String, Path, description = "Mesh workflow id")),
+    responses((status = 202, description = "Mesh workflow cancelled"))
+)]
+pub(crate) async fn cancel_mesh_workflow(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let detail = load_detail(&state, &id)?;
+    let batches = detail
+        .stages
+        .iter()
+        .filter_map(|stage| stage.execution_batch_id.as_deref())
+        .collect::<std::collections::BTreeSet<_>>();
+    for batch_id in batches {
+        crate::routes::cancel_generation_batch_children(&state, batch_id).await?;
+    }
+    if mesh_workflow_jobs::cancel_job(db(&state)?, &id, now_ms()).map_err(|error| {
+        ApiError::internal(format!("cancelling mesh workflow failed: {error:#}"))
+    })? {
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ApiError::validation("mesh workflow is already settled"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detail_projection_keeps_execution_identity_and_mode() {
+        let request = || {
+            serde_json::from_value::<mold_core::GenerateRequest>(serde_json::json!({
+                "prompt": "",
+                "model": "test",
+                "width": 64,
+                "height": 64,
+                "steps": 1,
+                "guidance": 1.0,
+                "seed": 1
+            }))
+            .unwrap()
+        };
+        let row = MeshWorkflowJobRow {
+            id: "workflow".into(),
+            state: MeshWorkflowJobState::Running,
+            request_json: serde_json::to_string(&CreateMeshWorkflowRequest::TextToMesh {
+                image_request: Box::new(request()),
+                mesh_request: Box::new(request()),
+            })
+            .unwrap(),
+            work_dir: PathBuf::from("workflow"),
+            stage_count: 1,
+            current_stage: 0,
+            output_filename: None,
+            error: None,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        };
+        let detail = detail_from_rows(
+            row,
+            vec![MeshWorkflowStageRow {
+                job_id: "workflow".into(),
+                stage_index: 0,
+                kind: mold_core::mesh_workflow::MeshWorkflowStageKind::Image,
+                state: MeshWorkflowStageState::Running,
+                execution_batch_id: Some("batch".into()),
+                artifacts: Vec::new(),
+                error: None,
+                updated_at_ms: 2,
+            }],
+        )
+        .unwrap();
+        assert_eq!(detail.summary.mode, MeshWorkflowMode::TextToMesh);
+        assert_eq!(
+            detail.stages[0].execution_batch_id.as_deref(),
+            Some("batch")
+        );
+    }
+}

@@ -34,6 +34,38 @@ pub enum CreateMeshWorkflowRequest {
     },
 }
 
+impl CreateMeshWorkflowRequest {
+    /// Stable stage graph advertised before execution. Matting remains a
+    /// stage even when `auto` later preserves an existing useful alpha mask;
+    /// that decision and its retained input/output are part of provenance.
+    pub fn planned_stage_kinds(&self) -> Vec<MeshWorkflowStageKind> {
+        match self {
+            Self::TextToMesh { mesh_request, .. } => {
+                let mut stages = vec![
+                    MeshWorkflowStageKind::Image,
+                    MeshWorkflowStageKind::Matting,
+                    MeshWorkflowStageKind::Shape,
+                ];
+                if mesh_request
+                    .mesh
+                    .as_ref()
+                    .and_then(|mesh| mesh.texture)
+                    .unwrap_or(false)
+                {
+                    stages.push(MeshWorkflowStageKind::Paint);
+                }
+                stages.push(MeshWorkflowStageKind::Finalize);
+                stages
+            }
+            Self::MeshTexture { .. } => vec![
+                MeshWorkflowStageKind::Matting,
+                MeshWorkflowStageKind::Paint,
+                MeshWorkflowStageKind::Finalize,
+            ],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MeshWorkflowJobState {
@@ -175,6 +207,10 @@ pub struct MeshWorkflowStageRecord {
     pub index: u32,
     pub kind: MeshWorkflowStageKind,
     pub state: MeshWorkflowStageState,
+    /// Opaque durable generation batch driving this stage. Persisting it lets
+    /// restart reconciliation reattach instead of submitting duplicate work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_batch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<MeshWorkflowArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -643,6 +679,41 @@ mod tests {
     }
 
     #[test]
+    fn stage_graph_distinguishes_shape_and_supplied_mesh_paths() {
+        let mut geometry_request = mesh_request();
+        geometry_request.mesh.as_mut().unwrap().texture = Some(false);
+        let geometry = CreateMeshWorkflowRequest::TextToMesh {
+            image_request: Box::new(image_request()),
+            mesh_request: Box::new(geometry_request),
+        };
+        assert_eq!(
+            geometry.planned_stage_kinds(),
+            vec![
+                MeshWorkflowStageKind::Image,
+                MeshWorkflowStageKind::Matting,
+                MeshWorkflowStageKind::Shape,
+                MeshWorkflowStageKind::Finalize,
+            ]
+        );
+        let mut textured = mesh_request();
+        textured.mesh.as_mut().unwrap().texture = Some(true);
+        let text_to_textured = CreateMeshWorkflowRequest::TextToMesh {
+            image_request: Box::new(image_request()),
+            mesh_request: Box::new(textured),
+        };
+        assert_eq!(
+            text_to_textured.planned_stage_kinds(),
+            vec![
+                MeshWorkflowStageKind::Image,
+                MeshWorkflowStageKind::Matting,
+                MeshWorkflowStageKind::Shape,
+                MeshWorkflowStageKind::Paint,
+                MeshWorkflowStageKind::Finalize,
+            ]
+        );
+    }
+
+    #[test]
     fn manifest_round_trips_only_sealed_media_and_relative_artifacts() {
         let mut image = image_request();
         image.source_image = None;
@@ -654,6 +725,7 @@ mod tests {
             index: 0,
             kind: MeshWorkflowStageKind::Image,
             state: MeshWorkflowStageState::Completed,
+            execution_batch_id: Some("batch-image".into()),
             artifacts: vec![MeshWorkflowArtifact {
                 role: "generated_image".into(),
                 relative_path: "stages/000/generated.png".into(),
@@ -696,6 +768,7 @@ mod tests {
             index: 0,
             kind: MeshWorkflowStageKind::Image,
             state: MeshWorkflowStageState::Completed,
+            execution_batch_id: None,
             artifacts: vec![MeshWorkflowArtifact {
                 role: "generated_image".into(),
                 relative_path: "../stolen.png".into(),

@@ -378,7 +378,7 @@ fn greatest_common_divisor(mut left: usize, mut right: usize) -> usize {
     left
 }
 
-fn read_verified_binding(
+pub(crate) fn read_verified_binding(
     binding: &GenerationReferenceBinding,
     checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Vec<u8>> {

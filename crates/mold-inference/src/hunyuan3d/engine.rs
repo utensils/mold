@@ -37,6 +37,8 @@ use mold_core::{
 };
 #[cfg(feature = "mesh-matting")]
 use mold_core::{GenerationImageReferenceRole, MeshDerivedMedia, MeshMattingMode};
+#[cfg(feature = "mesh-texture")]
+use mold_core::{MeshReferenceFormat, MeshUpAxis};
 
 use crate::engine::{rand_seed, GenerationReferenceBinding, InferenceEngine, LoadStrategy};
 use crate::engine_base::EngineBase;
@@ -90,6 +92,34 @@ const POSTER_SIZE: u32 = 512;
 /// How many chunks to decode before emitting a progress tick. One event per
 /// chunk at 17M points would be ~2,100 SSE frames for a single stage.
 const DECODE_TICKS: usize = 64;
+
+#[cfg(feature = "mesh-texture")]
+fn normalize_supplied_mesh_coordinates(
+    mesh: &mut Mesh,
+    up_axis: MeshUpAxis,
+    meters_per_unit: f64,
+) -> Result<()> {
+    anyhow::ensure!(
+        meters_per_unit.is_finite() && (1.0e-9..=1.0e6).contains(&meters_per_unit),
+        "supplied mesh meters_per_unit is outside the supported range"
+    );
+    let scale = meters_per_unit as f32;
+    for vertex in &mut mesh.vertices {
+        *vertex = vertex.map(|value| value * scale);
+        if up_axis == MeshUpAxis::Z {
+            *vertex = [vertex[0], vertex[2], -vertex[1]];
+        }
+    }
+    if up_axis == MeshUpAxis::Z {
+        if let Some(normals) = mesh.normals.as_mut() {
+            for normal in normals {
+                *normal = [normal[0], normal[2], -normal[1]];
+            }
+        }
+    }
+    mesh.validate()?;
+    Ok(())
+}
 
 #[cfg(feature = "mesh-matting")]
 fn matte_images<'a>(
@@ -371,6 +401,14 @@ impl Hunyuan3dEngine {
         if options.texture == Some(true) {
             bail!("PBR texture generation requires the mesh-texture build feature");
         }
+        #[cfg(feature = "mesh-texture")]
+        if req.references.as_deref().is_some_and(|references| {
+            references
+                .iter()
+                .any(|reference| matches!(reference, GenerationReference::Mesh { .. }))
+        }) {
+            return self.generate_supplied_mesh_texture(req, bindings, &options, started);
+        }
 
         // Decode and matte before the shape checkpoint is loaded. On a cold
         // engine this guarantees U²-Net tensors are released before DINO, the
@@ -626,6 +664,138 @@ impl Hunyuan3dEngine {
                 bounds_min,
                 bounds_max,
                 textured: false,
+                poster,
+                poster_width: POSTER_SIZE,
+                poster_height: POSTER_SIZE,
+                derived_media,
+            }),
+            generation_time_ms: started.elapsed().as_millis() as u64,
+            model: self.base.model_name.clone(),
+            seed_used: seed,
+            gpu: Some(self.base.gpu_ordinal),
+            request_warnings: Vec::new(),
+        })
+    }
+
+    #[cfg(feature = "mesh-texture")]
+    fn generate_supplied_mesh_texture(
+        &mut self,
+        req: &GenerateRequest,
+        bindings: &[GenerationReferenceBinding],
+        options: &mold_core::MeshRequestOptions,
+        started: std::time::Instant,
+    ) -> Result<GenerateResponse> {
+        anyhow::ensure!(
+            options.texture == Some(true),
+            "supplied mesh generation requires mesh.texture=true"
+        );
+        let references = req
+            .references
+            .as_deref()
+            .context("supplied mesh texturing requires a mesh reference")?;
+        anyhow::ensure!(
+            references.len() == 1,
+            "supplied mesh texturing requires exactly one mesh reference"
+        );
+        let GenerationReference::Mesh {
+            media,
+            format,
+            coordinates,
+            ..
+        } = &references[0]
+        else {
+            bail!("supplied mesh texturing accepts a mesh reference only")
+        };
+        anyhow::ensure!(
+            bindings.is_empty() || bindings.len() == 1,
+            "supplied mesh binding count differs from its request"
+        );
+        let source = req
+            .source_image
+            .as_deref()
+            .filter(|bytes| !bytes.is_empty())
+            .context("supplied mesh texturing requires an appearance image")?;
+        let source_rgba = crate::img_utils::decode_oriented_srgb_rgba(source)
+            .context("decode the supplied mesh appearance image")?;
+        #[cfg(feature = "mesh-matting")]
+        let (source_rgba, derived_media) = {
+            let mut source_rgba = source_rgba;
+            let derived_media = matte_images(
+                std::iter::once((None, &mut source_rgba)),
+                options.matting.unwrap_or_default(),
+                self.matting_asset.as_deref(),
+                self.base.gpu_ordinal,
+                &self.base.progress,
+            )?;
+            (source_rgba, derived_media)
+        };
+        #[cfg(not(feature = "mesh-matting"))]
+        let derived_media = Vec::new();
+
+        let mesh_bytes = if let Some(binding) = bindings.first() {
+            anyhow::ensure!(
+                binding.metadata().kind == mold_core::GenerationReferenceKind::Mesh,
+                "supplied mesh binding changed kind before inference"
+            );
+            crate::reference_media::read_verified_binding(binding, &mut || {
+                Ok(self.base.progress.checkpoint()?)
+            })?
+        } else {
+            let GenerationReferenceAuthority::Inline { data } = media else {
+                bail!("non-inline supplied mesh requires a resolved server binding")
+            };
+            data.clone()
+        };
+        let mut mesh = match format {
+            MeshReferenceFormat::Glb => super::glb::read_glb(&mesh_bytes)
+                .map_err(|error| anyhow::anyhow!(error))
+                .context("parse supplied GLB")?,
+            MeshReferenceFormat::Obj => {
+                let source =
+                    std::str::from_utf8(&mesh_bytes).context("supplied OBJ must be UTF-8 text")?;
+                super::obj::read_obj(source).context("parse supplied OBJ")?
+            }
+        };
+        normalize_supplied_mesh_coordinates(
+            &mut mesh,
+            coordinates.up_axis,
+            coordinates.meters_per_unit,
+        )?;
+
+        // A texture-only request must not carry shape residency, even if this
+        // engine instance previously served image-to-mesh work.
+        let shape = self.base.loaded.take();
+        drop(shape);
+        let _ = crate::device::post_drop_free_vram_bytes(self.base.gpu_ordinal);
+        let assets = self
+            .paint_assets
+            .clone()
+            .context("Hunyuan3D Paint assets were not frozen before execution")?;
+        let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
+        let seed = req.seed.unwrap_or_else(rand_seed);
+        let texture_size = options.texture_resolution.unwrap_or(2048);
+        let textured = super::paint_runtime::PaintRuntime {
+            assets: &assets,
+            device: &device,
+            gpu_ordinal: self.base.gpu_ordinal,
+            progress: &self.base.progress,
+        }
+        .generate(&mesh, &source_rgba, texture_size, seed)?;
+        let (bounds_min, bounds_max) = textured.mesh.bounds();
+        let poster = super::poster::render_poster(&textured.mesh, POSTER_SIZE)
+            .context("render the gallery poster")?;
+        Ok(GenerateResponse {
+            images: Vec::new(),
+            video: None,
+            audio: None,
+            mesh: Some(MeshData {
+                data: textured.glb,
+                format: OutputFormat::Glb,
+                vertex_count: textured.mesh.vertex_count() as u32,
+                face_count: textured.mesh.face_count() as u32,
+                bounds_min,
+                bounds_max,
+                textured: true,
                 poster,
                 poster_width: POSTER_SIZE,
                 poster_height: POSTER_SIZE,
