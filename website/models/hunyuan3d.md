@@ -207,11 +207,17 @@ behalf.
 
 ## PBR painting
 
+Shipping builds remove opaque image backgrounds with a pinned pure-Rust U²-Net
+pre-stage before Hunyuan3D reads the image. `--matting auto` preserves a useful
+existing alpha channel and processes an opaque input; `on` recomputes the mask;
+`off` keeps the pixels unchanged. The same choices appear in web, desktop,
+mobile, TUI, Discord, and MCP clients when the host advertises them.
+
 CUDA builds with `mesh-texture` can run Hunyuan3D Paint after shape generation
 and embed base color, metallic/roughness and normal textures in the stored GLB.
 Use `--texture [--texture-resolution 1024|2048|4096]` on the CLI, or enable
 **PBR materials** in the desktop Create inspector. Multi-view input,
-text-to-3D, matting, delight and supplied-mesh retexturing remain tracked in
+text-to-3D, delight and supplied-mesh retexturing remain tracked in
 [#1496](https://github.com/utensils/mold/issues/1496).
 
 ## Accepting the licence from the apps

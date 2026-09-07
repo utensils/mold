@@ -20,6 +20,7 @@ export interface MeshRequestOptions {
   target_faces?: number | null;
   texture?: boolean | null;
   texture_resolution?: number | null;
+  matting?: "auto" | "on" | "off" | null;
 }
 
 /** Form state: `null` means "use the profile default". */
@@ -30,6 +31,7 @@ export interface MeshFormState {
   /** Additive fields: older persisted drafts omit them. */
   texture?: boolean | null;
   textureResolution?: number | null;
+  matting?: "auto" | "on" | "off" | null;
 }
 
 export function emptyMeshForm(): MeshFormState {
@@ -57,6 +59,7 @@ export function meshRequestFromForm(
         | "texture"
         | "texture_resolutions"
         | "texture_default_resolution"
+        | "matting"
       >
     | null
     | undefined,
@@ -85,6 +88,15 @@ export function meshRequestFromForm(
       request.texture_resolution = resolution;
     }
   }
+  const matting = form.matting;
+  if (
+    matting &&
+    caps?.matting?.mode !== "hidden" &&
+    caps?.matting?.choices.includes(matting) &&
+    matting !== caps.matting.default
+  ) {
+    request.matting = matting;
+  }
   return Object.keys(request).length > 0 ? request : undefined;
 }
 
@@ -100,6 +112,7 @@ export function meshFormFromMetadata(
     targetFaces: explicit(mesh?.target_faces),
     ...(texture ? { texture: true } : {}),
     ...(textureResolution !== null ? { textureResolution } : {}),
+    ...(mesh?.matting ? { matting: mesh.matting } : {}),
   };
 }
 

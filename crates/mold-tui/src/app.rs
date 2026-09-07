@@ -588,6 +588,8 @@ pub enum ParamField {
     MeshThreshold,
     /// Decimation target; off keeps the raw surface.
     TargetFaces,
+    /// Background-removal policy before shape conditioning.
+    Matting,
     // Advanced — Identity (PuLID)
     IdentityImage,
     IdentityWeight,
@@ -665,6 +667,7 @@ impl ParamField {
             Self::Octree => "Octree",
             Self::MeshThreshold => "Iso threshold",
             Self::TargetFaces => "Target faces",
+            Self::Matting => "Remove bg",
             // These three live inside the "Identity photo" section, so they
             // are named for their role there — `LABEL_W` is 16 columns and a
             // repeated "Identity " prefix would not fit any of them.
@@ -1128,6 +1131,11 @@ impl GenerateParams {
                 .target_faces
                 .map(crate::ui::preview::format_thousands)
                 .unwrap_or_else(|| "off \u{00b7} raw surface".to_string()),
+            ParamField::Matting => match self.mesh.matting.unwrap_or_default() {
+                mold_core::MeshMattingMode::Auto => "auto".to_string(),
+                mold_core::MeshMattingMode::On => "on".to_string(),
+                mold_core::MeshMattingMode::Off => "off".to_string(),
+            },
             ParamField::MaskImage => self
                 .mask_image_path
                 .as_deref()
@@ -6288,6 +6296,23 @@ impl App {
                         p.mesh.target_faces,
                         delta,
                     );
+                }
+            }
+            ParamField::Matting => {
+                if mesh_profile
+                    .as_ref()
+                    .and_then(|profile| profile.matting.as_ref())
+                    .is_some_and(|control| control.mode != mold_core::ControlMode::Hidden)
+                {
+                    let choices = [
+                        mold_core::MeshMattingMode::Auto,
+                        mold_core::MeshMattingMode::On,
+                        mold_core::MeshMattingMode::Off,
+                    ];
+                    let current = p.mesh.matting.unwrap_or_default();
+                    let index = choices.iter().position(|choice| *choice == current).unwrap_or(0);
+                    let next = (index as i32 + delta).rem_euclid(choices.len() as i32) as usize;
+                    p.mesh.matting = Some(choices[next]);
                 }
             }
             ParamField::IdentityWeight => {

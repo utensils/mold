@@ -87,6 +87,9 @@ pub struct FrozenEngineConfig {
     /// Exact Hunyuan3D paint runtime weights materialized for a textured mesh
     /// request before scheduler admission.
     pub paint_assets: Option<mold_core::hunyuan3d_paint_assets::Hunyuan3dPaintPaths>,
+    /// Exact U²-Net graph materialized for a Hunyuan3D request whose matting
+    /// policy may execute before shape conditioning.
+    pub matting_asset: Option<PathBuf>,
     /// Exact contract-only MiniMax H3 admission/factory authority. This is
     /// `None` for every runnable family and cannot activate H3 by itself.
     pub h3_factory_authority: Option<crate::FrozenH3FactoryAuthority>,
@@ -150,6 +153,7 @@ impl FrozenEngineConfig {
             selected_umt5_path: None,
             identity_assets: None,
             paint_assets: None,
+            matting_asset: None,
             h3_factory_authority: None,
             runtime_environment,
             // Resolved from the FAMILY, not the image default: a video
@@ -924,7 +928,8 @@ where
                 load_strategy,
                 gpu_ordinal,
             )
-            .with_paint_assets(frozen.paint_assets.clone()),
+            .with_paint_assets(frozen.paint_assets.clone())
+            .with_matting_asset(frozen.matting_asset.clone()),
         )),
         "wuerstchen" | "wuerstchen-v2" => Ok(boxed_inference_engine(WuerstchenEngine::new(
             model_name,

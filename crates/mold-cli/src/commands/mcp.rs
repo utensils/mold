@@ -1329,6 +1329,7 @@ struct GenerateMeshArgs {
     #[serde(alias = "mesh_threshold")]
     threshold: Option<f32>,
     target_faces: Option<u32>,
+    matting: Option<mold_core::MeshMattingMode>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2754,6 +2755,7 @@ fn build_generate_mesh_request(
         target_faces: args.target_faces,
         texture: None,
         texture_resolution: None,
+        matting: args.matting,
     };
 
     let mut req = build_generate_request(
@@ -3340,6 +3342,12 @@ fn builtin_tool_definitions() -> Value {
                         "minimum": mold_core::validation::MESH_MIN_TARGET_FACES,
                         "maximum": mold_core::validation::MESH_MAX_TARGET_FACES,
                         "description": "Decimate to approximately this many triangles. Omit to keep the raw surface-net output, which is dense and regular."
+                    },
+                    "matting": {
+                        "type": "string",
+                        "enum": ["auto", "on", "off"],
+                        "default": "auto",
+                        "description": "Background removal before conditioning. Auto preserves useful existing alpha; on recomputes it; off keeps the input background."
                     },
                     // The earlier spellings. `additionalProperties: false`
                     // means a schema-validating host refuses anything not

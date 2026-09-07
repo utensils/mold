@@ -2848,6 +2848,21 @@ pub struct AudioData {
 ///
 /// Every field is optional: absent means the checkpoint's own default, which
 /// is what `manifest.rs` and the upstream `config.yaml` agree on.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum MeshMattingMode {
+    /// Preserve useful alpha; run the remover only for effectively opaque input.
+    #[default]
+    Auto,
+    /// Always run the remover, replacing any supplied alpha.
+    On,
+    /// Preserve the supplied pixels and alpha without segmentation.
+    Off,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MeshRequestOptions {
     /// Resolution of the cubic query grid the shape VAE's occupancy field is
@@ -2872,6 +2887,10 @@ pub struct MeshRequestOptions {
     /// Edge length of the generated texture atlas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture_resolution: Option<u32>,
+    /// Background-removal policy applied before Hunyuan3D conditioning.
+    /// Absent resolves to `auto` for backward-compatible requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matting: Option<MeshMattingMode>,
 }
 
 impl MeshRequestOptions {
@@ -2925,6 +2944,7 @@ impl MeshRequestOptions {
             target_faces: self.target_faces,
             texture: self.texture,
             texture_resolution: self.texture_resolution,
+            matting: self.matting.or(Some(MeshMattingMode::Auto)),
         }
     }
 }
@@ -5937,6 +5957,7 @@ mod tests {
             "no decimation IS the rendered choice"
         );
         assert_eq!(mesh.texture, None);
+        assert_eq!(mesh.matting, Some(MeshMattingMode::Auto));
 
         // Touched: the request's own values win, and the rest still fills.
         let mut touched: GenerateRequest = serde_json::from_str(json).unwrap();
@@ -5946,6 +5967,7 @@ mod tests {
             target_faces: Some(50_000),
             texture: None,
             texture_resolution: None,
+            matting: Some(MeshMattingMode::Off),
         });
         let mesh = OutputMetadata::from_generate_request(&touched, 1, None, "test")
             .mesh
@@ -5956,6 +5978,7 @@ mod tests {
             Some(crate::validation::MESH_DEFAULT_THRESHOLD as f32)
         );
         assert_eq!(mesh.target_faces, Some(50_000));
+        assert_eq!(mesh.matting, Some(MeshMattingMode::Off));
 
         let mut multiview = untouched.clone();
         multiview.model = crate::manifest::HUNYUAN3D_2MV_TURBO_MODEL.into();
@@ -5987,6 +6010,26 @@ mod tests {
         let meta = OutputMetadata::from_generate_request(&raster, 1, None, "test");
         assert!(meta.mesh.is_none());
         assert!(!serde_json::to_string(&meta).unwrap().contains("\"mesh\""));
+    }
+
+    #[test]
+    fn mesh_matting_modes_have_a_stable_wire_contract() {
+        assert_eq!(
+            serde_json::to_string(&MeshMattingMode::Auto).unwrap(),
+            "\"auto\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MeshMattingMode::On).unwrap(),
+            "\"on\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MeshMattingMode::Off).unwrap(),
+            "\"off\""
+        );
+        assert_eq!(
+            serde_json::from_str::<MeshMattingMode>("\"auto\"").unwrap(),
+            MeshMattingMode::Auto
+        );
     }
 
     /// The field is additive: metadata saved before it existed (no `mesh`

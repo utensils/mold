@@ -29,6 +29,7 @@ pub async fn mesh(
     #[description = "Shape query-grid resolution"] octree: Option<u32>,
     #[description = "Surface iso threshold"] threshold: Option<f64>,
     #[description = "Approximate triangle target"] target_faces: Option<u32>,
+    #[description = "Background removal: auto, on, or off"] matting: Option<String>,
 ) -> Result<()> {
     let named = [
         (GenerationImageReferenceRole::Front, front.as_ref()),
@@ -87,6 +88,20 @@ pub async fn mesh(
         .or(fallback_defaults.as_ref());
 
     let user_id = ctx.author().id.get();
+    let matting = match matting.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("auto") => Some(mold_core::MeshMattingMode::Auto),
+        Some("on") => Some(mold_core::MeshMattingMode::On),
+        Some("off") => Some(mold_core::MeshMattingMode::Off),
+        Some(_) => {
+            ctx.send(
+                poise::CreateReply::default()
+                    .content("Matting must be `auto`, `on`, or `off`.")
+                    .ephemeral(true),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
     if let AuthResult::Denied(message) = checks::check_generate_auth(&ctx).await {
         ctx.send(
             poise::CreateReply::default()
@@ -133,13 +148,15 @@ pub async fn mesh(
         request.mesh = (texture.is_some()
             || octree.is_some()
             || threshold.is_some()
-            || target_faces.is_some())
+            || target_faces.is_some()
+            || matting.is_some())
         .then_some(MeshRequestOptions {
             octree_resolution: octree,
             threshold: threshold.map(|value| value as f32),
             target_faces,
             texture,
             texture_resolution: None,
+            matting,
         });
         handler::run_generation(ctx, request).await
     }

@@ -96,6 +96,10 @@ export type MeshInputProfile = { mode: ControlMode, formats: Array<MeshReference
 
 export type MeshWorkflowMode = "image_to_mesh" | "multiview_to_mesh" | "mesh_texture" | "text_to_mesh";
 
+export type MeshMattingMode = "auto" | "on" | "off";
+
+export type MeshMattingControlProfile = { mode: ControlMode, default: MeshMattingMode, choices: Array<MeshMattingMode>, reason?: string | null, };
+
 export type MeshCapabilitiesProfile = {
 /**
  * Query-grid resolutions this recipe admits. An ALLOWLIST, because the
@@ -128,7 +132,7 @@ texture_resolutions?: Array<number>, texture_default_resolution?: number | null,
 /**
  * Number of raster views used by the paint stage.
  */
-texture_view_count?: IntegerControl | null, matting?: FeatureControlProfile | null, delight?: FeatureControlProfile | null,
+texture_view_count?: IntegerControl | null, matting?: MeshMattingControlProfile | null, delight?: FeatureControlProfile | null,
 /**
  * Complete workflows executable by this recipe in this build.
  */

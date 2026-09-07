@@ -6,6 +6,7 @@ import type {
   GenerationProfileSet,
   IntegerControl,
   MeshCapabilitiesProfile,
+  MeshMattingControlProfile,
   OutputCapabilitiesProfile,
   OutputFormat,
   FloatControl,
@@ -29,6 +30,7 @@ export type {
   GenerationProfileSet,
   IntegerControl,
   MeshCapabilitiesProfile,
+  MeshMattingControlProfile,
   OutputCapabilitiesProfile,
   PromptCapabilitiesProfile,
   PromptRequirement,
@@ -442,7 +444,7 @@ function isMeshCapabilities(value: unknown): value is MeshCapabilitiesProfile {
       isIntegerControl(value.texture_view_count)) &&
     (value.matting === undefined ||
       value.matting === null ||
-      isFeatureControl(value.matting)) &&
+      isMeshMattingControl(value.matting)) &&
     (value.delight === undefined ||
       value.delight === null ||
       isFeatureControl(value.delight)) &&
@@ -457,6 +459,19 @@ function isMeshCapabilities(value: unknown): value is MeshCapabilitiesProfile {
             "text_to_mesh",
           ].includes(String(mode)),
         )))
+  );
+}
+
+function isMeshMattingControl(value: unknown): value is MeshMattingControlProfile {
+  return (
+    isRecord(value) &&
+    ["adjustable", "fixed", "hidden"].includes(String(value.mode)) &&
+    ["auto", "on", "off"].includes(String(value.default)) &&
+    Array.isArray(value.choices) &&
+    value.choices.every((choice) => ["auto", "on", "off"].includes(String(choice))) &&
+    new Set(value.choices).size === value.choices.length &&
+    (value.mode === "hidden" || value.choices.includes(value.default)) &&
+    (value.reason === undefined || value.reason === null || typeof value.reason === "string")
   );
 }
 

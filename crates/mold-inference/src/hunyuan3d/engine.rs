@@ -33,7 +33,7 @@ use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
 use mold_core::{
     GenerateRequest, GenerateResponse, GenerationReference, GenerationReferenceAuthority, MeshData,
-    ModelPaths, OutputFormat,
+    MeshMattingMode, ModelPaths, OutputFormat,
 };
 
 use crate::engine::{rand_seed, GenerationReferenceBinding, InferenceEngine, LoadStrategy};
@@ -86,6 +86,31 @@ const POSTER_SIZE: u32 = 512;
 /// How many chunks to decode before emitting a progress tick. One event per
 /// chunk at 17M points would be ~2,100 SSE frames for a single stage.
 const DECODE_TICKS: usize = 64;
+
+#[cfg(feature = "mesh-matting")]
+fn apply_matting_policy(
+    image: &mut image::RgbaImage,
+    policy: MeshMattingMode,
+    model_path: Option<&std::path::Path>,
+    network: &mut Option<super::background_matting::U2Net>,
+) -> Result<()> {
+    let should_run = match policy {
+        MeshMattingMode::Off => false,
+        MeshMattingMode::On => true,
+        MeshMattingMode::Auto => !super::background_matting::has_useful_alpha(image),
+    };
+    if !should_run {
+        return Ok(());
+    }
+    if network.is_none() {
+        let path = model_path.context(
+            "background matting was requested but the U²-Net dependency was not materialized",
+        )?;
+        *network = Some(super::background_matting::U2Net::load(path, &Device::Cpu)?);
+    }
+    *image = network.as_ref().expect("initialized above").matte(image)?;
+    Ok(())
+}
 
 /// The two edge lengths a source image passes through on its way to the
 /// vision tower.
@@ -154,6 +179,7 @@ struct Loaded {
 pub struct Hunyuan3dEngine {
     base: EngineBase<Loaded>,
     paint_assets: Option<mold_core::hunyuan3d_paint_assets::Hunyuan3dPaintPaths>,
+    matting_asset: Option<std::path::PathBuf>,
 }
 
 impl Hunyuan3dEngine {
@@ -166,7 +192,13 @@ impl Hunyuan3dEngine {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             paint_assets: None,
+            matting_asset: None,
         }
+    }
+
+    pub fn with_matting_asset(mut self, asset: Option<std::path::PathBuf>) -> Self {
+        self.matting_asset = asset;
+        self
     }
 
     pub fn with_paint_assets(
@@ -348,6 +380,21 @@ impl Hunyuan3dEngine {
                 views.push((*role, rgba));
             }
             views.sort_by_key(|(role, _)| super::multiview::view_slot(*role));
+            #[cfg(feature = "mesh-matting")]
+            {
+                let mut network = None;
+                for (_, rgba) in &mut views {
+                    apply_matting_policy(
+                        rgba,
+                        options.matting.unwrap_or_default(),
+                        self.matting_asset.as_deref(),
+                        &mut network,
+                    )?;
+                }
+                // U²-Net is scoped to preprocessing and cannot remain resident
+                // through DINO or shape inference.
+                drop(network);
+            }
             let source_rgba = views[0].1.clone();
             let mut encoded = Vec::with_capacity(views.len());
             for (role, rgba) in views {
@@ -377,8 +424,19 @@ impl Hunyuan3dEngine {
                 .filter(|bytes| !bytes.is_empty())
                 .context("3-D generation requires a source image")?;
             // RGBA, not RGB: alpha is the SUBJECT MASK here, not decoration.
-            let source_rgba = crate::img_utils::decode_oriented_srgb_rgba(source)
+            let mut source_rgba = crate::img_utils::decode_oriented_srgb_rgba(source)
                 .context("decode the source image")?;
+            #[cfg(feature = "mesh-matting")]
+            {
+                let mut network = None;
+                apply_matting_policy(
+                    &mut source_rgba,
+                    options.matting.unwrap_or_default(),
+                    self.matting_asset.as_deref(),
+                    &mut network,
+                )?;
+                drop(network);
+            }
             let image = image::DynamicImage::ImageRgba8(source_rgba.clone());
             let pixels = super::dino2::preprocess(
                 &image,
