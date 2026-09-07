@@ -1877,7 +1877,7 @@ onBeforeUnmount(() => {
 }
 
 .gallery-viewer-mesh-label {
-  color: rgba(245, 239, 255, 0.62);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;
@@ -1969,7 +1969,7 @@ onBeforeUnmount(() => {
 }
 
 .gallery-viewer-prompt-heading > span {
-  color: rgba(245, 239, 255, 0.62);
+  color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
   letter-spacing: 0.04em;

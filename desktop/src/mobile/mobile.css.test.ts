@@ -17,7 +17,9 @@ const tokens = readFileSync("../ui/tokens.css", "utf8");
 
 describe("mobile theme swatches", () => {
   it("copy each theme's chrome, content, telemetry, and accent hexes from ui/tokens.css", () => {
-    for (const [, id, body] of tokens.matchAll(/:root\[data-theme="([\w-]+)"\] \{([^}]*)\}/g)) {
+    const themes = [...tokens.matchAll(/\[data-theme="([\w-]+)"\] \{([^}]*)\}/g)];
+    expect(themes).toHaveLength(6);
+    for (const [, id, body] of themes) {
       const token = (key: string) => body!.match(new RegExp(`--mold-${key}: (#[0-9a-f]{6});`))?.[1];
       const swatch = css.match(
         new RegExp(`\\.mobile-theme-preview\\[data-theme="${id}"\\] \\{([^}]*)\\}`),
@@ -58,6 +60,35 @@ describe("mobile viewport scaling", () => {
 });
 
 describe("mobile gallery viewer", () => {
+  it("keeps sheet text readable against every theme background", () => {
+    const sheet = css.match(/\.gallery-viewer-sheet\s*\{([^}]*)\}/s)?.[1];
+    expect(sheet).toContain("background: var(--mold-bg-deep)");
+    expect(sheet).toContain("color: var(--mold-text)");
+    const themes = [...tokens.matchAll(/\[data-theme="([\w-]+)"\] \{([^}]*)\}/g)];
+    expect(themes).toHaveLength(6);
+    const luminance = (hex: string) => {
+      const channels = [1, 3, 5].map((offset) => {
+        const value = parseInt(hex.slice(offset, offset + 2), 16) / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+      return channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722;
+    };
+    for (const [, theme, body] of themes) {
+      const color = (key: string) => {
+        const hex = body!.match(new RegExp(`--mold-${key}: (#[0-9a-f]{6});`))?.[1];
+        expect(hex, `${theme} ${key}`).toBeDefined();
+        return luminance(hex!);
+      };
+      const background = color("bg-deep");
+      for (const key of ["text", "text-2", "text-dim", "blue", "error"]) {
+        const foreground = color(key);
+        const contrast =
+          (Math.max(background, foreground) + 0.05) / (Math.min(background, foreground) + 0.05);
+        expect(contrast, `${theme} ${key}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
   it("lets fixed edges size the top-layer dialog without iOS inline offset", () => {
     const viewer = css.match(/\.gallery-viewer\s*\{([^}]*)\}/s);
 
