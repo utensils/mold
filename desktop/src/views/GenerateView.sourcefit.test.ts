@@ -369,7 +369,9 @@ describe("GenerateView source-fit submit path", () => {
     await flushPromises();
 
     const form = useGenerateFormStore().form;
-    expect(form.imageAttachments).toEqual(["iVBORw0KGgoAAAANSUhEUgAABJIAAAnk"]);
+    await vi.waitFor(() =>
+      expect(form.imageAttachments).toEqual(["iVBORw0KGgoAAAANSUhEUgAABJIAAAnk"]),
+    );
     expect(form.width).toBe(1024);
     expect(form.height).toBe(1024);
   });
