@@ -123,6 +123,10 @@ export function hunyuan3dRecipe(): GenerationRecipeProfile {
           choices: ["auto", "on", "off"],
           reason: "Auto preserves useful alpha and removes opaque backgrounds.",
         },
+        delight: {
+          mode: "adjustable",
+          required: false,
+        },
       },
     },
     provenance: [

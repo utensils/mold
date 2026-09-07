@@ -8,7 +8,9 @@ use mold_core::mesh_workflow::{
     CreateMeshWorkflowRequest, MeshWorkflowArtifact, MeshWorkflowJobState, MeshWorkflowManifest,
     MeshWorkflowStageKind, MeshWorkflowStageState,
 };
-use mold_core::{GenerationBatchAdmissionRequest, GenerationBatchChildState, OutputFormat};
+use mold_core::{
+    GenerationBatchAdmissionRequest, GenerationBatchChildState, MeshMattingMode, OutputFormat,
+};
 use mold_db::mesh_workflow_jobs::{self, MeshWorkflowJobRow, MeshWorkflowStageRow};
 use sha2::{Digest, Sha256};
 
@@ -201,6 +203,159 @@ async fn drive_job(
                 )?;
                 update_manifest_from_db(db, &current)?;
             }
+            NextAction::SubmitMatting { attempt_epoch } => {
+                let source = if matches!(request, CreateMeshWorkflowRequest::TextToMesh { .. }) {
+                    let image = artifact_for_kind(&stages, MeshWorkflowStageKind::Image)?;
+                    std::fs::read(current.work_dir.join(&image.relative_path))?
+                } else {
+                    crate::mesh_workflow_media::hydrate_for_admission(
+                        workflows_root,
+                        &current.work_dir,
+                        "texture",
+                    )?
+                    .source_image
+                    .context("mesh-texture matting stage has no appearance image")?
+                };
+                let matting = workflow_mesh_request(&request)
+                    .mesh
+                    .as_ref()
+                    .and_then(|mesh| mesh.matting)
+                    .unwrap_or_default();
+                let model = if matting == MeshMattingMode::On {
+                    mold_core::manifest::HUNYUAN3D_MATTING_FORCE_MANIFEST
+                } else {
+                    mold_core::manifest::HUNYUAN3D_MATTING_MANIFEST
+                };
+                let mut child: mold_core::GenerateRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "prompt": "",
+                        "model": model,
+                        "width": 512,
+                        "height": 512,
+                        "steps": 1,
+                        "guidance": 1.0,
+                        "seed": 0,
+                        "output_format": "png"
+                    }))?;
+                child.source_image = Some(source);
+                let batch_id =
+                    admit_child(state, &current.id, "matting", attempt_epoch, child).await?;
+                if !attach_batch(
+                    db,
+                    &current.id,
+                    &stages,
+                    &[MeshWorkflowStageKind::Matting],
+                    &batch_id,
+                )? {
+                    crate::routes::cancel_generation_batch_children(state, &batch_id)
+                        .await
+                        .map_err(|error| anyhow!(error.error))?;
+                    continue;
+                }
+                update_manifest_from_db(db, &current)?;
+            }
+            NextAction::WaitMatting { batch_id } => {
+                let Some(filename) = completed_child_filename(state, &batch_id).await? else {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                };
+                let stage_index = stages
+                    .iter()
+                    .find(|stage| stage.kind == MeshWorkflowStageKind::Matting)
+                    .context("mesh workflow has no matting stage")?
+                    .stage_index;
+                let output_dir = state.config.read().await.effective_output_dir();
+                let artifact = retain_gallery_artifact(
+                    &output_dir,
+                    &current,
+                    stage_index,
+                    "matted_image",
+                    &filename,
+                )?;
+                complete_kinds(
+                    db,
+                    &current.id,
+                    &stages,
+                    &[MeshWorkflowStageKind::Matting],
+                    &[artifact],
+                )?;
+                update_manifest_from_db(db, &current)?;
+            }
+            NextAction::SubmitDelight { attempt_epoch } => {
+                let source = if stages
+                    .iter()
+                    .any(|stage| stage.kind == MeshWorkflowStageKind::Matting)
+                {
+                    let image = artifact_for_kind(&stages, MeshWorkflowStageKind::Matting)?;
+                    std::fs::read(current.work_dir.join(&image.relative_path))?
+                } else if matches!(request, CreateMeshWorkflowRequest::TextToMesh { .. }) {
+                    let image = artifact_for_kind(&stages, MeshWorkflowStageKind::Image)?;
+                    std::fs::read(current.work_dir.join(&image.relative_path))?
+                } else {
+                    crate::mesh_workflow_media::hydrate_for_admission(
+                        workflows_root,
+                        &current.work_dir,
+                        "texture",
+                    )?
+                    .source_image
+                    .context("mesh-texture delight stage has no appearance image")?
+                };
+                let mut child: mold_core::GenerateRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "prompt": "",
+                        "model": mold_core::manifest::HUNYUAN3D_DELIGHT_MANIFEST,
+                        "width": 512,
+                        "height": 512,
+                        "steps": 50,
+                        "guidance": 1.0,
+                        "seed": 42,
+                        "scheduler": "euler-ancestral",
+                        "output_format": "png"
+                    }))?;
+                child.source_image = Some(source);
+                let batch_id =
+                    admit_child(state, &current.id, "delight", attempt_epoch, child).await?;
+                if !attach_batch(
+                    db,
+                    &current.id,
+                    &stages,
+                    &[MeshWorkflowStageKind::Delight],
+                    &batch_id,
+                )? {
+                    crate::routes::cancel_generation_batch_children(state, &batch_id)
+                        .await
+                        .map_err(|error| anyhow!(error.error))?;
+                    continue;
+                }
+                update_manifest_from_db(db, &current)?;
+            }
+            NextAction::WaitDelight { batch_id } => {
+                let Some(filename) = completed_child_filename(state, &batch_id).await? else {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                };
+                let stage_index = stages
+                    .iter()
+                    .find(|stage| stage.kind == MeshWorkflowStageKind::Delight)
+                    .context("mesh workflow has no delight stage")?
+                    .stage_index;
+                let output_dir = state.config.read().await.effective_output_dir();
+                let artifact = retain_gallery_artifact(
+                    &output_dir,
+                    &current,
+                    stage_index,
+                    "delighted_image",
+                    &filename,
+                )?;
+                complete_kinds(
+                    db,
+                    &current.id,
+                    &stages,
+                    &[MeshWorkflowStageKind::Delight],
+                    &[artifact],
+                )?;
+                update_manifest_from_db(db, &current)?;
+            }
             NextAction::SubmitMesh { attempt_epoch } => {
                 let label = if matches!(request, CreateMeshWorkflowRequest::TextToMesh { .. }) {
                     "mesh"
@@ -215,8 +370,41 @@ async fn drive_job(
                 if matches!(child.output_format, None | Some(OutputFormat::Png)) {
                     child.output_format = Some(OutputFormat::Glb);
                 }
+                if let Some(mesh) = child.mesh.as_mut() {
+                    mesh.matting = Some(MeshMattingMode::Off);
+                    mesh.delight = None;
+                }
                 if matches!(request, CreateMeshWorkflowRequest::TextToMesh { .. }) {
-                    let image = artifact_for_kind(&stages, MeshWorkflowStageKind::Image)?;
+                    let image = artifact_for_kind(
+                        &stages,
+                        if stages
+                            .iter()
+                            .any(|stage| stage.kind == MeshWorkflowStageKind::Delight)
+                        {
+                            MeshWorkflowStageKind::Delight
+                        } else if stages
+                            .iter()
+                            .any(|stage| stage.kind == MeshWorkflowStageKind::Matting)
+                        {
+                            MeshWorkflowStageKind::Matting
+                        } else {
+                            MeshWorkflowStageKind::Image
+                        },
+                    )?;
+                    child.source_image =
+                        Some(std::fs::read(current.work_dir.join(&image.relative_path))?);
+                } else if stages
+                    .iter()
+                    .any(|stage| stage.kind == MeshWorkflowStageKind::Delight)
+                {
+                    let image = artifact_for_kind(&stages, MeshWorkflowStageKind::Delight)?;
+                    child.source_image =
+                        Some(std::fs::read(current.work_dir.join(&image.relative_path))?);
+                } else if stages
+                    .iter()
+                    .any(|stage| stage.kind == MeshWorkflowStageKind::Matting)
+                {
+                    let image = artifact_for_kind(&stages, MeshWorkflowStageKind::Matting)?;
                     child.source_image =
                         Some(std::fs::read(current.work_dir.join(&image.relative_path))?);
                 }
@@ -296,6 +484,10 @@ async fn drive_job(
 enum NextAction {
     SubmitImage { attempt_epoch: i64 },
     WaitImage { batch_id: String },
+    SubmitMatting { attempt_epoch: i64 },
+    WaitMatting { batch_id: String },
+    SubmitDelight { attempt_epoch: i64 },
+    WaitDelight { batch_id: String },
     SubmitMesh { attempt_epoch: i64 },
     WaitMesh { batch_id: String },
     Finalize { batch_id: String },
@@ -329,14 +521,56 @@ fn next_action(
             MeshWorkflowStageState::Completed => {}
         }
     }
+    if let Some(matting) = stages
+        .iter()
+        .find(|stage| stage.kind == MeshWorkflowStageKind::Matting)
+    {
+        match matting.state {
+            MeshWorkflowStageState::Pending => {
+                return Ok(NextAction::SubmitMatting {
+                    attempt_epoch: matting.updated_at_ms,
+                });
+            }
+            MeshWorkflowStageState::Running => {
+                return Ok(NextAction::WaitMatting {
+                    batch_id: matting
+                        .execution_batch_id
+                        .clone()
+                        .context("running matting stage has no durable batch")?,
+                });
+            }
+            MeshWorkflowStageState::Failed => bail!("matting stage is failed"),
+            MeshWorkflowStageState::Completed => {}
+        }
+    }
+    if let Some(delight) = stages
+        .iter()
+        .find(|stage| stage.kind == MeshWorkflowStageKind::Delight)
+    {
+        match delight.state {
+            MeshWorkflowStageState::Pending => {
+                return Ok(NextAction::SubmitDelight {
+                    attempt_epoch: delight.updated_at_ms,
+                });
+            }
+            MeshWorkflowStageState::Running => {
+                return Ok(NextAction::WaitDelight {
+                    batch_id: delight
+                        .execution_batch_id
+                        .clone()
+                        .context("running delight stage has no durable batch")?,
+                });
+            }
+            MeshWorkflowStageState::Failed => bail!("delight stage is failed"),
+            MeshWorkflowStageState::Completed => {}
+        }
+    }
     let mesh_stages = stages
         .iter()
         .filter(|stage| {
             matches!(
                 stage.kind,
-                MeshWorkflowStageKind::Matting
-                    | MeshWorkflowStageKind::Shape
-                    | MeshWorkflowStageKind::Paint
+                MeshWorkflowStageKind::Shape | MeshWorkflowStageKind::Paint
             )
         })
         .collect::<Vec<_>>();
@@ -502,13 +736,18 @@ fn mesh_execution_kinds(stages: &[MeshWorkflowStageRow]) -> Vec<MeshWorkflowStag
         .filter_map(|stage| {
             matches!(
                 stage.kind,
-                MeshWorkflowStageKind::Matting
-                    | MeshWorkflowStageKind::Shape
-                    | MeshWorkflowStageKind::Paint
+                MeshWorkflowStageKind::Shape | MeshWorkflowStageKind::Paint
             )
             .then_some(stage.kind)
         })
         .collect()
+}
+
+fn workflow_mesh_request(request: &CreateMeshWorkflowRequest) -> &mold_core::GenerateRequest {
+    match request {
+        CreateMeshWorkflowRequest::TextToMesh { mesh_request, .. } => mesh_request,
+        CreateMeshWorkflowRequest::MeshTexture { texture_request } => texture_request,
+    }
 }
 
 fn artifact_for_kind(
@@ -681,6 +920,69 @@ mod tests {
             NextAction::Finalize { batch_id } if batch_id == "batch"
         ));
         assert_eq!(mesh_artifact(&stages).unwrap().role, "final_glb");
+    }
+
+    #[test]
+    fn durable_order_runs_matting_before_delight_before_mesh() {
+        let child = serde_json::from_value::<mold_core::GenerateRequest>(serde_json::json!({
+            "prompt": "",
+            "model": "hunyuan3d:fp16",
+            "width": 0,
+            "height": 0,
+            "steps": 30,
+            "guidance": 5.0,
+            "seed": 1,
+            "output_format": "glb"
+        }))
+        .unwrap();
+        let request = CreateMeshWorkflowRequest::MeshTexture {
+            texture_request: Box::new(child),
+        };
+        let pending = vec![
+            stage(
+                0,
+                MeshWorkflowStageKind::Matting,
+                MeshWorkflowStageState::Pending,
+                None,
+            ),
+            stage(
+                1,
+                MeshWorkflowStageKind::Delight,
+                MeshWorkflowStageState::Pending,
+                None,
+            ),
+            stage(
+                2,
+                MeshWorkflowStageKind::Paint,
+                MeshWorkflowStageState::Pending,
+                None,
+            ),
+            stage(
+                3,
+                MeshWorkflowStageKind::Finalize,
+                MeshWorkflowStageState::Pending,
+                None,
+            ),
+        ];
+        assert!(matches!(
+            next_action(&request, &pending).unwrap(),
+            NextAction::SubmitMatting { .. }
+        ));
+
+        let mut matted = pending;
+        matted[0].state = MeshWorkflowStageState::Completed;
+        matted[0].execution_batch_id = Some("matting-batch".into());
+        assert!(matches!(
+            next_action(&request, &matted).unwrap(),
+            NextAction::SubmitDelight { .. }
+        ));
+
+        matted[1].state = MeshWorkflowStageState::Completed;
+        matted[1].execution_batch_id = Some("delight-batch".into());
+        assert!(matches!(
+            next_action(&request, &matted).unwrap(),
+            NextAction::SubmitMesh { .. }
+        ));
     }
 
     #[test]

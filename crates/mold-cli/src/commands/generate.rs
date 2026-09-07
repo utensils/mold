@@ -247,12 +247,15 @@ fn local_generation_profile(
         .find(|entry| entry.info.name == model || entry.info.name == canonical)
         .and_then(|entry| entry.generation_profile)
         .or_else(|| {
-            // Keep exact-name LTX-2.5 runs registry-authored even when a
-            // caller filters hidden or not-yet-installed catalog entries.
-            if !mold_core::ltx25_manifest::is_runtime_manifest(&canonical) {
+            let manifest = manifest::find_manifest(&canonical)?;
+            // Hidden runnable workers are absent from the public catalog but
+            // still need the registry-authored profile for internal UAT and
+            // exact-name diagnostics. Activation was checked above.
+            if !(mold_core::ltx25_manifest::is_runtime_manifest(&canonical)
+                || manifest.hidden && manifest.is_generation_model())
+            {
                 return None;
             }
-            let manifest = manifest::find_manifest(&canonical)?;
             let model_cfg = config.resolved_model_config(&canonical);
             Some(mold_core::generation_profile_for_manifest_with_defaults(
                 manifest,

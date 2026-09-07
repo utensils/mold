@@ -1332,6 +1332,7 @@ struct GenerateMeshArgs {
     threshold: Option<f32>,
     target_faces: Option<u32>,
     matting: Option<mold_core::MeshMattingMode>,
+    delight: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2759,6 +2760,7 @@ fn build_generate_mesh_request(
         texture: None,
         texture_resolution: None,
         matting: args.matting,
+        delight: args.delight.filter(|value| *value),
     };
 
     let mut req = build_generate_request(
@@ -3352,6 +3354,11 @@ fn builtin_tool_definitions() -> Value {
                         "default": "auto",
                         "description": "Background removal before conditioning. Auto preserves useful existing alpha; on recomputes it; off keeps the input background."
                     },
+                    "delight": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Remove baked lighting and highlights before shape and PBR generation."
+                    },
                     // The earlier spellings. `additionalProperties: false`
                     // means a schema-validating host refuses anything not
                     // declared here, so an alias that lived only in serde
@@ -3773,6 +3780,7 @@ mod tests {
             threshold: None,
             target_faces: None,
             matting: None,
+            delight: None,
         })
         .unwrap_err();
         assert!(bad.contains("valid base64"), "{bad}");
@@ -3790,6 +3798,7 @@ mod tests {
             threshold: None,
             target_faces: None,
             matting: None,
+            delight: None,
         })
         .unwrap_err();
         assert!(empty.contains("must not be empty"), "{empty}");
@@ -3811,6 +3820,7 @@ mod tests {
             threshold: Some(0.55),
             target_faces: Some(50_000),
             matting: Some(mold_core::MeshMattingMode::On),
+            delight: Some(true),
         })
         .expect("a well-formed mesh request builds");
 
@@ -3830,6 +3840,7 @@ mod tests {
         assert_eq!(mesh.threshold, Some(0.55));
         assert_eq!(mesh.target_faces, Some(50_000));
         assert_eq!(mesh.matting, Some(mold_core::MeshMattingMode::On));
+        assert_eq!(mesh.delight, Some(true));
         // Texturing is not available; the tool must not ask for it.
         assert_eq!(mesh.texture, None);
         assert_eq!(req.seed, Some(42));

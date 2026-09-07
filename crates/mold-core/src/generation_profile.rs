@@ -715,7 +715,13 @@ pub fn prompt_requirement_for_family(
     has_visual_conditioning: bool,
 ) -> PromptRequirement {
     match family.map(canonical_family) {
-        Some(family) if family == crate::manifest::HUNYUAN3D_FAMILY => PromptRequirement::Ignored,
+        Some(family)
+            if family == crate::manifest::HUNYUAN3D_FAMILY
+                || family == crate::manifest::HUNYUAN3D_MATTING_FAMILY
+                || family == crate::manifest::HUNYUAN3D_DELIGHT_FAMILY =>
+        {
+            PromptRequirement::Ignored
+        }
         Some("ltx2") if has_visual_conditioning => PromptRequirement::Optional,
         _ => PromptRequirement::Required,
     }
@@ -1030,6 +1036,19 @@ pub fn validate_mesh_against_recipe(
                 .as_ref()
                 .and_then(|control| control.reason.clone())
                 .unwrap_or_else(|| "Background matting is not available for this recipe".into()));
+        }
+    }
+    if options.delight == Some(true) {
+        let available = mesh
+            .delight
+            .as_ref()
+            .is_some_and(|control| matches!(control.mode, ControlMode::Adjustable));
+        if !available {
+            return Err(mesh
+                .delight
+                .as_ref()
+                .and_then(|control| control.reason.clone())
+                .unwrap_or_else(|| "Delighting is not available for this recipe".into()));
         }
     }
     Ok(())
@@ -1931,6 +1950,8 @@ fn recipe(
         && !mesh_only
         && !wan
         && family != "minimax-h3"
+        && family != crate::manifest::HUNYUAN3D_MATTING_FAMILY
+        && family != crate::manifest::HUNYUAN3D_DELIGHT_FAMILY
         && !references_replace_source
         && source_image != Some(SourceImageCapability::Unsupported);
     // The advertised mode is the answer for a CONDITIONED request, because
@@ -2209,6 +2230,10 @@ fn recipe(
                 "sd15" | "sdxl" => {
                     vec![Scheduler::Ddim, Scheduler::EulerAncestral, Scheduler::UniPc]
                 }
+                family if family == crate::manifest::HUNYUAN3D_MATTING_FAMILY => Vec::new(),
+                family if family == crate::manifest::HUNYUAN3D_DELIGHT_FAMILY => {
+                    vec![Scheduler::EulerAncestral]
+                }
                 "wan" => vec![Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp],
                 _ => Vec::new(),
             },
@@ -2229,11 +2254,6 @@ fn recipe(
 fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
     let multiview = crate::manifest::hunyuan3d_multiview_model(model);
     let paint_available = cfg!(feature = "mesh-texture");
-    let unavailable = |reason: &str| FeatureControlProfile {
-        mode: ControlMode::Hidden,
-        required: false,
-        reason: Some(reason.to_string()),
-    };
     MeshCapabilitiesProfile {
         octree_resolutions: validation::MESH_OCTREE_RESOLUTIONS.to_vec(),
         octree_default: validation::MESH_DEFAULT_OCTREE_RESOLUTION,
@@ -2321,7 +2341,11 @@ fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
             reason: (!cfg!(feature = "mesh-matting"))
                 .then(|| "Background matting requires the mesh-matting build feature".to_string()),
         }),
-        delight: Some(unavailable("Delighting is not executable by this build")),
+        delight: Some(feature_control(
+            cfg!(feature = "mesh-delight"),
+            false,
+            "Delighting requires the mesh-delight build feature",
+        )),
         workflow_modes: if multiview {
             vec![MeshWorkflowMode::MultiviewToMesh]
         } else {

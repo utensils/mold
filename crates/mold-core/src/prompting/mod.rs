@@ -905,7 +905,17 @@ mod tests {
     fn generation_manifests() -> Vec<&'static crate::manifest::ModelManifest> {
         crate::manifest::known_manifests()
             .iter()
-            .filter(|manifest| manifest.is_generation_model() || manifest.is_upscaler())
+            .filter(|manifest| {
+                (manifest.is_generation_model() || manifest.is_upscaler())
+                    // These hidden workers have generation profiles for
+                    // durable scheduling, but consume images rather than
+                    // user prompts and therefore have no prompting corpus.
+                    && !matches!(
+                        manifest.family.as_str(),
+                        crate::manifest::HUNYUAN3D_MATTING_FAMILY
+                            | crate::manifest::HUNYUAN3D_DELIGHT_FAMILY
+                    )
+            })
             .collect()
     }
 

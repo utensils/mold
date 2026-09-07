@@ -25,9 +25,13 @@
 pub mod backend;
 #[cfg(feature = "mesh-matting")]
 pub mod background_matting;
+#[cfg(feature = "mesh-delight")]
+pub mod delight;
 pub mod dino2;
 pub mod engine;
 pub mod glb;
+#[cfg(feature = "mesh-matting")]
+pub mod matting_engine;
 pub mod mesh;
 pub mod multiview;
 pub mod obj;

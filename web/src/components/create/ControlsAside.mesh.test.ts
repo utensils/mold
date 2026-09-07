@@ -210,6 +210,30 @@ describe("ControlsAside 3-D mesh", () => {
     ).toBe(true);
   });
 
+  it("writes the advertised delight opt-in", async () => {
+    const wrapper = mountMesh();
+    const control = wrapper.get("[data-test='mesh-delight']");
+    expect(control.text()).toContain("Remove lighting");
+    await control.get("button").trigger("click");
+    const next = wrapper
+      .emitted("update:modelValue")!
+      .at(-1)![0] as GenerateFormState;
+    expect(next.mesh?.delight).toBe(true);
+  });
+
+  it("hides delight when the host does not advertise it", () => {
+    const recipe = hunyuan3dRecipe();
+    recipe.capabilities.mesh!.delight = {
+      mode: "hidden",
+      required: false,
+    };
+    expect(
+      mountMesh({}, meshModel(recipe))
+        .find("[data-test='mesh-delight']")
+        .exists(),
+    ).toBe(false);
+  });
+
   it("binds the iso-threshold slider to the recipe's float control", () => {
     const wrapper = mountMesh();
     const slider = wrapper

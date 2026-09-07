@@ -21,6 +21,7 @@ export interface MeshRequestOptions {
   texture?: boolean | null;
   texture_resolution?: number | null;
   matting?: "auto" | "on" | "off" | null;
+  delight?: boolean | null;
 }
 
 /** Form state: `null` means "use the profile default". */
@@ -32,6 +33,7 @@ export interface MeshFormState {
   texture?: boolean | null;
   textureResolution?: number | null;
   matting?: "auto" | "on" | "off" | null;
+  delight?: boolean | null;
 }
 
 export function emptyMeshForm(): MeshFormState {
@@ -60,6 +62,7 @@ export function meshRequestFromForm(
         | "texture_resolutions"
         | "texture_default_resolution"
         | "matting"
+        | "delight"
       >
     | null
     | undefined,
@@ -97,6 +100,9 @@ export function meshRequestFromForm(
   ) {
     request.matting = matting;
   }
+  if (form.delight === true && caps?.delight?.mode === "adjustable") {
+    request.delight = true;
+  }
   return Object.keys(request).length > 0 ? request : undefined;
 }
 
@@ -115,6 +121,7 @@ export function meshFormFromMetadata(
     // A mesh print with no matting field predates the pre-stage and rendered
     // with its background intact. Preserve that behavior on Reuse settings.
     ...(mesh ? { matting: mesh.matting ?? "off" } : {}),
+    ...(mesh?.delight === true ? { delight: true } : {}),
   };
 }
 

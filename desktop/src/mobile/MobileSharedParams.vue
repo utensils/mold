@@ -132,6 +132,11 @@ const mattingControl = computed(() => meshCaps.value?.matting ?? null);
 const mattingValue = computed(
   () => meshForm.value.matting ?? mattingControl.value?.default ?? "auto",
 );
+const delightControl = computed(() => meshCaps.value?.delight ?? null);
+const delightEnabled = computed(() => meshForm.value.delight === true);
+function setDelight(enabled: boolean): void {
+  writableMeshForm().delight = enabled ? true : null;
+}
 function setMatting(event: Event): void {
   writableMeshForm().matting = (event.target as HTMLSelectElement).value as "auto" | "on" | "off";
 }
@@ -374,6 +379,21 @@ const selectedQuality = computed(() => activeQualityPreset(quality.value, props.
           {{ thresholdNote }}
         </small>
       </label>
+      <div
+        v-if="delightControl?.mode === 'adjustable'"
+        class="mobile-generate-toggle-row"
+        data-test="mobile-mesh-delight"
+      >
+        <span
+          ><strong>Remove lighting</strong
+          ><small>Neutralize baked highlights before shape and PBR materials.</small></span
+        >
+        <SwitchToggle
+          :model-value="delightEnabled"
+          label="Remove lighting and highlights"
+          @update:model-value="setDelight"
+        />
+      </div>
       <label class="field">
         <span>Simplify to</span>
         <input

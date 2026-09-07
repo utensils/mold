@@ -13,6 +13,7 @@ description = "Terminal UI for mold — interactive AI image generation"
 [features]
 mesh-texture = ["mold-inference/mesh-texture"]
 mesh-matting = ["mold-core/mesh-matting", "mold-inference/mesh-matting"]
+mesh-delight = ["mold-core/mesh-delight", "mold-inference/mesh-delight"]
 default = []
 cuda = ["mold-inference/cuda"]
 cudnn = ["cuda", "mold-inference/cudnn"]

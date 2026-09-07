@@ -94,8 +94,8 @@ and `ffprobe` on `PATH` before the server advertises that feature.
 - **Video and audio:** text/image-to-video, sequences, clip continuation,
   lip dub, text-to-audio, and MP4 output with generated audio.
 - **3D:** single-image and named multiview-to-mesh with Hunyuan3D 2.0 and 2.1,
-  automatic background removal, and optional Hunyuan3D Paint PBR materials in
-  CUDA builds. Results are published to the Library as
+  automatic background removal, optional highlight and lighting removal, and
+  Hunyuan3D Paint PBR materials in CUDA builds. Results are published to the Library as
   binary glTF with a rendered poster tile, exportable as OBJ, STL, or PLY, or
   shared as a turntable GIF, APNG, or WebP. The web and desktop **3-D Studio**
   also runs durable text-to-3D and supplied-mesh texturing workflows: each

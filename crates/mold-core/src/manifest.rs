@@ -61,6 +61,12 @@ pub const HUNYUAN3D_PAINT_MANIFEST: &str = "hunyuan3d-paint";
 /// Apache-2.0 U²-Net weights used by the Hunyuan3D background-matting pre-stage.
 pub const HUNYUAN3D_MATTING_FAMILY: &str = "hunyuan3d-matting";
 pub const HUNYUAN3D_MATTING_MANIFEST: &str = "hunyuan3d-matting";
+pub const HUNYUAN3D_MATTING_FORCE_MANIFEST: &str = "hunyuan3d-matting:on";
+/// Tencent's SD2.1 InstructPix2Pix lighting-removal pre-stage. Hidden from
+/// ordinary model pickers; durable mesh workflows invoke it as its own leased
+/// image job so restart and resource ownership remain explicit.
+pub const HUNYUAN3D_DELIGHT_FAMILY: &str = "hunyuan3d-delight";
+pub const HUNYUAN3D_DELIGHT_MANIFEST: &str = "hunyuan3d-delight:fp16";
 /// Untiled 4x upscaler required between paint diffusion and material baking.
 pub const HUNYUAN3D_PAINT_UPSCALER_MANIFEST: &str = "real-esrgan-x4plus:fp16";
 
@@ -85,7 +91,6 @@ pub const AUXILIARY_FAMILIES: &[&str] = &[
     "ltx2-camera-control",
     "pulid",
     HUNYUAN3D_PAINT_FAMILY,
-    HUNYUAN3D_MATTING_FAMILY,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,11 +274,7 @@ impl ModelManifest {
                 && !crate::ltx25_manifest::is_runtime_manifest(&self.name))
             || matches!(
                 self.family.as_str(),
-                "ltx2-control"
-                    | "ltx2-camera-control"
-                    | PULID_FAMILY
-                    | HUNYUAN3D_PAINT_FAMILY
-                    | HUNYUAN3D_MATTING_FAMILY
+                "ltx2-control" | "ltx2-camera-control" | PULID_FAMILY | HUNYUAN3D_PAINT_FAMILY
             )
     }
 
@@ -4976,12 +4977,15 @@ pub fn paths_from_downloads(
         })?;
 
     // Utility models and LTX-2: transformer + optional tokenizer, no standalone VAE asset
-    let vae =
-        if UTILITY_FAMILIES.contains(&family) || family == "ltx2" || family == HUNYUAN3D_FAMILY {
-            find(ModelComponent::Vae).unwrap_or_default()
-        } else {
-            find(ModelComponent::Vae)?
-        };
+    let vae = if UTILITY_FAMILIES.contains(&family)
+        || family == "ltx2"
+        || family == HUNYUAN3D_FAMILY
+        || family == HUNYUAN3D_MATTING_FAMILY
+    {
+        find(ModelComponent::Vae).unwrap_or_default()
+    } else {
+        find(ModelComponent::Vae)?
+    };
 
     Some(ModelPaths {
         transformer,
@@ -5177,6 +5181,32 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
             defaults: hunyuan3d_paint_defaults(),
             hidden: true,
         },
+        ModelManifest {
+            name: HUNYUAN3D_MATTING_FORCE_MANIFEST.to_string(),
+            family: HUNYUAN3D_MATTING_FAMILY.to_string(),
+            description: "U²-Net forced background matting for Hunyuan3D inputs".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "f5aiteam/rembg".to_string(),
+                hf_filename: "u2net.onnx".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 175_997_641,
+                gated: false,
+                sha256: Some("8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491"),
+            }],
+            defaults: ManifestDefaults {
+                width: 512,
+                height: 512,
+                steps: 1,
+                guidance: 1.0,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+                frames: None,
+                fps: None,
+                source_image: Some(crate::types::SourceImageCapability::Required),
+            },
+            hidden: true,
+        },
         // rembg's full U²-Net model, used as a bounded pre-stage and never as
         // a standalone generator. This HF mirror carries the exact bytes from
         // danielgatis/rembg's v0.0.0 release asset (the SHA-256 and rembg's
@@ -5193,7 +5223,85 @@ fn hunyuan3d_manifests() -> Vec<ModelManifest> {
                 gated: false,
                 sha256: Some("8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491"),
             }],
-            defaults: hunyuan3d_paint_defaults(),
+            defaults: ManifestDefaults {
+                width: 512,
+                height: 512,
+                steps: 1,
+                guidance: 1.0,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+                frames: None,
+                fps: None,
+                source_image: Some(crate::types::SourceImageCapability::Required),
+            },
+            hidden: true,
+        },
+        // Hunyuan3D 2.0 revision 9cd649ba6913f7a852e3286bad86bfa9a2d83dcf.
+        // The tokenizer is the standard CLIP BPE tokenizer and comes from its
+        // canonical ungated repository because Tencent's diffusers directory
+        // publishes vocab/merges rather than tokenizer.json.
+        ModelManifest {
+            name: HUNYUAN3D_DELIGHT_MANIFEST.to_string(),
+            family: HUNYUAN3D_DELIGHT_FAMILY.to_string(),
+            description: "Hunyuan3D lighting and highlight removal".to_string(),
+            files: vec![
+                ModelFile {
+                    hf_repo: "tencent/Hunyuan3D-2".to_string(),
+                    hf_filename: "hunyuan3d-delight-v2-0/unet/diffusion_pytorch_model.safetensors"
+                        .to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 3_463_772_592,
+                    gated: false,
+                    sha256: Some(
+                        "0ce61d15a43d11ba19079ab8f24dfce78b876d3f5291470079ef64b17e08ca58",
+                    ),
+                },
+                ModelFile {
+                    hf_repo: "tencent/Hunyuan3D-2".to_string(),
+                    hf_filename: "hunyuan3d-delight-v2-0/vae/diffusion_pytorch_model.safetensors"
+                        .to_string(),
+                    component: ModelComponent::Vae,
+                    size_bytes: 167_335_342,
+                    gated: false,
+                    sha256: Some(
+                        "3e4c08995484ee61270175e9e7a072b66a6e4eeb5f0c266667fe1f45b90daf9a",
+                    ),
+                },
+                ModelFile {
+                    hf_repo: "tencent/Hunyuan3D-2".to_string(),
+                    hf_filename: "hunyuan3d-delight-v2-0/text_encoder/model.safetensors"
+                        .to_string(),
+                    component: ModelComponent::ClipEncoder,
+                    size_bytes: 680_820_392,
+                    gated: false,
+                    sha256: Some(
+                        "bc1827c465450322616f06dea41596eac7d493f4e95904dcb51f0fc745c4e13f",
+                    ),
+                },
+                ModelFile {
+                    hf_repo: "openai/clip-vit-large-patch14".to_string(),
+                    hf_filename: "tokenizer.json".to_string(),
+                    component: ModelComponent::ClipTokenizer,
+                    size_bytes: 2_224_003,
+                    gated: false,
+                    sha256: Some(
+                        "a83e0809aa4c3af7208b2df632a7a69668c6d48775b3c3fe4e1b1199d1f8b8f4",
+                    ),
+                },
+            ],
+            defaults: ManifestDefaults {
+                steps: 50,
+                guidance: 1.0,
+                width: 512,
+                height: 512,
+                is_schnell: false,
+                scheduler: Some(Scheduler::EulerAncestral),
+                negative_prompt: None,
+                frames: None,
+                fps: None,
+                source_image: Some(crate::types::SourceImageCapability::Required),
+            },
             hidden: true,
         },
     ]
@@ -7938,12 +8046,14 @@ mod tests {
     }
 
     #[test]
-    fn hunyuan3d_matting_is_a_hidden_pinned_files_only_bundle() {
+    fn hunyuan3d_matting_is_a_hidden_runnable_pinned_pipeline() {
         let matting =
             super::find_manifest(HUNYUAN3D_MATTING_MANIFEST).expect("matting dependency manifest");
         assert!(matting.hidden);
-        assert!(matting.is_auxiliary());
-        assert!(matting.is_files_only_bundle());
+        assert!(!matting.is_auxiliary());
+        assert!(!matting.is_files_only_bundle());
+        assert!(matting.is_generation_model());
+        assert_eq!(matting.defaults.scheduler, None);
         assert_eq!(matting.files.len(), 1);
         let file = &matting.files[0];
         assert_eq!(file.size_bytes, 175_997_641);
@@ -7951,6 +8061,24 @@ mod tests {
             file.sha256,
             Some("8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491")
         );
+    }
+
+    #[test]
+    fn hunyuan3d_delight_is_a_hidden_runnable_pinned_pipeline() {
+        let delight =
+            super::find_manifest(HUNYUAN3D_DELIGHT_MANIFEST).expect("delight pipeline manifest");
+        assert!(delight.hidden);
+        assert!(!delight.is_auxiliary());
+        assert!(!delight.is_files_only_bundle());
+        assert_eq!(delight.family, HUNYUAN3D_DELIGHT_FAMILY);
+        assert_eq!(delight.defaults.steps, 50);
+        assert_eq!(delight.defaults.guidance, 1.0);
+        assert_eq!(
+            delight.defaults.scheduler,
+            Some(crate::Scheduler::EulerAncestral)
+        );
+        assert_eq!(delight.files.len(), 4);
+        assert_eq!(delight.total_size_bytes(), 4_314_152_329);
     }
 
     use super::*;
@@ -9262,7 +9390,9 @@ mod tests {
         // Hunyuan3D 2.1 shape: one additional self-contained checkpoint.
         // Hunyuan3D multiview: +2 self-contained normal and five-step Turbo
         // checkpoints, each carrying its DiT, shape VAE and DINO tower.
-        assert_eq!(known_manifests().len(), 206);
+        // Mesh preprocessing: +3 hidden runnable workers — auto/forced U²-Net
+        // matting aliases and the Delight diffusion pipeline.
+        assert_eq!(known_manifests().len(), 208);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`
@@ -10221,6 +10351,7 @@ mod tests {
                 && !manifest.is_auxiliary()
                 && manifest.family != "ltx2"
                 && manifest.family != HUNYUAN3D_FAMILY
+                && manifest.family != HUNYUAN3D_MATTING_FAMILY
             {
                 assert!(
                     components.contains(&ModelComponent::Vae),

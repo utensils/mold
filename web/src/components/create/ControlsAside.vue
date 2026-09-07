@@ -141,6 +141,8 @@ const mattingOptions = computed(() =>
 const mattingValue = computed(
   () => meshForm.value.matting ?? mattingControl.value?.default ?? "auto",
 );
+const delightControl = computed(() => meshProfile.value?.delight ?? null);
+const delightEnabled = computed(() => meshForm.value.delight === true);
 /** Advisory only, like the resolution warning: the server is the authority
  * and refuses an out-of-range value at admission (422), so the rail says so
  * here instead of letting Generate fail with no explanation. */
@@ -484,6 +486,23 @@ function lockLastSeed() {
         :disabled="mattingControl?.mode === 'fixed'"
         @update:model-value="patchMesh({ matting: $event })"
       />
+      <div
+        v-if="delightControl?.mode === 'adjustable'"
+        class="controls__toggle"
+        data-test="mesh-delight"
+      >
+        <span class="controls__label controls__label--inline"
+          >Remove lighting</span
+        >
+        <SwitchToggle
+          :model-value="delightEnabled"
+          label="Remove lighting and highlights before texturing"
+          @update:model-value="patchMesh({ delight: $event ? true : null })"
+        />
+        <p class="controls__hint controls__hint--full">
+          Neutralizes baked highlights before shape and PBR material generation.
+        </p>
+      </div>
     </div>
 
     <div v-if="capabilities.supportsVideo" class="controls__group">

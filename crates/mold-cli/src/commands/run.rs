@@ -695,6 +695,7 @@ pub struct MeshFlags {
     pub texture: bool,
     pub texture_resolution: Option<u32>,
     pub matting: Option<mold_core::MeshMattingMode>,
+    pub delight: bool,
 }
 
 impl MeshFlags {
@@ -749,6 +750,7 @@ impl MeshFlags {
             && !self.texture
             && self.texture_resolution.is_none()
             && self.matting.is_none()
+            && !self.delight
         {
             return None;
         }
@@ -762,6 +764,7 @@ impl MeshFlags {
             texture: self.texture.then_some(true),
             texture_resolution: self.texture_resolution,
             matting: self.matting,
+            delight: self.delight.then_some(true),
         })
     }
 }

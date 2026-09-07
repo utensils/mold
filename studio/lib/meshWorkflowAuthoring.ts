@@ -22,7 +22,10 @@ export interface WorkflowModel {
       capabilities: {
         canvasless?: boolean;
         prompt?: { mode?: string };
-        mesh?: { workflow_modes?: string[] } | null;
+        mesh?: {
+          workflow_modes?: string[];
+          delight?: { mode?: string } | null;
+        } | null;
       };
     }>;
   } | null;
@@ -41,8 +44,9 @@ export interface WorkflowGenerateRequest {
   source_image?: string;
   references?: GenerationReference[];
   mesh?: {
-    texture: true;
-    texture_resolution: number;
+    texture?: true;
+    texture_resolution?: number;
+    delight?: true;
   };
 }
 
@@ -104,6 +108,7 @@ export function buildTextToMeshWorkflow(options: {
   meshModel: WorkflowModel;
   texture: boolean;
   textureResolution: number;
+  delight?: boolean;
 }): Extract<
   CreateMeshWorkflowRequest<WorkflowGenerateRequest>,
   { mode: "text_to_mesh" }
@@ -117,7 +122,10 @@ export function buildTextToMeshWorkflow(options: {
     mesh.mesh = {
       texture: true,
       texture_resolution: options.textureResolution,
+      ...(options.delight ? { delight: true as const } : {}),
     };
+  } else if (options.delight) {
+    mesh.mesh = { delight: true };
   }
   return {
     mode: "text_to_mesh",
@@ -137,6 +145,7 @@ export function buildMeshTextureWorkflow(options: {
   upAxis: "y" | "z";
   metersPerUnit: number;
   textureResolution: number;
+  delight?: boolean;
 }): Extract<
   CreateMeshWorkflowRequest<WorkflowGenerateRequest>,
   { mode: "mesh_texture" }
@@ -150,6 +159,7 @@ export function buildMeshTextureWorkflow(options: {
   request.mesh = {
     texture: true,
     texture_resolution: options.textureResolution,
+    ...(options.delight ? { delight: true } : {}),
   };
   request.references = [
     {

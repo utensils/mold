@@ -31,6 +31,7 @@ pulid = []
 # forward this only when the xatlas/native paint path is compiled.
 mesh-texture = []
 mesh-matting = []
+mesh-delight = ["mesh-matting"]
 
 [dependencies]
 anyhow = "1"

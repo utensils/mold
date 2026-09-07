@@ -1331,6 +1331,31 @@ pub(crate) async fn resolved_generation_profile(
         .into_iter()
         .find(|entry| entry.info.name == model || entry.info.name == canonical_model)
         .and_then(|entry| entry.generation_profile)
+        .or_else(|| hidden_worker_generation_profile(canonical_model))
+}
+
+/// Resolve scheduler-owned mesh preprocessing workers that are intentionally
+/// absent from the public model catalog. They still pass through the same
+/// delivery-qualified recipe validation as every public generation model.
+fn hidden_worker_generation_profile(model: &str) -> Option<mold_core::GenerationProfileSet> {
+    if !matches!(
+        model,
+        mold_core::manifest::HUNYUAN3D_MATTING_MANIFEST
+            | mold_core::manifest::HUNYUAN3D_MATTING_FORCE_MANIFEST
+            | mold_core::manifest::HUNYUAN3D_DELIGHT_MANIFEST
+    ) {
+        return None;
+    }
+    let manifest = mold_core::manifest::find_manifest(model)?;
+    let mut profile = mold_core::generation_profile_for_manifest(manifest);
+    mold_core::qualify_generation_profile_delivery(
+        &mut profile,
+        mold_core::GenerationDeliveryCapabilities::new(
+            cfg!(feature = "mp4"),
+            cfg!(feature = "webp"),
+        ),
+    );
+    (!profile.recipes.is_empty()).then_some(profile)
 }
 
 pub(crate) async fn prepare_generation_after_durable_ack(
@@ -11591,6 +11616,20 @@ mod tests {
     use crate::test_support::env_lock;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    #[test]
+    fn hidden_mesh_workers_have_internal_generation_profiles() {
+        for model in [
+            mold_core::manifest::HUNYUAN3D_MATTING_MANIFEST,
+            mold_core::manifest::HUNYUAN3D_MATTING_FORCE_MANIFEST,
+            mold_core::manifest::HUNYUAN3D_DELIGHT_MANIFEST,
+        ] {
+            let profile = super::hidden_worker_generation_profile(model)
+                .unwrap_or_else(|| panic!("missing internal profile for {model}"));
+            assert!(!profile.recipes.is_empty());
+        }
+        assert!(super::hidden_worker_generation_profile("flux-schnell:q8").is_none());
+    }
 
     /// Every `$ref` the OpenAPI document emits must name a component the
     /// document also defines.

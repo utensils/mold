@@ -16,7 +16,7 @@ mod h3_server_features;
 
 use h3_server_features::validate_canonical_h3_server_feature_keys as validate;
 
-/// `mold-ai`'s `h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting`
+/// `mold-ai`'s `h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-delight`
 /// as it reaches `mold-ai-server`. Features `mold-ai` does not forward to the
 /// server (`preview`, `discord`, `tui`) are deliberately absent.
 fn shipping_sm89_recipe() -> Vec<String> {
@@ -27,6 +27,7 @@ fn shipping_sm89_recipe() -> Vec<String> {
         "CARGO_FEATURE_H3_CUDA",
         "CARGO_FEATURE_H3_PRIVATE_BRIDGE",
         "CARGO_FEATURE_MDNS",
+        "CARGO_FEATURE_MESH_DELIGHT",
         "CARGO_FEATURE_MESH_MATTING",
         "CARGO_FEATURE_MESH_TEXTURE",
         "CARGO_FEATURE_METRICS",
@@ -49,6 +50,7 @@ fn shipping_metal_recipe() -> Vec<String> {
         "CARGO_FEATURE_MDNS",
         "CARGO_FEATURE_METAL",
         "CARGO_FEATURE_METRICS",
+        "CARGO_FEATURE_MESH_DELIGHT",
         "CARGO_FEATURE_MESH_MATTING",
         "CARGO_FEATURE_MESH_TEXTURE",
         "CARGO_FEATURE_MP4",
@@ -110,4 +112,13 @@ fn dropping_mesh_matting_cannot_ship_an_incomplete_h3_backend() {
         .filter(|key| key != "CARGO_FEATURE_MESH_MATTING")
         .collect();
     validate(&recipe).expect_err("the public H3 backend must include background matting");
+}
+
+#[test]
+fn dropping_mesh_delight_cannot_ship_an_incomplete_h3_backend() {
+    let recipe: Vec<String> = shipping_sm89_recipe()
+        .into_iter()
+        .filter(|key| key != "CARGO_FEATURE_MESH_DELIGHT")
+        .collect();
+    validate(&recipe).expect_err("the public H3 backend must include Delight preprocessing");
 }
