@@ -65,6 +65,7 @@ pub mod paint_vertex_fill;
 pub mod paint_views;
 mod paint_weights;
 pub mod poster;
+pub mod quantization;
 pub mod raster;
 pub mod sampler;
 pub mod shape_vae;
