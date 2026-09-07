@@ -1971,6 +1971,32 @@ Run 'mold list' to see all available models.")]
         accept_license: Vec<String>,
     },
 
+    /// Create and register a local quantized Hunyuan3D shape model
+    #[command(after_long_help = "\
+Examples:
+  mold quantize hunyuan3d-2.1:fp16 --tier q8
+  mold quantize hunyuan3d-turbo:fp16 --tier q4 --name my-h3-turbo:q4
+
+The source checkpoint is preserved. The derived GGUF is written atomically
+under the configured models directory and registered on every local surface.")]
+    Quantize {
+        /// Installed Hunyuan3D source model.
+        #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        model: String,
+
+        /// Quantized transformer storage tier.
+        #[arg(long, default_value = "q8", value_name = "TIER")]
+        tier: mold_inference::hunyuan3d::quantization::ShapeQuantization,
+
+        /// Name used to register the derived model (defaults to SOURCE:qN).
+        #[arg(long, value_name = "MODEL")]
+        name: Option<String>,
+
+        /// Exact GGUF destination (defaults under the configured models directory).
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+        output: Option<std::path::PathBuf>,
+    },
+
     /// Show third-party model licenses and whether they have been accepted
     #[command(after_long_help = "\
 Acceptance is recorded per Mold data root, so this reports the machine that
@@ -3139,6 +3165,12 @@ async fn run() -> anyhow::Result<()> {
                 commands::pull::run(&model, &opts, &accept_licenses).await?;
             }
         }
+        Commands::Quantize {
+            model,
+            tier,
+            name,
+            output,
+        } => commands::quantize::run(&model, tier, name, output)?,
         Commands::Licenses { action, local } => match action {
             Some(LicensesAction::Accept {
                 ids,
@@ -4888,6 +4920,37 @@ mod tests {
                 assert_eq!(accept_license, vec!["one".to_string(), "two".to_string()]);
             }
             _ => panic!("expected Pull"),
+        }
+    }
+
+    #[test]
+    fn hunyuan3d_quantize_parses_lower_bit_tier_and_registration_name() {
+        let cli = parse(&[
+            "quantize",
+            "hunyuan3d-2.1:fp16",
+            "--tier",
+            "q4",
+            "--name",
+            "workbench:q4",
+            "--output",
+            "/storage/workbench.gguf",
+        ]);
+        match cli.command {
+            Commands::Quantize {
+                model,
+                tier,
+                name,
+                output,
+            } => {
+                assert_eq!(model, "hunyuan3d-2.1:fp16");
+                assert_eq!(tier.to_string(), "q4");
+                assert_eq!(name.as_deref(), Some("workbench:q4"));
+                assert_eq!(
+                    output.unwrap(),
+                    std::path::Path::new("/storage/workbench.gguf")
+                );
+            }
+            _ => panic!("expected Quantize"),
         }
     }
 
