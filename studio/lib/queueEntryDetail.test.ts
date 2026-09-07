@@ -40,6 +40,32 @@ function model(input: Partial<QueueEntryDetailInput> = {}) {
 }
 
 describe("queueEntryDetailModel", () => {
+  /*
+   * This panel is opened FROM a queue row, so it cannot describe the row
+   * differently. It read only the position, so a paused row was captioned
+   * "#3 in line" — a place in a line it is not standing in — while the row
+   * behind it said Paused.
+   */
+  it("describes a paused row the way the row that opened it does", () => {
+    const mine = model({
+      entry: entry({ state: "paused", explicitly_paused: true }),
+    });
+    expect(mine.stateLabel).toBe("Paused");
+    expect(mine.stateCode).toBe("PAUSED");
+    expect(mine.waitLabel).toBe("Paused");
+
+    const parked = model({
+      entry: entry({ state: "paused", explicitly_paused: false }),
+    });
+    expect(parked.stateLabel).toBe("Paused");
+    expect(parked.waitLabel).toBe("Paused after restart");
+
+    // A host that does not distinguish them only ever parked at restart.
+    expect(model({ entry: entry({ state: "paused" }) }).waitLabel).toBe(
+      "Paused after restart",
+    );
+  });
+
   it("resolves the shared waiting vocabulary rather than a raw position", () => {
     expect(model({ entry: entry({ position: 0 }) }).stateCode).toBe("NEXT UP");
     expect(model({ entry: entry({ position: 3 }) }).waitLabel).toBe(

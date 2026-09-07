@@ -445,3 +445,113 @@ describe("useQueueCommands — resuming an auto-chain parked by a restart", () =
     expect(labels(menu.entries)).not.toContain("Resume");
   });
 });
+
+/*
+ * Three pause scopes, three controls: the whole queue, one machine's queue,
+ * and one job. A per-row Pause that reached the host-wide gate would stop
+ * every other print on that machine, so the endpoint each control posts to is
+ * pinned here rather than left to a reviewer's reading.
+ */
+describe("useQueueCommands — the pause scopes stay apart", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    __resetQueueCommandState();
+    readyLocalHost();
+  });
+
+  function queuedRow(id = "job-9") {
+    return { kind: "print", print: { hostId: "local", id } } as never;
+  }
+
+  function queueWith(entries: unknown[], paused = false) {
+    useJobsStore().queues["local"] = {
+      hostId: "local",
+      entries,
+      paused,
+      caps: { canPause: true, canCancelAll: true, canReorder: false, canPauseJob: true },
+      gpuOrdinals: [],
+      error: null,
+    } as never;
+  }
+
+  function labels(entries: readonly MenuEntry[]): string[] {
+    return entries.map((entry) => ("label" in entry ? entry.label : "—"));
+  }
+
+  it("pauses ONE row through the per-job route, never the host-wide gate", async () => {
+    queueWith([{ id: "job-9", state: "queued", position: 0 }]);
+    const jobs = useJobsStore();
+    const setJobPaused = vi.spyOn(jobs, "setJobPaused").mockResolvedValue(undefined as never);
+    const pause = vi.spyOn(jobs, "pause").mockResolvedValue(undefined as never);
+    const api = commands();
+    const menu = useContextMenuStore();
+    const event = { clientX: 1, clientY: 1, preventDefault() {}, stopPropagation() {} } as never;
+
+    api.contextMenu(event, queuedRow());
+    expect(labels(menu.entries)).toContain("Pause");
+    const entry = menu.entries.find((item) => "label" in item && item.label === "Pause");
+    (entry as { action: () => void }).action();
+    await Promise.resolve();
+
+    expect(setJobPaused).toHaveBeenCalledWith("local", "job-9", true);
+    expect(pause).not.toHaveBeenCalled();
+  });
+
+  it("resumes ONE row without resuming the machine", async () => {
+    queueWith([{ id: "job-9", state: "paused", position: 0 }]);
+    const jobs = useJobsStore();
+    const setJobPaused = vi.spyOn(jobs, "setJobPaused").mockResolvedValue(undefined as never);
+    const resume = vi.spyOn(jobs, "resume").mockResolvedValue(undefined as never);
+    const api = commands();
+    const menu = useContextMenuStore();
+    const event = { clientX: 1, clientY: 1, preventDefault() {}, stopPropagation() {} } as never;
+
+    api.contextMenu(event, queuedRow());
+    expect(labels(menu.entries)).toContain("Resume");
+    const entry = menu.entries.find((item) => "label" in item && item.label === "Resume");
+    (entry as { action: () => void }).action();
+    await Promise.resolve();
+
+    expect(setJobPaused).toHaveBeenCalledWith("local", "job-9", false);
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it("pauses a MACHINE through that host's own gate, touching no row", async () => {
+    queueWith([{ id: "job-9", state: "queued", position: 0 }]);
+    const jobs = useJobsStore();
+    const pause = vi.spyOn(jobs, "pause").mockResolvedValue(undefined as never);
+    const setJobPaused = vi.spyOn(jobs, "setJobPaused").mockResolvedValue(undefined as never);
+
+    await commands().togglePauseFor("local");
+
+    expect(pause).toHaveBeenCalledWith("local");
+    expect(setJobPaused).not.toHaveBeenCalled();
+  });
+
+  it("offers no per-job pause on a host that does not advertise one", () => {
+    useJobsStore().queues["local"] = {
+      hostId: "local",
+      entries: [{ id: "job-9", state: "queued", position: 0 }],
+      paused: false,
+      caps: { canPause: true, canCancelAll: true, canReorder: false, canPauseJob: false },
+      gpuOrdinals: [],
+      error: null,
+    } as never;
+    const api = commands();
+    const menu = useContextMenuStore();
+    const event = { clientX: 1, clientY: 1, preventDefault() {}, stopPropagation() {} } as never;
+
+    api.contextMenu(event, queuedRow());
+    expect(labels(menu.entries)).not.toContain("Pause");
+  });
+
+  it("offers no per-job pause for a RUNNING row, which has no such route", () => {
+    queueWith([{ id: "job-9", state: "running", position: 0 }]);
+    const api = commands();
+    const menu = useContextMenuStore();
+    const event = { clientX: 1, clientY: 1, preventDefault() {}, stopPropagation() {} } as never;
+
+    api.contextMenu(event, queuedRow());
+    expect(labels(menu.entries)).not.toContain("Pause");
+  });
+});

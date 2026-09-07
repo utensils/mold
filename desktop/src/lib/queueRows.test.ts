@@ -5,10 +5,13 @@ import {
   queueSentence,
   railStatusLine,
   rowGlyph,
+  rowProgressFraction,
   rowStatusLine,
   rowTitle,
   rowTone,
+  type QueueRowContext,
 } from "./queueRows";
+import type { QueueStatus } from "@studio/lib/queuePosition";
 import type { QueueRow } from "../composables/useQueueActivity";
 import type { Job } from "./generationJob";
 
@@ -47,6 +50,26 @@ const print = (part: Partial<Job> = {}): QueueRow => ({
   kind: "print",
   print: job(part),
 });
+
+/** A row the host reports through `/api/activity` rather than one this
+ * client is tracking itself — every fleet row, and every row after a
+ * reconnect. */
+const shared = (part: Record<string, unknown> = {}): QueueRow =>
+  ({
+    key: "shared:1",
+    createdAtMs: 0,
+    kind: "shared",
+    shared: {
+      id: "job-1",
+      kind: "generation",
+      phase: "running",
+      model: "hunyuan3d-2.1:fp16",
+      created_at_unix_ms: 0,
+      updated_at_unix_ms: 0,
+      can_cancel: true,
+      ...part,
+    },
+  }) as unknown as QueueRow;
 
 describe("queue rows speak the lexicon", () => {
   it("titles a print by its words and a clip by its scenes", () => {
@@ -89,37 +112,53 @@ describe("queue rows speak the lexicon", () => {
 
   it("says what a parked row is parked on, not a bare Waiting", () => {
     const waiting = print({ status: "queued", queuePosition: 2 });
+    const wait = (part: Partial<QueueStatus>): QueueRowContext => ({
+      wait: {
+        state: "queued",
+        position: 2,
+        blockedReason: null,
+        preparation: null,
+        explicitlyPaused: null,
+        ...part,
+      },
+    });
     expect(rowStatusLine(waiting)).toBe("Waiting — #2 in line");
+    expect(rowStatusLine(waiting, wait({ state: "held" }))).toBe("Held");
     expect(
-      rowStatusLine(waiting, {
-        wait: { state: "paused", position: 2, blockedReason: null, preparation: null },
-      }),
-    ).toBe("Paused after restart");
-    expect(
-      rowStatusLine(waiting, {
-        wait: { state: "held", position: 2, blockedReason: null, preparation: null },
-      }),
-    ).toBe("Held");
-    expect(
-      rowStatusLine(waiting, {
-        wait: {
-          state: "queued",
-          position: 2,
+      rowStatusLine(
+        waiting,
+        wait({
           blockedReason: "preparing",
           preparation: { component: "flux weights", fraction: 0.42, elapsedMs: null },
-        },
-      }),
+        }),
+      ),
     ).toBe("Getting a style ready · 42%");
-    expect(
-      rowStatusLine(waiting, {
-        wait: {
-          state: "queued",
-          position: 2,
-          blockedReason: "model_not_installed",
-          preparation: null,
-        },
-      }),
-    ).toBe("Waiting — model not installed");
+    expect(rowStatusLine(waiting, wait({ blockedReason: "model_not_installed" }))).toBe(
+      "Waiting — model not installed",
+    );
+  });
+
+  /*
+   * A row someone paused and a whole queue parked by a restart both arrive as
+   * `state: "paused"`. Saying "after restart" for the first is what made
+   * pausing ONE job read as the entire queue stopping.
+   */
+  it("tells a job someone paused apart from a queue parked by a restart", () => {
+    const waiting = print({ status: "queued", queuePosition: 2 });
+    const paused = (explicitlyPaused: boolean | null): QueueRowContext => ({
+      wait: {
+        state: "paused",
+        position: 2,
+        blockedReason: null,
+        preparation: null,
+        explicitlyPaused,
+      },
+    });
+    expect(rowStatusLine(waiting, paused(true))).toBe("Paused");
+    expect(rowStatusLine(waiting, paused(false))).toBe("Paused after restart");
+    // A host too old to distinguish them only ever parked at restart, so its
+    // rows keep the sentence they have always had.
+    expect(rowStatusLine(waiting, paused(null))).toBe("Paused after restart");
   });
 
   /** `POST /api/queue/pause` holds DISPATCH; the job already on the GPU
@@ -168,5 +207,45 @@ describe("queue rows speak the lexicon", () => {
     expect(queueSentence(1, 3, false)).toBe("1 image being made · 3 waiting");
     expect(queueSentence(2, 0, false)).toBe("2 images being made");
     expect(queueSentence(1, 3, true)).toBe("queue paused · 3 waiting");
+  });
+});
+
+/*
+ * The meter and the sentence beside it read ONE counter.
+ *
+ * `rowStatusLine` gave a shared row "Generating PBR views · 11/15" from the
+ * host's own `current`/`total` while both meters understood only a print
+ * row's denoise step, so the bar fell back to a hard-coded stub and drew ~8%
+ * next to a caption saying 73%.
+ */
+describe("a queue row's meter agrees with its sentence", () => {
+  it("measures a shared row by the same counter its caption states", () => {
+    const row = shared({ stage: "Generating PBR views", current: 11, total: 15 });
+    expect(rowStatusLine(row)).toBe("Generating PBR views · 11/15");
+    expect(rowProgressFraction(row)).toBeCloseTo(11 / 15, 5);
+  });
+
+  it("measures a print row by its denoise pass", () => {
+    expect(rowProgressFraction(print({ status: "denoising", step: 7, total: 28 }))).toBeCloseTo(
+      0.25,
+      5,
+    );
+  });
+
+  it("measures nothing it cannot measure, rather than guessing", () => {
+    expect(rowProgressFraction(print())).toBeNull();
+    expect(rowProgressFraction(print({ status: "loading" }))).toBeNull();
+    expect(rowProgressFraction(print({ status: "denoising", total: 0 }))).toBeNull();
+    // A host that names a stage without counting it still gets a caption.
+    const uncounted = shared({ stage: "Unwrapping mesh" });
+    expect(rowStatusLine(uncounted)).toBe("Unwrapping mesh");
+    expect(rowProgressFraction(uncounted)).toBeNull();
+    expect(rowProgressFraction(shared({ current: 3, total: 0 }))).toBeNull();
+  });
+
+  it("never leaves the meter outside its track", () => {
+    // A host that over-counts its own stage must not draw past the end.
+    expect(rowProgressFraction(shared({ current: 40, total: 15 }))).toBe(1);
+    expect(rowProgressFraction(shared({ current: -2, total: 15 }))).toBe(0);
   });
 });

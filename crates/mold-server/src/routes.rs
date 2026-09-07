@@ -7011,6 +7011,11 @@ fn job_entry_from_durable_projection(
         batch_id: row.batch_id,
         client_batch_id: row.client_batch_id,
         batch_index: row.batch_index,
+        // Only a paused row has a pause to explain, and the durable column is
+        // the only thing that tells the restart sweep's parking apart from a
+        // pause someone asked for.
+        explicitly_paused: (state == crate::job_registry::JobLifecycle::Paused)
+            .then_some(row.explicitly_paused),
     }
 }
 
@@ -9164,6 +9169,12 @@ pub(crate) struct GalleryExportRequest {
     /// bounding box. Refused on `glb`, on a turntable, and on a video.
     #[serde(default)]
     pub(crate) origin: Option<mold_core::MeshExportOrigin>,
+    /// Mesh turntables only: render the object over nothing instead of the
+    /// poster's slate ramp. Refused on a geometry container and on a video —
+    /// a transcode has no backdrop to drop, and a video's frames already
+    /// exist. Absent is opaque, so an older client is unchanged.
+    #[serde(default)]
+    pub(crate) transparent: Option<bool>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -9635,6 +9646,15 @@ async fn export_gallery_media(
     // export has made a real mistake and must hear about it.
     let _: Option<mold_core::MeshExportGeometry> =
         geometry_options_for(&request, request.format.mesh_format())?;
+    // A video's frames already exist and carry no coverage, so there is no
+    // backdrop to leave out. `geometry_options_for` lets it through here
+    // because the requested container IS an animation; only the source tells
+    // the two apart.
+    if request.transparent.is_some() {
+        return Err(ApiError::validation(
+            "transparent is only supported for a mesh turntable",
+        ));
+    }
     let bounce = matches!(request.playback, GalleryGifPlayback::Bounce);
     if bounce && !matches!(request.format, GalleryExportFormat::Gif) {
         return Err(ApiError::validation(
@@ -9735,6 +9755,11 @@ pub(crate) fn geometry_options_for(
     request: &GalleryExportRequest,
     format: mold_core::MeshExportFormat,
 ) -> Result<Option<mold_core::MeshExportGeometry>, ApiError> {
+    if request.transparent.is_some() && !format.is_animation() {
+        return Err(ApiError::validation(
+            "transparent is only supported for a mesh turntable",
+        ));
+    }
     let options = mold_core::MeshGeometryOptions {
         size_mm: request.size_mm,
         up_axis: request.up_axis,
@@ -9795,6 +9820,7 @@ pub(crate) fn turntable_options_for(
         size: request.max_dimension.unwrap_or(DEFAULT_SIZE),
         bounce,
         repeat_forever: matches!(request.repeat, GalleryGifRepeat::Forever),
+        transparent: request.transparent.unwrap_or(false),
     };
     // Refused here, before the file is even read, so the budget is a
     // request error and not a render failure half-way through.
@@ -9815,9 +9841,10 @@ fn render_gallery_turntable(
     options: &mold_inference::hunyuan3d::turntable::TurntableOptions,
 ) -> Result<Vec<u8>, String> {
     let bytes = std::fs::read(source).map_err(|error| format!("cannot read the mesh: {error}"))?;
-    let mesh = mold_inference::hunyuan3d::glb::read_glb(&bytes)
-        .map_err(|error| format!("cannot export this mesh: {error}"))?;
-    mold_inference::hunyuan3d::turntable::export_turntable(&mesh, format, options)
+    let (mesh, appearance) = mold_inference::hunyuan3d::glb::read_glb_scene(&bytes)
+        .map_err(|error| format!("cannot export this mesh: {error}"))?
+        .split();
+    mold_inference::hunyuan3d::turntable::export_turntable_with(&mesh, &appearance, format, options)
         .map_err(|error| format!("cannot render a turntable of this mesh: {error:#}"))
 }
 

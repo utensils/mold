@@ -26,7 +26,10 @@ export const GENERATION_STAGE_LABELS = {
   confirming: "Confirming with host",
   resync: "Re-syncing with host",
   queued: queueWaitLabel({ kind: "queued" }),
-  paused: queueWaitLabel({ kind: "paused" }),
+  // A durable batch child's coarse phase carries no pause reason, so this
+  // table keeps the wording it always had. The queue's own rows resolve
+  // through `resolveQueueWait`, which does know.
+  paused: queueWaitLabel({ kind: "paused", explicit: false }),
   running: "Developing",
   held: "Held by host — action required",
   cancelling: "Cancellation pending",

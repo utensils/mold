@@ -48,6 +48,8 @@ export interface ActivityJobVM {
   queuePosition?: number | null;
   /** Effective waiting lifecycle after projecting host-wide pause state. */
   queueState?: string | null;
+  /** For a paused row: whether the host says SOMEONE paused this one. */
+  queueExplicitlyPaused?: boolean | null;
   /** Raw scheduler `blocked_reason` for this job, when the plan named one. */
   blockedReason?: string | null;
   /** Live dependency preparation detail from the scheduler plan. */
@@ -82,6 +84,8 @@ export function withLiveQueueStatus(
   if (!status) return vm;
   const next: PrintActivityVM = { ...vm };
   if (status.state !== null) next.queueState = status.state;
+  if (status.explicitlyPaused !== null)
+    next.queueExplicitlyPaused = status.explicitlyPaused;
   if (status.position !== null) next.queuePosition = status.position;
   if (status.blockedReason !== null) next.blockedReason = status.blockedReason;
   if (status.preparation !== null) next.preparation = status.preparation;
@@ -100,6 +104,7 @@ export function queueStatusLabel(vm: ActivityJobVM): string | null {
   return queueWaitLabel(
     resolveQueueWait({
       state: vm.queueState,
+      explicitlyPaused: vm.queueExplicitlyPaused,
       position: vm.queuePosition,
       blockedReason: vm.blockedReason,
       preparation: vm.preparation,

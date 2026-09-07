@@ -153,6 +153,15 @@ pub struct GenerationQueueProjection {
     pub held_reason: Option<String>,
     /// Whether an explicit retry may safely return this held row to the queue.
     pub retryable: bool,
+    /// Whether a `paused` row was paused BY SOMEONE, as opposed to parked by
+    /// the restart sweep.
+    ///
+    /// Both wear `state = 'paused'` and only this bit tells them apart, which
+    /// is why it has to leave the database: a client that could not see it
+    /// captioned a job the user had just paused "Paused after restart", so one
+    /// row's pause read as the whole queue stopping. It also decides what a
+    /// global resume touches — see [`resume_all_paused`].
+    pub explicitly_paused: bool,
     pub created_at_ms: i64,
     /// Durable batch this row is a child of, when it has one.
     ///
@@ -223,7 +232,7 @@ pub enum OwnedQueuedPatchOutcome {
 const QUEUE_PROJECTION_FIRST_PAGE_SQL: &str = "
     SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
            q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable, q.created_at,
-           q.rowid, c.batch_id, c.batch_index, b.client_batch_id
+           q.rowid, c.batch_id, c.batch_index, b.client_batch_id, q.explicitly_paused
       FROM generation_queue AS q
       LEFT JOIN generation_batch_children AS c ON c.job_id = q.id
       LEFT JOIN generation_batches AS b ON b.id = c.batch_id
@@ -234,7 +243,7 @@ const QUEUE_PROJECTION_FIRST_PAGE_SQL: &str = "
 const QUEUE_PROJECTION_AFTER_SQL: &str = "
     SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
            q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable, q.created_at,
-           q.rowid, c.batch_id, c.batch_index, b.client_batch_id
+           q.rowid, c.batch_id, c.batch_index, b.client_batch_id, q.explicitly_paused
       FROM generation_queue AS q
       LEFT JOIN generation_batch_children AS c ON c.job_id = q.id
       LEFT JOIN generation_batches AS b ON b.id = c.batch_id
@@ -250,7 +259,7 @@ const QUEUE_PROJECTION_AFTER_SQL: &str = "
 const QUEUE_PROJECTION_BY_ID_SQL: &str = "
     SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
            q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable, q.created_at,
-           q.rowid, c.batch_id, c.batch_index, b.client_batch_id
+           q.rowid, c.batch_id, c.batch_index, b.client_batch_id, q.explicitly_paused
       FROM generation_queue AS q
       LEFT JOIN generation_batch_children AS c ON c.job_id = q.id
       LEFT JOIN generation_batches AS b ON b.id = c.batch_id
@@ -259,7 +268,7 @@ const QUEUE_PROJECTION_BY_ID_SQL: &str = "
 const QUEUE_PROJECTION_BY_STATE_SQL: &str = "
     SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
            q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable, q.created_at,
-           q.rowid, c.batch_id, c.batch_index, b.client_batch_id
+           q.rowid, c.batch_id, c.batch_index, b.client_batch_id, q.explicitly_paused
       FROM generation_queue AS q
       LEFT JOIN generation_batch_children AS c ON c.job_id = q.id
       LEFT JOIN generation_batches AS b ON b.id = c.batch_id
@@ -762,6 +771,7 @@ fn projection_page_row(
             batch_id: row.get(11)?,
             batch_index: row.get::<_, Option<i64>>(12)?.map(|index| index as u32),
             client_batch_id: row.get(13)?,
+            explicitly_paused: row.get::<_, i64>(14)? != 0,
         },
         QueueProjectionCursor {
             created_at_ms: row.get(9)?,
@@ -1879,6 +1889,10 @@ fn patch_owned_queued_with_claim_fence(
                 batch_id: row.get(10)?,
                 batch_index: row.get::<_, Option<i64>>(11)?.map(|index| index as u32),
                 client_batch_id: row.get(12)?,
+                // Every `projection_sql` above is fenced on `state = 'queued'`,
+                // which is why `state` is hardcoded here too: a reorder never
+                // sees a paused row.
+                explicitly_paused: false,
             })
         };
         let projection = if matches!(claim_fence, QueuePatchClaimFence::AnyExact) {
@@ -2340,6 +2354,7 @@ mod tests {
             batch_id: _,
             batch_index: _,
             client_batch_id: _,
+            explicitly_paused: _,
         } = &first.rows[0];
         assert_eq!(id, "queued");
         assert_eq!(*target_gpu, Some(2));

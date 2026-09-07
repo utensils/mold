@@ -38,6 +38,7 @@ import CreateHeader from "../components/create/CreateHeader.vue";
 import { type InspectorTab } from "../components/create/inspectorTabs";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import StylePicker from "../components/create/StylePicker.vue";
+import ShapeChip from "../components/create/ShapeChip.vue";
 import InspectorPanel from "../components/create/InspectorPanel.vue";
 import { MIN_CANVAS_HEIGHT } from "../lib/benchLayout";
 import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
@@ -4608,7 +4609,6 @@ onBeforeUnmount(() => {
           :length-frames="form.frames"
           :length-fps="form.fps"
           :length-contract="composerLengthContract"
-          @open-shape="inspectorTab = 'settings'"
           @prompt-authored="onPromptAuthored"
           @update:length-frames="form.frames = $event"
           @generate="composerGenerate"
@@ -4621,6 +4621,17 @@ onBeforeUnmount(() => {
           <!-- The one style selector in the app. -->
           <template #style>
             <StylePicker :form="form" @pull-missing-model="offerPullForSelectedModel" />
+          </template>
+          <!-- The composer's canvas control. It reads and writes the SAME
+               output-shape resolver the inspector's Shape and Resolution
+               fields do, so the two cannot disagree or fall out of step. -->
+          <template #shape>
+            <ShapeChip
+              :form="form"
+              :contract-model="contractEntry"
+              :canvas-intent="canvasIntent"
+              @canvas-intent="setCanvasIntent"
+            />
           </template>
         </ComposerCard>
       </div>

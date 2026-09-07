@@ -8,6 +8,13 @@ export interface VideoExportOptions {
   repeat: GifRepeat;
   max_dimension: number | null;
   fps: number | null;
+  /**
+   * Mesh turntables only: render the object over nothing instead of the
+   * poster's slate backdrop. Omitted entirely for a video re-encode, whose
+   * frames already exist — the host refuses the key there rather than
+   * ignoring it.
+   */
+  transparent?: boolean;
 }
 
 export interface VideoExportCapabilities {

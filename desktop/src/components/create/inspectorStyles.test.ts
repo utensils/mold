@@ -57,11 +57,15 @@ describe("inspector local styles", () => {
   it("lets the mesh face-budget field win over the seed input it shares a class with", () => {
     expect(inspectorSource).toContain("ms-seed__input ms-card__faces");
     expect(rule(inspectorSource, ".ms-seed__input.ms-card__faces")).toContain(
-      "width: calc(17ch + 16px + 18px)",
+      "width: calc(18ch + 16px + 18px)",
     );
     expect(rule(inspectorSource, ".ms-seed__input.ms-card__faces")).toContain(
       "height: var(--mold-ctl-md)",
     );
+    // The declared width only holds if the field refuses to shrink and the
+    // label column beside it agrees to.
+    expect(rule(inspectorSource, ".ms-seed__input.ms-card__faces")).toContain("flex: none");
+    expect(rule(inspectorSource, ".ms-field--row > div")).toContain("min-width: 0");
     expect(rule(inspectorSource, ".ms-card__faces")).toBe("");
   });
 

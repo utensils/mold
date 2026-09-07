@@ -64,7 +64,7 @@ pub fn file_media_version(metadata: &std::fs::Metadata) -> String {
 /// and the studio's persistent cache key on the opaque `media_version`, which
 /// is this. `the_two_spellings_of_the_poster_revision_agree` pins them
 /// together, so bumping the constant in `mold-core` is the whole edit.
-pub const MESH_POSTER_REVISION_SUFFIX: &str = ":p2";
+pub const MESH_POSTER_REVISION_SUFFIX: &str = ":p3";
 
 /// The poster-revision suffix for `filename`, or `""`.
 ///
@@ -280,9 +280,13 @@ pub fn render_mesh_poster_sized(source: &Path, size: u32) -> anyhow::Result<Vec<
     let size = size.clamp(1, MAX_POSTER_SIZE);
     let bytes = std::fs::read(source)
         .map_err(|error| anyhow::anyhow!("cannot read the mesh {}: {error}", source.display()))?;
-    let mesh = mold_inference::hunyuan3d::glb::read_glb(&bytes)
-        .map_err(|error| anyhow::anyhow!("cannot read the mesh: {error}"))?;
-    mold_inference::hunyuan3d::poster::render_poster(&mesh, size)
+    // Read with its material, not as bare geometry: a painted print's colours
+    // live in the file's baseColorTexture, and a tile that drops them shows a
+    // different object than the one the viewer opens.
+    let (mesh, appearance) = mold_inference::hunyuan3d::glb::read_glb_scene(&bytes)
+        .map_err(|error| anyhow::anyhow!("cannot read the mesh: {error}"))?
+        .split();
+    mold_inference::hunyuan3d::poster::render_poster_with(&mesh, &appearance, size)
 }
 
 /// Write one tile atomically (temp + rename) so a concurrent reader never
@@ -642,6 +646,31 @@ mod tests {
         .expect("write the GLB fixture")
     }
 
+    /// [`glb_fixture`] with UVs and an embedded red `baseColorTexture` — a
+    /// stand-in for what Hunyuan3D Paint bakes into a print.
+    fn painted_glb_fixture() -> Vec<u8> {
+        let mesh = mold_inference::hunyuan3d::mesh::Mesh {
+            uvs: Some(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+            ..mold_inference::hunyuan3d::glb::read_glb(&glb_fixture()).unwrap()
+        };
+        let mut texture = Vec::new();
+        image::RgbImage::from_pixel(8, 8, image::Rgb([220, 30, 40]))
+            .write_to(
+                &mut std::io::Cursor::new(&mut texture),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        mold_inference::hunyuan3d::glb::write_glb(
+            &mesh,
+            &mold_inference::hunyuan3d::glb::GlbMaterial {
+                base_color_texture: Some(texture),
+                ..mold_inference::hunyuan3d::glb::GlbMaterial::default()
+            },
+            None,
+        )
+        .expect("write the painted GLB fixture")
+    }
+
     /// Two writers of one destination is the ordinary case, not a race to
     /// design out: the thumbnail route's singleflight does not cover the
     /// import route, so an import and a tile request can derive the same
@@ -692,6 +721,37 @@ mod tests {
         assert_eq!(
             (decoded.width(), decoded.height()),
             (MESH_POSTER_SIZE, MESH_POSTER_SIZE)
+        );
+    }
+
+    /// A painted print's tile has to show the painted object.
+    ///
+    /// The poster is derived from the stored file here, so this is the path a
+    /// PBR mesh took to a grey gallery tile: the geometry was read without its
+    /// material and shaded in the placeholder surface, while the Lightbox's
+    /// viewer — reading the same file, with its texture — showed it in colour.
+    #[test]
+    fn a_painted_glb_renders_a_painted_poster() {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = dir.path().join("bare.glb");
+        let painted = dir.path().join("painted.glb");
+        std::fs::write(&bare, glb_fixture()).unwrap();
+        std::fs::write(&painted, painted_glb_fixture()).unwrap();
+
+        let centre = |path: &std::path::Path| {
+            let png = render_mesh_poster(path).expect("render the poster");
+            let img = image::load_from_memory(&png).unwrap().to_rgb8();
+            img.get_pixel(img.width() / 2, img.height() / 2).0
+        };
+        let bare = centre(&bare);
+        let painted = centre(&painted);
+        assert!(
+            bare[0].abs_diff(bare[2]) < 24,
+            "bare geometry keeps the neutral placeholder surface, got {bare:?}"
+        );
+        assert!(
+            painted[0] > painted[1] && painted[0] > painted[2],
+            "the baseColor texture must reach the tile, got {painted:?}"
         );
     }
 
@@ -906,7 +966,7 @@ mod tests {
     }
 
     /// The two spellings of the revision are one constant. The name carries
-    /// it as `.p2`, the wire as `:p2`, and a bump that touched only one would
+    /// it as `.p3`, the wire as `:p3`, and a bump that touched only one would
     /// leave half the caches serving the old poster.
     #[test]
     fn the_two_spellings_of_the_poster_revision_agree() {

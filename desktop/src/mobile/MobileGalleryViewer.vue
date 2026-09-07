@@ -1043,9 +1043,15 @@ async function runMeshExport(destination: "share" | "folder"): Promise<void> {
   else await performMeshExport(format);
 }
 
+/** True while the open export sheet is a mesh TURNTABLE rather than a video
+ * re-encode. Only a turntable is rendered here, so only it can leave its
+ * backdrop out; the host refuses `transparent` on anything else. */
+const exportIsTurntable = ref(false);
+
 async function openVideoExport(): Promise<void> {
   exportOpen.value = true;
   exportError.value = "";
+  exportIsTurntable.value = Boolean(mesh.value);
   if (mesh.value) {
     // A turntable's containers are the host's advertised ANIMATED mesh
     // exports; `/api/gallery/export-options` answers for clips only.
@@ -1539,6 +1545,7 @@ onBeforeUnmount(() => {
       :open="exportOpen"
       :filename="item.filename"
       :formats="exportCapabilities.formats"
+      :transparency="exportIsTurntable"
       :destinations="exportDestinations"
       :busy="exportBusy"
       :error="exportError"

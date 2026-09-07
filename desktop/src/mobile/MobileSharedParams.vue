@@ -334,12 +334,12 @@ const selectedQuality = computed(() => activeQualityPreset(quality.value, props.
         </small>
       </label>
       <label class="field">
-        <span>Target faces</span>
+        <span>Simplify to</span>
         <input
           class="control"
           type="number"
           inputmode="numeric"
-          placeholder="Leave blank for the raw surface"
+          placeholder="keep every detail"
           :value="meshForm.targetFaces ?? ''"
           :min="meshCaps.target_faces_min"
           :max="meshCaps.target_faces_max"
@@ -349,9 +349,10 @@ const selectedQuality = computed(() => activeQualityPreset(quality.value, props.
           @change="setTargetFaces"
         />
         <small class="mobile-generate-hint">
-          Optional — decimates to this budget, between
+          Merges flat areas down to this many triangles. Creases and color survive; the file just
+          opens faster elsewhere. Optional, between
           {{ meshCaps.target_faces_min.toLocaleString("en-US") }} and
-          {{ meshCaps.target_faces_max.toLocaleString("en-US") }} triangles.
+          {{ meshCaps.target_faces_max.toLocaleString("en-US") }}.
         </small>
       </label>
       <p

@@ -4428,6 +4428,16 @@ pub struct QueueJobEntryWire {
     /// One-based position of this row within its batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_index: Option<u32>,
+    /// For a `"paused"` row: whether SOMEONE paused this one row, as opposed
+    /// to the restart sweep parking the whole queue.
+    ///
+    /// Both wear `state: "paused"`, so a client without this bit had to
+    /// caption them identically — and it captioned a job the user had just
+    /// paused "Paused after restart", making one row's pause read as the whole
+    /// queue stopping. Additive: absent means the host does not distinguish
+    /// them, which for every server built before per-job pause is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicitly_paused: Option<bool>,
 }
 
 impl QueueJobEntryWire {
@@ -6403,6 +6413,7 @@ mod tests {
             max_dimension: Some(480),
             frames: Some(24),
             fps: Some(12),
+            transparent: Some(true),
         };
         assert_eq!(
             serde_json::to_value(options).unwrap(),
@@ -6411,7 +6422,8 @@ mod tests {
                 "repeat": "once",
                 "max_dimension": 480,
                 "frames": 24,
-                "fps": 12
+                "fps": 12,
+                "transparent": true
             })
         );
         for (raw, expected) in [
@@ -11930,6 +11942,13 @@ pub struct MeshTurntableOptions {
     pub frames: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
+    /// Render the object over nothing instead of the poster's slate ramp.
+    ///
+    /// Absent is opaque, so an older client's request is unchanged. APNG and
+    /// WebP keep the antialiased silhouette; a GIF's one transparent palette
+    /// index makes its edge a hard cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparent: Option<bool>,
 }
 
 /// Which world axis points up in an exported geometry file.

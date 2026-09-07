@@ -3520,6 +3520,7 @@ const generationStatus = computed(() => {
       return queueWaitLabel(
         resolveQueueWait({
           state: live?.state,
+          explicitlyPaused: live?.explicitlyPaused,
           position: live?.position ?? active.queuePosition,
           blockedReason: live?.blockedReason,
           preparation: live?.preparation,
