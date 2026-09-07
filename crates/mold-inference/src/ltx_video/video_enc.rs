@@ -277,13 +277,15 @@ pub fn encode_gif_rgba_with_options(
                 if pixel[3] >= ALPHA_CUTOFF {
                     pixel[3] = 255;
                 } else {
-                    // Cleared pixels are stamped with one colour, and a
-                    // deliberately garish one. `Frame::from_rgba_speed`
-                    // resolves the transparent palette entry by nearest
-                    // neighbour over RGBA, so a cut-out whose clear colour was
-                    // black could pull the darkest pixels of a dark PAINTED
-                    // mesh onto that entry and punch holes in the object. The
-                    // entry is never drawn, so its colour costs nothing.
+                    // Cleared pixels are stamped with ONE colour so the
+                    // transparent palette entry is deterministic:
+                    // `Frame::from_rgba_speed` takes its transparent colour
+                    // from the LAST sub-cutoff pixel in scan order, and the
+                    // renderer only writes a bare `[0, 0, 0, 0]` for fully
+                    // cleared pixels — the antialiased edge arrives carrying
+                    // the object's own RGB under a low alpha. Left alone,
+                    // which colour ends up standing for "transparent" depends
+                    // on where the silhouette happens to end.
                     *pixel = CLEAR_SENTINEL;
                 }
             }
@@ -317,9 +319,16 @@ pub fn encode_gif_rgba_with_options(
 /// instead of eroding or dilating its outline.
 const ALPHA_CUTOFF: u8 = 128;
 
-/// The RGBA a cleared pixel is stamped with before quantization: magenta, as
-/// far from any shaded surface as the cube allows.
-const CLEAR_SENTINEL: [u8; 4] = [255, 0, 255, 0];
+/// The RGBA a cleared pixel is stamped with before quantization.
+///
+/// Transparent black, which is what [`Backdrop::Transparent`] already writes
+/// for a fully cleared pixel, so this only restates it for the antialiased
+/// edge. It is NOT a garish sentinel on purpose: the entry is never drawn by
+/// a decoder that honours transparency, but one that ignores it composites
+/// this colour, and black is the backdrop the poster would have used anyway.
+///
+/// [`Backdrop::Transparent`]: crate::hunyuan3d::poster::Backdrop
+const CLEAR_SENTINEL: [u8; 4] = [0, 0, 0, 0];
 
 /// [`encode_apng`] for frames that carry their own alpha. APNG holds the full
 /// channel, so the antialiased silhouette survives intact.
