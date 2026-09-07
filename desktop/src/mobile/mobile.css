@@ -5423,3 +5423,118 @@ button:disabled {
   margin: 8px 0 20px;
   color: var(--mold-text-dim);
 }
+
+/* New image: one composer, with secondary controls in More settings. */
+.mobile-output-kinds {
+  margin: 0 0 16px;
+  width: 100%;
+}
+.mobile-output-kinds button {
+  min-height: var(--mobile-touch-target);
+  font-size: var(--mold-fs-sm);
+  flex: 1;
+}
+.mobile-make-result {
+  margin: 0 0 16px;
+  background: var(--mold-media-bed);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  overflow: hidden;
+}
+.mobile-make-result .result-media {
+  max-height: 34svh;
+  object-fit: contain;
+  width: 100%;
+}
+.mobile-organize,
+.mobile-prompt-modifiers {
+  border-top: 1px solid var(--mold-border);
+  margin: 8px 0 16px;
+}
+.mobile-organize > summary,
+.mobile-prompt-modifiers > summary {
+  min-height: var(--mobile-touch-target);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  font-size: var(--mold-fs-sm);
+}
+.mobile-organize > summary > span,
+.mobile-prompt-modifiers > summary > span {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--mold-text-dim);
+  max-width: 55%;
+}
+.mobile-prompt-field > span {
+  font-size: var(--mold-fs-sm);
+  text-transform: none;
+}
+.mobile-prompt-field textarea {
+  min-height: 112px;
+}
+.mobile-quality {
+  border: 0;
+  padding: 0;
+  margin: 0 0 24px;
+}
+.mobile-quality legend {
+  margin-bottom: 12px;
+  font-size: var(--mold-fs-base);
+}
+.mobile-quality-options {
+  display: flex;
+  gap: 8px;
+}
+.mobile-quality-options button {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 8px;
+  min-height: var(--mobile-touch-target);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: transparent;
+}
+.mobile-quality-options button[aria-pressed="true"] {
+  border-color: var(--mold-blue);
+  background: var(--mold-accent-tint);
+}
+.mobile-quality-options span {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-dim);
+}
+.mobile-text-action {
+  min-height: var(--mobile-touch-target);
+  background: transparent;
+  border: 0;
+  color: var(--mold-blue);
+  text-decoration: underline;
+}
+.mobile-advanced-sheet-close {
+  min-width: var(--mobile-touch-target);
+  font-size: var(--mold-fs-base);
+}
+.mobile-shell:has(textarea:focus) .mobile-make-result {
+  display: none;
+}
+
+.mobile-size-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: var(--mobile-touch-target, 44px);
+  cursor: pointer;
+  gap: 12px;
+}
+.mobile-size-disclosure > summary small {
+  color: var(--mold-text-muted);
+}
+.mobile-size-disclosure[open] > summary {
+  margin-bottom: 12px;
+}

@@ -50,7 +50,7 @@ import {
   type ModelInstallPlan,
 } from "@studio/lib/modelInstallTargets";
 import { catalogThumbnailUrl } from "../lib/catalogThumbnails";
-import { isVideoFamily } from "../lib/capabilities";
+import { outputKindForModel, OUTPUT_KIND_LABEL } from "@studio/lib/outputKind";
 import { useInfiniteScrollSentinel } from "../lib/useInfiniteScrollSentinel";
 import { formatCount, formatGB, percent } from "../lib/format";
 import {
@@ -76,7 +76,7 @@ import {
   type MobilePullStatus,
 } from "./mobileDownloads";
 
-type MediaType = "all" | "image" | "video";
+type MediaType = "all" | "image" | "video" | "mesh";
 type CatalogSource = "all" | "hf" | "civitai" | "installed";
 
 type MobileCatalogEntry = CatalogEntry & {
@@ -319,7 +319,10 @@ function sourceMatches(entry: CatalogEntry): boolean {
 function mediaMatches(entry: CatalogEntry): boolean {
   if (mediaType.value === "all") return true;
   if (isUtilityModel({ family: entry.family } as ModelEntry)) return false;
-  return isVideoFamily(entry.family) === (mediaType.value === "video");
+  return (
+    outputKindForModel(entry) ===
+    (mediaType.value === "image" ? "still" : mediaType.value === "video" ? "clip" : "mesh")
+  );
 }
 
 const safeLiveEntries = computed(() => {
@@ -801,7 +804,13 @@ async function refreshCatalog(): Promise<void> {
   );
 }
 
-defineExpose({ refresh: refreshCatalog });
+defineExpose({
+  refresh: refreshCatalog,
+  browseKind(value: MediaType) {
+    mediaType.value = value;
+    showDiscoverModels();
+  },
+});
 
 function handleDownloadEvent({
   host,
@@ -1329,7 +1338,7 @@ onBeforeUnmount(() => {
           data-test="mobile-catalog-segment-installed"
           @click="showInstalledModels"
         >
-          Installed
+          Ready to use
         </button>
         <button
           type="button"
@@ -1337,19 +1346,25 @@ onBeforeUnmount(() => {
           data-test="mobile-catalog-segment-discover"
           @click="showDiscoverModels"
         >
-          Discover
+          Browse more
         </button>
       </div>
 
       <div class="mobile-catalog-media" role="group" aria-label="Media type">
         <button
-          v-for="option in ['all', 'image', 'video'] as const"
+          v-for="option in ['all', 'image', 'video', 'mesh'] as const"
           :key="option"
           type="button"
           :aria-pressed="mediaType === option"
           @click="mediaType = option"
         >
-          {{ option === "all" ? "All" : option === "image" ? "Images" : "Video" }}
+          {{
+            option === "all"
+              ? "All"
+              : OUTPUT_KIND_LABEL[
+                  option === "image" ? "still" : option === "video" ? "clip" : "mesh"
+                ]
+          }}
         </button>
       </div>
 

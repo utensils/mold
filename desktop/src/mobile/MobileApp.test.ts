@@ -603,6 +603,23 @@ function fieldControl(label: string): DOMWrapper<Element> {
   return field.find("input, textarea, select");
 }
 
+/** Use the same output-kind doors as a person before picking a style. */
+async function selectStyle(name: string): Promise<void> {
+  for (const label of ["Still picture", "Short clip", "3-D object"]) {
+    const select = fieldControl("Style");
+    if (select.findAll("option").some((option) => option.attributes("value") === name)) {
+      await select.setValue(name);
+      return;
+    }
+    const door = wrapper!
+      .get("[data-test='mobile-output-kind']")
+      .findAll("button")
+      .find((button) => button.text() === label);
+    if (door) await door.trigger("click");
+  }
+  await fieldControl("Style").setValue(name);
+}
+
 function mobileTouch(type: string, x: number, y: number, ended = false): Event {
   const event = new Event(type, { bubbles: true, cancelable: true });
   const point = { identifier: 17, clientX: x, clientY: y };
@@ -800,7 +817,7 @@ describe("MobileApp generation lifecycle", () => {
     const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
     expect(liveForm.frames).toBe(124);
 
-    await fieldControl("Model").setValue(wan.name);
+    await selectStyle(wan.name);
     await flushPromises();
 
     expect(liveForm.frames).toBe(121);
@@ -985,7 +1002,7 @@ describe("MobileApp generation lifecycle", () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
-    const values = fieldControl("Model")
+    const values = fieldControl("Style")
       .findAll("option")
       .map((option) => option.attributes("value"));
     expect(values).toContain(model.name);
@@ -1307,8 +1324,8 @@ describe("MobileApp generation lifecycle", () => {
       "value",
       "a lighthouse beyond the red dunes",
     );
-    expect(fieldControl("Steps").element).toHaveProperty("value", "18");
-    expect(fieldControl("Guidance").element).toHaveProperty("value", "2.5");
+    expect(fieldControl("Detail").element).toHaveProperty("value", "18");
+    expect(fieldControl("Stick to my words").element).toHaveProperty("value", "2.5");
     expect(fieldControl("Negative prompt").element).toHaveProperty("value", "fog");
     expect(fieldControl("Title").element).toHaveProperty("value", "Queue lighthouse study");
     expect(wrapper.text()).toContain("New seed for every print.");
@@ -1372,7 +1389,7 @@ describe("MobileApp generation lifecycle", () => {
     await flushPromises();
     await flushPromises();
 
-    const before = (fieldControl("Model").element as HTMLSelectElement).value;
+    const before = (fieldControl("Style").element as HTMLSelectElement).value;
     const autoChainRow = wrapper.get(
       "[data-test='live-activity-select-studio-id:generation:foreign-auto-chain']",
     );
@@ -1385,7 +1402,7 @@ describe("MobileApp generation lifecycle", () => {
     expect(wrapper.get("[data-test='mobile-tab-hosts']").attributes("aria-current")).toBe("page");
     await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
     await flushPromises();
-    expect((fieldControl("Model").element as HTMLSelectElement).value).toBe(before);
+    expect((fieldControl("Style").element as HTMLSelectElement).value).toBe(before);
   });
 
   it("refuses to restore a stale queue row after the server instance changes", async () => {
@@ -1487,7 +1504,7 @@ describe("MobileApp Create output", () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
-    const picker = fieldControl("Model");
+    const picker = fieldControl("Style");
     expect(
       [...(picker.element as HTMLSelectElement).options].map((option) => option.value),
     ).toEqual(expect.arrayContaining([model.name, sequenceModel.name]));
@@ -3253,7 +3270,7 @@ describe("MobileApp generation queue", () => {
     await fieldControl("Prompt").setValue("a lighthouse");
     await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
-    await fieldControl("Model").setValue(catalogModel.name);
+    await selectStyle(catalogModel.name);
     await flushPromises();
 
     const stale = wrapper.get("[data-test='mobile-quick-expansion-stale']");
@@ -3456,8 +3473,8 @@ describe("MobileApp generation queue", () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
-    expect(fieldControl("Model").attributes("disabled")).toBeDefined();
-    expect(fieldControl("Model").text()).toContain("No generation models available");
+    expect(fieldControl("Style").attributes("disabled")).toBeDefined();
+    expect(fieldControl("Style").text()).toContain("No generation models available");
     expect(wrapper.get("[data-test='mobile-model-error']").text()).toContain(
       "Couldn’t load generation models",
     );
@@ -3490,7 +3507,7 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("[data-shape='1:1']").attributes("aria-checked")).toBe("true");
     expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("1024 × 1024 px");
 
-    await fieldControl("Model").setValue(model.name);
+    await selectStyle(model.name);
     await flushPromises();
     expect(wrapper.get("[data-shape='3:2']").attributes("aria-checked")).toBe("true");
     expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("768 × 512 px");
@@ -3584,7 +3601,7 @@ describe("MobileApp generation queue", () => {
     await fieldControl("Prompt").setValue("next prompt");
     await wrapper.get("[data-test='mobile-generate-host']").setValue("render-id");
     await flushPromises();
-    expect(fieldControl("Model").element).toHaveProperty("value", renderModel.name);
+    expect(fieldControl("Style").element).toHaveProperty("value", renderModel.name);
 
     finishPreprocess();
     await flushPromises();
@@ -3776,13 +3793,13 @@ describe("MobileApp generation queue", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await fieldControl("Prompt").setValue("a clean product orbit");
-    expect(fieldControl("Model").element).toHaveProperty("value", qwen.name);
+    expect(fieldControl("Style").element).toHaveProperty("value", qwen.name);
     expect(wrapper.get("[data-test='mobile-source-validation']").text()).toContain("Target photo");
     expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
       "disabled",
     );
 
-    await fieldControl("Model").setValue(video.name);
+    await selectStyle(video.name);
     await flushPromises();
     expect(wrapper.find("[data-test='mobile-source-controls']").exists()).toBe(false);
     expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).not.toHaveProperty(
@@ -3840,15 +3857,15 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     await fieldControl("Prompt").setValue("a precise studio portrait");
 
-    await fieldControl("Steps").setValue("0");
+    await fieldControl("Detail").setValue("0");
     expect(wrapper.get("[data-test='mobile-basic-parameter-error']").text()).toContain("1 to 100");
     expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
       "disabled",
     );
-    await fieldControl("Steps").setValue("20");
-    await fieldControl("Guidance").setValue("101");
+    await fieldControl("Detail").setValue("20");
+    await fieldControl("Stick to my words").setValue("101");
     expect(wrapper.get("[data-test='mobile-basic-parameter-error']").text()).toContain("0 to 100");
-    await fieldControl("Guidance").setValue("3");
+    await fieldControl("Stick to my words").setValue("3");
 
     await wrapper.get("[data-test='mobile-resolution-custom-toggle']").trigger("click");
     await wrapper.get("input[aria-label='Custom width']").setValue("2000");
@@ -3893,7 +3910,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     expect(
-      fieldControl("Model")
+      fieldControl("Style")
         .findAll("option")
         .map((option) => option.text()),
     ).toEqual([imageModel.name]);
@@ -6859,7 +6876,7 @@ describe("MobileApp transport error copy", () => {
     await flushPromises();
 
     expect(wrapper.find("[data-test='mobile-model-error']").exists()).toBe(false);
-    expect(fieldControl("Model").element).toHaveProperty("value", model.name);
+    expect(fieldControl("Style").element).toHaveProperty("value", model.name);
   });
 });
 
@@ -7199,7 +7216,7 @@ describe("MobileApp create settings reset", () => {
 
     await fieldControl("Prompt").setValue("a ship crossing violet lightning");
     await fieldControl("Negative prompt").setValue("calm water");
-    await fieldControl("Steps").setValue("12");
+    await fieldControl("Detail").setValue("12");
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     expect(wrapper.get("[data-test='mobile-batch-value']").attributes("value")).toBe("2");
     expect(
@@ -7215,7 +7232,7 @@ describe("MobileApp create settings reset", () => {
     );
     expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe("");
     // The selected model's defaults, not the bare form defaults.
-    expect((fieldControl("Steps").element as HTMLInputElement).value).toBe("30");
+    expect((fieldControl("Detail").element as HTMLInputElement).value).toBe("30");
     expect(wrapper.get("[data-test='mobile-batch-value']").attributes("value")).toBe("1");
     expect(wrapper.get("[data-test='mobile-settings-reset']").attributes("aria-label")).toBe(
       "Reset settings to model defaults",
@@ -7471,7 +7488,7 @@ describe("MobileApp primary navigation", () => {
   it("does not switch destinations when a horizontal control owns the gesture", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
-    const modelPicker = fieldControl("Model").element;
+    const modelPicker = fieldControl("Style").element;
     modelPicker.dispatchEvent(mobileTouch("touchstart", 280, 180));
     modelPicker.dispatchEvent(mobileTouch("touchmove", 100, 180));
     modelPicker.dispatchEvent(mobileTouch("touchend", 100, 180, true));
@@ -9416,7 +9433,8 @@ describe("MobileApp gallery", () => {
     await vi.waitFor(() =>
       expect(wrapper!.find("[data-test='mobile-generated-result']").exists()).toBe(true),
     );
-    await wrapper.get("[data-test='mobile-generated-result']").trigger("click");
+    await fieldControl("Prompt").setValue("a different unfinished draft");
+    await wrapper.get("[data-test='mobile-result-actions']").trigger("click");
     await flushPromises();
 
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
@@ -9426,6 +9444,11 @@ describe("MobileApp gallery", () => {
       "https://studio/media/full-video",
     );
 
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+    expect(fieldControl("Prompt").element).toHaveProperty("value", "expand this result");
+    await wrapper.get("[data-test='mobile-result-actions']").trigger("click");
+    await flushPromises();
     await wrapper.get("[data-test='gallery-viewer-upscale']").trigger("click");
     await flushPromises();
     (document.querySelector("[data-test='start-upscale']") as HTMLButtonElement).click();
@@ -9809,7 +9832,7 @@ describe("MobileApp gallery", () => {
     const prompt = fieldControl("Prompt").element as HTMLTextAreaElement;
     expect(prompt.value).toBe("a harbour at dawn");
     expect(prompt.value).not.toContain("the boats leave");
-    expect((fieldControl("Model").element as HTMLSelectElement).value).toBe(sequenceModel.name);
+    expect((fieldControl("Style").element as HTMLSelectElement).value).toBe(sequenceModel.name);
   });
 
   it("never refuses reuse of an H3 stitched print", async () => {
@@ -9920,7 +9943,7 @@ describe("MobileApp gallery", () => {
 
     wrapper = mountMobileApp();
     await vi.waitFor(
-      () => expect(fieldControl("Model").element).toHaveProperty("value", studioModel.name),
+      () => expect(fieldControl("Style").element).toHaveProperty("value", studioModel.name),
       { timeout: 5_000 },
     );
 
@@ -9947,7 +9970,7 @@ describe("MobileApp gallery", () => {
     await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
     await flushPromises();
 
-    expect(fieldControl("Model").element).toHaveProperty("value", model.name);
+    expect(fieldControl("Style").element).toHaveProperty("value", model.name);
     expect(wrapper.get(".status-line").text()).toBe("Prompt settings restored");
     const developButton = wrapper.findAll("button").find((button) => button.text() === "Generate");
     expect(developButton?.attributes("disabled")).toBeUndefined();
@@ -10455,7 +10478,7 @@ describe("MobileApp host and catalog coordination", () => {
     );
     await flushPromises();
 
-    const options = fieldControl("Model")
+    const options = fieldControl("Style")
       .findAll("option")
       .map((option) => option.text());
     expect(options).toContain(pulledModel.name);
@@ -11296,7 +11319,7 @@ describe("MobileApp automatic generation routing", () => {
 
     // The union picker offers the model even though the browsed machine
     // lacks it, tagged with the machine that has it.
-    const modelOptions = fieldControl("Model")
+    const modelOptions = fieldControl("Style")
       .findAll("option")
       .map((option) => option.text());
     expect(modelOptions.some((label) => label.includes("Render"))).toBe(true);
@@ -12948,7 +12971,7 @@ describe("MobileApp identity photo", () => {
     expect(wrapper.find("[data-test='mobile-identity-well']").exists()).toBe(true);
     expect(wrapper.find("[data-test='mobile-identity-section']").exists()).toBe(true);
 
-    await fieldControl("Model").setValue(plainModel.name);
+    await selectStyle(plainModel.name);
     await flushPromises();
 
     // Absent, not disabled: a control for a capability this checkpoint does
@@ -12964,7 +12987,7 @@ describe("MobileApp identity photo", () => {
     await attachPhoto();
     expect(well().props("image")).toBe(PNG_1X1);
 
-    await fieldControl("Model").setValue(plainModel.name);
+    await selectStyle(plainModel.name);
     await fieldControl("Prompt").setValue("a parked identity print");
     await flushPromises();
 
@@ -12981,7 +13004,7 @@ describe("MobileApp identity photo", () => {
     expect(parked.id_image_name).toBeUndefined();
 
     // Selecting a qualified checkpoint again brings the photo back untouched.
-    await fieldControl("Model").setValue(identityModel.name);
+    await selectStyle(identityModel.name);
     await flushPromises();
     expect(well().props("image")).toBe(PNG_1X1);
     expect(well().props("filename")).toBe("ada.png");
@@ -13383,5 +13406,54 @@ describe("MobileApp identity photo", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
     expect(openStreams).toHaveLength(0);
+  });
+});
+
+describe("MobileApp output kinds", () => {
+  it("filters styles by kind and restores the remembered style without losing the prompt", async () => {
+    const secondStill = { ...stillModel, name: "still-alternative:q8" };
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path, init) =>
+      path === "/api/models"
+        ? Promise.resolve([model, stillModel, secondStill, meshModel])
+        : base(target, path, init),
+    );
+    localStorage.setItem(
+      "mold.create.lastUsedStyles.v1",
+      JSON.stringify({
+        version: 1,
+        bySection: { still: secondStill.name, clip: model.name },
+        lastSection: "still",
+      }),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect((fieldControl("Style").element as HTMLSelectElement).value).toBe(secondStill.name);
+    expect(
+      fieldControl("Style")
+        .findAll("option")
+        .map((x) => x.attributes("value")),
+    ).toEqual([stillModel.name, secondStill.name]);
+    await fieldControl("Prompt").setValue("Keep this draft when changing what I make");
+    await selectStyle(model.name);
+    expect(fieldControl("Style").findAll("option")).toHaveLength(1);
+    await selectStyle(secondStill.name);
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "Keep this draft when changing what I make",
+    );
+    expect((fieldControl("Style").element as HTMLSelectElement).value).toBe(secondStill.name);
+  });
+
+  it("keeps details mounted and reports changed settings behind the closed sheet", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const control = fieldControl("Detail");
+    expect(control.element.closest(".mobile-advanced-sheet")).not.toBeNull();
+    expect(wrapper.get(".mobile-advanced-sheet").classes()).not.toContain("is-open");
+    await control.setValue(model.default_steps + 1);
+    expect(wrapper.get("[data-test='mobile-advanced-trigger-count']").text()).toBe("1");
+    await wrapper.get("[data-test='mobile-advanced-reset']").trigger("click");
+    expect((control.element as HTMLInputElement).value).toBe(String(model.default_steps));
+    expect(wrapper.find("[data-test='mobile-advanced-trigger-count']").exists()).toBe(false);
   });
 });

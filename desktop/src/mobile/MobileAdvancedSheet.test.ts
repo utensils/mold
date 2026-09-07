@@ -1,4 +1,4 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 
@@ -40,5 +40,25 @@ describe("MobileAdvancedSheet", () => {
 
     expect(wrapper.emitted("close")).toHaveLength(1);
     expect(wrapper.emitted("reset")).toHaveLength(1);
+  });
+  it("takes focus on open and returns it to the trigger after Escape", async () => {
+    const trigger = document.createElement("button");
+    document.body.append(trigger);
+    trigger.focus();
+    const wrapper = mount(MobileAdvancedSheet, {
+      attachTo: document.body,
+      props: { open: false, count: 0 },
+      slots: { default: '<input aria-label="Detail" />' },
+    });
+    expect(wrapper.get("[data-test=mobile-advanced-sheet]").attributes("inert")).toBeDefined();
+    await wrapper.setProps({ open: true });
+    await flushPromises();
+    expect(document.activeElement).toBe(wrapper.get("[data-test=mobile-advanced-sheet]").element);
+    await wrapper.get("[data-test=mobile-advanced-sheet]").trigger("keydown", { key: "Escape" });
+    expect(wrapper.emitted("close")).toHaveLength(1);
+    await wrapper.setProps({ open: false });
+    expect(document.activeElement).toBe(trigger);
+    wrapper.unmount();
+    trigger.remove();
   });
 });

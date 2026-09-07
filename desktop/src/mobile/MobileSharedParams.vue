@@ -6,6 +6,7 @@
  * private copies that drift from what the user can see.
  */
 import { computed } from "vue";
+import { qualityPresets, activeQualityPreset } from "../lib/qualityPresets";
 import { meshTargetFacesError } from "../lib/generateValidation";
 import { buildRequest, type GenerateForm } from "../lib/generateForm";
 import type { ModelEntry } from "../lib/api/types";
@@ -22,6 +23,7 @@ import type { CanvasIntent } from "@studio/lib/outputShape";
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
+    section?: "all" | "primary" | "details";
     model?: ModelEntry | null;
     /** Timing metadata without changing legacy resolution projection behavior. */
     durationModel?: ModelEntry | null;
@@ -151,190 +153,214 @@ const sourceDimensions = computed(() =>
       }
     : null,
 );
+const quality = computed(() => qualityPresets(stepsControl.value));
+const selectedQuality = computed(() => activeQualityPreset(quality.value, props.form.steps));
 </script>
 
 <template>
-  <MobileResolutionPicker
-    v-model:width="form.width"
-    v-model:height="form.height"
-    :family="form.family"
-    :model="model"
-    :pipeline="form.pipeline"
-    :source-dimensions="sourceDimensions"
-    :canvas-intent="canvasIntent"
-    :disabled="disabled"
-    @validity-change="emit('resolution-validity', $event)"
-    @canvas-intent="emit('canvas-intent', $event)"
-  />
-  <div
-    v-if="canPredictDuration"
-    class="field mobile-predict-duration"
-    data-test="mobile-predict-duration"
-  >
-    <span>Predict duration</span>
-    <SwitchToggle
-      :model-value="form.predictDuration"
-      label="Predict duration from prompt"
-      @update:model-value="form.predictDuration = $event"
+  <template v-if="section !== 'details'">
+    <MobileResolutionPicker
+      :compact="section === 'primary'"
+      v-model:width="form.width"
+      v-model:height="form.height"
+      :family="form.family"
+      :model="model"
+      :pipeline="form.pipeline"
+      :source-dimensions="sourceDimensions"
+      :canvas-intent="canvasIntent"
+      :disabled="disabled"
+      @validity-change="emit('resolution-validity', $event)"
+      @canvas-intent="emit('canvas-intent', $event)"
     />
-  </div>
-  <VideoDurationSlider
-    v-if="supportsVideo && !form.predictDuration"
-    class="mobile-duration-field"
-    :frames="form.frames"
-    :fps="form.fps"
-    :model="durationModel ?? model"
-    :family="form.family"
-    :model-name="form.model"
-    :source-image-capability="
-      durationModel?.source_image ?? model?.source_image ?? form.sourceImageCapability
-    "
-    :routing-request="buildRequest(form)"
-    touch-friendly
-    data-test="mobile-duration"
-    @update:frames="form.frames = $event"
-  />
-  <p
-    v-else-if="supportsVideo && form.predictDuration"
-    class="field-hint"
-    data-test="mobile-predicted-duration-hint"
-  >
-    The host will choose 1–20 seconds from the prompt.
-  </p>
-  <div class="field-grid">
-    <label class="field" :class="{ 'field--with-note': stepsNote }">
-      <span>Steps</span>
-      <input
-        v-model.number="form.steps"
-        class="control"
-        type="number"
-        inputmode="numeric"
-        :min="stepsControl?.min ?? 1"
-        :max="stepsControl?.max ?? 100"
-        :step="stepsControl?.step ?? 1"
-        :disabled="stepsControl?.mode === 'fixed'"
-        :aria-invalid="stepsError ? 'true' : undefined"
-      />
-      <small v-if="stepsNote" class="mobile-generate-hint" data-test="mobile-fixed-steps-hint">
-        {{ stepsNote }}
-      </small>
-    </label>
-    <label class="field" :class="{ 'field--with-note': guidanceNote }">
-      <span>Guidance</span>
-      <input
-        :value="guidanceCaps.fixedGuidance ?? form.guidance"
-        class="control"
-        type="number"
-        inputmode="decimal"
-        :step="guidanceControl?.step ?? 0.1"
-        :min="guidanceControl?.min ?? 0"
-        :max="guidanceControl?.max ?? 100"
-        :disabled="guidanceControl?.mode === 'fixed' || !guidanceCaps.guidanceAdjustable"
-        :aria-invalid="guidanceError ? 'true' : undefined"
-        @input="
-          guidanceCaps.guidanceAdjustable &&
-          (form.guidance = Number(($event.target as HTMLInputElement).value))
-        "
-      />
-      <small
-        v-if="guidanceNote"
-        class="mobile-generate-hint"
-        data-test="mobile-fixed-guidance-hint"
-      >
-        {{ guidanceNote }}
-      </small>
-    </label>
-  </div>
-  <p
-    v-if="stepsError || guidanceError"
-    class="mobile-generate-validation"
-    role="alert"
-    data-test="mobile-basic-parameter-error"
-  >
-    {{ stepsError || guidanceError }}
-  </p>
-  <!-- 3-D: rendered only for a recipe that advertises a `mesh` block, which
-       is also the only request the server accepts `mesh` on. -->
-  <fieldset
-    v-if="meshCaps"
-    class="mobile-mesh-controls"
-    :disabled="disabled"
-    data-test="mobile-mesh-controls"
-  >
-    <legend class="mobile-mesh-legend">Mesh</legend>
-    <div v-if="octreeSegments.length" class="mobile-mesh-group">
-      <span class="mobile-mesh-label">Octree detail</span>
-      <SegmentedControl
-        wrap
-        data-test="mobile-mesh-octree"
-        :model-value="octreeSelected"
-        :options="octreeSegments"
-        label="Octree detail"
-        :disabled="disabled"
-        @update:model-value="setOctreeResolution"
+    <div
+      v-if="canPredictDuration"
+      class="field mobile-predict-duration"
+      data-test="mobile-predict-duration"
+    >
+      <span>Predict duration</span>
+      <SwitchToggle
+        :model-value="form.predictDuration"
+        label="Predict duration from prompt"
+        @update:model-value="form.predictDuration = $event"
       />
     </div>
-    <label
-      v-if="thresholdControl"
-      class="mobile-range-field"
-      :class="{ 'field--with-note': thresholdNote }"
-    >
-      <span
-        >Iso threshold <output>{{ thresholdValue.toFixed(2) }}</output></span
-      >
-      <input
-        type="range"
-        :value="thresholdValue"
-        :min="thresholdControl.min"
-        :max="thresholdControl.max"
-        :step="thresholdControl.step"
-        :disabled="thresholdControl.mode === 'fixed'"
-        aria-label="Iso threshold"
-        data-test="mobile-mesh-threshold"
-        @input="setThreshold"
-      />
-      <small
-        v-if="thresholdNote"
-        class="mobile-generate-hint"
-        data-test="mobile-mesh-threshold-note"
-      >
-        {{ thresholdNote }}
-      </small>
-    </label>
-    <label class="field">
-      <span>Target faces</span>
-      <input
-        class="control"
-        type="number"
-        inputmode="numeric"
-        placeholder="Leave blank for the raw surface"
-        :value="meshForm.targetFaces ?? ''"
-        :min="meshCaps.target_faces_min"
-        :max="meshCaps.target_faces_max"
-        step="1"
-        :aria-invalid="targetFacesError ? 'true' : undefined"
-        data-test="mobile-mesh-target-faces"
-        @change="setTargetFaces"
-      />
-      <small class="mobile-generate-hint">
-        Optional — decimates to this budget, between
-        {{ meshCaps.target_faces_min.toLocaleString("en-US") }} and
-        {{ meshCaps.target_faces_max.toLocaleString("en-US") }} triangles.
-      </small>
-    </label>
+    <VideoDurationSlider
+      v-if="supportsVideo && !form.predictDuration"
+      class="mobile-duration-field"
+      :frames="form.frames"
+      :fps="form.fps"
+      :model="durationModel ?? model"
+      :family="form.family"
+      :model-name="form.model"
+      :source-image-capability="
+        durationModel?.source_image ?? model?.source_image ?? form.sourceImageCapability
+      "
+      :routing-request="buildRequest(form)"
+      touch-friendly
+      data-test="mobile-duration"
+      @update:frames="form.frames = $event"
+    />
     <p
-      v-if="targetFacesError"
+      v-else-if="supportsVideo && form.predictDuration"
+      class="field-hint"
+      data-test="mobile-predicted-duration-hint"
+    >
+      The host will choose 1–20 seconds from the prompt.
+    </p>
+  </template>
+  <template v-if="section !== 'primary'">
+    <fieldset v-if="quality.length" class="mobile-quality" data-test="mobile-quality">
+      <legend>Quality</legend>
+      <div class="mobile-quality-options">
+        <button
+          v-for="preset in quality"
+          :key="preset.key"
+          type="button"
+          :aria-pressed="selectedQuality === preset.key"
+          :disabled="disabled"
+          @click="form.steps = preset.steps"
+        >
+          <strong>{{ preset.label }}</strong
+          ><span>{{ preset.steps }} passes</span>
+        </button>
+      </div>
+      <p v-if="!selectedQuality" class="section-note">Custom · {{ form.steps }} passes</p>
+    </fieldset>
+    <div class="field-grid">
+      <label class="field" :class="{ 'field--with-note': stepsNote }">
+        <span>Detail</span>
+        <input
+          v-model.number="form.steps"
+          class="control"
+          type="number"
+          inputmode="numeric"
+          :min="stepsControl?.min ?? 1"
+          :max="stepsControl?.max ?? 100"
+          :step="stepsControl?.step ?? 1"
+          :disabled="stepsControl?.mode === 'fixed'"
+          :aria-invalid="stepsError ? 'true' : undefined"
+        />
+        <small v-if="stepsNote" class="mobile-generate-hint" data-test="mobile-fixed-steps-hint">
+          {{ stepsNote }}
+        </small>
+      </label>
+      <label class="field" :class="{ 'field--with-note': guidanceNote }">
+        <span>Stick to my words</span>
+        <input
+          :value="guidanceCaps.fixedGuidance ?? form.guidance"
+          class="control"
+          type="number"
+          inputmode="decimal"
+          :step="guidanceControl?.step ?? 0.1"
+          :min="guidanceControl?.min ?? 0"
+          :max="guidanceControl?.max ?? 100"
+          :disabled="guidanceControl?.mode === 'fixed' || !guidanceCaps.guidanceAdjustable"
+          :aria-invalid="guidanceError ? 'true' : undefined"
+          @input="
+            guidanceCaps.guidanceAdjustable &&
+            (form.guidance = Number(($event.target as HTMLInputElement).value))
+          "
+        />
+        <small
+          v-if="guidanceNote"
+          class="mobile-generate-hint"
+          data-test="mobile-fixed-guidance-hint"
+        >
+          {{ guidanceNote }}
+        </small>
+      </label>
+    </div>
+    <p
+      v-if="stepsError || guidanceError"
       class="mobile-generate-validation"
       role="alert"
-      data-test="mobile-mesh-target-faces-error"
+      data-test="mobile-basic-parameter-error"
     >
-      {{ targetFacesError }}
+      {{ stepsError || guidanceError }}
     </p>
-  </fieldset>
-  <MobileSeedPicker
-    :model-value="form.seed"
-    :last-seed="lastSeed"
-    @update:model-value="form.seed = $event"
-    @validity-change="emit('seed-validity', $event)"
-  />
+    <!-- 3-D: rendered only for a recipe that advertises a `mesh` block, which
+       is also the only request the server accepts `mesh` on. -->
+    <fieldset
+      v-if="meshCaps"
+      class="mobile-mesh-controls"
+      :disabled="disabled"
+      data-test="mobile-mesh-controls"
+    >
+      <legend class="mobile-mesh-legend">3-D object</legend>
+      <div v-if="octreeSegments.length" class="mobile-mesh-group">
+        <span class="mobile-mesh-label">Surface detail</span>
+        <SegmentedControl
+          wrap
+          data-test="mobile-mesh-octree"
+          :model-value="octreeSelected"
+          :options="octreeSegments"
+          label="Surface detail"
+          :disabled="disabled"
+          @update:model-value="setOctreeResolution"
+        />
+      </div>
+      <label
+        v-if="thresholdControl"
+        class="mobile-range-field"
+        :class="{ 'field--with-note': thresholdNote }"
+      >
+        <span
+          >Iso threshold <output>{{ thresholdValue.toFixed(2) }}</output></span
+        >
+        <input
+          type="range"
+          :value="thresholdValue"
+          :min="thresholdControl.min"
+          :max="thresholdControl.max"
+          :step="thresholdControl.step"
+          :disabled="thresholdControl.mode === 'fixed'"
+          aria-label="Iso threshold"
+          data-test="mobile-mesh-threshold"
+          @input="setThreshold"
+        />
+        <small
+          v-if="thresholdNote"
+          class="mobile-generate-hint"
+          data-test="mobile-mesh-threshold-note"
+        >
+          {{ thresholdNote }}
+        </small>
+      </label>
+      <label class="field">
+        <span>Target faces</span>
+        <input
+          class="control"
+          type="number"
+          inputmode="numeric"
+          placeholder="Leave blank for the raw surface"
+          :value="meshForm.targetFaces ?? ''"
+          :min="meshCaps.target_faces_min"
+          :max="meshCaps.target_faces_max"
+          step="1"
+          :aria-invalid="targetFacesError ? 'true' : undefined"
+          data-test="mobile-mesh-target-faces"
+          @change="setTargetFaces"
+        />
+        <small class="mobile-generate-hint">
+          Optional — decimates to this budget, between
+          {{ meshCaps.target_faces_min.toLocaleString("en-US") }} and
+          {{ meshCaps.target_faces_max.toLocaleString("en-US") }} triangles.
+        </small>
+      </label>
+      <p
+        v-if="targetFacesError"
+        class="mobile-generate-validation"
+        role="alert"
+        data-test="mobile-mesh-target-faces-error"
+      >
+        {{ targetFacesError }}
+      </p>
+    </fieldset>
+    <MobileSeedPicker
+      :model-value="form.seed"
+      :last-seed="lastSeed"
+      @update:model-value="form.seed = $event"
+      @validity-change="emit('seed-validity', $event)"
+    />
+  </template>
 </template>
