@@ -21,12 +21,6 @@ export const router = createRouter({
       component: () => import("./views/QueueView.vue"),
     },
     {
-      path: "/create/3d",
-      name: "mesh-workflow",
-      meta: { title: "3-D studio" },
-      component: () => import("./views/MeshWorkflowView.vue"),
-    },
-    {
       path: "/library",
       name: "library",
       meta: { title: "My images" },
@@ -58,6 +52,12 @@ export const router = createRouter({
           component: () => import("./views/HostDetailView.vue"),
         },
       ],
+    },
+    {
+      path: "/create/3d",
+      name: "mesh-workflow",
+      meta: { title: "3-D studio" },
+      component: () => import("./views/MeshWorkflowView.vue"),
     },
     {
       path: "/settings",

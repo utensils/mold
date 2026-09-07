@@ -578,7 +578,7 @@ onBeforeUnmount(() => {
 }
 .mesh-studio__header h1 {
   margin: 3px 0 6px;
-  font-size: 28px;
+  font-size: var(--mold-fs-xl);
   font-weight: 700;
 }
 .mesh-studio__header p {
@@ -586,7 +586,7 @@ onBeforeUnmount(() => {
   color: var(--mold-text-2);
 }
 .mesh-studio__eyebrow {
-  font: 700 11px var(--mold-font-mono);
+  font: 700 var(--mold-fs-micro) var(--mold-font-mono);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--mold-accent) !important;
@@ -614,7 +614,7 @@ onBeforeUnmount(() => {
   display: grid;
   gap: 7px;
   color: var(--mold-text-2);
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   font-weight: 650;
 }
 .mesh-studio select,
@@ -706,11 +706,11 @@ onBeforeUnmount(() => {
 }
 .mesh-studio__empty strong {
   color: var(--mold-text);
-  font-size: 18px;
+  font-size: var(--mold-fs-lg);
 }
 .mesh-studio__progress h2 {
   margin-bottom: 12px;
-  font-size: 18px;
+  font-size: var(--mold-fs-lg);
 }
 .mesh-studio__progress ol {
   display: grid;
@@ -725,7 +725,7 @@ onBeforeUnmount(() => {
   color: var(--mold-text-2);
 }
 .mesh-studio__progress strong {
-  font: 600 10px var(--mold-font-mono);
+  font: 600 var(--mold-fs-micro) var(--mold-font-mono);
   text-transform: uppercase;
 }
 .mesh-studio__dot {

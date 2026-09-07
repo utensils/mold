@@ -262,6 +262,12 @@ const staticCommands = computed<Command[]>(() => {
       run: () => go("/create"),
     },
     {
+      id: "nav-mesh-workflow",
+      title: "3-D studio",
+      keywords: ["3d", "mesh", "texture", "hunyuan"],
+      run: () => go("/create/3d"),
+    },
+    {
       id: "nav-queue",
       title: "Queue",
       keywords: ["jobs", "waiting", "line", "being made"],
