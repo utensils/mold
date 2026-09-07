@@ -101,8 +101,8 @@ const caps = computed(() =>
 const plan = computed(() => sourceMediaPlan(caps.value));
 const namedViewsProfile = computed(() =>
   activeNamedViewsProfile(
-    effectiveGenerationRecipe(selectedModel.value, props.modelValue.pipeline)?.capabilities.mesh
-      ?.named_views,
+    effectiveGenerationRecipe(selectedModel.value, props.modelValue.pipeline)
+      ?.capabilities.mesh?.named_views,
   ),
 );
 /** Family-scoped label for the shared `strength` wire field (#1055). */
@@ -147,16 +147,16 @@ const kicker = computed(() =>
   namedViewsProfile.value
     ? "Object views"
     : plan.value.kind === "h3-boundaries"
-    ? "Frame endpoints"
-    : plan.value.kind === "h3-references"
-      ? "Ordered references"
-      : plan.value.kind === "single-or-references"
-        ? "Source or references"
-        : plan.value.kind === "attachments"
-          ? referencesOnly.value
-            ? "Reference images"
-            : "Edit images"
-          : "Source image",
+      ? "Frame endpoints"
+      : plan.value.kind === "h3-references"
+        ? "Ordered references"
+        : plan.value.kind === "single-or-references"
+          ? "Source or references"
+          : plan.value.kind === "attachments"
+            ? referencesOnly.value
+              ? "Reference images"
+              : "Edit images"
+            : "Source image",
 );
 
 const hasSource = computed(() => props.modelValue.imageAttachments.length > 0);
@@ -402,10 +402,14 @@ function clearControl() {
       v-if="namedViewsProfile"
       :profile="namedViewsProfile"
       :model-value="modelValue.namedViews"
-      :error="namedViewValidationError(modelValue.namedViews, namedViewsProfile)"
+      :error="
+        namedViewValidationError(modelValue.namedViews, namedViewsProfile)
+      "
       @file="onNamedViewFile"
       @gallery="emit('open-named-view-picker', $event)"
-      @clear="patch({ namedViews: setNamedView(modelValue.namedViews, $event, null) })"
+      @clear="
+        patch({ namedViews: setNamedView(modelValue.namedViews, $event, null) })
+      "
     />
 
     <MinimaxH3AuthoringPanel

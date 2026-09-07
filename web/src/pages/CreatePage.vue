@@ -3792,13 +3792,17 @@ function onPickNamedView(images: SourceImageState[]): void {
   const role = namedViewPickerTarget.value;
   const image = images[0];
   if (!role || !image?.width || !image.height || !image.mime) return;
-  form.state.value.namedViews = setNamedView(form.state.value.namedViews, role, {
-    base64: image.base64,
-    filename: image.filename,
-    mimeType: image.mime,
-    width: image.width,
-    height: image.height,
-  });
+  form.state.value.namedViews = setNamedView(
+    form.state.value.namedViews,
+    role,
+    {
+      base64: image.base64,
+      filename: image.filename,
+      mimeType: image.mime,
+      width: image.width,
+      height: image.height,
+    },
+  );
   namedViewPickerTarget.value = null;
   composerError.value = null;
 }

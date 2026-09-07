@@ -882,7 +882,9 @@ function ensureDraftIds(state: GenerateFormState) {
   ensure(state.sourceVideo);
   ensure(state.extendVideo);
   state.keyframes.forEach((keyframe) => ensure(keyframe.image));
-  Object.values(state.namedViews ?? {}).forEach((image) => ensure(image ?? null));
+  Object.values(state.namedViews ?? {}).forEach((image) =>
+    ensure(image ?? null),
+  );
   const h3 = state.h3Authoring;
   if (!h3) return;
   for (const boundary of [h3.firstFrame, h3.lastFrame]) {
@@ -1028,7 +1030,9 @@ async function hydrateDraftMedia(state: GenerateFormState) {
 
   const namedSnapshot = state.namedViews ?? {};
   const namedEntries = await Promise.all(
-    Object.entries(namedSnapshot).map(async ([role, image]) => [role, await hydrate(image ?? null)] as const),
+    Object.entries(namedSnapshot).map(
+      async ([role, image]) => [role, await hydrate(image ?? null)] as const,
+    ),
   );
   if (state.namedViews === namedSnapshot) {
     state.namedViews = Object.fromEntries(namedEntries);
