@@ -34,6 +34,7 @@ pub mod ltx25_manifest;
 pub mod ltx25_probe;
 pub mod manifest;
 pub mod media_paths;
+pub mod mesh_workflow;
 pub mod metal_memory;
 pub mod minimax_h3;
 pub mod model_policy;
