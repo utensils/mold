@@ -26,14 +26,14 @@ Iso threshold, Target faces) takes their place. See
 
 ## Variants
 
-| Model                       | Steps | Size    | VRAM                      | Notes                                            |
-| --------------------------- | ----- | ------- | ------------------------- | ------------------------------------------------ |
-| `hunyuan3d-mini-turbo:fp16` | 5     | 3.6 GiB | ~5 GB                     | 0.6B, step-distilled. **The default.**           |
-| `hunyuan3d-turbo:fp16`      | 5     | 4.6 GiB | ~6 GB                     | 1.1B, step-distilled                             |
-| `hunyuan3d:fp16`            | 30    | 4.6 GiB | ~6 GB                     | 1.1B, undistilled                                |
-| `hunyuan3d-2.1:fp16`        | 30    | 6.9 GiB | qualification in progress | 3.3B MoE shape transformer; separate 2.1 licence |
-| `hunyuan3d-2mv:fp16`        | 30    | 4.6 GiB | ~6 GB                     | 1–4 named views, undistilled                     |
-| `hunyuan3d-2mv-turbo:fp16`  | 5     | 4.6 GiB | ~6 GB                     | 1–4 named views, step-distilled                  |
+| Model                       | Steps | Size    | VRAM                       | Notes                                            |
+| --------------------------- | ----- | ------- | -------------------------- | ------------------------------------------------ |
+| `hunyuan3d-mini-turbo:fp16` | 5     | 3.6 GiB | ~5 GB                      | 0.6B, step-distilled. **The default.**           |
+| `hunyuan3d-turbo:fp16`      | 5     | 4.6 GiB | ~6 GB                      | 1.1B, step-distilled                             |
+| `hunyuan3d:fp16`            | 30    | 4.6 GiB | ~6 GB                      | 1.1B, undistilled                                |
+| `hunyuan3d-2.1:fp16`        | 30    | 6.9 GiB | ~8 GB shape VAE round-trip | 3.3B MoE shape transformer; separate 2.1 licence |
+| `hunyuan3d-2mv:fp16`        | 30    | 4.6 GiB | ~6 GB                      | 1–4 named views, undistilled                     |
+| `hunyuan3d-2mv-turbo:fp16`  | 5     | 4.6 GiB | ~6 GB                      | 1–4 named views, step-distilled                  |
 
 ## Named multiview shape
 
@@ -86,8 +86,20 @@ mold run hunyuan3d-2.1 --image chair.png -o chair.glb
 
 The 2.1 checkpoint uses a different transformer with sparse experts and 4,096
 shape latents. Accepting the 2.0 terms does not accept the 2.1 terms. The default
-remains mini-turbo. CUDA component and full-render validation is recorded in the
-campaign qualification ledger; broader parity qualification is still running.
+remains mini-turbo.
+
+The web and desktop **3-D Studio** can also rebuild a supplied GLB or OBJ through
+the 2.1 shape VAE. Choose **Rebuild a mesh**, declare whether the input is Y-up
+or Z-up and its metres-per-unit scale, and submit it as a durable workflow. mold
+normalizes the source, samples its surface deterministically from the request
+seed, encodes all 81,920 points into 4,096 latents, decodes a fresh surface, and
+publishes the result as a new Library GLB. The source mesh and stage checkpoint
+survive app or server restarts.
+
+The installed fp16 Shape VAE is tensor-qualified against Tencent's 2.1
+implementation and a full GLB round trip is geometry-qualified on CUDA. Image
+conditioning through the 2.1 sparse shape transformer remains under campaign
+qualification.
 
 ## Getting good results
 

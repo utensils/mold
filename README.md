@@ -98,8 +98,9 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   Hunyuan3D Paint PBR materials in CUDA builds. Results are published to the Library as
   binary glTF with a rendered poster tile, exportable as OBJ, STL, or PLY, or
   shared as a turntable GIF, APNG, or WebP. The web and desktop **3-D Studio**
-  also runs durable text-to-3D and supplied-mesh texturing workflows: each
-  stage survives app or server restarts and can be resumed from its checkpoint.
+  also runs durable text-to-3D, supplied-mesh texturing, and Hunyuan3D 2.1
+  mesh-rebuild workflows through the shape VAE: each stage survives app or
+  server restarts and can be resumed from its checkpoint.
 - **Multiple machines:** connect local, LAN, Tailscale, and RunPod hosts, then
   route work and browse one combined Library.
 - **Organization:** title, favorite, tag, collect, restore, and manage prints

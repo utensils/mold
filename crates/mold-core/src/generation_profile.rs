@@ -2298,7 +2298,7 @@ fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
                 .then(|| "Named camera views require a Hunyuan3D 2mv checkpoint".to_string()),
         }),
         mesh_input: Some(MeshInputProfile {
-            mode: if paint_available {
+            mode: if paint_available || roundtrip_available {
                 ControlMode::Adjustable
             } else {
                 ControlMode::Hidden

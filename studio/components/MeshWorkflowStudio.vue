@@ -681,7 +681,7 @@ onBeforeUnmount(() => {
   font: 700 var(--mold-fs-micro) var(--mold-font-mono);
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--mold-accent) !important;
+  color: var(--mold-blue) !important;
 }
 .mesh-studio__grid {
   display: grid;
@@ -766,7 +766,7 @@ onBeforeUnmount(() => {
 .mesh-studio__primary {
   margin-top: auto;
   border-radius: var(--mold-radius-1);
-  background: var(--mold-accent);
+  background: var(--mold-blue);
   color: var(--mold-on-accent);
   padding: 12px 16px;
   font-weight: 750;
@@ -827,9 +827,9 @@ onBeforeUnmount(() => {
   border-radius: 50%;
 }
 .mesh-studio__progress li[data-state="running"] .mesh-studio__dot {
-  border-color: var(--mold-accent);
-  background: var(--mold-accent);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--mold-accent) 18%, transparent);
+  border-color: var(--mold-blue);
+  background: var(--mold-blue);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--mold-blue) 18%, transparent);
 }
 .mesh-studio__progress li[data-state="completed"] .mesh-studio__dot {
   border-color: var(--mold-success);
