@@ -4260,6 +4260,15 @@ button:disabled {
   gap: 12px;
 }
 
+.host-row-head > :first-child {
+  min-width: 0;
+  flex: 1;
+}
+
+.host-row-state .host-chip {
+  max-width: none;
+}
+
 .host-name {
   display: block;
   font-weight: 700;
@@ -5612,6 +5621,10 @@ button:disabled {
   border-radius: 12px;
   background: var(--mold-surface);
 }
+.mobile-host-form {
+  margin-top: 20px;
+}
+
 .mobile-add-machine > summary {
   min-height: var(--mobile-touch-target, 44px);
   align-content: center;
