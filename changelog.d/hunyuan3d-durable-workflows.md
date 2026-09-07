@@ -1,0 +1,1 @@
+- **Durable 3-D workflows.** Create, monitor, cancel, and resume text-to-mesh and supplied-mesh texturing jobs from the desktop and web 3-D Studio, with encrypted source retention and crash-safe stage recovery.

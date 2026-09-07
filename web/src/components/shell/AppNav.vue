@@ -90,6 +90,13 @@ const pills: Pill[] = [
     match: ["create"],
   },
   {
+    name: "mesh-workflow",
+    label: "3-D",
+    icon: "create",
+    path: "/create/3d",
+    match: ["mesh-workflow"],
+  },
+  {
     name: "models",
     label: "Models",
     icon: "models",

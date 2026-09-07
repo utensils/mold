@@ -236,6 +236,36 @@ pub fn attach_stage_execution(
     })
 }
 
+/// Bind every logical stage driven by one durable child in one transaction.
+/// A restart must observe either the whole execution group or none of it.
+pub fn attach_stage_executions(
+    db: &MetadataDb,
+    id: &str,
+    stage_indices: &[u32],
+    batch_id: &str,
+    now_ms: i64,
+) -> Result<bool> {
+    if stage_indices.is_empty() {
+        return Ok(false);
+    }
+    db.with_conn(|connection| {
+        let transaction = connection.unchecked_transaction()?;
+        for stage_index in stage_indices {
+            if transaction.execute(
+                "UPDATE mesh_workflow_stages
+                 SET state='running',execution_batch_id=?3,error=NULL,updated_at_ms=?4
+                 WHERE job_id=?1 AND stage_index=?2 AND state='pending' AND execution_batch_id IS NULL",
+                params![id, stage_index, batch_id, now_ms],
+            )? != 1
+            {
+                return Ok(false);
+            }
+        }
+        transaction.commit()?;
+        Ok(true)
+    })
+}
+
 pub fn complete_stage(
     db: &MetadataDb,
     id: &str,
@@ -252,6 +282,35 @@ pub fn complete_stage(
              WHERE job_id=?1 AND stage_index=?2 AND state='running'",
             params![id, stage_index, artifacts, now_ms],
         )? == 1)
+    })
+}
+
+/// Complete the complete logical stage group owned by one child batch.
+pub fn complete_stage_execution(
+    db: &MetadataDb,
+    id: &str,
+    batch_id: &str,
+    artifacts: &[MeshWorkflowArtifact],
+    now_ms: i64,
+) -> Result<bool> {
+    let artifacts =
+        serde_json::to_string(artifacts).context("serializing mesh workflow stage artifacts")?;
+    db.with_conn(|connection| {
+        let expected = connection.query_row(
+            "SELECT COUNT(*) FROM mesh_workflow_stages
+             WHERE job_id=?1 AND execution_batch_id=?2",
+            params![id, batch_id],
+            |row| row.get::<_, usize>(0),
+        )?;
+        if expected == 0 {
+            return Ok(false);
+        }
+        Ok(connection.execute(
+            "UPDATE mesh_workflow_stages
+             SET state='completed',artifacts_json=?3,error=NULL,updated_at_ms=?4
+             WHERE job_id=?1 AND execution_batch_id=?2 AND state='running'",
+            params![id, batch_id, artifacts, now_ms],
+        )? == expected)
     })
 }
 
@@ -272,7 +331,7 @@ pub fn fail_stage_and_job(
                     WHERE job_id=?1 AND stage_index=?2
                )",
             params![id, stage_index, error, now_ms],
-        )? == 1;
+        )? > 0;
         if !stage_changed {
             return Ok(false);
         }
@@ -524,5 +583,85 @@ mod tests {
             get_job(&db, "done").unwrap().unwrap().state,
             MeshWorkflowJobState::Completed
         );
+    }
+
+    #[test]
+    fn one_failed_execution_marks_every_stage_sharing_the_child_batch() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let job = job("workflow", MeshWorkflowJobState::Queued, 1);
+        let stage = |stage_index, kind| MeshWorkflowStageRow {
+            job_id: job.id.clone(),
+            stage_index,
+            kind,
+            state: MeshWorkflowStageState::Pending,
+            execution_batch_id: None,
+            artifacts: Vec::new(),
+            error: None,
+            updated_at_ms: 1,
+        };
+        let stages = vec![
+            stage(0, MeshWorkflowStageKind::Matting),
+            stage(1, MeshWorkflowStageKind::Shape),
+            stage(2, MeshWorkflowStageKind::Paint),
+        ];
+        insert_job_with_stages(&db, &job, &stages).unwrap();
+        assert!(claim_job(&db, &job.id, 2).unwrap());
+        for index in 0..3 {
+            assert!(attach_stage_execution(&db, &job.id, index, "mesh-batch", 3).unwrap());
+        }
+        assert!(fail_stage_and_job(&db, &job.id, 0, "paint failed", 4).unwrap());
+        let stages = stages_for_job(&db, &job.id).unwrap();
+        assert!(stages[..3]
+            .iter()
+            .all(|stage| stage.state == MeshWorkflowStageState::Failed));
+        assert_eq!(
+            get_job(&db, &job.id).unwrap().unwrap().state,
+            MeshWorkflowJobState::Failed
+        );
+    }
+
+    #[test]
+    fn shared_child_attachment_and_completion_are_all_or_nothing() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let job = job("workflow", MeshWorkflowJobState::Queued, 1);
+        insert_job(&db, &job).unwrap();
+        for (stage_index, kind) in [
+            MeshWorkflowStageKind::Matting,
+            MeshWorkflowStageKind::Shape,
+            MeshWorkflowStageKind::Paint,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            upsert_stage(
+                &db,
+                &MeshWorkflowStageRow {
+                    job_id: job.id.clone(),
+                    stage_index: stage_index as u32,
+                    kind,
+                    state: MeshWorkflowStageState::Pending,
+                    execution_batch_id: None,
+                    artifacts: Vec::new(),
+                    error: None,
+                    updated_at_ms: 1,
+                },
+            )
+            .unwrap();
+        }
+        assert!(attach_stage_executions(&db, &job.id, &[0, 1, 2], "batch", 2).unwrap());
+        assert!(!attach_stage_executions(&db, &job.id, &[0, 1, 2], "other", 3).unwrap());
+        let artifact = MeshWorkflowArtifact {
+            role: "final_glb".into(),
+            relative_path: "stages/001/final.glb".into(),
+            media_type: "model/gltf-binary".into(),
+            sha256: "a".repeat(64),
+            byte_length: 1,
+        };
+        assert!(complete_stage_execution(&db, &job.id, "batch", &[artifact.clone()], 4).unwrap());
+        let rows = stages_for_job(&db, &job.id).unwrap();
+        assert!(rows.iter().all(|stage| {
+            stage.state == MeshWorkflowStageState::Completed
+                && stage.artifacts == vec![artifact.clone()]
+        }));
     }
 }

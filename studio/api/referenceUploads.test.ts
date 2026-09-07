@@ -99,6 +99,14 @@ function metadataFor(
       sample_count: reference.sample_count,
     };
   }
+  if (reference.kind === "mesh") {
+    return {
+      ...base,
+      mesh_format: reference.format,
+      byte_length: reference.byte_length,
+      coordinates: reference.coordinates,
+    };
+  }
   return {
     ...base,
     width: reference.width,
@@ -788,5 +796,64 @@ describe("MiniMax H3 reference upload leases", () => {
         })) as GenerationReference[],
       }),
     ).toBe(false);
+  });
+
+  it("prepares a Hunyuan3D mesh reference without putting its bytes in JSON", async () => {
+    const raw = "glTFmesh";
+    const request: ReferenceUploadRequest = {
+      model: "hunyuan3d-2.1:fp16",
+      prompt: "",
+      batch_size: 1,
+      references: [
+        {
+          kind: "mesh",
+          media: { authority: "inline", data: base64(raw) },
+          provenance: { name: "chair.glb", sha256: await digest(raw) },
+          mime_type: "model/gltf-binary",
+          format: "glb",
+          byte_length: raw.length,
+          coordinates: { up_axis: "y", meters_per_unit: 1 },
+        },
+      ],
+    };
+    let descriptor: GenerationReference | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          const payload = JSON.parse(String(init.body)) as {
+            request: ReferenceUploadRequest;
+          };
+          descriptor = payload.request.references?.[0];
+          expect(JSON.stringify(payload)).not.toContain(base64(raw));
+          return Response.json({
+            instance_id: INSTANCE_ID,
+            expires_at_ms: 20_000,
+            request_scope_sha256: SCOPE_DIGEST,
+            session_handle: "mesh-session",
+            uploads: [{ reference: 1, handle: "mesh-upload" }],
+          });
+        }
+        return Response.json({
+          instance_id: INSTANCE_ID,
+          reference: 1,
+          metadata: metadataFor(descriptor!, 1),
+          request_scope_sha256: REBOUND_SCOPE_DIGEST,
+          session_complete: true,
+        });
+      }),
+    );
+    expect(requestNeedsReferenceUpload(request)).toBe(true);
+    const lease = await prepareReferenceUploads({
+      target: TARGET,
+      expectedInstanceId: INSTANCE_ID,
+      capabilities: CAPABILITIES,
+      request,
+      now: () => 10_000,
+    });
+    expect(lease.request.references?.[0]?.media).toEqual({
+      authority: "upload",
+      handle: "mesh-upload",
+    });
   });
 });

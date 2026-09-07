@@ -314,10 +314,13 @@ function captureReferences(
   request: ReferenceUploadRequest,
   capabilities: ReferenceUploadCapabilities,
 ): CapturedReference[] {
-  if (minimaxH3TaskForModel(request.model) !== "ref2va") {
+  const meshRequest =
+    request.model.toLowerCase().startsWith("hunyuan3d") &&
+    request.references?.every((reference) => reference.kind === "mesh");
+  if (minimaxH3TaskForModel(request.model) !== "ref2va" && !meshRequest) {
     protocolError(
       "REFERENCE_UPLOAD_REQUEST_INVALID",
-      "Reference uploads require an explicit MiniMax H3 Ref2VA model.",
+      "Reference uploads require a supported reference-bearing model.",
     );
   }
   if (
@@ -344,7 +347,7 @@ function captureReferences(
     if (
       !reference ||
       typeof reference !== "object" ||
-      !["image", "video", "audio"].includes(reference.kind) ||
+      !["image", "video", "audio", "mesh"].includes(reference.kind) ||
       typeof reference.mime_type !== "string" ||
       reference.mime_type.trim().length === 0
     ) {
@@ -646,6 +649,29 @@ function canonicalDescriptorFromMetadata(
       sample_count: metadata.sample_count,
     };
   }
+  if (reference.kind === "mesh") {
+    if (
+      metadata.mime_type !== reference.mime_type ||
+      metadata.mesh_format !== reference.format ||
+      metadata.byte_length !== reference.byte_length ||
+      JSON.stringify(metadata.coordinates) !==
+        JSON.stringify(reference.coordinates)
+    ) {
+      return null;
+    }
+    return {
+      kind: "mesh",
+      media: { authority: "descriptor" },
+      provenance,
+      mime_type: metadata.mime_type,
+      format: metadata.mesh_format as "glb" | "obj",
+      byte_length: metadata.byte_length as number,
+      coordinates: metadata.coordinates as {
+        up_axis: "y" | "z";
+        meters_per_unit: number;
+      },
+    };
+  }
   if (
     reference.mime_type !== "video/mp4" ||
     metadata.mime_type !== "video/mp4" ||
@@ -920,7 +946,10 @@ export function requestNeedsReferenceUpload(
   request: ReferenceUploadRequest,
 ): boolean {
   return (
-    minimaxH3TaskForModel(request.model) === "ref2va" &&
+    (minimaxH3TaskForModel(request.model) === "ref2va" ||
+      (request.model.toLowerCase().startsWith("hunyuan3d") &&
+        request.references?.every((reference) => reference.kind === "mesh") ===
+          true)) &&
     Array.isArray(request.references) &&
     request.references.some(
       (reference) => reference.media.authority === "inline",

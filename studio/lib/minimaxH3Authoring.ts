@@ -521,6 +521,12 @@ export function minimaxH3ReferenceBudget(
       );
       return;
     }
+    if (reference.kind === "mesh") {
+      errors.push(
+        `Reference ${oneBased} is a mesh, which MiniMax H3 does not accept.`,
+      );
+      return;
+    }
     if (reference.kind === "video") {
       videos += 1;
       videoDurationMs += reference.duration_ms;
@@ -621,7 +627,9 @@ export function minimaxH3ReferenceName(
 export function minimaxH3ReferenceDurationMs(
   reference: GenerationReference,
 ): number | null {
-  return reference.kind === "image" || reference.kind === "named_image"
+  return reference.kind === "image" ||
+    reference.kind === "named_image" ||
+    reference.kind === "mesh"
     ? null
     : reference.duration_ms;
 }

@@ -440,19 +440,14 @@ fn attach_batch(
     kinds: &[MeshWorkflowStageKind],
     batch_id: &str,
 ) -> anyhow::Result<()> {
-    for stage in stages.iter().filter(|stage| kinds.contains(&stage.kind)) {
-        if !mesh_workflow_jobs::attach_stage_execution(
-            db,
-            job_id,
-            stage.stage_index,
-            batch_id,
-            now_ms(),
-        )? {
-            bail!(
-                "mesh workflow stage {} lost its pending claim",
-                stage.stage_index
-            );
-        }
+    let stage_indices = stages
+        .iter()
+        .filter(|stage| kinds.contains(&stage.kind))
+        .map(|stage| stage.stage_index)
+        .collect::<Vec<_>>();
+    if !mesh_workflow_jobs::attach_stage_executions(db, job_id, &stage_indices, batch_id, now_ms())?
+    {
+        bail!("mesh workflow stage group lost its pending claim");
     }
     Ok(())
 }
@@ -464,14 +459,13 @@ fn complete_kinds(
     kinds: &[MeshWorkflowStageKind],
     artifacts: &[MeshWorkflowArtifact],
 ) -> anyhow::Result<()> {
-    for stage in stages.iter().filter(|stage| kinds.contains(&stage.kind)) {
-        if !mesh_workflow_jobs::complete_stage(db, job_id, stage.stage_index, artifacts, now_ms())?
-        {
-            bail!(
-                "mesh workflow stage {} lost its running claim",
-                stage.stage_index
-            );
-        }
+    let batch_id = stages
+        .iter()
+        .filter(|stage| kinds.contains(&stage.kind))
+        .find_map(|stage| stage.execution_batch_id.as_deref())
+        .context("mesh workflow stage group has no durable batch")?;
+    if !mesh_workflow_jobs::complete_stage_execution(db, job_id, batch_id, artifacts, now_ms())? {
+        bail!("mesh workflow stage group lost its running claim");
     }
     if let Some(next) = stages
         .iter()
@@ -546,7 +540,7 @@ fn retain_gallery_artifact(
     })
 }
 
-fn update_manifest_from_db(
+pub(crate) fn update_manifest_from_db(
     db: &mold_db::MetadataDb,
     job: &MeshWorkflowJobRow,
 ) -> anyhow::Result<()> {

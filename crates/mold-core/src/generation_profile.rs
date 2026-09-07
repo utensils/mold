@@ -2276,14 +2276,20 @@ fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
                 .then(|| "Named camera views require a Hunyuan3D 2mv checkpoint".to_string()),
         }),
         mesh_input: Some(MeshInputProfile {
-            mode: ControlMode::Hidden,
+            mode: if paint_available {
+                ControlMode::Adjustable
+            } else {
+                ControlMode::Hidden
+            },
             formats: vec![MeshReferenceFormat::Glb, MeshReferenceFormat::Obj],
-            max_count: 0,
+            max_count: u32::from(paint_available),
             max_bytes: validation::MESH_REFERENCE_MAX_BYTES,
             up_axes: vec![MeshUpAxis::Y, MeshUpAxis::Z],
             meters_per_unit_min: 1.0e-6,
             meters_per_unit_max: 1.0e6,
-            reason: Some("Supplied-mesh texturing is not executable by this build".to_string()),
+            reason: (!paint_available).then(|| {
+                "Supplied-mesh texturing requires the mesh-texture build feature".to_string()
+            }),
         }),
         texture_resolutions: validation::MESH_TEXTURE_RESOLUTIONS.to_vec(),
         texture_default_resolution: Some(2048),
@@ -2319,7 +2325,11 @@ fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
         workflow_modes: if multiview {
             vec![MeshWorkflowMode::MultiviewToMesh]
         } else {
-            vec![MeshWorkflowMode::ImageToMesh]
+            let mut modes = vec![MeshWorkflowMode::ImageToMesh, MeshWorkflowMode::TextToMesh];
+            if paint_available {
+                modes.push(MeshWorkflowMode::MeshTexture);
+            }
+            modes
         },
     }
 }
@@ -3066,13 +3076,18 @@ mod tests {
                 .map(|value| value.default),
             Some(6)
         );
-        assert_eq!(
-            mesh_caps.workflow_modes,
-            vec![MeshWorkflowMode::ImageToMesh]
-        );
+        let mut workflow_modes = vec![MeshWorkflowMode::ImageToMesh, MeshWorkflowMode::TextToMesh];
+        if cfg!(feature = "mesh-texture") {
+            workflow_modes.push(MeshWorkflowMode::MeshTexture);
+        }
+        assert_eq!(mesh_caps.workflow_modes, workflow_modes);
         assert_eq!(
             mesh_caps.mesh_input.as_ref().map(|input| input.mode),
-            Some(ControlMode::Hidden)
+            Some(if cfg!(feature = "mesh-texture") {
+                ControlMode::Adjustable
+            } else {
+                ControlMode::Hidden
+            })
         );
         assert_eq!(
             mesh_caps.matting.as_ref().map(|control| control.mode),

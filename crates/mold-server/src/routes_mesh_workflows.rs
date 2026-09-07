@@ -379,6 +379,20 @@ pub(crate) async fn resume_mesh_workflow(
     if mesh_workflow_jobs::resume_job(db(&state)?, &id, now_ms())
         .map_err(|error| ApiError::internal(format!("resuming mesh workflow failed: {error:#}")))?
     {
+        let row = mesh_workflow_jobs::get_job(db(&state)?, &id)
+            .map_err(|error| {
+                ApiError::internal(format!("loading resumed mesh workflow failed: {error:#}"))
+            })?
+            .ok_or_else(|| {
+                ApiError::with_code("mesh workflow not found", NOT_FOUND, StatusCode::NOT_FOUND)
+            })?;
+        crate::mesh_workflow_runner::update_manifest_from_db(db(&state)?, &row).map_err(
+            |error| {
+                ApiError::internal(format!(
+                    "checkpointing resumed mesh workflow failed: {error:#}"
+                ))
+            },
+        )?;
         if let Some(runner) = state.mesh_workflows.as_ref() {
             runner.kick();
         }
@@ -415,6 +429,20 @@ pub(crate) async fn cancel_mesh_workflow(
     if mesh_workflow_jobs::cancel_job(db(&state)?, &id, now_ms()).map_err(|error| {
         ApiError::internal(format!("cancelling mesh workflow failed: {error:#}"))
     })? {
+        let row = mesh_workflow_jobs::get_job(db(&state)?, &id)
+            .map_err(|error| {
+                ApiError::internal(format!("loading cancelled mesh workflow failed: {error:#}"))
+            })?
+            .ok_or_else(|| {
+                ApiError::with_code("mesh workflow not found", NOT_FOUND, StatusCode::NOT_FOUND)
+            })?;
+        crate::mesh_workflow_runner::update_manifest_from_db(db(&state)?, &row).map_err(
+            |error| {
+                ApiError::internal(format!(
+                    "checkpointing cancelled mesh workflow failed: {error:#}"
+                ))
+            },
+        )?;
         Ok(StatusCode::ACCEPTED)
     } else {
         Err(ApiError::validation("mesh workflow is already settled"))
