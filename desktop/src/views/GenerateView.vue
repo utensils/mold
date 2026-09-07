@@ -4628,7 +4628,6 @@ onBeforeUnmount(() => {
           <template #shape>
             <ShapeChip
               :form="form"
-              :caps="caps"
               :contract-model="contractEntry"
               :canvas-intent="canvasIntent"
               @canvas-intent="setCanvasIntent"

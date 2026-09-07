@@ -20,21 +20,25 @@ import Popover from "@ui/components/Popover.vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import { useOutputShape } from "../../composables/useOutputShape";
-import type { GenerationCapabilities } from "../../lib/capabilities";
-import type { CanvasIntent, OutputShapeModel } from "@studio/lib/outputShape";
+import { capabilitiesForCreateForm } from "../../lib/capabilities";
+import type { CanvasIntent } from "@studio/lib/outputShape";
 import type { GenerateForm } from "../../lib/generateForm";
+import type { ModelEntry } from "../../lib/api/types";
 
 /**
- * `caps` and `contractModel` are handed down rather than recomputed here:
- * the view already resolves both from the same five inputs the form's own
- * validators use, and a control that answered for the checkpoint itself is
- * exactly how the chip came to disagree with the rail in the first place.
+ * `contractModel` is the picked catalog row — the same
+ * `contractEntryForTarget(form.model, stickyTarget)` the rail resolves. The
+ * capabilities are derived HERE, through the one shared helper, rather than
+ * handed down: the view and the rail read a checkpoint's source-image
+ * contract from different places (`form.sourceImageCapability` against
+ * `model.source_image ?? form.sourceImageCapability`), and a chip fed the
+ * view's answer could disagree with the rail about whether the ladder offers
+ * Source — the very divergence this component exists to close.
  */
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
-    caps: GenerationCapabilities;
-    contractModel?: OutputShapeModel | null;
+    contractModel?: ModelEntry | null;
     canvasIntent?: CanvasIntent;
   }>(),
   { contractModel: null, canvasIntent: "model-default" },
@@ -42,16 +46,17 @@ const props = withDefaults(
 const emit = defineEmits<{ "canvas-intent": [intent: CanvasIntent] }>();
 
 const open = ref(false);
+const caps = computed(() => capabilitiesForCreateForm(props.form, props.contractModel));
 const shape = useOutputShape({
   form: () => props.form,
   canvasIntent: () => props.canvasIntent,
   contractModel: () => props.contractModel,
-  supportsSourceImage: () => props.caps.supportsSourceImage,
+  supportsSourceImage: () => caps.value.supportsSourceImage,
   onCanvasIntent: (intent) => emit("canvas-intent", intent),
 });
 
 /** A 3-D style has no canvas, so it has no chip. */
-const canvasless = computed(() => props.caps.canvasless || shape.outputShape.value.canvasless);
+const canvasless = computed(() => caps.value.canvasless || shape.outputShape.value.canvasless);
 
 /**
  * "Square · 1024" — the resolver's own answer, not a second reading of the
@@ -70,7 +75,10 @@ const label = computed(() => {
   // where it has one — the chip has always said "Square", and the rail's
   // picker keeps the ladder's own "1:1" beside its swatch.
   const plain = family === "1:1" ? "Square" : family;
-  return `${plain} · ${resolved.approximate ? "≈" : ""}${size}`;
+  const marked = `${resolved.approximate ? "≈" : ""}${size}`;
+  // A recipe whose model authors no ladder has no family to name; the size
+  // alone still says something true, where a bare "· 1024" reads as broken.
+  return plain ? `${plain} · ${marked}` : marked;
 });
 </script>
 

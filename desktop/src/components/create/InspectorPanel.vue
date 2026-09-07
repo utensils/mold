@@ -26,7 +26,7 @@ import {
 } from "@studio/lib/cameraMotion";
 import { apiJsonTo } from "../../lib/api/client";
 import { normalizeTargetHost } from "../../lib/hosts";
-import { generationCapabilitiesForFamily } from "../../lib/capabilities";
+import { capabilitiesForCreateForm } from "../../lib/capabilities";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import SourceImageWell from "../generate/SourceImageWell.vue";
 import LoraStack from "../generate/LoraStack.vue";
@@ -208,19 +208,9 @@ function onInspectorReset() {
   void appPrefs.update({ generateParamsWidth: null });
 }
 
-const caps = computed(() =>
-  generationCapabilitiesForFamily(
-    props.form.family,
-    props.form.model,
-    props.form.pipeline,
-    contractModel.value?.guidance_capabilities,
-    // Per-model source-image contract (#772): the picked row when we have it,
-    // otherwise the form's snapshot of it. Without this the Source image well
-    // would render for a text-to-video wan checkpoint that rejects one.
-    contractModel.value?.source_image ?? props.form.sourceImageCapability,
-    effectiveGenerationRecipe(contractModel.value, props.form.pipeline),
-  ),
-);
+// Shared with the composer's Shape chip, which answers for the same form: two
+// readings of one checkpoint's contract is how the two controls diverged.
+const caps = computed(() => capabilitiesForCreateForm(props.form, contractModel.value));
 /** The model's image-attachment shape — one shared policy, never a local
  * heuristic. Only `none` hides the primary conditioning editor. */
 const sourcePlan = computed(() => sourceMediaPlan(caps.value));

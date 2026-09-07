@@ -14,15 +14,13 @@ import { reactive } from "vue";
 import ShapeChip from "./ShapeChip.vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
-import { generationCapabilitiesForFamily } from "../../lib/capabilities";
+import { capabilitiesForCreateForm } from "../../lib/capabilities";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import type { ModelEntry } from "../../lib/api/types";
 
-function mountChip(form: GenerateForm, family = form.family) {
+function mountChip(form: GenerateForm) {
   setActivePinia(createPinia());
-  return mount(ShapeChip, {
-    attachTo: document.body,
-    props: { form, caps: generationCapabilitiesForFamily(family, form.model) },
-  });
+  return mount(ShapeChip, { attachTo: document.body, props: { form } });
 }
 
 function squareForm(): GenerateForm {
@@ -104,8 +102,43 @@ describe("ShapeChip", () => {
     form.model = "hunyuan3d-2.1:fp16";
     form.width = 0;
     form.height = 0;
-    const wrapper = mountChip(form, "hunyuan3d");
+    const wrapper = mountChip(form);
     expect(wrapper.find("[data-test='shape-chip']").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("0×0");
+  });
+
+  /*
+   * The rail resolves a checkpoint's source-image contract as
+   * `model.source_image ?? form.sourceImageCapability`, so a chip that read
+   * only the form's snapshot would disagree with it about whether this
+   * checkpoint takes a still at all — and therefore about whether the shape
+   * ladder offers Source. That is the divergence this component closes, so
+   * both go through `capabilitiesForCreateForm`.
+   */
+  it("reads the checkpoint's contract the way the rail does, not the form's snapshot alone", () => {
+    const form = squareForm();
+    // A wan text-to-video checkpoint that rejects a still. The catalog row
+    // says so; the form's own snapshot has not caught up.
+    form.family = "wan";
+    form.model = "wan21-t2v-1.3b:turbo";
+    form.sourceImageCapability = null;
+    const row = { source_image: "unsupported" } as ModelEntry;
+
+    expect(capabilitiesForCreateForm(form, row).supportsSourceImage).toBe(false);
+    // Without the row the family answers yes — which is what a chip fed only
+    // the form's snapshot would have believed.
+    expect(capabilitiesForCreateForm(form, null).supportsSourceImage).toBe(true);
+
+    // The chip renders from the row's contract without falling over, and
+    // names the size even for a stub row that authors no shape ladder.
+    setActivePinia(createPinia());
+    const wrapper = mount(ShapeChip, {
+      attachTo: document.body,
+      props: { form, contractModel: row },
+    });
+    const text = wrapper.get("[data-test='shape-chip']").text();
+    expect(text).toContain("1024");
+    expect(text.trimStart().startsWith("·")).toBe(false);
+    wrapper.unmount();
   });
 });
