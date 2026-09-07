@@ -1,6 +1,6 @@
 [package]
 name = "mold-desktop"
-version = "0.28.0"
+version = "0.29.0"
 description = "Mold — native desktop app for local AI image/video generation"
 authors = [
     "James Brink <brink.james@gmail.com>",
@@ -68,9 +68,9 @@ tar = "0.4"
 tempfile = "3"
 filetime = "0.2"
 sha2 = "0.10"
-mold-core = { path = "../../crates/mold-core", package = "mold-ai-core", version = "0.28.0" }
-mold-db = { path = "../../crates/mold-db", package = "mold-ai-db", version = "0.28.0" }
-mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.28.0", features = [
+mold-core = { path = "../../crates/mold-core", package = "mold-ai-core", version = "0.29.0" }
+mold-db = { path = "../../crates/mold-db", package = "mold-ai-db", version = "0.29.0" }
+mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.29.0", features = [
   "expand",
   "mdns",
 ] }
@@ -84,7 +84,7 @@ mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", v
 # `#[cfg(not(feature = "mp4"))]` arm: video still renders and muxes through the
 # pure-Rust mp4 writer, and only a generated AAC track is refused, by name.
 [target.'cfg(not(windows))'.dependencies]
-mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.28.0", features = [
+mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.29.0", features = [
   "mp4",
 ] }
 
@@ -160,7 +160,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Test-only: builds the two-triangle GLB the offline mesh-poster tests render.
 # `default = []` and the crate is already in this root's graph through
 # mold-server, so this edge adds no features and no extra compilation.
-mold-inference = { path = "../../crates/mold-inference", package = "mold-ai-inference", version = "0.28.0" }
+mold-inference = { path = "../../crates/mold-inference", package = "mold-ai-inference", version = "0.29.0" }
 
 # TEMPORARY: mirror the root workspace's same-name compatibility patch because
 # this standalone Cargo root owns an independent dependency graph.
