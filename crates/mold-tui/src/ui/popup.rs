@@ -16,6 +16,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::SizeInput { .. }) => render_size_input(frame, app),
         Some(Popup::StgBlocksInput { .. }) => render_stg_blocks_input(frame, app),
         Some(Popup::ReferencesInput { .. }) => render_references_input(frame, app),
+        Some(Popup::NamedViewsInput { .. }) => render_named_views_input(frame, app),
         Some(Popup::ReferenceImagesInput { .. }) => render_reference_images_input(frame, app),
         Some(Popup::IdentityImageInput { .. }) => render_identity_image_input(frame, app),
         Some(Popup::SourceImageInput { .. }) => render_source_image_input(frame, app),
@@ -666,6 +667,20 @@ fn render_references_input(frame: &mut Frame, app: &mut App) {
         &app.theme,
         " Ordered H3 References ",
         "Semicolon order is semantic: image=/a.png; video=/b.mp4; audio=/c.wav",
+        input,
+        error.as_deref(),
+    );
+}
+
+fn render_named_views_input(frame: &mut Frame, app: &mut App) {
+    let Some(Popup::NamedViewsInput { input, error }) = &app.popup else {
+        return;
+    };
+    render_ordered_reference_input(
+        frame,
+        &app.theme,
+        " Hunyuan3D Named Views ",
+        "Semantic slots: front=/a.png; left=/b.jpg; back=/c.png; right=/d.png",
         input,
         error.as_deref(),
     );

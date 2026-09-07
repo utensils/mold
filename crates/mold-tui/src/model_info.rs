@@ -59,6 +59,14 @@ pub struct ModelCapabilities {
 }
 
 impl ModelCapabilities {
+    pub fn named_views_row(&self) -> Option<&mold_core::generation_profile::NamedViewsProfile> {
+        self.mesh
+            .as_ref()?
+            .named_views
+            .as_ref()
+            .filter(|profile| profile.mode != mold_core::ControlMode::Hidden)
+    }
+
     /// The reference contract the Create form may offer a **References row**
     /// for — the ONE gate every surface that draws, opens, or commits that
     /// row reads.

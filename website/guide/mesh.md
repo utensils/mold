@@ -285,7 +285,11 @@ now — not only the CLI, TUI, and Discord.
 Pick a Hunyuan3D model in `mold tui`'s Create form and the form reshapes
 itself from the model's generation profile rather than from its name:
 
-- **Source image** is the only conditioning row. Strength, Mask and the
+- **Source image** is the conditioning row for ordinary single-view models.
+  A multiview recipe also shows **Named views**, edited as semantic
+  `front=/a.png; left=/b.jpg; back=/c.png; right=/d.png` slots. Any non-empty
+  subset is accepted, the TUI orders it front/left/back/right before sending,
+  and choosing one form clears the other. Strength, Mask and the
   Negative prompt disappear because the profile advertises no strength
   (`supports_strength` is false), a hidden mask, and no negative prompt.
 - **Advanced ▸ 3-D mesh** appears with three rows — **Octree** (`◀▶` walks
@@ -324,8 +328,13 @@ the gallery file is untouched.
 
 ## In Discord
 
-`/generate` with a Hunyuan3D `model` and a `source_image` attachment renders
-a mesh. The `prompt` option is optional whenever a source image is attached
+`/mesh` renders a Hunyuan3D mesh. Attach `source` for a single-view model, or
+attach any non-empty subset of `front`, `left`, `back`, and `right` for a 2mv
+model. When `model` is omitted, single-view input selects the ordinary default
+and named views select `hunyuan3d-2mv-turbo:fp16`. The command also exposes
+seed, texture, octree, threshold, and target-face controls. `/generate` with a
+Hunyuan3D `model` and `source_image` remains available for compatibility. Its
+`prompt` option is optional whenever a source image is attached
 (Discord cannot make an option optional per model, and a source image is
 exactly what image-to-video and image-to-3D have in common), the
 `video_format` option is ignored because the family has one deliverable

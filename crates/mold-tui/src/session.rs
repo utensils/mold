@@ -697,6 +697,7 @@ mod tests {
             upscale_model: None,
             source_image_path: None,
             source_image_recall: None,
+            named_view_paths: Vec::new(),
             reference_paths: Vec::new(),
             edit_image_paths: Vec::new(),
             identity_image_path: None,

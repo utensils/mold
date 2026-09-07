@@ -144,7 +144,7 @@ loader without replacing network or rendering computations.
 - `paint-conditions-rust-v1/` contains all twelve 2048-pixel conditioning maps
   produced from the real mesh in 14.968 seconds on CPU. The comparison against
   the successful upstream run passes every preset gate (mask IoU >= .999,
-  >= .995 of channels within one level, PSNR >= 40 dB).
+  at least .995 of channels within one level, PSNR at least 40 dB).
   `paint-conditions-comparison-v1.json` records mask IoU exactly 1 for every map;
   positions differ by at most one level. Normal-map PSNR is at least 59.02 dB,
   with more than 99.999% of channels within one level; rare triangle-boundary
@@ -557,7 +557,6 @@ Full-pipeline P0 oracle parity and the remaining P1–P15 implementation/qualifi
 gates remain open. A successful 2.1 render does not close those gates. This ledger will record measured results as each gate is exercised;
 it is not a completion checklist with assumed passes.
 
-
 ## Request-owned paint denoising checkpoint
 
 - `paint_denoiser.rs` joins the complete main/reference networks, projector,
@@ -603,7 +602,6 @@ it is not a completion checklist with assumed passes.
   input; its relationship to Torch's accumulation policy is under investigation.
   No production convolution policy or tolerance has changed. All tensors and
   failed diagnostics are retained.
-
 
 ## Full six-view denoising trajectory
 
@@ -651,7 +649,6 @@ it is not a completion checklist with assumed passes.
   decoder tensors remain retained in `paint-vae-cudnn-f32accum-real512-candle-v1/`.
   The pinned build passes 194 Hunyuan tests with fourteen hardware/oracle tests
   ignored (`candle-cudnn-pin-hunyuan-tests-v1.log`).
-
 
 ## Spatial projection bias-rounding correction
 
@@ -707,7 +704,6 @@ it is not a completion checklist with assumed passes.
   (`paint-projection-shared-clippy-v2.log`); the initial lint failure remains
   retained in v1. Rust formatting checks pass.
 
-
 ## Paint image boundaries and staged runner
 
 - `paint-pixels-oracle-v1` captures unchanged Tencent `encode_images` through
@@ -760,7 +756,6 @@ it is not a completion checklist with assumed passes.
   decoder limits. That follow-up compiles under all-target warnings-denied
   Clippy (`paint-pipeline-clippy-v2.log`); execution remains a separate gate.
 
-
 ## Full prepared paint result and source image preparation
 
 - `capture-20260906T100514Z-368852622599` completed every inference stage and
@@ -800,7 +795,6 @@ it is not a completion checklist with assumed passes.
   explicit oracle tests ignored (`paint-images-all-paint-v1.log`); the two
   real-image oracle tests above were run explicitly. All-target CUDA/cuDNN
   Clippy passes with warnings denied (`paint-images-clippy-v2.log`).
-
 
 ## P7 projection sampling and weighted merge
 
@@ -1113,7 +1107,6 @@ it is not a completion checklist with assumed passes.
 - All-target CUDA/cuDNN Clippy passes with warnings denied after the fork pin
   and qualification guards (`paint-upscaler-explicit-first-clippy-v1.log`).
 
-
 ### P7 ordered material adapter
 
 - The remaining ten full views now pass: `paint-upscaler-remaining-views-v1/completed.json`
@@ -1150,7 +1143,6 @@ it is not a completion checklist with assumed passes.
   Read-only peer review confirms the scoped backend lifetime and preserved
   overrides; its stale thread-local documentation comment was corrected.
 
-
 ### P7 bounded upscaler memory plan
 
 - `ResolvedUpscaleExecutionPlan::for_paint_materials` specializes the existing
@@ -1173,7 +1165,6 @@ it is not a completion checklist with assumed passes.
   The rebuilt real adapter still matches both material streams exactly with
   no backend override (`paint-budget-adapter-v1`). Read-only follow-up review
   reports both findings resolved and no additional actionable findings.
-
 
 ### P7 mesh vertex propagation
 
@@ -1201,7 +1192,6 @@ it is not a completion checklist with assumed passes.
   denied passes (`vertex-fill-clippy-v2.log`). Follow-up read-only review
   confirms both findings resolved with no additional actionable issue.
 
-
 ### P7 Navier–Stokes pixel fill
 
 - `paint_ns_fill::fill_rgb` ports OpenCV 4.10.0's three-channel radius-three
@@ -1220,8 +1210,7 @@ it is not a completion checklist with assumed passes.
   images: the source's global sqrt/divide/fabs widen to double after the F32
   product. The corrected helper is pinned by a compiled C++ source-expression
   oracle (`ns-direction-oracle.cpp`, executable and text): r=(1,2), gradient
-  (-1,15) yields F32 bits 1063049670; the former float-only expression gives
-  1063049671. Source and distribution notices retain Intel's original license.
+  (-1,15) yields F32 bits 1063049670; the former float-only expression gives 1063049671. Source and distribution notices retain Intel's original license.
 - Cancellation checks run during initialization, every popped front and before
   returning. Entry/middle/final cancellation is exercised on every image case.
   Actual chair-mesh qualification and composition with vertex propagation remain
@@ -1231,7 +1220,6 @@ it is not a completion checklist with assumed passes.
   All-target CUDA/cuDNN Clippy with warnings denied passes
   (`ns-fill-clippy-v3.log`). Read-only follow-up review confirms the arithmetic,
   attribution and coverage findings resolved with no remaining actionable issue.
-
 
 ### P7 composed texture fill on the retained chair
 
@@ -1263,7 +1251,6 @@ it is not a completion checklist with assumed passes.
   and all-target CUDA/cuDNN Clippy passes with warnings denied
   (`texture-fill-clippy-v2.log`). Follow-up peer review confirms the oracle
   guard and composed cancellation findings resolved.
-
 
 ### P7 full projection/bake/fill integration
 
@@ -1545,3 +1532,12 @@ the remaining P8-P15 features, and every client surface.
   prices the concatenated DiT context while keeping the per-view DINO peak
   sequential, and exact/retained request restoration preserves inline named
   views across a desktop/mobile form round trip.
+- The follow-up surface pass completes the P9 authoring matrix. The TUI reads
+  `capabilities.mesh.named_views` and exposes a named-view editor only on
+  qualifying recipes. Its syntax is
+  `front=PATH; left=PATH; back=PATH; right=PATH`. The TUI probes every file at
+  dispatch and sends canonical `NamedImage` references without a competing
+  `source_image`. Discord adds `/mesh` because `/generate` already occupies
+  Discord's 25-option ceiling; the focused command accepts one single-view
+  source or any named-view subset plus the mesh controls and uses the same
+  generation streaming and delivery path as `/generate`.

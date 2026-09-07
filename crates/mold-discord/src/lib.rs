@@ -73,6 +73,7 @@ pub async fn run() -> Result<()> {
             commands: vec![
                 commands::generate::generate(),
                 commands::identity::identity(),
+                commands::mesh::mesh(),
                 commands::expand::expand(),
                 commands::remix::remix(),
                 commands::models::models(),

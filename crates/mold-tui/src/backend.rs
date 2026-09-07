@@ -1495,6 +1495,7 @@ pub(crate) fn build_request(
         .source_image_path
         .as_ref()
         .and_then(|p| std::fs::read(p).ok());
+    let named_views = crate::named_views::prepare_named_views(&params.named_view_paths)?;
 
     let mask_image = params
         .mask_image_path
@@ -1646,9 +1647,17 @@ pub(crate) fn build_request(
         scheduler: params.scheduler,
         cfg_plus: None,
         edit_images,
-        references: None,
-        source_image,
-        source_image_name,
+        references: (!named_views.is_empty()).then_some(named_views),
+        source_image: if params.named_view_paths.is_empty() {
+            source_image
+        } else {
+            None
+        },
+        source_image_name: if params.named_view_paths.is_empty() {
+            source_image_name
+        } else {
+            None
+        },
         strength,
         mask_image,
         control_image,
@@ -1935,6 +1944,43 @@ mod tests {
         let request = build_request(&params, "", &None).unwrap();
         assert_eq!(request.source_image, None);
         assert_eq!(request.source_image_name, None);
+    }
+
+    #[test]
+    fn named_view_paths_ship_semantic_references_without_a_source_image() {
+        let config = mold_core::Config::default();
+        let mut params = GenerateParams::from_config(&config);
+        params.model = "hunyuan3d-2mv-turbo:fp16".to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let front = dir.path().join("front.png");
+        let right = dir.path().join("right.png");
+        image::DynamicImage::new_rgba8(32, 16).save(&front).unwrap();
+        image::DynamicImage::new_rgba8(16, 32).save(&right).unwrap();
+        params.source_image_path = Some(front.to_string_lossy().into_owned());
+        params.named_view_paths = crate::named_views::parse_named_view_paths(&format!(
+            "right={}; front={}",
+            right.display(),
+            front.display()
+        ))
+        .unwrap();
+
+        let request = build_request(&params, "", &None).unwrap();
+        assert!(request.source_image.is_none());
+        assert!(request.source_image_name.is_none());
+        let references = request.references.unwrap();
+        assert!(matches!(
+            references.as_slice(),
+            [
+                mold_core::GenerationReference::NamedImage {
+                    role: mold_core::GenerationImageReferenceRole::Front,
+                    ..
+                },
+                mold_core::GenerationReference::NamedImage {
+                    role: mold_core::GenerationImageReferenceRole::Right,
+                    ..
+                }
+            ]
+        ));
     }
 
     /// The mesh block is absent-until-touched: an untouched form ships no
