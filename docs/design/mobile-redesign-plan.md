@@ -237,3 +237,9 @@ Bound video/mesh, favorite, and ordered-image marker glyphs to 18px inside their
 ### Gallery entry destination
 
 Native visual testing found that Choose from gallery opened Local file. Source/edit-target and first/last-frame gallery actions now declare Gallery as the initial tab and restore it on each reopen; generic ordered-reference addition keeps its file-first default. The simulator verifies Gallery → Local file → Done → Choose from gallery returns to Gallery with real host thumbnails. 98 focused tests, formatting, native rebuild, and independent review pass. No generation was launched for this UI check.
+
+### Final TestFlight prompt-tool routing follow-up
+
+Auto and Most capable now resolve fresh Expand and Remix requests across reachable machines instead of using the browsed machine. The shared expansion policy can select a peer with the expander installed while generation remains on its separately captured route. Frozen refreshes and missing-model recovery preserve both authorities. Automatic browsing does not move prepared work, explicit pinning retains quick-result portability, and policy changes are named before stale work can submit.
+
+Validation covers offline browsed hosts with reachable peers, both automatic policies and prompt tools, unavailable expander configuration, pinned behavior, separate generation destinations for Batch 1 and Batch N, immutable recovery, and policy changes during and after expansion. Mobile regression tests, production build/typecheck, architecture, formatting, and independent review pass. This check used local fixtures without generation.

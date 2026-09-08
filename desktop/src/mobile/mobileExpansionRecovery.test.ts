@@ -24,6 +24,29 @@ const route: HostRoute = {
 };
 
 describe("mobile expansion recovery", () => {
+  it("keeps the generation authority separate from the expander and immutable", () => {
+    const generationRoute = {
+      ...route,
+      hostId: "render",
+      target: { baseUrl: "https://render.test", apiKey: "render-key" },
+    };
+    const recovery = createMobileExpansionRecovery({
+      id: 1,
+      leaseId: "lease",
+      model: "qwen3-expand:q8",
+      inputs,
+      route,
+      generationRoute,
+      requestToken: 1,
+      replacePrepared: false,
+    });
+    generationRoute.target.baseUrl = "https://replacement.test";
+    expect(recovery.route).toEqual(route);
+    expect(recovery.host.id).toBe(route.hostId);
+    expect(recovery.generationRoute.target.baseUrl).toBe("https://render.test");
+    expect(Object.isFrozen(recovery.generationRoute.target)).toBe(true);
+  });
+
   it("deep-snapshots inputs and derives its pull host only from the frozen route", () => {
     const mutableInputs = { ...inputs };
     const mutableRoute = { ...route, target: { ...route.target } };

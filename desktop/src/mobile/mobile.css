@@ -5777,6 +5777,7 @@ button:disabled {
   flex-wrap: wrap;
 }
 .mobile-surface .ms-seg .ms-seg__btn {
+  justify-content: center;
   min-width: 0;
   min-height: 44px;
   height: auto;

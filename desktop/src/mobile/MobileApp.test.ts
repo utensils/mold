@@ -3358,7 +3358,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     expect(wrapper.get("[data-test='mobile-prepared-expansion']").text()).toContain(
-      "Host selection changed from Studio to Render",
+      "Host selection changed from Auto to Render",
     );
   });
 
@@ -11457,6 +11457,176 @@ describe("MobileApp automatic generation routing", () => {
     expect(admissionTargets()[0]).toEqual(target);
   });
 
+  it.each([
+    ["auto", "expand", true],
+    ["auto", "remix", true],
+    ["capable", "expand", true],
+    ["capable", "remix", true],
+    ["auto", "expand", false],
+    ["auto", "remix", false],
+  ] as const)(
+    "%s %s chooses a peer expander (preferred configured: %s)",
+    async (policy, tool, configured) => {
+      twoHosts();
+      localStorage.setItem("mold.mobile.generate-target.v1", policy);
+      fleetApi({ renderModels: [] });
+      const baseApi = apiJsonTo.getMockImplementation()!;
+      apiJsonTo.mockImplementation((route, path, init) =>
+        path === "/api/capabilities"
+          ? Promise.resolve({
+              ...durableQueueCapabilities,
+              expand: {
+                configured: route.baseUrl === renderTarget.baseUrl || configured,
+                model_present: route.baseUrl === renderTarget.baseUrl,
+              },
+            })
+          : baseApi(route, path, init),
+      );
+      wrapper = mountMobileApp();
+      await flushPromises();
+      await fieldControl("Prompt").setValue("a lighthouse in rain");
+      await wrapper.get(`[data-test='mobile-prompt-${tool}']`).trigger("click");
+      await flushPromises();
+      const call = (tool === "expand" ? expandPrompt : remixPrompt).mock.calls[0]!;
+      expect(call.at(-1)).toEqual(renderTarget);
+      expect(wrapper.text()).not.toContain("will not fall back");
+    },
+  );
+
+  it.each([1, 2])(
+    "keeps Batch %s generation on its original host after peer expansion",
+    async (count) => {
+      twoHosts();
+      fleetApi({ renderModels: [] });
+      const baseApi = apiJsonTo.getMockImplementation()!;
+      apiJsonTo.mockImplementation((route, path, init) =>
+        path === "/api/capabilities"
+          ? Promise.resolve({
+              ...durableQueueCapabilities,
+              expand: {
+                configured: true,
+                model_present: route.baseUrl === renderTarget.baseUrl,
+              },
+            })
+          : baseApi(route, path, init),
+      );
+      wrapper = mountMobileApp();
+      await flushPromises();
+      if (count === 2) await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+      await fieldControl("Prompt").setValue("a lighthouse in rain");
+      await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+      await flushPromises();
+      expect(expandPrompt.mock.calls[0]!.at(-1)).toEqual(renderTarget);
+      await wrapper
+        .get(
+          count === 1
+            ? "[data-test='mobile-develop-button']"
+            : "[data-test='mobile-develop-prepared']",
+        )
+        .trigger("click");
+      await flushPromises();
+      expect(admissionTargets()).toHaveLength(1);
+      expect(admissionTargets()[0]).toEqual(target);
+      expect(admittedRequests()).toHaveLength(count);
+    },
+  );
+
+  it("does not generate on an old Auto route after changing a completed rewrite to Most capable", async () => {
+    twoHosts();
+    fleetApi({});
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("capable");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-quick-expansion-stale']").text()).toContain(
+      "Host selection changed from Auto to Most capable",
+    );
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(admissionTargets()).toHaveLength(0);
+  });
+
+  it("rejects a late expansion result after the routing policy changes", async () => {
+    twoHosts();
+    fleetApi({});
+    let finish!: (value: { expanded: string[] }) => void;
+    expandPrompt.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("original lighthouse");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("capable");
+    await flushPromises();
+    finish({ expanded: ["late rewritten lighthouse"] });
+    await flushPromises();
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "original lighthouse",
+    );
+    expect(wrapper.text()).toContain("changed while expansion was running");
+  });
+
+  it("Auto expansion ignores an unreachable browsed machine", async () => {
+    twoHosts();
+    const saved = JSON.parse(localStorage.getItem("mold.mobile.hosts.v1")!);
+    saved.push({ id: "peer-id", name: "Peer", baseUrl: "http://peer:7680", instanceId: "peer-id" });
+    localStorage.setItem("mold.mobile.hosts.v1", JSON.stringify(saved));
+    fleetApi({});
+    const baseApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((route, path, init) => {
+      if (route.baseUrl === target.baseUrl) return Promise.reject(new Error("offline"));
+      if (path === "/api/status" && route.baseUrl === "http://peer:7680")
+        return Promise.resolve({ ...status, instance_id: "peer-id", hostname: "peer" });
+      if (path === "/api/capabilities")
+        return Promise.resolve({
+          ...durableQueueCapabilities,
+          expand: { configured: true, model_present: true },
+        });
+      return baseApi(route, path, init);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect(wrapper.get(".mobile-header .host-chip").text()).toBe("Auto");
+    await fieldControl("Prompt").setValue("a lighthouse in rain");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    expect(expandPrompt).toHaveBeenCalledOnce();
+    expect(expandPrompt.mock.calls[0]!.at(-1)).not.toEqual(target);
+    expect(wrapper.text()).not.toContain("will not fall back");
+  });
+
+  it("pinned expansion keeps its selected machine even when a peer has the expander", async () => {
+    twoHosts();
+    fleetApi({});
+    localStorage.setItem("mold.mobile.generate-target.v1", "studio-id");
+    const baseApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((route, path, init) =>
+      path === "/api/capabilities"
+        ? Promise.resolve({
+            ...durableQueueCapabilities,
+            expand: {
+              configured: true,
+              model_present: route.baseUrl === renderTarget.baseUrl,
+            },
+          })
+        : baseApi(route, path, init),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a lighthouse in rain");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    expect(expandPrompt.mock.calls[0]!.at(-1)).toEqual(target);
+  });
+
   it("offers Auto and Most capable once two machines are reachable", async () => {
     twoHosts();
     fleetApi({});
@@ -12913,10 +13083,9 @@ describe("MobileApp Create File under", () => {
   });
 
   it("gives every prepared Batch N sibling the same dropped outcome, once", async () => {
-    // Prepared work never re-routes: it freezes the BROWSED machine at
-    // preparation and develops there, which under an automatic policy need not
-    // be a machine the candidate-set gate spoke for. Browsing Render while
-    // Studio keeps the group visible is exactly that seam.
+    // Auto chooses Render for preparation; reviewed work then keeps that route.
+    // Studio still makes filing visible across the candidate set.
+    autoWinner(filerTarget.baseUrl);
     localStorage.setItem("mold.mobile.selected-host.v1", "render-id");
     await openFleetCreate();
 

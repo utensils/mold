@@ -10,6 +10,7 @@ export interface MobileExpansionRecoveryRecord {
   readonly model: string;
   readonly inputs: Readonly<PreparedExpansionInputs>;
   readonly route: Readonly<HostRoute>;
+  readonly generationRoute: Readonly<HostRoute>;
   readonly host: Readonly<MobileHost>;
   readonly requestToken: number;
   readonly replacePrepared: boolean;
@@ -30,6 +31,7 @@ interface MobileExpansionRecoveryDraft {
   model: string;
   inputs: PreparedExpansionInputs;
   route: HostRoute;
+  generationRoute?: HostRoute;
   requestToken: number;
   replacePrepared: boolean;
   remix?: MobileRemixRecoveryPayload | null;
@@ -68,6 +70,10 @@ export function createMobileExpansionRecovery(
     model: draft.model,
     inputs,
     route,
+    generationRoute: Object.freeze({
+      ...(draft.generationRoute ?? route),
+      target: Object.freeze({ ...(draft.generationRoute ?? route).target }),
+    }),
     host,
     requestToken: draft.requestToken,
     replacePrepared: draft.replacePrepared,
