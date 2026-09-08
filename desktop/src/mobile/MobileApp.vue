@@ -11447,7 +11447,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         :host-count="hosts.length"
         :app-version="appVersion"
         :host="selectedHost ?? null"
-        :update-channel="androidNativeRuntime ? 'Google Play' : 'TestFlight'"
+        :update-channel="androidNativeRuntime ? 'GitHub APK' : 'TestFlight'"
         @update="updateSettings"
         @manage-hosts="manageHostsFromSettings"
       />

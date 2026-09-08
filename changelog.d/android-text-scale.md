@@ -1,0 +1,1 @@
+- **Android text preferences.** Follow system text size at launch and when it changes without restarting the app or losing the draft. Android About correctly names the GitHub APK update channel.

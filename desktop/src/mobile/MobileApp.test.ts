@@ -10327,14 +10327,14 @@ describe("MobileApp host and catalog coordination", () => {
     );
   });
 
-  it("names Google Play instead of TestFlight in Android settings", async () => {
+  it("names the signed GitHub APK channel in Android settings", async () => {
     isNativeAndroidRuntime.mockReturnValue(true);
     wrapper = mountMobileApp();
     await flushPromises();
 
     await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
 
-    expect(wrapper.get("[data-test='mobile-update-channel']").text()).toBe("Google Play");
+    expect(wrapper.get("[data-test='mobile-update-channel']").text()).toBe("GitHub APK");
   });
 
   it("claims Android pairing codes with an Android client identity", async () => {
