@@ -184,3 +184,21 @@ describe("HostChip", () => {
     expect(menu()).toBeNull();
   });
 });
+
+it("supports an independent workflow pick without changing image routing preferences", async () => {
+  readyLocal();
+  const prefs = useAppPrefsStore();
+  const update = vi.spyOn(prefs, "update");
+  const wrapper = mount(HostChip, {
+    props: { modelValue: null, alwaysShowRouting: true },
+    attachTo: document.body,
+  });
+  mounted.push(wrapper);
+  await wrapper.get("[data-test=host-chip]").trigger("click");
+  option("capable").click();
+  await flushPromises();
+  expect(wrapper.emitted("update:modelValue")).toEqual([["capable"]]);
+  expect(update).not.toHaveBeenCalled();
+  await wrapper.setProps({ disabled: true });
+  expect(wrapper.get("[data-test=host-chip]").attributes("disabled")).toBeDefined();
+});

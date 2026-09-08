@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
+import { createPinia, setActivePinia } from "pinia";
 import AuthedMedia from "./AuthedMedia.vue";
 import { authedMediaUrl, fullSizeMediaUrl } from "../../lib/gallery/media";
 
@@ -12,6 +13,7 @@ vi.mock("../../lib/gallery/media", async (importOriginal) => ({
 }));
 
 beforeEach(() => {
+  setActivePinia(createPinia());
   vi.clearAllMocks();
   vi.mocked(authedMediaUrl).mockResolvedValue("blob:video");
   vi.mocked(fullSizeMediaUrl).mockResolvedValue("http://remote/media?ticket=one-use");

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@studio/components/MeshWorkflowStudio.vue", () => ({
   default: {
-    props: ["target"],
+    props: ["target", "resolveTarget", "availableModels", "desktop", "hostLabel"],
     template: `
       <div data-test="mesh-studio">
         <span data-test="target-url">{{ target.baseUrl }}</span>
@@ -19,6 +19,9 @@ vi.mock("../lib/ipc", () => ({
   ipc: {},
 }));
 
+import MeshWorkflowStudio from "@studio/components/MeshWorkflowStudio.vue";
+import HostChip from "../components/create/HostChip.vue";
+import { useHostModelsStore } from "../stores/hostModels";
 import MeshWorkflowView from "./MeshWorkflowView.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useHostsStore } from "../stores/hosts";
@@ -43,6 +46,7 @@ function mountView() {
     error: null,
     instanceId: "renderbox-instance",
   });
+  vi.spyOn(useHostModelsStore(), "refresh").mockResolvedValue(undefined);
   return mount(MeshWorkflowView, { global: { plugins: [pinia] } });
 }
 
@@ -54,13 +58,8 @@ describe("MeshWorkflowView host routing", () => {
     await flushPromises();
 
     expect(wrapper.get("[data-test='target-url']").text()).toBe("http://127.0.0.1:49152");
-    const picker = wrapper.get("[data-test='mesh-workflow-host']");
-    expect(picker.findAll("option").map((option) => option.text())).toEqual([
-      "This device · ready",
-      "Render box · ready",
-    ]);
-
-    await picker.setValue("renderbox-7680");
+    wrapper.findComponent(HostChip).vm.$emit("update:modelValue", "renderbox-7680");
+    await flushPromises();
 
     expect(wrapper.get("[data-test='target-url']").text()).toBe("http://renderbox:7680");
     expect(wrapper.get("[data-test='target-key']").text()).toBe("remote-secret");
@@ -69,15 +68,112 @@ describe("MeshWorkflowView host routing", () => {
   it("keeps an unavailable pinned machine visible instead of silently rerouting", async () => {
     const wrapper = mountView();
     const hosts = useHostsStore();
-    await wrapper.get("[data-test='mesh-workflow-host']").setValue("renderbox-7680");
+    wrapper.findComponent(HostChip).vm.$emit("update:modelValue", "renderbox-7680");
+    await flushPromises();
     hosts.extras[0]!.status = "connecting";
     await flushPromises();
 
-    expect(wrapper.get("[data-test='mesh-workflow-host']").element).toHaveProperty(
-      "value",
-      "renderbox-7680",
-    );
-    expect(wrapper.text()).toContain("Render box is reconnecting");
-    expect(wrapper.find("[data-test='mesh-studio']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='target-url']").text()).toBe("http://renderbox:7680");
+    expect(wrapper.find("[data-test='mesh-studio']").exists()).toBe(true);
+    wrapper.unmount();
+  });
+  it("refreshes newly ready hosts without refetching on telemetry changes", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    const hosts = useHostsStore();
+    const inventory = useHostModelsStore();
+    vi.mocked(inventory.refresh).mockClear();
+    hosts.extras[0]!.status = "connecting";
+    await flushPromises();
+    vi.mocked(inventory.refresh).mockClear();
+    hosts.extras[0]!.status = "ready";
+    await flushPromises();
+    expect(inventory.refresh).toHaveBeenCalledTimes(1);
+    hosts.telemetry["renderbox-7680"] = {
+      queueDepth: 2,
+      queueCapacity: 8,
+      version: null,
+      gpuInfo: { name: "CUDA", backend: "cuda", vram_total_mb: 96000, vram_used_mb: 1000 },
+    };
+    await flushPromises();
+    expect(inventory.refresh).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("retains cached styles while their host reconnects", async () => {
+    const wrapper = mountView();
+    const inventory = useHostModelsStore();
+    const row = { name: "mesh", family: "hunyuan3d", downloaded: true };
+    inventory.byHost["renderbox-7680"] = {
+      entries: [row] as never,
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    wrapper.findComponent(HostChip).vm.$emit("update:modelValue", "renderbox-7680");
+    await flushPromises();
+    useHostsStore().extras[0]!.status = "connecting";
+    await flushPromises();
+    expect(wrapper.findComponent(MeshWorkflowStudio).props("availableModels")).toEqual([row]);
+    wrapper.unmount();
+  });
+
+  it("filters complete workflows before Auto and Most capable rank machines", async () => {
+    const wrapper = mountView();
+    const hosts = useHostsStore();
+    const inventory = useHostModelsStore();
+    const mesh = {
+      name: "hunyuan3d",
+      family: "hunyuan3d",
+      downloaded: true,
+      generation_profile: {
+        default_recipe_id: "shape",
+        recipes: [
+          {
+            id: "shape",
+            capabilities: {
+              mesh: { workflow_modes: ["text_to_mesh"] },
+            },
+          },
+        ],
+      },
+    };
+    const image = { name: "z-image", family: "z-image", modality: "image", downloaded: true };
+    for (const host of hosts.all)
+      inventory.byHost[host.id] = {
+        entries: [mesh, image] as never,
+        fetchedAt: Date.now(),
+        error: null,
+      };
+    hosts.telemetry.local = {
+      queueDepth: 0,
+      queueCapacity: 8,
+      version: null,
+      gpuInfo: { name: "Apple", backend: "metal", vram_total_mb: 64000, vram_used_mb: 0 },
+    };
+    hosts.telemetry["renderbox-7680"] = {
+      queueDepth: 5,
+      queueCapacity: 8,
+      version: null,
+      gpuInfo: { name: "CUDA", backend: "cuda", vram_total_mb: 96000, vram_used_mb: 0 },
+    };
+    await flushPromises();
+    const resolve = wrapper.findComponent(MeshWorkflowStudio).props("resolveTarget")!;
+    const request = {
+      mode: "text_to_mesh" as const,
+      meshModel: mesh.name,
+      imageModel: image.name,
+      texture: false,
+      delight: false,
+    };
+    expect((await resolve(request)).target.baseUrl).toBe("http://127.0.0.1:49152");
+    wrapper.findComponent(HostChip).vm.$emit("update:modelValue", "capable");
+    await flushPromises();
+    expect((await resolve(request)).target.baseUrl).toBe("http://renderbox:7680");
+    inventory.byHost["renderbox-7680"]!.entries = [mesh] as never;
+    expect((await resolve(request)).target.baseUrl).toBe("http://127.0.0.1:49152");
+    wrapper.findComponent(HostChip).vm.$emit("update:modelValue", "renderbox-7680");
+    await flushPromises();
+    await expect(resolve(request)).rejects.toThrow("Render box cannot run all");
+    wrapper.unmount();
   });
 });

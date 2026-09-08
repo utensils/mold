@@ -3,18 +3,17 @@ import {
   retainedSourceMediaDisclosure,
   retainedSourceMediaInventory,
 } from "@studio/api/gallerySourceMedia";
-import { useComposerStore } from "../stores/composer";
+import { useComposerStore, type RetainedSourceReuseHandoff } from "../stores/composer";
 import { useGalleryStore, type MergedPrint } from "../stores/gallery";
 import { useToastStore } from "../stores/toasts";
 
 /**
- * "Use these settings again" for a STILL print: the full metadata prefill plus
+ * "Use these settings again" for a print: the full metadata prefill plus
  * the print's own retained-source authority, asked of the producing host.
  *
  * The Lightbox and the Create view's Recent tab promise the same thing, so
  * they run the same routine — the only per-surface part is what happens after
- * (the Lightbox navigates; Recent is already on the canvas). A sequence print
- * belongs to `composer.setSequence` and never reaches here.
+ * (the Lightbox navigates; Recent is already on the canvas).
  */
 export function useReuseStillPrint() {
   const composer = useComposerStore();
@@ -39,31 +38,49 @@ export function useReuseStillPrint() {
         settledAtMs: entry.item.timestamp * 1000,
       },
     });
-    if (!target) return;
-    // Always ask — the host is the only authority on what it retained, and the
-    // metadata under-reports inline video/audio/mask bytes. But a text-to-image
-    // print's archive entry resolves with no pins, which the server can only
-    // report as `unavailable_legacy`, so an UNAVAILABLE answer is toasted only
-    // when the print's own metadata says conditioning bytes were shipped.
-    void retainedSourceMediaInventory(entry.item.filename, target)
-      .then((inventory) => {
-        if (
-          !composer.setRetainedSourceIfCurrent(retainedVersion, {
-            filename: entry.item.filename,
-            origin: target,
-            inventory,
-          })
-        ) {
-          return;
+    // The merged Library prefers a local output mirror, but mirroring the
+    // output does not copy the producing host's private source-media archive.
+    // Ask every known copy before disclosing an unavailable inventory, and
+    // retain the exact filename and host that actually own the source bytes.
+    const locations = [
+      { sourceKey: entry.sourceKey, filename: entry.item.filename },
+      ...gallery.locationsOf(entry),
+    ].filter(
+      (location, index, all) =>
+        all.findIndex(
+          (other) => other.sourceKey === location.sourceKey && other.filename === location.filename,
+        ) === index,
+    );
+    void (async () => {
+      let unavailable: RetainedSourceReuseHandoff | null = null;
+      for (const location of locations) {
+        if (!composer.isRetainedSourceCurrent(retainedVersion)) return;
+        const origin = gallery.targetOfOrNull(location.sourceKey);
+        if (!origin) continue;
+        try {
+          const inventory = await retainedSourceMediaInventory(location.filename, origin);
+          if (!composer.isRetainedSourceCurrent(retainedVersion)) return;
+          const handoff = { filename: location.filename, origin, inventory };
+          if (inventory.availability === "available") {
+            composer.setRetainedSourceIfCurrent(retainedVersion, handoff);
+            return;
+          }
+          // Prefer a concrete archive/auth failure over a mirror's lack of
+          // private pins when no reachable copy can restore the media.
+          if (!unavailable || unavailable.inventory.availability === "unavailable_legacy") {
+            unavailable = handoff;
+          }
+        } catch {
+          // One unreachable copy must not hide a reachable source archive.
+          // The established local stash/gallery-name restore stays live.
         }
-        const disclosure = retainedSourceMediaDisclosable(entry.item.metadata)
-          ? retainedSourceMediaDisclosure(inventory.availability)
-          : null;
-        if (disclosure) toasts.push(disclosure, "error");
-      })
-      // The established local stash/gallery-name restore stays live. A
-      // transport failure inspecting the additive endpoint must not turn a
-      // previously working reuse into a dead end.
-      .catch(() => {});
+      }
+      if (!unavailable || !composer.setRetainedSourceIfCurrent(retainedVersion, unavailable))
+        return;
+      const disclosure = retainedSourceMediaDisclosable(entry.item.metadata)
+        ? retainedSourceMediaDisclosure(unavailable.inventory.availability)
+        : null;
+      if (disclosure) toasts.push(disclosure, "error");
+    })();
   };
 }

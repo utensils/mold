@@ -309,6 +309,11 @@ describe("queue plan contract", () => {
           entries: [row("wanted")],
           page: { limit: 1, offset: 1, returned: 1 },
         }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          job: { ...row("wanted"), metadata: { prompt: "restored" } },
+        }),
       );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -317,13 +322,52 @@ describe("queue plan contract", () => {
         { baseUrl: "https://gpu.example", apiKey: "secret" },
         "wanted",
       ),
-    ).resolves.toMatchObject({ id: "wanted" });
+    ).resolves.toMatchObject({
+      id: "wanted",
+      metadata: { prompt: "restored" },
+    });
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "https://gpu.example/api/status",
       "https://gpu.example/api/queue?limit=1",
       "https://gpu.example/api/queue?limit=1&cursor=next",
+      "https://gpu.example/api/queue/wanted",
     ]);
   });
+
+  it.each([404, 405, 401, 500])(
+    "handles detail endpoint status %s without hiding server failures",
+    async (status) => {
+      const row = {
+        id: "wanted",
+        model: "flux-dev:q8",
+        state: "paused",
+        started_at_unix_ms: 1,
+        position: 0,
+      };
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce(Response.json({ queue_capacity: 1 }))
+          .mockResolvedValueOnce(
+            Response.json({
+              entries: [row],
+              page: { limit: 1, offset: 0, returned: 1 },
+            }),
+          )
+          .mockResolvedValueOnce(
+            Response.json({ error: "detail unavailable" }, { status }),
+          ),
+      );
+      const result = findQueueEntryById(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        "wanted",
+      );
+      if (status === 404 || status === 405)
+        await expect(result).resolves.toMatchObject(row);
+      else await expect(result).rejects.toMatchObject({ status });
+    },
+  );
 
   it("reads one queue job with persisted settings and retry authority", async () => {
     const fetchMock = vi.fn().mockResolvedValue(

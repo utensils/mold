@@ -301,6 +301,22 @@ describe("Lightbox metadata panel", () => {
   });
 });
 
+describe("Lightbox playback context menu", () => {
+  it("routes video settings reuse through the owner", async () => {
+    const wrapper = mountLightbox({ ...item, filename: "clip.mp4", format: "mp4" }, true);
+    await wrapper.get('[data-test="lightbox-media"]').trigger("contextmenu");
+    const menu = useContextMenuStore();
+    const reuse = menu.entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Reuse settings",
+    );
+    expect(reuse).toBeDefined();
+    menu.activate(reuse!);
+    expect(wrapper.emitted("reuse")).toHaveLength(1);
+    expect(useComposerStore().prefill).toBeNull();
+    wrapper.unmount();
+  });
+});
+
 describe("Lightbox a11y", () => {
   it("is a labelled modal dialog", () => {
     const wrapper = mountLightbox();
@@ -663,6 +679,7 @@ describe("Lightbox in the Trash", () => {
     expect(wrapper.find("[data-test='lightbox-use-source']").exists()).toBe(false);
     await wrapper.vm.$nextTick();
     expect(openMenu(wrapper)).not.toContain("Use as source");
+    expect(openMenu(wrapper)).not.toContain("Reuse settings");
     // The trash's own actions are untouched.
     expect(wrapper.find("[data-test='lightbox-restore']").exists()).toBe(true);
     expect(wrapper.find("[data-test='lightbox-delete-forever']").exists()).toBe(true);
@@ -676,6 +693,7 @@ describe("Lightbox in the Trash", () => {
     expect(wrapper.find("[data-test='lightbox-use-source']").exists()).toBe(false);
     await wrapper.vm.$nextTick();
     expect(openMenu(wrapper)).not.toContain("Use as source");
+    expect(openMenu(wrapper)).not.toContain("Reuse settings");
     wrapper.unmount();
   });
 });

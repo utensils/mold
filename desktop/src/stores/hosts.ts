@@ -649,8 +649,13 @@ export const useHostsStore = defineStore("hosts", {
      * forgotten) falls back to Auto — the selector already displays it as
      * Auto, and a stale persisted id must never wedge every Generate click.
      */
-    resolveRoute(selection: string | null, modelName: string | null = null): HostRoute | null {
+    resolveRoute(
+      selection: string | null,
+      modelName: string | null = null,
+      eligibleHostIds?: readonly string[],
+    ): HostRoute | null {
       const routable = this.all
+        .filter((host) => !eligibleHostIds || eligibleHostIds.includes(host.id))
         .filter((host) => {
           const telemetry = this.telemetry[host.id];
           if (telemetry?.devices != null)

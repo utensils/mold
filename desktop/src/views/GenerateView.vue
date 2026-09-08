@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import VideoSoundToggle from "../components/gallery/VideoSoundToggle.vue";
+import { useVideoPlaybackStore } from "../stores/videoPlayback";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   dropTargetAtPosition,
@@ -278,6 +280,7 @@ const models = useModelStore();
 const composer = useComposerStore();
 const toasts = useToastStore();
 const ui = useUiStore();
+const videoPlayback = useVideoPlaybackStore();
 const contextMenu = useContextMenuStore();
 const videoExportJob = ref<Job | null>(null);
 const videoExportBusy = ref(false);
@@ -4339,6 +4342,9 @@ onBeforeUnmount(() => {
                 <video
                   v-else-if="job?.resultUrl && job.result?.video_frames"
                   :src="job.resultUrl"
+                  :muted="videoPlayback.muted"
+                  :volume="videoPlayback.volume"
+                  @volumechange="videoPlayback.syncFromPlayer"
                   class="absolute inset-0 h-full w-full object-contain"
                   autoplay
                   loop
@@ -4440,10 +4446,12 @@ onBeforeUnmount(() => {
                   <span
                     v-if="captionMeta"
                     data-test="generation-caption-meta"
+                    :class="{ 'caption-meta--video': job?.result?.video_frames }"
                     class="shrink-0 font-mono text-micro text-fg-dim whitespace-nowrap"
                   >
                     {{ captionMeta }}
                   </span>
+                  <VideoSoundToggle v-if="job?.resultUrl && job.result?.video_frames" />
                   <template v-if="job && job.status === 'complete'">
                     <span class="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
                     <button
@@ -4726,7 +4734,8 @@ onBeforeUnmount(() => {
    with no scroll and no cue. Below that width the word actions stand down and
    the ... menu, which carries every one of them, answers instead. */
 @container preview-frame (max-width: 440px) {
-  .caption-action--word {
+  .caption-action--word,
+  .caption-meta--video {
     display: none;
   }
 }

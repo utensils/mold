@@ -95,7 +95,7 @@ describe("GenerateView layout", () => {
       expect(tagFor(viewSource, "preview-frame")).toContain("[container-type:inline-size]");
       expect(tagFor(viewSource, "preview-frame")).toContain("[container-name:preview-frame]");
       expect(viewSource).toMatch(
-        /@container preview-frame \(max-width: \d+px\) \{\s*\.caption-action--word \{\s*display: none;/,
+        /@container preview-frame \(max-width: \d+px\) \{\s*\.caption-action--word(?:,\s*\.caption-meta--video)? \{\s*display: none;/,
       );
     });
 

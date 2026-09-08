@@ -288,3 +288,25 @@ describe("GenerateView — where Make 4 variations is offered", () => {
     expect(document.querySelector("[data-test='canvas-variations']")).toBeNull();
   });
 });
+
+describe("GenerateView video sound", () => {
+  it("keeps a visible caption toggle while autoplay and looping stay enabled", async () => {
+    await mountWithAPrint(false);
+    finishPrint({ video_frames: 97 }).resultUrl = "blob:video";
+    await flushPromises();
+    const toggle = document.querySelector<HTMLButtonElement>(
+      "[data-test='canvas-caption'] [data-test='video-sound-toggle']",
+    )!;
+    const video = document.querySelector<HTMLVideoElement>("[data-test='preview-frame'] video")!;
+    expect(toggle).not.toBeNull();
+    expect(video.autoplay).toBe(true);
+    expect(video.loop).toBe(true);
+    toggle.click();
+    await flushPromises();
+    expect(toggle.textContent).toContain("Sound off");
+    expect(video.muted).toBe(true);
+    toggle.click();
+    await flushPromises();
+    expect(video.muted).toBe(false);
+  });
+});

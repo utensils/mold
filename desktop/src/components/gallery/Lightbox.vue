@@ -4,6 +4,7 @@ import { useOverlayStack } from "@ui/lib/overlayStack";
 import Icon from "@ui/components/Icon.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import MeshExportDialog from "@ui/components/MeshExportDialog.vue";
+import VideoSoundToggle from "./VideoSoundToggle.vue";
 import AuthedMedia from "./AuthedMedia.vue";
 import CollectionPicker from "../library/CollectionPicker.vue";
 import TagEditor from "../library/TagEditor.vue";
@@ -360,6 +361,10 @@ function imageMenu(): MenuEntry[] {
       ? []
       : [
           {
+            label: "Reuse settings",
+            action: primaryAction,
+          },
+          {
             label: "Use as source",
             disabled: props.audio || props.mesh,
             action: () => emit("useSource"),
@@ -632,6 +637,7 @@ async function performVideoExport(options: VideoExportOptions) {
         <Icon name="reuse" :size="13" />
         Use these settings
       </button>
+      <VideoSoundToggle v-if="video" />
       <button
         ref="closeBtn"
         type="button"
@@ -962,7 +968,7 @@ async function performVideoExport(options: VideoExportOptions) {
 
         <!-- the secondary actions -->
         <div class="mt-auto flex flex-col gap-2 pt-2">
-          <div class="flex gap-2">
+          <div class="flex flex-wrap gap-2">
             <button
               v-if="!fromTrash"
               type="button"
@@ -1025,7 +1031,7 @@ async function performVideoExport(options: VideoExportOptions) {
               {{ generationAssetLabel(asset) }}
             </button>
           </div>
-          <div class="flex gap-2">
+          <div class="flex flex-wrap gap-2">
             <button
               v-if="canExportVideo"
               type="button"

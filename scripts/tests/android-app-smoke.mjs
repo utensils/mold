@@ -99,10 +99,11 @@ try {
     !bootAnr.includes("com.utensils.mold")
   ) {
     writeFileSync(output + "/boot-launcher-anr.txt", bootAnr);
-    writeFileSync(
-      output + "/boot-launcher-anr.png",
-      execFileSync(adb, ["-s", serial, "exec-out", "screencap", "-p"]),
-    );
+    // Pull the PNG as a file: full-resolution screenshots can exceed the
+    // child-process stdout buffer before the app smoke test even starts.
+    shell("screencap", "-p", "/sdcard/mold-boot-launcher-anr.png");
+    run("pull", "/sdcard/mold-boot-launcher-anr.png", output + "/boot-launcher-anr.png");
+    shell("rm", "-f", "/sdcard/mold-boot-launcher-anr.png");
     shell("am", "force-stop", "com.android.launcher3");
   }
   shell("am", "start", "-n", "com.utensils.mold/.MainActivity");

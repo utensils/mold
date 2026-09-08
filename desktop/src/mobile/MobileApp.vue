@@ -3242,7 +3242,9 @@ async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
       }
       await verifyAuthority();
       if (epoch !== mobileLiveWorkSelectionEpoch) return;
-      const selection = selectedQueueGeneration<OutputMetadata>(queue.entries, row.id);
+      const entry = await findQueueEntryById(target, row.id);
+      if (epoch !== mobileLiveWorkSelectionEpoch) return;
+      const selection = selectedQueueGeneration<OutputMetadata>(entry ? [entry] : [], row.id);
       if (!selection) {
         setGenerationStatus("This host cannot restore settings for that generation.", true);
         return;

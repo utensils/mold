@@ -7,6 +7,8 @@ defineProps<{
     stale?: boolean;
   }>;
   modelValue: string;
+  automatic?: boolean;
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{ "update:modelValue": [id: string] }>();
@@ -17,12 +19,17 @@ const emit = defineEmits<{ "update:modelValue": [id: string] }>();
     Run workflow on
     <select
       :value="modelValue"
+      :disabled="disabled"
       data-test="mesh-workflow-host"
       aria-label="3-D workflow machine"
       @change="
         emit('update:modelValue', ($event.target as HTMLSelectElement).value)
       "
     >
+      <option v-if="automatic" value="auto">Auto · least busy</option>
+      <option v-if="automatic" value="capable">
+        Most capable · strongest GPU
+      </option>
       <option
         v-for="host in hosts"
         :key="host.id"
