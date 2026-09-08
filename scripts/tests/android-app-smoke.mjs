@@ -56,6 +56,30 @@ let socket;
 let originalTab;
 let evaluate;
 let port;
+const navigationEvidence = [];
+async function recordNavigation(label) {
+  if (!evaluate) return;
+  navigationEvidence.push({
+    label,
+    at: new Date().toISOString(),
+    state: await evaluate(`({
+      settingsOpen: !!document.querySelector('.is-settings-open'),
+      tab: document.querySelector('.mobile-tab[aria-current=page]')?.dataset.test,
+      transient: history.state?.['mold.mobile.transient'] ?? null,
+      historyLength: history.length,
+      activeTag: document.activeElement?.tagName,
+      activeControl: document.activeElement?.getAttribute('data-test'),
+      userActivated: navigator.userActivation?.hasBeenActive,
+      viewportHeight: visualViewport?.height,
+      windowHeight: innerHeight,
+      visibility: document.visibilityState
+    })`),
+  });
+  writeFileSync(
+    output + "/navigation.json",
+    JSON.stringify(navigationEvidence, null, 2),
+  );
+}
 try {
   shell("am", "start", "-n", "com.utensils.mold/.MainActivity");
   const pid = await until(
@@ -192,6 +216,7 @@ try {
       () => evaluate('!!document.querySelector(".is-settings-open")'),
       "settings opens",
     );
+    await recordNavigation("before native Back");
     shell("input", "keyevent", "4");
     await until(
       () =>
@@ -245,6 +270,27 @@ try {
       "Android app navigation, native Back and live text-scale smoke passed",
     );
   }
+} catch (error) {
+  // Capture the failing state before restoration or emulator teardown. Only
+  // control metadata is recorded; no prompt, credentials, or history payloads.
+  try {
+    writeFileSync(output + "/failure.txt", String(error));
+  } catch (captureError) {
+    console.error("Could not record Android failure:", captureError);
+  }
+  try {
+    await recordNavigation("failure");
+  } catch (captureError) {
+    console.error("Could not capture navigation state:", captureError);
+  }
+  try {
+    run("shell", "screencap", "-p", "/sdcard/mold-app-smoke-failure.png");
+    run("pull", "/sdcard/mold-app-smoke-failure.png", output + "/failure.png");
+    shell("rm", "-f", "/sdcard/mold-app-smoke-failure.png");
+  } catch (captureError) {
+    console.error("Could not capture Android failure evidence:", captureError);
+  }
+  throw error;
 } finally {
   shell(
     "settings",
