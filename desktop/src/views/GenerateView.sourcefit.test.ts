@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { mount, flushPromises } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import GenerateView from "./GenerateView.vue";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useGenerationStore } from "../stores/generation";
@@ -86,6 +86,8 @@ vi.mock("@studio/lib/base64Digest", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/lib/base64Digest")>()),
   sha256PaddedBase64: vi.fn(async () => "c".repeat(64)),
 }));
+
+enableAutoUnmount(afterEach);
 
 const model: ModelEntry = {
   name: "sd15:fp16",
