@@ -26,6 +26,7 @@ on:
         "scripts/tests/android-release-assets.sh",
         "scripts/tests/android-app-smoke.mjs",
         "scripts/tests/android-legacy-downloads.sh",
+        "scripts/tests/android-legacy-media-smoke.mjs",
         "flake.nix",
         ".github/workflows/android.yml",
       ]
@@ -53,6 +54,7 @@ on:
         "scripts/tests/android-release-assets.sh",
         "scripts/tests/android-app-smoke.mjs",
         "scripts/tests/android-legacy-downloads.sh",
+        "scripts/tests/android-legacy-media-smoke.mjs",
         "flake.nix",
         ".github/workflows/android.yml",
       ]
@@ -111,6 +113,7 @@ jobs:
               - 'scripts/tests/android-release-assets.sh'
               - 'scripts/tests/android-app-smoke.mjs'
               - 'scripts/tests/android-legacy-downloads.sh'
+              - 'scripts/tests/android-legacy-media-smoke.mjs'
               - 'flake.nix'
               - '.github/workflows/android.yml'
 

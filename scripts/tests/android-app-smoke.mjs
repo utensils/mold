@@ -2,6 +2,7 @@
 // generation is needed. CDP controls the real Tauri WebView, not a browser copy.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { runLegacyMediaSmoke } from "./android-legacy-media-smoke.mjs";
 
 const adb = process.env.ADB ?? "adb";
 const serial = process.env.ANDROID_SERIAL ?? "emulator-5554";
@@ -34,6 +35,22 @@ assert(
   "This test requires an emulator",
 );
 mkdirSync(output, { recursive: true });
+const api = shell("getprop", "ro.build.version.sdk");
+if (api === "28") {
+  shell("am", "force-stop", "com.utensils.mold");
+  shell(
+    "pm",
+    "revoke",
+    "com.utensils.mold",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+  );
+  shell(
+    "pm",
+    "revoke",
+    "com.utensils.mold",
+    "android.permission.READ_EXTERNAL_STORAGE",
+  );
+}
 const originalScale = shell("settings", "get", "system", "font_scale");
 let socket;
 let originalTab;
@@ -128,102 +145,106 @@ try {
         awaitPromise: true,
       })
     ).result.value;
-  const selector = (name) => '[data-test="' + name + '"]';
-  const click = async (name) => {
-    const point = await evaluate(
-      "(() => { const e=document.querySelector(" +
-        JSON.stringify(selector(name)) +
-        "); if (!e || !e.checkVisibility()) return null; e.scrollIntoView({block: 'nearest'}); const r=e.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()",
-    );
-    assert(point, "Visible control missing: " + name);
-    // Trusted input matters: Chromium may skip pushState entries made without
-    // user activation when Android Back traverses the WebView history.
-    await command("Input.dispatchTouchEvent", {
-      type: "touchStart",
-      touchPoints: [point],
-    });
-    await command("Input.dispatchTouchEvent", {
-      type: "touchEnd",
-      touchPoints: [],
-    });
-  };
-  await until(
-    () =>
-      evaluate('!!document.querySelector(".mobile-tab[aria-current=page]")'),
-    "navigation ready",
-  );
-  originalTab = await evaluate(
-    'document.querySelector(".mobile-tab[aria-current=page]").dataset.test',
-  );
-  for (const tab of ["generate", "queue", "gallery", "catalog", "hosts"]) {
-    await click("mobile-tab-" + tab);
+  if (api === "28") {
+    await runLegacyMediaSmoke({ evaluate, run, shell, until, output });
+  } else {
+    const selector = (name) => '[data-test="' + name + '"]';
+    const click = async (name) => {
+      const point = await evaluate(
+        "(() => { const e=document.querySelector(" +
+          JSON.stringify(selector(name)) +
+          "); if (!e || !e.checkVisibility()) return null; e.scrollIntoView({block: 'nearest'}); const r=e.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()",
+      );
+      assert(point, "Visible control missing: " + name);
+      // Trusted input matters: Chromium may skip pushState entries made without
+      // user activation when Android Back traverses the WebView history.
+      await command("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [point],
+      });
+      await command("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+    };
     await until(
       () =>
-        evaluate(
-          "document.querySelector(" +
-            JSON.stringify(selector("mobile-tab-" + tab)) +
-            ')?.getAttribute("aria-current") === "page"',
-        ),
-      "select " + tab,
+        evaluate('!!document.querySelector(".mobile-tab[aria-current=page]")'),
+      "navigation ready",
+    );
+    originalTab = await evaluate(
+      'document.querySelector(".mobile-tab[aria-current=page]").dataset.test',
+    );
+    for (const tab of ["generate", "queue", "gallery", "catalog", "hosts"]) {
+      await click("mobile-tab-" + tab);
+      await until(
+        () =>
+          evaluate(
+            "document.querySelector(" +
+              JSON.stringify(selector("mobile-tab-" + tab)) +
+              ')?.getAttribute("aria-current") === "page"',
+          ),
+        "select " + tab,
+      );
+    }
+    await click("mobile-open-settings");
+    await until(
+      () => evaluate('!!document.querySelector(".is-settings-open")'),
+      "settings opens",
+    );
+    shell("input", "keyevent", "4");
+    await until(
+      () =>
+        evaluate('!!document.querySelector(".mobile-tab[aria-current=page]")'),
+      "native Back dismisses settings",
+    );
+    assert(
+      await evaluate(
+        'document.querySelector(".mobile-tab[aria-current=page]").dataset.test === "mobile-tab-hosts"',
+      ),
+      "Back changed the underlying destination",
+    );
+    const metrics = () =>
+      evaluate(
+        '({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, font: parseFloat(getComputedStyle(document.querySelector(".mobile-wordmark")).fontSize) })',
+      );
+    shell("settings", "put", "system", "font_scale", "1");
+    await sleep(500);
+    const normal = await metrics();
+    shell("settings", "put", "system", "font_scale", "2");
+    const large = await until(async () => {
+      const m = await metrics();
+      return m.font >= normal.font * 1.9 && m;
+    }, "live system font scale");
+    assert(
+      large.scrollWidth <= large.width + 1,
+      "Large text causes horizontal overflow",
+    );
+    assert(
+      shell("pidof", "com.utensils.mold") === pid,
+      "Text scale recreated the app process",
+    );
+    run("shell", "screencap", "-p", "/sdcard/mold-app-smoke.png");
+    run("pull", "/sdcard/mold-app-smoke.png", output + "/large-text.png");
+    writeFileSync(
+      output + "/result.json",
+      JSON.stringify(
+        {
+          api: shell("getprop", "ro.build.version.sdk"),
+          abi: shell("getprop", "ro.product.cpu.abi"),
+          normal,
+          large,
+          navigation: "five destinations",
+          back: "settings dismissed to Machines",
+        },
+        null,
+        2,
+      ),
+    );
+    console.log(
+      "Android app navigation, native Back and live text-scale smoke passed",
     );
   }
-  await click("mobile-open-settings");
-  await until(
-    () => evaluate('!!document.querySelector(".is-settings-open")'),
-    "settings opens",
-  );
-  shell("input", "keyevent", "4");
-  await until(
-    () =>
-      evaluate('!!document.querySelector(".mobile-tab[aria-current=page]")'),
-    "native Back dismisses settings",
-  );
-  assert(
-    await evaluate(
-      'document.querySelector(".mobile-tab[aria-current=page]").dataset.test === "mobile-tab-hosts"',
-    ),
-    "Back changed the underlying destination",
-  );
-  const metrics = () =>
-    evaluate(
-      '({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, font: parseFloat(getComputedStyle(document.querySelector(".mobile-wordmark")).fontSize) })',
-    );
-  shell("settings", "put", "system", "font_scale", "1");
-  await sleep(500);
-  const normal = await metrics();
-  shell("settings", "put", "system", "font_scale", "2");
-  const large = await until(async () => {
-    const m = await metrics();
-    return m.font >= normal.font * 1.9 && m;
-  }, "live system font scale");
-  assert(
-    large.scrollWidth <= large.width + 1,
-    "Large text causes horizontal overflow",
-  );
-  assert(
-    shell("pidof", "com.utensils.mold") === pid,
-    "Text scale recreated the app process",
-  );
-  run("shell", "screencap", "-p", "/sdcard/mold-app-smoke.png");
-  run("pull", "/sdcard/mold-app-smoke.png", output + "/large-text.png");
-  writeFileSync(
-    output + "/result.json",
-    JSON.stringify(
-      {
-        api: shell("getprop", "ro.build.version.sdk"),
-        abi: shell("getprop", "ro.product.cpu.abi"),
-        normal,
-        large,
-        navigation: "five destinations",
-        back: "settings dismissed to Machines",
-      },
-      null,
-      2,
-    ),
-  );
-  console.log(
-    "Android app navigation, native Back and live text-scale smoke passed",
-  );
 } finally {
   shell(
     "settings",
@@ -241,4 +262,18 @@ try {
   }
   socket?.close();
   if (port) run("forward", "--remove", "tcp:" + port);
+  if (api === "28") {
+    shell(
+      "pm",
+      "revoke",
+      "com.utensils.mold",
+      "android.permission.WRITE_EXTERNAL_STORAGE",
+    );
+    shell(
+      "pm",
+      "revoke",
+      "com.utensils.mold",
+      "android.permission.READ_EXTERNAL_STORAGE",
+    );
+  }
 }

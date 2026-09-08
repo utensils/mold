@@ -768,9 +768,13 @@ Settings Back dismissal, and live system text scaling. Android 15 also runs
 native credential, discovery, MediaStore, clipboard, content-URI, and
 authenticated-share instrumentation. An isolated API28 instrumentation package
 also verifies refusal without storage permission and exact public Downloads
-bytes after an OS grant; this does not stand in for permission-dialog callback
-acceptance. These checks run for shared-mobile
-frontend changes as well as Kotlin changes. The app smoke uses Bun's built-in
+bytes after an OS grant. That emulator then installs the actual debug app and
+exercises its native bridge through the Android Deny/Allow dialog: denial must
+return without downloading, and the retry must save exact fixture bytes into
+Downloads/Mold. Screenshots and results are retained; the uniquely named output
+is deleted. API28's bundled WebView is too old for the modern frontend, so this
+is native callback acceptance; Android15/16 cover the full frontend. These checks
+run for shared-mobile frontend changes as well as Kotlin changes. The app smoke uses Bun's built-in
 WebSocket support and requires a debug APK on an emulator:
 `bun scripts/tests/android-app-smoke.mjs`. Set `ADB`, `ANDROID_SERIAL`, or
 `MOLD_ANDROID_EVIDENCE` when needed; it restores the previous font scale and

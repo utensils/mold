@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Only the isolated instrumentation package is installed/revoked here.
+# Requires an emulator. The isolated test package validates native storage;
+# the installed debug app then validates its actual permission callbacks.
 ADB="${ADB:-adb}"
 serial="${ANDROID_SERIAL:-emulator-5554}"
 test_package=com.utensils.mold.mobile_native.test
@@ -17,3 +18,6 @@ mkdir -p "$output"
 # am instrument may exit zero for a failed test; inspect JUnit's actual result.
 grep -Fq 'OK (1 test)' "$output/instrumentation.txt"
 ! grep -Eq 'FAILURES!!!|INSTRUMENTATION_FAILED|Process crashed' "$output/instrumentation.txt"
+
+"$ADB" -s "$serial" install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+ADB="$ADB" ANDROID_SERIAL="$serial" MOLD_ANDROID_EVIDENCE="$output/app" bun scripts/tests/android-app-smoke.mjs
