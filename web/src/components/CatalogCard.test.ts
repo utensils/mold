@@ -80,6 +80,29 @@ describe("CatalogCard (discover)", () => {
     expect(w.text()).toContain("6.0 GB");
   });
 
+  it("shows the exact identifier beside a friendly name", () => {
+    const w = mount(CatalogCard, { props: { entry: baseEntry } });
+    expect(w.get("[data-test=card-model-id]").text()).toBe("hf:a");
+    for (const selector of [
+      "discover-card",
+      "card-open",
+      "details-btn",
+      "catalog-select",
+      "pull-btn",
+    ]) {
+      expect(
+        w.get(`[data-test=${selector}]`).attributes("aria-label"),
+      ).toContain("hf:a");
+    }
+    expect(w.get("[data-test=card-open]").text()).toContain("Alpha");
+  });
+  it("does not repeat an identifier already used as the name", () => {
+    const w = mount(CatalogCard, {
+      props: { entry: { ...baseEntry, name: "hf:a" } },
+    });
+    expect(w.find("[data-test=card-model-id]").exists()).toBe(false);
+  });
+
   it.each([
     ["checkpoint", "Checkpoint"],
     ["lora", "LoRA"],

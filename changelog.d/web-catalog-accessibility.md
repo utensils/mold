@@ -1,0 +1,3 @@
+- **Readable Styles at larger text sizes.** Catalog filters, cards and model details scale with browser text preferences, wrap within narrow screens, and keep actions reachable. Friendly titles retain exact model IDs for sighted and screen-reader users; unknown model modality is no longer guessed.
+- **Honest account recovery.** Settings keeps server token status unknown when its initial read fails, offers inline Retry, and prevents overlapping token writes while retaining unsaved drafts.
+- **Reliable machine details.** Failed style and download reads show Retry and preserve last-known rows instead of claiming empty lists. Machine controls and telemetry scale with larger text, and callbacks from a previous machine cannot disturb the current view.

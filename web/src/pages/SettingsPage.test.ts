@@ -239,6 +239,79 @@ describe("SettingsPage", () => {
     expect(matchSystem.value).toBe(true);
   });
 
+  it("keeps credential status unknown after a failed read and retries inline", async () => {
+    const fallback = globalThis.fetch;
+    let fail = true;
+    globalThis.fetch = vi.fn(async (input, init) => {
+      if (String(input).endsWith("/api/catalog/credentials") && fail) {
+        return {
+          ok: false,
+          status: 503,
+          text: async () => "temporarily unavailable",
+        } as Response;
+      }
+      return fallback(input, init);
+    }) as typeof fetch;
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
+    expect(wrapper.get('[data-test="credentials-error"]').text()).toContain(
+      "Could not load",
+    );
+    expect(wrapper.find("input[name=hf_token]").exists()).toBe(false);
+    fail = false;
+    await wrapper.get('[data-test="retry-credentials"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-test="credentials-error"]').exists()).toBe(
+      false,
+    );
+    expect(wrapper.find("input[name=hf_token]").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("serializes token changes and preserves other provider drafts", async () => {
+    const fallback = globalThis.fetch;
+    let finish!: (response: Response) => void;
+    let writes = 0;
+    globalThis.fetch = vi.fn(async (input, init) => {
+      if (
+        String(input).endsWith("/api/catalog/credentials/hf") &&
+        init?.method === "PUT"
+      ) {
+        writes++;
+        return new Promise<Response>((resolve) => {
+          finish = resolve;
+        });
+      }
+      return fallback(input, init);
+    }) as typeof fetch;
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await wrapper.get("input[name=hf_token]").setValue("hf_fixture");
+    await wrapper.get("input[name=civitai_token]").setValue("cv_keep_draft");
+    await wrapper.get('[data-test="save-hf"]').trigger("click");
+    await wrapper.get('[data-test="save-hf"]').trigger("click");
+    expect(writes).toBe(1);
+    expect(
+      wrapper.get('[data-test="credential-fields"]').attributes("disabled"),
+    ).toBeDefined();
+    finish({
+      ok: true,
+      json: async () => ({
+        hf: { configured: true, source: "server", masked: "hf_••••ture" },
+        civitai: { configured: false, source: null, masked: null },
+      }),
+    } as Response);
+    await flushPromises();
+    expect(
+      wrapper.get('[data-test="credential-fields"]').attributes("disabled"),
+    ).toBeUndefined();
+    expect(
+      (wrapper.get("input[name=civitai_token]").element as HTMLInputElement)
+        .value,
+    ).toBe("cv_keep_draft");
+    wrapper.unmount();
+  });
+
   it("stores the Hugging Face token on the server and shows a masked state", async () => {
     localStorage.clear();
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;

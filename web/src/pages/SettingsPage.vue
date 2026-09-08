@@ -57,6 +57,17 @@ const emptyCredentialStatus = (): CatalogCredentialStatus => ({
   civitai: { configured: false, source: null, masked: null },
 });
 const saved = ref<CatalogCredentialStatus>(emptyCredentialStatus());
+const credentialsLoaded = ref(false);
+const credentialsLoading = ref(false);
+const credentialsError = ref("");
+const credentialMutation = ref(false);
+const canChangeCredentials = computed(
+  () =>
+    credentialsLoaded.value &&
+    !credentialsLoading.value &&
+    !credentialsError.value &&
+    !credentialMutation.value,
+);
 const hfMasked = computed(() => saved.value.hf.masked);
 const civitaiMasked = computed(() => saved.value.civitai.masked);
 const hfHasSavedOverride = computed(() => saved.value.hf.source === "server");
@@ -81,10 +92,16 @@ function errorMessage(error: unknown): string {
 }
 
 async function loadCredentials() {
+  if (credentialsLoading.value || credentialMutation.value) return;
+  credentialsLoading.value = true;
+  credentialsError.value = "";
   try {
     saved.value = await getCatalogCredentialStatus();
+    credentialsLoaded.value = true;
   } catch (error) {
-    toast("error", `Could not load server credentials: ${errorMessage(error)}`);
+    credentialsError.value = `Could not load server credentials: ${errorMessage(error)}`;
+  } finally {
+    credentialsLoading.value = false;
   }
 }
 
@@ -93,8 +110,10 @@ onMounted(() => {
 });
 
 async function saveHf() {
+  if (!canChangeCredentials.value) return;
   const value = hfDraft.value.trim();
   if (!value) return;
+  credentialMutation.value = true;
   try {
     saved.value = await putCatalogCredential("hf", value);
     hfDraft.value = "";
@@ -102,9 +121,13 @@ async function saveHf() {
     toast("success", "Hugging Face token saved on this server");
   } catch (error) {
     toast("error", `Hugging Face token was not saved: ${errorMessage(error)}`);
+  } finally {
+    credentialMutation.value = false;
   }
 }
 async function removeHf() {
+  if (!canChangeCredentials.value) return;
+  credentialMutation.value = true;
   try {
     saved.value = await deleteCatalogCredential("hf");
     hfDraft.value = "";
@@ -114,11 +137,15 @@ async function removeHf() {
       "error",
       `Hugging Face token was not removed: ${errorMessage(error)}`,
     );
+  } finally {
+    credentialMutation.value = false;
   }
 }
 async function saveCivitai() {
+  if (!canChangeCredentials.value) return;
   const value = civitaiDraft.value.trim();
   if (!value) return;
+  credentialMutation.value = true;
   try {
     saved.value = await putCatalogCredential("civitai", value);
     civitaiDraft.value = "";
@@ -126,15 +153,21 @@ async function saveCivitai() {
     toast("success", "Civitai token saved on this server");
   } catch (error) {
     toast("error", `Civitai token was not saved: ${errorMessage(error)}`);
+  } finally {
+    credentialMutation.value = false;
   }
 }
 async function removeCivitai() {
+  if (!canChangeCredentials.value) return;
+  credentialMutation.value = true;
   try {
     saved.value = await deleteCatalogCredential("civitai");
     civitaiDraft.value = "";
     editingCivitai.value = false;
   } catch (error) {
     toast("error", `Civitai token was not removed: ${errorMessage(error)}`);
+  } finally {
+    credentialMutation.value = false;
   }
 }
 
@@ -285,124 +318,155 @@ onBeforeUnmount(() => {
 
     <p class="kicker">Accounts</p>
     <CardSurface class="settings__card">
-      <!-- Hugging Face -->
-      <div class="row">
-        <label class="row__label" for="hf_token">Hugging Face token</label>
-        <div v-if="hfMasked && !editingHf" class="field" data-test="hf-saved">
-          <code class="token-mask" data-test="hf-mask">{{ hfMasked }}</code>
-          <button
-            type="button"
-            class="btn"
-            data-test="replace-hf"
-            @click="editingHf = true"
-          >
-            {{ hfHasSavedOverride ? "Replace" : "Override" }}
-          </button>
-          <button
-            v-if="hfHasSavedOverride"
-            type="button"
-            class="btn btn--ghost"
-            data-test="clear-hf"
-            @click="removeHf"
-          >
-            Clear
-          </button>
-          <span class="env-badge" data-test="hf-source">{{
-            credentialSourceLabel(saved.hf.source)
-          }}</span>
-        </div>
-        <div v-else class="field">
-          <input
-            id="hf_token"
-            v-model="hfDraft"
-            name="hf_token"
-            type="password"
-            placeholder="hf_…"
-            autocomplete="off"
-            class="input"
-          />
-          <button
-            type="button"
-            class="btn"
-            data-test="save-hf"
-            :disabled="!hfDraft.trim()"
-            @click="saveHf"
-          >
-            Save
-          </button>
-          <button
-            v-if="editingHf"
-            type="button"
-            class="btn btn--ghost"
-            @click="editingHf = false"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-
-      <!-- Civitai -->
-      <div class="row">
-        <label class="row__label" for="civitai_token">Civitai token</label>
-        <div
-          v-if="civitaiMasked && !editingCivitai"
-          class="field"
-          data-test="civitai-saved"
+      <p v-if="credentialsLoading" class="settings__note" role="status">
+        Loading server credentials…
+      </p>
+      <div
+        v-if="credentialsError"
+        class="credential-error"
+        role="alert"
+        data-test="credentials-error"
+      >
+        <p>{{ credentialsError }}</p>
+        <button
+          type="button"
+          class="btn"
+          data-test="retry-credentials"
+          :disabled="credentialsLoading"
+          @click="loadCredentials"
         >
-          <code class="token-mask" data-test="civitai-mask">{{
-            civitaiMasked
-          }}</code>
-          <button
-            type="button"
-            class="btn"
-            data-test="replace-civitai"
-            @click="editingCivitai = true"
-          >
-            {{ civitaiHasSavedOverride ? "Replace" : "Override" }}
-          </button>
-          <button
-            v-if="civitaiHasSavedOverride"
-            type="button"
-            class="btn btn--ghost"
-            data-test="clear-civitai"
-            @click="removeCivitai"
-          >
-            Clear
-          </button>
-          <span class="env-badge" data-test="civitai-source">{{
-            credentialSourceLabel(saved.civitai.source)
-          }}</span>
-        </div>
-        <div v-else class="field">
-          <input
-            id="civitai_token"
-            v-model="civitaiDraft"
-            name="civitai_token"
-            type="password"
-            placeholder="cv_…"
-            autocomplete="off"
-            class="input"
-          />
-          <button
-            type="button"
-            class="btn"
-            data-test="save-civitai"
-            :disabled="!civitaiDraft.trim()"
-            @click="saveCivitai"
-          >
-            Save
-          </button>
-          <button
-            v-if="editingCivitai"
-            type="button"
-            class="btn btn--ghost"
-            @click="editingCivitai = false"
-          >
-            Cancel
-          </button>
-        </div>
+          Retry
+        </button>
       </div>
+      <fieldset
+        v-if="credentialsLoaded"
+        class="credential-fields"
+        data-test="credential-fields"
+        :disabled="!canChangeCredentials"
+        :aria-busy="credentialMutation"
+      >
+        <legend class="sr-only">Server account tokens</legend>
+        <!-- Hugging Face -->
+        <div class="row">
+          <label class="row__label" for="hf_token">Hugging Face token</label>
+          <div v-if="hfMasked && !editingHf" class="field" data-test="hf-saved">
+            <code class="token-mask" data-test="hf-mask">{{ hfMasked }}</code>
+            <button
+              type="button"
+              class="btn"
+              data-test="replace-hf"
+              @click="editingHf = true"
+            >
+              {{ hfHasSavedOverride ? "Replace" : "Override" }}
+            </button>
+            <button
+              v-if="hfHasSavedOverride"
+              type="button"
+              class="btn btn--ghost"
+              data-test="clear-hf"
+              @click="removeHf"
+            >
+              Clear
+            </button>
+            <span class="env-badge" data-test="hf-source">{{
+              credentialSourceLabel(saved.hf.source)
+            }}</span>
+          </div>
+          <div v-else class="field">
+            <input
+              id="hf_token"
+              v-model="hfDraft"
+              name="hf_token"
+              type="password"
+              placeholder="hf_…"
+              autocomplete="off"
+              class="input"
+            />
+            <button
+              type="button"
+              class="btn"
+              data-test="save-hf"
+              :disabled="!hfDraft.trim()"
+              @click="saveHf"
+            >
+              Save
+            </button>
+            <button
+              v-if="editingHf"
+              type="button"
+              class="btn btn--ghost"
+              @click="editingHf = false"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
 
+        <!-- Civitai -->
+        <div class="row">
+          <label class="row__label" for="civitai_token">Civitai token</label>
+          <div
+            v-if="civitaiMasked && !editingCivitai"
+            class="field"
+            data-test="civitai-saved"
+          >
+            <code class="token-mask" data-test="civitai-mask">{{
+              civitaiMasked
+            }}</code>
+            <button
+              type="button"
+              class="btn"
+              data-test="replace-civitai"
+              @click="editingCivitai = true"
+            >
+              {{ civitaiHasSavedOverride ? "Replace" : "Override" }}
+            </button>
+            <button
+              v-if="civitaiHasSavedOverride"
+              type="button"
+              class="btn btn--ghost"
+              data-test="clear-civitai"
+              @click="removeCivitai"
+            >
+              Clear
+            </button>
+            <span class="env-badge" data-test="civitai-source">{{
+              credentialSourceLabel(saved.civitai.source)
+            }}</span>
+          </div>
+          <div v-else class="field">
+            <input
+              id="civitai_token"
+              v-model="civitaiDraft"
+              name="civitai_token"
+              type="password"
+              placeholder="cv_…"
+              autocomplete="off"
+              class="input"
+            />
+            <button
+              type="button"
+              class="btn"
+              data-test="save-civitai"
+              :disabled="!civitaiDraft.trim()"
+              @click="saveCivitai"
+            >
+              Save
+            </button>
+            <button
+              v-if="editingCivitai"
+              type="button"
+              class="btn btn--ghost"
+              @click="editingCivitai = false"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </fieldset>
+      <p v-if="credentialMutation" class="settings__note" role="status">
+        Updating server credentials…
+      </p>
       <p class="settings__note">
         Tokens are stored privately on this server and used only for catalog
         discovery and downloads. Saved tokens override environment defaults;
@@ -479,6 +543,17 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.credential-fields {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.credential-error {
+  color: var(--stop);
+  overflow-wrap: anywhere;
+}
+
 .settings {
   width: 100%;
   max-width: 900px;

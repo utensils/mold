@@ -84,7 +84,7 @@ function setLayout(layout: CatalogLayoutChoice) {
   >
     <!-- Modality chips — match TopBar's filter-pill pattern -->
     <nav
-      class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-2"
+      class="flex max-w-full flex-wrap items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-sm font-medium text-ink-2"
       aria-label="Modality filter"
     >
       <button
@@ -124,7 +124,7 @@ function setLayout(layout: CatalogLayoutChoice) {
 
     <!-- Kind chips -->
     <nav
-      class="flex max-w-full items-center gap-0.5 overflow-x-auto rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-2"
+      class="flex max-w-full items-center gap-0.5 overflow-x-auto rounded-full border border-white/5 bg-white/5 p-0.5 text-sm font-medium text-ink-2"
       aria-label="Kind filter"
     >
       <button
@@ -155,7 +155,7 @@ function setLayout(layout: CatalogLayoutChoice) {
 
     <!-- Source chips -->
     <nav
-      class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-2"
+      class="flex max-w-full flex-wrap items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-sm font-medium text-ink-2"
       aria-label="Source filter"
     >
       <button
@@ -194,7 +194,7 @@ function setLayout(layout: CatalogLayoutChoice) {
     </nav>
 
     <!-- Search -->
-    <label class="relative min-w-[180px] flex-1">
+    <label class="relative min-w-0 basis-[180px] flex-1">
       <svg
         class="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3"
         viewBox="0 0 24 24"
@@ -212,9 +212,10 @@ function setLayout(layout: CatalogLayoutChoice) {
         v-model="searchLocal"
         type="search"
         placeholder="Search catalog…"
+        aria-label="Search catalog"
         autocomplete="off"
         spellcheck="false"
-        class="h-10 w-full rounded-full border border-white/5 bg-white/5 pl-10 pr-10 text-[13px] text-rebate placeholder:text-ink-3 focus:border-safelight/40 focus:outline-none focus:ring-2 focus:ring-safelight/25"
+        class="h-10 w-full rounded-full border border-white/5 bg-white/5 pl-10 pr-10 text-sm text-rebate placeholder:text-ink-3 focus:border-safelight/40 focus:outline-none focus:ring-2 focus:ring-safelight/25"
       />
       <button
         v-if="searchLocal"
@@ -242,7 +243,7 @@ function setLayout(layout: CatalogLayoutChoice) {
     <!-- Sort -->
     <select
       :value="cat.filter.value.sort ?? 'downloads'"
-      class="h-10 rounded-full border border-white/5 bg-white/5 px-4 text-[13px] font-medium text-rebate focus:border-safelight/40 focus:outline-none focus:ring-2 focus:ring-safelight/25"
+      class="h-10 rounded-full border border-white/5 bg-white/5 px-4 text-sm font-medium text-rebate focus:border-safelight/40 focus:outline-none focus:ring-2 focus:ring-safelight/25"
       aria-label="Sort by"
       @change="
         setSort(($event.target as HTMLSelectElement).value as SortOption)
@@ -255,7 +256,7 @@ function setLayout(layout: CatalogLayoutChoice) {
 
     <!-- Include NSFW -->
     <label
-      class="flex items-center gap-2 rounded-full border border-white/5 bg-white/5 px-3.5 py-1.5 text-[13px] font-medium text-ink-2"
+      class="flex items-center gap-2 rounded-full border border-white/5 bg-white/5 px-3.5 py-1.5 text-sm font-medium text-ink-2"
     >
       <input
         type="checkbox"
@@ -274,3 +275,21 @@ function setLayout(layout: CatalogLayoutChoice) {
     />
   </div>
 </template>
+
+<style scoped>
+nav button,
+select,
+input[type="search"] {
+  min-height: 44px;
+}
+
+nav button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+:deep(.ms-layout__option) {
+  min-height: 44px;
+  font-size: 0.75rem;
+}
+</style>

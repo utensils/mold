@@ -725,15 +725,31 @@ describe("ModelDetailDrawer", () => {
       expect(w.find("[data-test=load-btn]").exists()).toBe(true);
     });
 
-    it("classifies installed models from their family", () => {
+    it("classifies installed kind without inventing unknown modality", () => {
       mockDetail.value = {
         kind: "installed",
         model: makeModel({ family: "upscaler" }),
         components: [],
       };
       const w = mount(ModelDetailDrawer);
-      expect(w.get("[data-test=model-modality-badge]").text()).toBe("Image");
+      expect(w.find("[data-test=model-modality-badge]").exists()).toBe(false);
       expect(w.get("[data-test=model-kind-badge]").text()).toBe("Upscaler");
+    });
+
+    it("keeps the exact ID visible alongside a friendly installed name", () => {
+      mockDetail.value = {
+        kind: "installed",
+        model: makeModel({
+          name: "cv:4242",
+          display_name: "Paper cutouts",
+          modality: "mesh",
+        }),
+        components: [],
+      };
+      const w = mount(ModelDetailDrawer);
+      expect(w.get(".md__name").text()).toBe("Paper cutouts");
+      expect(w.get("[data-test=detail-model-id]").text()).toBe("cv:4242");
+      expect(w.get("[data-test=model-modality-badge]").text()).toBe("Mesh");
     });
 
     it("prefers exact installed catalog metadata over family inference", () => {

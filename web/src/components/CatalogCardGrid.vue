@@ -261,7 +261,7 @@ async function startBatch(): Promise<void> {
     <template v-else-if="cat.visibleEntries.value.length > 0">
       <p
         data-testid="catalog-result-count"
-        class="mb-3 text-[12px] text-ink-3"
+        class="mb-3 text-xs text-ink-3"
         aria-live="polite"
       >
         {{ cat.resultCount.value.toLocaleString() }}
@@ -322,7 +322,7 @@ async function startBatch(): Promise<void> {
         :data-layout="cat.layout.value"
         :class="
           cat.layout.value === 'grid'
-            ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3'
+            ? 'catalog-grid grid gap-3'
             : 'flex flex-col gap-2'
         "
       >
@@ -362,7 +362,14 @@ async function startBatch(): Promise<void> {
 </template>
 
 <style scoped>
+.catalog-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
+}
+
 .batch-bar {
+  flex-wrap: wrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
   position: sticky;
   top: 8px;
   z-index: 10;
@@ -377,12 +384,14 @@ async function startBatch(): Promise<void> {
   box-shadow: var(--shadow-raised);
   backdrop-filter: blur(12px);
   color: var(--rebate);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .batch-bar__target {
   display: flex;
-  flex: 1;
+  flex: 1 1 16rem;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
@@ -391,12 +400,18 @@ async function startBatch(): Promise<void> {
 
 .batch-bar select,
 .batch-bar button {
-  min-height: 34px;
+  min-height: 44px;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--ce);
   border-radius: var(--radius-control);
   background: var(--bath);
   color: var(--rebate);
   padding: 0 10px;
+}
+
+.batch-bar select {
+  height: 44px;
 }
 
 .batch-bar__download {
