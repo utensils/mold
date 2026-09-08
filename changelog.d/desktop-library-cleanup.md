@@ -9,3 +9,4 @@
   reload workflow capabilities or reset the selected workflow and inputs.
 - Align desktop 3-D Studio with the shared toolbar, canvas, and inspector design. Add Auto and Most capable routing that keeps every workflow stage on one eligible machine, retains the workflow owner for progress and results, and avoids reloading unchanged result media.
 - Center the web queue's failed-job dismiss icon in its touch target and vertically align it with wrapped error text.
+- Fix text-to-mesh admission rejecting its own future-image validation placeholder as invalid PNG/JPEG, while keeping that placeholder out of the durable request.

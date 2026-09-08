@@ -126,20 +126,38 @@ fn load_detail(state: &AppState, id: &str) -> Result<MeshWorkflowJobDetail, ApiE
     detail_from_rows(row, stages)
 }
 
-async fn validate_stage_model(
-    state: &AppState,
+// Only the validation clone receives a stand-in. The durable request stays
+// source-free until the image stage publishes its real PNG.
+fn stage_validation_request(
     request: &mold_core::GenerateRequest,
     workflow_mode: Option<MeshWorkflowMode>,
-) -> Result<(), ApiError> {
-    let family = crate::routes::require_server_model_activation(state, &request.model).await?;
+) -> Result<mold_core::GenerateRequest, ApiError> {
     let mut validation_request = request.clone();
     if workflow_mode == Some(MeshWorkflowMode::TextToMesh)
         && validation_request.source_image.is_none()
     {
         // The preceding durable image stage supplies this field. Validation
         // still needs to exercise the Hunyuan3D image-conditioned recipe.
-        validation_request.source_image = Some(vec![0]);
+        validation_request.source_image = Some({
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(1, 1)
+                .write_to(&mut png, image::ImageFormat::Png)
+                .map_err(|error| {
+                    ApiError::internal(format!("workflow validation image: {error}"))
+                })?;
+            png.into_inner()
+        });
     }
+    Ok(validation_request)
+}
+
+async fn validate_stage_model(
+    state: &AppState,
+    request: &mold_core::GenerateRequest,
+    workflow_mode: Option<MeshWorkflowMode>,
+) -> Result<(), ApiError> {
+    let family = crate::routes::require_server_model_activation(state, &request.model).await?;
+    let validation_request = stage_validation_request(request, workflow_mode)?;
     crate::routes::validate_generate_request(
         &validation_request,
         family.as_deref(),
@@ -672,6 +690,36 @@ pub(crate) async fn delete_mesh_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_to_mesh_validates_future_image_without_persisting_placeholder() {
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "model": "hunyuan3d-mini-turbo:fp16", "prompt": "", "width": 0,
+            "height": 0, "steps": 5, "guidance": 5.0, "output_format": "glb"
+        }))
+        .unwrap();
+        let validation =
+            stage_validation_request(&request, Some(MeshWorkflowMode::TextToMesh)).unwrap();
+        let image = image::load_from_memory(validation.source_image.as_ref().unwrap()).unwrap();
+        assert_eq!((image.width(), image.height()), (1, 1));
+        crate::routes::validate_generate_request(
+            &validation,
+            Some("hunyuan3d"),
+            mold_core::ReferenceForm::Admitted,
+        )
+        .unwrap();
+        assert!(request.source_image.is_none());
+        let mut invalid = request.clone();
+        invalid.source_image = Some(vec![0]);
+        let unchanged =
+            stage_validation_request(&invalid, Some(MeshWorkflowMode::TextToMesh)).unwrap();
+        assert!(crate::routes::validate_generate_request(
+            &unchanged,
+            Some("hunyuan3d"),
+            mold_core::ReferenceForm::Admitted
+        )
+        .is_err());
+    }
 
     #[test]
     fn detail_projection_keeps_execution_identity_and_mode() {
