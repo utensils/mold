@@ -118,7 +118,11 @@ const description = computed(() => props.entry.description?.trim() ?? "");
 const accessibleName = computed(() => {
   const classification = `${modelKindLabel(kind.value)} model`;
   const mature = props.entry.nsfw ? " — 18+ NSFW" : "";
-  return `${props.entry.name} — ${classification}${mature}`;
+  const identity =
+    props.entry.id === props.entry.name
+      ? props.entry.name
+      : `${props.entry.name} (${props.entry.id})`;
+  return `${identity} — ${classification}${mature}`;
 });
 const detailsAriaLabel = computed(() => `${accessibleName.value} — details`);
 
@@ -196,7 +200,7 @@ const pullLabel = computed(() =>
           type="checkbox"
           :checked="checked"
           :disabled="!selectable"
-          :aria-label="`Select ${props.entry.name}`"
+          :aria-label="`Select ${accessibleName}`"
           data-test="catalog-select"
           @change="
             emit('toggle-select', ($event.target as HTMLInputElement).checked)
@@ -235,6 +239,13 @@ const pullLabel = computed(() =>
       @click="emit('open')"
     >
       <span class="card__name">{{ props.entry.name }}</span>
+      <span
+        v-if="props.entry.id !== props.entry.name"
+        class="card__id"
+        data-test="card-model-id"
+      >
+        {{ props.entry.id }}
+      </span>
       <span class="card__meta">
         {{ props.entry.family }} · {{ formatGB(props.entry.size_bytes) }}
       </span>
@@ -261,6 +272,7 @@ const pullLabel = computed(() =>
       type="button"
       class="card__pull"
       data-test="pull-btn"
+      :aria-label="`${pullLabel} ${accessibleName}`"
       :disabled="!supported"
       :title="supported ? undefined : 'Unsupported catalog package'"
       @click="emit('pull')"
@@ -279,10 +291,12 @@ const pullLabel = computed(() =>
   border: 1px solid var(--edge);
   border-radius: var(--radius-chip, 4px);
   color: var(--ink-2);
-  font-size: var(--text-caption, 11px);
+  font-size: 0.75rem;
 }
 
 .card {
+  min-width: 0;
+  overflow-wrap: anywhere;
   display: flex;
   flex-direction: column;
   background: var(--bench);
@@ -305,8 +319,9 @@ const pullLabel = computed(() =>
 .card__select {
   display: inline-flex;
   align-items: center;
-  min-width: 20px;
-  min-height: 20px;
+  min-width: 44px;
+  min-height: 44px;
+  justify-content: center;
 }
 
 .card__select input {
@@ -422,7 +437,7 @@ const pullLabel = computed(() =>
 
 .card__placeholder-mark {
   font-family: var(--f-mono);
-  font-size: 30px;
+  font-size: 1.875rem;
   font-weight: 600;
   letter-spacing: -0.04em;
   color: color-mix(in srgb, var(--family-primary) 88%, var(--rebate));
@@ -433,7 +448,7 @@ const pullLabel = computed(() =>
   left: 12px;
   bottom: 10px;
   font-family: var(--f-mono);
-  font-size: 9px;
+  font-size: 0.75rem;
   letter-spacing: 0.06em;
   color: color-mix(in srgb, var(--family-primary) 72%, var(--rebate));
 }
@@ -445,6 +460,7 @@ const pullLabel = computed(() =>
 
 .card__top {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-bottom: 5px;
@@ -452,7 +468,7 @@ const pullLabel = computed(() =>
 
 .card__installed {
   font-family: var(--f-mono);
-  font-size: 9px;
+  font-size: 0.75rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--success);
@@ -463,11 +479,13 @@ const pullLabel = computed(() =>
 }
 
 .card__details {
+  min-height: 44px;
+  max-width: 100%;
   margin-left: auto;
   border: 0;
   background: transparent;
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 0.75rem;
   color: var(--ink-3);
   cursor: pointer;
   padding: 2px 0;
@@ -493,16 +511,15 @@ const pullLabel = computed(() =>
 
 .card__name {
   font-family: var(--f-mono);
-  font-size: 13.5px;
+  font-size: 0.875rem;
   font-weight: 600;
   color: var(--rebate);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
 }
 
+.card__id,
 .card__meta {
-  font-size: 11px;
+  font-size: 0.75rem;
   color: var(--ink-3);
 }
 
@@ -513,12 +530,13 @@ const pullLabel = computed(() =>
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   color: var(--ink-2);
-  font-size: 11.5px;
+  font-size: 0.75rem;
   line-height: 1.45;
   white-space: normal;
 }
 
 .card__pull {
+  min-height: 44px;
   width: 100%;
   margin-top: auto;
   box-sizing: border-box;
@@ -528,7 +546,7 @@ const pullLabel = computed(() =>
   padding: 9px;
   border-radius: var(--radius-control);
   font-family: var(--f-body);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
   display: flex;
@@ -555,5 +573,16 @@ const pullLabel = computed(() =>
 .card__nameline:focus-visible {
   outline: 2px solid var(--safelight);
   outline-offset: 2px;
+}
+@media (max-width: 700px) {
+  .card[data-layout="list"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .card[data-layout="list"] .card__pull {
+    grid-column: 1;
+    grid-row: auto;
+    width: 100%;
+    margin-top: 12px;
+  }
 }
 </style>

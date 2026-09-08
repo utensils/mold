@@ -457,14 +457,14 @@ pushed screen opened from the header.
   chip is offered, so turning it off never touches prints already made.
   Settings also links to host
   management and shows the app version, remote-only processing policy, and
-  platform update channel (TestFlight on iPhone, Google Play on Android). About opens the public privacy policy at
+  platform update channel (TestFlight on iPhone, GitHub APK on Android). About opens the public privacy policy at
   `https://utensils.io/mold/privacy` through the native external-browser opener.
 
 The app shell suppresses WebKit focus/double-tap page zoom and rubber-band
-overscroll. A horizontal swipe moves through Make → Queue → Images → Styles →
-Machines, while a right swipe pops Machine Detail or Settings. Editable
-controls, horizontal scrollers, action rows, dialogs, and the full-screen
-Library viewer retain their own gesture authority. Pulling down at the top
+overscroll. Destination changes use the navigation buttons; horizontal swipes
+do not change tabs or pop Machine Detail or Settings. Editable controls,
+horizontal scrollers, action rows, dialogs, and the full-screen Library viewer
+retain their own gesture authority. Pulling down at the top
 refreshes Images, Styles, Machines, and Machine Detail; Make and Settings
 stay on their existing live polling/streaming paths so an in-progress form is
 never disrupted. The Library viewer keeps its scoped horizontal swipe gesture,

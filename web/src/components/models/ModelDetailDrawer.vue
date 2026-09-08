@@ -153,13 +153,15 @@ const runtimeNotice = computed(
 );
 const runtimeUnavailable = computed(() => runtimeNotice.value !== null);
 
-const mediaLabel = computed(() => {
-  if (metadataEntry.value) return metadataEntry.value.modality;
-  const m = installedModel.value;
-  if (!m) return "";
-  if (m.modality?.trim()) return m.modality;
-  return /ltx/i.test(m.family ?? "") ? "video" : "image";
-});
+const mediaLabel = computed(
+  () =>
+    metadataEntry.value?.modality?.trim() ||
+    installedModel.value?.modality?.trim() ||
+    "",
+);
+const exactModelId = computed(
+  () => installedModel.value?.name ?? entry.value?.id ?? "",
+);
 
 const name = computed(
   () =>
@@ -591,6 +593,13 @@ function onRetry() {
           />
         </div>
         <div class="md__name">{{ name || "Untitled model" }}</div>
+        <div
+          v-if="exactModelId && exactModelId !== name"
+          class="md__id"
+          data-test="detail-model-id"
+        >
+          {{ exactModelId }}
+        </div>
         <div v-if="family" class="md__fam">{{ family }}</div>
         <p v-if="description" class="md__desc">{{ description }}</p>
 
@@ -828,9 +837,40 @@ function onRetry() {
 
 <style scoped>
 .md {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--rebate);
 }
 
+:deep(.ms-sheet__title),
+:deep(.ms-drawer__title) {
+  font-size: 1.25rem;
+}
+:deep(.ms-sheet__close),
+:deep(.ms-drawer__close) {
+  min-width: 44px;
+  min-height: 44px;
+}
+.md__id {
+  font: 0.75rem var(--f-mono);
+  color: var(--ink-3);
+  margin-top: 4px;
+}
+.md__action,
+.md__ghost,
+.md__chip-action,
+.md__link {
+  min-height: 44px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.md__chip {
+  min-width: 0;
+  max-width: 100%;
+}
+.md__row > * {
+  min-width: 0;
+}
 .md__hero {
   position: relative;
   width: 100%;
@@ -856,7 +896,7 @@ function onRetry() {
 
 .md__name {
   font-family: var(--f-display);
-  font-size: 23px;
+  font-size: 1.4375rem;
   font-weight: 700;
   letter-spacing: -0.01em;
   word-break: break-word;
@@ -864,13 +904,13 @@ function onRetry() {
 
 .md__fam {
   font-family: var(--f-mono);
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--ink-3);
   margin-top: 4px;
 }
 
 .md__desc {
-  font-size: 14px;
+  font-size: 0.875rem;
   color: var(--ink-2);
   line-height: 1.55;
   margin: 16px 0 20px;
@@ -878,12 +918,14 @@ function onRetry() {
 
 .md__tiles {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   margin: 20px 0 22px;
 }
 
 .md__tile {
-  flex: 1;
+  flex: 1 1 8rem;
+  min-width: 0;
   background: var(--bath);
   border: 1px solid var(--edge);
   border-radius: var(--radius-control-lg);
@@ -892,7 +934,7 @@ function onRetry() {
 
 .md__tile-key {
   font-family: var(--f-mono);
-  font-size: 9px;
+  font-size: 0.75rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--ink-3);
@@ -900,13 +942,13 @@ function onRetry() {
 
 .md__tile-val {
   font-family: var(--f-mono);
-  font-size: 17px;
+  font-size: 1.0625rem;
   margin-top: 5px;
 }
 
 .md__kicker {
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 0.75rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink-3);
@@ -926,7 +968,7 @@ function onRetry() {
   color: var(--ink-2);
   padding: 6px 11px;
   border-radius: var(--radius-pill);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-family: var(--f-mono);
 }
 
@@ -940,12 +982,15 @@ function onRetry() {
 }
 
 .md__variant {
+  min-height: 44px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   border: 1px solid var(--ce);
   background: transparent;
   color: var(--ink-2);
   padding: 6px 13px;
   border-radius: var(--radius-pill);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-family: var(--f-mono);
   cursor: pointer;
   transition:
@@ -977,11 +1022,12 @@ function onRetry() {
 
 .md__row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
   padding: 11px 0;
   border-bottom: 1px solid var(--edge);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 
 .md__row:last-child {
@@ -993,7 +1039,7 @@ function onRetry() {
   align-items: center;
   gap: 6px;
   margin: 0 0 22px;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   color: var(--safelight);
   text-decoration: none;
 }
@@ -1013,7 +1059,7 @@ function onRetry() {
 
 .md__row-val {
   font-family: var(--f-mono);
-  font-size: 11px;
+  font-size: 0.75rem;
   text-align: right;
   word-break: break-all;
 }
@@ -1026,7 +1072,7 @@ function onRetry() {
   padding: 13px;
   border-radius: var(--radius-control-lg);
   font-family: var(--f-body);
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 700;
   cursor: pointer;
   display: flex;
@@ -1052,19 +1098,20 @@ function onRetry() {
 
 .md__secondary {
   display: flex;
+  flex-wrap: wrap;
   gap: 9px;
   margin-top: 9px;
 }
 
 .md__ghost {
-  flex: 1;
+  flex: 1 1 7rem;
   border: 1px solid var(--ce);
   background: transparent;
   color: var(--ink-2);
   padding: 11px;
   border-radius: var(--radius-control);
   font-family: var(--f-body);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   font-weight: 600;
   cursor: pointer;
   transition:
@@ -1117,7 +1164,7 @@ function onRetry() {
 }
 .md__state-msg {
   margin: 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--ink-3);
   line-height: 1.5;
 }
