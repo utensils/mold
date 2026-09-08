@@ -18,6 +18,22 @@ beforeEach(() => {
 });
 
 describe("video sound preference", () => {
+  it("does not persist unchanged volume events from mounted players", () => {
+    const store = useVideoPlaybackStore();
+    const write = vi.spyOn(localStorage, "setItem");
+    try {
+      const event = { currentTarget: { muted: false, volume: 1 } } as unknown as Event;
+      for (let tile = 0; tile < 1000; tile++) store.syncFromPlayer(event);
+      expect(write).not.toHaveBeenCalled();
+      store.setMuted(true);
+      expect(write).toHaveBeenCalledTimes(1);
+      store.setMuted(true);
+      expect(write).toHaveBeenCalledTimes(1);
+    } finally {
+      write.mockRestore();
+    }
+  });
+
   it("keeps both controls and a looping player in sync, and remembers mute for the next launch", async () => {
     const first = mount(VideoSoundToggle);
     const second = mount(VideoSoundToggle);

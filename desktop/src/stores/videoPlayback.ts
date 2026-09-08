@@ -15,6 +15,7 @@ export const useVideoPlaybackStore = defineStore("videoPlayback", {
   state: () => ({ muted: savedMuted(), volume: 1 }),
   actions: {
     setMuted(muted: boolean) {
+      if (this.muted === muted) return;
       this.muted = muted;
       try {
         localStorage.setItem(VIDEO_MUTED_STORAGE_KEY, String(muted));

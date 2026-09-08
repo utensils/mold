@@ -236,3 +236,41 @@ it("restores a selected workflow's settings without overwriting edits on progres
     vi.useRealTimers();
   }
 });
+
+it.each([
+  ["running", "Cancel", "cancelMeshWorkflow"],
+  ["paused", "Resume", "resumeMeshWorkflow"],
+] as const)(
+  "sends %s workflow controls to the resolved owner",
+  async (state, label, action) => {
+    const api = await import("../api/meshWorkflows");
+    vi.clearAllMocks();
+    vi.mocked(api.getMeshWorkflow).mockResolvedValue({
+      id: "workflow-1",
+      state,
+      mode: "text_to_mesh",
+      stages: [],
+    } as never);
+    const owner = { baseUrl: "http://plato-uat:7689", apiKey: null };
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://browse-host:7680", apiKey: null },
+        resolveTarget: async () => ({ target: owner, label: "Plato UAT" }),
+      },
+    });
+    try {
+      await flushPromises();
+      await wrapper.get("textarea").setValue("A wooden fox");
+      await wrapper.get("form").trigger("submit");
+      await flushPromises();
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === label)!
+        .trigger("click");
+      await flushPromises();
+      expect(api[action]).toHaveBeenCalledWith(owner, "workflow-1");
+    } finally {
+      wrapper.unmount();
+    }
+  },
+);
