@@ -95,12 +95,15 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   lip dub, text-to-audio, and MP4 output with generated audio.
 - **3D:** single-image and named multiview-to-mesh with Hunyuan3D 2.0 and 2.1,
   automatic background removal, optional highlight and lighting removal, and
-  Hunyuan3D Paint PBR materials in CUDA builds. Results are published to the Library as
-  binary glTF with a rendered poster tile, exportable as OBJ, STL, or PLY, or
+  Hunyuan3D Paint PBR materials in CUDA builds. Shape transformers can be
+  locally derived as qualified FP8/GGUF tiers. Results are published to the Library as
+  binary glTF with a rendered poster tile, exportable as OBJ, an OBJ+PBR ZIP, STL, or PLY, or
   shared as a turntable GIF, APNG, or WebP. The web and desktop **3-D Studio**
   also runs durable text-to-3D, supplied-mesh texturing, and Hunyuan3D 2.1
   mesh-rebuild workflows through the shape VAE: each stage survives app or
   server restarts and can be resumed from its checkpoint.
+  Painted prints expose their base-color, metallic-roughness, and normal maps as
+  independent, digest-checked Library downloads on web, desktop, and mobile.
 - **Multiple machines:** connect local, LAN, Tailscale, and RunPod hosts, then
   route work and browse one combined Library.
 - **Organization:** title, favorite, tag, collect, restore, and manage prints

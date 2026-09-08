@@ -247,14 +247,14 @@ controls instead of a resolution picker; a mesh recipe advertises
 audio-only recipe does.
 `capabilities.mesh.export_formats` on `GET /api/capabilities` says which
 containers `POST /api/gallery/export/:name` can turn a stored mesh into: the
-geometry transcodes (`glb`, `obj`, `stl`, `ply`) and the turntable renders
+geometry deliveries (`glb`, `obj`, `zip`, `stl`, `ply`) and the turntable renders
 (`gif`, `apng`, and `webp` on a build with the `webp` feature). A client
 should skip a name it does not know rather than fail the read.
 
 `capabilities.mesh.export_geometry`, present only on a build that supports
 the print-ready options below, carries `size_mm` (`{min, max, default}`),
 `up_axes`, `origins`, and `defaults` — one `{size_mm, up_axis, origin}` entry
-per geometry format (`obj`, `stl`, `ply`; a null `size_mm` means that format
+per geometry format (`obj`, `zip`, `stl`, `ply`; a null `size_mm` means that format
 exports at model scale, unscaled). Its absence is the whole gate: a client
 offers the size, axis, and origin controls only when the block is present,
 exactly as it treats every other capabilities-advertised block on an older
@@ -1096,6 +1096,16 @@ the identity clients key a thumbnail or media cache on. Both are advertised as
 `capabilities.gallery.conditional_get` and `.media_version`. Thumbnails carry
 their own per-rendition ETag.
 
+A row may carry `assets[]`: `{asset_id, role, display_name, media_type,
+size_bytes, sha256, width?, height?}`. These are files logically owned by that
+print. Textured GLBs expose the exact encoded `base_color`,
+`metallic_roughness`, and `normal` PNGs embedded in the stored container.
+`GET /api/gallery/assets/:filename/:asset_id` downloads one with attachment
+headers and verifies its size and digest before answering. The database table
+is a repairable index: the committed GLB remains the archive authority, so a
+reconciled or restored gallery can recreate the same inventory. Trash keeps
+the entries; permanent deletion cascades them with the generation row.
+
 ### Library organization
 
 Organization state lives in each host's own metadata DB, so a client holding
@@ -1153,7 +1163,7 @@ advertised as `capabilities.gallery.trash` (`enabled`, `retention_days`).
 `GET /api/gallery/export-options` reports every format this build can transcode
 into: the animation containers (`gif`, `apng`, and `webp` when the `webp`
 feature is on) plus the GIF playback and repeat options, and the geometry
-containers a gallery GLB transcodes to (`glb`, `obj`, `stl`, `ply`, which need
+containers a gallery GLB delivers (`glb`, `obj`, `zip`, `stl`, `ply`, which need
 no encoder feature because they are conversions of geometry that already
 exists). Each name appears once whatever the source kind.
 
@@ -1163,7 +1173,8 @@ anything back into the gallery. The SOURCE extension picks what a format
 means: a `.mp4` takes the animation formats only, and asking it for a
 geometry container is a `422` naming the other side. A `.glb` takes both
 groups. Exporting it as `glb` returns the stored bytes unchanged; `obj` is
-`model/obj`, `stl` is `model/stl`, and `ply` is `application/x-ply`. Asking a
+`model/obj`; `zip` is an OBJ + MTL + exact PBR-map bundle with
+`application/zip`; `stl` is `model/stl`; and `ply` is `application/x-ply`. Asking a
 `.glb` for `gif`, `apng` or `webp` renders a **turntable**: the gallery
 poster's own camera, lighting and background swept a full turn around the
 mesh and encoded by the same encoders a video export uses, as `image/gif`,
@@ -1200,7 +1211,7 @@ holds to is refused before a frame renders, naming `frames` and
 foreign file dropped into the output directory — is a `422` naming what is
 unsupported rather than a corrupt download.
 
-Exporting a `.glb` as `obj`, `stl` or `ply` instead takes three geometry
+Exporting a `.glb` as `obj`, `zip`, `stl` or `ply` instead takes three geometry
 options of its own, each optional:
 
 ```json

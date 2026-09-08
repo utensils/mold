@@ -6502,6 +6502,7 @@ mod tests {
             size_bytes: Some(123),
             media_version: Some(format!("{timestamp}:123")),
             metadata_synthetic: false,
+            assets: Vec::new(),
             title: None,
             tags: Vec::new(),
             favorite: false,

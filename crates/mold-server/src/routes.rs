@@ -723,6 +723,10 @@ pub fn create_router(state: AppState) -> Router {
             get(crate::gallery_source_media::download),
         )
         .route(
+            "/api/gallery/assets/:filename/:asset_id",
+            get(crate::generation_assets::download),
+        )
+        .route(
             "/api/gallery/source-media/:filename/reuse-sessions",
             post(crate::gallery_source_media::create_reuse_session),
         )
@@ -9128,6 +9132,7 @@ pub(crate) enum GalleryExportFormat {
     Webp,
     Glb,
     Obj,
+    Zip,
     Stl,
     Ply,
 }
@@ -9139,7 +9144,7 @@ impl GalleryExportFormat {
             Self::Gif => Some(mold_core::OutputFormat::Gif),
             Self::Apng => Some(mold_core::OutputFormat::Apng),
             Self::Webp => Some(mold_core::OutputFormat::Webp),
-            Self::Glb | Self::Obj | Self::Stl | Self::Ply => None,
+            Self::Glb | Self::Obj | Self::Zip | Self::Stl | Self::Ply => None,
         }
     }
 
@@ -9149,6 +9154,7 @@ impl GalleryExportFormat {
         match self {
             Self::Glb => mold_core::MeshExportFormat::Glb,
             Self::Obj => mold_core::MeshExportFormat::Obj,
+            Self::Zip => mold_core::MeshExportFormat::Zip,
             Self::Stl => mold_core::MeshExportFormat::Stl,
             Self::Ply => mold_core::MeshExportFormat::Ply,
             Self::Gif => mold_core::MeshExportFormat::Gif,
@@ -9165,9 +9171,10 @@ impl GalleryExportFormat {
 /// Every GEOMETRY container a stored `.glb` can be exported as, in the order
 /// clients show them. GLB first because it is the stored form. These need no
 /// encoder feature: any build that can serve the file can transcode it.
-pub(crate) const MESH_GEOMETRY_EXPORT_FORMATS: [mold_core::MeshExportFormat; 4] = [
+pub(crate) const MESH_GEOMETRY_EXPORT_FORMATS: [mold_core::MeshExportFormat; 5] = [
     mold_core::MeshExportFormat::Glb,
     mold_core::MeshExportFormat::Obj,
+    mold_core::MeshExportFormat::Zip,
     mold_core::MeshExportFormat::Stl,
     mold_core::MeshExportFormat::Ply,
 ];
@@ -9809,6 +9816,14 @@ fn transcode_gallery_mesh(
         mold_core::MeshExportFormat::Obj => {
             mold_inference::hunyuan3d::glb::write_obj(&mesh).into_bytes()
         }
+        mold_core::MeshExportFormat::Zip => {
+            let stem = source
+                .file_stem()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or("mesh");
+            mold_inference::hunyuan3d::glb::write_obj_bundle(&mesh, &bytes, stem)
+                .map_err(|error| format!("cannot package this mesh: {error}"))?
+        }
         mold_core::MeshExportFormat::Stl => mold_inference::hunyuan3d::glb::write_stl(&mesh),
         mold_core::MeshExportFormat::Ply => mold_inference::hunyuan3d::glb::write_ply(&mesh),
         mold_core::MeshExportFormat::Gif
@@ -10071,8 +10086,8 @@ async fn list_gallery(
                 .map_err(|e| anyhow::anyhow!("gallery organization query failed: {e}"))?;
             match view {
                 GalleryView::Trash => {
-                    let mut images = db
-                        .list_trashed(Some(&dir))?
+                    let rows = db.list_trashed(Some(&dir))?;
+                    let mut images = rows
                         .iter()
                         .map(|row| {
                             let mut image = row.to_gallery_image();
@@ -10084,6 +10099,7 @@ async fn list_gallery(
                             image
                         })
                         .collect::<Vec<_>>();
+                    crate::generation_assets::attach_to_images(db, &dir, &rows, &mut images)?;
                     images.sort_by_key(|image| {
                         std::cmp::Reverse((image.trashed_at.unwrap_or(0), image.timestamp))
                     });
@@ -10096,11 +10112,13 @@ async fn list_gallery(
                     }
                     let archive = gallery_archive.committed_archive_index(&dir)?;
                     let images = archive.overlay_db_gallery(&rows);
-                    Ok(Some(crate::gallery_organization::enrich_library_listing(
+                    let mut images = crate::gallery_organization::enrich_library_listing(
                         images,
                         &organization,
                         retention_days,
-                    )))
+                    );
+                    crate::generation_assets::attach_to_images(db, &dir, &rows, &mut images)?;
+                    Ok(Some(images))
                 }
             }
         })
@@ -11111,6 +11129,7 @@ fn scan_gallery_dir_with_archive(
                 collections: Vec::new(),
                 trashed_at: None,
                 purge_at: None,
+                assets: Vec::new(),
             })
         })
         .collect();
@@ -13237,6 +13256,7 @@ mod tests {
                 collections: Vec::new(),
                 trashed_at: None,
                 purge_at: None,
+                assets: Vec::new(),
             }
         }
 

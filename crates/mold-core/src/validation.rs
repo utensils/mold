@@ -2258,7 +2258,7 @@ pub fn mesh_export_geometry_defaults(
 ) -> Option<crate::MeshExportGeometry> {
     use crate::{MeshExportFormat, MeshExportGeometry, MeshExportOrigin, MeshUpAxis};
     match format {
-        MeshExportFormat::Obj => Some(MeshExportGeometry {
+        MeshExportFormat::Obj | MeshExportFormat::Zip => Some(MeshExportGeometry {
             size_mm: None,
             up_axis: MeshUpAxis::Y,
             origin: MeshExportOrigin::Floor,
@@ -2346,6 +2346,7 @@ pub fn mesh_export_geometry_capabilities() -> crate::MeshExportGeometryCapabilit
     use crate::MeshExportFormat;
     let defaults = [
         MeshExportFormat::Obj,
+        MeshExportFormat::Zip,
         MeshExportFormat::Stl,
         MeshExportFormat::Ply,
     ]

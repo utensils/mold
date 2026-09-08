@@ -459,7 +459,7 @@ async fn library_trash(client: &MoldClient, filenames: &[String]) -> Result<()> 
     Ok(())
 }
 
-/// `mold library export <file> --format glb|obj|stl|ply|gif|apng|webp` —
+/// `mold library export <file> --format glb|obj|zip|stl|ply|gif|apng|webp` —
 /// transcode one stored mesh (or download the stored `.glb` unchanged, or
 /// render its turntable) and write the result locally.
 ///

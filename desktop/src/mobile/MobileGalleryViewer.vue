@@ -37,6 +37,11 @@ import {
   type MeshExportGeometryCapabilities,
   type MeshGeometryOptions,
 } from "@studio/lib/meshExport";
+import {
+  generationAssetLabel,
+  generationAssetPath,
+  type GenerationAsset,
+} from "@studio/api/generationAssets";
 import { isAnimatedMeshExportFormat, meshExportFilename } from "./meshResult";
 import {
   meshExportChoices,
@@ -309,7 +314,7 @@ const originalPrompt = computed(() =>
 const upscaled = computed(() => isUpscaledImage(props.item));
 const actionStatus = ref("");
 const promptCopyStatus = ref("");
-const actionBusy = ref<"copy" | "save" | "save-video" | null>(null);
+const actionBusy = ref<"copy" | "save" | "save-video" | `asset-${string}` | null>(null);
 const exportOpen = ref(false);
 const exportBusy = ref(false);
 const exportError = ref("");
@@ -1046,6 +1051,31 @@ async function runMeshExport(destination: "share" | "folder"): Promise<void> {
   else await performMeshExport(format);
 }
 
+async function saveGenerationAsset(asset: GenerationAsset): Promise<void> {
+  if (actionBusy.value) return;
+  actionBusy.value = `asset-${asset.asset_id}`;
+  actionStatus.value = "";
+  try {
+    const response = await apiFetchTo(
+      props.target,
+      generationAssetPath(props.item.filename, asset.asset_id),
+    );
+    const saved = await invoke<{
+      filename: string;
+      path: string;
+      directory: string;
+    }>("save_media_bytes", {
+      filename: asset.display_name,
+      dataB64: await blobToBase64(await response.blob()),
+    });
+    actionStatus.value = `Saved to ${saved.directory}`;
+  } catch (error) {
+    actionStatus.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    actionBusy.value = null;
+  }
+}
+
 /** True while the open export sheet is a mesh TURNTABLE rather than a video
  * re-encode. Only a turntable is rendered here, so only it can leave its
  * backdrop out; the host refuses `transparent` on anything else. */
@@ -1483,6 +1513,17 @@ onBeforeUnmount(() => {
               </button>
             </div>
           </div>
+          <button
+            v-for="asset in item.assets ?? []"
+            :key="asset.asset_id"
+            class="secondary-button gallery-viewer-export"
+            type="button"
+            :data-test="`generation-asset-${asset.asset_id}`"
+            :disabled="!!actionBusy"
+            @click="saveGenerationAsset(asset)"
+          >
+            {{ generationAssetLabel(asset) }}
+          </button>
           <template v-if="!video && !audio && !mesh">
             <button
               class="secondary-button gallery-viewer-copy"

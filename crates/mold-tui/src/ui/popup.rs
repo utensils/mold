@@ -1732,6 +1732,7 @@ pub(crate) fn mesh_export_format_note(format: mold_core::MeshExportFormat) -> &'
         mold_core::MeshExportFormat::Obj => {
             "positions, normals, UVs; no materials (Blender, MeshLab)"
         }
+        mold_core::MeshExportFormat::Zip => "OBJ + MTL + exact PBR maps in one ZIP",
         mold_core::MeshExportFormat::Stl => {
             "triangles only; no UVs or colour; Z-up, bed-ready (CAD)"
         }

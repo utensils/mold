@@ -1574,6 +1574,9 @@ pub(crate) fn export_local_mesh(
         // The stored form: handed back as-is, not re-encoded.
         mold_core::MeshExportFormat::Glb => glb.to_vec(),
         mold_core::MeshExportFormat::Obj => glb::write_obj(&shaped()?).into_bytes(),
+        mold_core::MeshExportFormat::Zip => {
+            glb::write_obj_bundle(&shaped()?, glb, "mesh").map_err(|e| format!("{e:#}"))?
+        }
         mold_core::MeshExportFormat::Stl => glb::write_stl(&shaped()?),
         mold_core::MeshExportFormat::Ply => glb::write_ply(&shaped()?),
         mold_core::MeshExportFormat::Gif

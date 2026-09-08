@@ -13,6 +13,7 @@ mod durable_disposition;
 mod durable_generation_settlement;
 mod gallery_authority;
 mod gallery_source_media;
+mod generation_assets;
 #[allow(dead_code)]
 mod h3_admission;
 mod h3_attempt;

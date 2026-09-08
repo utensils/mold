@@ -287,6 +287,10 @@ pushed screen opened from the header.
   scene by an older build, **Use as prompt** restores a plain one-shot clip
   built from the first scene's prompt; the per-scene provenance stays on the
   print.
+  Painted GLBs also show one save action per material map. Each downloads the
+  exact PNG embedded in the stored print and writes it to the same browsable
+  Mold folder; ZIP export packages OBJ, MTL, base color, metallic-roughness, and
+  normal maps together.
   Generated media opens the same viewer on tap, with the same **Use as
   source** action as a Library print — offered only for a still on a model
   that conditions on one, and only while the machine that rendered it is

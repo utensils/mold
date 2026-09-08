@@ -174,6 +174,7 @@ impl GenerationRecord {
             collections: Vec::new(),
             trashed_at: self.trashed_at_ms.map(|ms| (ms / 1000) as u64),
             purge_at: None,
+            assets: Vec::new(),
         }
     }
 }

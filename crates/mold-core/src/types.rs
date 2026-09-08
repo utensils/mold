@@ -10503,6 +10503,26 @@ pub struct GalleryImage {
     /// print. Absent when retention is "keep forever" or the row is live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purge_at: Option<u64>,
+    /// Downloadable files associated with this print, such as PBR texture
+    /// maps embedded in a stored GLB. Additive; older servers omit it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets: Vec<GenerationAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationAsset {
+    /// Stable, item-scoped identifier used by the asset download route.
+    pub asset_id: String,
+    /// Semantic role such as `base_color` or `metallic_roughness`.
+    pub role: String,
+    pub display_name: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -11677,9 +11697,9 @@ pub struct MeshCapabilities {
     /// Formats this host will STORE. GLB only today.
     pub formats: Vec<OutputFormat>,
     /// Formats `POST /api/gallery/export/:filename` can transcode a stored
-    /// mesh into. Separate from `formats` because OBJ, STL and PLY are
-    /// exportable but never storable — none of them carries materials and
-    /// textures the way the stored GLB does — and because a turntable GIF,
+    /// mesh into. Separate from `formats` because OBJ, ZIP, STL and PLY are
+    /// exportable but never storable — ZIP packages material assets while the
+    /// plain geometry formats shed some of them — and because a turntable GIF,
     /// APNG or WebP is a RENDER of the mesh, not the mesh at all.
     ///
     /// Typed as [`MeshExportFormat`] rather than [`OutputFormat`] so an
@@ -11727,8 +11747,9 @@ where
 /// are DELIVERY containers for geometry that already exists, and a request can
 /// never name one as a generation target. The stored artifact stays GLB — the
 /// one form that carries geometry, UVs, normals and any textures in a single
-/// file — and everything else here loses something on the way out, which is
-/// exactly why it is an export and not a save.
+/// file. Every delivery here is derived on request rather than becoming a
+/// second gallery authority: ZIP preserves the painted maps beside OBJ/MTL,
+/// while the plain geometry containers deliberately shed material data.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
 )]
@@ -11738,6 +11759,8 @@ pub enum MeshExportFormat {
     Glb,
     /// Wavefront OBJ: positions, UVs and normals as text. No materials.
     Obj,
+    /// A Wavefront OBJ package: OBJ + MTL + exact embedded PBR maps in ZIP.
+    Zip,
     /// Binary STL: triangle soup with a per-face normal. No UVs, no vertex
     /// identity, no colour — the format 3-D printers and CAD tools want.
     Stl,
@@ -11763,6 +11786,7 @@ impl MeshExportFormat {
         match self {
             Self::Glb => "glb",
             Self::Obj => "obj",
+            Self::Zip => "zip",
             Self::Stl => "stl",
             Self::Ply => "ply",
             Self::Gif => "gif",
@@ -11786,6 +11810,7 @@ impl MeshExportFormat {
         match self {
             Self::Glb => "model/gltf-binary",
             Self::Obj => "model/obj",
+            Self::Zip => "application/zip",
             Self::Stl => "model/stl",
             // PLY has no registered media type; this is the spelling every
             // viewer and toolchain uses.
@@ -11810,7 +11835,7 @@ impl MeshExportFormat {
     /// own download disagree. An animation is a render of the mesh through a
     /// fitted camera, where a millimetre size has no meaning at all.
     pub fn takes_geometry_options(self) -> bool {
-        matches!(self, Self::Obj | Self::Stl | Self::Ply)
+        matches!(self, Self::Obj | Self::Zip | Self::Stl | Self::Ply)
     }
 
     /// The generation-side [`OutputFormat`] an animated export encodes as,
@@ -11820,7 +11845,7 @@ impl MeshExportFormat {
             Self::Gif => Some(OutputFormat::Gif),
             Self::Apng => Some(OutputFormat::Apng),
             Self::Webp => Some(OutputFormat::Webp),
-            Self::Glb | Self::Obj | Self::Stl | Self::Ply => None,
+            Self::Glb | Self::Obj | Self::Zip | Self::Stl | Self::Ply => None,
         }
     }
 }
@@ -11838,13 +11863,14 @@ impl std::str::FromStr for MeshExportFormat {
         match value.trim().to_ascii_lowercase().as_str() {
             "glb" => Ok(Self::Glb),
             "obj" => Ok(Self::Obj),
+            "zip" => Ok(Self::Zip),
             "stl" => Ok(Self::Stl),
             "ply" => Ok(Self::Ply),
             "gif" => Ok(Self::Gif),
             "apng" => Ok(Self::Apng),
             "webp" => Ok(Self::Webp),
             other => Err(format!(
-                "unknown mesh export format '{other}' (expected glb, obj, stl, ply, gif, apng, or webp)"
+                "unknown mesh export format '{other}' (expected glb, obj, zip, stl, ply, gif, apng, or webp)"
             )),
         }
     }
@@ -13111,6 +13137,7 @@ mod server_event_tests {
                 size_bytes: Some(123),
                 media_version: Some("1700000000000:123".into()),
                 metadata_synthetic: false,
+                assets: Vec::new(),
                 title: None,
                 tags: Vec::new(),
                 favorite: false,
@@ -13146,6 +13173,7 @@ mod server_event_tests {
             size_bytes: Some(123),
             media_version: Some("1700000000000:123".into()),
             metadata_synthetic: false,
+            assets: Vec::new(),
             title: Some("Smurf village".into()),
             tags: vec!["blue".into(), "cartoon".into()],
             favorite: true,

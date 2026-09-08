@@ -664,6 +664,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 36,
         kind: MigrationKind::Sql(V36_MESH_WORKFLOW_JOBS),
     },
+    Migration {
+        version: 37,
+        kind: MigrationKind::Sql(V37_GENERATION_ASSETS),
+    },
 ];
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY
@@ -905,7 +909,45 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 36;
+pub const SCHEMA_VERSION: i64 = 37;
+
+/// Downloadable files that belong to one gallery print. The generation row
+/// remains the lifecycle authority, so permanent deletion cascades while
+/// trash/restore preserves the inventory. `locator` is interpreted only by
+/// the server-side extractor and never reaches clients.
+const V37_GENERATION_ASSETS: &str = r#"
+CREATE TABLE generation_assets (
+    generation_id INTEGER NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
+    asset_id       TEXT NOT NULL CHECK (length(asset_id) BETWEEN 1 AND 128),
+    role           TEXT NOT NULL CHECK (length(role) BETWEEN 1 AND 64),
+    display_name   TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 255),
+    media_type     TEXT NOT NULL CHECK (length(media_type) BETWEEN 1 AND 128),
+    size_bytes     INTEGER NOT NULL CHECK (size_bytes >= 0),
+    sha256         TEXT NOT NULL CHECK (length(sha256) = 64),
+    width          INTEGER CHECK (width IS NULL OR width > 0),
+    height         INTEGER CHECK (height IS NULL OR height > 0),
+    storage_kind   TEXT NOT NULL CHECK (storage_kind IN ('embedded_glb', 'sidecar')),
+    locator        TEXT NOT NULL CHECK (length(locator) BETWEEN 1 AND 1024),
+    PRIMARY KEY (generation_id, asset_id)
+);
+
+CREATE INDEX generation_assets_generation
+ON generation_assets(generation_id, role, asset_id);
+
+CREATE TABLE generation_asset_scans (
+    generation_id INTEGER PRIMARY KEY REFERENCES generations(id) ON DELETE CASCADE,
+    media_version TEXT NOT NULL CHECK (length(media_version) BETWEEN 1 AND 128)
+);
+
+CREATE TRIGGER generation_assets_invalidate_after_media_change
+AFTER UPDATE OF file_mtime_ms, file_size_bytes ON generations
+WHEN NEW.file_mtime_ms IS NOT OLD.file_mtime_ms
+  OR NEW.file_size_bytes IS NOT OLD.file_size_bytes
+BEGIN
+    DELETE FROM generation_asset_scans WHERE generation_id = NEW.id;
+    DELETE FROM generation_assets WHERE generation_id = NEW.id;
+END;
+"#;
 
 /// Opaque staged-media ownership for durable queue rows.
 ///

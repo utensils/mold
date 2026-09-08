@@ -229,7 +229,7 @@ mold library favorite <FILENAME>...
 mold library unfavorite <FILENAME>...
 mold library trash <FILENAME>...
 mold library export <FILENAME.glb> --format glb [-o PATH | --output -]
-mold library export <FILENAME.glb> --format obj|stl|ply [--size-mm 1..1000] [--up-axis y|z] [--origin center|floor] [-o PATH | --output -]
+mold library export <FILENAME.glb> --format obj|zip|stl|ply [--size-mm 1..1000] [--up-axis y|z] [--origin center|floor] [-o PATH | --output -]
 mold library export <FILENAME.glb> --format gif|apng|webp [--playback loop|bounce] [--repeat forever|once] [--max-dimension 240..2048] [--frames 8..180] [--fps 1..30] [-o PATH | --output -]
 
 mold library tag list [--json]
@@ -254,12 +254,14 @@ form carrying geometry, UVs, normals and textures in one file — and it default
 to writing the print's stem with the new extension in the current directory.
 `--output -` writes to stdout. A host that does not advertise the format under
 `capabilities.mesh.export_formats` is refused by name.
+ZIP is the portable painted-asset package: transformed OBJ geometry, an MTL,
+and the exact base-color and glTF-packed metallic-roughness PNGs.
 
-`--size-mm`, `--up-axis` and `--origin` apply only to `obj`, `stl` and `ply`
+`--size-mm`, `--up-axis` and `--origin` apply only to `obj`, `zip`, `stl` and `ply`
 — refused on `glb` and refused against a host that does not advertise
 `capabilities.mesh.export_geometry` — and default to what each format's own
 tools expect (100 mm/Z-up/floor for STL and PLY, unscaled/Y-up/floor for
-OBJ); see [Print-ready exports](/guide/mesh#print-ready-exports) for the
+OBJ and ZIP); see [Print-ready exports](/guide/mesh#print-ready-exports) for the
 full table and the reasoning behind it.
 
 Repeat `--tag` for every tag; one flag consumes exactly one value. Multiple

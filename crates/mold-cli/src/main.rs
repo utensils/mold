@@ -1099,7 +1099,7 @@ pub enum LibraryAction {
         #[arg(required = true, value_name = "FILENAME")]
         filenames: Vec<String>,
     },
-    /// Export one stored 3-D print as OBJ, STL, PLY, or a turntable GIF/APNG/WebP
+    /// Export one stored 3-D print as OBJ, an OBJ+PBR ZIP, STL, PLY, or a turntable GIF/APNG/WebP
     ///
     /// The gallery keeps its `.glb`; this writes a converted copy beside it or
     /// wherever `--output` names. Each geometry container loses something the
@@ -1127,8 +1127,8 @@ Examples:
     Export {
         #[arg(value_name = "FILENAME")]
         filename: String,
-        /// Container: glb, obj, stl, or ply. glb downloads the stored file
-        /// unchanged; the rest are transcodes.
+        /// Container: glb, obj, zip, stl, or ply. glb downloads the stored file
+        /// unchanged; zip packages OBJ + MTL + PBR maps; the rest transcode.
         #[arg(long, value_name = "FORMAT", value_parser = mesh_export_format_parser)]
         format: mold_core::MeshExportFormat,
         /// Where to write the converted file. Defaults to the print's stem
@@ -4504,6 +4504,7 @@ mod tests {
         for (flag, expected) in [
             ("glb", mold_core::MeshExportFormat::Glb),
             ("obj", mold_core::MeshExportFormat::Obj),
+            ("zip", mold_core::MeshExportFormat::Zip),
             ("stl", mold_core::MeshExportFormat::Stl),
             ("ply", mold_core::MeshExportFormat::Ply),
             ("gif", mold_core::MeshExportFormat::Gif),
