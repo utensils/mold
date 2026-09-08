@@ -248,8 +248,13 @@ watch(
 watch(
   () => route.query.type,
   (type) => {
-    if (type === "images" || type === "video" || type === "all")
-      filter.value = type;
+    filter.value =
+      type === "images" ||
+      type === "video" ||
+      type === "audio" ||
+      type === "mesh"
+        ? type
+        : "all";
   },
   { immediate: true },
 );
@@ -361,7 +366,12 @@ function clearSearch() {
   syncSearchToUrl("");
 }
 function setFilter(next: FilterKind) {
+  if (filter.value === next) return;
   filter.value = next;
+  const query = { ...route.query };
+  if (next === "all") delete query.type;
+  else query.type = next;
+  void router.push({ query });
 }
 
 /*

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { defineComponent } from "vue";
+import { defineComponent, reactive } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import LibraryPage from "./LibraryPage.vue";
 import {
@@ -55,6 +55,7 @@ const orgApi = vi.hoisted(() => ({
   listTags: vi.fn(async () => []),
 }));
 vi.mock("@studio/api/galleryOrganization", () => orgApi);
+const routeState = vi.hoisted(() => ({ query: {} as Record<string, string> }));
 const { pushMock, replaceMock } = vi.hoisted(() => ({
   pushMock: vi.fn(),
   replaceMock: vi.fn(),
@@ -134,7 +135,7 @@ vi.mock("../lib/multiHostGallery", async () => {
 });
 
 vi.mock("vue-router", () => ({
-  useRoute: () => ({ query: {} }),
+  useRoute: () => reactive(routeState),
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
 }));
 
@@ -285,6 +286,7 @@ describe("LibraryPage", () => {
       error: "test stop",
       disclosure: "Framewise upscale",
     });
+    routeState.query = {};
     pushMock.mockReset();
     replaceMock.mockReset();
     vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);
@@ -487,6 +489,27 @@ describe("LibraryPage", () => {
     await flushPromises();
     expect(wrapper.find("[data-test='grid-count']").text()).toBe("2");
   });
+
+  it.each(["audio", "mesh"])(
+    "restores the %s URL filter and resets it on browser Back",
+    async (type) => {
+      routeState.query = { type };
+      const wrapper = await mounted();
+      const group = wrapper.get('[data-test="gallery-filter"]');
+      expect(group.find('[aria-checked="true"]').text()).toBe(
+        type === "audio" ? "Audio" : "3D",
+      );
+      reactive(routeState).query = {};
+      await flushPromises();
+      expect(group.find('[aria-checked="true"]').text()).toBe("All");
+      await group
+        .findAll("button")
+        .find((button) => button.text() === "Video")!
+        .trigger("click");
+      expect(pushMock).toHaveBeenCalledWith({ query: { type: "video" } });
+      wrapper.unmount();
+    },
+  );
 
   it("shows the video-empty prompt when filtering video with none present", async () => {
     const wrapper = await mounted();
@@ -777,6 +800,7 @@ describe("LibraryPage multi-host identity", () => {
     hostGalleryMock.mockReset().mockResolvedValue([]);
     for (const fn of Object.values(orgApi)) fn.mockClear();
     fetchBlobMock.mockReset().mockResolvedValue(new Blob(["bytes"]));
+    routeState.query = {};
     pushMock.mockReset();
     replaceMock.mockReset();
     vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);

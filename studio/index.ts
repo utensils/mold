@@ -7,6 +7,7 @@ export * from "./lib/sourceFit";
 export * from "./lib/chainRouting";
 export * from "./lib/modelDisplay";
 export * from "./lib/styleLabel";
+export * from "./lib/queueSections";
 export * from "./lib/base64";
 export * from "./lib/starterModels";
 export * from "./lib/generationLifecycle";

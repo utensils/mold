@@ -18,6 +18,8 @@ import { useCatalog } from "./composables/useCatalog";
 import { useGenerateStream } from "./composables/useGenerateStream";
 import { startGenerateQueueReconciler } from "./composables/useQueueReconciler";
 import { useHostRouting } from "./composables/useHostRouting";
+import { useActivityRows } from "./composables/useActivityRows";
+import { useQueueSections } from "./composables/useQueueSections";
 import { useLiveActivity } from "./composables/useLiveActivity";
 import { installNotifications } from "./lib/notifications";
 import {
@@ -43,6 +45,20 @@ const reconciler = startGenerateQueueReconciler(stream);
 // read the same singleton, including while Create is unmounted.
 const routing = useHostRouting();
 const liveActivity = useLiveActivity(routing);
+const activityRows = useActivityRows(stream.jobs, liveActivity.rows);
+const queueSections = useQueueSections(
+  activityRows.localActivityJobs,
+  activityRows.sharedActivityRows,
+  routing.queueStatus,
+  routing.hosts,
+);
+const liveSummary = computed(() =>
+  queueSections.value
+    .filter((section) => section.count > 0)
+    .map((section) => `${section.count} ${section.label.toLowerCase()}`)
+    .join(" · "),
+);
+
 onMounted(() => liveActivity.start());
 
 // Downloads popover (spec §06). Opened by the AppNav button and ⌘K palette,
@@ -132,6 +148,16 @@ const notifications = useNotifications();
 <template>
   <div class="app-frame">
     <AppNav />
+    <div
+      v-if="liveSummary && route.path !== '/queue'"
+      class="global-live-work"
+      data-test="global-live-work"
+    >
+      <router-link to="/queue"
+        ><span aria-live="polite">{{ liveSummary }}</span
+        ><span>View Queue →</span></router-link
+      >
+    </div>
     <router-view />
     <DownloadsPopover
       :open="downloadsOpen"
@@ -163,5 +189,37 @@ const notifications = useNotifications();
   min-height: 100svh;
   display: flex;
   flex-direction: column;
+}
+</style>
+
+<style scoped>
+.global-live-work {
+  padding: 8px 24px;
+  background: var(--mold-bg-deep);
+  border-bottom: 1px solid var(--mold-border);
+}
+.global-live-work a {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 24px;
+  max-width: 1072px;
+  margin: auto;
+  min-height: 32px;
+  font-size: 0.875rem;
+  color: var(--mold-text);
+  text-decoration: none;
+}
+.global-live-work a > span:last-child {
+  color: var(--mold-blue);
+}
+@media (max-width: 639px) {
+  .global-live-work {
+    padding-inline: 16px;
+  }
+  .global-live-work a {
+    min-height: 44px;
+  }
 }
 </style>
