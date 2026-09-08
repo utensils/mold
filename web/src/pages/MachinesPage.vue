@@ -169,7 +169,7 @@ async function contextForget() {
        mx-auto child otherwise shrinks to its content width, making the page
        grow sideways as async content lands. -->
   <div class="mx-auto w-full max-w-[1800px] px-4 pb-40 pt-6 sm:px-6 lg:px-10">
-    <div class="mb-5 flex items-center gap-4">
+    <div class="mb-5 flex flex-wrap items-center gap-4">
       <h1
         class="font-display text-2xl font-bold tracking-tight text-ink"
         data-test="machines-title"
@@ -298,8 +298,9 @@ async function contextForget() {
   background: transparent;
   color: var(--rebate);
   padding: 8px 15px;
+  min-height: 44px;
   border-radius: 8px;
-  font-size: 12px;
+  font-size: 0.875rem;
   font-weight: 600;
   cursor: pointer;
 }
@@ -329,12 +330,12 @@ async function contextForget() {
 }
 
 .ms-addcard__title {
-  font-size: 13.5px;
+  font-size: 0.875rem;
   font-weight: 600;
 }
 
 .ms-addcard__sub {
-  font-size: 11.5px;
+  font-size: 0.875rem;
   color: var(--ink-3);
 }
 
@@ -352,14 +353,14 @@ async function contextForget() {
 .machine-context button {
   display: block;
   width: 100%;
-  min-height: 32px;
+  min-height: 44px;
   padding: 0 10px;
   border: 0;
   border-radius: 5px;
   background: transparent;
   color: var(--rebate);
   text-align: left;
-  font-size: 12.5px;
+  font-size: 0.875rem;
   cursor: pointer;
 }
 

@@ -74,6 +74,8 @@ const emit = defineEmits<{
   dismiss: [id: string];
   open: [job: Job];
   "shared-open": [row: FleetActiveWork];
+  "shared-inspect": [row: FleetActiveWork, opener: HTMLElement];
+  inspect: [job: Job, opener: HTMLElement];
 }>();
 
 /** Failed prints go through the shared partition so their rows expire on the
@@ -227,12 +229,33 @@ const active = computed(
     </div>
 
     <template v-for="row in activeRows" :key="row.key">
-      <LiveActivityList
-        v-if="row.kind === 'shared'"
-        :rows="[row.shared]"
-        interactive
-        @select="emit('shared-open', $event)"
-      />
+      <div v-if="row.kind === 'shared'" class="activity__shared">
+        <LiveActivityList
+          :rows="[row.shared]"
+          interactive
+          @select="emit('shared-open', $event)"
+        />
+        <button
+          v-if="
+            expanded &&
+            row.shared.kind === 'generation' &&
+            row.shared.execution !== 'chain'
+          "
+          type="button"
+          class="activity__row-action"
+          :aria-label="`Details for ${row.shared.model ?? 'job'} on ${row.shared.hostLabel}`"
+          :data-test="`activity-details-${row.shared.key}`"
+          @click="
+            emit(
+              'shared-inspect',
+              row.shared,
+              $event.currentTarget as HTMLElement,
+            )
+          "
+        >
+          Details
+        </button>
+      </div>
 
       <div
         v-else-if="row.kind === 'print' && row.print.workStarted"
@@ -279,6 +302,17 @@ const active = computed(
           }}</span>
         </button>
         <button
+          v-if="expanded && row.print.serverId && !row.print.chain"
+          type="button"
+          class="activity__row-action"
+          :aria-label="`Details for ${promptFor(row.print)}`"
+          @click="
+            emit('inspect', row.print, $event.currentTarget as HTMLElement)
+          "
+        >
+          Details
+        </button>
+        <button
           type="button"
           class="activity__cancel activity__cancel--running"
           :aria-label="
@@ -318,6 +352,17 @@ const active = computed(
             <span v-if="row.print.holdError" class="activity__hold-error">
               · {{ row.print.holdError }}
             </span>
+          </button>
+          <button
+            v-if="expanded && row.print.serverId && !row.print.chain"
+            type="button"
+            class="activity__row-action"
+            :aria-label="`Details for ${promptFor(row.print)}`"
+            @click="
+              emit('inspect', row.print, $event.currentTarget as HTMLElement)
+            "
+          >
+            Details
           </button>
           <button
             v-if="row.print.retryable"
@@ -383,6 +428,17 @@ const active = computed(
 </template>
 
 <style scoped>
+.activity__shared {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.activity__shared > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
 .activity {
   display: flex;
   flex-direction: column;

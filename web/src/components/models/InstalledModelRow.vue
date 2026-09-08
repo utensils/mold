@@ -66,6 +66,11 @@ const installHint = computed(() => {
             ★ loaded
           </BadgePill>
         </span>
+        <span
+          v-if="modelDisplayName(props.model) !== props.model.name"
+          class="row__id"
+          >{{ props.model.name }}</span
+        >
         <span class="row__meta">
           {{ props.model.family }} ·
           {{ formatGB(props.model.size_gb * 1_000_000_000) }}
@@ -89,15 +94,25 @@ const installHint = computed(() => {
 </template>
 
 <style scoped>
+.row__id {
+  display: block;
+  font-family: var(--f-mono);
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
 .rowline {
   display: flex;
   align-items: stretch;
   gap: 8px;
+  flex-wrap: wrap;
   min-width: 0;
 }
 
 .rowline .row {
-  flex: 1;
+  flex: 1 1 20rem;
+  max-width: 100%;
   min-width: 0;
 }
 
@@ -110,9 +125,10 @@ const installHint = computed(() => {
   border: 1px solid var(--edge);
   border-radius: var(--radius-card);
   padding: 0 14px;
+  min-height: 44px;
   color: var(--ink-2);
   font-family: var(--f-body);
-  font-size: 12.5px;
+  font-size: 0.875rem;
   font-weight: 600;
   cursor: pointer;
   transition:
@@ -186,22 +202,18 @@ const installHint = computed(() => {
 }
 
 .row__name {
-  flex: 1 1 160px;
-  font-family: var(--f-mono);
-  font-size: 13.5px;
+  flex: 1 1 10rem;
+  font-family: var(--f-body);
+  font-size: 1rem;
   font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
   min-width: 0;
 }
 
 .row__meta {
-  font-size: 11px;
+  font-size: 0.875rem;
   color: var(--ink-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 
 .row__chevron {

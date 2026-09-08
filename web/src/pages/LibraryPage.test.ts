@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
-import { flushPromises, mount } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { defineComponent } from "vue";
+import { defineComponent, reactive } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import LibraryPage from "./LibraryPage.vue";
 import {
@@ -55,6 +55,7 @@ const orgApi = vi.hoisted(() => ({
   listTags: vi.fn(async () => []),
 }));
 vi.mock("@studio/api/galleryOrganization", () => orgApi);
+const routeState = vi.hoisted(() => ({ query: {} as Record<string, string> }));
 const { pushMock, replaceMock } = vi.hoisted(() => ({
   pushMock: vi.fn(),
   replaceMock: vi.fn(),
@@ -134,7 +135,7 @@ vi.mock("../lib/multiHostGallery", async () => {
 });
 
 vi.mock("vue-router", () => ({
-  useRoute: () => ({ query: {} }),
+  useRoute: () => reactive(routeState),
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
 }));
 
@@ -230,6 +231,7 @@ async function mounted() {
   return wrapper;
 }
 
+enableAutoUnmount(afterEach);
 beforeEach(() => setActivePinia(createPinia()));
 
 describe("LibraryPage", () => {
@@ -285,6 +287,7 @@ describe("LibraryPage", () => {
       error: "test stop",
       disclosure: "Framewise upscale",
     });
+    routeState.query = {};
     pushMock.mockReset();
     replaceMock.mockReset();
     vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);
@@ -438,6 +441,40 @@ describe("LibraryPage", () => {
     wrapper.unmount();
   });
 
+  it("refreshes on visible return and reconnect without losing linked selection or overlapping reads", async () => {
+    routeState.query = { print: "cat.png", printHost: "origin", q: "cat" };
+    const wrapper = await mounted();
+    const hidden = vi.spyOn(document, "hidden", "get");
+    hidden.mockReturnValue(true);
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("online"));
+    expect(listGalleryMock).toHaveBeenCalledTimes(1);
+    let resolveRefresh!: (entries: GalleryImage[]) => void;
+    listGalleryMock.mockReturnValueOnce(
+      new Promise((resolve) => (resolveRefresh = resolve)),
+    );
+    hidden.mockReturnValue(false);
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("online"));
+    expect(listGalleryMock).toHaveBeenCalledTimes(2);
+    resolveRefresh([cat, dog]);
+    await flushPromises();
+    expect(wrapper.get('[data-test="lb-key"]').text()).toBe("origin|cat.png");
+    expect(routeState.query).toEqual({
+      print: "cat.png",
+      printHost: "origin",
+      q: "cat",
+    });
+    window.dispatchEvent(new Event("online"));
+    await flushPromises();
+    expect(listGalleryMock).toHaveBeenCalledTimes(3);
+    wrapper.unmount();
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("online"));
+    expect(listGalleryMock).toHaveBeenCalledTimes(3);
+    hidden.mockRestore();
+  });
+
   it("does not start its refresh timer after unmounting during initial load", async () => {
     vi.useFakeTimers();
     let resolveGallery!: (entries: GalleryImage[]) => void;
@@ -469,6 +506,73 @@ describe("LibraryPage", () => {
     wrapper.unmount();
   });
 
+  it("opens a print URL after loading and restores Back/Forward without mutating media", async () => {
+    routeState.query = { print: "cat.png", printHost: "origin", q: "cat" };
+    const wrapper = await mounted();
+    expect(wrapper.get('[data-test="lb-key"]').text()).toBe("origin|cat.png");
+    reactive(routeState).query = { q: "cat" };
+    await flushPromises();
+    expect(wrapper.find('[data-test="lightbox"]').exists()).toBe(false);
+    expect(wrapper.get('[data-test="grid-count"]').text()).toBe("1");
+    reactive(routeState).query = {
+      print: "cat.png",
+      printHost: "origin",
+      q: "cat",
+    };
+    await flushPromises();
+    expect(wrapper.get('[data-test="lb-key"]').text()).toBe("origin|cat.png");
+    expect(deleteMock).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("keeps a configured empty machine filter without claiming it is unavailable", async () => {
+    const STUDIO = {
+      id: "studio-7680",
+      name: "studio",
+      url: "http://studio:7680",
+    };
+    localStorage.setItem("mold.web.hosts.v1", JSON.stringify([STUDIO]));
+    routeState.query = { host: STUDIO.id };
+    const wrapper = await mounted();
+    expect(
+      wrapper.find('[data-test="library-link-unavailable"]').exists(),
+    ).toBe(false);
+    expect(
+      wrapper
+        .findAll('[data-test="gallery-host-filter"]')
+        .some((button) => button.text() === STUDIO.name),
+    ).toBe(true);
+    expect(wrapper.find('[data-test="grid-count"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("keeps an unknown linked machine explicit without connecting it", async () => {
+    routeState.query = {
+      host: "unknown",
+      print: "cat.png",
+      printHost: "unknown",
+    };
+    const wrapper = await mounted();
+    expect(wrapper.find('[data-test="lightbox"]').exists()).toBe(false);
+    expect(
+      wrapper.get('[data-test="library-link-unavailable"]').text(),
+    ).toContain("linked machine");
+    expect(hostGalleryMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: "unknown" }),
+    );
+    wrapper.unmount();
+  });
+
+  it("opening a print creates a history entry retaining its current view", async () => {
+    routeState.query = { q: "cat" };
+    const wrapper = await mounted();
+    await wrapper.get('[data-test="grid-open"]').trigger("click");
+    expect(pushMock).toHaveBeenCalledWith({
+      query: { q: "cat", print: "cat.png", printHost: "origin" },
+    });
+    wrapper.unmount();
+  });
+
   it("narrows the grid as the user searches", async () => {
     const wrapper = await mounted();
     await wrapper.find("[data-test='gallery-search']").setValue("dog");
@@ -487,6 +591,27 @@ describe("LibraryPage", () => {
     await flushPromises();
     expect(wrapper.find("[data-test='grid-count']").text()).toBe("2");
   });
+
+  it.each(["audio", "mesh"])(
+    "restores the %s URL filter and resets it on browser Back",
+    async (type) => {
+      routeState.query = { type };
+      const wrapper = await mounted();
+      const group = wrapper.get('[data-test="gallery-filter"]');
+      expect(group.find('[aria-checked="true"]').text()).toBe(
+        type === "audio" ? "Audio" : "3D",
+      );
+      reactive(routeState).query = {};
+      await flushPromises();
+      expect(group.find('[aria-checked="true"]').text()).toBe("All");
+      await group
+        .findAll("button")
+        .find((button) => button.text() === "Video")!
+        .trigger("click");
+      expect(pushMock).toHaveBeenCalledWith({ query: { type: "video" } });
+      wrapper.unmount();
+    },
+  );
 
   it("shows the video-empty prompt when filtering video with none present", async () => {
     const wrapper = await mounted();
@@ -777,6 +902,7 @@ describe("LibraryPage multi-host identity", () => {
     hostGalleryMock.mockReset().mockResolvedValue([]);
     for (const fn of Object.values(orgApi)) fn.mockClear();
     fetchBlobMock.mockReset().mockResolvedValue(new Blob(["bytes"]));
+    routeState.query = {};
     pushMock.mockReset();
     replaceMock.mockReset();
     vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);
@@ -913,6 +1039,14 @@ describe("LibraryPage multi-host identity", () => {
       expect.objectContaining({ id: "archive-7680" }),
       "oldest.png",
     );
+    // Deleting the last print on this machine must not silently show another
+    // machine's media. Explicitly return to All to inspect the surviving copy.
+    expect(wrapper.find("[data-test='grid-keys']").exists()).toBe(false);
+    const allHosts = wrapper
+      .findAll("[data-test='gallery-host-filter']")
+      .find((button) => button.text().includes("All"));
+    await allHosts!.trigger("click");
+    await flushPromises();
     expect(wrapper.find("[data-test='grid-keys']").text()).toBe(
       "archive-7680|oldest.png",
     );

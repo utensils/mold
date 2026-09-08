@@ -206,6 +206,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .access-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 .access-card {

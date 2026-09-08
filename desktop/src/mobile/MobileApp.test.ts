@@ -5682,6 +5682,21 @@ describe("MobileApp generation queue", () => {
    * phone holds Develop with the bounds named, the way it holds a bad steps
    * value, instead of spending a round trip to learn them.
    */
+  it("uses the advertised mesh prompt rule for both visibility and submission", async () => {
+    serveMeshModel();
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const form = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    form.prompt = "";
+    form.sourceImage = PNG_1170x2532;
+    form.sourceImageName = "armchair.png";
+    await flushPromises();
+    expect(wrapper.get("#mobile-prompt").isVisible()).toBe(false);
+    expect(
+      wrapper.get("[data-test='mobile-develop-button']").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
   it("holds Develop while Target faces is outside the recipe's bounds", async () => {
     serveMeshModel();
     wrapper = mountMobileApp();
@@ -7667,19 +7682,22 @@ describe("MobileApp primary navigation", () => {
     expect(content.scrollTop).toBe(180);
   });
 
-  it("swipes left and right through the five major destinations", async () => {
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    await swipeMobileContent(280, 100);
-    expect(wrapper.get("[data-test='mobile-tab-queue']").attributes("aria-current")).toBe("page");
-    await swipeMobileContent(280, 100);
-    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
-    await swipeMobileContent(280, 100);
-    expect(wrapper.get("[data-test='mobile-tab-catalog']").attributes("aria-current")).toBe("page");
-    await swipeMobileContent(100, 280);
-    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
-  });
+  it.each(["generate", "queue", "gallery", "catalog", "hosts"])(
+    "does not navigate away from %s on horizontal swipes",
+    async (destination) => {
+      wrapper = mountMobileApp();
+      await flushPromises();
+      await wrapper.get(`[data-test='mobile-tab-${destination}']`).trigger("click");
+      await swipeMobileContent(280, 100);
+      expect(
+        wrapper.get(`[data-test='mobile-tab-${destination}']`).attributes("aria-current"),
+      ).toBe("page");
+      await swipeMobileContent(100, 280);
+      expect(
+        wrapper.get(`[data-test='mobile-tab-${destination}']`).attributes("aria-current"),
+      ).toBe("page");
+    },
+  );
 
   it.each(["hosts", "gallery"])("shows only Settings when opened from %s", async (destination) => {
     wrapper = mountMobileApp();
@@ -7709,7 +7727,7 @@ describe("MobileApp primary navigation", () => {
     );
   });
 
-  it("swipes right out of Machine Detail without stealing swipe-row gestures", async () => {
+  it("keeps Machine Detail open on horizontal swipes", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
@@ -7718,7 +7736,7 @@ describe("MobileApp primary navigation", () => {
     expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(true);
 
     await swipeMobileContent(90, 270);
-    expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-host-detail']").exists()).toBe(true);
     expect(wrapper.get("[data-test='mobile-tab-hosts']").attributes("aria-current")).toBe("page");
   });
 

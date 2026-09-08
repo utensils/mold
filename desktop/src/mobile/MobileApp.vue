@@ -453,7 +453,7 @@ import {
   type OutputKind,
 } from "@studio/lib/outputKind";
 import MobileNavigation from "./MobileNavigation.vue";
-import { MOBILE_TABS, type MobileTab } from "./navigation";
+import { type MobileTab } from "./navigation";
 import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileStyleChips from "./MobileStyleChips.vue";
 import MobileTemplates from "./MobileTemplates.vue";
@@ -1049,12 +1049,6 @@ const VIEW_PULL_MAX = 112;
 let viewPullTouchId: number | null = null;
 let viewPullStartX = 0;
 let viewPullStartY = 0;
-const MAJOR_TABS: readonly Tab[] = MOBILE_TABS.map((item) => item.id);
-const MAJOR_SWIPE_DISTANCE = 64;
-const MAJOR_SWIPE_INTENT_RATIO = 1.2;
-let majorSwipeTouchId: number | null = null;
-let majorSwipeStartX = 0;
-let majorSwipeStartY = 0;
 const gallerySelectMode = ref(false);
 let nativeGalleryContextKey: string | null = null;
 const gallerySelection = ref<Set<string>>(new Set());
@@ -11012,104 +11006,20 @@ function cancelViewPull(): void {
   viewPullDistance.value = 0;
 }
 
-function horizontalScrollOwnsGesture(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false;
-  if (
-    target.closest(
-      "input, textarea, select, video, audio, [contenteditable='true'], [role='dialog'], .swipe-row, .live-activity-row--has-actions, .mobile-library-sheet, .mobile-catalog-detail, .mobile-catalog-target-sheet",
-    )
-  )
-    return true;
-  let element: Element | null = target;
-  while (element && element !== mobileContent.value) {
-    const style = getComputedStyle(element);
-    if (
-      (style.overflowX === "auto" || style.overflowX === "scroll") &&
-      element.scrollWidth > element.clientWidth
-    )
-      return true;
-    element = element.parentElement;
-  }
-  return false;
-}
-
-function beginMajorSwipe(event: TouchEvent): void {
-  if (
-    pairingScannerOpen.value ||
-    gallerySelectMode.value ||
-    event.touches.length !== 1 ||
-    horizontalScrollOwnsGesture(event.target)
-  ) {
-    majorSwipeTouchId = null;
-    return;
-  }
-  const touch = event.touches[0];
-  if (!touch) return;
-  majorSwipeTouchId = touch.identifier;
-  majorSwipeStartX = touch.clientX;
-  majorSwipeStartY = touch.clientY;
-}
-
-function moveMajorSwipe(event: TouchEvent): void {
-  if (majorSwipeTouchId === null || event.touches.length !== 1) return;
-  const touch = [...event.touches].find((candidate) => candidate.identifier === majorSwipeTouchId);
-  if (!touch) return;
-  const deltaX = touch.clientX - majorSwipeStartX;
-  const deltaY = touch.clientY - majorSwipeStartY;
-  if (Math.abs(deltaX) > 12 && Math.abs(deltaX) >= Math.abs(deltaY) * MAJOR_SWIPE_INTENT_RATIO)
-    event.preventDefault();
-}
-
-function finishMajorSwipe(event: TouchEvent): void {
-  if (majorSwipeTouchId === null) return;
-  const touch = [...(event.changedTouches ?? [])].find(
-    (candidate) => candidate.identifier === majorSwipeTouchId,
-  );
-  majorSwipeTouchId = null;
-  if (!touch) return;
-  const deltaX = touch.clientX - majorSwipeStartX;
-  const deltaY = touch.clientY - majorSwipeStartY;
-  if (
-    Math.abs(deltaX) < MAJOR_SWIPE_DISTANCE ||
-    Math.abs(deltaX) < Math.abs(deltaY) * MAJOR_SWIPE_INTENT_RATIO
-  )
-    return;
-
-  if (settingsOpen.value) {
-    if (deltaX > 0) closeSettings();
-    return;
-  }
-  if (deltaX > 0 && tab.value === "hosts" && hostDetail.value) {
-    closeHostDetail();
-    return;
-  }
-  const current = MAJOR_TABS.indexOf(tab.value);
-  const next = current + (deltaX < 0 ? 1 : -1);
-  if (next >= 0 && next < MAJOR_TABS.length) tab.value = MAJOR_TABS[next]!;
-}
-
-function cancelMajorSwipe(): void {
-  majorSwipeTouchId = null;
-}
-
 function beginMobileTouch(event: TouchEvent): void {
   beginViewPull(event);
-  beginMajorSwipe(event);
 }
 
 function moveMobileTouch(event: TouchEvent): void {
   moveViewPull(event);
-  moveMajorSwipe(event);
 }
 
-function finishMobileTouch(event: TouchEvent): void {
+function finishMobileTouch(): void {
   finishViewPull();
-  finishMajorSwipe(event);
 }
 
 function cancelMobileTouch(): void {
   cancelViewPull();
-  cancelMajorSwipe();
 }
 
 function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement {

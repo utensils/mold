@@ -209,33 +209,40 @@ function openContextMenu(event: MouseEvent) {
 
 .hc__head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
 }
 
 .hc__name {
-  font-size: 14.5px;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  font-size: 0.90625rem;
   font-weight: 600;
 }
 
 .hc__gpu {
+  min-width: 0;
+  overflow-wrap: anywhere;
   margin-top: 6px;
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 0.875rem;
   color: var(--ink-3);
 }
 
 .hc__row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   margin: 14px 0 6px;
   font-family: var(--f-mono);
-  font-size: 11px;
+  font-size: 0.875rem;
   color: var(--ink-3);
 }
 
 .hc__offline {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
@@ -244,7 +251,7 @@ function openContextMenu(event: MouseEvent) {
 
 .hc__offline-text {
   font-family: var(--f-mono);
-  font-size: 11px;
+  font-size: 0.875rem;
   color: var(--ink-3);
 }
 
@@ -258,8 +265,9 @@ function openContextMenu(event: MouseEvent) {
   background: transparent;
   color: var(--ink-2);
   padding: 6px 13px;
+  min-height: 44px;
   border-radius: 8px;
-  font-size: 12px;
+  font-size: 0.875rem;
   font-weight: 600;
   cursor: pointer;
 }

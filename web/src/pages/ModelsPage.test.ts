@@ -234,6 +234,37 @@ describe("ModelsPage — Models workspace", () => {
     expect(w.findAllComponents(InstalledModelRow)).toHaveLength(1);
   });
 
+  it("searches friendly names and descriptions while retaining exact model identity", async () => {
+    const model = makeModel({
+      name: "cv:123",
+      display_name: "Paper cutouts",
+      description: "Layered craft illustration",
+    });
+    mock.installed.value = [model];
+    const w = mountPage();
+    for (const query of ["paper", "craft", "cv:123"]) {
+      await w.get('[data-test="installed-search"]').setValue(query);
+      expect(w.findAllComponents(InstalledModelRow)).toHaveLength(1);
+    }
+    await w.get('[data-test="installed-row"]').trigger("click");
+    expect(mock.openInstalledDetail).toHaveBeenCalledWith(model);
+  });
+
+  it("shows retry instead of a false empty state when installed styles cannot load", async () => {
+    mock.installedError.value = "Machine unavailable";
+    const w = mountPage();
+    expect(w.get('[data-test="installed-error"]').text()).toContain(
+      "Machine unavailable",
+    );
+    expect(w.find('[data-test="installed-empty"]').exists()).toBe(false);
+    await w.get('[data-test="installed-error"] button').trigger("click");
+    expect(mock.refreshInstalled).toHaveBeenCalledTimes(2);
+    mock.installed.value = [makeModel()];
+    await flushPromises();
+    expect(w.findAllComponents(InstalledModelRow)).toHaveLength(1);
+    expect(w.find('[data-test="installed-error"]').exists()).toBe(true);
+  });
+
   it("shows the nothing-installed empty state with a Discover CTA", async () => {
     mock.installed.value = [];
     const w = mountPage();
@@ -249,7 +280,7 @@ describe("ModelsPage — Models workspace", () => {
     expect(w.find("[data-test=installed-tab]").exists()).toBe(false);
   });
 
-  it("opens sequence discovery on the Discover tab with video checkpoints filtered", () => {
+  it("keeps old sequence links as ordinary video discovery without retired guidance", () => {
     routeQuery.value = {
       tab: "discover",
       type: "video",
@@ -263,8 +294,6 @@ describe("ModelsPage — Models workspace", () => {
       modality: "video",
       kind: "checkpoint",
     });
-    expect(w.get("[data-test='sequence-model-guide']").text()).toContain(
-      "sequence",
-    );
+    expect(w.find("[data-test='sequence-model-guide']").exists()).toBe(false);
   });
 });

@@ -73,9 +73,10 @@ const installedQuery = ref("");
 const filteredInstalled = computed(() => {
   const q = installedQuery.value.trim().toLowerCase();
   if (!q) return cat.installed.value;
-  return cat.installed.value.filter(
-    (m) =>
-      m.name.toLowerCase().includes(q) || m.family.toLowerCase().includes(q),
+  return cat.installed.value.filter((m) =>
+    [modelDisplayName(m), m.name, m.family, m.description ?? ""].some((value) =>
+      value.toLowerCase().includes(q),
+    ),
   );
 });
 
@@ -119,7 +120,7 @@ onMounted(() => {
         data-test="models-tabs"
         :model-value="cat.tab.value"
         :options="tabOptions"
-        label="Models view"
+        label="Styles view"
         @update:model-value="cat.setTab"
       />
     </header>
@@ -132,12 +133,33 @@ onMounted(() => {
           v-model="installedQuery"
           type="search"
           class="search__input"
-          placeholder="Search installed…"
+          placeholder="Search installed styles…"
+          aria-label="Search installed styles"
           autocomplete="off"
           spellcheck="false"
           data-test="installed-search"
         />
       </label>
+
+      <div
+        v-if="cat.installedError.value"
+        class="installed-error"
+        role="alert"
+        data-test="installed-error"
+      >
+        <p>
+          Could not refresh styles on this server.
+          {{ cat.installedError.value }}
+        </p>
+        <button
+          type="button"
+          class="empty__cta"
+          :disabled="cat.installedLoading.value"
+          @click="cat.refreshInstalled()"
+        >
+          Try again
+        </button>
+      </div>
 
       <div
         v-if="cat.installedLoading.value && cat.installed.value.length === 0"
@@ -148,14 +170,16 @@ onMounted(() => {
       </div>
 
       <div
-        v-else-if="cat.installed.value.length === 0"
+        v-else-if="
+          cat.installed.value.length === 0 && !cat.installedError.value
+        "
         class="empty"
         data-test="installed-empty"
       >
         <EmptyStateBlock
           icon="models"
-          headline="Nothing installed — pull a model to start."
-          guidance="Browse the catalog to download your first model."
+          headline="No styles installed yet."
+          guidance="Browse styles to download one to this server."
         >
           <template #action>
             <button
@@ -164,21 +188,23 @@ onMounted(() => {
               data-test="discover-cta"
               @click="cat.setTab('discover')"
             >
-              Discover models
+              Browse styles
             </button>
           </template>
         </EmptyStateBlock>
       </div>
 
       <div
-        v-else-if="filteredInstalled.length === 0"
+        v-else-if="
+          filteredInstalled.length === 0 && cat.installed.value.length > 0
+        "
         class="empty"
         data-test="installed-no-match"
       >
         <EmptyStateBlock
           icon="search"
           headline="Nothing installed matches."
-          guidance="No installed model matches your search."
+          guidance="No installed style matches your search."
         >
           <template #action>
             <button
@@ -206,15 +232,6 @@ onMounted(() => {
 
     <!-- Discover -->
     <section v-else data-test="discover-tab">
-      <div
-        v-if="route.query.intent === 'sequence'"
-        data-test="sequence-model-guide"
-        class="mb-4 rounded-2xl border border-safelight/30 bg-safelight/10 px-4 py-3 text-sm text-ink-2"
-      >
-        <strong class="text-rebate">Choose a model for sequences.</strong>
-        Distilled LTX-2 checkpoints support smooth continuation between clips;
-        two-stage dev checkpoints currently render single videos only.
-      </div>
       <CatalogTopbar />
       <div class="discover">
         <CatalogSidebar class="discover__sidebar" />
@@ -240,6 +257,7 @@ onMounted(() => {
 .models__header {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 14px;
   margin-bottom: 18px;
 }
@@ -247,7 +265,7 @@ onMounted(() => {
 .models__title {
   margin: 0;
   font-family: var(--f-display);
-  font-size: 22px;
+  font-size: 2rem;
   font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--rebate);
@@ -279,7 +297,7 @@ onMounted(() => {
 
 .search__input {
   width: 100%;
-  height: 40px;
+  min-height: 44px;
   box-sizing: border-box;
   padding: 0 14px 0 36px;
   border: 1px solid var(--ce);
@@ -287,7 +305,7 @@ onMounted(() => {
   background: var(--bath);
   color: var(--rebate);
   font-family: var(--f-body);
-  font-size: 13px;
+  font-size: 1rem;
   outline: none;
 }
 
@@ -304,7 +322,7 @@ onMounted(() => {
 .state {
   padding: 48px 0;
   text-align: center;
-  font-size: 13px;
+  font-size: 1rem;
   color: var(--ink-3);
 }
 
@@ -319,7 +337,7 @@ onMounted(() => {
   padding: 9px 16px;
   border-radius: var(--radius-control);
   font-family: var(--f-body);
-  font-size: 12.5px;
+  font-size: 0.875rem;
   font-weight: 600;
   cursor: pointer;
   transition:
@@ -335,6 +353,18 @@ onMounted(() => {
 .empty__cta:focus-visible {
   outline: 2px solid var(--safelight);
   outline-offset: 2px;
+}
+
+.installed-error {
+  padding: 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--danger);
+  color: var(--ink-2);
+  background: var(--bath);
+  overflow-wrap: anywhere;
+}
+.installed-error p {
+  margin: 0 0 0.75rem;
 }
 
 /* ── Installed grid ───────────────────────────────────────────────── */

@@ -1,0 +1,3 @@
+- **Clearer mobile controls.** Shape and size is compact with a visible Change disclosure. Destination swipe navigation is removed while overlay and media gestures remain. Unavailable Color/PBR controls explain themselves from model capabilities, and older-server prompt validation matches capability presentation.
+- **Shareable Library views.** Filter and print links retain exact machine ownership, with keyboard-safe media actions and readable themes.
+- **Easier style discovery.** Search installed styles by friendly title or description, retry failed inventory reads, and read exact IDs beneath friendly names. Styles, Machines, Settings and pairing panels wrap at enlarged text sizes.

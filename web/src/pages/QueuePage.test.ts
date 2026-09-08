@@ -86,6 +86,42 @@ beforeEach(() => {
   takeLocalJobHandoff();
 });
 describe("Queue", () => {
+  it("does not offer ordinary queue Details for a local auto-chain", () => {
+    state.jobs = [
+      {
+        ...job("chain"),
+        chain: { stageCount: 2, currentStage: 0, estimatedTotalFrames: 194 },
+      } as Job,
+    ];
+    const wrapper = render();
+    expect(wrapper.find('[data-test="activity-queued-chain"]').exists()).toBe(
+      true,
+    );
+    expect(wrapper.text()).not.toContain("Details");
+  });
+  it("separates live, waiting, and stale work while keeping downloads out of generation sections", () => {
+    state.jobs = [job("waiting"), { ...job("making"), workStarted: true }];
+    state.rows = [
+      { ...row("stale", "other"), stale: true },
+      { ...row("download"), kind: "download" },
+    ];
+    const wrapper = render();
+    expect(wrapper.get('[data-test="queue-section-making"]').text()).toContain(
+      "Being made",
+    );
+    expect(wrapper.get('[data-test="queue-section-waiting"]').text()).toContain(
+      "Prompt waiting",
+    );
+    expect(
+      wrapper.get('[data-test="queue-section-attention"]').text(),
+    ).toContain("Last seen active");
+    expect(
+      wrapper
+        .find('[data-test="live-activity-select-box:generation:download"]')
+        .exists(),
+    ).toBe(false);
+  });
+
   it("renders every queued job and only restores one when explicitly opened", async () => {
     state.jobs = [job("one"), job("two"), job("three")];
     const wrapper = render();
