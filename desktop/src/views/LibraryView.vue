@@ -287,19 +287,49 @@ async function fetchItemBase64(entry: MergedPrint): Promise<string> {
   return readGalleryMediaBase64(entry, gallery);
 }
 
+const localSaveBusy = ref(false);
+const localSaveProgress = ref("");
 async function saveToThisMac(entry: MergedPrint) {
+  await saveSelectedLocally([entry]);
+}
+
+async function saveSelectedLocally(selection: MergedPrint[]) {
+  if (localSaveBusy.value) return;
+  const targets = selection.filter(canSaveLocally);
+  if (!targets.length) return;
+  localSaveBusy.value = true;
+  let saved = 0;
+  const failures: string[] = [];
   try {
-    // The origin row's metadata rides along so the local DB row matches the
-    // origin exactly — videos embed nothing in the file itself.
-    const saved = await ipc.saveOutputBytes(
-      entry.item.filename,
-      await fetchItemBase64(entry),
-      entry.item.metadata,
+    for (const [index, entry] of targets.entries()) {
+      localSaveProgress.value = `Saving ${index + 1} of ${targets.length}…`;
+      try {
+        await ipc.saveOutputBytes(
+          entry.item.filename,
+          await fetchItemBase64(entry),
+          entry.item.metadata,
+        );
+        saved++;
+      } catch (error) {
+        failures.push(
+          `${entry.item.filename}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (saved) await gallery.refreshHost("local");
+    const description =
+      failures[0] ??
+      (selection.length > targets.length
+        ? `${selection.length - targets.length} prints already local or unavailable for local saving.`
+        : "");
+    toasts.push(
+      `Saved locally ${saved} of ${targets.length} prints`,
+      failures.length ? "error" : "info",
+      description ? { description } : {},
     );
-    toasts.push(`Saved locally — ${saved}`);
-    void gallery.refreshHost("local");
-  } catch (err) {
-    toasts.push(err instanceof Error ? err.message : String(err), "error");
+  } finally {
+    localSaveBusy.value = false;
+    localSaveProgress.value = "";
   }
 }
 
@@ -1148,7 +1178,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
   const favorite = isFavorite(entry);
   const trashable = entryTrashCapable(entry);
   if (selectedForBulk) {
-    const targets = selectedEntries.value;
+    const targets = [...selectedEntries.value];
     const allFavourite = targets.every(isFavorite);
     const allOrganizable = targets.every(canOrganizeEntry);
     const allTrashable = targets.every(entryTrashCapable);
@@ -1175,6 +1205,16 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
             { separator: true } as MenuEntry,
           ]
         : []),
+      {
+        label: localSaveProgress.value || `Save ${targets.filter(canSaveLocally).length} locally`,
+        disabled: localSaveBusy.value || !targets.some(canSaveLocally),
+        action: () => void saveSelectedLocally(targets),
+      },
+      {
+        label: exportBusy.value ? "Exporting…" : `Export ${bulkCount} selected…`,
+        disabled: exportBusy.value,
+        action: () => void exportSelected(targets),
+      },
       {
         label: allTrashable
           ? `Move ${bulkCount} selected to trash`
@@ -2791,6 +2831,10 @@ onUnmounted(() => {
       :confirming="confirmingBulkDelete"
       :busy="bulkDeleting || organizeBusy"
       :exporting="exportBusy"
+      :local-save="inTauri()"
+      :local-save-count="selectedEntries.filter(canSaveLocally).length"
+      :saving-locally="localSaveBusy"
+      :local-save-progress="localSaveProgress"
       :collections="gallery.mergedCollections"
       :collection-selected="selectionOrganization.collectionsAll"
       :collection-mixed="selectionOrganization.collectionsSome"
@@ -2803,7 +2847,8 @@ onUnmounted(() => {
       @select-all="selectAllInFilter"
       @clear="clearBulkSelection"
       @exit="setSelectMode(false)"
-      @export="exportSelected(selectedEntries)"
+      @export="exportSelected([...selectedEntries])"
+      @save-locally="saveSelectedLocally([...selectedEntries])"
       @favorite="(value) => setFavorite(selectedEntries, value)"
       @trash="deleteSelectedPrints"
       @update:confirming="confirmingBulkDelete = $event"

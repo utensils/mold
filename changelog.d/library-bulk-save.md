@@ -1,0 +1,1 @@
+- Add bulk local saving to desktop and mobile Library selections and bulk downloads to web, with progress and partial-failure reporting. Desktop skips existing local copies and exposes save/export in the selection context menu; web also exposes removal from the current collection.

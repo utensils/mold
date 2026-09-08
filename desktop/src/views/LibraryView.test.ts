@@ -8,6 +8,7 @@ const { apiFetchTo, localGalleryDelete, localGalleryList } = vi.hoisted(() => ({
   localGalleryDelete: vi.fn().mockResolvedValue(undefined),
   localGalleryList: vi.fn(),
 }));
+const nativeSave = vi.hoisted(() => ({ enabled: false, save: vi.fn() }));
 const retainedInventoryMock = vi.hoisted(() => vi.fn());
 vi.mock("@studio/api/gallerySourceMedia", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@studio/api/gallerySourceMedia")>();
@@ -54,12 +55,12 @@ vi.mock("../lib/api/client", () => ({
   currentTarget: () => ({ baseUrl: "http://x", apiKey: null }),
 }));
 vi.mock("../lib/ipc", () => ({
-  inTauri: () => false,
+  inTauri: () => nativeSave.enabled,
   ipc: {
     localGalleryDelete,
     localGalleryList,
     revealOutputFile: vi.fn(),
-    saveOutputBytes: vi.fn(),
+    saveOutputBytes: nativeSave.save,
   },
 }));
 
@@ -183,6 +184,8 @@ async function mountView(
 }
 
 beforeEach(() => {
+  nativeSave.enabled = false;
+  nativeSave.save.mockReset();
   clearSessionScrollForTests();
   vi.clearAllMocks();
   localStorage.clear();
@@ -1339,6 +1342,35 @@ describe("scope counts and Escape in a text field", () => {
     window.dispatchEvent(handled);
     await flushPromises();
     expect(wrapper.findComponent({ name: "Lightbox" }).exists()).toBe(true);
+    wrapper.unmount();
+  });
+});
+
+describe("Library bulk local saving", () => {
+  it("skips local prints, retains source metadata, and continues after failure", async () => {
+    const remote = { ...prints[0]!, filename: "remote.png" };
+    const { wrapper, gallery } = await mountView(remote, (store) => {
+      store.buckets["plato-7680"]!.items.push({ ...remote, filename: "second.mp4" });
+    });
+    nativeSave.enabled = true;
+    const refresh = vi.spyOn(gallery, "refreshHost").mockResolvedValue(undefined);
+    apiFetchTo.mockImplementation(async () => new Response(new Blob(["original"])));
+    nativeSave.save
+      .mockRejectedValueOnce(new Error("disk full"))
+      .mockResolvedValueOnce("saved.mp4");
+    window.dispatchEvent(new Event("mold:library-select-all"));
+    await flushPromises();
+    expect(wrapper.find("[data-test='bulk-save-locally']").exists()).toBe(true);
+    await wrapper.get("[data-test='bulk-save-locally']").trigger("click");
+    await flushPromises();
+    expect(nativeSave.save).toHaveBeenCalledTimes(2);
+    expect(nativeSave.save.mock.calls.map((args) => args[0]).sort()).toEqual([
+      "remote.png",
+      "second.mp4",
+    ]);
+    expect(nativeSave.save.mock.calls[0]![2]).toEqual(remote.metadata);
+    expect(refresh).toHaveBeenCalledWith("local");
+    expect(wrapper.get("[data-test='bulk-save-locally']").attributes("disabled")).toBeUndefined();
     wrapper.unmount();
   });
 });

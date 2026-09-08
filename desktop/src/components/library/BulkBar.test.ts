@@ -175,3 +175,19 @@ describe("BulkBar export progress", () => {
     expect(wrapper.get("[data-test='bulk-export']").text()).toBe("Export…");
   });
 });
+
+describe("bulk local saving", () => {
+  it("uses eligibility independently of the selection count and exposes progress", async () => {
+    const wrapper = mountBar({ localSave: true, localSaveCount: 2 });
+    await wrapper.get("[data-test='bulk-save-locally']").trigger("click");
+    expect(wrapper.emitted("saveLocally")).toHaveLength(1);
+    await wrapper.setProps({ savingLocally: true, localSaveProgress: "Saving 1 of 2…" });
+    expect(wrapper.get("[data-test='bulk-save-locally']").text()).toBe("Saving 1 of 2…");
+    expect(wrapper.get("[data-test='bulk-save-locally']").attributes("disabled")).toBeDefined();
+    await wrapper.setProps({ savingLocally: false, localSaveCount: 0 });
+    expect(wrapper.get("[data-test='bulk-save-locally']").attributes("disabled")).toBeDefined();
+    await wrapper.setProps({ scope: "trash", localSaveCount: 2 });
+    expect(wrapper.find("[data-test='bulk-save-locally']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+});

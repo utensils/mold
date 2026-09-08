@@ -41,6 +41,10 @@ const props = withDefaults(
     /** An export batch is running — the Export button says so and stands
      *  down. Separate from `busy` so it never borrows the delete wording. */
     exporting?: boolean;
+    localSave?: boolean;
+    localSaveCount?: number;
+    savingLocally?: boolean;
+    localSaveProgress?: string;
     collections?: readonly MergedCollection[];
     /** Slugs every selected print is in. */
     collectionSelected?: readonly string[];
@@ -64,6 +68,10 @@ const props = withDefaults(
     confirming: false,
     busy: false,
     exporting: false,
+    localSave: false,
+    localSaveCount: 0,
+    savingLocally: false,
+    localSaveProgress: "",
     collections: () => [],
     collectionSelected: () => [],
     collectionMixed: () => [],
@@ -81,6 +89,7 @@ const emit = defineEmits<{
   clear: [];
   exit: [];
   export: [];
+  saveLocally: [];
   favorite: [value: boolean];
   trash: [];
   /** Hard delete (non-trash hosts): first press arms, second deletes. */
@@ -296,6 +305,21 @@ defineExpose({ openCollections, openTags, closePopovers });
           Remove from album
         </button>
       </template>
+      <button
+        v-if="localSave"
+        type="button"
+        class="ms-bb"
+        :disabled="!localSaveCount || busy || savingLocally"
+        :title="
+          localSaveCount
+            ? `Save ${localSaveCount} remote prints to this device's Library`
+            : 'Selected prints are already local or cannot be saved locally'
+        "
+        data-test="bulk-save-locally"
+        @click="emit('saveLocally')"
+      >
+        {{ savingLocally ? localSaveProgress || "Saving…" : "Save locally" }}
+      </button>
       <button
         type="button"
         class="ms-bb"

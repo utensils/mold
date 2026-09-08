@@ -9,6 +9,12 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent } from "vue";
 import { createPinia, setActivePinia } from "pinia";
+import { fetchGalleryBlob } from "../lib/galleryMedia";
+import { downloadVideoExport } from "@studio/lib/videoExport";
+vi.mock("@studio/lib/videoExport", async (original) => ({
+  ...(await original<typeof import("@studio/lib/videoExport")>()),
+  downloadVideoExport: vi.fn(),
+}));
 import LibraryPage from "./LibraryPage.vue";
 import {
   requestConfirm,
@@ -642,6 +648,28 @@ describe("Trash-aware deletes in Prints", () => {
     expect(wrapper.get("[data-test='grid-names']").text()).toBe(
       "old.png,smurf.png",
     );
+  });
+
+  it("downloads a frozen selection and continues after a failed print", async () => {
+    const wrapper = mountPage();
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-select']").trigger("click");
+    await wrapper.get("[data-test='grid-select-first']").trigger("click");
+    await wrapper.get("[data-test='grid-select-second']").trigger("click");
+    vi.mocked(fetchGalleryBlob)
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(new Blob(["original"]));
+    await wrapper.get("[data-test='bulk-download']").trigger("click");
+    await flushPromises();
+    expect(fetchGalleryBlob).toHaveBeenCalledTimes(2);
+    expect(downloadVideoExport).toHaveBeenCalledTimes(1);
+    expect(
+      wrapper.get("[data-test='bulk-download']").attributes("disabled"),
+    ).toBeUndefined();
+    expect(JSON.stringify(useNotifications().toasts)).toContain(
+      "Started 1 of 2 downloads",
+    );
+    wrapper.unmount();
   });
 
   it("bulk Trash is undoable and commits through the bulk trash route", async () => {
