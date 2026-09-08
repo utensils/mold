@@ -392,8 +392,8 @@ describe("output format gate", () => {
   it("accepts the canvasless GLB contract a 3-D family advertises", () => {
     // `OUTPUT_FORMATS` is a runtime GATE, not a type: a missing format makes
     // `isOutputCapabilities` reject the whole profile, and the model then
-    // renders with the legacy raster fallback — canvas controls and PNG
-    // output — instead of the contract the server actually sent. Nothing
+    // loses the advertised mesh controls to the conservative legacy
+    // fallback instead of using the contract the server sent. Nothing
     // fails loudly, which is why this is asserted rather than reviewed.
     const model = profileModel();
     const set = model.generation_profile as GenerationProfileSet;
@@ -687,6 +687,26 @@ describe("prompt, strength, and mesh contract", () => {
     expect(legacy("flux", "flux-dev:q8")?.capabilities.mesh).toBeUndefined();
     expect(legacy("flux", "flux-dev:q8")?.legacy_adapter).toBe(true);
   });
+});
+
+describe("mesh profile fallback", () => {
+  it.each([undefined, { schema_version: 999 }])(
+    "never invents a canvas for an unavailable profile (%j)",
+    (generation_profile) => {
+      const recipe = effectiveGenerationRecipe({
+        name: "hunyuan3d-2.1:fp16",
+        family: "hunyuan3d",
+        default_width: 1024,
+        default_height: 1024,
+        generation_profile,
+      } as GenerationProfileModel);
+      expect(recipe?.legacy_adapter).toBe(true);
+      expect(recipeIsCanvasless(recipe)).toBe(true);
+      expect(recipe?.defaults).toMatchObject({ width: 0, height: 0 });
+      expect(recipe?.resolution.aspect_groups).toEqual([]);
+      expect(recipe?.capabilities.mesh).toBeUndefined();
+    },
+  );
 });
 
 describe("recipeIsCanvasless", () => {

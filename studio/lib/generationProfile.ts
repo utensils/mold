@@ -19,6 +19,7 @@ import type {
   WanRecipeCapabilitiesProfile,
 } from "./generated/generationProfileV1";
 import {
+  isMeshFamily,
   legacyPromptRequirementForFamily,
   legacySupportsStrength,
 } from "./legacyRecipeRules";
@@ -708,6 +709,7 @@ function legacyRecipe(
   pipeline?: string | null,
 ): GenerationRecipeProfile {
   const family = model.family.trim().toLowerCase();
+  const canvasless = isMeshFamily(family);
   const alignment = positiveInteger(model.dimension_alignment, 16);
   const refining =
     family === "ltx2" &&
@@ -782,8 +784,12 @@ function legacyRecipe(
     label: "Default",
     request_selector: {},
     defaults: {
-      width: positiveInteger(model.default_width, Math.max(64, alignment)),
-      height: positiveInteger(model.default_height, Math.max(64, alignment)),
+      width: canvasless
+        ? 0
+        : positiveInteger(model.default_width, Math.max(64, alignment)),
+      height: canvasless
+        ? 0
+        : positiveInteger(model.default_height, Math.max(64, alignment)),
       steps: positiveInteger(model.default_steps, 20),
       guidance: Number.isFinite(model.default_guidance)
         ? Number(model.default_guidance)
@@ -793,15 +799,24 @@ function legacyRecipe(
         : {}),
       ...(model.default_fps !== undefined ? { fps: model.default_fps } : {}),
     },
-    resolution: {
-      domain: "dynamic",
-      alignment,
-      min_width: Math.max(64, alignment),
-      min_height: Math.max(64, alignment),
-      max_pixels: maxPixels,
-      max_axis_pixels: maxAxisPixels,
-      aspect_groups: aspectGroups,
-    },
+    resolution: canvasless
+      ? {
+          domain: "none",
+          alignment: 1,
+          min_width: 0,
+          min_height: 0,
+          max_pixels: 0,
+          aspect_groups: [],
+        }
+      : {
+          domain: "dynamic",
+          alignment,
+          min_width: Math.max(64, alignment),
+          min_height: Math.max(64, alignment),
+          max_pixels: maxPixels,
+          max_axis_pixels: maxAxisPixels,
+          aspect_groups: aspectGroups,
+        },
     steps: {
       default: positiveInteger(model.default_steps, 20),
       min: 1,
@@ -842,12 +857,14 @@ function legacyRecipe(
       lora: { mode: "hidden", max_count: 0 },
       controlnet: { mode: "hidden", max_count: 0 },
       output: {
-        default_format:
-          family === "ltx2" || family === "ltx-video" || family === "wan"
+        default_format: canvasless
+          ? "glb"
+          : family === "ltx2" || family === "ltx-video" || family === "wan"
             ? "mp4"
             : "png",
-        formats:
-          family === "ltx2" || family === "ltx-video" || family === "wan"
+        formats: canvasless
+          ? ["glb"]
+          : family === "ltx2" || family === "ltx-video" || family === "wan"
             ? ["mp4", "gif", "apng", "webp"]
             : ["png", "jpeg", "webp"],
         audio_requires_mp4: family === "ltx2",
@@ -864,7 +881,8 @@ function legacyRecipe(
       // that resolves through the recipe gets the same answer it would have
       // computed from the family. `legacy_adapter` still marks this object
       // as the client talking, for callers that must tell a host's answer
-      // from a fallback. No legacy host has a mesh family.
+      // from a fallback. An absent or rejected mesh profile still has no
+      // pixel canvas; optional mesh features remain unadvertised.
       prompt: { mode: legacyPromptRequirementForFamily(family) },
       supports_strength: legacySupportsStrength(family, model.name ?? ""),
     },

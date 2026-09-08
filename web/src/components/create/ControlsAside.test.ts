@@ -53,6 +53,29 @@ function factory(overrides: Partial<GenerateFormState> = {}, family = "flux") {
 }
 
 describe("ControlsAside", () => {
+  it("hides raster controls when a mesh model has no usable profile", () => {
+    const wrapper = mount(ControlsAside, {
+      props: {
+        family: "hunyuan3d",
+        advCount: 0,
+        modelValue: baseForm({
+          model: "hunyuan3d-2.1:fp16",
+          width: 1024,
+          height: 1024,
+        }),
+        model: {
+          name: "hunyuan3d-2.1:fp16",
+          family: "hunyuan3d",
+          default_width: 1024,
+          default_height: 1024,
+        } as ModelInfoExtended,
+      },
+    });
+    expect(wrapper.findComponent(ShapePicker).exists()).toBe(false);
+    expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   beforeEach(() => {
     setActivePinia(createPinia());
     localStorage.clear();
