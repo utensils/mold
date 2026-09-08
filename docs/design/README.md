@@ -14,8 +14,9 @@ and the shipped shared components are authoritative where a mock differs.
 - **`mold-studio-style-guide.dc.html`** — principles, the binding lexicon, the
   theme token map, shell anatomy, the component table, and the contrast rules.
 - **`mold-studio-web.dc.html`**, **`mold-studio-iphone.dc.html`** — the web
-  and phone mocks. Those surfaces still ship on the pre-redesign look through
-  the legacy bridge in `ui/tokens.css`; these are what they move to.
+  and phone references. iOS was accepted complete after #1639; Android shares
+  those redesigned screens. Web presentation and Android platform acceptance
+  continue in [the web/Android completion plan](web-android-redesign-plan.md).
 - **`mold-tokens.css`** — the token vocabulary the mocks are written in.
   `ui/tokens.css` is the shipped copy, with one complete map per theme.
 - **`mold-desktop.css`** — shell metrics, control heights, semantic surface
@@ -57,7 +58,7 @@ Rule: **plain words in sans, technical truth in mono, on the same row.**
 | Connect a machine · Rent a GPU · billing begins now      | Add host, Provision pod                 | Machines             |
 | My images · albums · Favourites · Everything             | Library, collections, gallery, Prints   | Nav, My images       |
 | Ready to use \| Browse more · Get it · ● ready           | Installed \| Discover, Pull, installed  | Styles               |
-| Short clip · Length · Smoothness                          | Sequence, clips, frames, fps, timeline  | Clip toolbar         |
+| Short clip · Length · Smoothness                         | Sequence, clips, frames, fps, timeline  | Clip toolbar         |
 
 Voice markers carried over from the CLI: terse, second person, directive.
 Units stay tight and mono (`14.9 / 24 GB`, `eta 8m12s`, `$1.44/hr`).
@@ -228,8 +229,8 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
   selects each theme map on any element, not only `:root`, so the Look picker
   can show a theme's own surfaces without repeating a hex in TypeScript. That
   band is the only themed island the app is allowed.
-- **Smoothness rides the Clip card.** The lexicon row is `Short clip · Length ·
-  Smoothness`, so a clip's frame rate sits beside the length it pairs with.
+- **Smoothness rides the Clip card.** The lexicon row is `Short clip · Length · Smoothness`,
+  so a clip's frame rate sits beside the length it pairs with.
   Advanced ▸ Video keeps the raw fps field; the card is the one people reach
   for, and the two must never disagree.
 - **The bulk Delete says "Move N pictures to trash".** The lexicon's noun for a

@@ -5124,7 +5124,7 @@ button:disabled {
   overflow: hidden;
   border-radius: var(--mold-radius-2);
   background: var(--mold-media-bed);
-  color: var(--mold-text-dim);
+  color: var(--mold-on-media);
   font-size: 1.25rem;
 }
 
@@ -5513,6 +5513,26 @@ button:disabled {
   max-height: 34svh;
   object-fit: contain;
   width: 100%;
+}
+.mobile-make-result .mobile-result-actions,
+.mobile-make-result .result-mesh figcaption {
+  background: var(--mold-bg-deep);
+  color: var(--mold-text);
+}
+.mobile-make-result .mobile-result-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--mold-border-control);
+  border-radius: 0;
+  padding: 12px;
+  text-align: center;
+}
+.mobile-make-result .result-mesh figcaption {
+  margin: 0;
+  padding: 10px 12px;
 }
 .mobile-organize,
 .mobile-prompt-modifiers {
