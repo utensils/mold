@@ -1,4 +1,4 @@
-import { flushPromises, mount } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ConnectModal from "./ConnectModal.vue";
 import { listStoredHosts } from "../../lib/hostRegistry";
@@ -31,6 +31,8 @@ async function advanceToDetails(w: ReturnType<typeof mountModal>) {
   await w.get('[data-test="connect-continue"]').trigger("click");
 }
 
+enableAutoUnmount(afterEach);
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -51,7 +53,9 @@ describe("ConnectModal", () => {
     expect(w.find('[data-test="type-remote"]').exists()).toBe(true);
     const lan = w.get('[data-test="type-lan"]');
     expect((lan.element as HTMLButtonElement).disabled).toBe(true);
-    expect(lan.text()).toContain("Browsers can't discover LAN hosts");
+    expect(lan.text()).toContain(
+      "This server does not advertise network discovery",
+    );
     expect(hostDiscoveryPeers).not.toHaveBeenCalled();
   });
 
@@ -317,5 +321,156 @@ describe("ConnectModal", () => {
     await flushPromises();
     expect(w.find('[data-test="connect-error"]').exists()).toBe(true);
     expect(hostStatus).not.toHaveBeenCalled();
+  });
+  it.each(["back", "close", "unmount"])(
+    "refuses a late successful probe after %s",
+    async (exit) => {
+      let finish!: (value: HostStatus) => void;
+      hostStatus.mockReturnValue(
+        new Promise<HostStatus>((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const w = mountModal();
+      await advanceToDetails(w);
+      await w
+        .get('[data-test="connect-address"]')
+        .setValue("192.168.1.20:7680");
+      await w.get('[data-test="connect-submit"]').trigger("click");
+      if (exit === "back")
+        await w.get('[data-test="connect-back"]').trigger("click");
+      else if (exit === "close") await w.setProps({ open: false });
+      else w.unmount();
+      finish(okStatus());
+      await flushPromises();
+      expect(listStoredHosts()).toEqual([]);
+      expect(w.emitted("added")).toBeUndefined();
+    },
+  );
+
+  it("rejects duplicate Enter submissions and saves exactly the tested key", async () => {
+    let finish!: (value: HostStatus) => void;
+    hostStatus.mockReturnValue(
+      new Promise<HostStatus>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const w = mountModal();
+    await advanceToDetails(w);
+    await w.get('[data-test="connect-address"]').setValue("192.168.1.20:7680");
+    const key = w.get('[data-test="connect-key"]');
+    await key.setValue("tested-key");
+    await key.trigger("keydown", { key: "Enter" });
+    await key.trigger("keydown", { key: "Enter" });
+    expect(hostStatus).toHaveBeenCalledTimes(1);
+    expect(key.attributes("disabled")).toBeDefined();
+    // A programmatic edit must not change the credentials committed by this probe.
+    await key.setValue("changed-key");
+    finish(okStatus());
+    await flushPromises();
+    expect(listStoredHosts()[0]?.apiKey).toBe("tested-key");
+  });
+
+  it("does not repopulate or restart discovery after Back", async () => {
+    vi.useFakeTimers();
+    hostCapabilities.mockResolvedValue({ discovery: { can_browse: true } });
+    let finish!: (value: unknown[]) => void;
+    hostDiscoveryPeers.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const w = mountModal();
+    await flushPromises();
+    await w.get('[data-test="type-lan"]').trigger("click");
+    expect(w.find('[data-test="discovery-scanning"]').exists()).toBe(true);
+    expect(w.find('[data-test="connect-done"]').exists()).toBe(false);
+    await w.get('[data-test="connect-back"]').trigger("click");
+    finish([]);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(hostDiscoveryPeers).toHaveBeenCalledTimes(1);
+    expect(w.find('[data-test="discovery-empty"]').exists()).toBe(false);
+  });
+
+  it("retains authentication errors when discovery refresh succeeds", async () => {
+    vi.useFakeTimers();
+    hostCapabilities.mockResolvedValue({ discovery: { can_browse: true } });
+    hostDiscoveryPeers.mockResolvedValue([
+      {
+        name: "Studio",
+        url: "http://studio:7680",
+        host: "studio",
+        port: 7680,
+        auth_required: true,
+        instance_id: "studio",
+        is_this_machine: false,
+      },
+    ]);
+    hostStatus.mockRejectedValue(new Error("GET /api/status failed: 401"));
+    const w = mountModal();
+    await flushPromises();
+    await w.get('[data-test="type-lan"]').trigger("click");
+    await flushPromises();
+    await w.get('[data-test="discovery-peer-connect"]').trigger("click");
+    await w.get('[data-test="discovery-key"]').setValue("wrong");
+    await w.get('[data-test="connect-submit"]').trigger("click");
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(w.get('[data-test="connect-error"]').text()).toContain(
+      "Authentication failed",
+    );
+  });
+  it("offers explicit discovery retry without presenting failure as empty", async () => {
+    hostCapabilities.mockResolvedValue({ discovery: { can_browse: true } });
+    hostDiscoveryPeers
+      .mockRejectedValueOnce(new Error("unreachable"))
+      .mockResolvedValue([]);
+    const w = mountModal();
+    await flushPromises();
+    await w.get('[data-test="type-lan"]').trigger("click");
+    await flushPromises();
+    expect(w.get('[data-test="discovery-error"]').text()).toContain(
+      "Couldn't scan",
+    );
+    expect(w.find('[data-test="discovery-empty"]').exists()).toBe(false);
+    await w.get('[data-test="discovery-retry"]').trigger("click");
+    await flushPromises();
+    expect(w.find('[data-test="discovery-error"]').exists()).toBe(false);
+    expect(w.find('[data-test="discovery-empty"]').exists()).toBe(true);
+    expect(w.find('[data-test="connect-done"]').exists()).toBe(false);
+  });
+
+  it("keeps a newer probe busy when an obsolete probe completes", async () => {
+    let finishOld!: (value: HostStatus) => void;
+    let finishNew!: (value: HostStatus) => void;
+    hostStatus
+      .mockReturnValueOnce(
+        new Promise<HostStatus>((resolve) => {
+          finishOld = resolve;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise<HostStatus>((resolve) => {
+          finishNew = resolve;
+        }),
+      );
+    const w = mountModal();
+    await advanceToDetails(w);
+    await w.get('[data-test="connect-address"]').setValue("old.test");
+    await w.get('[data-test="connect-submit"]').trigger("click");
+    await w.get('[data-test="connect-back"]').trigger("click");
+    await advanceToDetails(w);
+    await w.get('[data-test="connect-address"]').setValue("new.test");
+    await w.get('[data-test="connect-submit"]').trigger("click");
+    finishOld(okStatus());
+    await flushPromises();
+    expect(
+      w.get('[data-test="connect-submit"]').attributes("disabled"),
+    ).toBeDefined();
+    expect(listStoredHosts()).toEqual([]);
+    finishNew(okStatus());
+    await flushPromises();
+    expect(listStoredHosts()[0]?.url).toBe("http://new.test:7680");
   });
 });
