@@ -384,7 +384,7 @@ describe("MobileResolutionPicker", () => {
         family: meshModel.family,
         model: {
           ...meshModel,
-          generation_profile: undefined,
+          generation_profile: null,
           default_width: 1024,
           default_height: 1024,
         },
