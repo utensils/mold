@@ -108,20 +108,11 @@ describe.each(ENTRIES)("$name pre-paint script", ({ path, key }) => {
         const saved =
           value === null
             ? { theme: "safelight-dark" as ThemeId, matchSystem: false }
-            : {
-                ...migrateLegacyTheme(
-                  record.theme,
-                  record.family ?? record.themeFamily,
-                ),
-                // migrateLegacyTheme cannot see a sibling flag; the script can.
-                matchSystem:
-                  record.matchSystem === true
-                    ? true
-                    : migrateLegacyTheme(
-                        record.theme,
-                        record.family ?? record.themeFamily,
-                      ).matchSystem,
-              };
+            : migrateLegacyTheme(
+                record.theme,
+                record.family ?? record.themeFamily,
+                record.matchSystem,
+              );
 
         expect(
           painted,

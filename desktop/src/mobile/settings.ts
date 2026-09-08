@@ -71,15 +71,15 @@ export function loadMobileSettings(
       string,
       unknown
     >;
-    // A pre-redesign file carries `theme: system|dark|light` + `themeFamily`;
-    // the shared table maps that pair onto a named theme.
+    // A pre-redesign file carries `theme: system|dark|light` + `themeFamily`,
+    // and a pre-tone one a single-word id; the shared table maps either onto a
+    // current theme AND keeps the `matchSystem` saved beside it.
     const migrated =
-      isThemeId(parsed.theme) || parsed.theme === undefined
+      parsed.theme === undefined
         ? null
-        : migrateLegacyTheme(parsed.theme, parsed.themeFamily);
+        : migrateLegacyTheme(parsed.theme, parsed.themeFamily, parsed.matchSystem);
     return {
-      theme:
-        migrated?.theme ?? (isThemeId(parsed.theme) ? parsed.theme : DEFAULT_MOBILE_SETTINGS.theme),
+      theme: migrated?.theme ?? DEFAULT_MOBILE_SETTINGS.theme,
       matchSystem:
         migrated?.matchSystem ??
         (typeof parsed.matchSystem === "boolean"

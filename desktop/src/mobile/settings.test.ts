@@ -147,6 +147,14 @@ describe("mobile settings persistence", () => {
     ).toBe(true);
   });
 
+  it("keeps Match phone on while renaming a pre-tone theme", () => {
+    const saved = loadMobileSettings(
+      memoryStorage(JSON.stringify({ theme: "porcelain", matchSystem: true })),
+    );
+    expect(saved.theme).toBe("graphite-light");
+    expect(saved.matchSystem).toBe(true);
+  });
+
   it("migrates an install saved before File under to tagging prints with their title", () => {
     // A pre-File-under blob has no `autoTagTitle` key at all; the product
     // default is on, and every other saved choice survives the migration.

@@ -195,14 +195,23 @@ const RENAMED_THEMES: Readonly<Record<string, ThemeId>> = {
  * `themeFamily: safelight|mold`, and then the six single-word ids. Both land in
  * one hop, and an unreadable value falls back rather than failing — a theme this
  * build cannot parse must never cost the user their saved machines.
+ *
+ * `savedMatchSystem` is the flag stored BESIDE the id. Renaming a theme must
+ * not answer for it: the pre-tone shape already carried `matchSystem`, so
+ * dropping it here turns Match system off for everyone on upgrade — and only
+ * after first paint, because the inline pre-paint scripts read the flag
+ * directly. The oldest shape has no such sibling; there the appearance word
+ * (`system`) is the flag, which is why it still wins.
  */
 export function migrateLegacyTheme(
   theme: unknown,
   family: unknown,
+  savedMatchSystem?: unknown,
 ): { theme: ThemeId; matchSystem: boolean } {
-  if (isThemeId(theme)) return { theme, matchSystem: false };
+  const kept = savedMatchSystem === true;
+  if (isThemeId(theme)) return { theme, matchSystem: kept };
   if (typeof theme === "string" && theme in RENAMED_THEMES) {
-    return { theme: RENAMED_THEMES[theme]!, matchSystem: false };
+    return { theme: RENAMED_THEMES[theme]!, matchSystem: kept };
   }
   const dark: ThemeId = family === "mold" ? "mocha-dark" : "safelight-dark";
   if (theme === "light")

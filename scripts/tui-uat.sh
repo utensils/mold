@@ -856,19 +856,22 @@ cmd_settings_focus() {
             ;;
         appearance-tone|AppearanceTone)
             # The Light / Dark row sits between the cards and the
-            # Configuration list. Walk down from the cards until the key
-            # hints say Light/Dark — the only text that names that focus.
-            cmd_settings_focus appearance >/dev/null
-            local reached=0 _i
-            for _i in $(seq 1 8); do
+            # Configuration list. Approach it from BELOW: walking down from
+            # the cards moves — and live-applies — the theme selection on the
+            # way, so `theme-set` would land on the wrong theme. Up from
+            # Configuration's first row touches nothing. Stop the moment the
+            # key hints say Light/Dark, the only text that names this focus;
+            # one press further would walk on into the cards.
+            cmd_settings_focus configuration >/dev/null
+            local _i
+            for _i in $(seq 1 60); do
                 if capture | grep -q "Light/Dark"; then
-                    reached=1
                     break
                 fi
-                send_one_key "$term_id" j
+                send_one_key "$term_id" k
                 sleep 0.05
             done
-            if [ "$reached" != 1 ] && ! capture | grep -q "Light/Dark"; then
+            if ! capture | grep -q "Light/Dark"; then
                 echo "ERROR: could not focus the Light/Dark row." >&2
                 return 1
             fi
@@ -1008,20 +1011,33 @@ cmd_theme_set() {
         exit 1
     fi
 
-    # Make sure we're on Settings + Appearance focus.
     cmd_view settings >/dev/null
-    cmd_settings_focus appearance >/dev/null
+    local term_id cur_slug cur_family cur_tone cur_idx
+    term_id=$(load_state)
 
-    # Find the currently-active theme from the header (`theme · <slug>`)
-    # and cycle forward to the target.
-    local cur_slug cur_family cur_tone cur_idx
+    # TONE FIRST, then the family. Focusing a pane normalizes through the card
+    # grid, which live-applies whatever card it lands on, so the family cycle
+    # has to be the LAST thing that happens — and it re-reads the header
+    # immediately before it runs. The tone row never moves the family.
+    cur_tone=$(capture | grep -o 'theme · [a-z-]*' | head -1 | awk '{print $3}')
+    cur_tone="${cur_tone##*-}"
+    if [ -z "$cur_tone" ]; then
+        echo "ERROR: couldn't read current theme from Appearance header." >&2
+        return 1
+    fi
+    if [ "$cur_tone" != "$want_tone" ]; then
+        cmd_settings_focus appearance-tone >/dev/null
+        send_one_key "$term_id" "+"
+        sleep 0.05
+    fi
+
+    cmd_settings_focus appearance >/dev/null
     cur_slug=$(capture | grep -o 'theme · [a-z-]*' | head -1 | awk '{print $3}')
     if [ -z "$cur_slug" ]; then
         echo "ERROR: couldn't read current theme from Appearance header." >&2
         return 1
     fi
     cur_family="${cur_slug%-*}"
-    cur_tone="${cur_slug##*-}"
     for i in "${!families[@]}"; do
         if [ "${families[$i]}" = "$cur_family" ]; then
             cur_idx=$i
@@ -1030,18 +1046,10 @@ cmd_theme_set() {
     done
     local total=${#families[@]}
     local delta=$(( (want_idx - cur_idx + total) % total ))
-    local term_id
-    term_id=$(load_state)
     for _ in $(seq 1 $delta); do
         send_one_key "$term_id" "+"
         sleep 0.05
     done
-    # Then the tone, on its own row. Cycling the cards never moves it.
-    if [ "$cur_tone" != "$want_tone" ]; then
-        cmd_settings_focus appearance-tone >/dev/null
-        send_one_key "$term_id" "+"
-        sleep 0.05
-    fi
     sleep 0.2
     if capture | grep -q "theme · $slug"; then
         echo "OK: theme set to $slug"

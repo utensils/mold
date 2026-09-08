@@ -163,6 +163,34 @@ describe("shared theme contract", () => {
     }
   });
 
+  it("keeps an explicit match-system flag while renaming the theme", () => {
+    // The pre-tone shape carried the flag BESIDE the id, so migrating the id
+    // must not answer for the flag. Losing it here silently turned Match
+    // system off for everyone on upgrade — and only after first paint, since
+    // the inline pre-paint script reads the flag directly.
+    expect(migrateLegacyTheme("nebula", undefined, true)).toEqual({
+      theme: "nebula-dark",
+      matchSystem: true,
+    });
+    expect(migrateLegacyTheme("porcelain", undefined, true)).toEqual({
+      theme: "graphite-light",
+      matchSystem: true,
+    });
+    // A current id passes through with its flag too.
+    expect(migrateLegacyTheme("mocha-light", undefined, true)).toEqual({
+      theme: "mocha-light",
+      matchSystem: true,
+    });
+    // Absent or false means false; the flag is never invented.
+    expect(migrateLegacyTheme("nebula", undefined).matchSystem).toBe(false);
+    expect(migrateLegacyTheme("nebula", undefined, false).matchSystem).toBe(false);
+    // The oldest shape has no sibling flag — its appearance word decides.
+    expect(migrateLegacyTheme("system", "mold", false)).toEqual({
+      theme: "mocha-dark",
+      matchSystem: true,
+    });
+  });
+
   it("migrates the legacy appearance + family pair in one hop", () => {
     expect(migrateLegacyTheme("dark", "safelight")).toEqual({
       theme: "safelight-dark",

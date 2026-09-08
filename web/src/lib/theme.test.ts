@@ -49,6 +49,16 @@ describe("web theme defaults", () => {
     }
   });
 
+  it("keeps Match system on while renaming a pre-tone theme", async () => {
+    localStorage.setItem(
+      "mold.web.theme.v1",
+      JSON.stringify({ theme: "nebula", matchSystem: true }),
+    );
+    const { theme, matchSystem } = await importTheme();
+    expect(theme.value).toBe("nebula-dark");
+    expect(matchSystem.value).toBe(true);
+  });
+
   it("migrates the pre-redesign family + appearance pair", async () => {
     localStorage.setItem(
       "mold.web.theme.v1",
