@@ -239,6 +239,9 @@ export interface UseDownloads {
   /// downloads) but the relevant SSE event might be lagged or missed.
   refresh: () => Promise<void>;
   connected: Ref<boolean>;
+  loaded: Ref<boolean>;
+  loading: Ref<boolean>;
+  error: Ref<string | null>;
   close: () => void;
 }
 
@@ -277,6 +280,11 @@ function buildSingleton(): UseDownloads {
     {},
   );
   const connected = ref(false);
+  const loaded = ref(false);
+  const loading = ref(false);
+  const error = ref<string | null>(null);
+  let readGeneration = 0;
+  let eventGeneration = 0;
   let es: EventSource | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
@@ -306,11 +314,17 @@ function buildSingleton(): UseDownloads {
   }
 
   function onEvent(raw: string) {
+    if (closed) return;
     let evt: DownloadEventWire;
     try {
       evt = JSON.parse(raw) as DownloadEventWire;
     } catch {
       return;
+    }
+    eventGeneration++;
+    if (evt.type === "snapshot") {
+      loaded.value = true;
+      error.value = null;
     }
     const snap = state();
     applyDownloadEvent(snap, evt);
@@ -376,24 +390,29 @@ function buildSingleton(): UseDownloads {
   }
 
   function connect() {
-    if (closed) return;
+    if (closed || es) return;
     try {
       es = new EventSource(downloadsStreamUrl());
     } catch {
       scheduleReconnect();
       return;
     }
-    es.onopen = () => {
-      connected.value = true;
+    const source = es;
+    const current = () => !closed && es === source;
+    source.onopen = () => {
+      if (current()) connected.value = true;
     };
-    es.onmessage = (ev) => onEvent(ev.data);
+    source.onmessage = (ev) => {
+      if (current()) onEvent(ev.data);
+    };
     // The server emits named events ("download"); fall back to default too.
-    es.addEventListener("download", (ev) =>
-      onEvent((ev as MessageEvent).data as string),
-    );
-    es.onerror = () => {
+    source.addEventListener("download", (ev) => {
+      if (current()) onEvent((ev as MessageEvent).data as string);
+    });
+    source.onerror = () => {
+      if (!current()) return;
       connected.value = false;
-      es?.close();
+      source.close();
       es = null;
       scheduleReconnect();
     };
@@ -403,18 +422,14 @@ function buildSingleton(): UseDownloads {
     if (closed) return;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => {
-      void fetchDownloads()
-        .then(applyListing)
-        .catch(() => undefined);
-      connect();
+      void refresh().finally(connect);
     }, 2000);
   }
 
   // Boot: initial snapshot then subscribe.
-  void fetchDownloads()
-    .then(applyListing)
-    .catch(() => undefined);
-  connect();
+  // Establish the HTTP baseline before subscribing; older streams may send
+  // deltas without a snapshot. A failed baseline retains an explicit retry.
+  void refresh().finally(connect);
 
   /// Force-fetch the current `/api/downloads` listing and apply it. The
   /// SSE stream also keeps state fresh, but `refresh()` is the click-time
@@ -422,11 +437,40 @@ function buildSingleton(): UseDownloads {
   /// depending on SSE event delivery (which can lag, especially right
   /// after a reconnect or when the page is in a background tab).
   async function refresh(): Promise<void> {
+    if (closed) return;
+    const needsBaseline = !loaded.value;
+    const reconnectAfterRead = needsBaseline && es !== null;
+    if (needsBaseline && es) {
+      es.close();
+      es = null;
+      connected.value = false;
+    }
+    const ticket = ++readGeneration;
+    const eventsAtStart = eventGeneration;
+    loading.value = true;
     try {
       const listing = await fetchDownloads();
+      if (
+        closed ||
+        ticket !== readGeneration ||
+        eventsAtStart !== eventGeneration
+      )
+        return;
       applyListing(listing);
+      loaded.value = true;
+      error.value = null;
     } catch {
-      /* network blip — SSE will catch us up if it stays connected */
+      if (
+        !closed &&
+        ticket === readGeneration &&
+        eventsAtStart === eventGeneration
+      )
+        error.value = "Couldn't load downloads. Try again.";
+    } finally {
+      if (!closed && ticket === readGeneration) {
+        loading.value = false;
+        if (reconnectAfterRead) connect();
+      }
     }
   }
 
@@ -455,6 +499,9 @@ function buildSingleton(): UseDownloads {
 
   function close() {
     closed = true;
+    readGeneration++;
+    connected.value = false;
+    loading.value = false;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     es?.close();
     es = null;
@@ -470,6 +517,9 @@ function buildSingleton(): UseDownloads {
     cancel,
     refresh,
     connected,
+    loaded,
+    loading,
+    error,
     close,
   };
 }

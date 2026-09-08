@@ -429,6 +429,7 @@ export async function fetchDownloads(
   // Server may omit `active`/`history` as null; normalise.
   return {
     active: raw.active ?? null,
+    active_jobs: raw.active_jobs ?? (raw.active ? [raw.active] : []),
     queued: raw.queued ?? [],
     history: raw.history ?? [],
   };

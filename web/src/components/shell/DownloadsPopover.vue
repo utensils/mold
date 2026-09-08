@@ -6,14 +6,20 @@
  * `mold:open-downloads` window event (App owns the state); the AppNav button
  * and ⌘K palette both dispatch it.
  */
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import Icon from "@ui/components/Icon.vue";
 import DownloadsBody from "./DownloadsBody.vue";
-import type { DownloadJobWire } from "../../types";
+import type { DownloadJobWire, ModelInfoExtended } from "../../types";
 
 const props = defineProps<{
   open: boolean;
+  models?: ModelInfoExtended[];
+  loaded?: boolean;
+  loading?: boolean;
+  error?: string | null;
+  actionError?: string | null;
+  actionBusy?: boolean;
   active: DownloadJobWire[];
   queued: DownloadJobWire[];
   history: DownloadJobWire[];
@@ -23,6 +29,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "close"): void;
+  (e: "refresh"): void;
   (e: "cancel", id: string): void;
   (e: "retry", model: string): void;
 }>();
@@ -34,9 +41,17 @@ const emit = defineEmits<{
 const panelEl = ref<HTMLElement | null>(null);
 
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === "Escape") emit("close");
+  if (isNarrow.value || e.defaultPrevented) return;
+  const target = e.target instanceof Element ? e.target : null;
+  if (target?.closest('[role="dialog"]') && !panelEl.value?.contains(target))
+    return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    emit("close");
+  }
 }
 function onPointerDownOutside(e: MouseEvent) {
+  if (isNarrow.value) return;
   const target = e.target as Node | null;
   if (target && panelEl.value?.contains(target)) return;
   emit("close");
@@ -55,10 +70,33 @@ function unbindDismiss() {
 // anchored panel when matchMedia is unavailable (jsdom / SSR).
 const isNarrow = ref(false);
 let mql: MediaQueryList | null = null;
-function sync() {
+async function sync() {
+  const wasNarrow = isNarrow.value;
   isNarrow.value = mql?.matches ?? false;
+  if (props.open && wasNarrow && !isNarrow.value) {
+    await nextTick();
+    if (props.open && !isNarrow.value) panelEl.value?.focus();
+  }
 }
 
+let returnFocus: HTMLElement | null = null;
+watch(
+  () => props.open,
+  async (open) => {
+    if (open) {
+      await nextTick();
+      if (!props.open) return;
+      returnFocus =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      if (props.open && !isNarrow.value) panelEl.value?.focus();
+    } else if (panelEl.value?.contains(document.activeElement)) {
+      if (returnFocus?.isConnected) returnFocus.focus();
+    }
+  },
+  { immediate: true },
+);
 watch(
   () => props.open,
   (open) => (open ? bindDismiss() : unbindDismiss()),
@@ -81,12 +119,27 @@ onBeforeUnmount(() => {
 <template>
   <SheetPanel
     v-if="open && isNarrow"
+    class="dl-sheet"
     :open="open"
     variant="bottom"
     title="Downloads"
     @close="emit('close')"
   >
+    <button
+      type="button"
+      class="dl-sheet-close dl-retry"
+      @click="emit('close')"
+    >
+      Close downloads
+    </button>
     <DownloadsBody
+      :action-error="actionError"
+      :action-busy="actionBusy"
+      :models="models"
+      :loaded="loaded"
+      :loading="loading"
+      :error="error"
+      @refresh="emit('refresh')"
       :active="active"
       :queued="queued"
       :history="history"
@@ -104,6 +157,7 @@ onBeforeUnmount(() => {
     aria-label="Downloads"
     data-test="downloads-popover"
     ref="panelEl"
+    tabindex="-1"
   >
     <header class="dl-pop__head">
       <span class="dl-pop__title">Downloads</span>
@@ -117,6 +171,13 @@ onBeforeUnmount(() => {
       </button>
     </header>
     <DownloadsBody
+      :action-error="actionError"
+      :action-busy="actionBusy"
+      :models="models"
+      :loaded="loaded"
+      :loading="loading"
+      :error="error"
+      @refresh="emit('refresh')"
       :active="active"
       :queued="queued"
       :history="history"
@@ -166,16 +227,16 @@ onBeforeUnmount(() => {
 
 .dl-pop__title {
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 0.8125rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink-3);
 }
 
 .dl-pop__close {
-  width: 26px;
-  height: 26px;
-  flex: 0 0 26px;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
   border-radius: 50%;
   border: 0;
   background: color-mix(in srgb, var(--rebate) 9%, transparent);
@@ -198,5 +259,22 @@ onBeforeUnmount(() => {
 .dl-pop__close:focus-visible {
   outline: 2px solid var(--safelight);
   outline-offset: 2px;
+}
+.dl-sheet :deep(.ms-sheet__panel-bottom) {
+  max-height: calc(100svh - 1rem);
+  overflow-y: auto;
+  min-height: 0;
+}
+.dl-sheet :deep(.ms-sheet__bottom-title) {
+  font-size: 1rem;
+}
+.dl-sheet-close {
+  min-height: 44px;
+  padding: 0.5rem;
+  margin-bottom: 1rem;
+  font-size: 0.875rem;
+  color: var(--rebate);
+  background: var(--bench);
+  border: 1px solid var(--edge);
 }
 </style>

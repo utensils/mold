@@ -2,7 +2,7 @@
 /*
  * Downloads panel body (spec §06, prototype web downloads popover). Three
  * sections — Downloading (name · % · progress bar · rate/eta), Queued, and a
- * divider then Recently installed (status glyph · name · size). Cancel on
+ * divider then Recent downloads (status glyph · name · size). Cancel on
  * active/queued,
  * retry on a failed history row. Presentational: the parent owns the download
  * state and wraps this in either an anchored panel or a bottom sheet.
@@ -21,11 +21,22 @@ const props = defineProps<{
   /** Bytes/sec, keyed by job id. */
   rateByJob: Record<string, number | null>;
   models?: ModelInfoExtended[];
+  loaded?: boolean;
+  loading?: boolean;
+  error?: string | null;
+  actionError?: string | null;
+  actionBusy?: boolean;
 }>();
 const modelLabel = (name: string) =>
   modelDisplayNameForId(name, props.models ?? []);
 
+const actionLabel = (name: string) => {
+  const label = modelLabel(name);
+  return label === name ? name : label + " (" + name + ")";
+};
+
 const emit = defineEmits<{
+  (e: "refresh"): void;
   (e: "cancel", id: string): void;
   (e: "retry", model: string): void;
 }>();
@@ -73,6 +84,22 @@ const isEmpty = () =>
 
 <template>
   <div class="dl-body">
+    <div v-if="error" class="dl-recovery" role="alert">
+      <p>{{ error }}</p>
+      <p v-if="loaded">Showing the last known downloads.</p>
+      <button
+        class="dl-retry"
+        type="button"
+        :disabled="loading"
+        @click="emit('refresh')"
+      >
+        Retry loading
+      </button>
+    </div>
+    <p v-else-if="loading || loaded === false" role="status">
+      Loading downloads…
+    </p>
+    <p v-if="actionError" class="dl-error" role="alert">{{ actionError }}</p>
     <!-- Downloading -->
     <template v-if="active.length">
       <div class="dl-kicker">Downloading</div>
@@ -84,13 +111,19 @@ const isEmpty = () =>
       >
         <div class="dl-active__head">
           <span class="dl-dot dl-dot--active" />
-          <span class="dl-active__name">{{ modelLabel(job.model) }}</span>
+          <span class="dl-active__name"
+            >{{ modelLabel(job.model)
+            }}<small v-if="modelLabel(job.model) !== job.model">{{
+              job.model
+            }}</small></span
+          >
           <span class="dl-active__pct">{{ pct(job) }}%</span>
           <button
             type="button"
             class="dl-cancel"
+            :disabled="actionBusy"
             :data-test="`dl-cancel-${job.id}`"
-            :aria-label="`Cancel ${modelLabel(job.model)}`"
+            :aria-label="`Cancel ${actionLabel(job.model)}`"
             @click="emit('cancel', job.id)"
           >
             <Icon name="close" :size="12" />
@@ -114,13 +147,22 @@ const isEmpty = () =>
         :data-test="`dl-queued-${job.id}`"
       >
         <span class="dl-dot dl-dot--queued" />
-        <span class="dl-row__name">{{ modelLabel(job.model) }}</span>
+        <span class="dl-row__name"
+          >{{ modelLabel(job.model)
+          }}<small v-if="modelLabel(job.model) !== job.model">{{
+            job.model
+          }}</small
+          ><small v-if="job.error" class="dl-error">{{
+            job.error
+          }}</small></span
+        >
         <span class="dl-row__meta">#{{ idx + 1 }}</span>
         <button
           type="button"
           class="dl-cancel"
+          :disabled="actionBusy"
           :data-test="`dl-cancel-${job.id}`"
-          :aria-label="`Cancel queued ${modelLabel(job.model)}`"
+          :aria-label="`Cancel queued ${actionLabel(job.model)}`"
           @click="emit('cancel', job.id)"
         >
           <Icon name="close" :size="12" />
@@ -128,10 +170,10 @@ const isEmpty = () =>
       </div>
     </template>
 
-    <!-- Recently installed -->
+    <!-- Recent downloads -->
     <template v-if="history.length">
       <div v-if="active.length || queued.length" class="dl-divider" />
-      <div class="dl-kicker">Recently installed</div>
+      <div class="dl-kicker">Recent downloads</div>
       <div
         v-for="job in [...history].reverse()"
         :key="job.id"
@@ -149,7 +191,15 @@ const isEmpty = () =>
           <Icon v-if="job.status === 'completed'" name="check" :size="12" />
           <Icon v-else name="close" :size="12" />
         </span>
-        <span class="dl-row__name">{{ modelLabel(job.model) }}</span>
+        <span class="dl-row__name"
+          >{{ modelLabel(job.model)
+          }}<small v-if="modelLabel(job.model) !== job.model">{{
+            job.model
+          }}</small
+          ><small v-if="job.error" class="dl-error">{{
+            job.error
+          }}</small></span
+        >
         <span v-if="job.status === 'completed'" class="dl-row__meta">
           {{ formatSize(job.bytes_total) }}
         </span>
@@ -158,7 +208,9 @@ const isEmpty = () =>
           v-if="job.status === 'failed'"
           type="button"
           class="dl-retry"
+          :disabled="actionBusy"
           :data-test="`retry-${job.id}`"
+          :aria-label="`Retry ${actionLabel(job.model)}`"
           @click="emit('retry', job.model)"
         >
           Retry
@@ -166,7 +218,12 @@ const isEmpty = () =>
       </div>
     </template>
 
-    <p v-if="isEmpty()" class="dl-empty">No downloads yet.</p>
+    <p
+      v-if="isEmpty() && loaded !== false && !loading && !error"
+      class="dl-empty"
+    >
+      No downloads yet.
+    </p>
   </div>
 </template>
 
@@ -178,7 +235,7 @@ const isEmpty = () =>
 
 .dl-kicker {
   font-family: var(--f-mono);
-  font-size: 9px;
+  font-size: 0.75rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink-3);
@@ -201,10 +258,11 @@ const isEmpty = () =>
 }
 
 .dl-active__head {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  font-size: 12.5px;
+  font-size: 0.875rem;
   margin-bottom: 8px;
 }
 
@@ -212,36 +270,33 @@ const isEmpty = () =>
   font-family: var(--f-mono);
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   color: var(--rebate);
 }
 
 .dl-active__pct {
   font-family: var(--f-mono);
-  font-size: 11px;
+  font-size: 0.8125rem;
   color: var(--safelight);
 }
 
 .dl-active__sub,
 .dl-active__file {
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 0.75rem;
   color: var(--ink-3);
   margin-top: 7px;
 }
 
 .dl-active__file {
   margin-top: 3px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 /* ── Compact rows (queued / history) ────────────────────────────────── */
 .dl-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
   padding: 7px 0;
@@ -249,18 +304,16 @@ const isEmpty = () =>
 
 .dl-row__name {
   font-family: var(--f-mono);
-  font-size: 12px;
+  font-size: 0.875rem;
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   color: var(--rebate);
 }
 
 .dl-row__meta {
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 0.75rem;
   color: var(--ink-3);
 }
 
@@ -298,13 +351,16 @@ const isEmpty = () =>
 
 /* ── Actions ────────────────────────────────────────────────────────── */
 .dl-cancel {
+  min-width: 44px;
+  min-height: 44px;
+  justify-content: center;
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   border: 0;
   background: transparent;
   color: var(--ink-3);
-  font-size: 12px;
+  font-size: 0.875rem;
   line-height: 1;
   padding: 2px 4px;
   border-radius: var(--radius-control-sm);
@@ -317,12 +373,14 @@ const isEmpty = () =>
 }
 
 .dl-retry {
+  min-width: 44px;
+  min-height: 44px;
   flex: 0 0 auto;
   border: 1px solid var(--sel-border);
   background: var(--sel-bg);
   color: var(--sel-ink);
   font-family: var(--f-body);
-  font-size: 11px;
+  font-size: 0.8125rem;
   font-weight: 600;
   padding: 3px 10px;
   border-radius: var(--radius-pill);
@@ -337,8 +395,34 @@ const isEmpty = () =>
 
 .dl-empty {
   text-align: center;
-  font-size: 12.5px;
+  font-size: 0.875rem;
   color: var(--ink-3);
   padding: 18px 0;
+}
+.dl-active__name small,
+.dl-row__name small {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  margin-top: 0.25rem;
+}
+.dl-error,
+.dl-row__name .dl-error {
+  color: var(--stop);
+}
+.dl-row__name,
+.dl-active__name {
+  grid-column: 2 / -1;
+}
+.dl-row__meta,
+.dl-active__pct {
+  grid-column: 2;
+}
+.dl-cancel,
+.dl-retry {
+  justify-self: end;
+}
+.dl-recovery .dl-retry {
+  justify-self: start;
 }
 </style>

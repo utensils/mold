@@ -1,7 +1,8 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { computed, nextTick, ref } from "vue";
+import { computed, defineComponent, h, nextTick, ref } from "vue";
 import CommandK from "./CommandK.vue";
+import DownloadsPopover from "./DownloadsPopover.vue";
 import PalettePanel from "@ui/components/PalettePanel.vue";
 import { matchSystem, theme } from "../../lib/theme";
 import {
@@ -165,6 +166,70 @@ describe("CommandK", () => {
     vi.useRealTimers();
     theme.value = "safelight";
     matchSystem.value = false;
+  });
+
+  it("returns to the palette opener after opening and closing Downloads", async () => {
+    vi.useRealTimers();
+    const palette = ref(false);
+    const downloads = ref(false);
+    const openDownloads = () => {
+      downloads.value = true;
+    };
+    window.addEventListener("mold:open-downloads", openDownloads);
+    const wrapper = mount(
+      defineComponent({
+        setup: () => () =>
+          h("div", [
+            h(
+              "button",
+              {
+                onClick: () => {
+                  palette.value = true;
+                },
+              },
+              "Commands",
+            ),
+            h(CommandK, {
+              open: palette.value,
+              onClose: () => {
+                palette.value = false;
+              },
+            }),
+            h(DownloadsPopover, {
+              open: downloads.value,
+              loaded: true,
+              active: [],
+              queued: [],
+              history: [],
+              etaByJob: {},
+              rateByJob: {},
+              onClose: () => {
+                downloads.value = false;
+              },
+            }),
+          ]),
+      }),
+      { attachTo: document.body },
+    );
+    try {
+      const opener = wrapper.get("button").element as HTMLButtonElement;
+      opener.focus();
+      opener.click();
+      await flushPromises();
+      wrapper.getComponent(PalettePanel).vm.$emit("run", "action-downloads");
+      await flushPromises();
+      expect(document.activeElement).toBe(
+        wrapper.get('[data-test="downloads-popover"]').element,
+      );
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", cancelable: true }),
+      );
+      await flushPromises();
+      expect(document.activeElement).toBe(opener);
+    } finally {
+      window.removeEventListener("mold:open-downloads", openDownloads);
+      wrapper.unmount();
+    }
   });
 
   it("offers navigation, action, and theme commands", async () => {

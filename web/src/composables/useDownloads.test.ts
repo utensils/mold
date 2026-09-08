@@ -366,3 +366,115 @@ describe("useDownloads.enqueue dispatch", () => {
     ).toBe(true);
   });
 });
+
+describe("download inventory recovery", () => {
+  let stream: { onmessage: ((event: { data: string }) => void) | null };
+  const listing = { active_jobs: [], queued: [], history: [] };
+  beforeEach(() => {
+    __resetUseDownloadsForTest();
+    vi.stubGlobal(
+      "EventSource",
+      class {
+        onmessage = null;
+        addEventListener() {}
+        close() {}
+        constructor() {
+          stream = this;
+        }
+      },
+    );
+  });
+  afterEach(() => {
+    __resetUseDownloadsForTest();
+    vi.unstubAllGlobals();
+  });
+  it("reports an initial failure and recovers a known-empty listing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockRejectedValueOnce(new Error("offline"))
+        .mockResolvedValue({ ok: true, json: async () => listing }),
+    );
+    const downloads = useDownloads();
+    expect(downloads.loading.value).toBe(true);
+    expect(downloads.loaded.value).toBe(false);
+    await vi.waitFor(() =>
+      expect(downloads.error.value).toContain("Couldn't load"),
+    );
+    await downloads.refresh();
+    expect(downloads.loaded.value).toBe(true);
+    expect(downloads.error.value).toBeNull();
+    expect(downloads.loading.value).toBe(false);
+  });
+  it.each(["snapshot", "close"] as const)(
+    "fences a delayed refresh after %s",
+    async (action) => {
+      let release!: (value: unknown) => void;
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce({ ok: true, json: async () => listing })
+          .mockImplementation(
+            () =>
+              new Promise((resolve) => {
+                release = resolve;
+              }),
+          ),
+      );
+      const downloads = useDownloads();
+      await vi.waitFor(() => expect(downloads.loaded.value).toBe(true));
+      const refresh = downloads.refresh();
+      if (action === "snapshot")
+        stream.onmessage?.({
+          data: JSON.stringify({
+            type: "snapshot",
+            listing: { ...listing, queued: [{ id: "newer", model: "latest" }] },
+          }),
+        });
+      else downloads.close();
+      release({ ok: true, json: async () => listing });
+      await refresh;
+      expect(downloads.queued.value.map((job) => job.id)).toEqual(
+        action === "snapshot" ? ["newer"] : [],
+      );
+      expect(downloads.loaded.value).toBe(true);
+    },
+  );
+  it("preserves concurrent active jobs from the HTTP baseline", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          ...listing,
+          active_jobs: [{ id: "one" }, { id: "two" }],
+        }),
+      }),
+    );
+    const downloads = useDownloads();
+    await vi.waitFor(() => expect(downloads.loaded.value).toBe(true));
+    expect(downloads.activeJobs.value.map((job) => job.id)).toEqual([
+      "one",
+      "two",
+    ]);
+  });
+  it("retains the last known listing when refresh fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ ...listing, queued: [{ id: "kept" }] }),
+        })
+        .mockRejectedValue(new Error("offline")),
+    );
+    const downloads = useDownloads();
+    await vi.waitFor(() => expect(downloads.loaded.value).toBe(true));
+    await downloads.refresh();
+    expect(downloads.queued.value[0].id).toBe("kept");
+    expect(downloads.error.value).toBeTruthy();
+  });
+});

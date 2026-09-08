@@ -6,6 +6,7 @@ import DownloadsPopover from "./components/shell/DownloadsPopover.vue";
 import AppNav from "./components/shell/AppNav.vue";
 import CommandK from "./components/shell/CommandK.vue";
 import ConfirmDialog from "./components/shell/ConfirmDialog.vue";
+import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 import LicenseAcceptanceDialog from "@studio/components/LicenseAcceptanceDialog.vue";
 import { dismissToast, runToastAction, useNotifications } from "./lib/toasts";
 import {
@@ -31,6 +32,10 @@ const route = useRoute();
 
 // Singleton — mounted once, survives navigation.
 const downloads = useDownloads();
+const downloadModels = computed(() => [
+  ...useCatalog().installed.value,
+  ...useCatalog().availableManifests.value,
+]);
 
 // Queue reconciliation (L3): poll `/api/queue` and dead-letter any
 // running card whose server-side registry entry is gone. Catches the
@@ -127,11 +132,35 @@ const rateByJob = computed(() =>
   ),
 );
 
+const downloadActionError = ref<string | null>(null);
+const downloadActionBusy = ref(false);
+async function downloadAction(action: () => Promise<unknown>) {
+  if (downloadActionBusy.value) return;
+  downloadActionBusy.value = true;
+  downloadActionError.value = null;
+  try {
+    await action();
+  } catch (error) {
+    downloadActionError.value =
+      error instanceof Error
+        ? error.message
+        : "The download action failed. Try again.";
+  } finally {
+    downloadActionBusy.value = false;
+  }
+}
 async function handleCancel(id: string) {
-  await downloads.cancel(id);
+  await downloadAction(() => downloads.cancel(id));
 }
 async function handleRetry(model: string) {
-  await downloads.enqueue(model);
+  await downloadAction(() =>
+    runWithLicenseConsent({
+      hostLabel: "This machine",
+      target: { baseUrl: "", apiKey: null },
+      installModel: model,
+      start: () => downloads.enqueue(model),
+    }),
+  );
 }
 
 // `useResources` is mounted once at the App root and provided so pages that
@@ -161,6 +190,13 @@ const notifications = useNotifications();
     <router-view />
     <DownloadsPopover
       :open="downloadsOpen"
+      :models="downloadModels"
+      :action-error="downloadActionError"
+      :action-busy="downloadActionBusy"
+      :loaded="downloads.loaded.value"
+      :loading="downloads.loading.value"
+      :error="downloads.error.value"
+      @refresh="downloads.refresh()"
       :active="downloads.activeJobs.value"
       :queued="downloads.queued.value"
       :history="downloads.history.value"
