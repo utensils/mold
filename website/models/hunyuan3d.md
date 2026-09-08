@@ -60,13 +60,13 @@ installed fp16 checkpoint with `mold quantize`; the source file is preserved,
 the derived model is registered atomically, and every app discovers it through
 the normal installed-model list.
 
-| Shape checkpoint | CUDA-qualified derived tiers |
-| ---------------- | ---------------------------- |
-| 2.1 sparse MoE | `fp8`, `q8`, `q4` |
-| 2.0 full, undistilled | `fp8`, `q8` |
-| 2.0 full Turbo | `fp8`, `q8`, `q6`, `q5`, `q4`, `q3` |
-| 2.0 mini Turbo | `q8`, `q4` |
-| 2mv Turbo | `q8`, `q6`, `q5`, `q4`, `q3` |
+| Shape checkpoint      | CUDA-qualified derived tiers        |
+| --------------------- | ----------------------------------- |
+| 2.1 sparse MoE        | `fp8`, `q8`, `q4`                   |
+| 2.0 full, undistilled | `fp8`, `q8`                         |
+| 2.0 full Turbo        | `fp8`, `q8`, `q6`, `q5`, `q4`, `q3` |
+| 2.0 mini Turbo        | `q8`, `q4`                          |
+| 2mv Turbo             | `q8`, `q6`, `q5`, `q4`, `q3`        |
 
 `q2` is deliberately refused because qualification produced invalid geometry.
 FP8 uses group-of-32 E4M3 scaling on large expert/MLP matrices and leaves
@@ -200,13 +200,13 @@ mold library export chair.glb --format obj -o ~/chair.obj
 mold library export chair.glb --format zip -o ~/chair.zip
 ```
 
-| Format | Carries                                             | Reach for it when                      |
-| ------ | --------------------------------------------------- | -------------------------------------- |
-| `glb`  | Geometry, normals, UVs, materials, embedded texture | Anything. This is the stored file.     |
-| `obj`  | Positions, normals, UVs. No materials.              | Blender, MeshLab, most DCC importers.  |
-| `zip`  | OBJ, MTL, base color, metallic-roughness and normal maps. | Moving a painted asset between tools. |
-| `stl`  | Triangles and one normal each. No UVs, no colour.   | 3-D printing and CAD.                  |
-| `ply`  | Positions and per-vertex normals, vertices shared.  | Point-and-mesh tooling, research code. |
+| Format | Carries                                                   | Reach for it when                      |
+| ------ | --------------------------------------------------------- | -------------------------------------- |
+| `glb`  | Geometry, normals, UVs, materials, embedded texture       | Anything. This is the stored file.     |
+| `obj`  | Positions, normals, UVs. No materials.                    | Blender, MeshLab, most DCC importers.  |
+| `zip`  | OBJ, MTL, base color, metallic-roughness and normal maps. | Moving a painted asset between tools.  |
+| `stl`  | Triangles and one normal each. No UVs, no colour.         | 3-D printing and CAD.                  |
+| `ply`  | Positions and per-vertex normals, vertices shared.        | Point-and-mesh tooling, research code. |
 
 The gallery file is never renamed or replaced. The same conversions are on
 `POST /api/gallery/export/:filename` and the `export_mesh` MCP tool, and a host

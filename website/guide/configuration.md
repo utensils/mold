@@ -180,6 +180,7 @@ Environment variables take precedence over config file values.
 
 | Variable                 | Default | Description                                                                                                                                                                           |
 | ------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MOLD_TEST_CUDA_FP8`     | unset   | Test-only switch that runs the Hunyuan3D 2.1 grouped-FP8 linear parity contract on CUDA instead of CPU. Production ignores it.                                                        |
 | `MOLD_TEST_PULID_ASSETS` | unset   | Test-only path to the pinned PuLID and AntelopeV2 assets used by ignored parity tests. It may name the checkpoint file or a directory searched one level deep; production ignores it. |
 
 ### Generation
