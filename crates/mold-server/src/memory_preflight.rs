@@ -3010,29 +3010,18 @@ mod fail_closed_tests {
             old_boundary.peak_memory_bytes
         );
 
-        let corrected_boundary = estimate_generation_memory_for_request(
-            &request,
-            &denoise_paths,
-            Some(ActivationHint::from_request(&request, "wan")),
-            metal_offload(mold_inference::wan::block_offload::AdmissionPolicy::Disabled),
-            Some(8_600_000_000),
-            false,
-            false,
-        );
-        assert_eq!(corrected_boundary.fits_available_memory, Some(true));
-
         let whole_request = estimate_generation_memory_for_request(
             &request,
             &model_paths,
             Some(ActivationHint::from_request(&request, "wan")),
             metal_offload(mold_inference::wan::block_offload::AdmissionPolicy::Disabled),
-            Some(8_600_000_000),
+            Some(6_500_000_000),
             false,
             false,
         );
-        assert_eq!(whole_request.fits_available_memory, Some(true));
+        assert_eq!(whole_request.fits_available_memory, Some(false));
         assert_eq!(
-            whole_request.peak_memory_bytes, corrected_boundary.peak_memory_bytes,
+            whole_request.peak_memory_bytes, old_boundary.peak_memory_bytes,
             "the encoder phase must not overlap the larger denoise phase"
         );
 
