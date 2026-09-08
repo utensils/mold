@@ -6,9 +6,10 @@ import ProgressRing from "@ui/components/ProgressRing.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 
 describe("ResultCanvas", () => {
-  it("renders the brand empty state", () => {
+  it("renders readable theme text in the empty state", () => {
     const wrapper = mount(ResultCanvas, { props: { mode: "empty" } });
     expect(wrapper.text()).toContain("Your print develops here");
+    expect(wrapper.find(".ms-empty__headline--brand").exists()).toBe(false);
     expect(wrapper.text()).toContain("runs on your own machine");
   });
 

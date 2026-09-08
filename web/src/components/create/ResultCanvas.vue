@@ -155,7 +155,6 @@ watch(
   <div class="canvas" data-test="result-canvas" :data-mode="mode">
     <div v-if="mode === 'empty'" class="canvas__empty">
       <EmptyStateBlock
-        brand
         headline="Your print develops here"
         :guidance="emptyGuidance"
       />

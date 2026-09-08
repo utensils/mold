@@ -319,8 +319,8 @@ function setSize(id: string | number) {
 // Seed: Random / Fixed segments. "Fixed" covers the persisted static and
 // increment modes so an increment set in Advanced survives a re-click.
 const seedSegments = [
-  { value: "random", label: "Random" },
-  { value: "fixed", label: "Fixed" },
+  { value: "fixed", label: "Keep" },
+  { value: "random", label: "Surprise me" },
 ] as const;
 const seedSegment = computed(() =>
   props.modelValue.seedMode === "random" ? "random" : "fixed",
@@ -371,7 +371,7 @@ function lockLastSeed() {
     </div>
 
     <div v-if="!canvasless" class="controls__group">
-      <div class="controls__label">Resolution</div>
+      <div class="controls__label">Size</div>
       <ResolutionSelector
         :model-value="selectedSizeId"
         :ratio="currentRatio"
@@ -480,6 +480,7 @@ function lockLastSeed() {
       <SegmentedControl
         v-if="mattingControl?.mode !== 'hidden' && mattingOptions.length > 0"
         data-test="mesh-matting"
+        wrap
         :model-value="mattingValue"
         :options="mattingOptions"
         label="Remove background"
@@ -591,7 +592,9 @@ function lockLastSeed() {
 
     <div class="controls__group">
       <div class="controls__seed-head">
-        <span class="controls__label controls__label--inline">Seed</span>
+        <span class="controls__label controls__label--inline"
+          >Repeat this look</span
+        >
         <button
           type="button"
           class="controls__reroll"
@@ -600,14 +603,15 @@ function lockLastSeed() {
           @click="reroll"
         >
           <Icon name="reroll" :size="13" />
-          reroll
+          New seed
         </button>
       </div>
       <SegmentedControl
         data-test="seed-seg"
+        wrap
         :model-value="seedSegment"
         :options="seedSegments"
-        label="Seed mode"
+        label="Repeat this look"
         @update:model-value="setSeedSegment"
       />
       <input
@@ -666,7 +670,7 @@ function lockLastSeed() {
       @click="emit('open-advanced')"
     >
       <Icon name="sliders" :size="14" />
-      Advanced
+      More settings
       <BadgePill v-if="advCount > 0" data-test="adv-badge"
         >{{ advCount }} on</BadgePill
       >
