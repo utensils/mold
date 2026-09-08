@@ -54,7 +54,7 @@ describe("MeshWorkflowPage host routing", () => {
   beforeEach(() => {
     const routing = useHostRouting();
     routing.hosts.value = [origin, remote];
-    routing.targetId.value = "auto";
+    (routing.targetId as unknown as { value: string }).value = "auto";
   });
 
   it("routes models, workflows, and results to the selected authenticated host", async () => {
@@ -78,7 +78,8 @@ describe("MeshWorkflowPage host routing", () => {
   });
 
   it("honours an explicitly pinned machine on entry", async () => {
-    useHostRouting().targetId.value = "renderbox-7680";
+    (useHostRouting().targetId as unknown as { value: string }).value =
+      "renderbox-7680";
     const wrapper = mount(MeshWorkflowPage);
     await flushPromises();
 

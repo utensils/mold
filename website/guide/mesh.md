@@ -250,6 +250,11 @@ delight, shape, paint, and finalization are checkpointed, a shutdown parks unfin
 work, and **Resume** continues the same child job after restart. Settled
 workflow-owned inputs and stage copies remain available until **Delete workflow
 data** releases them; deleting the Library print remains a separate action.
+Choose **Run workflow on** before authoring to bind the whole studio session to
+one connected machine. Its models, previous workflows, uploads, progress,
+resume/cancel actions, and final GLB all stay on that machine; authenticated
+hosts receive their saved API key. Switching machines opens that machine's own
+workflow state rather than carrying a draft or job identity across hosts.
 
 1. **Pick a Hunyuan3D model** in Create. The form reshapes itself from the
    model's own generation profile: Shape, Resolution, exact-size, Fit to
@@ -381,5 +386,8 @@ draw glTF bytes as a picture.
 
 Text-to-3D, supplied-mesh retexturing, named multiview input, background
 matting, and delight preprocessing are available through the server-backed
-3-D workflow. PBR painting is available on CUDA builds that include
-`mesh-texture`; delight is available when the host includes `mesh-delight`.
+3-D workflow. PBR painting is available on builds that include `mesh-texture`;
+delight is available when the host includes `mesh-delight`. A host without the
+paint feature keeps Text to 3-D available for geometry and hides the PBR toggle
+instead of submitting a request that the host must reject. Official signed
+macOS desktop builds include the complete mesh feature set.

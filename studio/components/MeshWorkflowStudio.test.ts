@@ -102,7 +102,11 @@ describe("MeshWorkflowStudio feature-aware PBR authoring", () => {
     await flushPromises();
 
     expect(createMeshWorkflow).toHaveBeenCalledTimes(1);
-    const request = createMeshWorkflow.mock.calls[0]![1];
+    const request = (
+      createMeshWorkflow.mock.calls as unknown as Array<
+        [unknown, { mode: string; mesh_request: { mesh?: unknown } }]
+      >
+    )[0]![1];
     expect(request.mode).toBe("text_to_mesh");
     expect(request.mesh_request.mesh).toBeUndefined();
   });

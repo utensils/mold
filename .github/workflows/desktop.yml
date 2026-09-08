@@ -234,7 +234,7 @@ jobs:
       # Compile the exact signed macOS Nightly feature graph on PRs. The
       # distribution used to omit every mesh feature, leaving 3-D Studio
       # visible while its PBR path could only return a build-feature error.
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features h3,metal,pulid,webp,mesh-texture,mesh-matting,mesh-delight -- -D warnings
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features metal,pulid,webp,mesh-texture,mesh-matting,mesh-delight -- -D warnings
 
   desktop-windows:
     name: Windows (clippy, test; main NSIS installer)

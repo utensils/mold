@@ -108,6 +108,8 @@ grep -Fq 'pkgs.protobuf' "$repo_root/flake.nix" \
 distribution="$repo_root/.github/workflows/desktop-distribution.yml"
 grep -Fq 'bunx tauri build --features metal,pulid,webp,mesh-texture,mesh-matting,mesh-delight --bundles app --ci --config' "$distribution" \
   || fail "the signed macOS desktop build does not ship the complete mesh feature recipe"
+grep -Fq 'cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features metal,pulid,webp,mesh-texture,mesh-matting,mesh-delight -- -D warnings' <<< "$rust_job" \
+  || fail "the macOS PR gate does not compile the signed desktop mesh feature recipe"
 grep -Fq 'brew install minisign protobuf' "$distribution" \
   || fail "the signed macOS desktop build has no protoc for candle-onnx"
 
