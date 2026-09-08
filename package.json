@@ -20,7 +20,8 @@
     "build:web": "cd web && bun run build",
     "build:desktop": "cd desktop && bun run build",
     "build:mobile": "cd desktop && bun run build:mobile",
-    "check:frontend": "bun run check:architecture && bun run test:studio && bun run test:web && bun run test:desktop && bun run build:web && bun run build:desktop"
+    "check:frontend": "bun run check:architecture && bun run test:studio && bun run test:web && bun run test:desktop && bun run build:web && bun run build:desktop",
+    "test:android:identity-picker": "bun scripts/android-identity-picker-smoke.mjs"
   },
   "dependencies": {
     "@microsoft/fetch-event-source": "2.0.1",

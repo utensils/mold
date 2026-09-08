@@ -98,6 +98,9 @@ internal class AndroidPairingScanner(
             val parent = webView.parent as? ViewGroup
                 ?: error("Android WebView has no camera overlay parent")
             previewView = PreviewView(activity).apply {
+                // The camera is composited behind a transparent WebView overlay.
+                // Use TextureView so the preview shares the overlay view composition.
+                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,

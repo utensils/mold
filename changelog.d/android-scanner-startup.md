@@ -1,0 +1,1 @@
+- Fix Android pairing scanner startup on Android 17 with the patched CameraX dependency, and composite its camera preview through TextureView beneath the scanner controls.
