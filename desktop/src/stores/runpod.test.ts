@@ -11,6 +11,9 @@ const runpodOverview = vi.fn().mockResolvedValue({
   networkVolumes: [],
 });
 const runpodDelete = vi.fn();
+const runpodNetworkVolumeCreate = vi.fn();
+const runpodNetworkVolumeUpdate = vi.fn();
+const runpodNetworkVolumeDelete = vi.fn();
 const disconnectHost = vi.fn();
 const forgetRemoteHost = vi.fn();
 const appSettingsGet = vi.fn();
@@ -28,6 +31,9 @@ vi.mock("../lib/ipc", () => ({
     runpodOverview: (...args: unknown[]) => runpodOverview(...args),
     runpodCreate: vi.fn().mockRejectedValue(new Error("GPU is unavailable for Pod creation")),
     runpodDelete: (...args: unknown[]) => runpodDelete(...args),
+    runpodNetworkVolumeCreate: (...args: unknown[]) => runpodNetworkVolumeCreate(...args),
+    runpodNetworkVolumeUpdate: (...args: unknown[]) => runpodNetworkVolumeUpdate(...args),
+    runpodNetworkVolumeDelete: (...args: unknown[]) => runpodNetworkVolumeDelete(...args),
     forgetRemoteHost: (...args: unknown[]) => forgetRemoteHost(...args),
     appSettingsGet: (...args: unknown[]) => appSettingsGet(...args),
   },
@@ -44,6 +50,9 @@ describe("RunPod operation errors", () => {
     setActivePinia(createPinia());
     runpodOverview.mockClear();
     runpodDelete.mockReset().mockResolvedValue(undefined);
+    runpodNetworkVolumeCreate.mockReset().mockResolvedValue({ id: "volume-created" });
+    runpodNetworkVolumeUpdate.mockReset().mockResolvedValue({ id: "volume-updated" });
+    runpodNetworkVolumeDelete.mockReset().mockResolvedValue(undefined);
     disconnectHost.mockReset().mockResolvedValue(undefined);
     forgetRemoteHost.mockReset().mockResolvedValue([]);
     appSettingsGet.mockReset().mockResolvedValue({ savedHosts: [] });
@@ -60,6 +69,40 @@ describe("RunPod operation errors", () => {
 
     store.clearOperationError();
     expect(store.operationError).toBeNull();
+  });
+
+  it("keeps volume mutations busy through refresh and returns their IPC result", async () => {
+    const store = useRunPodStore();
+
+    const creating = store.createNetworkVolume({ name: "models" } as never);
+
+    expect(store.mutating).toBe("volume:create");
+    expect(store.operationError).toBeNull();
+    await expect(creating).resolves.toEqual({ id: "volume-created" });
+    expect(store.mutating).toBeNull();
+    expect(runpodOverview).toHaveBeenCalledOnce();
+
+    const updating = store.updateNetworkVolume({ id: "volume-created" } as never);
+
+    expect(store.mutating).toBe("volume:update:volume-created");
+    await expect(updating).resolves.toEqual({ id: "volume-updated" });
+    expect(store.mutating).toBeNull();
+    expect(runpodOverview).toHaveBeenCalledTimes(2);
+  });
+
+  it("records volume mutation failures and always clears the busy state", async () => {
+    runpodNetworkVolumeDelete.mockRejectedValueOnce(new Error("volume is attached"));
+    const store = useRunPodStore();
+    store.operationError = "old failure";
+
+    const deleting = store.deleteNetworkVolume("volume-123");
+
+    expect(store.mutating).toBe("volume:delete:volume-123");
+    expect(store.operationError).toBeNull();
+    await expect(deleting).rejects.toThrow("volume is attached");
+    expect(store.operationError).toContain("volume is attached");
+    expect(store.mutating).toBeNull();
+    expect(runpodOverview).not.toHaveBeenCalled();
   });
 
   it("disconnects the deleted pod's Mold host so its download queue is retired", async () => {
