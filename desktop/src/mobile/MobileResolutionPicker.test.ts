@@ -41,11 +41,12 @@ function mountPicker(
   sourceDimensions: { width: number; height: number } | null = null,
   model: ModelEntry | null = null,
   canvasIntent: "source" | "source-exact" | "model-default" | "manual" = "model-default",
+  compact = false,
 ) {
   const state = reactive<PickerState>({ width, height, family });
   const Harness = defineComponent({
     components: { MobileResolutionPicker },
-    setup: () => ({ state, sourceDimensions, model, canvasIntent }),
+    setup: () => ({ state, sourceDimensions, model, canvasIntent, compact }),
     template: `
       <MobileResolutionPicker
         v-model:width="state.width"
@@ -54,6 +55,7 @@ function mountPicker(
         :model="model"
         :source-dimensions="sourceDimensions"
         :canvas-intent="canvasIntent"
+        :compact="compact"
       />
     `,
   });
@@ -65,6 +67,32 @@ function tierSegments(wrapper: VueWrapper) {
 }
 
 describe("MobileResolutionPicker", () => {
+  it("does not change dimensions or canvas intent when disabled", async () => {
+    const wrapper = mount(MobileResolutionPicker, {
+      props: { family: "flux", width: 1024, height: 1024, compact: true, disabled: true },
+    });
+    await wrapper.get("[data-shape='9:16']").trigger("click");
+    expect(wrapper.emitted("update:width")).toBeUndefined();
+    expect(wrapper.emitted("update:height")).toBeUndefined();
+    expect(wrapper.emitted("canvas-intent")).toBeUndefined();
+  });
+
+  it("keeps aspect ratios visible while primary size details are collapsed", async () => {
+    const { wrapper, state } = mountPicker(1024, 1024, "flux", null, null, "model-default", true);
+    const details = wrapper.get(".mobile-size-disclosure");
+    expect(details.attributes("open")).toBeUndefined();
+    expect(
+      wrapper.get("[data-test='mobile-resolution-shape']").element.closest("details"),
+    ).toBeNull();
+    expect(
+      wrapper.get("[data-test='mobile-resolution-announcement']").element.closest("details"),
+    ).toBeNull();
+    await wrapper.get("[data-shape='9:16']").trigger("click");
+    expect(state).toMatchObject({ width: 576, height: 1024 });
+    expect(details.get("summary").text()).toContain("576 × 1024 px");
+    expect(details.attributes("open")).toBeUndefined();
+  });
+
   it("uses the shared desktop shape picker without orientation tabs", async () => {
     const { wrapper, state } = mountPicker(1024, 1024, "flux");
 

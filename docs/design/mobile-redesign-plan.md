@@ -2,7 +2,7 @@
 
 Tracking: [#1628](https://github.com/utensils/mold/issues/1628).
 
-Status: locked after independent peer review; implementation underway on `feat/mobile-studio-redesign`.
+Status: iOS accepted complete by James on 2026-09-07 after #1639 merged at `fe7d258f`. Android completion and the separately requested visible aspect-ratio follow-up continue in [the web/Android plan](web-android-redesign-plan.md).
 Baseline: `c38d569d5d2ef14ea60adb05cc81a2e95f126c13`, verified against remote main on 2026-09-06.
 
 ## Outcome
@@ -157,7 +157,8 @@ Independent review: GPT-5.6 Sol, medium reasoning, `plan_review`. All seven find
 - [x] Milestone 2: Make, three output kinds, style memory, consolidated settings.
 - [x] Milestone 3: Queue sections, details, safe offline state, exact-machine actions.
 - [x] Milestone 4: Images, Styles, Machines, Settings.
-- [ ] Milestone 5: full regression, visual comparison, native iOS acceptance, Android acceptance.
+- [x] Milestone 5, iOS: regression and visual follow-ups delivered; James accepted iOS complete after #1639. Historical unverified automation cases below remain evidence boundaries, not reopened acceptance blockers.
+- [x] Android remainder transferred to the [web/Android completion plan](web-android-redesign-plan.md); transfer does not claim Android acceptance.
 
 Sync baseline: `origin/main` remains `c38d569d` at plan lock; no new main commits.
 

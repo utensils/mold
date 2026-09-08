@@ -169,21 +169,32 @@ function matchSource(): void {
 <template>
   <fieldset v-if="!canvasless" class="mobile-resolution-picker" :disabled="disabled">
     <legend class="mobile-resolution-legend">Shape and size</legend>
+    <div class="mobile-resolution-group">
+      <span class="mobile-resolution-label">Shape</span>
+      <ShapePicker
+        :model-value="shapeId"
+        :options="shapeOptions"
+        :approximate="shapeApproximate"
+        :disabled="disabled"
+        label="Aspect ratio"
+        data-test="mobile-resolution-shape"
+        @update:model-value="setShape"
+      />
+    </div>
+
+    <p
+      class="sr-only"
+      data-test="mobile-resolution-announcement"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      Selected resolution: {{ width }} by {{ height }} pixels, {{ currentAspect }},
+      {{ currentOrientation }}.
+    </p>
     <details :open="!compact || !!resolutionError" class="mobile-size-disclosure">
       <summary>
-        <span>{{ currentAspect }}</span
-        ><small>{{ width }} × {{ height }} px</small>
+        <span>Size</span><small>{{ width }} × {{ height }} px</small>
       </summary>
-
-      <p
-        class="sr-only"
-        data-test="mobile-resolution-announcement"
-        aria-live="polite"
-        aria-atomic="true"
-      >
-        Selected resolution: {{ width }} by {{ height }} pixels, {{ currentAspect }},
-        {{ currentOrientation }}.
-      </p>
 
       <div
         v-if="sourceResolution"
@@ -202,19 +213,6 @@ function matchSource(): void {
         >
           Match source
         </button>
-      </div>
-
-      <div class="mobile-resolution-group">
-        <span class="mobile-resolution-label">Shape</span>
-        <ShapePicker
-          :model-value="shapeId"
-          :options="shapeOptions"
-          :approximate="shapeApproximate"
-          :disabled="disabled"
-          label="Aspect ratio"
-          data-test="mobile-resolution-shape"
-          @update:model-value="setShape"
-        />
       </div>
 
       <div v-if="hasLadder" class="mobile-resolution-group mobile-resolution-tier">
