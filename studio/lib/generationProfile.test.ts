@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   advertisedGenerationProfile,
@@ -16,6 +18,29 @@ import {
   type GenerationRecipeProfile,
 } from "./generationProfile";
 import { hunyuan3dRecipe, sdxlRecipe } from "./generationProfile.testFixtures";
+
+it("accepts every generation profile emitted by the Rust registry", () => {
+  let directory = process.cwd();
+  const relative = "docs/generated/generation-profiles-v1.json";
+  while (!existsSync(resolve(directory, relative))) {
+    const parent = dirname(directory);
+    if (parent === directory) throw new Error(`Missing ${relative}`);
+    directory = parent;
+  }
+  const registry = JSON.parse(
+    readFileSync(resolve(directory, relative), "utf8"),
+  );
+  expect(registry.profiles.length).toBeGreaterThan(0);
+  for (const { models, profile } of registry.profiles) {
+    expect(
+      advertisedGenerationProfile({
+        family: models[0].family,
+        generation_profile: profile,
+      }),
+      profile.profile_id,
+    ).not.toBeNull();
+  }
+});
 
 function profileModel(): GenerationProfileModel {
   const recipe = (
@@ -585,6 +610,24 @@ describe("prompt, strength, and mesh contract", () => {
     const unknownWorkflow = structuredClone(complete);
     (caps(unknownWorkflow).mesh as LooseCaps).workflow_modes = ["magic_mesh"];
     expect(advertisedGenerationProfile(modelWith(unknownWorkflow))).toBeNull();
+  });
+
+  it("preserves Hunyuan3D 2.1 prompt and PBR authority with mesh roundtrip", () => {
+    const recipe = hunyuan3dRecipe();
+    const mesh = caps(recipe).mesh as LooseCaps;
+    mesh.workflow_modes = [
+      "image_to_mesh",
+      "text_to_mesh",
+      "mesh_roundtrip",
+      "mesh_texture",
+    ];
+    mesh.texture = { mode: "adjustable", required: false };
+    const model = modelWith(recipe);
+    const resolved = effectiveGenerationRecipe(model);
+    expect(resolved).toEqual(recipe);
+    expect(resolved?.capabilities.prompt?.mode).toBe("ignored");
+    expect(resolved?.capabilities.mesh?.texture.mode).toBe("adjustable");
+    expect(recipeIsCanvasless(resolved)).toBe(true);
   });
 
   it("retains PBR and prompt contracts on hosts with the old hidden matting placeholder", () => {
