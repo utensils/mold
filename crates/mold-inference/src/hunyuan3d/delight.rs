@@ -266,22 +266,7 @@ pub(crate) fn delight_rgba(
     source: &RgbaImage,
     progress: &crate::progress::ProgressReporter,
 ) -> Result<RgbaImage> {
-    let mut bytes = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(source.clone())
-        .write_to(&mut bytes, image::ImageFormat::Png)
-        .context("encode matted input for delight")?;
-    let request: GenerateRequest = serde_json::from_value(serde_json::json!({
-        "prompt": "",
-        "model": mold_core::manifest::HUNYUAN3D_DELIGHT_MANIFEST,
-        "width": SIZE,
-        "height": SIZE,
-        "steps": STEPS,
-        "guidance": 1.0,
-        "seed": SEED,
-        "scheduler": "euler-ancestral",
-        "output_format": "png",
-        "source_image": bytes.into_inner()
-    }))?;
+    let request = delight_request(source)?;
     let loaded = load_delight(paths, gpu_ordinal, progress)?;
     let response = generate_loaded(&loaded, &request, progress)?;
     let image = response
@@ -292,6 +277,28 @@ pub(crate) fn delight_rgba(
     Ok(image::load_from_memory(&image.data)
         .context("decode delighted intermediate")?
         .to_rgba8())
+}
+
+fn delight_request(source: &RgbaImage) -> Result<GenerateRequest> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(source.clone())
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .context("encode matted input for delight")?;
+    let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+        "prompt": "",
+        "model": mold_core::manifest::HUNYUAN3D_DELIGHT_MANIFEST,
+        "width": SIZE,
+        "height": SIZE,
+        "steps": STEPS,
+        "guidance": 1.0,
+        "seed": SEED,
+        "scheduler": "euler-ancestral",
+        "output_format": "png"
+    }))?;
+    // The wire schema accepts base64 strings, not JSON arrays of byte values.
+    // This internal PNG already has the typed representation we need.
+    request.source_image = Some(bytes.into_inner());
+    Ok(request)
 }
 
 fn load_delight(
@@ -485,6 +492,31 @@ impl InferenceEngine for DelightEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delight_request_preserves_rgba_source_and_pinned_recipe() {
+        let source = RgbaImage::from_fn(3, 2, |x, y| {
+            image::Rgba([x as u8 * 70, y as u8 * 90, 123, (x + y) as u8 * 50])
+        });
+        let request = delight_request(&source).expect("build internal delight request");
+        let bytes = request.source_image.as_ref().expect("source PNG");
+        assert_eq!(image::load_from_memory(bytes).unwrap().to_rgba8(), source);
+        assert_eq!(request.prompt, "");
+        assert_eq!(
+            request.model,
+            mold_core::manifest::HUNYUAN3D_DELIGHT_MANIFEST
+        );
+        assert_eq!((request.width, request.height), (SIZE, SIZE));
+        assert_eq!(request.steps, STEPS);
+        assert_eq!(request.guidance, 1.0);
+        assert_eq!(request.seed, Some(SEED));
+        assert_eq!(request.scheduler, Some(Scheduler::EulerAncestral));
+        assert_eq!(request.output_format, Some(OutputFormat::Png));
+        let wire = serde_json::to_value(&request).unwrap();
+        assert!(wire["source_image"].is_string());
+        let restored: GenerateRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored.source_image, request.source_image);
+    }
+
     #[test]
     fn alpha_erosion_matches_a_three_by_three_min_filter() {
         let mut image = RgbaImage::from_pixel(SIZE, SIZE, image::Rgba([0, 0, 0, 255]));

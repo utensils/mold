@@ -1,0 +1,1 @@
+- **Fix Hunyuan3D lighting removal.** Requests with lighting removal enabled no longer fail with `invalid type: sequence, expected a string` while preparing the source image for the delight stage.
