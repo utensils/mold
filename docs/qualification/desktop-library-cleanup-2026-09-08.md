@@ -6,7 +6,7 @@ Implementation: `b5462fa1` (admission) and `49cb683e` (shared UI and queue resto
 
 Real inference ran on Plato GPU 3 (L40S), using an isolated server at loopback port 7689, a separate durable home/output directory, and the installed model files. The test binary was built from `9ec27747` plus the admission fix later committed as `b5462fa1`, with CUDA, cuDNN, preview, mesh-texture, mesh-matting, and mesh-delight enabled. Existing accepted licenses were copied into the isolated home. Production service and existing paused jobs were untouched.
 
-Browser UAT exercised the actual desktop MeshWorkflowView, web MeshWorkflowPage, and mobile MobileApp through local Vite servers. Desktop native APIs were replaced by the browser harness; this is not a packaged Tauri or physical iPhone/Android qualification.
+Browser UAT exercised the actual desktop MeshWorkflowView, web MeshWorkflowPage, and mobile MobileApp through local Vite servers. The initial desktop browser harness replaced native APIs. Follow-up UAT used the actual macOS development binary in a separate test bundle with WKWebView and native IPC. Physical iPhone/Android hardware and release installer delivery are not part of this qualification.
 
 ## Real workflows
 
@@ -27,7 +27,7 @@ Desktop rendered the textured fox with 304,062 triangles. Web and mobile rendere
 ## Interaction and regression checks
 
 - Desktop style pickers are the same components as Generate, filtered by workflow mode and image/mesh capability.
-- Mouse resize, keyboard resize, saved preference updates, and double-click reset passed in the desktop browser harness. Actual OS preference persistence uses the existing app preference store and was not exercised through a packaged app.
+- Mouse resize, keyboard resize, saved preference updates, and double-click reset passed in the desktop browser harness. Follow-up native keyboard resizing changed the saved preference from 480 to 460 pixels and persisted it to the native settings file.
 - Telemetry refresh preserves draft text and focus; unchanged results are not fetched repeatedly.
 - Web uses its existing Create picker, shared segmented mode control and switches, and Auto/Most capable routing constrained to a host supporting every stage.
 - Web 390×844 layout has no horizontal overflow. Mobile connects to Plato, lists generated outputs, and opens the shared mesh viewer.
@@ -40,6 +40,16 @@ Desktop rendered the textured fox with 304,062 triangles. Web and mobile rendere
 
 Local screenshots, API receipts, downloaded GLBs, and harness scripts are retained under `/tmp/mold-library-cleanup/`. The isolated remote output is under `/home/jamesbrink/.local/share/mold-cleanup-uat/output`.
 
-## Remaining observation
+## Native follow-up and progress verification
 
-During the texture run, the queue preview continued reporting “Unwrapping mesh” while a debugger stack showed paint denoising on the GPU. It later advanced to upscaling and completed in about nine minutes. This qualification proves successful output, not accurate intermediate paint progress; the stale progress observation remains unresolved. The production paused jobs were not resumed as part of this test.
+The actual NYC LTX video `mold-ltx-2.5-22b-dev-int8-conv-1788888568154.mp4` was opened in the native Library. Its playback context menu offered Reuse settings; that action restored the original `mold-z-image-turbo-q8-1788888016740.png` source without the missing-media warning. The persistent Sound off control synchronized with the native player and remained muted in Generate. Inspector actions fit inside the panel. The native mesh viewer rendered the first textured fox successfully.
+
+A fourth workflow was submitted through the native file pickers and Generate button to the isolated Plato endpoint: `d53b958c-6a41-4220-8b2c-6a03143f8346`. It completed with a 12,482,632-byte textured GLB, SHA-256 `c6f7d7ba2e365e1c0e7590f98bf82ecfb9e809c9e3f8382ff6b9f3b86adc5f3f`.
+
+The first run had an apparent stale “Unwrapping mesh” observation while a later debugger stack showed denoising. To resolve the uncertainty, the fourth run used temporary event logging in the isolated build only. Unwrapping completed in 88 seconds; the API and native queue then reported “Generating PBR views” with steps 1–15, followed by decode, upscale, bake, fill, and GLB publication. Denoising took 371 seconds. The earlier discrepancy was not reproduced; no paint-progress source change was needed. Test logging is not included in this branch. Production paused jobs were not resumed by this UAT.
+
+Native development reload exposed a separate inventory timing issue: 3-D Studio mounted before host readiness did not refresh its model inventory later. The ready-authority watcher now refreshes only on connection/authority changes, not telemetry; cached styles remain available while reconnecting. Regression tests cover both behaviors.
+
+## Independent review
+
+Claude Sonnet reviewed the full branch and found no critical/high issues. Its valid redundant localStorage-write finding was fixed in `b0e0f508`, with regression coverage. Queue-detail error handling and workflow-owner cancel/resume tests were also added. The appearance picker deliberately accepts PNG/JPEG, matching server admission. Claude's follow-up review found no actionable issues in that fix.

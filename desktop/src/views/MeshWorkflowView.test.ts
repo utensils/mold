@@ -77,6 +77,46 @@ describe("MeshWorkflowView host routing", () => {
     expect(wrapper.find("[data-test='mesh-studio']").exists()).toBe(true);
     wrapper.unmount();
   });
+  it("refreshes newly ready hosts without refetching on telemetry changes", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    const hosts = useHostsStore();
+    const inventory = useHostModelsStore();
+    vi.mocked(inventory.refresh).mockClear();
+    hosts.extras[0]!.status = "connecting";
+    await flushPromises();
+    vi.mocked(inventory.refresh).mockClear();
+    hosts.extras[0]!.status = "ready";
+    await flushPromises();
+    expect(inventory.refresh).toHaveBeenCalledTimes(1);
+    hosts.telemetry["renderbox-7680"] = {
+      queueDepth: 2,
+      queueCapacity: 8,
+      version: null,
+      gpuInfo: { name: "CUDA", backend: "cuda", vram_total_mb: 96000, vram_used_mb: 1000 },
+    };
+    await flushPromises();
+    expect(inventory.refresh).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("retains cached styles while their host reconnects", async () => {
+    const wrapper = mountView();
+    const inventory = useHostModelsStore();
+    const row = { name: "mesh", family: "hunyuan3d", downloaded: true };
+    inventory.byHost["renderbox-7680"] = {
+      entries: [row] as never,
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    wrapper.findComponent(HostChip).vm.$emit("update:modelValue", "renderbox-7680");
+    await flushPromises();
+    useHostsStore().extras[0]!.status = "connecting";
+    await flushPromises();
+    expect(wrapper.findComponent(MeshWorkflowStudio).props("availableModels")).toEqual([row]);
+    wrapper.unmount();
+  });
+
   it("filters complete workflows before Auto and Most capable rank machines", async () => {
     const wrapper = mountView();
     const hosts = useHostsStore();

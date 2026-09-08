@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import MeshWorkflowStudio from "@studio/components/MeshWorkflowStudio.vue";
 import { meshWorkflowModes, type WorkflowModel } from "@studio/lib/meshWorkflowAuthoring";
 import {
@@ -59,13 +59,23 @@ watch(
 watch(routing, (value) => {
   if (value && value !== "capable") browseHostId.value = value;
 });
-onMounted(() => void inventory.refresh());
+// Connections become ready after the view mounts on a cold launch. Refresh
+// only when that authority set changes, never on queue/GPU telemetry ticks.
+watch(
+  () =>
+    JSON.stringify(
+      hosts.all
+        .filter((host) => host.status === "ready" && !host.stale)
+        .map((host) => [host.id, host.baseUrl, host.apiKey]),
+    ),
+  () => void inventory.refresh(),
+  { immediate: true },
+);
 
 const availableModels = computed(() => {
   const byName = new Map<string, WorkflowModel>();
   for (const host of hosts.all) {
     if (routing.value && routing.value !== "capable" && host.id !== routing.value) continue;
-    if (host.status !== "ready" || host.stale) continue;
     for (const model of inventory.byHost[host.id]?.entries ?? []) {
       if (!model.downloaded || model.runtime_available === false) continue;
       const existing = byName.get(model.name);
