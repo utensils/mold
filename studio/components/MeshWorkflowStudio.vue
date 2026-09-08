@@ -81,6 +81,9 @@ const selectedImageModel = computed(() =>
 const selectedModes = computed(() =>
   selectedMeshModel.value ? meshWorkflowModes(selectedMeshModel.value) : [],
 );
+const textureAvailable = computed(() =>
+  selectedModes.value.includes("mesh_texture"),
+);
 const delightAvailable = computed(() => {
   const profile = selectedMeshModel.value?.generation_profile;
   const recipe = profile?.recipes.find(
@@ -386,6 +389,7 @@ watch(meshModelName, () => {
         ? "mesh_roundtrip"
         : "mesh_texture";
   }
+  if (!textureAvailable.value) texture.value = false;
 });
 watch(selectedId, () => void refreshSelected());
 watch(
@@ -410,20 +414,23 @@ onBeforeUnmount(() => {
           from the checkpoint.
         </p>
       </div>
-      <select v-model="selectedId" aria-label="Previous 3-D workflow">
-        <option value="">New workflow</option>
-        <option v-for="job in jobs" :key="job.id" :value="job.id">
-          {{
-            job.mode === "text_to_mesh"
-              ? "Text to 3-D"
-              : job.mode === "mesh_roundtrip"
-                ? "Rebuild mesh"
-                : "Texture mesh"
-          }}
-          ·
-          {{ job.state }}
-        </option>
-      </select>
+      <div class="mesh-studio__header-actions">
+        <slot name="machine" />
+        <select v-model="selectedId" aria-label="Previous 3-D workflow">
+          <option value="">New workflow</option>
+          <option v-for="job in jobs" :key="job.id" :value="job.id">
+            {{
+              job.mode === "text_to_mesh"
+                ? "Text to 3-D"
+                : job.mode === "mesh_roundtrip"
+                  ? "Rebuild mesh"
+                  : "Texture mesh"
+            }}
+            ·
+            {{ job.state }}
+          </option>
+        </select>
+      </div>
     </header>
 
     <p v-if="error" class="mesh-studio__error" role="alert">{{ error }}</p>
@@ -499,10 +506,22 @@ onBeforeUnmount(() => {
               </option>
             </select>
           </label>
-          <label class="mesh-studio__check">
+          <label
+            v-if="textureAvailable"
+            class="mesh-studio__check"
+            data-test="mesh-workflow-texture"
+          >
             <input v-model="texture" type="checkbox" />
             Paint PBR materials after geometry
           </label>
+          <p
+            v-else
+            class="mesh-studio__availability"
+            data-test="mesh-workflow-texture-unavailable"
+          >
+            PBR painting is unavailable on this machine. Geometry generation
+            remains available.
+          </p>
         </template>
 
         <template v-else>
@@ -677,6 +696,11 @@ onBeforeUnmount(() => {
   margin: 0;
   color: var(--mold-text-2);
 }
+.mesh-studio__header-actions {
+  display: grid;
+  gap: 8px;
+  min-width: min(100%, 320px);
+}
 .mesh-studio__eyebrow {
   font: 700 var(--mold-fs-micro) var(--mold-font-mono);
   letter-spacing: 0.12em;
@@ -746,6 +770,12 @@ onBeforeUnmount(() => {
   display: flex !important;
   align-items: center;
   gap: 9px !important;
+}
+.mesh-studio__availability {
+  margin: 0;
+  color: var(--mold-text-2);
+  font-size: var(--mold-fs-xs);
+  line-height: 1.45;
 }
 .mesh-studio__file input {
   position: absolute;

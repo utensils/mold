@@ -133,6 +133,14 @@ the model controls, and the length slider. A sequence is now something you scrip
   seed, then decodes and extracts a new surface. The web and desktop 3-D Studio
   submit the same durable request and use reference-upload leases for large
   meshes. This path is independent of the optional `mesh-texture` feature.
+  The Studio's **Run workflow on** picker binds every read, mutation, upload,
+  poll and result fetch to one explicit host target (including its API key),
+  and a host change remounts the workflow state so identities never cross
+  machines. A recipe without `mesh_texture` disables PBR authoring while
+  leaving geometry-only Text to 3-D available. Signed macOS desktop builds
+  compile the complete mesh feature set with Metal (the private fused `h3`
+  feature remains CUDA-only), guarded by the PR-native feature graph and the
+  desktop distribution contract test.
 
 - **Background matting is profile-driven and its transformed inputs are durable private media.** `capabilities.mesh.matting` is the one Auto/On/Off contract every authoring surface reads. Auto preserves useful alpha and otherwise runs the pinned pure-Rust U²-Net stage before shape weights load; On always recomputes and Off preserves the historical pixels. Processed PNGs never enter the public response or GLB: a durable job seals them under its purpose-keyed `generation_queue_derived_media` obligation before gallery publication, hands every authored and derived set to the same archive identity, and exposes the processed roles for authenticated download while refusing them for request reuse so matting cannot be applied twice. Cancellation, held-row retention, startup reconciliation, gallery deletion, and queue settlement cover all attached sets.
 

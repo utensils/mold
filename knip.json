@@ -14,6 +14,7 @@
       "entry": [
         "index.ts",
         "components/MeshWorkflowStudio.vue",
+        "components/MeshWorkflowHostPicker.vue",
         "**/*.test.ts"
       ],
       "project": ["**/*.{ts,vue}"]
