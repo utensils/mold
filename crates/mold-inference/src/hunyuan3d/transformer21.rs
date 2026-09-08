@@ -15,6 +15,11 @@ use crate::quantized_linear::QuantizedLinear;
 pub(super) enum ShapeLinear {
     Dense(Linear),
     Quantized(QuantizedLinear),
+    Fp8 {
+        weight: Tensor,
+        scale: Tensor,
+        bias: Option<Tensor>,
+    },
 }
 
 impl Module for ShapeLinear {
@@ -22,6 +27,30 @@ impl Module for ShapeLinear {
         match self {
             Self::Dense(linear) => linear.forward(tensor),
             Self::Quantized(linear) => linear.forward(tensor),
+            Self::Fp8 {
+                weight,
+                scale,
+                bias,
+            } => {
+                let dtype = tensor.dtype();
+                let [output_dim, input_dim] = weight.dims() else {
+                    return Err(candle_core::Error::Msg(
+                        "Hunyuan3D FP8 linear weight is not a matrix".to_string(),
+                    ));
+                };
+                let groups = scale.dim(1)?;
+                let group_size = input_dim / groups;
+                let weight = weight
+                    .to_dtype(dtype)?
+                    .reshape((*output_dim, groups, group_size))?
+                    .broadcast_mul(&scale.to_dtype(dtype)?.unsqueeze(2)?)?
+                    .reshape((*output_dim, *input_dim))?;
+                let mut output = Linear::new(weight, None).forward(tensor)?;
+                if let Some(bias) = bias {
+                    output = output.broadcast_add(&bias.to_dtype(dtype)?)?;
+                }
+                Ok(output)
+            }
         }
     }
 }
@@ -67,6 +96,14 @@ impl<'a> ShapeVarBuilder<'a> {
                 } else {
                     candle_nn::linear_no_bias(input, output, builder.clone())?
                 };
+                if linear.weight().dtype() == DType::F8E4M3 {
+                    let scale = builder.get_unchecked("scale_weight")?;
+                    return Ok(ShapeLinear::Fp8 {
+                        weight: linear.weight().clone(),
+                        scale,
+                        bias: linear.bias().cloned(),
+                    });
+                }
                 Ok(ShapeLinear::Dense(linear))
             }
             Self::Quantized {
@@ -626,6 +663,34 @@ mod tests {
             error < 0.00005,
             "Tencent fixture maximum absolute error: {error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn fp8_linear_applies_scale_before_unscaled_bias() -> candle_core::Result<()> {
+        let device = if std::env::var_os("MOLD_TEST_CUDA_FP8").is_some() {
+            Device::new_cuda(0)?
+        } else {
+            Device::Cpu
+        };
+        let weight = Tensor::new(&[[4f32, -8.0, 12.0, 16.0], [8.0, 4.0, -4.0, -8.0]], &device)?
+            .to_dtype(DType::F8E4M3)?;
+        let scale = Tensor::new(&[[0.25f32, 0.5], [0.5, 0.25]], &device)?;
+        let bias = Tensor::new(&[3f32, -5.0], &device)?;
+        let input = Tensor::new(&[[2f32, -1.0, 0.5, 3.0]], &device)?;
+        let linear = ShapeLinear::Fp8 {
+            weight: weight.clone(),
+            scale: scale.clone(),
+            bias: Some(bias.clone()),
+        };
+        let actual = linear.forward(&input)?;
+        let widened = weight
+            .to_dtype(DType::F32)?
+            .reshape((2, 2, 2))?
+            .broadcast_mul(&scale.unsqueeze(2)?)?
+            .reshape((2, 4))?;
+        let expected = Linear::new(widened, Some(bias)).forward(&input)?;
+        assert_eq!(actual.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
         Ok(())
     }
 

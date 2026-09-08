@@ -465,9 +465,17 @@ impl Hunyuan3dEngine {
         // BF16 cannot resolve the query grid the shape VAE is evaluated on.
         let dtype = super::backend::compute_dtype(&device);
 
+        let storage = crate::artifact_format::probe(&checkpoint);
         let quantized = matches!(
-            crate::artifact_format::probe(&checkpoint),
+            &storage,
             Ok(crate::artifact_format::ArtifactStorageFormat::Gguf { .. })
+        );
+        let fp8 = matches!(
+            &storage,
+            Ok(crate::artifact_format::ArtifactStorageFormat::Safetensors {
+                tensor_dtypes,
+                ..
+            }) if tensor_dtypes.contains(&crate::artifact_format::TensorDType::F8E4M3)
         );
         let (dit, vb) = if quantized {
             let qvb = mold_candle::quantized::VarBuilder::from_gguf(&checkpoint, &device)
@@ -486,13 +494,31 @@ impl Hunyuan3dEngine {
             let dense = dense_components_from_gguf(&qvb, dtype, &device)?;
             (dit, dense)
         } else {
-            let vb = crate::weight_loader::load_safetensors_with_progress(
-                std::slice::from_ref(&checkpoint),
-                dtype,
-                &device,
-                "Hunyuan3D checkpoint",
-                &self.base.progress,
-            )?;
+            if fp8 {
+                super::quantization::validate_fp8_checkpoint(&checkpoint)?;
+            }
+            if fp8 && device.is_metal() {
+                bail!(
+                    "Hunyuan3D FP8 shape checkpoints require CUDA or CPU because Candle cannot widen F8E4M3 weights on Metal"
+                );
+            }
+            let vb = if fp8 {
+                crate::weight_loader::load_native_safetensors_with_progress(
+                    std::slice::from_ref(&checkpoint),
+                    dtype,
+                    &device,
+                    "Hunyuan3D FP8 checkpoint",
+                    &self.base.progress,
+                )?
+            } else {
+                crate::weight_loader::load_safetensors_with_progress(
+                    std::slice::from_ref(&checkpoint),
+                    dtype,
+                    &device,
+                    "Hunyuan3D checkpoint",
+                    &self.base.progress,
+                )?
+            };
             let dit = match (&dit20_cfg, &dit21_cfg) {
                 (Some(cfg), None) => ShapeDit::V20(Box::new(
                     Hunyuan3dDit::new(cfg, vb.pp(DIT_PREFIX))

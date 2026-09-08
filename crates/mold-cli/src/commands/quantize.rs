@@ -40,7 +40,7 @@ pub fn run(
             .resolved_models_dir()
             .join("derived")
             .join(derived_name.replace(':', "-"))
-            .join(format!("shape-{tier}.gguf"))
+            .join(format!("shape-{tier}.{}", tier.file_extension()))
     });
 
     eprintln!(
