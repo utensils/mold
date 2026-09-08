@@ -9,6 +9,7 @@ android="$repo_root/.github/workflows/android.yml"
 android_gradle="$repo_root/apps/mobile/src-tauri/gen/android/build.gradle.kts"
 release_workflow="$repo_root/.github/workflows/release.yml"
 testflight="$repo_root/.github/workflows/testflight-ios.yml"
+ci_local="$repo_root/scripts/ci-local.sh"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -310,6 +311,9 @@ fi
 require_text "$ci" \
   "cargo clippy -p mold-ai --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings" \
   "Metal-gated production code is not linted"
+require_text "$ci_local" \
+  "cargo clippy -p mold-ai --features h3-cuda,mesh-texture,mesh-matting,mesh-delight,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings" \
+  "the local CUDA gate omits required Hunyuan3D mesh features"
 require_text "$ci" \
   "cargo check -p mold-ai-server --features h3,mesh-texture,mesh-matting,mesh-delight,metal,expand,mdns,metrics,mp4,pulid,webp" \
   "the reviewed H3 Metal server recipe is not compiled"
