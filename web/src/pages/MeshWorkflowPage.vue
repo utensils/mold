@@ -68,7 +68,10 @@ async function resolveTarget(requirements: MeshWorkflowRequirements) {
       "No selected machine can run all these 3-D stages. Choose styles installed together on one ready machine.",
     );
   return {
-    target: { baseUrl: route.target.baseUrl, apiKey: route.target.apiKey ?? null },
+    target: {
+      baseUrl: route.target.baseUrl,
+      apiKey: route.target.apiKey ?? null,
+    },
     label: route.label,
   };
 }
