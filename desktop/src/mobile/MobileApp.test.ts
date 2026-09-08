@@ -7822,6 +7822,33 @@ describe("MobileApp durable composer", () => {
     });
   });
 
+  it("does not override a selected destination when delayed startup finishes", async () => {
+    localStorage.setItem("mold.mobile.hosts.v1", "[]");
+    localStorage.removeItem("mold.mobile.selected-host.v1");
+    let finishRestore!: (value: { error: string; missing: never[] }) => void;
+    const restoring = new Promise<{ error: string; missing: never[] }>((resolve) => {
+      finishRestore = resolve;
+    });
+    const factory = vi.spyOn(mobileDraftModule, "createMobileComposerDraft").mockReturnValue({
+      restore: () => restoring,
+      save: async () => true,
+      clear: async () => {},
+    });
+    try {
+      wrapper = mountMobileApp();
+      await nextTick();
+      expect(wrapper.get("[data-test='mobile-tab-hosts']").attributes("aria-current")).toBe("page");
+      await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+      finishRestore({ error: "", missing: [] });
+      await flushPromises();
+      expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
+        "page",
+      );
+    } finally {
+      factory.mockRestore();
+    }
+  });
+
   it("coalesces hidden, pagehide and teardown into one save for the same edit", async () => {
     const save = vi.fn(() => new Promise<boolean>(() => {}));
     const factory = vi.spyOn(mobileDraftModule, "createMobileComposerDraft").mockReturnValue({

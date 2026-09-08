@@ -1383,6 +1383,9 @@ async function listMobileQueue(host: MobileHost, target: ApiTarget): Promise<Que
 const selectedHost = computed(() =>
   connectedHosts.value.find((host) => host.id === selectedHostId.value),
 );
+// Choose the first-run destination before rendering. Async restoration must
+// never overwrite a destination the user has already selected.
+if (!selectedHost.value) tab.value = "hosts";
 
 // --- Generation routing -----------------------------------------------------
 // The phone is remote-only: Auto and Most capable choose between CONNECTED
@@ -11333,8 +11336,6 @@ onMounted(async () => {
     // makes the automatic policies model-aware on the first Develop.
     if (automaticRouting.value) void refreshRoutingModels();
     void refreshMobileActivity();
-  } else {
-    tab.value = "hosts";
   }
 });
 
