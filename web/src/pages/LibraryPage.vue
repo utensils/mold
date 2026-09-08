@@ -2378,7 +2378,12 @@ onBeforeUnmount(() => {
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let disposed = false;
+function refreshWhenVisible() {
+  if (!disposed && !document.hidden) void refresh();
+}
 onMounted(async () => {
+  document.addEventListener("visibilitychange", refreshWhenVisible);
+  window.addEventListener("online", refreshWhenVisible);
   const [, listing] = await Promise.all([
     refresh(),
     fetchModels().catch(() => [] as ModelInfoExtended[]),
@@ -2394,6 +2399,8 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  document.removeEventListener("visibilitychange", refreshWhenVisible);
+  window.removeEventListener("online", refreshWhenVisible);
   stopUpscalePoll();
   if (refreshTimer) clearInterval(refreshTimer);
 });

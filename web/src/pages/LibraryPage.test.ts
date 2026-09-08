@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { flushPromises, mount } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, reactive } from "vue";
 import { createPinia, setActivePinia } from "pinia";
@@ -231,6 +231,7 @@ async function mounted() {
   return wrapper;
 }
 
+enableAutoUnmount(afterEach);
 beforeEach(() => setActivePinia(createPinia()));
 
 describe("LibraryPage", () => {
@@ -438,6 +439,34 @@ describe("LibraryPage", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(listGalleryMock).toHaveBeenCalledTimes(2);
     wrapper.unmount();
+  });
+
+  it("refreshes on visible return and reconnect without losing linked selection or overlapping reads", async () => {
+    routeState.query = { print: "cat.png", printHost: "origin", q: "cat" };
+    const wrapper = await mounted();
+    const hidden = vi.spyOn(document, "hidden", "get");
+    hidden.mockReturnValue(true);
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("online"));
+    expect(listGalleryMock).toHaveBeenCalledTimes(1);
+    let resolveRefresh!: (entries: GalleryImage[]) => void;
+    listGalleryMock.mockReturnValueOnce(new Promise((resolve) => (resolveRefresh = resolve)));
+    hidden.mockReturnValue(false);
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("online"));
+    expect(listGalleryMock).toHaveBeenCalledTimes(2);
+    resolveRefresh([cat, dog]);
+    await flushPromises();
+    expect(wrapper.get('[data-test="lb-key"]').text()).toBe("origin|cat.png");
+    expect(routeState.query).toEqual({ print: "cat.png", printHost: "origin", q: "cat" });
+    window.dispatchEvent(new Event("online"));
+    await flushPromises();
+    expect(listGalleryMock).toHaveBeenCalledTimes(3);
+    wrapper.unmount();
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("online"));
+    expect(listGalleryMock).toHaveBeenCalledTimes(3);
+    hidden.mockRestore();
   });
 
   it("does not start its refresh timer after unmounting during initial load", async () => {
