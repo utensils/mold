@@ -12,6 +12,7 @@ import type {
   FloatControl,
   ProfileAspectGroup,
   ProfileFpsControl,
+  MeshWorkflowMode,
   PromptCapabilitiesProfile,
   ResolutionProfile,
   TemporalProfile,
@@ -435,6 +436,14 @@ function isPromptCapabilities(
  * default outside it, or a non-integer entry, is a contract this client
  * could only misrender.
  */
+const MESH_WORKFLOW_MODES = {
+  image_to_mesh: true,
+  multiview_to_mesh: true,
+  mesh_roundtrip: true,
+  mesh_texture: true,
+  text_to_mesh: true,
+} satisfies Record<MeshWorkflowMode, true>;
+
 function isMeshCapabilities(value: unknown): value is MeshCapabilitiesProfile {
   if (!isRecord(value)) return false;
   const { octree_resolutions, octree_default, target_faces_min } = value;
@@ -482,13 +491,10 @@ function isMeshCapabilities(value: unknown): value is MeshCapabilitiesProfile {
     (workflowModes === undefined ||
       (Array.isArray(workflowModes) &&
         new Set(workflowModes).size === workflowModes.length &&
-        workflowModes.every((mode) =>
-          [
-            "image_to_mesh",
-            "multiview_to_mesh",
-            "mesh_texture",
-            "text_to_mesh",
-          ].includes(String(mode)),
+        workflowModes.every(
+          (mode) =>
+            typeof mode === "string" &&
+            Object.hasOwn(MESH_WORKFLOW_MODES, mode),
         )))
   );
 }

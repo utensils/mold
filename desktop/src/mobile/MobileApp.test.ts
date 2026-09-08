@@ -520,10 +520,10 @@ function serveProfiledRasterModel(): void {
   });
 }
 
-function serveMeshModel(): void {
+function serveMeshModel(entry: ModelEntry = meshModel): void {
   const base = apiJsonTo.getMockImplementation()!;
   apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-    if (path === "/api/models") return Promise.resolve([meshModel]);
+    if (path === "/api/models") return Promise.resolve([entry]);
     if (path === "/api/capabilities") {
       return Promise.resolve({
         ...durableQueueCapabilities,
@@ -5729,6 +5729,32 @@ describe("MobileApp generation queue", () => {
     form.sourceImageName = "armchair.png";
     await flushPromises();
     expect(wrapper.get("#mobile-prompt").isVisible()).toBe(false);
+    expect(
+      wrapper.get("[data-test='mobile-develop-button']").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it("keeps Hunyuan3D 2.1 promptless and exposes PBR when roundtrip is advertised", async () => {
+    const entry = structuredClone(meshModel);
+    entry.name = "hunyuan3d-2.1:fp16";
+    const mesh = entry.generation_profile!.recipes[0]!.capabilities.mesh!;
+    mesh.workflow_modes = ["image_to_mesh", "text_to_mesh", "mesh_roundtrip", "mesh_texture"];
+    mesh.texture = { mode: "adjustable", required: false };
+    serveMeshModel(entry);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const form = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    form.prompt = "";
+    form.sourceImage = PNG_1170x2532;
+    form.sourceImageName = "teapot.png";
+    await flushPromises();
+    expect(wrapper.get("#mobile-prompt").isVisible()).toBe(false);
+    expect(
+      wrapper.get("[data-test='mobile-develop-button']").attributes("disabled"),
+    ).toBeUndefined();
+    expect(wrapper.get("[data-test='mobile-mesh-materials']").text()).toContain("Color / PBR");
+    await wrapper.get("[data-test='mobile-mesh-texture-toggle']").trigger("click");
+    expect(form.mesh.texture).toBe(true);
     expect(
       wrapper.get("[data-test='mobile-develop-button']").attributes("disabled"),
     ).toBeUndefined();

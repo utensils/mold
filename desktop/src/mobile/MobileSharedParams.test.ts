@@ -373,6 +373,7 @@ describe("MobileSharedParams mesh controls", () => {
 
   it("exposes color PBR on the primary form and serializes the advertised texture size", async () => {
     const recipe = hunyuan3dRecipe();
+    recipe.capabilities.mesh!.workflow_modes = ["image_to_mesh", "mesh_roundtrip", "mesh_texture"];
     recipe.capabilities.mesh!.texture = { mode: "adjustable", required: false };
     recipe.capabilities.mesh!.texture_resolutions = [1024, 2048, 4096];
     recipe.capabilities.mesh!.texture_default_resolution = 2048;
