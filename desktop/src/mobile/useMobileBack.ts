@@ -54,12 +54,21 @@ function onPop(event: PopStateEvent): void {
   scheduleReconcile();
 }
 
+function onNativeBack(event: Event): void {
+  const top = entries.at(-1);
+  if (!top) return;
+  event.preventDefault();
+  top.close();
+  scheduleReconcile();
+}
+
 /** Android Back dismisses one temporary surface. Closing nested surfaces in
  * one render consumes their history together without closing the next screen. */
 export function useMobileBack(open: Ref<boolean>, close: () => void): void {
   if (!isNativeAndroidRuntime()) return;
   if (!installed) {
     window.addEventListener("popstate", onPop, true);
+    window.addEventListener("mold:native-back", onNativeBack);
     installed = true;
   }
   const entry: Entry = { id: `mobile-${++serial}`, close };

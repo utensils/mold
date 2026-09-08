@@ -20,7 +20,6 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import androidx.core.view.WindowCompat
 import org.json.JSONObject
-import java.lang.ref.WeakReference
 
 @InvokeArg
 class HostKeyArgs {
@@ -94,22 +93,11 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
     private var identityPickPending = false
     private var pendingIdentityCamera: AndroidIdentityPhoto.CameraTarget? = null
     private var pendingLegacyMedia: PendingLegacyMedia? = null
-    private var textScaleWebView: WeakReference<WebView>? = null
     private lateinit var pairingScanner: AndroidPairingScanner
 
     override fun load(webView: WebView) {
         super.load(webView)
-        textScaleWebView = WeakReference(webView)
-        applyAndroidTextScale(webView, hostActivity.resources.configuration.fontScale)
         pairingScanner = AndroidPairingScanner(hostActivity, webView)
-    }
-
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        val scale = newConfig.fontScale
-        hostActivity.runOnUiThread {
-            textScaleWebView?.get()?.let { applyAndroidTextScale(it, scale) }
-        }
     }
 
     @Command

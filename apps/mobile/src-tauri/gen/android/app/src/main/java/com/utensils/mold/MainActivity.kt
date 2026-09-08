@@ -2,12 +2,35 @@ package com.utensils.mold
 
 import android.R
 import android.graphics.Color
+import android.content.res.Configuration
 import android.os.Bundle
+import android.webkit.WebView
+import com.utensils.mold.mobile_native.AndroidOverlayBack
+import com.utensils.mold.mobile_native.applyAndroidTextScale
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
+  private var currentWebView: WebView? = null
+
+  override fun onWebViewCreate(webView: WebView) {
+    super.onWebViewCreate(webView)
+    currentWebView = webView
+    applyAndroidTextScale(webView, resources.configuration.fontScale)
+    AndroidOverlayBack(this, webView)
+  }
+
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    currentWebView?.let { applyAndroidTextScale(it, newConfig.fontScale) }
+  }
+
+  override fun onDestroy() {
+    currentWebView = null
+    super.onDestroy()
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)

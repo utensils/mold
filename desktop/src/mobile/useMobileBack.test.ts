@@ -47,6 +47,25 @@ function setup() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("mobile Android Back", () => {
+  it("consumes immediate native Back before history reconciliation", async () => {
+    const h = setup();
+    h.first.value = true;
+    h.second.value = true;
+    const back = new Event("mold:native-back", { cancelable: true });
+    window.dispatchEvent(back);
+    expect(back.defaultPrevented).toBe(true);
+    expect(h.closeSecond).toHaveBeenCalledOnce();
+    expect(h.closeFirst).not.toHaveBeenCalled();
+    await settle();
+    h.first.value = false;
+    await settle();
+    const rootBack = new Event("mold:native-back", { cancelable: true });
+    window.dispatchEvent(rootBack);
+    expect(rootBack.defaultPrevented).toBe(false);
+    h.harness.unmount();
+    await settle();
+  });
+
   it("dismisses details before the viewer and Done leaves the viewer open", async () => {
     const h = setup();
     h.first.value = true;
