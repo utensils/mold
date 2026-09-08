@@ -284,3 +284,28 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
 Pausing the job that is already running: an in-flight denoise cannot be
 suspended, so the active card's pause holds the queue after the current
 image and says so.
+
+## 3-D Studio workflows
+
+The 3-D Studio uses the desktop shell's 40px view toolbar, a full-height result
+canvas, and the standard 300px inspector on the right. **From words**, **Rebuild**,
+and **Add texture** are the shared segmented control; only workflows supported
+by the connected machines appear. Workflow inputs belong together in the
+inspector, including the description or source files, with **Generate** at its
+foot. Use **3-D style** and **Picture style** for the two style pickers. The
+result and its stage progress occupy the canvas, without a separate landing-page
+heading or oversized cards.
+
+The existing **Where it runs** chip is the last toolbar control. **Auto** chooses
+the least-busy eligible machine; **Most capable** chooses its strongest eligible
+GPU. Eligibility covers every selected stage and style on one machine, including
+optional texture and lighting removal. A named machine is a pin, never a hint.
+Routing is resolved when Generate is pressed, before source uploads. The
+accepted job's machine remains visible beside its history selector; inspecting,
+resuming, cancelling, and downloading the result stay attached to that owner.
+
+Routine telemetry and polling must preserve the draft, focus, selected history
+entry, and viewer camera. Only a changed URL or credential refreshes the browsing
+context. Progress polling updates stage state in place, and a result's bytes are
+loaded once per output identity. At narrow widths, toolbar controls may wrap;
+the canvas and inspector retain independent scrolling.

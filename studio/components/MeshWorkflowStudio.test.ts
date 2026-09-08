@@ -127,3 +127,72 @@ it("preserves the draft when telemetry recreates an equivalent target", async ()
   expect(wrapper.text()).not.toContain("Loading workflow capabilities");
   wrapper.unmount();
 });
+
+it("submits and reads workflow history on the resolved owner", async () => {
+  const target = { baseUrl: "http://remote:7680", apiKey: "remote-key" };
+  const resolveTarget = vi.fn(async () => ({ target, label: "Render box" }));
+  const wrapper = mount(MeshWorkflowStudio, {
+    props: {
+      target: { baseUrl: "http://local:7680", apiKey: null },
+      resolveTarget,
+    },
+  });
+  await flushPromises();
+  await wrapper.get("textarea").setValue("A brass telescope");
+  await wrapper.get("form").trigger("submit");
+  await flushPromises();
+  expect(resolveTarget).toHaveBeenCalledWith(
+    expect.objectContaining({
+      mode: "text_to_mesh",
+      imageModel: "z-image-turbo:q8",
+    }),
+  );
+  expect(createMeshWorkflow).toHaveBeenCalledWith(target, expect.any(Object));
+  expect(listMeshWorkflows).toHaveBeenLastCalledWith(target);
+  wrapper.unmount();
+});
+
+it("retains unchanged result media across progress polls and stops polling on unmount", async () => {
+  const { getMeshWorkflow } = await import("../api/meshWorkflows");
+  const { apiFetchTo } = await import("../api/client");
+  vi.clearAllMocks();
+  vi.useFakeTimers();
+  vi.mocked(getMeshWorkflow).mockResolvedValue({
+    id: "workflow-1",
+    state: "running",
+    mode: "text_to_mesh",
+    stages: [],
+    output_filename: "result.glb",
+  } as never);
+  vi.mocked(apiFetchTo).mockImplementation(
+    async () => new Response(new Uint8Array([1])),
+  );
+  const createUrl = vi
+    .spyOn(URL, "createObjectURL")
+    .mockReturnValue("blob:result");
+  const revokeUrl = vi
+    .spyOn(URL, "revokeObjectURL")
+    .mockImplementation(() => {});
+  const wrapper = mount(MeshWorkflowStudio, {
+    props: { target: { baseUrl: "http://local:7680", apiKey: null } },
+  });
+  try {
+    await flushPromises();
+    await wrapper.get("textarea").setValue("A brass telescope");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+    expect(apiFetchTo).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(750);
+    await flushPromises();
+    expect(getMeshWorkflow).toHaveBeenCalledTimes(2);
+    expect(apiFetchTo).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(getMeshWorkflow).toHaveBeenCalledTimes(2);
+  } finally {
+    wrapper.unmount();
+    createUrl.mockRestore();
+    revokeUrl.mockRestore();
+    vi.useRealTimers();
+  }
+});

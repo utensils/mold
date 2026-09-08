@@ -1,5 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import type {
+  MeshWorkflowRequirements,
+  MeshWorkflowRoute,
+} from "../lib/meshWorkflowRouting";
 
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../api/client";
 import {
@@ -29,9 +34,20 @@ import {
   type ReferenceUploadLease,
 } from "../api/referenceUploads";
 
-const props = defineProps<{ target: ApiTarget }>();
+const props = defineProps<{
+  target: ApiTarget;
+  hostLabel?: string;
+  desktop?: boolean;
+  availableModels?: WorkflowModel[];
+  resolveTarget?: (
+    requirements: MeshWorkflowRequirements,
+  ) => Promise<MeshWorkflowRoute>;
+}>();
 
-const models = ref<WorkflowModel[]>([]);
+const hostModels = ref<WorkflowModel[]>([]);
+const models = computed(() => props.availableModels ?? hostModels.value);
+const ownedTarget = ref<ApiTarget>({ ...props.target });
+const ownerLabel = ref(props.hostLabel ?? "");
 const jobs = ref<MeshWorkflowJobSummary[]>([]);
 const detail = ref<MeshWorkflowJobDetail<WorkflowGenerateRequest> | null>(null);
 const selectedId = ref("");
@@ -53,10 +69,11 @@ const loading = ref(true);
 const error = ref("");
 const resultSrc = ref("");
 const resultPoster = ref("");
-const instanceId = ref("");
-const referenceUploads = ref<ReferenceUploadCapabilities | null>(null);
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let resultEpoch = 0;
+let contextEpoch = 0;
+let selectionEpoch = 0;
+let loadedResult = "";
 
 const meshModels = computed(() =>
   models.value.filter(
@@ -138,59 +155,85 @@ function clearPoll(): void {
 
 function schedulePoll(): void {
   clearPoll();
-  if (settled.value || !selectedId.value) return;
+  if (
+    !selectedId.value ||
+    !detail.value ||
+    !["queued", "running"].includes(detail.value.state)
+  )
+    return;
   pollTimer = setTimeout(() => void refreshSelected(), 750);
 }
 
 async function refreshJobs(): Promise<void> {
-  const listing = await listMeshWorkflows(props.target);
-  jobs.value = listing.jobs;
+  const target = ownedTarget.value;
+  const epoch = contextEpoch;
+  const listing = await listMeshWorkflows(target);
+  if (epoch === contextEpoch && target === ownedTarget.value)
+    jobs.value = listing.jobs;
 }
 
 async function refreshSelected(): Promise<void> {
-  if (!selectedId.value) return;
+  clearPoll();
+  const epoch = ++selectionEpoch;
+  const id = selectedId.value;
+  if (!id) {
+    detail.value = null;
+    revokeResult();
+    return;
+  }
+  const target = ownedTarget.value;
   try {
-    detail.value = await getMeshWorkflow<WorkflowGenerateRequest>(
-      props.target,
-      selectedId.value,
-    );
+    const result = await getMeshWorkflow<WorkflowGenerateRequest>(target, id);
+    if (epoch !== selectionEpoch) return;
+    detail.value = result;
     await loadResult();
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause);
+    if (epoch === selectionEpoch)
+      error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
-    schedulePoll();
+    if (epoch === selectionEpoch) schedulePoll();
   }
 }
 
-async function bootstrap(): Promise<void> {
-  loading.value = true;
-  error.value = "";
-  try {
-    const [availableModels, status, capabilities] = await Promise.all([
-      apiJsonTo<WorkflowModel[]>(props.target, "/api/models"),
-      apiJsonTo<{ instance_id: string }>(props.target, "/api/status"),
-      apiJsonTo<{ reference_uploads?: ReferenceUploadCapabilities | null }>(
-        props.target,
-        "/api/capabilities",
-      ),
-      refreshJobs(),
-    ]);
-    models.value = availableModels;
-    instanceId.value = status.instance_id;
-    referenceUploads.value = capabilities.reference_uploads ?? null;
+function chooseModels(): void {
+  if (!meshModels.value.some((model) => model.name === meshModelName.value)) {
     meshModelName.value =
       meshModels.value.find((model) =>
         meshWorkflowModes(model).includes("mesh_texture"),
       )?.name ??
       meshModels.value[0]?.name ??
       "";
+  }
+  if (!imageModels.value.some((model) => model.name === imageModelName.value))
     imageModelName.value = imageModels.value[0]?.name ?? "";
-    selectedId.value = jobs.value[0]?.id ?? "";
-    await refreshSelected();
+}
+
+async function bootstrap(): Promise<void> {
+  const epoch = ++contextEpoch;
+  ++selectionEpoch;
+  clearPoll();
+  revokeResult();
+  selectedId.value = "";
+  detail.value = null;
+  ownedTarget.value = { ...props.target };
+  ownerLabel.value = props.hostLabel ?? "";
+  const target = ownedTarget.value;
+  loading.value = true;
+  error.value = "";
+  try {
+    const [availableModels, listing] = await Promise.all([
+      apiJsonTo<WorkflowModel[]>(target, "/api/models"),
+      listMeshWorkflows(target),
+    ]);
+    if (epoch !== contextEpoch) return;
+    hostModels.value = availableModels;
+    jobs.value = listing.jobs;
+    chooseModels();
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause);
+    if (epoch === contextEpoch)
+      error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
-    loading.value = false;
+    if (epoch === contextEpoch) loading.value = false;
   }
 }
 
@@ -222,22 +265,66 @@ async function submit(): Promise<void> {
   busy.value = true;
   error.value = "";
   let uploadLease: ReferenceUploadLease<WorkflowGenerateRequest> | null = null;
+  const epoch = contextEpoch;
+  const draft = {
+    mode: mode.value,
+    prompt: prompt.value,
+    texture: texture.value,
+    textureResolution: textureResolution.value,
+    delight: delight.value,
+    delightAvailable: delightAvailable.value,
+    textureAvailable: textureAvailable.value,
+    selectedImageModel: selectedImageModel.value,
+    meshFile: meshFile.value,
+    appearanceFile: appearanceFile.value,
+    upAxis: upAxis.value,
+    metersPerUnit: metersPerUnit.value,
+  };
   try {
+    const route = props.resolveTarget
+      ? await props.resolveTarget({
+          mode: draft.mode,
+          meshModel: meshModel.name,
+          ...(draft.mode === "text_to_mesh"
+            ? { imageModel: draft.selectedImageModel!.name }
+            : {}),
+          texture:
+            draft.mode === "mesh_texture" ||
+            (draft.mode === "text_to_mesh" &&
+              draft.textureAvailable &&
+              draft.texture),
+          delight:
+            draft.mode !== "mesh_roundtrip" &&
+            draft.delightAvailable &&
+            draft.delight,
+        })
+      : { target: { ...props.target }, label: props.hostLabel ?? "" };
+    if (epoch !== contextEpoch) return;
+    const submissionTarget = route.target;
+    const [status, capabilities] = await Promise.all([
+      apiJsonTo<{ instance_id: string }>(submissionTarget, "/api/status"),
+      apiJsonTo<{ reference_uploads?: ReferenceUploadCapabilities | null }>(
+        submissionTarget,
+        "/api/capabilities",
+      ),
+    ]);
+    if (epoch !== contextEpoch) return;
+    const submissionUploads = capabilities.reference_uploads ?? null;
     let request =
-      mode.value === "text_to_mesh"
+      draft.mode === "text_to_mesh"
         ? buildTextToMeshWorkflow({
-            prompt: prompt.value,
-            imageModel: selectedImageModel.value!,
+            prompt: draft.prompt,
+            imageModel: draft.selectedImageModel!,
             meshModel,
-            texture: texture.value,
-            textureResolution: textureResolution.value,
-            delight: delightAvailable.value && delight.value,
+            texture: draft.texture,
+            textureResolution: draft.textureResolution,
+            delight: draft.delightAvailable && draft.delight,
           })
         : await (async () => {
-            const mesh = meshFile.value!;
+            const mesh = draft.meshFile!;
             const useUpload =
-              referenceUploads.value?.available === true &&
-              Boolean(props.target.apiKey?.trim());
+              submissionUploads?.available === true &&
+              Boolean(submissionTarget.apiKey?.trim());
             const meshPayload = useUpload ? null : await filePayload(mesh);
             const meshFormat: "glb" | "obj" = mesh.name
               .toLowerCase()
@@ -251,18 +338,18 @@ async function submit(): Promise<void> {
               meshByteLength: mesh.size,
               ...(meshPayload ? { meshSha256: meshPayload.sha256 } : {}),
               meshFormat,
-              upAxis: upAxis.value,
-              metersPerUnit: metersPerUnit.value,
+              upAxis: draft.upAxis,
+              metersPerUnit: draft.metersPerUnit,
             };
-            if (mode.value === "mesh_roundtrip") {
+            if (draft.mode === "mesh_roundtrip") {
               return buildMeshRoundtripWorkflow(shared);
             }
-            const appearancePayload = await filePayload(appearanceFile.value!);
+            const appearancePayload = await filePayload(draft.appearanceFile!);
             return buildMeshTextureWorkflow({
               ...shared,
               appearanceBase64: appearancePayload.base64,
-              textureResolution: textureResolution.value,
-              delight: delightAvailable.value && delight.value,
+              textureResolution: draft.textureResolution,
+              delight: draft.delightAvailable && draft.delight,
             });
           })();
     const meshRequest =
@@ -278,17 +365,17 @@ async function submit(): Promise<void> {
       (directMeshUpload ||
         requestShouldUseReferenceUploads(
           meshRequest,
-          props.target,
-          referenceUploads.value,
+          submissionTarget,
+          submissionUploads,
         ))
     ) {
       uploadLease = await prepareReferenceUploads({
-        target: props.target,
-        expectedInstanceId: instanceId.value,
-        capabilities: referenceUploads.value,
+        target: submissionTarget,
+        expectedInstanceId: status.instance_id,
+        capabilities: submissionUploads,
         request: meshRequest,
         ...(directMeshUpload
-          ? { uploadBodies: new Map([[1, meshFile.value!]]) }
+          ? { uploadBodies: new Map([[1, draft.meshFile!]]) }
           : {}),
       });
       if (request.mode === "mesh_texture") {
@@ -297,11 +384,21 @@ async function submit(): Promise<void> {
         request = { ...request, roundtrip_request: uploadLease.request };
       }
     }
-    const created = await createMeshWorkflow(props.target, request);
+    if (epoch !== contextEpoch) {
+      await uploadLease?.cancel().catch(() => undefined);
+      return;
+    }
+    const created = await createMeshWorkflow(submissionTarget, request);
     uploadLease = null;
-    await refreshJobs();
+    if (epoch !== contextEpoch) return;
+    clearPoll();
+    ++selectionEpoch;
+    revokeResult();
+    detail.value = null;
+    ownedTarget.value = submissionTarget;
+    ownerLabel.value = route.label;
     selectedId.value = created.job_id;
-    await refreshSelected();
+    await refreshJobs();
   } catch (cause) {
     await uploadLease?.cancel().catch(() => undefined);
     error.value = cause instanceof Error ? cause.message : String(cause);
@@ -314,7 +411,7 @@ async function cancel(): Promise<void> {
   if (!selectedId.value) return;
   busy.value = true;
   try {
-    await cancelMeshWorkflow(props.target, selectedId.value);
+    await cancelMeshWorkflow(ownedTarget.value, selectedId.value);
     await Promise.all([refreshJobs(), refreshSelected()]);
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause);
@@ -327,7 +424,7 @@ async function resume(): Promise<void> {
   if (!selectedId.value) return;
   busy.value = true;
   try {
-    await resumeMeshWorkflow(props.target, selectedId.value);
+    await resumeMeshWorkflow(ownedTarget.value, selectedId.value);
     await Promise.all([refreshJobs(), refreshSelected()]);
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause);
@@ -341,7 +438,7 @@ async function remove(): Promise<void> {
   busy.value = true;
   error.value = "";
   try {
-    await deleteMeshWorkflow(props.target, selectedId.value);
+    await deleteMeshWorkflow(ownedTarget.value, selectedId.value);
     selectedId.value = "";
     detail.value = null;
     revokeResult();
@@ -354,6 +451,8 @@ async function remove(): Promise<void> {
 }
 
 function revokeResult(): void {
+  ++resultEpoch;
+  loadedResult = "";
   if (resultSrc.value) URL.revokeObjectURL(resultSrc.value);
   if (resultPoster.value) URL.revokeObjectURL(resultPoster.value);
   resultSrc.value = "";
@@ -362,24 +461,50 @@ function revokeResult(): void {
 
 async function loadResult(): Promise<void> {
   const filename = detail.value?.output_filename;
-  const epoch = ++resultEpoch;
   if (!filename) {
     revokeResult();
     return;
   }
+  const target = ownedTarget.value;
+  const identity = JSON.stringify([target.baseUrl, target.apiKey, filename]);
+  if (loadedResult === identity && resultSrc.value) return;
+  const epoch = ++resultEpoch;
   const media = await apiFetchTo(
-    props.target,
+    target,
     `/api/gallery/image/${encodeURIComponent(filename)}`,
   );
   const poster = await apiFetchTo(
-    props.target,
+    target,
     `/api/gallery/thumbnail/${encodeURIComponent(filename)}`,
   ).catch(() => null);
+  if (!media.ok) throw new Error("Could not load the 3-D result.");
+  const blob = await media.blob();
+  const posterBlob = poster?.ok ? await poster.blob() : null;
   if (epoch !== resultEpoch) return;
   revokeResult();
-  resultSrc.value = URL.createObjectURL(await media.blob());
-  if (poster) resultPoster.value = URL.createObjectURL(await poster.blob());
+  loadedResult = identity;
+  resultSrc.value = URL.createObjectURL(blob);
+  if (posterBlob) resultPoster.value = URL.createObjectURL(posterBlob);
 }
+
+const modeOptions = computed(() =>
+  [
+    { value: "text_to_mesh" as const, label: "From words" },
+    { value: "mesh_roundtrip" as const, label: "Rebuild" },
+    { value: "mesh_texture" as const, label: "Add texture" },
+  ].filter((option) =>
+    meshModels.value.some((model) =>
+      meshWorkflowModes(model).includes(option.value),
+    ),
+  ),
+);
+watch(mode, (value) => {
+  if (!selectedModes.value.includes(value))
+    meshModelName.value =
+      meshModels.value.find((model) => meshWorkflowModes(model).includes(value))
+        ?.name ?? "";
+});
+watch(models, chooseModels);
 
 watch(meshModelName, () => {
   if (!selectedModes.value.includes(mode.value)) {
@@ -391,22 +516,40 @@ watch(meshModelName, () => {
   }
   if (!textureAvailable.value) texture.value = false;
 });
-watch(selectedId, () => void refreshSelected());
+watch(selectedId, () => {
+  revokeResult();
+  void refreshSelected();
+});
 watch(
   [() => props.target.baseUrl, () => props.target.apiKey],
   () => void bootstrap(),
 );
 onMounted(() => void bootstrap());
 onBeforeUnmount(() => {
+  ++contextEpoch;
+  ++selectionEpoch;
   clearPoll();
   revokeResult();
 });
 </script>
 
 <template>
-  <section class="mesh-studio" aria-label="3-D workflow studio">
+  <section
+    class="mesh-studio"
+    :class="{ 'mesh-studio--desktop': desktop }"
+    aria-label="3-D workflow studio"
+  >
     <header class="mesh-studio__header">
-      <div>
+      <SegmentedControl
+        v-if="desktop"
+        v-model="mode"
+        :options="modeOptions"
+        :disabled="busy || loading"
+        label="3-D workflow"
+        variant="neutral"
+        compact
+      />
+      <div v-else>
         <p class="mesh-studio__eyebrow">Hunyuan3D workflow</p>
         <h1>Build and texture a 3-D object</h1>
         <p>
@@ -415,8 +558,14 @@ onBeforeUnmount(() => {
         </p>
       </div>
       <div class="mesh-studio__header-actions">
-        <slot name="machine" />
-        <select v-model="selectedId" aria-label="Previous 3-D workflow">
+        <span v-if="ownerLabel && selectedId" class="mesh-studio__owner">{{
+          ownerLabel
+        }}</span>
+        <select
+          v-model="selectedId"
+          :disabled="busy"
+          aria-label="Previous 3-D workflow"
+        >
           <option value="">New workflow</option>
           <option v-for="job in jobs" :key="job.id" :value="job.id">
             {{
@@ -430,6 +579,7 @@ onBeforeUnmount(() => {
             {{ job.state }}
           </option>
         </select>
+        <slot name="machine" :busy="busy" />
       </div>
     </header>
 
@@ -438,67 +588,48 @@ onBeforeUnmount(() => {
 
     <div v-else class="mesh-studio__grid">
       <form class="mesh-studio__composer" @submit.prevent="submit">
-        <div
-          class="mesh-studio__tabs"
-          role="tablist"
-          aria-label="Workflow type"
-        >
-          <button
-            type="button"
-            :aria-selected="mode === 'mesh_roundtrip'"
-            :class="{ active: mode === 'mesh_roundtrip' }"
-            :disabled="!selectedModes.includes('mesh_roundtrip')"
-            @click="mode = 'mesh_roundtrip'"
+        <fieldset class="mesh-studio__fields" :disabled="busy">
+          <span v-if="desktop" class="ms-group-label">Settings</span>
+          <div
+            v-if="!desktop"
+            class="mesh-studio__tabs"
+            role="tablist"
+            aria-label="Workflow type"
           >
-            Rebuild a mesh
-          </button>
-          <button
-            type="button"
-            :aria-selected="mode === 'text_to_mesh'"
-            :class="{ active: mode === 'text_to_mesh' }"
-            :disabled="!selectedModes.includes('text_to_mesh')"
-            @click="mode = 'text_to_mesh'"
-          >
-            Text to 3-D
-          </button>
-          <button
-            type="button"
-            :aria-selected="mode === 'mesh_texture'"
-            :class="{ active: mode === 'mesh_texture' }"
-            :disabled="!selectedModes.includes('mesh_texture')"
-            @click="mode = 'mesh_texture'"
-          >
-            Texture a mesh
-          </button>
-        </div>
-
-        <label>
-          3-D model
-          <select v-model="meshModelName" data-test="mesh-workflow-model">
-            <option
-              v-for="model in meshModels"
-              :key="model.name"
-              :value="model.name"
+            <button
+              type="button"
+              :aria-selected="mode === 'mesh_roundtrip'"
+              :class="{ active: mode === 'mesh_roundtrip' }"
+              :disabled="!selectedModes.includes('mesh_roundtrip')"
+              @click="mode = 'mesh_roundtrip'"
             >
-              {{ modelLabel(model) }}
-            </option>
-          </select>
-        </label>
+              Rebuild a mesh
+            </button>
+            <button
+              type="button"
+              :aria-selected="mode === 'text_to_mesh'"
+              :class="{ active: mode === 'text_to_mesh' }"
+              :disabled="!selectedModes.includes('text_to_mesh')"
+              @click="mode = 'text_to_mesh'"
+            >
+              Text to 3-D
+            </button>
+            <button
+              type="button"
+              :aria-selected="mode === 'mesh_texture'"
+              :class="{ active: mode === 'mesh_texture' }"
+              :disabled="!selectedModes.includes('mesh_texture')"
+              @click="mode = 'mesh_texture'"
+            >
+              Texture a mesh
+            </button>
+          </div>
 
-        <template v-if="mode === 'text_to_mesh'">
           <label>
-            Describe the object
-            <textarea
-              v-model="prompt"
-              rows="5"
-              placeholder="A hand-carved wooden fox, centered on a plain background"
-            />
-          </label>
-          <label>
-            Image model
-            <select v-model="imageModelName">
+            3-D style
+            <select v-model="meshModelName" data-test="mesh-workflow-model">
               <option
-                v-for="model in imageModels"
+                v-for="model in meshModels"
                 :key="model.name"
                 :value="model.name"
               >
@@ -506,102 +637,129 @@ onBeforeUnmount(() => {
               </option>
             </select>
           </label>
-          <label
-            v-if="textureAvailable"
-            class="mesh-studio__check"
-            data-test="mesh-workflow-texture"
-          >
-            <input v-model="texture" type="checkbox" />
-            Paint PBR materials after geometry
-          </label>
-          <p
-            v-else
-            class="mesh-studio__availability"
-            data-test="mesh-workflow-texture-unavailable"
-          >
-            PBR painting is unavailable on this machine. Geometry generation
-            remains available.
-          </p>
-        </template>
 
-        <template v-else>
-          <label class="mesh-studio__file">
-            Source mesh (GLB or OBJ)
-            <input
-              type="file"
-              accept=".glb,.obj,model/gltf-binary,model/obj"
-              @change="
-                meshFile =
-                  ($event.target as HTMLInputElement).files?.[0] ?? null
-              "
-            />
-            <span>{{ meshFile?.name || "Choose a mesh" }}</span>
-          </label>
-          <label v-if="mode === 'mesh_texture'" class="mesh-studio__file">
-            Appearance image
-            <input
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              @change="
-                appearanceFile =
-                  ($event.target as HTMLInputElement).files?.[0] ?? null
-              "
-            />
-            <span>{{ appearanceFile?.name || "Choose an image" }}</span>
-          </label>
-          <div class="mesh-studio__row">
+          <template v-if="mode === 'text_to_mesh'">
             <label>
-              Up axis
-              <select v-model="upAxis">
-                <option value="y">Y up</option>
-                <option value="z">Z up</option>
-              </select>
-            </label>
-            <label>
-              Metres per unit
-              <input
-                v-model.number="metersPerUnit"
-                type="number"
-                min="0.000001"
-                max="1000000"
-                step="any"
+              Describe the object
+              <textarea
+                v-model="prompt"
+                rows="5"
+                placeholder="A hand-carved wooden fox, centered on a plain background"
               />
             </label>
-          </div>
-        </template>
+            <label>
+              Picture style
+              <select v-model="imageModelName">
+                <option
+                  v-for="model in imageModels"
+                  :key="model.name"
+                  :value="model.name"
+                >
+                  {{ modelLabel(model) }}
+                </option>
+              </select>
+            </label>
+            <label
+              v-if="textureAvailable"
+              class="mesh-studio__check"
+              data-test="mesh-workflow-texture"
+            >
+              <input v-model="texture" type="checkbox" />
+              Paint PBR materials after geometry
+            </label>
+            <p
+              v-else
+              class="mesh-studio__availability"
+              data-test="mesh-workflow-texture-unavailable"
+            >
+              PBR painting is unavailable on this machine. Geometry generation
+              remains available.
+            </p>
+          </template>
 
-        <label
-          v-if="(mode === 'text_to_mesh' && texture) || mode === 'mesh_texture'"
-        >
-          Texture size
-          <select v-model.number="textureResolution">
-            <option :value="1024">1024</option>
-            <option :value="2048">2048</option>
-            <option :value="4096">4096</option>
-          </select>
-        </label>
-        <label
-          v-if="delightAvailable && mode !== 'mesh_roundtrip'"
-          class="mesh-studio__check"
-        >
-          <input v-model="delight" type="checkbox" />
-          Remove baked lighting and highlights before building the mesh
-        </label>
-        <button
-          class="mesh-studio__primary"
-          type="submit"
-          :disabled="!canSubmit"
-        >
-          {{
-            busy
-              ? "Preparing…"
-              : mode === "text_to_mesh"
-                ? "Build 3-D object"
-                : mode === "mesh_roundtrip"
-                  ? "Rebuild mesh"
-                  : "Paint mesh"
-          }}
-        </button>
+          <template v-else>
+            <label class="mesh-studio__file">
+              Source mesh (GLB or OBJ)
+              <input
+                type="file"
+                accept=".glb,.obj,model/gltf-binary,model/obj"
+                @change="
+                  meshFile =
+                    ($event.target as HTMLInputElement).files?.[0] ?? null
+                "
+              />
+              <span>{{ meshFile?.name || "Choose a mesh" }}</span>
+            </label>
+            <label v-if="mode === 'mesh_texture'" class="mesh-studio__file">
+              Appearance image
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                @change="
+                  appearanceFile =
+                    ($event.target as HTMLInputElement).files?.[0] ?? null
+                "
+              />
+              <span>{{ appearanceFile?.name || "Choose an image" }}</span>
+            </label>
+            <div class="mesh-studio__row">
+              <label>
+                Up axis
+                <select v-model="upAxis">
+                  <option value="y">Y up</option>
+                  <option value="z">Z up</option>
+                </select>
+              </label>
+              <label>
+                Metres per unit
+                <input
+                  v-model.number="metersPerUnit"
+                  type="number"
+                  min="0.000001"
+                  max="1000000"
+                  step="any"
+                />
+              </label>
+            </div>
+          </template>
+
+          <label
+            v-if="
+              (mode === 'text_to_mesh' && texture) || mode === 'mesh_texture'
+            "
+          >
+            Texture size
+            <select v-model.number="textureResolution">
+              <option :value="1024">1024</option>
+              <option :value="2048">2048</option>
+              <option :value="4096">4096</option>
+            </select>
+          </label>
+          <label
+            v-if="delightAvailable && mode !== 'mesh_roundtrip'"
+            class="mesh-studio__check"
+          >
+            <input v-model="delight" type="checkbox" />
+            Remove baked lighting and highlights before building the mesh
+          </label>
+          <button
+            class="mesh-studio__primary"
+            type="submit"
+            :disabled="!canSubmit"
+          >
+            {{
+              busy
+                ? "Preparing…"
+                : desktop
+                  ? "Generate"
+                  : mode === "text_to_mesh"
+                    ? "Build 3-D object"
+                    : mode === "mesh_roundtrip"
+                      ? "Rebuild mesh"
+                      : "Paint mesh"
+            }}
+          </button>
+        </fieldset>
       </form>
 
       <article class="mesh-studio__result">
@@ -720,6 +878,9 @@ onBeforeUnmount(() => {
   border: 1px solid var(--mold-border);
   background: var(--mold-surface);
   padding: 20px;
+}
+.mesh-studio__fields {
+  display: contents;
 }
 .mesh-studio__composer {
   display: flex;
@@ -895,6 +1056,111 @@ onBeforeUnmount(() => {
   }
   .mesh-studio__result {
     min-height: 440px;
+  }
+}
+/* Desktop shares the 40px view toolbar and the standard right inspector. */
+.mesh-studio--desktop {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  min-width: 0;
+  background: var(--mold-canvas);
+}
+.mesh-studio--desktop .mesh-studio__header {
+  height: 40px;
+  flex-shrink: 0;
+  align-items: center;
+  flex-direction: row;
+  gap: 12px;
+  max-width: none;
+  width: 100%;
+  margin: 0;
+  padding: 0 12px;
+  border-bottom: var(--mold-bw) solid var(--mold-border);
+  background: var(--mold-bg-crust);
+}
+.mesh-studio--desktop .mesh-studio__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  margin-left: auto;
+}
+.mesh-studio--desktop .mesh-studio__header-actions select {
+  width: auto;
+  max-width: 200px;
+}
+.mesh-studio--desktop .mesh-studio__grid {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: none;
+  grid-template-columns: minmax(0, 1fr) var(--mold-shell-inspector-w, 300px);
+  gap: 0;
+  margin: 0;
+}
+.mesh-studio--desktop .mesh-studio__composer {
+  grid-column: 2;
+  grid-row: 1;
+  min-height: 0;
+  overflow-y: auto;
+  gap: 16px;
+  padding: 16px;
+  border: 0;
+  border-left: var(--mold-bw) solid var(--mold-border);
+  background: var(--mold-bg-deep);
+}
+.mesh-studio--desktop .mesh-studio__result {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 24px;
+  border: 0;
+  background: var(--mold-canvas);
+  overflow: auto;
+}
+.mesh-studio--desktop .mesh-studio__result :deep(.mesh-viewer) {
+  min-height: 0;
+  height: 100%;
+}
+.mesh-studio--desktop select,
+.mesh-studio--desktop input[type="number"] {
+  height: var(--mold-ctl-md);
+  padding: 0 8px;
+  font-size: var(--mold-fs-xs);
+}
+.mesh-studio--desktop textarea {
+  padding: 8px;
+  font-size: var(--mold-fs-sm);
+}
+.mesh-studio--desktop .mesh-studio__primary {
+  padding: 8px 12px;
+  font-size: var(--mold-fs-sm);
+  font-weight: 600;
+}
+.mesh-studio__owner {
+  font: var(--mold-fs-micro) var(--mold-font-mono);
+  color: var(--mold-text-2);
+}
+.mesh-studio--desktop .mesh-studio__error {
+  margin: 8px 12px;
+  flex-shrink: 0;
+}
+@media (max-width: 760px) {
+  .mesh-studio--desktop .mesh-studio__header {
+    height: auto;
+    min-height: 40px;
+    flex-wrap: wrap;
+    padding: 8px;
+  }
+  .mesh-studio--desktop .mesh-studio__header-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .mesh-studio--desktop .mesh-studio__header-actions select {
+    max-width: 150px;
   }
 }
 </style>

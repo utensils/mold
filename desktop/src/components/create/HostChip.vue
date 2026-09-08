@@ -13,12 +13,26 @@ import { useHostsStore, type HostView } from "../../stores/hosts";
  * same persisted `generateTargetHost` contract as always. With one host it
  * is a plain status label; there is nothing to choose between.
  */
+const props = defineProps<{
+  /** A controlled workflow pick; omitted retains New image's persisted setting. */
+  modelValue?: string | null;
+  disabled?: boolean;
+  alwaysShowRouting?: boolean;
+}>();
+const emit = defineEmits<{ "update:modelValue": [value: string | null] }>();
 const hosts = useHostsStore();
+const interactive = computed(() => hosts.multiHost || props.alwaysShowRouting);
 const prefs = useAppPrefsStore();
 
 /** Current routing pick; a persisted host that's gone reads as Auto. */
 const target = computed(
-  () => normalizeTargetHost(prefs.settings?.generateTargetHost ?? null, hosts.all) ?? "auto",
+  () =>
+    normalizeTargetHost(
+      props.modelValue !== undefined
+        ? props.modelValue
+        : (prefs.settings?.generateTargetHost ?? null),
+      hosts.all,
+    ) ?? "auto",
 );
 
 const targetHost = computed(() =>
@@ -30,7 +44,7 @@ const targetHost = computed(() =>
 /** The chip names the pick, not just the primary: sticky host → its label. */
 const chipHost = computed(() => targetHost.value ?? hosts.primaryHost ?? null);
 const chipLabel = computed(() => {
-  if (target.value === "auto" && hosts.multiHost) return "Auto";
+  if (target.value === "auto" && interactive.value) return "Auto";
   if (target.value === "capable") return "Most capable";
   return chipHost.value?.label ?? "This device";
 });
@@ -53,7 +67,10 @@ const chipStatus = computed(() => {
 });
 
 function pick(id: string) {
-  void prefs.update({ generateTargetHost: id === "auto" ? null : id });
+  if (props.disabled) return;
+  const value = id === "auto" ? null : id;
+  if (props.modelValue !== undefined) emit("update:modelValue", value);
+  else void prefs.update({ generateTargetHost: value });
   popoverOpen.value = false;
 }
 
@@ -75,7 +92,7 @@ function hostLine(host: HostView): string {
  */
 const popoverOpen = ref(false);
 function toggle() {
-  if (hosts.multiHost) popoverOpen.value = !popoverOpen.value;
+  if (interactive.value && !props.disabled) popoverOpen.value = !popoverOpen.value;
 }
 </script>
 
@@ -90,13 +107,14 @@ function toggle() {
       <button
         type="button"
         data-test="host-chip"
+        :disabled="disabled"
         class="ms-hostchip__chip"
-        :class="{ 'ms-hostchip__chip--button': hosts.multiHost }"
-        :aria-expanded="hosts.multiHost ? popoverOpen : undefined"
-        :aria-haspopup="hosts.multiHost ? 'menu' : undefined"
-        :tabindex="hosts.multiHost ? 0 : -1"
+        :class="{ 'ms-hostchip__chip--button': interactive }"
+        :aria-expanded="interactive ? popoverOpen : undefined"
+        :aria-haspopup="interactive ? 'menu' : undefined"
+        :tabindex="interactive ? 0 : -1"
         :title="
-          hosts.multiHost
+          interactive
             ? 'Where it runs — Auto picks whichever machine has the style'
             : 'Where it runs'
         "
@@ -107,7 +125,7 @@ function toggle() {
           :class="chipReady ? 'ms-hostchip__dot--ready' : 'ms-hostchip__dot--wait'"
         />
         {{ chipLabel }} · {{ chipStatus }}
-        <Icon v-if="hosts.multiHost" name="chevron-down" :size="12" class="ms-hostchip__chev" />
+        <Icon v-if="interactive" name="chevron-down" :size="12" class="ms-hostchip__chev" />
       </button>
     </template>
     <div data-test="host-menu" role="menu" aria-label="Where it runs" class="ms-hostchip__menu">
