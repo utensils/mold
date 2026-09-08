@@ -1266,6 +1266,17 @@ fn migration_failed(version: i64, from: i64, err: rusqlite::Error) -> anyhow::Er
     anyhow::anyhow!("migration v{version} failed (DB at v{from}): {detail}")
 }
 
+fn is_migration_lock_contention(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 /// Apply every migration whose version is greater than the DB's current
 /// `user_version` pragma. Runs each migration in its own transaction —
 /// partial failures leave the DB at the previous version instead of a
@@ -1295,22 +1306,18 @@ pub fn apply_pending(conn: &mut Connection) -> Result<i64> {
     // that lock. A connection that lost the race sees the bumped version
     // and skips, instead of re-applying DDL and corrupting the schema
     // ("duplicate column" on every subsequent open).
+    // This is one budget for the complete migration pass, not one budget per
+    // schema version. One transaction attempt may additionally spend the
+    // connection's configured SQLite busy timeout before it returns BUSY.
+    let lock_retry_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut current;
     loop {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let tx = loop {
             match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
                 Ok(tx) => break tx,
                 Err(error)
-                    if matches!(
-                        &error,
-                        rusqlite::Error::SqliteFailure(code, _)
-                            if matches!(
-                                code.code,
-                                rusqlite::ErrorCode::DatabaseBusy
-                                    | rusqlite::ErrorCode::DatabaseLocked
-                            )
-                    ) && std::time::Instant::now() < deadline =>
+                    if is_migration_lock_contention(&error)
+                        && std::time::Instant::now() < lock_retry_deadline =>
                 {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
@@ -1355,6 +1362,71 @@ pub(crate) fn current_version(conn: &Connection) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static MIGRATION_BUSY_SIGNAL: (std::sync::Mutex<bool>, std::sync::Condvar) =
+        (std::sync::Mutex::new(false), std::sync::Condvar::new());
+
+    fn report_migration_busy(_: i32) -> bool {
+        let (seen, wake) = &MIGRATION_BUSY_SIGNAL;
+        *seen.lock().unwrap() = true;
+        wake.notify_one();
+        false
+    }
+
+    #[test]
+    fn apply_pending_retries_a_proven_held_write_lock() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-db-migrate-held-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("mold.db");
+
+        let mut holder = Connection::open(&path).unwrap();
+        let held = holder
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        *MIGRATION_BUSY_SIGNAL.0.lock().unwrap() = false;
+
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            let mut conn = Connection::open(worker_path).unwrap();
+            // Return BUSY immediately and signal that SQLite actually observed
+            // the held lock; this makes the test independent of scheduling.
+            conn.busy_handler(Some(report_migration_busy)).unwrap();
+            apply_pending(&mut conn)
+        });
+
+        let (seen, wake) = &MIGRATION_BUSY_SIGNAL;
+        let (seen, timeout) = wake
+            .wait_timeout_while(
+                seen.lock().unwrap(),
+                std::time::Duration::from_secs(5),
+                |seen| !*seen,
+            )
+            .unwrap();
+        assert!(*seen, "the worker must encounter the held SQLite lock");
+        assert!(!timeout.timed_out());
+        drop(seen);
+        held.commit().unwrap();
+
+        assert_eq!(worker.join().unwrap().unwrap(), SCHEMA_VERSION);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn migration_retry_classifier_rejects_non_lock_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        let error = conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect_err("nested transaction must fail");
+        assert!(!is_migration_lock_contention(&error));
+    }
 
     #[test]
     fn concurrent_opens_of_a_fresh_db_all_migrate_safely() {
