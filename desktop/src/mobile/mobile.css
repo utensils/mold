@@ -5946,3 +5946,23 @@ button:disabled {
     white-space: nowrap;
   }
 }
+
+.mobile-draft-recovery {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--mold-error);
+  border-radius: var(--radius-sm, 4px);
+  color: var(--mold-error);
+  overflow-wrap: anywhere;
+}
+
+.mobile-draft-recovery p {
+  margin: 0;
+}
+
+.mobile-draft-recovery .secondary-button {
+  min-height: 48px;
+  white-space: normal;
+}
