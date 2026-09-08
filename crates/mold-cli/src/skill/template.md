@@ -23,7 +23,7 @@ mold server status
   `--delight` when the profile advertises Hunyuan3D lighting and highlight
   removal; it runs after matting and before shape or paint.
   There is no prompt to write, and `mold expand` / `mold remix` answer
-  with image advice instead of a rewrite. OBJ, STL and PLY are gallery-side
+  with image advice instead of a rewrite. OBJ, OBJ+PBR ZIP, STL and PLY are gallery-side
   exports of the stored GLB, never generation targets, and take optional
   `--size-mm`/`--up-axis`/`--origin` to make the export print-ready; a
   turntable GIF, APNG or WebP (`mold library export <file> --format gif`) is

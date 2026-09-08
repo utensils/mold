@@ -248,7 +248,7 @@ pushed screen opened from the header.
   mesh, since there is no raster to stage as conditioning. A mesh print's
   sheet carries one **Export** control: a segmented picker of every container
   the host advertises on `capabilities.mesh.export_formats` — the stored GLB
-  itself, the OBJ, STL, and PLY transcodes (`mold library export` and the
+  itself, the OBJ, OBJ+PBR ZIP, STL, and PLY exports (`mold library export` and the
   `export_mesh` MCP tool perform the same ones), and one **Turntable** entry
   standing for the animated GIF / APNG / WebP — followed by the two verbs
   **Share…**, which opens the system share sheet, and **Save to Mold
@@ -287,6 +287,10 @@ pushed screen opened from the header.
   scene by an older build, **Use as prompt** restores a plain one-shot clip
   built from the first scene's prompt; the per-scene provenance stays on the
   print.
+  Painted GLBs also show one save action per material map. Each downloads the
+  exact PNG embedded in the stored print and writes it to the same browsable
+  Mold folder; ZIP export packages OBJ, MTL, base color, metallic-roughness, and
+  normal maps together.
   Generated media opens the same viewer on tap, with the same **Use as
   source** action as a Library print — offered only for a still on a model
   that conditions on one, and only while the machine that rendered it is

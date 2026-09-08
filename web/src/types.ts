@@ -19,6 +19,7 @@ import type {
   MeshRequestOptions,
 } from "@studio/lib/meshControls";
 import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
+import type { GenerationAsset } from "@studio/api/generationAssets";
 import type { NamedViewsState } from "@studio/lib/namedViews";
 
 export type { MeshRequestOptions } from "@studio/lib/meshControls";
@@ -196,6 +197,8 @@ export interface GalleryImage extends GalleryOrganizationFields {
   size_bytes?: number | null;
   media_version?: string | null;
   metadata_synthetic?: boolean;
+  /** Independently downloadable files retained by this print. */
+  assets?: GenerationAsset[];
 }
 
 export type MediaKind = "image" | "animated" | "video" | "audio" | "mesh";

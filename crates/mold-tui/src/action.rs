@@ -67,7 +67,7 @@ pub enum Action {
     OpenFile,
     /// Gallery: upscale the selected image.
     UpscaleImage,
-    /// Gallery: export the selected 3-D print as OBJ, STL, or PLY (opens
+    /// Gallery: export the selected 3-D print as OBJ, OBJ+PBR ZIP, STL, or PLY (opens
     /// the format picker; a no-op on anything but a `.glb`).
     ExportMesh,
     /// Models: pull the selected model.

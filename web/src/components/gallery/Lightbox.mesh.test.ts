@@ -137,6 +137,41 @@ afterEach(() => {
 });
 
 describe("Lightbox 3-D prints", () => {
+  it("offers every material asset carried by the gallery row", async () => {
+    mockCapabilities([]);
+    const wrapper = mountWide({
+      item: {
+        ...mesh,
+        assets: [
+          {
+            asset_id: "base_color",
+            role: "base_color",
+            display_name: "chair-base-color.png",
+            media_type: "image/png",
+            size_bytes: 12,
+            sha256: "a".repeat(64),
+          },
+          {
+            asset_id: "normal",
+            role: "normal",
+            display_name: "chair-normal.png",
+            media_type: "image/png",
+            size_bytes: 12,
+            sha256: "b".repeat(64),
+          },
+        ],
+      },
+    });
+    await flushPromises();
+    await wrapper.get(".lb__morebtn").trigger("click");
+    expect(
+      wrapper.get("[data-test='generation-asset-base_color']").text(),
+    ).toBe("Download base color map");
+    expect(wrapper.get("[data-test='generation-asset-normal']").text()).toBe(
+      "Download normal map",
+    );
+  });
+
   it("refuses Use as source for a mesh print", async () => {
     mockCapabilities([]);
     const wrapper = mountWide();

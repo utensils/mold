@@ -165,6 +165,19 @@ pub fn load_fp8_safetensors<'a>(
     component: &str,
     progress: &ProgressReporter,
 ) -> Result<VarBuilder<'a>> {
+    load_native_safetensors_with_progress(paths, DType::BF16, device, component, progress)
+}
+
+/// Load mixed native-dtype safetensors while retaining the caller's compute
+/// dtype on the VarBuilder. Family loaders whose numerics require F16 use
+/// this instead of the BF16-default FP8 helper.
+pub(crate) fn load_native_safetensors_with_progress<'a>(
+    paths: &[impl AsRef<Path>],
+    compute_dtype: DType,
+    device: &Device,
+    component: &str,
+    progress: &ProgressReporter,
+) -> Result<VarBuilder<'a>> {
     let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_ref()).collect();
     let bytes_total = total_file_bytes(paths);
 
@@ -172,7 +185,7 @@ pub fn load_fp8_safetensors<'a>(
 
     let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&path_refs)? };
     let backend = NativeFp8Backend { inner: tensors };
-    let vb = VarBuilder::from_backend(Box::new(backend), DType::BF16, device.clone());
+    let vb = VarBuilder::from_backend(Box::new(backend), compute_dtype, device.clone());
 
     progress.weight_load(component, bytes_total, bytes_total);
 

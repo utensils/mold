@@ -544,6 +544,93 @@ pub fn read_glb_scene(bytes: &[u8]) -> Result<GlbScene, GlbReadError> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedMaterialAsset {
+    pub role: &'static str,
+    pub display_suffix: &'static str,
+    pub media_type: &'static str,
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Return the original encoded PBR images embedded in a single-material GLB.
+/// These bytes back the gallery's per-asset inventory and download route, so
+/// extracting an asset never rewrites or recompresses it.
+pub fn embedded_material_assets(bytes: &[u8]) -> Result<Vec<EmbeddedMaterialAsset>, GlbReadError> {
+    let (json, bin) = split_glb_chunks(bytes)?;
+    let Some(material) = sole_material(&json) else {
+        return Ok(Vec::new());
+    };
+    let Some(material_json) = json
+        .get("materials")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|materials| materials.get(material))
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(pbr) = material_pbr(&json, material) else {
+        return Ok(Vec::new());
+    };
+    let mut assets = Vec::new();
+    for (reference, role, suffix) in [
+        (pbr.get("baseColorTexture"), "base_color", "base-color.png"),
+        (
+            pbr.get("metallicRoughnessTexture"),
+            "metallic_roughness",
+            "metallic-roughness.png",
+        ),
+        (material_json.get("normalTexture"), "normal", "normal.png"),
+    ] {
+        let Some(reference) = reference else {
+            continue;
+        };
+        let Some(encoded) = referenced_image_bytes(&json, bin, reference) else {
+            continue;
+        };
+        let Ok(reader) =
+            image::ImageReader::new(std::io::Cursor::new(encoded)).with_guessed_format()
+        else {
+            continue;
+        };
+        let Ok((width, height)) = reader.into_dimensions() else {
+            continue;
+        };
+        if width > MAX_TEXTURE_EDGE || height > MAX_TEXTURE_EDGE {
+            continue;
+        }
+        assets.push(EmbeddedMaterialAsset {
+            role,
+            display_suffix: suffix,
+            media_type: "image/png",
+            bytes: encoded.to_vec(),
+            width,
+            height,
+        });
+    }
+    Ok(assets)
+}
+
+fn referenced_image_bytes<'a>(
+    json: &serde_json::Value,
+    bin: &'a [u8],
+    reference: &serde_json::Value,
+) -> Option<&'a [u8]> {
+    let texture = json
+        .get("textures")?
+        .as_array()?
+        .get(usize::try_from(reference.get("index")?.as_u64()?).ok()?)?;
+    let image = json
+        .get("images")?
+        .as_array()?
+        .get(usize::try_from(texture.get("source")?.as_u64()?).ok()?)?;
+    if image.get("mimeType").and_then(serde_json::Value::as_str) != Some("image/png") {
+        return None;
+    }
+    let view = usize::try_from(image.get("bufferView")?.as_u64()?).ok()?;
+    buffer_view_bytes(json, bin, view)
+}
+
 /// The one material every primitive in the file shares, if there is exactly
 /// one.
 ///
@@ -571,6 +658,27 @@ fn material_pbr(json: &serde_json::Value, material: usize) -> Option<&serde_json
         .as_array()?
         .get(material)?
         .get("pbrMetallicRoughness")
+}
+
+fn material_texture_reference_count(json: &serde_json::Value) -> usize {
+    json.get("materials")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|material| {
+            usize::from(
+                material
+                    .get("pbrMetallicRoughness")
+                    .and_then(|pbr| pbr.get("baseColorTexture"))
+                    .is_some(),
+            ) + usize::from(
+                material
+                    .get("pbrMetallicRoughness")
+                    .and_then(|pbr| pbr.get("metallicRoughnessTexture"))
+                    .is_some(),
+            ) + usize::from(material.get("normalTexture").is_some())
+        })
+        .sum()
 }
 
 /// `baseColorFactor` RGB. Alpha is dropped: a poster composites nothing, so a
@@ -1241,6 +1349,74 @@ pub fn write_mtl(material: &GlbMaterial, base_color_texture_file: Option<&str>) 
     out
 }
 
+/// Package a portable Wavefront OBJ with its MTL and the exact PNG material
+/// maps embedded by the stored GLB. The metallic-roughness image remains in
+/// glTF's documented channel packing and is included beside the OBJ for DCC
+/// importers that support PBR extensions or manual hookup.
+pub fn write_obj_bundle(mesh: &Mesh, glb_bytes: &[u8], stem: &str) -> anyhow::Result<Vec<u8>> {
+    use std::io::{Cursor, Write as _};
+    use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+    let safe_stem: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(120)
+        .collect();
+    let safe_stem = if safe_stem.is_empty() {
+        "mesh"
+    } else {
+        &safe_stem
+    };
+    let obj_name = format!("{safe_stem}.obj");
+    let mtl_name = format!("{safe_stem}.mtl");
+    let assets = embedded_material_assets(glb_bytes)?;
+    let (material_json, _) = split_glb_chunks(glb_bytes)?;
+    anyhow::ensure!(
+        material_texture_reference_count(&material_json) == assets.len(),
+        "OBJ ZIP export requires one shared material whose texture images are embedded PNG buffer views"
+    );
+    let base_name = assets
+        .iter()
+        .find(|asset| asset.role == "base_color")
+        .map(|_| format!("{safe_stem}-base-color.png"));
+    let has_pbr = assets
+        .iter()
+        .any(|asset| asset.role == "metallic_roughness");
+    let mtl_material = GlbMaterial {
+        base_color_factor: base_name.as_ref().map(|_| [1.0; 4]),
+        metallic_factor: has_pbr.then_some(1.0),
+        roughness_factor: has_pbr.then_some(1.0),
+        ..GlbMaterial::default()
+    };
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    writer.start_file(&obj_name, options)?;
+    writer.write_all(write_obj_with_mtl(mesh, &mtl_name).as_bytes())?;
+    writer.start_file(&mtl_name, options)?;
+    writer.write_all(write_mtl(&mtl_material, base_name.as_deref()).as_bytes())?;
+    for asset in assets {
+        let name = match asset.role {
+            "base_color" => format!("{safe_stem}-base-color.png"),
+            "metallic_roughness" => format!("{safe_stem}-metallic-roughness.png"),
+            "normal" => format!("{safe_stem}-normal.png"),
+            role => format!("{safe_stem}-{role}.bin"),
+        };
+        writer.start_file(name, options)?;
+        writer.write_all(&asset.bytes)?;
+    }
+    writer.start_file("MATERIALS.txt", options)?;
+    writer.write_all(
+        b"The base-color PNG is referenced by the MTL. The metallic-roughness PNG preserves glTF packing: roughness is green and metallic is blue. The normal PNG uses glTF/OpenGL +Y tangent space.\n",
+    )?;
+    Ok(writer.finish()?.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1483,6 +1659,32 @@ mod tests {
     }
 
     #[test]
+    fn embedded_material_assets_preserve_both_original_pngs() {
+        let mut mesh = triangle_mesh();
+        mesh.uvs = Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        let albedo = solid_png([200, 40, 90], 4);
+        let metallic_roughness = solid_png([0, 128, 240], 2);
+        let bytes = write_glb(
+            &mesh,
+            &GlbMaterial {
+                base_color_texture: Some(albedo.clone()),
+                metallic_roughness_texture: Some(metallic_roughness.clone()),
+                ..GlbMaterial::default()
+            },
+            None,
+        )
+        .unwrap();
+        let assets = embedded_material_assets(&bytes).unwrap();
+        assert_eq!(assets.len(), 2);
+        assert_eq!(assets[0].role, "base_color");
+        assert_eq!(assets[0].bytes, albedo);
+        assert_eq!((assets[0].width, assets[0].height), (4, 4));
+        assert_eq!(assets[1].role, "metallic_roughness");
+        assert_eq!(assets[1].bytes, metallic_roughness);
+        assert_eq!((assets[1].width, assets[1].height), (2, 2));
+    }
+
+    #[test]
     fn bare_geometry_reports_no_texture_and_keeps_its_dark_factor() {
         let bytes = write_glb(&triangle_mesh(), &GlbMaterial::default(), None).unwrap();
         let scene = read_glb_scene(&bytes).unwrap();
@@ -1664,6 +1866,97 @@ mod tests {
 
         let textured = write_mtl(&GlbMaterial::default(), Some("basecolor.png"));
         assert!(textured.contains("map_Kd basecolor.png"));
+    }
+
+    #[test]
+    fn obj_bundle_preserves_embedded_pbr_maps_byte_for_byte() {
+        use std::io::Read as _;
+        let png = |rgb| {
+            let image = image::RgbImage::from_pixel(2, 2, image::Rgb(rgb));
+            let mut bytes = Vec::new();
+            image
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            bytes
+        };
+        let base = png([1, 2, 3]);
+        let pbr = png([4, 5, 6]);
+        let normal = png([128, 128, 255]);
+        let mut mesh = triangle_mesh();
+        mesh.uvs = Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        let glb = write_glb(
+            &mesh,
+            &GlbMaterial {
+                base_color_texture: Some(base.clone()),
+                metallic_roughness_texture: Some(pbr.clone()),
+                normal_texture: Some(normal.clone()),
+                ..GlbMaterial::default()
+            },
+            None,
+        )
+        .unwrap();
+        let bundle = write_obj_bundle(&mesh, &glb, "chair one").unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bundle)).unwrap();
+        let names = (0..archive.len())
+            .map(|index| archive.by_index(index).unwrap().name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "chair_one.obj",
+                "chair_one.mtl",
+                "chair_one-base-color.png",
+                "chair_one-metallic-roughness.png",
+                "chair_one-normal.png",
+                "MATERIALS.txt",
+            ]
+        );
+        for (name, expected) in [
+            ("chair_one-base-color.png", base),
+            ("chair_one-metallic-roughness.png", pbr),
+            ("chair_one-normal.png", normal),
+        ] {
+            let mut actual = Vec::new();
+            archive
+                .by_name(name)
+                .unwrap()
+                .read_to_end(&mut actual)
+                .unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn obj_bundle_refuses_material_images_it_cannot_preserve() {
+        let mut mesh = triangle_mesh();
+        mesh.uvs = Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        let image = image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3]));
+        let mut png = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let glb = write_glb(
+            &mesh,
+            &GlbMaterial {
+                base_color_texture: Some(png),
+                ..GlbMaterial::default()
+            },
+            None,
+        )
+        .unwrap();
+        let parsed = parse_glb(&glb);
+        let mut json = parsed.json;
+        json["images"][0]["mimeType"] = serde_json::json!("image/jpeg");
+        let foreign = rebuild_glb(&json, &parsed.bin);
+
+        let error = write_obj_bundle(&mesh, &foreign, "chair").unwrap_err();
+        assert!(
+            error.to_string().contains("embedded PNG buffer views"),
+            "{error:#}"
+        );
     }
 
     /// Two triangles sharing an edge: small enough to write the expected

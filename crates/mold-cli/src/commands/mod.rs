@@ -26,6 +26,7 @@ mod metal_memory_admin;
 mod metal_memory_persistence;
 pub mod ps;
 pub mod pull;
+pub mod quantize;
 pub mod queue;
 pub mod remix;
 pub mod rm;

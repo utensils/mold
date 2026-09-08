@@ -66,6 +66,11 @@ import {
   type VideoExportCapabilities,
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
+import {
+  generationAssetLabel,
+  generationAssetPath,
+  type GenerationAsset,
+} from "@studio/api/generationAssets";
 
 const props = withDefaults(
   defineProps<{
@@ -285,6 +290,23 @@ async function runMeshExport(
       meshExportFilename(props.item.filename, format),
     );
     meshGeometryOpen.value = false;
+  } catch (error) {
+    exportError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    exportBusy.value = false;
+  }
+}
+
+async function downloadGenerationAsset(asset: GenerationAsset) {
+  if (!props.item || exportBusy.value) return;
+  menuOpen.value = false;
+  exportBusy.value = true;
+  exportError.value = "";
+  try {
+    const response = await exportFetch(
+      generationAssetPath(props.item.filename, asset.asset_id),
+    );
+    downloadVideoExport(await response.blob(), asset.display_name);
   } catch (error) {
     exportError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -846,6 +868,16 @@ async function performVideoExport(options: VideoExportOptions) {
                       Export turntable…
                     </button>
                     <button
+                      v-for="asset in item.assets ?? []"
+                      :key="asset.asset_id"
+                      role="menuitem"
+                      :data-test="`generation-asset-${asset.asset_id}`"
+                      :disabled="exportBusy"
+                      @click="downloadGenerationAsset(asset)"
+                    >
+                      {{ generationAssetLabel(asset) }}
+                    </button>
+                    <button
                       role="menuitem"
                       class="lb__menu-danger"
                       @click="onDelete"
@@ -1160,6 +1192,16 @@ async function performVideoExport(options: VideoExportOptions) {
                     @click="openMeshAnimationExport"
                   >
                     Export turntable…
+                  </button>
+                  <button
+                    v-for="asset in item.assets ?? []"
+                    :key="asset.asset_id"
+                    role="menuitem"
+                    :data-test="`generation-asset-${asset.asset_id}`"
+                    :disabled="exportBusy"
+                    @click="downloadGenerationAsset(asset)"
+                  >
+                    {{ generationAssetLabel(asset) }}
                   </button>
                   <button
                     role="menuitem"

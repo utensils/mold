@@ -2119,6 +2119,106 @@ description = "stale"
         assert_eq!(model.lora_scale, Some(0.6));
     }
 
+    #[test]
+    fn locked_updates_preserve_concurrent_model_registrations() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mold_home = test_models_dir("locked-update");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+        Config::default().save().unwrap();
+
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let handles = ["derived-a", "derived-b"].map(|name| {
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                Config::update_locked(|config| {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    config
+                        .models
+                        .insert(name.to_string(), ModelConfig::default());
+                    Ok(())
+                })
+                .unwrap();
+            })
+        });
+        start.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let saved: Config =
+            toml::from_str(&std::fs::read_to_string(mold_home.join("config.toml")).unwrap())
+                .unwrap();
+        assert!(saved.models.contains_key("derived-a"));
+        assert!(saved.models.contains_key("derived-b"));
+        assert!(std::fs::read_dir(&mold_home).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("partial")
+        }));
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&mold_home);
+    }
+
+    #[test]
+    fn locked_update_preserves_a_malformed_config_instead_of_replacing_it() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mold_home = test_models_dir("locked-update-malformed");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+        let path = mold_home.join("config.toml");
+        let malformed = b"api_key = [this is not valid TOML\n";
+        std::fs::write(&path, malformed).unwrap();
+
+        let error = Config::update_locked(|config| {
+            config
+                .models
+                .insert("must-not-land".to_string(), ModelConfig::default());
+            Ok(())
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("parse config"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), malformed);
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&mold_home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_config_save_is_private_and_preserves_stricter_owner_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mold_home = test_models_dir("private-atomic-save");
+        std::fs::create_dir_all(&mold_home).unwrap();
+        std::env::set_var("MOLD_HOME", &mold_home);
+        let path = mold_home.join("config.toml");
+        std::fs::write(&path, "server_port = 7680\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        Config::default().save().unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        Config::default().save().unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
+
+        std::env::remove_var("MOLD_HOME");
+        let _ = std::fs::remove_dir_all(&mold_home);
+    }
+
     // ── effective_negative_prompt ────────────────────────────────────────
 
     #[test]

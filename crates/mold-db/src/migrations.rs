@@ -664,6 +664,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 36,
         kind: MigrationKind::Sql(V36_MESH_WORKFLOW_JOBS),
     },
+    Migration {
+        version: 37,
+        kind: MigrationKind::Sql(V37_GENERATION_ASSETS),
+    },
 ];
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY
@@ -905,7 +909,45 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 36;
+pub const SCHEMA_VERSION: i64 = 37;
+
+/// Downloadable files that belong to one gallery print. The generation row
+/// remains the lifecycle authority, so permanent deletion cascades while
+/// trash/restore preserves the inventory. `locator` is interpreted only by
+/// the server-side extractor and never reaches clients.
+const V37_GENERATION_ASSETS: &str = r#"
+CREATE TABLE generation_assets (
+    generation_id INTEGER NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
+    asset_id       TEXT NOT NULL CHECK (length(asset_id) BETWEEN 1 AND 128),
+    role           TEXT NOT NULL CHECK (length(role) BETWEEN 1 AND 64),
+    display_name   TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 255),
+    media_type     TEXT NOT NULL CHECK (length(media_type) BETWEEN 1 AND 128),
+    size_bytes     INTEGER NOT NULL CHECK (size_bytes >= 0),
+    sha256         TEXT NOT NULL CHECK (length(sha256) = 64),
+    width          INTEGER CHECK (width IS NULL OR width > 0),
+    height         INTEGER CHECK (height IS NULL OR height > 0),
+    storage_kind   TEXT NOT NULL CHECK (storage_kind IN ('embedded_glb', 'sidecar')),
+    locator        TEXT NOT NULL CHECK (length(locator) BETWEEN 1 AND 1024),
+    PRIMARY KEY (generation_id, asset_id)
+);
+
+CREATE INDEX generation_assets_generation
+ON generation_assets(generation_id, role, asset_id);
+
+CREATE TABLE generation_asset_scans (
+    generation_id INTEGER PRIMARY KEY REFERENCES generations(id) ON DELETE CASCADE,
+    media_version TEXT NOT NULL CHECK (length(media_version) BETWEEN 1 AND 128)
+);
+
+CREATE TRIGGER generation_assets_invalidate_after_media_change
+AFTER UPDATE OF file_mtime_ms, file_size_bytes ON generations
+WHEN NEW.file_mtime_ms IS NOT OLD.file_mtime_ms
+  OR NEW.file_size_bytes IS NOT OLD.file_size_bytes
+BEGIN
+    DELETE FROM generation_asset_scans WHERE generation_id = NEW.id;
+    DELETE FROM generation_assets WHERE generation_id = NEW.id;
+END;
+"#;
 
 /// Opaque staged-media ownership for durable queue rows.
 ///
@@ -1224,6 +1266,17 @@ fn migration_failed(version: i64, from: i64, err: rusqlite::Error) -> anyhow::Er
     anyhow::anyhow!("migration v{version} failed (DB at v{from}): {detail}")
 }
 
+fn is_migration_lock_contention(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 /// Apply every migration whose version is greater than the DB's current
 /// `user_version` pragma. Runs each migration in its own transaction —
 /// partial failures leave the DB at the previous version instead of a
@@ -1253,9 +1306,24 @@ pub fn apply_pending(conn: &mut Connection) -> Result<i64> {
     // that lock. A connection that lost the race sees the bumped version
     // and skips, instead of re-applying DDL and corrupting the schema
     // ("duplicate column" on every subsequent open).
+    // This is one budget for the complete migration pass, not one budget per
+    // schema version. One transaction attempt may additionally spend the
+    // connection's configured SQLite busy timeout before it returns BUSY.
+    let lock_retry_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut current;
     loop {
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = loop {
+            match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+                Ok(tx) => break tx,
+                Err(error)
+                    if is_migration_lock_contention(&error)
+                        && std::time::Instant::now() < lock_retry_deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
         current = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let Some(m) = MIGRATIONS.iter().find(|m| m.version > current) else {
             break;
@@ -1294,6 +1362,71 @@ pub(crate) fn current_version(conn: &Connection) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static MIGRATION_BUSY_SIGNAL: (std::sync::Mutex<bool>, std::sync::Condvar) =
+        (std::sync::Mutex::new(false), std::sync::Condvar::new());
+
+    fn report_migration_busy(_: i32) -> bool {
+        let (seen, wake) = &MIGRATION_BUSY_SIGNAL;
+        *seen.lock().unwrap() = true;
+        wake.notify_one();
+        false
+    }
+
+    #[test]
+    fn apply_pending_retries_a_proven_held_write_lock() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-db-migrate-held-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("mold.db");
+
+        let mut holder = Connection::open(&path).unwrap();
+        let held = holder
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        *MIGRATION_BUSY_SIGNAL.0.lock().unwrap() = false;
+
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            let mut conn = Connection::open(worker_path).unwrap();
+            // Return BUSY immediately and signal that SQLite actually observed
+            // the held lock; this makes the test independent of scheduling.
+            conn.busy_handler(Some(report_migration_busy)).unwrap();
+            apply_pending(&mut conn)
+        });
+
+        let (seen, wake) = &MIGRATION_BUSY_SIGNAL;
+        let (seen, timeout) = wake
+            .wait_timeout_while(
+                seen.lock().unwrap(),
+                std::time::Duration::from_secs(5),
+                |seen| !*seen,
+            )
+            .unwrap();
+        assert!(*seen, "the worker must encounter the held SQLite lock");
+        assert!(!timeout.timed_out());
+        drop(seen);
+        held.commit().unwrap();
+
+        assert_eq!(worker.join().unwrap().unwrap(), SCHEMA_VERSION);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn migration_retry_classifier_rejects_non_lock_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        let error = conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect_err("nested transaction must fail");
+        assert!(!is_migration_lock_contention(&error));
+    }
 
     #[test]
     fn concurrent_opens_of_a_fresh_db_all_migrate_safely() {
@@ -1607,7 +1740,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 36);
+        assert_eq!(SCHEMA_VERSION, 37);
         assert!(table_exists(&conn, "device_preferences"));
         assert!(table_exists(&conn, "mesh_workflow_jobs"));
         assert!(table_exists(&conn, "mesh_workflow_stages"));
@@ -1763,7 +1896,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 36);
+        assert_eq!(SCHEMA_VERSION, 37);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1900,7 +2033,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 36);
+        assert_eq!(SCHEMA_VERSION, 37);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -2162,7 +2295,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 36);
+        assert_eq!(SCHEMA_VERSION, 37);
     }
 
     #[test]

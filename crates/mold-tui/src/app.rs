@@ -1487,6 +1487,7 @@ pub(crate) fn next_target_faces(
 pub(crate) fn local_mesh_export_formats() -> Vec<mold_core::MeshExportFormat> {
     let mut formats = vec![
         mold_core::MeshExportFormat::Obj,
+        mold_core::MeshExportFormat::Zip,
         mold_core::MeshExportFormat::Stl,
         mold_core::MeshExportFormat::Ply,
         mold_core::MeshExportFormat::Gif,
@@ -1503,7 +1504,7 @@ pub(crate) fn local_mesh_export_formats() -> Vec<mold_core::MeshExportFormat> {
 /// when there is no host (a local print) or the host has not been polled.
 /// What Library `u` says on a 3-D print. Names the action that does apply.
 pub(crate) const MESH_UPSCALE_REFUSAL: &str =
-    "Upscale reads rasters only; press x to export this 3-D print as OBJ, STL, or PLY";
+    "Upscale reads rasters only; press x to export this 3-D print as OBJ, ZIP, STL, or PLY";
 
 pub(crate) fn mesh_export_formats_for(
     advertised: Option<&[mold_core::MeshExportFormat]>,
@@ -1546,6 +1547,7 @@ pub(crate) fn mesh_export_target_path(
 /// different objects depending on which host held it.
 pub(crate) fn export_local_mesh(
     glb: &[u8],
+    stem: &str,
     format: mold_core::MeshExportFormat,
 ) -> Result<Vec<u8>, String> {
     use mold_inference::hunyuan3d::{glb, turntable};
@@ -1574,6 +1576,9 @@ pub(crate) fn export_local_mesh(
         // The stored form: handed back as-is, not re-encoded.
         mold_core::MeshExportFormat::Glb => glb.to_vec(),
         mold_core::MeshExportFormat::Obj => glb::write_obj(&shaped()?).into_bytes(),
+        mold_core::MeshExportFormat::Zip => {
+            glb::write_obj_bundle(&shaped()?, glb, stem).map_err(|e| format!("{e:#}"))?
+        }
         mold_core::MeshExportFormat::Stl => glb::write_stl(&shaped()?),
         mold_core::MeshExportFormat::Ply => glb::write_ply(&shaped()?),
         mold_core::MeshExportFormat::Gif
@@ -7113,7 +7118,11 @@ impl App {
                 }
                 None => tokio::task::spawn_blocking(move || {
                     let glb = std::fs::read(&local_path).map_err(|e| e.to_string())?;
-                    export_local_mesh(&glb, format)
+                    let stem = local_path
+                        .file_stem()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .unwrap_or("mesh");
+                    export_local_mesh(&glb, stem, format)
                 })
                 .await
                 .unwrap_or_else(|e| Err(e.to_string())),
@@ -15574,17 +15583,17 @@ mod tests {
     /// goes through the same writer the server's export route uses.
     #[test]
     fn mesh_export_helpers_name_the_target_and_transcode_locally() {
-        use mold_core::MeshExportFormat::{Apng, Gif, Glb, Obj, Ply, Stl, Webp};
+        use mold_core::MeshExportFormat::{Apng, Gif, Glb, Obj, Ply, Stl, Webp, Zip};
         let local = mesh_export_formats_for(None);
-        assert_eq!(&local[..5], &[Obj, Stl, Ply, Gif, Apng]);
+        assert_eq!(&local[..6], &[Obj, Zip, Stl, Ply, Gif, Apng]);
         assert_eq!(
             local.contains(&Webp),
             cfg!(feature = "webp"),
             "a local print offers WebP exactly when this build encodes it"
         );
         assert_eq!(
-            mesh_export_formats_for(Some(&[Glb, Obj, Stl, Ply, Gif])),
-            vec![Obj, Stl, Ply, Gif],
+            mesh_export_formats_for(Some(&[Glb, Obj, Zip, Stl, Ply, Gif])),
+            vec![Obj, Zip, Stl, Ply, Gif],
             "the stored GLB is never an export; the host's turntables are"
         );
         assert_eq!(mesh_export_formats_for(Some(&[Glb])), Vec::<_>::new());
@@ -15614,21 +15623,28 @@ mod tests {
             None,
         )
         .unwrap();
-        let stl = export_local_mesh(&glb, Stl).unwrap();
+        let stl = export_local_mesh(&glb, "chair", Stl).unwrap();
         assert_eq!(stl.len(), 80 + 4 + 50, "one binary STL triangle");
-        let obj = String::from_utf8(export_local_mesh(&glb, Obj).unwrap()).unwrap();
+        let obj = String::from_utf8(export_local_mesh(&glb, "chair", Obj).unwrap()).unwrap();
         assert_eq!(obj.lines().filter(|line| line.starts_with("v ")).count(), 3);
         assert!(obj.contains("f 1 2 3") || obj.contains("f 1/"), "{obj}");
-        assert!(!export_local_mesh(&glb, Ply).unwrap().is_empty());
-        assert_eq!(export_local_mesh(&glb, Glb).unwrap(), glb);
-        assert!(export_local_mesh(b"not a glb", Stl).is_err());
+        assert!(!export_local_mesh(&glb, "chair", Ply).unwrap().is_empty());
+        assert_eq!(export_local_mesh(&glb, "chair", Glb).unwrap(), glb);
+        assert!(export_local_mesh(b"not a glb", "chair", Stl).is_err());
+        let zip = export_local_mesh(&glb, "chair", Zip).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
+        let names = (0..archive.len())
+            .map(|index| archive.by_index(index).unwrap().name().to_string())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"chair.obj".to_string()), "{names:?}");
+        assert!(names.contains(&"chair.mtl".to_string()), "{names:?}");
         // A local turntable goes through the same renderer the server's
         // route uses, at the same defaults: a real GIF with the default
         // frame count.
-        let gif = export_local_mesh(&glb, Gif).unwrap();
+        let gif = export_local_mesh(&glb, "chair", Gif).unwrap();
         assert_eq!(&gif[..6], b"GIF89a");
         assert_eq!(
-            &export_local_mesh(&glb, Apng).unwrap()[..8],
+            &export_local_mesh(&glb, "chair", Apng).unwrap()[..8],
             b"\x89PNG\r\n\x1a\n"
         );
     }
@@ -15662,7 +15678,7 @@ mod tests {
 
         // Read the bounding box back out of the binary STL's own 50-byte
         // facet records, so the assertion measures the FILE.
-        let stl = export_local_mesh(&glb, Stl).unwrap();
+        let stl = export_local_mesh(&glb, "chair", Stl).unwrap();
         let count = u32::from_le_bytes(stl[80..84].try_into().unwrap()) as usize;
         assert_eq!(stl.len(), 84 + count * 50);
         let mut min = [f32::INFINITY; 3];
@@ -15685,7 +15701,7 @@ mod tests {
         );
         assert!(min[2].abs() < 1e-4, "and rests on z = 0: {min:?}");
 
-        let obj = String::from_utf8(export_local_mesh(&glb, Obj).unwrap()).unwrap();
+        let obj = String::from_utf8(export_local_mesh(&glb, "chair", Obj).unwrap()).unwrap();
         let mut min = [f32::INFINITY; 3];
         let mut max = [f32::NEG_INFINITY; 3];
         for line in obj.lines().filter(|line| line.starts_with("v ")) {

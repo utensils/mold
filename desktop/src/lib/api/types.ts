@@ -17,6 +17,7 @@ import type { MiniMaxH3Capability } from "@studio/lib/minimaxH3Inventory";
 import type { GenerationProfileSet } from "@studio/lib/generationProfile";
 import type { MeshRequestOptions } from "@studio/lib/meshControls";
 import type { MeshExportGeometryCapabilities } from "@studio/lib/meshExport";
+import type { GenerationAsset } from "@studio/api/generationAssets";
 
 export type { MeshRequestOptions } from "@studio/lib/meshControls";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
@@ -887,6 +888,8 @@ export interface GalleryImage extends GalleryOrganizationFields {
   size_bytes?: number | null;
   media_version?: string | null;
   metadata_synthetic?: boolean;
+  /** Independently downloadable files retained by this print. */
+  assets?: GenerationAsset[];
 }
 
 // ── Model components ──────────────────────────────────────────────────────

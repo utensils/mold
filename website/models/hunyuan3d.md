@@ -55,7 +55,29 @@ Each is ONE self-contained file carrying the shape transformer, the shape VAE
 and an image encoder (DINOv2-large for 2.1, giant for 2.0), which is why a "0.6B" model is still 3.6 GiB
 — the vision tower is 1.1B parameters on its own.
 
-No quantized (GGUF or FP8) variants exist for this family upstream.
+No quantized variants exist upstream. mold can derive them locally from an
+installed fp16 checkpoint with `mold quantize`; the source file is preserved,
+the derived model is registered atomically, and every app discovers it through
+the normal installed-model list.
+
+| Shape checkpoint      | CUDA-qualified derived tiers        |
+| --------------------- | ----------------------------------- |
+| 2.1 sparse MoE        | `fp8`, `q8`, `q4`                   |
+| 2.0 full, undistilled | `fp8`, `q8`                         |
+| 2.0 full Turbo        | `fp8`, `q8`, `q6`, `q5`, `q4`, `q3` |
+| 2.0 mini Turbo        | `q8`, `q4`                          |
+| 2mv Turbo             | `q8`, `q6`, `q5`, `q4`, `q3`        |
+
+`q2` is deliberately refused because qualification produced invalid geometry.
+FP8 uses group-of-32 E4M3 scaling on large expert/MLP matrices and leaves
+attention, modulation, input/output, VAE and vision weights in their source
+dtype. Quantized execution is CUDA-only; Metal reports the unsupported tier
+before loading weights.
+
+```bash
+mold quantize hunyuan3d-2.1:fp16 --tier fp8
+mold quantize hunyuan3d-2mv-turbo:fp16 --tier q4
+```
 
 ## Measured on Apple Silicon
 
@@ -97,9 +119,10 @@ publishes the result as a new Library GLB. The source mesh and stage checkpoint
 survive app or server restarts.
 
 The installed fp16 Shape VAE is tensor-qualified against Tencent's 2.1
-implementation and a full GLB round trip is geometry-qualified on CUDA. Image
-conditioning through the 2.1 sparse shape transformer remains under campaign
-qualification.
+implementation, a full GLB round trip is geometry-qualified on CUDA, and image
+conditioning through the 2.1 sparse top-2 MoE transformer is qualified end to
+end. Its `fp8`, `q8`, and `q4` tiers produced Khronos-clean GLBs in comparison
+with fp16.
 
 ## Getting good results
 
@@ -165,7 +188,7 @@ format is **pinned** to `glb` rather than refused. `-o` is the exception: a
 filename ending in `.png` or `.mp4` names a file this render will not write, so
 it is refused before any weight is read.
 
-### Export as OBJ, STL or PLY
+### Export as OBJ, ZIP, STL or PLY
 
 Everything except GLB is an **export** — a transcode of a mesh that already
 exists, never a stored format — because each of them loses something the glTF
@@ -174,18 +197,22 @@ carries.
 ```bash
 mold library export chair.glb --format stl
 mold library export chair.glb --format obj -o ~/chair.obj
+mold library export chair.glb --format zip -o ~/chair.zip
 ```
 
-| Format | Carries                                             | Reach for it when                      |
-| ------ | --------------------------------------------------- | -------------------------------------- |
-| `glb`  | Geometry, normals, UVs, materials, embedded texture | Anything. This is the stored file.     |
-| `obj`  | Positions, normals, UVs. No materials.              | Blender, MeshLab, most DCC importers.  |
-| `stl`  | Triangles and one normal each. No UVs, no colour.   | 3-D printing and CAD.                  |
-| `ply`  | Positions and per-vertex normals, vertices shared.  | Point-and-mesh tooling, research code. |
+| Format | Carries                                                   | Reach for it when                      |
+| ------ | --------------------------------------------------------- | -------------------------------------- |
+| `glb`  | Geometry, normals, UVs, materials, embedded texture       | Anything. This is the stored file.     |
+| `obj`  | Positions, normals, UVs. No materials.                    | Blender, MeshLab, most DCC importers.  |
+| `zip`  | OBJ, MTL, base color, metallic-roughness and normal maps. | Moving a painted asset between tools.  |
+| `stl`  | Triangles and one normal each. No UVs, no colour.         | 3-D printing and CAD.                  |
+| `ply`  | Positions and per-vertex normals, vertices shared.        | Point-and-mesh tooling, research code. |
 
 The gallery file is never renamed or replaced. The same conversions are on
 `POST /api/gallery/export/:filename` and the `export_mesh` MCP tool, and a host
 advertises what it can convert on `/api/capabilities.mesh.export_formats`.
+Painted prints also list their maps in `GalleryImage.assets`; the web,
+desktop, and mobile viewers offer each as an exact independent download.
 `--size-mm`, `--up-axis` and `--origin` make an STL or PLY print-ready for a
 slicer or DCC tool by default; see
 [Print-ready exports](/guide/mesh#print-ready-exports).
@@ -242,6 +269,9 @@ Use `--texture [--texture-resolution 1024|2048|4096]` on the CLI, or enable
 **PBR materials** in the desktop Create inspector. The 3-D Studio also runs
 durable text-to-3D and supplied-mesh retexturing workflows, with optional
 matting and delight preprocessing checkpointed before shape or paint.
+The Library preserves the original encoded base-color, metallic-roughness, and normal
+PNGs inside the GLB, indexes them as generation assets, and can download them
+separately or package them with OBJ + MTL through `--format zip`.
 
 ## Accepting the licence from the apps
 
