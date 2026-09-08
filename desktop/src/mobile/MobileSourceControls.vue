@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { useMobileBack } from "./useMobileBack";
 import MaskEditorModal from "../components/generate/MaskEditorModal.vue";
 import { fetchCatalogInstalled } from "../lib/api/catalog";
 import type { ApiTarget } from "../lib/api/client";
@@ -239,6 +240,9 @@ const sourceRefinements = computed(
 );
 const error = ref("");
 const maskOpen = ref(false);
+useMobileBack(maskOpen, () => {
+  maskOpen.value = false;
+});
 const sourcePickerOpen = ref(false);
 const endFramePickerOpen = ref(false);
 const sourcePickerMaxBytes = computed(() =>

@@ -11030,6 +11030,8 @@ function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement
 }
 
 const keyboardVisible = ref(false);
+const androidShortLandscape = ref(false);
+const createReadinessSlot = ref<HTMLElement | null>(null);
 let keyboardBaselineWidth = window.innerWidth;
 let keyboardBaselineHeight = window.innerHeight;
 let keyboardRotationOpen = false;
@@ -11049,6 +11051,10 @@ function syncVisualViewportOffset(): void {
     window.innerHeight,
     viewport?.height ?? 0,
   );
+  androidShortLandscape.value =
+    androidNativeRuntime &&
+    keyboardBaselineWidth > keyboardBaselineHeight &&
+    keyboardBaselineHeight < 500;
   if (
     !usesSoftwareKeyboard(document.activeElement) ||
     (viewport && viewport.height - lastKeyboardViewportHeight > 120)
@@ -11162,6 +11168,7 @@ onMounted(async () => {
   document.addEventListener("focusin", handleKeyboardFocusIn, true);
   document.addEventListener("focusout", handleKeyboardFocusOut, true);
   window.addEventListener("scroll", syncVisualViewportOffset, true);
+  window.addEventListener("resize", handleKeyboardViewportResize);
   window.addEventListener("pointermove", moveGallerySelectionDrag, { passive: false });
   window.addEventListener("pointerup", finishGallerySelectionDrag);
   window.addEventListener("pointercancel", finishGallerySelectionDrag);
@@ -11259,6 +11266,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("focusin", handleKeyboardFocusIn, true);
   document.removeEventListener("focusout", handleKeyboardFocusOut, true);
   window.removeEventListener("scroll", syncVisualViewportOffset, true);
+  window.removeEventListener("resize", handleKeyboardViewportResize);
   window.removeEventListener("pointermove", moveGallerySelectionDrag);
   window.removeEventListener("pointerup", finishGallerySelectionDrag);
   window.removeEventListener("pointercancel", finishGallerySelectionDrag);
@@ -11447,7 +11455,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         :host-count="hosts.length"
         :app-version="appVersion"
         :host="selectedHost ?? null"
-        :update-channel="androidNativeRuntime ? 'Google Play' : 'TestFlight'"
+        :update-channel="androidNativeRuntime ? 'GitHub APK' : 'TestFlight'"
         @update="updateSettings"
         @manage-hosts="manageHostsFromSettings"
       />
@@ -11495,6 +11503,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             </button>
           </div>
           <p class="section-note">{{ developOnNote }}</p>
+          <div
+            v-show="androidShortLandscape"
+            ref="createReadinessSlot"
+            data-test="mobile-inline-readiness"
+          />
           <label v-if="connectedHosts.length > 1" class="field">
             <span>Machine</span>
             <select
@@ -13460,12 +13473,18 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       class="mobile-create-action"
       data-test="mobile-create-action"
     >
-      <ActionBlocker
-        v-if="developBlockerReason"
-        :reason="developBlockerReason"
-        compact
-        data-test="mobile-develop-blocker"
-      />
+      <Teleport
+        :to="createReadinessSlot ?? 'body'"
+        :disabled="!androidShortLandscape || !createReadinessSlot"
+      >
+        <ActionBlocker
+          v-if="developBlockerReason"
+          id="mobile-create-readiness-message"
+          :reason="developBlockerReason"
+          compact
+          data-test="mobile-develop-blocker"
+        />
+      </Teleport>
       <div class="mobile-estimate">
         <EstimateBadge :request="estimateRequest" :target="generationTarget" />
       </div>
@@ -13474,6 +13493,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         type="button"
         :disabled="developDisabled"
         data-test="mobile-develop-button"
+        :aria-describedby="developBlockerReason ? 'mobile-create-readiness-message' : undefined"
         @click="preparingGeneration ? cancelGenerationSubmission() : generate()"
       >
         {{ developButtonLabel }}

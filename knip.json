@@ -6,6 +6,10 @@
   "ignoreDependencies": ["@mold/ui", "tailwindcss"],
   "ignoreFiles": ["docs/**", "website/**", "result*", "result*/**"],
   "workspaces": {
+    ".": {
+      "entry": ["scripts/tests/android-app-smoke.mjs"],
+      "project": ["scripts/**/*.{js,mjs,cjs,ts}"]
+    },
     "studio": {
       "entry": [
         "index.ts",

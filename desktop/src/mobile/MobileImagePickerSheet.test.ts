@@ -96,12 +96,48 @@ describe("MobileImagePickerSheet", () => {
     await wrapper.findAll("[data-test='mobile-image-picker-gallery-item']")[0]!.trigger("click");
     await flushPromises();
 
-    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/still.png");
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/still.png", {
+      signal: expect.any(AbortSignal),
+    });
     expect(wrapper.emitted("pick")?.[0]?.[0]).toEqual({
       filename: "still.png",
       base64: "Ynl0ZXM=",
     });
   });
+
+  it.each(["close", "host change", "unmount"])(
+    "discards a late gallery download after %s",
+    async (action) => {
+      let resolveDownload!: (value: unknown) => void;
+      apiFetchTo.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveDownload = resolve;
+          }),
+      );
+      const wrapper = mount(MobileImagePickerSheet, {
+        props: { open: true, target, initialTab: "gallery" },
+        global: { stubs: { AuthedMedia: true } },
+      });
+      await flushPromises();
+      await wrapper.findAll("[data-test='mobile-image-picker-gallery-item']")[0]!.trigger("click");
+      const signal = apiFetchTo.mock.calls[0]![2].signal as AbortSignal;
+      if (action === "close") {
+        await wrapper.setProps({ open: false });
+        await wrapper.setProps({ open: true });
+      } else if (action === "host change") await wrapper.setProps({ target: peerTarget });
+      else wrapper.unmount();
+      expect(signal.aborted).toBe(true);
+      resolveDownload({
+        headers: new Headers(),
+        blob: () => Promise.resolve(new Blob(["stale"], { type: "image/png" })),
+      });
+      await flushPromises();
+      expect(wrapper.emitted("pick")).toBeUndefined();
+      expect(wrapper.emitted("close")).toBeUndefined();
+      if (action !== "unmount") wrapper.unmount();
+    },
+  );
 
   it("supports ordered multi-image selection before fetching gallery bytes", async () => {
     const wrapper = mount(MobileImagePickerSheet, {
@@ -161,7 +197,9 @@ describe("MobileImagePickerSheet", () => {
 
     await items[0]!.trigger("click");
     await flushPromises();
-    expect(apiFetchTo).toHaveBeenCalledWith(peerTarget, "/api/gallery/image/peer.png");
+    expect(apiFetchTo).toHaveBeenCalledWith(peerTarget, "/api/gallery/image/peer.png", {
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it("renders a healthy host without waiting for a peer that never settles", async () => {

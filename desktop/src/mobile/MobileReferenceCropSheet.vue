@@ -6,10 +6,12 @@
  * the scrolling content column): a fixed overlay whose body owns its own
  * scroll and every safe-area inset.
  */
+import { computed } from "vue";
+import { useMobileBack } from "./useMobileBack";
 import ReferenceCropEditor from "@studio/components/ReferenceCropEditor.vue";
 import type { ReferenceCrop } from "@studio/lib/referenceCrop";
 
-defineProps<{
+const props = defineProps<{
   open: boolean;
   title: string;
   image: { data: string; mimeType: string; width: number; height: number } | null;
@@ -20,6 +22,10 @@ const emit = defineEmits<{
   apply: [crop: ReferenceCrop | null];
   close: [];
 }>();
+useMobileBack(
+  computed(() => props.open && props.image !== null),
+  () => emit("close"),
+);
 </script>
 
 <template>

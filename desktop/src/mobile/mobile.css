@@ -5899,3 +5899,50 @@ button:disabled {
   outline: 2px solid var(--mold-blue);
   outline-offset: 3px;
 }
+
+/* Android WebView text zoom enlarges glyphs independently of fixed grid
+   tracks. Intrinsic flex sizing keeps action and destination words intact. */
+.native-android .mobile-create-action {
+  display: flex;
+  flex-wrap: wrap;
+}
+.native-android .mobile-create-action .mobile-estimate {
+  flex: 1 1 10em;
+}
+.native-android .mobile-create-action .ms-action-blocker {
+  flex: 1 0 100%;
+}
+.native-android .mobile-create-action .primary-button {
+  width: auto;
+  max-width: 100%;
+  flex: 1 1 auto;
+  overflow-wrap: normal;
+}
+@media (max-width: 639px) {
+  .native-android .mobile-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .native-android .mobile-tab {
+    flex: 1 1 auto;
+    min-width: min-content;
+    overflow-wrap: normal;
+  }
+}
+@media (min-width: 640px) {
+  .native-android .mobile-shell:not(.is-settings-open):not(.is-keyboard-open) {
+    grid-template-columns: max-content minmax(0, 1fr);
+  }
+  .native-android .mobile-tabs {
+    min-height: 0;
+    overflow-y: auto;
+    grid-template-rows: repeat(5, minmax(72px, max-content));
+    align-content: start;
+  }
+  .native-android .mobile-tab {
+    min-width: max-content;
+    overflow-wrap: normal;
+    white-space: nowrap;
+  }
+}

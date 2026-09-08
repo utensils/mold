@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, toRef, watch } from "vue";
+import { useMobileBack } from "./useMobileBack";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import type { GalleryImage } from "../lib/api/types";
@@ -50,6 +51,8 @@ const emit = defineEmits<{
   close: [];
 }>();
 
+useMobileBack(toRef(props, "open"), () => emit("close"));
+
 const tab = ref<"file" | "gallery">(props.initialTab);
 watch(
   () => props.open,
@@ -78,6 +81,20 @@ const sourceSignature = computed(() =>
     )
     .join("\u0001"),
 );
+let selectionGeneration = 0;
+let selectionController: AbortController | null = null;
+function invalidateSelection(): void {
+  selectionGeneration++;
+  selectionController?.abort();
+  selectionController = null;
+  picking.value = false;
+}
+function selectionCurrent(generation: number): boolean {
+  return props.open && generation === selectionGeneration;
+}
+watch([() => props.open, sourceSignature], invalidateSelection, { flush: "sync" });
+onBeforeUnmount(invalidateSelection);
+
 const stillEntries = computed(() =>
   entries.value.filter((entry) => isStillImageFile(entry.image.filename)),
 );
@@ -152,6 +169,7 @@ watch(
 );
 
 async function chooseFile(event: Event): Promise<void> {
+  if (!props.open || picking.value) return;
   const element = event.target as HTMLInputElement;
   const files = [...(element.files ?? [])];
   element.value = "";
@@ -179,15 +197,22 @@ async function chooseFile(event: Event): Promise<void> {
     return;
   }
   error.value = "";
-  const picked = await Promise.all(
-    selected.map(async (file) => ({
-      filename: file.name,
-      base64: await fileToBase64(file),
-    })),
-  );
-  if (props.multiple) emit("pick-many", picked);
-  else emit("pick", picked[0]!);
-  emit("close");
+  const generation = selectionGeneration;
+  picking.value = true;
+  try {
+    const picked = await Promise.all(
+      selected.map(async (file) => ({ filename: file.name, base64: await fileToBase64(file) })),
+    );
+    if (!selectionCurrent(generation)) return;
+    if (props.multiple) emit("pick-many", picked);
+    else emit("pick", picked[0]!);
+    emit("close");
+  } catch (cause) {
+    if (selectionCurrent(generation))
+      error.value = cause instanceof Error ? cause.message : String(cause);
+  } finally {
+    if (selectionCurrent(generation)) picking.value = false;
+  }
 }
 
 async function chooseGallery(entry: MobileGalleryEntry): Promise<void> {
@@ -206,22 +231,29 @@ async function chooseGallery(entry: MobileGalleryEntry): Promise<void> {
 }
 
 async function emitGalleryEntries(selected: MobileGalleryEntry[]): Promise<void> {
-  if (picking.value) return;
+  if (!props.open || picking.value) return;
+  const generation = selectionGeneration;
+  const controller = new AbortController();
+  selectionController = controller;
   picking.value = true;
   error.value = "";
   try {
     let totalBytes = 0;
     const picked: MobilePickedImage[] = [];
     for (const entry of selected) {
+      if (!selectionCurrent(generation)) return;
       const response = await apiFetchTo(
         entry.source.target,
         galleryMediaPath(entry.image.filename, "host"),
+        { signal: controller.signal },
       );
+      if (!selectionCurrent(generation)) return;
       const declared = Number(response.headers?.get("content-length") ?? Number.NaN);
       if (Number.isFinite(declared) && totalBytes + declared > props.maxBytes) {
         throw new Error(props.oversizeMessage);
       }
       const blob = await response.blob();
+      if (!selectionCurrent(generation)) return;
       if (blob.size === 0) throw new Error("That gallery image is empty.");
       totalBytes += blob.size;
       if (totalBytes > props.maxBytes) throw new Error(props.oversizeMessage);
@@ -230,13 +262,18 @@ async function emitGalleryEntries(selected: MobileGalleryEntry[]): Promise<void>
         base64: await blobToBase64(blob),
       });
     }
+    if (!selectionCurrent(generation)) return;
     if (props.multiple) emit("pick-many", picked);
     else emit("pick", picked[0]!);
     emit("close");
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause);
+    if (selectionCurrent(generation))
+      error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
-    picking.value = false;
+    if (selectionCurrent(generation)) {
+      picking.value = false;
+      selectionController = null;
+    }
   }
 }
 
