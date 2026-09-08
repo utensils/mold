@@ -290,6 +290,19 @@ try {
   } catch (captureError) {
     console.error("Could not capture Android failure evidence:", captureError);
   }
+  for (const [name, args] of [
+    ["last-anr.txt", ["dumpsys", "activity", "lastanr"]],
+    [
+      "system-crash.txt",
+      ["logcat", "-d", "-b", "system", "-b", "crash", "-t", "500"],
+    ],
+  ]) {
+    try {
+      writeFileSync(output + "/" + name, shell(...args));
+    } catch (captureError) {
+      console.error("Could not capture " + name + ":", captureError);
+    }
+  }
   throw error;
 } finally {
   shell(

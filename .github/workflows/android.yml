@@ -181,6 +181,9 @@ jobs:
           api-level: 35
           arch: x86_64
           profile: pixel_6
+          # The action still defaults to deprecated swiftshader_indirect;
+          # use the supported renderer for standard AOSP SystemUI/Quickstep.
+          emulator-options: -no-window -gpu software -no-snapshot -noaudio -no-boot-anim
           disable-animations: true
           script: |
             adb install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
@@ -192,6 +195,9 @@ jobs:
           api-level: 36
           arch: x86_64
           profile: pixel_6
+          # The action still defaults to deprecated swiftshader_indirect;
+          # use the supported renderer for standard AOSP SystemUI/Quickstep.
+          emulator-options: -no-window -gpu software -no-snapshot -noaudio -no-boot-anim
           disable-animations: true
           script: |
             adb install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
@@ -202,6 +208,9 @@ jobs:
           api-level: 28
           arch: x86_64
           profile: pixel_2
+          # The action still defaults to deprecated swiftshader_indirect;
+          # use the supported renderer for standard AOSP SystemUI/Quickstep.
+          emulator-options: -no-window -gpu software -no-snapshot -noaudio -no-boot-anim
           disable-animations: true
           script: bash scripts/tests/android-legacy-downloads.sh
       - name: Retain Android app evidence
