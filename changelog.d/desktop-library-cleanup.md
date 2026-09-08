@@ -5,3 +5,5 @@
 - **Visible video sound control.** Create and Library show a persistent Sound
   on/off toggle, remember mute across videos and app launches, and synchronize
   with native player controls while playback continues to loop.
+- **Stable 3-D Studio drafts.** Routine machine telemetry updates no longer
+  reload workflow capabilities or reset the selected workflow and inputs.

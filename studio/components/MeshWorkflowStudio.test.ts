@@ -111,3 +111,19 @@ describe("MeshWorkflowStudio feature-aware PBR authoring", () => {
     expect(request.mesh_request.mesh).toBeUndefined();
   });
 });
+
+it("preserves the draft when telemetry recreates an equivalent target", async () => {
+  const target = { baseUrl: "http://metal-host:7680", apiKey: null };
+  const wrapper = mount(MeshWorkflowStudio, { props: { target } });
+  await flushPromises();
+  await wrapper.get("textarea").setValue("A brass telescope");
+  const calls = listMeshWorkflows.mock.calls.length;
+  for (let tick = 0; tick < 3; tick++) {
+    await wrapper.setProps({ target: { ...target } });
+    await flushPromises();
+  }
+  expect(listMeshWorkflows.mock.calls.length).toBe(calls);
+  expect(wrapper.get("textarea").element.value).toBe("A brass telescope");
+  expect(wrapper.text()).not.toContain("Loading workflow capabilities");
+  wrapper.unmount();
+});

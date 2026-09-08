@@ -393,7 +393,7 @@ watch(meshModelName, () => {
 });
 watch(selectedId, () => void refreshSelected());
 watch(
-  () => [props.target.baseUrl, props.target.apiKey],
+  [() => props.target.baseUrl, () => props.target.apiKey],
   () => void bootstrap(),
 );
 onMounted(() => void bootstrap());
