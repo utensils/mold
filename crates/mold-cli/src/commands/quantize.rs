@@ -4,6 +4,13 @@ use anyhow::{bail, Context, Result};
 use mold_core::manifest::{find_manifest, resolve_model_name, HUNYUAN3D_FAMILY};
 use mold_core::{Config, ModelPaths};
 
+fn model_points_at_output(model: &mold_core::ModelConfig, output: &std::path::Path) -> bool {
+    model
+        .transformer
+        .as_deref()
+        .is_some_and(|path| std::path::Path::new(path) == output)
+}
+
 pub fn run(
     model: &str,
     tier: mold_inference::hunyuan3d::quantization::ShapeQuantization,
@@ -32,9 +39,6 @@ pub fn run(
     if derived_name == source_name {
         bail!("derived model name must differ from its source model");
     }
-    if config.models.contains_key(&derived_name) {
-        bail!("model `{derived_name}` is already configured");
-    }
     let output = output.unwrap_or_else(|| {
         config
             .resolved_models_dir()
@@ -42,6 +46,21 @@ pub fn run(
             .join(derived_name.replace(':', "-"))
             .join(format!("shape-{tier}.{}", tier.file_extension()))
     });
+    let repair_registered_output = if let Some(existing) = config.models.get(&derived_name) {
+        if !model_points_at_output(existing, &output) {
+            bail!("model `{derived_name}` is already configured with a different checkpoint path");
+        }
+        if output.exists() {
+            bail!("model `{derived_name}` is already configured");
+        }
+        eprintln!(
+            "Recreating missing checkpoint for registered model {derived_name} at {}...",
+            output.display()
+        );
+        true
+    } else {
+        false
+    };
 
     let recover = || {
         mold_inference::hunyuan3d::quantization::recover_existing_checkpoint(
@@ -118,12 +137,14 @@ pub fn run(
             .unwrap_or("Hunyuan3D shape model")
     ));
     Config::update_locked(|config| {
-        if config.models.contains_key(&derived_name) {
-            bail!(
-                "model `{derived_name}` was registered while quantization was running; \
-                 the completed checkpoint was retained at {}",
-                output.display()
-            );
+        if let Some(existing) = config.models.get(&derived_name) {
+            if !repair_registered_output || !model_points_at_output(existing, &output) {
+                bail!(
+                    "model `{derived_name}` was registered while quantization was running; \
+                     the completed checkpoint was retained at {}",
+                    output.display()
+                );
+            }
         }
         config.models.insert(derived_name.clone(), derived);
         Ok(())
@@ -138,4 +159,25 @@ pub fn run(
         report.source.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registered_checkpoint_recovery_requires_the_exact_output_path() {
+        let model = mold_core::ModelConfig {
+            transformer: Some("/models/derived/shape-q8.gguf".to_string()),
+            ..Default::default()
+        };
+        assert!(model_points_at_output(
+            &model,
+            std::path::Path::new("/models/derived/shape-q8.gguf")
+        ));
+        assert!(!model_points_at_output(
+            &model,
+            std::path::Path::new("/models/other/shape-q8.gguf")
+        ));
+    }
 }

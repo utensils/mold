@@ -92,6 +92,15 @@ fn publish_no_replace(temporary: &Path, output: &Path) -> Result<()> {
     })?;
     std::fs::remove_file(temporary)
         .with_context(|| format!("remove conversion link {}", temporary.display()))?;
+    #[cfg(unix)]
+    File::open(output.parent().unwrap_or_else(|| Path::new(".")))?
+        .sync_all()
+        .with_context(|| {
+            format!(
+                "sync quantized checkpoint directory for {}",
+                output.display()
+            )
+        })?;
     Ok(())
 }
 
@@ -264,7 +273,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 
 /// Validate and describe a completed conversion that was published before
 /// its config registration committed. This makes `mold quantize` restartable
-/// across a process or power failure without trusting an unrelated file that
+/// across an interruption without trusting an unrelated file that
 /// happens to occupy the requested destination.
 pub fn recover_existing_checkpoint(
     source: &Path,

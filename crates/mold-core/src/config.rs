@@ -18,6 +18,19 @@ fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     std::fs::rename(temporary, destination)
 }
 
+#[cfg(not(windows))]
+fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
+    // ReplaceFileW preserves the destination ACL and MoveFileExW uses
+    // MOVEFILE_WRITE_THROUGH. Recovery still handles either durable state if
+    // an interruption lands between checkpoint publication and registration.
+    Ok(())
+}
+
 #[cfg(windows)]
 fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
@@ -108,6 +121,7 @@ fn atomic_replace_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
             std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(mode))?;
         }
         replace_file(&temporary, path)?;
+        sync_parent_directory(path)?;
         Ok(())
     })();
     if result.is_err() {
