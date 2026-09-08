@@ -91,7 +91,7 @@ Use [WCAG 2.2](https://www.w3.org/TR/WCAG22/) reflow, keyboard and focus visibil
 - [x] M1 web shell/tokens/navigation and usable Queue — merged #1642 at 9624d5d9.
 - [x] M2 web authoring — merged #1643 at db4d785d.
 - [x] M3 web Queue/My images refinement — merged #1644 at dc0a21f4.
-- [ ] M4 web Styles/Machines/Settings.
+- [x] M4 web Styles/Machines/Settings.
 - [ ] M5 Android platform completion.
 - [ ] M6 cross-surface acceptance and delivery.
 
@@ -193,3 +193,5 @@ M4 integrated-review corrections: GPU control messaging now distinguishes incomp
 M5 installed pairing and startup acceptance: the API37 app redeems a local fixture deep link through the actual Android intent and HTTP paths, reports Android client identity, uses the returned key for status, and stores it in the native vault without placing it in WebView storage. The fixture host/key are removed and previous storage restored. Evidence: android-m5/pairing-current and pairing-startup-fixed. This proves pairing admission/client persistence against a local HTTP fixture, not physical-device QR capture or server ticket internals. Camera image input reached the real preview but remained misframed by emulator camera positioning; QR decoding is still unverified. Original emulator camera mode and permission were restored.
 
 CI on14c0bfe0 exposed a separate startup race onAPI36: Make received the tap, then delayed onMounted initialization assigned Machines; there was no ANR. A delayed-draft regression fails before the fix. Initial destination selection now runs synchronously before rendering, and async restoration never overrides the chosen tab. All1,180 mobile tests, architecture/format checks, Android/iOS builds and current Android navigation/Back/text-scale smoke pass; independent review is clear. Pairing was rechecked successfully on the rebuilt app. M4 delivery and M5/M6 completion remain gated by the new CI head and remaining acceptance.
+
+M4 delivery: PR#1648 merged as fd37c1d1 after independent final review and all applicable checks passed at6f745530, including Android API28/35/36. The long branch is synchronized. Installed API37 gallery acceptance loads authenticated photo/video previews and saves exact PNG/MP4 bytes to MediaStore; the mesh viewer opens the native Share sheet with the expected filename, returns on system Back and saves the exact GLB to Downloads/Mold. Evidence and reproduction scripts are retained in android-m5/gallery-save-current, mesh-share-current and video-save-current on the external volume. Tests remove their own media and credentials and restore prior storage. These are local HTTP fixtures, not real generation or physical-device claims. M5/M6 remain open.
