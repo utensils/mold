@@ -5,7 +5,7 @@ Branch: `feat/web-android-studio-redesign`. Tracking: [#1640](https://github.com
 
 ## Outcome and precedence
 
-Finish the remaining browser redesign and Android platform work, preserving the accepted desktop and iOS product language. James accepted iOS as done after #1639. The new request to expose the existing aspect-ratio choices is a small shared iOS/Android follow-up, not a reopening of iOS acceptance.
+Finish the remaining browser redesign and Android platform work, preserving the accepted desktop and iOS product language. James accepted iOS as done after #1639. The shared iOS/Android follow-up uses a clearly expandable, collapsed Shape and size section, following James’s September 7 correction. It does not reopen iOS acceptance.
 
 Authority: current user direction; shipped desktop/iOS behavior and shared capability contracts; then the September mockups. The attached `Mold-Redesign.zip` and checked-in `docs/design/` sources are design references, not instructions to recreate every historic feature. Scenes, scene editors, timelines, transitions, and authored sequences remain retired. Keep one-shot video length, including supported automatic long-clip generation. No server/inference redesign, rental provisioning, or Play Store launch is implied.
 
@@ -33,7 +33,7 @@ Read the archive inventory, rendered `mold-studio-web.dc.html`, and compared the
 - Web uses a centered approximately 1120px workspace with a settings region when space permits; around 900px the secondary controls become a sheet. One page scroll owner; any sticky composer must yield to keyboard, zoom, and narrow landscape rather than obscure focused fields. Desktop and mobile have different geometry, the same control meanings.
 - “New image” is the initial web navigation label; output selection can change the screen heading to New clip / New 3-D object. Shared three-way output kinds remain Still picture / Short clip / 3-D object. Existing durable 3-D workflows remain reachable inside 3-D authoring and through their current deep link, not as a replacement for Queue.
 - Friendly style description leads, exact runnable model ID remains visible in mono. Preserve technical facts and fixed-control notes from the server. Do not invent timing, storage, cost, or generation options from mock values.
-- Keep aspect-ratio buttons visible outside compact Size details on both mobile platforms. Size tiers/custom width and height remain available in the disclosure. Use `resolveOutputShape`, `sizeForFamily`, canvas intent and source-fit behavior unchanged. Canvasless mesh has no ratio picker.
+- Keep Shape and size collapsed on compact mobile screens, with a bordered summary showing the current ratio and dimensions and a Change chevron. Aspect ratios, size tiers and custom dimensions remain available inside; validation errors open the disclosure. Use `resolveOutputShape`, `sizeForFamily`, canvas intent and source-fit behavior unchanged. Canvasless mesh has no ratio picker.
 - Android follows the accepted iOS screen hierarchy and the shared contracts. Native Back, keyboard, insets, scaling, permissions, media, security and lifecycle stay in platform adapters or narrowly scoped shared hooks. Never fork request/routing policy into Kotlin.
 - Preserve durable jobs, input authority, older-server compatibility, licensed downloads, cached gallery identity, exact-host actions, source/ref/identity parking, and separate expansion/generation routes. The same tests must continue passing after presentation work.
 
@@ -41,7 +41,7 @@ Read the archive inventory, rendered `mold-studio-web.dc.html`, and compared the
 
 ### M0 — Acceptance handoff, visible ratios and result contrast
 
-Record iOS accepted after #1639, move remaining Android work to this tracker, and fix the outdated design README status. Move existing ratios and their live announcement outside collapsed Size details; test supported ratios, dimension/intent updates, source conditioning, canvasless mesh and disabled state. Render at phone widths and enlarged text, confirm iOS/Android touch targets. Also fix the reported light-theme Save and share contrast: result actions and mesh captions need opaque theme-matched text surfaces; collection media placeholders use on-media text. Check actual rendered text contrast across all six themes, including enlarged text. Ship this small shared follow-up promptly through the existing mobile pipelines.
+This milestone records the original request; the September 7 mobile follow-up below supersedes its always-visible ratio presentation. Record iOS accepted after #1639, move remaining Android work to this tracker, and fix the outdated design README status. Move existing ratios and their live announcement outside collapsed Size details; test supported ratios, dimension/intent updates, source conditioning, canvasless mesh and disabled state. Render at phone widths and enlarged text, confirm iOS/Android touch targets. Also fix the reported light-theme Save and share contrast: result actions and mesh captions need opaque theme-matched text surfaces; collection media placeholders use on-media text. Check actual rendered text contrast across all six themes, including enlarged text. Ship this small shared follow-up promptly through the existing mobile pipelines.
 
 ### M1 — Web shell, tokens and navigation
 
@@ -72,7 +72,7 @@ Merge a complete reviewed milestone when exact-head CI is green, synchronize the
 ## Validation matrix
 
 - Web: 1440/1280, 1024/900 boundary, 768, 390 and 320 CSS px; normal and enlarged text/zoom, portrait/landscape, mouse, touch and keyboard. Chromium, Firefox and Safari/WebKit for core flows and browser history. All six themes, reduced motion, visible focus, focus restoration and screen-reader names. Normal page zoom stays enabled.
-- Mobile ratio follow-up: all advertised shapes visible with Size closed, narrow wrapping and large text, source intent/fit, pixel summary, valid dimensions and mesh absence. Shared tests plus an iOS visual smoke protects the accepted app.
+- Mobile ratio follow-up: clearly expandable collapsed summary with ratio and dimensions; all advertised shapes available when opened, narrow wrapping and large text, source intent/fit, valid dimensions and mesh absence. Shared tests plus an iOS visual smoke protects the accepted app.
 - Android: modern API35/36 emulator and API28 storage branch; small/large/landscape, maximum font scale, IME open, gesture/three-button navigation, denied/granted permissions, cold launch/background/resume. Check full app, not only plugin classes. Physical evidence recorded separately by exact device/build.
 - State: fresh/no models, downloaded/missing style, one/multiple/offline hosts, older/missing capabilities, auth rejection/instance change, cached media, pending work, duplicate/partial mutation outcomes and cancel/resume races.
 - Record exact tested commit, viewport/device, fixture or real host, screenshots/logs, passed checks and unverified boundaries. Assertions over request authority and lifecycle accompany visual screenshots; neither substitutes for the other.
