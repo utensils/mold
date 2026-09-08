@@ -7,11 +7,37 @@ import {
   type MeshWorkflowRequirements,
   type MeshWorkflowRoute,
 } from "@studio/lib/meshWorkflowRouting";
+import ModelPicker from "../components/create/ModelPicker.vue";
+import PanelResizeHandle from "../components/shell/PanelResizeHandle.vue";
+import { useAppPrefsStore } from "../stores/appPrefs";
+import { dragWidth } from "../lib/panelResize";
+import type { ModelEntry } from "../lib/api/types";
 import HostChip from "../components/create/HostChip.vue";
 import { useHostsStore } from "../stores/hosts";
 import { useHostModelsStore } from "../stores/hostModels";
 
 const hosts = useHostsStore();
+const prefs = useAppPrefsStore();
+const draftWidth = ref<number | null>(null);
+const inspectorWidth = computed(() => draftWidth.value ?? prefs.generateParamsWidth);
+function resizeInspector(dx: number) {
+  draftWidth.value = dragWidth("generateParams", prefs.generateParamsWidth, dx, "left");
+}
+async function commitInspector() {
+  if (draftWidth.value !== null) await prefs.update({ generateParamsWidth: draftWidth.value });
+  draftWidth.value = null;
+}
+function resetInspector() {
+  draftWidth.value = null;
+  void prefs.update({ generateParamsWidth: null });
+}
+function pickerModels(filtered: WorkflowModel[]): ModelEntry[] {
+  const names = new Set(filtered.map((model) => model.name));
+  const rows = new Map<string, ModelEntry>();
+  for (const snapshot of Object.values(inventory.byHost))
+    for (const model of snapshot.entries) if (names.has(model.name)) rows.set(model.name, model);
+  return [...rows.values()];
+}
 const inventory = useHostModelsStore();
 const routing = ref<string | null>(null);
 const browseHostId = ref("");
@@ -81,11 +107,48 @@ async function resolveTarget(requirements: MeshWorkflowRequirements): Promise<Me
   <MeshWorkflowStudio
     v-if="target"
     :target="target"
+    :style="{ '--mesh-inspector-width': inspectorWidth + 'px' }"
     :available-models="availableModels"
     :resolve-target="resolveTarget"
     :host-label="selectedHost?.label ?? ''"
     desktop
   >
+    <template #inspector-resize>
+      <PanelResizeHandle
+        class="mesh-inspector-resize"
+        :style="{ right: inspectorWidth - 2 + 'px' }"
+        label="Resize 3-D settings"
+        @resize="resizeInspector"
+        @commit="commitInspector"
+        @reset="resetInspector"
+      />
+    </template>
+    <template #mesh-picker="{ models, selected, select, disabled }">
+      <div class="mesh-style-field">
+        <span class="ms-group-label">3-D style</span>
+        <ModelPicker
+          :models="pickerModels(models)"
+          :selected="pickerModels(models).find((m) => m.name === selected) ?? null"
+          :disabled-reason="disabled ? () => 'Preparing workflow' : null"
+          kicker="3-D object styles"
+          browse-target="/models?type=mesh"
+          @pick="(model) => select(model.name)"
+        />
+      </div>
+    </template>
+    <template #image-picker="{ models, selected, select, disabled }">
+      <div class="mesh-style-field">
+        <span class="ms-group-label">Picture style</span>
+        <ModelPicker
+          :models="pickerModels(models)"
+          :selected="pickerModels(models).find((m) => m.name === selected) ?? null"
+          :disabled-reason="disabled ? () => 'Preparing workflow' : null"
+          kicker="Still picture styles"
+          browse-target="/models?type=image"
+          @pick="(model) => select(model.name)"
+        />
+      </div>
+    </template>
     <template #machine="{ busy }">
       <HostChip v-model="routing" :disabled="busy" always-show-routing />
     </template>
@@ -97,6 +160,18 @@ async function resolveTarget(requirements: MeshWorkflowRequirements): Promise<Me
 </template>
 
 <style scoped>
+.mesh-inspector-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 10;
+}
+.mesh-style-field {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
 .mesh-workflow-unavailable {
   display: grid;
   place-content: center;

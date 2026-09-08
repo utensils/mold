@@ -309,6 +309,11 @@ describe("queue plan contract", () => {
           entries: [row("wanted")],
           page: { limit: 1, offset: 1, returned: 1 },
         }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          job: { ...row("wanted"), metadata: { prompt: "restored" } },
+        }),
       );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -317,11 +322,15 @@ describe("queue plan contract", () => {
         { baseUrl: "https://gpu.example", apiKey: "secret" },
         "wanted",
       ),
-    ).resolves.toMatchObject({ id: "wanted" });
+    ).resolves.toMatchObject({
+      id: "wanted",
+      metadata: { prompt: "restored" },
+    });
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "https://gpu.example/api/status",
       "https://gpu.example/api/queue?limit=1",
       "https://gpu.example/api/queue?limit=1&cursor=next",
+      "https://gpu.example/api/queue/wanted",
     ]);
   });
 

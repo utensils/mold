@@ -288,11 +288,16 @@ image and says so.
 ## 3-D Studio workflows
 
 The 3-D Studio uses the desktop shell's 40px view toolbar, a full-height result
-canvas, and the standard 300px inspector on the right. **From words**, **Rebuild**,
+canvas, and the standard inspector on the right (300px by default, resizable
+280–480px with Generate's shared handle, width setting, keyboard controls, and
+double-click reset). **From words**, **Rebuild**,
 and **Add texture** are the shared segmented control; only workflows supported
 by the connected machines appear. Workflow inputs belong together in the
 inspector, including the description or source files, with **Generate** at its
-foot. Use **3-D style** and **Picture style** for the two style pickers. The
+foot. Use **3-D style** and **Picture style** for the two style pickers. Reuse
+Generate's model picker with filtered candidates, including its search, family
+groups, availability, and friendly labels; do not build a second selector.
+Use the shared switches and inspector typography for stage settings. The
 result and its stage progress occupy the canvas, without a separate landing-page
 heading or oversized cards.
 

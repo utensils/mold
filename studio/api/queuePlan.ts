@@ -1,4 +1,5 @@
 import {
+  ApiError,
   IncompatibleHostError,
   apiFetchTo,
   apiJsonTo,
@@ -348,7 +349,23 @@ export async function findQueueEntryById(
       listing.entries,
       listing.live_only_entries ?? [],
     ).find((entry) => entry.id === id);
-    if (match) return match;
+    if (match) {
+      // Listings deliberately omit durable request settings. Opening one row
+      // must read its bounded detail before handing it to any Create surface.
+      if (match.metadata == null) {
+        try {
+          return (await getQueueJob(target, id)).job;
+        } catch (error) {
+          // Compatibility with hosts that predate the single-job endpoint.
+          if (
+            !(error instanceof ApiError) ||
+            ![404, 405].includes(error.status)
+          )
+            throw error;
+        }
+      }
+      return match;
+    }
     const cursor = listing.page?.next_cursor;
     const limit = listing.page?.limit;
     if (!cursor || !limit) return null;

@@ -141,7 +141,11 @@ export interface HostRouting {
   /** Host-RAM pressure for one machine, or null when it does not report it. */
   hostMemoryPressure: (hostId: string) => HostMemoryLevel | null;
   /** Resolve the concrete dispatch route for a model, or null if unreachable. */
-  resolve: (model: string | null) => HostRoute | null;
+  resolve: (
+    model: string | null,
+    eligibleHostIds?: readonly string[],
+  ) => HostRoute | null;
+  modelsForHost: (hostId: string) => ModelInfoExtended[];
   /** Resolve through each host's read-only authoritative scheduler preview. */
   resolveFeasible: (
     request: GenerateRequestWire,
@@ -780,7 +784,10 @@ function withReferenceUploads(route: HostRoute | null): HostRoute | null {
   };
 }
 
-function resolve(model: string | null): HostRoute | null {
+function resolve(
+  model: string | null,
+  eligibleHostIds?: readonly string[],
+): HostRoute | null {
   const selection = targetId.value;
   if (
     model &&
@@ -790,9 +797,11 @@ function resolve(model: string | null): HostRoute | null {
   ) {
     return null;
   }
-  const eligible = model
-    ? hosts.value.filter((host) => !accessRestrictionForHost(host.id, model))
-    : hosts.value;
+  const eligible = hosts.value.filter(
+    (host) =>
+      (!eligibleHostIds || eligibleHostIds.includes(host.id)) &&
+      (!model || !accessRestrictionForHost(host.id, model)),
+  );
   if (
     model &&
     (selection === AUTO_TARGET_ID || selection === CAPABLE_TARGET_ID) &&
@@ -1533,6 +1542,8 @@ export function useHostRouting(): HostRouting {
     queueStatus,
     hostMemoryPressure,
     resolve,
+    modelsForHost: (hostId: string) =>
+      accessibleModelsByHost.value[hostId] ?? [],
     resolveFeasible,
     revalidateFeasible,
     resolveFeasibleChain,

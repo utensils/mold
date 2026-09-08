@@ -196,3 +196,43 @@ it("retains unchanged result media across progress polls and stops polling on un
     vi.useRealTimers();
   }
 });
+
+it("restores a selected workflow's settings without overwriting edits on progress polls", async () => {
+  const { getMeshWorkflow } = await import("../api/meshWorkflows");
+  vi.useFakeTimers();
+  listMeshWorkflows.mockResolvedValue({
+    jobs: [{ id: "saved", mode: "text_to_mesh", state: "running" }] as never,
+  });
+  vi.mocked(getMeshWorkflow).mockResolvedValue({
+    id: "saved",
+    mode: "text_to_mesh",
+    state: "running",
+    stages: [],
+    request: {
+      mode: "text_to_mesh",
+      image_request: {
+        model: "z-image-turbo:q8",
+        prompt: "A saved wooden fox",
+      },
+      mesh_request: {
+        model: "hunyuan3d-mini-turbo:fp16",
+        mesh: { texture: false },
+      },
+    },
+  } as never);
+  const wrapper = mount(MeshWorkflowStudio, {
+    props: { target: { baseUrl: "http://local:7680", apiKey: null } },
+  });
+  try {
+    await flushPromises();
+    await wrapper.get('[aria-label="Previous 3-D workflow"]').setValue("saved");
+    await flushPromises();
+    expect(wrapper.get("textarea").element.value).toBe("A saved wooden fox");
+    await wrapper.get("textarea").setValue("An edited fox");
+    await vi.advanceTimersByTimeAsync(750);
+    expect(wrapper.get("textarea").element.value).toBe("An edited fox");
+  } finally {
+    wrapper.unmount();
+    vi.useRealTimers();
+  }
+});

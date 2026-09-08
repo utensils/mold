@@ -22,6 +22,7 @@ vi.mock("../composables/useHostRouting", async () => {
     useHostRouting: () => ({
       hosts,
       targetId,
+      targetModels: ref([]),
       setTarget: (id: string) => {
         targetId.value = id;
       },

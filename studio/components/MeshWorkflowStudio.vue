@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import type {
   MeshWorkflowRequirements,
@@ -9,6 +10,7 @@ import type {
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../api/client";
 import {
   cancelMeshWorkflow,
+  type CreateMeshWorkflowRequest,
   createMeshWorkflow,
   deleteMeshWorkflow,
   getMeshWorkflow,
@@ -172,7 +174,7 @@ async function refreshJobs(): Promise<void> {
     jobs.value = listing.jobs;
 }
 
-async function refreshSelected(): Promise<void> {
+async function refreshSelected(restoreDraft = false): Promise<void> {
   clearPoll();
   const epoch = ++selectionEpoch;
   const id = selectedId.value;
@@ -186,12 +188,37 @@ async function refreshSelected(): Promise<void> {
     const result = await getMeshWorkflow<WorkflowGenerateRequest>(target, id);
     if (epoch !== selectionEpoch) return;
     detail.value = result;
+    if (restoreDraft && result?.request) restoreWorkflowDraft(result.request);
     await loadResult();
   } catch (cause) {
     if (epoch === selectionEpoch)
       error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
     if (epoch === selectionEpoch) schedulePoll();
+  }
+}
+
+function restoreWorkflowDraft(
+  request: CreateMeshWorkflowRequest<WorkflowGenerateRequest>,
+): void {
+  // History is a different request; never carry another workflow's attachments.
+  meshFile.value = null;
+  appearanceFile.value = null;
+  mode.value = request.mode;
+  const mesh =
+    request.mode === "text_to_mesh"
+      ? request.mesh_request
+      : request.mode === "mesh_texture"
+        ? request.texture_request
+        : request.roundtrip_request;
+  meshModelName.value = mesh.model;
+  texture.value =
+    request.mode === "mesh_texture" || mesh.mesh?.texture === true;
+  textureResolution.value = mesh.mesh?.texture_resolution ?? 2048;
+  delight.value = mesh.mesh?.delight === true;
+  if (request.mode === "text_to_mesh") {
+    prompt.value = request.image_request.prompt;
+    imageModelName.value = request.image_request.model;
   }
 }
 
@@ -518,7 +545,7 @@ watch(meshModelName, () => {
 });
 watch(selectedId, () => {
   revokeResult();
-  void refreshSelected();
+  void refreshSelected(true);
 });
 watch(
   [() => props.target.baseUrl, () => props.target.apiKey],
@@ -587,56 +614,47 @@ onBeforeUnmount(() => {
     <p v-if="loading">Loading workflow capabilities…</p>
 
     <div v-else class="mesh-studio__grid">
+      <slot name="inspector-resize" />
       <form class="mesh-studio__composer" @submit.prevent="submit">
         <fieldset class="mesh-studio__fields" :disabled="busy">
-          <span v-if="desktop" class="ms-group-label">Settings</span>
-          <div
-            v-if="!desktop"
-            class="mesh-studio__tabs"
-            role="tablist"
-            aria-label="Workflow type"
-          >
-            <button
-              type="button"
-              :aria-selected="mode === 'mesh_roundtrip'"
-              :class="{ active: mode === 'mesh_roundtrip' }"
-              :disabled="!selectedModes.includes('mesh_roundtrip')"
-              @click="mode = 'mesh_roundtrip'"
-            >
-              Rebuild a mesh
-            </button>
-            <button
-              type="button"
-              :aria-selected="mode === 'text_to_mesh'"
-              :class="{ active: mode === 'text_to_mesh' }"
-              :disabled="!selectedModes.includes('text_to_mesh')"
-              @click="mode = 'text_to_mesh'"
-            >
-              Text to 3-D
-            </button>
-            <button
-              type="button"
-              :aria-selected="mode === 'mesh_texture'"
-              :class="{ active: mode === 'mesh_texture' }"
-              :disabled="!selectedModes.includes('mesh_texture')"
-              @click="mode = 'mesh_texture'"
-            >
-              Texture a mesh
-            </button>
+          <div v-if="desktop" class="mesh-studio__inspector-heading">
+            Settings
           </div>
+          <SegmentedControl
+            v-if="!desktop"
+            v-model="mode"
+            :options="modeOptions"
+            :disabled="busy || loading"
+            label="3-D workflow"
+            variant="neutral"
+          />
 
-          <label>
-            3-D style
-            <select v-model="meshModelName" data-test="mesh-workflow-model">
-              <option
-                v-for="model in meshModels"
-                :key="model.name"
-                :value="model.name"
-              >
-                {{ modelLabel(model) }}
-              </option>
-            </select>
-          </label>
+          <slot
+            name="mesh-picker"
+            :models="
+              meshModels.filter((model) =>
+                meshWorkflowModes(model).includes(mode),
+              )
+            "
+            :selected="meshModelName"
+            :select="(name: string) => (meshModelName = name)"
+            :disabled="busy"
+          >
+            <label>
+              3-D style
+              <select v-model="meshModelName" data-test="mesh-workflow-model">
+                <option
+                  v-for="model in meshModels.filter((model) =>
+                    meshWorkflowModes(model).includes(mode),
+                  )"
+                  :key="model.name"
+                  :value="model.name"
+                >
+                  {{ modelLabel(model) }}
+                </option>
+              </select>
+            </label>
+          </slot>
 
           <template v-if="mode === 'text_to_mesh'">
             <label>
@@ -647,26 +665,38 @@ onBeforeUnmount(() => {
                 placeholder="A hand-carved wooden fox, centered on a plain background"
               />
             </label>
-            <label>
-              Picture style
-              <select v-model="imageModelName">
-                <option
-                  v-for="model in imageModels"
-                  :key="model.name"
-                  :value="model.name"
-                >
-                  {{ modelLabel(model) }}
-                </option>
-              </select>
-            </label>
-            <label
+            <slot
+              name="image-picker"
+              :models="imageModels"
+              :selected="imageModelName"
+              :select="(name: string) => (imageModelName = name)"
+              :disabled="busy"
+            >
+              <label>
+                Picture style
+                <select v-model="imageModelName">
+                  <option
+                    v-for="model in imageModels"
+                    :key="model.name"
+                    :value="model.name"
+                  >
+                    {{ modelLabel(model) }}
+                  </option>
+                </select>
+              </label>
+            </slot>
+            <div
               v-if="textureAvailable"
               class="mesh-studio__check"
               data-test="mesh-workflow-texture"
             >
-              <input v-model="texture" type="checkbox" />
+              <SwitchToggle
+                v-model="texture"
+                :disabled="busy"
+                label="Paint PBR materials after geometry"
+              />
               Paint PBR materials after geometry
-            </label>
+            </div>
             <p
               v-else
               class="mesh-studio__availability"
@@ -694,7 +724,7 @@ onBeforeUnmount(() => {
               Appearance image
               <input
                 type="file"
-                accept="image/png,image/jpeg,image/webp"
+                accept="image/png,image/jpeg"
                 @change="
                   appearanceFile =
                     ($event.target as HTMLInputElement).files?.[0] ?? null
@@ -735,13 +765,17 @@ onBeforeUnmount(() => {
               <option :value="4096">4096</option>
             </select>
           </label>
-          <label
+          <div
             v-if="delightAvailable && mode !== 'mesh_roundtrip'"
             class="mesh-studio__check"
           >
-            <input v-model="delight" type="checkbox" />
+            <SwitchToggle
+              v-model="delight"
+              :disabled="busy"
+              label="Remove baked lighting and highlights before building the mesh"
+            />
             Remove baked lighting and highlights before building the mesh
-          </label>
+          </div>
           <button
             class="mesh-studio__primary"
             type="submit"
@@ -887,12 +921,13 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 16px;
 }
-.mesh-studio label {
+.mesh-studio label,
+.mesh-studio__check {
   display: grid;
   gap: 7px;
   color: var(--mold-text-2);
   font-size: var(--mold-fs-xs);
-  font-weight: 650;
+  font-weight: 500;
 }
 .mesh-studio select,
 .mesh-studio textarea,
@@ -908,24 +943,9 @@ onBeforeUnmount(() => {
   resize: vertical;
   line-height: 1.45;
 }
-.mesh-studio__tabs {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 4px;
-  padding: 4px;
-  background: var(--mold-bg);
-}
-.mesh-studio__tabs button,
 .mesh-studio__actions button {
   padding: 9px;
   color: var(--mold-text-2);
-}
-.mesh-studio__tabs button.active {
-  background: var(--mold-surface-2);
-  color: var(--mold-text);
-}
-.mesh-studio__tabs button:disabled {
-  opacity: 0.35;
 }
 .mesh-studio__check {
   display: flex !important;
@@ -1096,7 +1116,11 @@ onBeforeUnmount(() => {
   min-height: 0;
   width: 100%;
   max-width: none;
-  grid-template-columns: minmax(0, 1fr) var(--mold-shell-inspector-w, 300px);
+  grid-template-columns: minmax(0, 1fr) var(
+      --mesh-inspector-width,
+      var(--mold-shell-inspector-w, 300px)
+    );
+  position: relative;
   gap: 0;
   margin: 0;
 }
@@ -1162,5 +1186,24 @@ onBeforeUnmount(() => {
   .mesh-studio--desktop .mesh-studio__header-actions select {
     max-width: 150px;
   }
+}
+
+.mesh-studio--desktop .mesh-studio__inspector-heading {
+  height: var(--mold-shell-viewbar-h);
+  min-height: var(--mold-shell-viewbar-h);
+  display: flex;
+  align-items: center;
+  margin: -16px -16px 0;
+  padding: 0 14px;
+  border-bottom: var(--mold-bw) solid var(--mold-border);
+  background: var(--mold-bg);
+  color: var(--mold-text);
+  font-size: var(--mold-fs-xs);
+  font-weight: 600;
+}
+.mesh-studio--desktop .mesh-studio__check {
+  flex-direction: row-reverse;
+  justify-content: space-between;
+  line-height: var(--mold-lh-body);
 }
 </style>
