@@ -171,6 +171,12 @@ pub(crate) fn enriched_gallery_image(
         .print_organization(dir, filename)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     apply_organization(&mut image, org.as_ref(), retention_days);
+    crate::generation_assets::attach_to_images(
+        db,
+        dir,
+        std::slice::from_ref(&row),
+        std::slice::from_mut(&mut image),
+    );
     // The single-row wire exit: the `PATCH /api/gallery/:filename` body and
     // its `gallery_updated` event, and the row a trash restore answers with.
     // A mesh tile is a RENDER of the geometry, so its `media_version` carries

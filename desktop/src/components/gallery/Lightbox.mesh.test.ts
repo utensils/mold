@@ -95,10 +95,11 @@ const geometry: MeshExportGeometryCapabilities = {
 function mountMesh(
   meshExportFormats: string[],
   meshExportGeometry: MeshExportGeometryCapabilities | null = null,
+  item: GalleryImage = meshItem,
 ) {
   return mount(Lightbox, {
     props: {
-      item: meshItem,
+      item,
       index: 0,
       count: 1,
       video: false,
@@ -112,6 +113,25 @@ function mountMesh(
 }
 
 describe("Lightbox — mesh exports", () => {
+  it("offers every material asset carried by the gallery row", () => {
+    const wrapper = mountMesh([], null, {
+      ...meshItem,
+      assets: [
+        {
+          asset_id: "metallic_roughness",
+          role: "metallic_roughness",
+          display_name: "chair-metallic-roughness.png",
+          media_type: "image/png",
+          size_bytes: 12,
+          sha256: "a".repeat(64),
+        },
+      ],
+    });
+    expect(wrapper.get("[data-test='generation-asset-metallic_roughness']").text()).toBe(
+      "Download metallic-roughness map",
+    );
+  });
+
   it("builds one entry per advertised geometry container", () => {
     const wrapper = mountMesh(["obj", "stl", "ply"]);
     expect(wrapper.get("[data-test='mesh-export-obj']").text()).toBe("Export as OBJ…");

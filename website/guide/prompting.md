@@ -53,12 +53,12 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `qwen-image-edit-2511` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md` | 100 | 513 |
 | `qwen-image-edit-lightning` | `qwen-image-edit` | `shared.md`, `families/qwen-image-edit.md`, `models/qwen-image-edit-lightning.md` | 100 | 594 |
 | `wuerstchen-v2` | `wuerstchen` | `shared.md`, `families/wuerstchen.md` | 50 | 325 |
-| `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 612 |
-| `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 612 |
-| `hunyuan3d` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 612 |
-| `hunyuan3d-2mv` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 612 |
-| `hunyuan3d-2mv-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 612 |
-| `hunyuan3d-2.1` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 612 |
+| `hunyuan3d-mini-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 616 |
+| `hunyuan3d-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 616 |
+| `hunyuan3d` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 616 |
+| `hunyuan3d-2mv` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 616 |
+| `hunyuan3d-2mv-turbo` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 616 |
+| `hunyuan3d-2.1` | `hunyuan3d` | `shared.md`, `families/hunyuan3d.md` | 40 | 616 |
 | `ltx-video-0.9.6` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
 | `ltx-video-0.9.6-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
 | `ltx-video-0.9.8-2b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
@@ -737,7 +737,7 @@ ground and every other prop cropped away.
 - Output is always binary glTF, so `-o` must name a `.glb` file or `-` for
   stdout; a raster, video, or audio extension is refused before any weight is
   read. An explicit `png` in a request is coerced to `glb`, not refused.
-- OBJ, STL, and PLY exist only as gallery exports of the stored glTF, never as
+- OBJ, OBJ+PBR ZIP, STL, and PLY exist only as gallery exports of the stored glTF, never as
   generation targets, because each loses something the glTF carries.
 - The same picture gives a different mesh here than in ComfyUI. mold prepares
   the image the way Tencent's `ImageProcessorV2` does: crop to the alpha
@@ -748,7 +748,7 @@ ground and every other prop cropped away.
   (`crop: none` squashes to a square instead, distorting rather than
   cropping); a threshold tuned on one is a fair start on the other, a crop
   is not.
-- The web, desktop, and mobile apps' export menu offers the same OBJ, STL,
+- The web, desktop, and mobile apps' export menu offers the same OBJ, OBJ+PBR ZIP, STL,
   and PLY geometry exports and the GIF, APNG, and WebP turntables as
   `mold library export` and the `export_mesh` MCP tool.
 - Text-to-3D is not supported. Select a 2mv tier for named front, left, back,
@@ -773,8 +773,11 @@ mold run hunyuan3d-turbo --image lamp.png --mesh-threshold 0.4 -o lamp.glb
 # Named views keep semantic slots; any non-empty subset is accepted
 mold run hunyuan3d-2mv-turbo --front front.png --left left.png --back back.png -o object.glb
 
-# Export a saved mesh from the gallery as STL, OBJ, or PLY
+# Export a saved mesh from the gallery as STL, OBJ+PBR ZIP, or PLY
 mold library export chair.glb --format stl -o chair.stl
+
+# Preserve the painted material maps in a portable OBJ bundle
+mold library export chair.glb --format zip -o chair.zip
 
 # Share a turntable: the poster spun a full turn as an animated GIF (or apng, webp)
 mold library export chair.glb --format gif

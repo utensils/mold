@@ -244,9 +244,11 @@ pub(crate) fn save_image_to_dir_with_suffix(
         };
         drop(reservation);
         let seeded = db.and_then(|db| upsert_and_report_filing(db, &record));
-        Some(Box::new(gallery_image_with_filing(
+        Some(Box::new(gallery_image_with_assets_and_filing(
             &record,
             seeded.as_ref(),
+            db,
+            dir,
         )))
     } else {
         drop(reservation);
@@ -314,6 +316,28 @@ fn gallery_image_with_filing(
     // disagreed with the listing would make it refetch the tile a moment
     // after inserting it.
     crate::thumbnails::stamp_poster_revision(&mut image);
+    image
+}
+
+/// Build the event row from the same indexed asset projection returned by a
+/// gallery listing. The GLB itself remains the archive authority; indexing it
+/// after the metadata upsert makes a newly published row complete without a
+/// client refetch, and a later reconciliation can rebuild the same projection.
+fn gallery_image_with_assets_and_filing(
+    record: &mold_db::GenerationRecord,
+    seeded: Option<&mold_db::organization::SeededOrganization>,
+    db: Option<&MetadataDb>,
+    output_dir: &std::path::Path,
+) -> mold_core::GalleryImage {
+    let mut image = gallery_image_with_filing(record, seeded);
+    if let Some(db) = db {
+        crate::generation_assets::attach_to_images(
+            db,
+            output_dir,
+            std::slice::from_ref(record),
+            std::slice::from_mut(&mut image),
+        );
+    }
     image
 }
 
@@ -541,9 +565,11 @@ fn save_video_to_dir_with_sidecar(
         before_publish(&filename);
     }
     let seeded = db.and_then(|db| upsert_and_report_filing(db, &record));
-    let image_row = Some(Box::new(gallery_image_with_filing(
+    let image_row = Some(Box::new(gallery_image_with_assets_and_filing(
         &record,
         seeded.as_ref(),
+        db,
+        dir,
     )));
     if let Some(events) = events {
         let seeded_filing = seeded.map(|seeded| !seeded.is_empty()).unwrap_or(false);
@@ -804,9 +830,11 @@ pub(crate) fn save_video_to_dir_named(
     };
     if let Some(events) = events {
         let seeded_filing = seeded.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
-        let image_row = Some(Box::new(gallery_image_with_filing(
+        let image_row = Some(Box::new(gallery_image_with_assets_and_filing(
             &record,
             seeded.as_ref(),
+            db,
+            dir,
         )));
         let announced = image_row.clone();
         events.publish(mold_core::ServerEvent::GalleryAdded {
@@ -922,9 +950,11 @@ pub(crate) fn publish_video_path_to_dir_named(
         .map(|(_, seeded)| seeded);
     if let Some(events) = events {
         let seeded_filing = seeded.as_ref().is_some_and(|seeded| !seeded.is_empty());
-        let image_row = Some(Box::new(gallery_image_with_filing(
+        let image_row = Some(Box::new(gallery_image_with_assets_and_filing(
             &record,
             seeded.as_ref(),
+            db,
+            dir,
         )));
         let announced = image_row.clone();
         events.publish(mold_core::ServerEvent::GalleryAdded {

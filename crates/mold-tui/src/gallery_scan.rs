@@ -125,7 +125,7 @@ pub async fn fetch_and_cache_preview(
 }
 
 /// Whether `filename` is a stored 3-D print. GLB is the only stored mesh
-/// container (OBJ, STL and PLY exist as export transcodes, never as gallery
+/// container (OBJ, OBJ+PBR ZIP, STL and PLY exist as exports, never as gallery
 /// files), so this is deliberately narrower than the server's own
 /// `thumbnails::is_mesh_filename`. A mesh is NEVER handed to `image::open`:
 /// its preview is the poster PNG rendered at save time.
@@ -1202,7 +1202,7 @@ mod tests {
         assert!(!merged.local_trash_available);
     }
 
-    /// GLB is the only stored mesh container. OBJ/STL/PLY are exports and
+    /// GLB is the only stored mesh container. OBJ/ZIP/STL/PLY are exports and
     /// never gallery files, so they must not be classified as prints whose
     /// preview is a poster.
     #[test]
@@ -1210,6 +1210,7 @@ mod tests {
         assert!(is_mesh_filename("mold-hunyuan3d-1.glb"));
         assert!(is_mesh_filename("CHAIR.GLB"));
         assert!(!is_mesh_filename("chair.obj"));
+        assert!(!is_mesh_filename("chair.zip"));
         assert!(!is_mesh_filename("chair.stl"));
         assert!(!is_mesh_filename("chair.ply"));
         assert!(!is_mesh_filename("frame.png"));

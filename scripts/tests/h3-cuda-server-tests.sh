@@ -18,11 +18,11 @@ set -euo pipefail
 [[ -d "$XDG_CONFIG_HOME" && "$XDG_CONFIG_HOME" != "$ORIGINAL_CONFIG" ]]
 [[ -z "${MOLD_HOME+x}${MOLD_MODELS_DIR+x}${MOLD_DB_PATH+x}${MOLD_OFFLOAD+x}" ]]
 case "$*" in
-  'test --locked -p mold-ai-server --lib --features h3-cuda --no-run')
+  'test --locked -p mold-ai-server --lib --features h3-cuda,mesh-texture,mesh-matting,mesh-delight --no-run')
     [[ -z "${H3_TEST_TIMEOUT_ACTIVE+x}" ]]
     printf 'compile\n' >>"$CALL_LOG"
     ;;
-  'test --locked -p mold-ai-server --lib --features h3-cuda -- fixture_test')
+  'test --locked -p mold-ai-server --lib --features h3-cuda,mesh-texture,mesh-matting,mesh-delight -- fixture_test')
     [[ "${H3_TEST_TIMEOUT_ACTIVE:-}" == 1 ]]
     printf 'run\n' >>"$CALL_LOG"
     exit "${FIXTURE_EXIT:-0}"

@@ -85,7 +85,7 @@ export function hunyuan3dRecipe(): GenerationRecipeProfile {
         formats: ["glb"],
         audio_requires_mp4: false,
         delivery_reason:
-          "3-D delivery uses binary glTF; OBJ, STL and PLY are available as gallery exports.",
+          "3-D delivery uses binary glTF; OBJ, OBJ+PBR ZIP, STL and PLY are available as gallery exports.",
       },
       wan_recipe: {
         mode: "hidden",

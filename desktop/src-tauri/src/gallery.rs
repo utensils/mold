@@ -238,6 +238,7 @@ fn scan(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
                 tags: Vec::new(),
                 favorite: false,
                 collections: Vec::new(),
+                assets: Vec::new(),
                 trashed_at: None,
                 purge_at: None,
             };

@@ -1387,11 +1387,12 @@ describe("MobileGalleryViewer mesh export", () => {
   function mountMesh(
     exportFormats: string[],
     exportGeometry: MeshExportGeometryCapabilities | null = null,
+    item: GalleryImage = meshPrint,
   ): VueWrapper {
     wrapper = mount(MobileGalleryViewer, {
       attachTo: document.body,
       props: {
-        item: meshPrint,
+        item,
         target,
         cacheKey: "studio",
         hostName: "Studio",
@@ -1435,6 +1436,24 @@ describe("MobileGalleryViewer mesh export", () => {
     // A stored mesh is not a raster: Photos and the clipboard take neither.
     expect(view.find("[data-test='gallery-viewer-copy']").exists()).toBe(false);
     expect(view.find("[data-test='gallery-viewer-save']").exists()).toBe(false);
+  });
+
+  it("offers every material asset carried by the gallery row", async () => {
+    const view = mountMesh([], null, {
+      ...meshPrint,
+      assets: [
+        {
+          asset_id: "normal",
+          role: "normal",
+          display_name: "armchair-normal.png",
+          media_type: "image/png",
+          size_bytes: 12,
+          sha256: "a".repeat(64),
+        },
+      ],
+    });
+    await flushPromises();
+    expect(view.get("[data-test='generation-asset-normal']").text()).toBe("Download normal map");
   });
 
   /**

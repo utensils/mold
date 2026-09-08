@@ -13,6 +13,7 @@ mod db;
 mod device_preferences;
 pub mod gallery_media;
 pub mod gallery_mutations;
+pub mod generation_assets;
 pub mod generation_batches;
 pub mod generation_queue;
 pub mod generation_queue_derived_media;

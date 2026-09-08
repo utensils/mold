@@ -4,10 +4,221 @@
 //! and Tencent 82920d64, hy3dshape/hy3dshape/models/denoisers/hunyuandit.py.
 //! The synthetic complete-forward fixture executes Tencent on CUDA.
 
+use candle_core::quantized::GgmlDType;
 use candle_core::{DType, Result, Tensor, D};
 use candle_nn::{LayerNorm, Linear, Module, RmsNorm, VarBuilder};
 
 use crate::attention::{attention_for, AttentionPolicy};
+use crate::quantized_linear::QuantizedLinear;
+
+#[derive(Clone)]
+pub(super) enum ShapeLinear {
+    Dense(Linear),
+    Quantized(QuantizedLinear),
+    Fp8 {
+        weight: Tensor,
+        scale: Tensor,
+        bias: Option<Tensor>,
+    },
+}
+
+impl Module for ShapeLinear {
+    fn forward(&self, tensor: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Dense(linear) => linear.forward(tensor),
+            Self::Quantized(linear) => linear.forward(tensor),
+            Self::Fp8 {
+                weight,
+                scale,
+                bias,
+            } => {
+                let dtype = tensor.dtype();
+                let [output_dim, input_dim] = weight.dims() else {
+                    return Err(candle_core::Error::Msg(
+                        "Hunyuan3D FP8 linear weight is not a matrix".to_string(),
+                    ));
+                };
+                let groups = scale.dim(1)?;
+                let group_size = input_dim / groups;
+                let weight = weight
+                    .to_dtype(dtype)?
+                    .reshape((*output_dim, groups, group_size))?
+                    .broadcast_mul(&scale.to_dtype(dtype)?.unsqueeze(2)?)?
+                    .reshape((*output_dim, *input_dim))?;
+                let mut output = Linear::new(weight, None).forward(tensor)?;
+                if let Some(bias) = bias {
+                    output = output.broadcast_add(&bias.to_dtype(dtype)?)?;
+                }
+                Ok(output)
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) enum ShapeVarBuilder<'a> {
+    Dense(VarBuilder<'a>),
+    Quantized {
+        builder: mold_candle::quantized::VarBuilder,
+        compute_dtype: DType,
+        qmatmul_enabled: bool,
+    },
+}
+
+impl<'a> ShapeVarBuilder<'a> {
+    pub(super) fn pp(&self, segment: impl ToString) -> Self {
+        match self {
+            Self::Dense(builder) => Self::Dense(builder.pp(segment)),
+            Self::Quantized {
+                builder,
+                compute_dtype,
+                qmatmul_enabled,
+            } => Self::Quantized {
+                builder: builder.pp(segment),
+                compute_dtype: *compute_dtype,
+                qmatmul_enabled: *qmatmul_enabled,
+            },
+        }
+    }
+
+    fn dtype(&self) -> DType {
+        match self {
+            Self::Dense(builder) => builder.dtype(),
+            Self::Quantized { compute_dtype, .. } => *compute_dtype,
+        }
+    }
+
+    pub(super) fn linear(&self, input: usize, output: usize, bias: bool) -> Result<ShapeLinear> {
+        match self {
+            Self::Dense(builder) => {
+                let linear = if bias {
+                    candle_nn::linear(input, output, builder.clone())?
+                } else {
+                    candle_nn::linear_no_bias(input, output, builder.clone())?
+                };
+                if linear.weight().dtype() == DType::F8E4M3 {
+                    let scale = builder.get_unchecked("scale_weight")?;
+                    return Ok(ShapeLinear::Fp8 {
+                        weight: linear.weight().clone(),
+                        scale,
+                        bias: linear.bias().cloned(),
+                    });
+                }
+                Ok(ShapeLinear::Dense(linear))
+            }
+            Self::Quantized {
+                builder,
+                compute_dtype,
+                qmatmul_enabled,
+            } => {
+                let weight = builder.get((output, input), "weight")?;
+                let bias = bias
+                    .then(|| builder.get(output, "bias"))
+                    .transpose()?
+                    .map(|bias| bias.dequantize(builder.device()))
+                    .transpose()?;
+                if matches!(
+                    weight.dtype(),
+                    GgmlDType::F16 | GgmlDType::BF16 | GgmlDType::F32
+                ) {
+                    let weight = weight
+                        .dequantize(builder.device())?
+                        .to_dtype(*compute_dtype)?;
+                    let bias = bias.map(|bias| bias.to_dtype(*compute_dtype)).transpose()?;
+                    return Ok(ShapeLinear::Dense(Linear::new(weight, bias)));
+                }
+                Ok(ShapeLinear::Quantized(QuantizedLinear::new(
+                    weight,
+                    bias,
+                    builder.device(),
+                    *compute_dtype,
+                    *qmatmul_enabled,
+                )?))
+            }
+        }
+    }
+
+    /// Routers remain dense by policy and are used to make host-visible top-k
+    /// decisions, so materialize them once rather than dequantizing per token
+    /// batch through the generic quantized linear fallback.
+    fn dense_linear_no_bias(&self, input: usize, output: usize) -> Result<ShapeLinear> {
+        match self {
+            Self::Dense(builder) => Ok(ShapeLinear::Dense(candle_nn::linear_no_bias(
+                input,
+                output,
+                builder.clone(),
+            )?)),
+            Self::Quantized {
+                builder,
+                compute_dtype,
+                ..
+            } => {
+                let weight = builder
+                    .get((output, input), "weight")?
+                    .dequantize(builder.device())?
+                    .to_dtype(*compute_dtype)?;
+                Ok(ShapeLinear::Dense(Linear::new(weight, None)))
+            }
+        }
+    }
+
+    fn layer_norm(&self, size: usize, eps: f64) -> Result<LayerNorm> {
+        match self {
+            Self::Dense(builder) => candle_nn::layer_norm(size, eps, builder.clone()),
+            Self::Quantized {
+                builder,
+                compute_dtype,
+                ..
+            } => {
+                let weight = builder
+                    .get(size, "weight")?
+                    .dequantize(builder.device())?
+                    .to_dtype(*compute_dtype)?;
+                let bias = builder
+                    .get(size, "bias")?
+                    .dequantize(builder.device())?
+                    .to_dtype(*compute_dtype)?;
+                Ok(LayerNorm::new(weight, bias, eps))
+            }
+        }
+    }
+
+    fn rms_norm(&self, size: usize, eps: f64) -> Result<RmsNorm> {
+        match self {
+            Self::Dense(builder) => candle_nn::rms_norm(size, eps, builder.clone()),
+            Self::Quantized {
+                builder,
+                compute_dtype,
+                ..
+            } => {
+                let weight = builder
+                    .get(size, "weight")?
+                    .dequantize(builder.device())?
+                    .to_dtype(*compute_dtype)?;
+                Ok(RmsNorm::new(weight, eps))
+            }
+        }
+    }
+
+    pub(super) fn tensor(
+        &self,
+        shape: impl Into<candle_core::Shape>,
+        name: &str,
+    ) -> Result<Tensor> {
+        let shape = shape.into();
+        match self {
+            Self::Dense(builder) => builder.get(shape, name),
+            Self::Quantized {
+                builder,
+                compute_dtype,
+                ..
+            } => builder
+                .get(shape, name)?
+                .dequantize(builder.device())?
+                .to_dtype(*compute_dtype),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -101,20 +312,20 @@ fn expert_routing(scores: &Tensor, top_k: usize) -> Result<Vec<Vec<(u32, f32)>>>
 }
 
 struct FeedForward {
-    first: Linear,
-    second: Linear,
+    first: ShapeLinear,
+    second: ShapeLinear,
 }
 
 impl FeedForward {
-    fn new(width: usize, expert: bool, vb: VarBuilder) -> Result<Self> {
+    fn new(width: usize, expert: bool, vb: ShapeVarBuilder<'_>) -> Result<Self> {
         let (first, second) = if expert {
             ("net.0.proj", "net.2")
         } else {
             ("fc1", "fc2")
         };
         Ok(Self {
-            first: candle_nn::linear(width, width * 4, vb.pp(first))?,
-            second: candle_nn::linear(width * 4, width, vb.pp(second))?,
+            first: vb.pp(first).linear(width, width * 4, true)?,
+            second: vb.pp(second).linear(width * 4, width, true)?,
         })
     }
 
@@ -124,16 +335,18 @@ impl FeedForward {
 }
 
 struct Moe {
-    gate: Linear,
+    gate: ShapeLinear,
     experts: Vec<FeedForward>,
     shared: FeedForward,
     top_k: usize,
 }
 
 impl Moe {
-    fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &Config, vb: ShapeVarBuilder<'_>) -> Result<Self> {
         Ok(Self {
-            gate: candle_nn::linear_no_bias(cfg.hidden_size, cfg.num_experts, vb.pp("gate"))?,
+            gate: vb
+                .pp("gate")
+                .dense_linear_no_bias(cfg.hidden_size, cfg.num_experts)?,
             experts: (0..cfg.num_experts)
                 .map(|index| {
                     FeedForward::new(cfg.hidden_size, true, vb.pp(format!("experts.{index}")))
@@ -168,24 +381,30 @@ impl Moe {
 }
 
 struct Attention {
-    q: Linear,
-    k: Linear,
-    v: Linear,
+    q: ShapeLinear,
+    k: ShapeLinear,
+    v: ShapeLinear,
     q_norm: RmsNorm,
     k_norm: RmsNorm,
-    out: Linear,
+    out: ShapeLinear,
     heads: usize,
 }
 
 impl Attention {
-    fn new(width: usize, context: usize, heads: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        width: usize,
+        context: usize,
+        heads: usize,
+        eps: f64,
+        vb: ShapeVarBuilder<'_>,
+    ) -> Result<Self> {
         Ok(Self {
-            q: candle_nn::linear_no_bias(width, width, vb.pp("to_q"))?,
-            k: candle_nn::linear_no_bias(context, width, vb.pp("to_k"))?,
-            v: candle_nn::linear_no_bias(context, width, vb.pp("to_v"))?,
-            q_norm: candle_nn::rms_norm(width / heads, eps, vb.pp("q_norm"))?,
-            k_norm: candle_nn::rms_norm(width / heads, eps, vb.pp("k_norm"))?,
-            out: candle_nn::linear(width, width, vb.pp("out_proj"))?,
+            q: vb.pp("to_q").linear(width, width, false)?,
+            k: vb.pp("to_k").linear(context, width, false)?,
+            v: vb.pp("to_v").linear(context, width, false)?,
+            q_norm: vb.pp("q_norm").rms_norm(width / heads, eps)?,
+            k_norm: vb.pp("k_norm").rms_norm(width / heads, eps)?,
+            out: vb.pp("out_proj").linear(width, width, true)?,
             heads,
         })
     }
@@ -245,16 +464,16 @@ struct Block {
     self_attention: Attention,
     cross_attention: Attention,
     mlp: Mlp,
-    skip: Option<(Linear, LayerNorm)>,
+    skip: Option<(ShapeLinear, LayerNorm)>,
 }
 
 impl Block {
-    fn new(cfg: &Config, index: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &Config, index: usize, eps: f64, vb: ShapeVarBuilder<'_>) -> Result<Self> {
         let width = cfg.hidden_size;
         Ok(Self {
-            norm1: candle_nn::layer_norm(width, eps, vb.pp("norm1"))?,
-            norm2: candle_nn::layer_norm(width, eps, vb.pp("norm2"))?,
-            norm3: candle_nn::layer_norm(width, eps, vb.pp("norm3"))?,
+            norm1: vb.pp("norm1").layer_norm(width, eps)?,
+            norm2: vb.pp("norm2").layer_norm(width, eps)?,
+            norm3: vb.pp("norm3").layer_norm(width, eps)?,
             self_attention: Attention::new(width, width, cfg.num_heads, eps, vb.pp("attn1"))?,
             cross_attention: Attention::new(
                 width,
@@ -270,8 +489,8 @@ impl Block {
             },
             skip: if index > cfg.depth / 2 {
                 Some((
-                    candle_nn::linear(width * 2, width, vb.pp("skip_linear"))?,
-                    candle_nn::layer_norm(width, eps, vb.pp("skip_norm"))?,
+                    vb.pp("skip_linear").linear(width * 2, width, true)?,
+                    vb.pp("skip_norm").layer_norm(width, eps)?,
                 ))
             } else {
                 None
@@ -307,12 +526,12 @@ impl Block {
 
 pub struct Hunyuan3dDit21 {
     cfg: Config,
-    input: Linear,
-    time_in: Linear,
-    time_out: Linear,
+    input: ShapeLinear,
+    time_in: ShapeLinear,
+    time_out: ShapeLinear,
     blocks: Vec<Block>,
     final_norm: LayerNorm,
-    final_linear: Linear,
+    final_linear: ShapeLinear,
 }
 
 impl Hunyuan3dDit21 {
@@ -321,6 +540,26 @@ impl Hunyuan3dDit21 {
     }
 
     pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+        Self::build(cfg, ShapeVarBuilder::Dense(vb))
+    }
+
+    pub fn new_quantized(
+        cfg: &Config,
+        vb: mold_candle::quantized::VarBuilder,
+        compute_dtype: DType,
+        qmatmul_enabled: bool,
+    ) -> Result<Self> {
+        Self::build(
+            cfg,
+            ShapeVarBuilder::Quantized {
+                builder: vb,
+                compute_dtype,
+                qmatmul_enabled,
+            },
+        )
+    }
+
+    fn build(cfg: &Config, vb: ShapeVarBuilder<'_>) -> Result<Self> {
         if cfg.depth == 0
             || cfg.depth.is_multiple_of(2)
             || cfg.hidden_size == 0
@@ -341,14 +580,16 @@ impl Hunyuan3dDit21 {
         };
         Ok(Self {
             cfg: cfg.clone(),
-            input: candle_nn::linear(cfg.in_channels, width, vb.pp("x_embedder"))?,
-            time_in: candle_nn::linear(width, width * 4, vb.pp("t_embedder.mlp.0"))?,
-            time_out: candle_nn::linear(width * 4, width, vb.pp("t_embedder.mlp.2"))?,
+            input: vb.pp("x_embedder").linear(cfg.in_channels, width, true)?,
+            time_in: vb.pp("t_embedder.mlp.0").linear(width, width * 4, true)?,
+            time_out: vb.pp("t_embedder.mlp.2").linear(width * 4, width, true)?,
             blocks: (0..cfg.depth)
                 .map(|i| Block::new(cfg, i, eps, vb.pp(format!("blocks.{i}"))))
                 .collect::<Result<_>>()?,
-            final_norm: candle_nn::layer_norm(width, eps, vb.pp("final_layer.norm_final"))?,
-            final_linear: candle_nn::linear(width, cfg.in_channels, vb.pp("final_layer.linear"))?,
+            final_norm: vb.pp("final_layer.norm_final").layer_norm(width, eps)?,
+            final_linear: vb
+                .pp("final_layer.linear")
+                .linear(width, cfg.in_channels, true)?,
         })
     }
 
@@ -422,6 +663,94 @@ mod tests {
             error < 0.00005,
             "Tencent fixture maximum absolute error: {error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn fp8_linear_applies_scale_before_unscaled_bias() -> candle_core::Result<()> {
+        let device = if std::env::var_os("MOLD_TEST_CUDA_FP8").is_some() {
+            Device::new_cuda(0)?
+        } else {
+            Device::Cpu
+        };
+        let weight = Tensor::new(&[[4f32, -8.0, 12.0, 16.0], [8.0, 4.0, -4.0, -8.0]], &device)?
+            .to_dtype(DType::F8E4M3)?;
+        let scale = Tensor::new(&[[0.25f32, 0.5], [0.5, 0.25]], &device)?;
+        let bias = Tensor::new(&[3f32, -5.0], &device)?;
+        let input = Tensor::new(&[[2f32, -1.0, 0.5, 3.0]], &device)?;
+        let linear = ShapeLinear::Fp8 {
+            weight: weight.clone(),
+            scale: scale.clone(),
+            bias: Some(bias.clone()),
+        };
+        let actual = linear.forward(&input)?;
+        let widened = weight
+            .to_dtype(DType::F32)?
+            .reshape((2, 2, 2))?
+            .broadcast_mul(&scale.unsqueeze(2)?)?
+            .reshape((2, 4))?;
+        let expected = Linear::new(widened, Some(bias)).forward(&input)?;
+        assert_eq!(actual.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
+        Ok(())
+    }
+
+    #[test]
+    fn q8_tiny_dit_executes_the_complete_moe_and_skip_forward() -> candle_core::Result<()> {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use candle_core::quantized::{GgmlDType, QTensor};
+
+        let device = Device::Cpu;
+        let tensors = candle_core::safetensors::load_buffer(
+            include_bytes!("../../../../tests/fixtures/hunyuan3d/transformer21.safetensors"),
+            &device,
+        )?;
+        let cfg = Config {
+            in_channels: 4,
+            hidden_size: 32,
+            context_dim: 16,
+            depth: 3,
+            num_heads: 2,
+            num_moe_layers: 1,
+            num_experts: 3,
+            top_k: 2,
+        };
+        let mut quantized = HashMap::new();
+        for (name, tensor) in &tensors {
+            if !name.starts_with("model.") {
+                continue;
+            }
+            let dtype = if name.ends_with(".weight")
+                && tensor.rank() == 2
+                && !name.ends_with(".moe.gate.weight")
+                && tensor.dim(1)?.is_multiple_of(32)
+            {
+                GgmlDType::Q8_0
+            } else {
+                GgmlDType::F32
+            };
+            quantized.insert(
+                name.clone(),
+                Arc::new(QTensor::quantize(&tensor.to_dtype(DType::F32)?, dtype)?),
+            );
+        }
+        let vb = mold_candle::quantized::VarBuilder::from_qtensors(quantized, &device);
+        let model = Hunyuan3dDit21::new_quantized(&cfg, vb.pp("model"), DType::F32, false)?;
+        let actual = model.forward(&tensors["input"], &tensors["sigma"], &tensors["context"])?;
+        let errors = (actual - &tensors["expected"])?
+            .abs()?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert!(errors.iter().all(|error| error.is_finite()));
+        let max = errors.iter().copied().fold(0f32, f32::max);
+        let rms = (errors
+            .iter()
+            .map(|error| f64::from(*error).powi(2))
+            .sum::<f64>()
+            / errors.len() as f64)
+            .sqrt();
+        assert!(max < 0.2 && rms < 0.05, "Q8 max={max} rms={rms}");
         Ok(())
     }
 

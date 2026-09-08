@@ -47,6 +47,7 @@ use crate::progress::{ProgressEvent, ProgressPhase};
 use super::dino2::{Dinov2Config, Dinov2Model};
 use super::glb::{write_glb, GlbMaterial};
 use super::mesh::{Mesh, MeshAlgorithm, OccupancyGrid};
+use super::quantization::SUPPORTED_POLICY_VERSIONS;
 use super::sampler::{self, SamplingPlan};
 use super::shape_vae::{ShapeVae, ShapeVaeConfig, ShapeVaeEncoder, ShapeVaeEncoderConfig};
 use super::transformer::{Config as DitConfig, Hunyuan3dDit};
@@ -56,6 +57,93 @@ use super::transformer21::{Config as Dit21Config, Hunyuan3dDit21};
 const DIT_PREFIX: &str = "model";
 const VAE_PREFIX: &str = "vae";
 const VISION_PREFIX: &str = "conditioner.main_image_encoder.model";
+
+fn ensure_quantized_shape_backend(is_cuda: bool, quantized: bool) -> Result<()> {
+    if quantized && !is_cuda {
+        bail!(
+            "quantized Hunyuan3D shape checkpoints are CUDA-only; select an fp16 tier on CPU or Metal"
+        );
+    }
+    Ok(())
+}
+
+fn checkpoint_header(
+    path: &std::path::Path,
+) -> Result<mold_core::safetensors_probe::SafetensorsHeader> {
+    let is_gguf = matches!(
+        crate::artifact_format::probe(path),
+        Ok(crate::artifact_format::ArtifactStorageFormat::Gguf { .. })
+    );
+    if !is_gguf {
+        return mold_core::safetensors_probe::read_safetensors_header(path)
+            .with_context(|| format!("read safetensors header at {}", path.display()));
+    }
+
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("open Hunyuan3D GGUF at {}", path.display()))?;
+    let content = candle_core::quantized::gguf_file::Content::read(&mut file)
+        .with_context(|| format!("read Hunyuan3D GGUF header at {}", path.display()))?;
+    let string = |key: &str| match content.metadata.get(key) {
+        Some(candle_core::quantized::gguf_file::Value::String(value)) => Ok(value.as_str()),
+        _ => bail!("Hunyuan3D GGUF is missing string metadata `{key}`"),
+    };
+    anyhow::ensure!(
+        string("general.architecture")? == "hunyuan3d",
+        "GGUF architecture is not Hunyuan3D"
+    );
+    anyhow::ensure!(
+        SUPPORTED_POLICY_VERSIONS.contains(&string("mold.quantization.policy")?),
+        "Hunyuan3D GGUF uses an unsupported quantization policy"
+    );
+    let _: super::quantization::ShapeQuantization = string("mold.quantization.tier")?.parse()?;
+    let digest = string("mold.source.sha256")?;
+    anyhow::ensure!(
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "Hunyuan3D GGUF has an invalid source digest"
+    );
+    anyhow::ensure!(
+        matches!(
+            content.metadata.get("mold.source.size"),
+            Some(candle_core::quantized::gguf_file::Value::U64(size)) if *size > 0
+        ),
+        "Hunyuan3D GGUF has an invalid source size"
+    );
+
+    let mut tensor_shapes = std::collections::BTreeMap::new();
+    let mut tensor_names = content.tensor_infos.keys().cloned().collect::<Vec<_>>();
+    tensor_names.sort();
+    for name in &tensor_names {
+        tensor_shapes.insert(
+            name.clone(),
+            content.tensor_infos[name].shape.dims().to_vec(),
+        );
+    }
+    Ok(mold_core::safetensors_probe::SafetensorsHeader {
+        metadata: std::collections::BTreeMap::new(),
+        tensor_names,
+        tensor_shapes,
+    })
+}
+
+fn dense_components_from_gguf(
+    vb: &mold_candle::quantized::VarBuilder,
+    dtype: DType,
+    device: &Device,
+) -> Result<candle_nn::VarBuilder<'static>> {
+    let mut tensors = std::collections::HashMap::new();
+    for (name, tensor) in vb.tensors() {
+        if name.starts_with("vae.") || name.starts_with("conditioner.") {
+            tensors.insert(
+                name.clone(),
+                tensor
+                    .dequantize(device)?
+                    .to_dtype(dtype)
+                    .with_context(|| format!("materialize Hunyuan3D GGUF tensor {name}"))?,
+            );
+        }
+    }
+    Ok(candle_nn::VarBuilder::from_tensors(tensors, dtype, device))
+}
 
 /// Default query-grid resolution. Upstream's `VAEDecodeHunyuan3D` default.
 ///
@@ -356,8 +444,7 @@ impl Hunyuan3dEngine {
         // re-quantization then loads without a manifest entry describing its
         // internals, and a manifest that drifts from the weights is caught
         // here instead of producing garbage.
-        let header = mold_core::safetensors_probe::read_safetensors_header(&checkpoint)
-            .with_context(|| format!("read safetensors header at {}", checkpoint.display()))?;
+        let header = checkpoint_header(&checkpoint)?;
         let dit21_cfg = detect_shape21_config(&header)?;
         let dit20_cfg = if dit21_cfg.is_none() {
             Some(detect_dit_config(&header)?)
@@ -387,24 +474,68 @@ impl Hunyuan3dEngine {
         // BF16 cannot resolve the query grid the shape VAE is evaluated on.
         let dtype = super::backend::compute_dtype(&device);
 
-        let vb = crate::weight_loader::load_safetensors_with_progress(
-            std::slice::from_ref(&checkpoint),
-            dtype,
-            &device,
-            "Hunyuan3D checkpoint",
-            &self.base.progress,
-        )?;
-
-        let dit = match (dit20_cfg, dit21_cfg) {
-            (Some(cfg), None) => ShapeDit::V20(Box::new(
-                Hunyuan3dDit::new(&cfg, vb.pp(DIT_PREFIX))
-                    .context("build the Hunyuan3D 2.0 shape transformer")?,
-            )),
-            (None, Some(cfg)) => ShapeDit::V21(Box::new(
-                Hunyuan3dDit21::new(&cfg, vb.pp(DIT_PREFIX))
-                    .context("build the Hunyuan3D 2.1 shape transformer")?,
-            )),
-            _ => bail!("ambiguous Hunyuan3D shape architecture"),
+        let storage = crate::artifact_format::probe(&checkpoint);
+        let quantized = matches!(
+            &storage,
+            Ok(crate::artifact_format::ArtifactStorageFormat::Gguf { .. })
+        );
+        let fp8 = matches!(
+            &storage,
+            Ok(crate::artifact_format::ArtifactStorageFormat::Safetensors {
+                tensor_dtypes,
+                ..
+            }) if tensor_dtypes.contains(&crate::artifact_format::TensorDType::F8E4M3)
+        );
+        ensure_quantized_shape_backend(device.is_cuda(), quantized || fp8)?;
+        let (dit, vb) = if quantized {
+            let qvb = mold_candle::quantized::VarBuilder::from_gguf(&checkpoint, &device)
+                .with_context(|| format!("load Hunyuan3D GGUF at {}", checkpoint.display()))?;
+            let dit = match (&dit20_cfg, &dit21_cfg) {
+                (Some(cfg), None) => ShapeDit::V20(Box::new(
+                    Hunyuan3dDit::new_quantized(cfg, qvb.pp(DIT_PREFIX), dtype, false)
+                        .context("build the quantized Hunyuan3D 2.0 shape transformer")?,
+                )),
+                (None, Some(cfg)) => ShapeDit::V21(Box::new(
+                    Hunyuan3dDit21::new_quantized(cfg, qvb.pp(DIT_PREFIX), dtype, false)
+                        .context("build the quantized Hunyuan3D 2.1 shape transformer")?,
+                )),
+                _ => bail!("ambiguous Hunyuan3D shape architecture"),
+            };
+            let dense = dense_components_from_gguf(&qvb, dtype, &device)?;
+            (dit, dense)
+        } else {
+            if fp8 {
+                super::quantization::validate_fp8_checkpoint(&checkpoint)?;
+            }
+            let vb = if fp8 {
+                crate::weight_loader::load_native_safetensors_with_progress(
+                    std::slice::from_ref(&checkpoint),
+                    dtype,
+                    &device,
+                    "Hunyuan3D FP8 checkpoint",
+                    &self.base.progress,
+                )?
+            } else {
+                crate::weight_loader::load_safetensors_with_progress(
+                    std::slice::from_ref(&checkpoint),
+                    dtype,
+                    &device,
+                    "Hunyuan3D checkpoint",
+                    &self.base.progress,
+                )?
+            };
+            let dit = match (&dit20_cfg, &dit21_cfg) {
+                (Some(cfg), None) => ShapeDit::V20(Box::new(
+                    Hunyuan3dDit::new(cfg, vb.pp(DIT_PREFIX))
+                        .context("build the Hunyuan3D 2.0 shape transformer")?,
+                )),
+                (None, Some(cfg)) => ShapeDit::V21(Box::new(
+                    Hunyuan3dDit21::new(cfg, vb.pp(DIT_PREFIX))
+                        .context("build the Hunyuan3D 2.1 shape transformer")?,
+                )),
+                _ => bail!("ambiguous Hunyuan3D shape architecture"),
+            };
+            (dit, vb)
         };
         let vae =
             ShapeVae::new(&vae_cfg, vb.pp(VAE_PREFIX)).context("build the Hunyuan3D shape VAE")?;
@@ -820,8 +951,7 @@ impl Hunyuan3dEngine {
         )?;
 
         let checkpoint = self.base.paths.transformer.clone();
-        let header = mold_core::safetensors_probe::read_safetensors_header(&checkpoint)
-            .with_context(|| format!("read safetensors header at {}", checkpoint.display()))?;
+        let header = checkpoint_header(&checkpoint)?;
         anyhow::ensure!(
             detect_shape21_config(&header)?.is_some()
                 && header
@@ -840,13 +970,24 @@ impl Hunyuan3dEngine {
         let _ = crate::device::post_drop_free_vram_bytes(self.base.gpu_ordinal);
         let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         let dtype = super::backend::compute_dtype(&device);
-        let vb = crate::weight_loader::load_safetensors_with_progress(
-            std::slice::from_ref(&checkpoint),
-            dtype,
-            &device,
-            "Hunyuan3D 2.1 shape VAE",
-            &self.base.progress,
-        )?;
+        let quantized = matches!(
+            crate::artifact_format::probe(&checkpoint),
+            Ok(crate::artifact_format::ArtifactStorageFormat::Gguf { .. })
+        );
+        ensure_quantized_shape_backend(device.is_cuda(), quantized)?;
+        let vb = if quantized {
+            let qvb = mold_candle::quantized::VarBuilder::from_gguf(&checkpoint, &device)
+                .with_context(|| format!("load Hunyuan3D GGUF at {}", checkpoint.display()))?;
+            dense_components_from_gguf(&qvb, dtype, &device)?
+        } else {
+            crate::weight_loader::load_safetensors_with_progress(
+                std::slice::from_ref(&checkpoint),
+                dtype,
+                &device,
+                "Hunyuan3D 2.1 shape VAE",
+                &self.base.progress,
+            )?
+        };
         let encoder = ShapeVaeEncoder::new(&ShapeVaeEncoderConfig::v2_1(), vb.pp(VAE_PREFIX))?;
         let decoder = ShapeVae::new(&ShapeVaeConfig::v2_1(), vb.pp(VAE_PREFIX))?;
         let seed = req.seed.unwrap_or_else(rand_seed);
@@ -1546,8 +1687,51 @@ impl InferenceEngine for Hunyuan3dEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quantized_shape_execution_is_cuda_only() {
+        ensure_quantized_shape_backend(true, true).unwrap();
+        ensure_quantized_shape_backend(false, false).unwrap();
+        let error = ensure_quantized_shape_backend(false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("CUDA-only"), "{error}");
+        assert!(error.contains("fp16"), "{error}");
+    }
     use mold_core::safetensors_probe::SafetensorsHeader;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn generated_gguf_exposes_the_same_shape_header_as_its_source() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("shape.safetensors");
+        let output = directory.path().join("shape-q8.gguf");
+        candle_core::safetensors::save(
+            &std::collections::HashMap::from([
+                (
+                    "model.x_embedder.weight".to_string(),
+                    Tensor::zeros((32, 32), DType::F32, &Device::Cpu)?,
+                ),
+                (
+                    "vae.decoder.weight".to_string(),
+                    Tensor::zeros((4, 32), DType::F32, &Device::Cpu)?,
+                ),
+            ]),
+            &source,
+        )?;
+        super::super::quantization::quantize_checkpoint(
+            &source,
+            &output,
+            "fixture:fp16",
+            super::super::quantization::ShapeQuantization::Q8,
+        )?;
+
+        let source_header = checkpoint_header(&source)?;
+        let gguf_header = checkpoint_header(&output)?;
+        assert_eq!(gguf_header.tensor_shapes, source_header.tensor_shapes);
+        assert_eq!(gguf_header.tensor_names, source_header.tensor_names);
+        Ok(())
+    }
 
     #[test]
     fn shape21_uses_large_vision_and_4096_latents_from_its_architecture() {

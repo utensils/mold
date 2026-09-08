@@ -22,7 +22,7 @@ import { copyLocalOutputPath } from "../../lib/localOutputPath";
 import { formatBytes, formatScheduler } from "../../lib/format";
 import { modelDisplayNameForId } from "../../lib/models";
 import { useHostModelsStore } from "../../stores/hostModels";
-import type { ApiTarget } from "../../lib/api/client";
+import { apiFetch, apiFetchTo, type ApiTarget } from "../../lib/api/client";
 import type { GalleryImage } from "../../lib/api/types";
 import { isUpscaledImage } from "../../lib/gallery/upscaled";
 import {
@@ -42,6 +42,7 @@ import {
 import type { TagCount } from "@studio/lib/api/galleryOrganization";
 import { saveGalleryMedia, showSavedMediaToast } from "../../lib/mediaSave";
 import { suggestedSaveName } from "../../lib/gallery/saveName";
+import { blobToBase64 } from "../../lib/image";
 import { formatGenerationTime } from "@studio/lib/generationTime";
 import {
   meshAnimationExportFormats,
@@ -55,6 +56,11 @@ import {
   type MeshExportGeometryCapabilities,
   type MeshGeometryOptions,
 } from "@studio/lib/meshExport";
+import {
+  generationAssetLabel,
+  generationAssetPath,
+  type GenerationAsset,
+} from "@studio/api/generationAssets";
 
 /** The print's organization across every copy (the Library's
  *  `organizationOf(entry)` union). Optional so callers that predate the
@@ -486,6 +492,24 @@ async function runMeshExport(format: string, geometry: MeshGeometryOptions | nul
     // that may need changing; the one-click path has nowhere but a toast.
     if (meshGeometryOpen.value) exportError.value = message;
     else toasts.push(message, "error");
+  } finally {
+    exportBusy.value = false;
+  }
+}
+
+async function saveGenerationAsset(asset: GenerationAsset) {
+  if (exportBusy.value) return;
+  exportBusy.value = true;
+  try {
+    const path = generationAssetPath(props.item.filename, asset.asset_id);
+    const response = props.target ? await apiFetchTo(props.target, path) : await apiFetch(path);
+    const saved = await ipc.saveMediaBytes(
+      asset.display_name,
+      await blobToBase64(await response.blob()),
+    );
+    showSavedMediaToast(toasts, saved);
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
   } finally {
     exportBusy.value = false;
   }
@@ -986,6 +1010,19 @@ async function performVideoExport(options: VideoExportOptions) {
               @click="openMeshAnimationExport"
             >
               Export turntable…
+            </button>
+          </div>
+          <div v-if="(item.assets?.length ?? 0) > 0" class="flex flex-wrap gap-2">
+            <button
+              v-for="asset in item.assets"
+              :key="asset.asset_id"
+              type="button"
+              :data-test="`generation-asset-${asset.asset_id}`"
+              class="ms-toolbar-button flex-1 justify-center"
+              :disabled="exportBusy"
+              @click="saveGenerationAsset(asset)"
+            >
+              {{ generationAssetLabel(asset) }}
             </button>
           </div>
           <div class="flex gap-2">

@@ -154,17 +154,17 @@ cubic), `threshold` (0–1 iso-level, ComfyUI `VoxelToMesh` scale), and
 omit them for the recipe's defaults. The older `octree_resolution` and
 `mesh_threshold` names are declared in the schema as deprecated aliases.
 
-`export_mesh` converts one stored `.glb` into `obj`, `stl`, or `ply` (`glb`
+`export_mesh` converts one stored `.glb` into `obj`, `zip`, `stl`, or `ply` (`glb`
 returns the stored bytes unchanged); the CLI equivalent is
 `mold library export <file> --format stl`. Both are transcodes of
 geometry that already exists — the gallery file is never renamed or replaced —
-and `-o` on a 3-D render must still name a `.glb`. `obj`, `stl`, and `ply`
+and `-o` on a 3-D render must still name a `.glb`. `obj`, `zip`, `stl`, and `ply`
 additionally take `size_mm` (1–1000; CLI `--size-mm`), `up_axis` (`y` | `z`;
 `--up-axis`), and `origin` (`center` | `floor`; `--origin`) to make the
 export print-ready: the stored GLB is in Hunyuan3D's normalized unit-cube
 space, which a slicer reads as a few millimetres and refuses. Omit any of
 them for the format's own default (100 mm, Z-up, floor for STL and PLY;
-unscaled, Y-up, floor for OBJ). All three are refused on `glb` and on a
+unscaled, Y-up, floor for OBJ and ZIP). All three are refused on `glb` and on a
 turntable, and on a host that does not advertise
 `capabilities.mesh.export_geometry`.
 
