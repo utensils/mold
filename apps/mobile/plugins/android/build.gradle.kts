@@ -46,6 +46,8 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test:core:1.5.0")
+    // Match Tauri's Invoke constructor dependency for native bridge acceptance.
+    androidTestImplementation("com.fasterxml.jackson.core:jackson-databind:2.15.3")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     implementation(project(":tauri-android"))
 }
