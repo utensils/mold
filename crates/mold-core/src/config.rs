@@ -1,7 +1,9 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use crate::expand::ExpandSettings;
@@ -9,6 +11,110 @@ use crate::manifest::resolve_model_name;
 use crate::types::Scheduler;
 
 static RUNTIME_MODELS_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+static CONFIG_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(not(windows))]
+fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(temporary, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
+        fn ReplaceFileW(
+            replaced: *const u16,
+            replacement: *const u16,
+            backup: *const u16,
+            flags: u32,
+            exclude: *mut std::ffi::c_void,
+            reserved: *mut std::ffi::c_void,
+        ) -> i32;
+    }
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let existing = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let replacement = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both pointers reference NUL-terminated UTF-16 buffers for the
+    // duration of the call. ReplaceFileW atomically retains an existing
+    // destination's ACL; MoveFileExW handles first creation.
+    let moved = unsafe {
+        if destination.exists() {
+            // ReplaceFileW retains the replaced file's ACL and attributes,
+            // which matters because config.toml can contain credentials.
+            ReplaceFileW(
+                replacement.as_ptr(),
+                existing.as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        } else {
+            MoveFileExW(
+                existing.as_ptr(),
+                replacement.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        }
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn atomic_replace_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let filename = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("config path has no filename"))?
+        .to_string_lossy();
+    let id = CONFIG_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(".{filename}.partial-{}-{id}", std::process::id()));
+    let result = (|| -> anyhow::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+            let mode = std::fs::metadata(path)
+                .ok()
+                .map(|metadata| metadata.mode() & 0o600)
+                .filter(|mode| *mode != 0)
+                .unwrap_or(0o600);
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(mode))?;
+        }
+        replace_file(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
 
 /// Banner comment written at the top of a `save_bootstrap_only` output so
 /// readers understand why the usual user-preference fields are missing.
@@ -1835,12 +1941,48 @@ impl Config {
             return Ok(());
         }
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let contents = toml::to_string_pretty(self)?;
-        std::fs::write(&path, contents)?;
+        atomic_replace_file(&path, contents.as_bytes())?;
         Ok(())
+    }
+
+    /// Reload, mutate, and atomically persist the config while holding one
+    /// cross-process lock. Long-running commands use this at commit time so
+    /// independent completed operations cannot overwrite each other's model
+    /// registrations from stale snapshots.
+    pub fn update_locked<T>(
+        update: impl FnOnce(&mut Self) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let path = Self::config_path()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine home directory for config path"))?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let lock_path = parent.join(".config.toml.lock");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        fs2::FileExt::lock_exclusive(&lock)?;
+        let mut config = if path.exists() {
+            let contents = std::fs::read_to_string(&path)
+                .with_context(|| format!("read config at {} for locked update", path.display()))?;
+            toml::from_str(&contents)
+                .with_context(|| format!("parse config at {} for locked update", path.display()))?
+        } else {
+            Self::default()
+        };
+        if config.config_version < CURRENT_CONFIG_VERSION {
+            Self::run_migrations(&mut config);
+            config.config_version = CURRENT_CONFIG_VERSION;
+        }
+        if let Some(hook) = POST_LOAD_HOOK.get() {
+            hook(&mut config);
+        }
+        let value = update(&mut config)?;
+        config.save()?;
+        Ok(value)
     }
 
     /// Serialize only the bootstrap/ops slice of the config to TOML:

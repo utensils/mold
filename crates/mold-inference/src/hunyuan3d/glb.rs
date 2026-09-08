@@ -660,6 +660,27 @@ fn material_pbr(json: &serde_json::Value, material: usize) -> Option<&serde_json
         .get("pbrMetallicRoughness")
 }
 
+fn material_texture_reference_count(json: &serde_json::Value) -> usize {
+    json.get("materials")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|material| {
+            usize::from(
+                material
+                    .get("pbrMetallicRoughness")
+                    .and_then(|pbr| pbr.get("baseColorTexture"))
+                    .is_some(),
+            ) + usize::from(
+                material
+                    .get("pbrMetallicRoughness")
+                    .and_then(|pbr| pbr.get("metallicRoughnessTexture"))
+                    .is_some(),
+            ) + usize::from(material.get("normalTexture").is_some())
+        })
+        .sum()
+}
+
 /// `baseColorFactor` RGB. Alpha is dropped: a poster composites nothing, so a
 /// translucent material still shades as its colour.
 fn base_color_factor(json: &serde_json::Value, material: usize) -> Option<[f32; 3]> {
@@ -1355,6 +1376,11 @@ pub fn write_obj_bundle(mesh: &Mesh, glb_bytes: &[u8], stem: &str) -> anyhow::Re
     let obj_name = format!("{safe_stem}.obj");
     let mtl_name = format!("{safe_stem}.mtl");
     let assets = embedded_material_assets(glb_bytes)?;
+    let (material_json, _) = split_glb_chunks(glb_bytes)?;
+    anyhow::ensure!(
+        material_texture_reference_count(&material_json) == assets.len(),
+        "OBJ ZIP export requires one shared material whose texture images are embedded PNG buffer views"
+    );
     let base_name = assets
         .iter()
         .find(|asset| asset.role == "base_color")
@@ -1901,6 +1927,36 @@ mod tests {
                 .unwrap();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn obj_bundle_refuses_material_images_it_cannot_preserve() {
+        let mut mesh = triangle_mesh();
+        mesh.uvs = Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+        let image = image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3]));
+        let mut png = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let glb = write_glb(
+            &mesh,
+            &GlbMaterial {
+                base_color_texture: Some(png),
+                ..GlbMaterial::default()
+            },
+            None,
+        )
+        .unwrap();
+        let parsed = parse_glb(&glb);
+        let mut json = parsed.json;
+        json["images"][0]["mimeType"] = serde_json::json!("image/jpeg");
+        let foreign = rebuild_glb(&json, &parsed.bin);
+
+        let error = write_obj_bundle(&mesh, &foreign, "chair").unwrap_err();
+        assert!(
+            error.to_string().contains("embedded PNG buffer views"),
+            "{error:#}"
+        );
     }
 
     /// Two triangles sharing an edge: small enough to write the expected

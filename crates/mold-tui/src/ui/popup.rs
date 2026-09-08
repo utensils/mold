@@ -1720,7 +1720,7 @@ pub(crate) fn mesh_turntable_picker_hint() -> String {
 pub(crate) fn mesh_geometry_picker_hint() -> String {
     use mold_core::validation::MESH_EXPORT_DEFAULT_SIZE_MM;
     format!(
-        "OBJ / STL / PLY write geometry: on a host that advertises it, STL and PLY at {MESH_EXPORT_DEFAULT_SIZE_MM} mm, Z-up, on the floor; OBJ keeps its model units. Other sizes or axes: mold library export --size-mm ..."
+        "OBJ / ZIP / STL / PLY write geometry: on a host that advertises it, STL and PLY at {MESH_EXPORT_DEFAULT_SIZE_MM} mm, Z-up, on the floor; OBJ and ZIP keep model units. Other sizes or axes: mold library export --size-mm ..."
     )
 }
 
@@ -1805,14 +1805,14 @@ mod tests {
     /// defaults and where the knobs live — the picker deliberately has none.
     #[test]
     fn mesh_export_picker_names_turntables_and_their_fixed_defaults() {
-        use mold_core::MeshExportFormat::{Apng, Gif, Glb, Obj, Ply, Stl, Webp};
+        use mold_core::MeshExportFormat::{Apng, Gif, Glb, Obj, Ply, Stl, Webp, Zip};
         for format in [Gif, Apng, Webp] {
             assert!(
                 super::mesh_export_format_note(format).contains("turntable"),
                 "{format}"
             );
         }
-        for format in [Glb, Obj, Stl, Ply] {
+        for format in [Glb, Obj, Zip, Stl, Ply] {
             assert!(
                 !super::mesh_export_format_note(format).contains("turntable"),
                 "{format}"
@@ -1843,7 +1843,7 @@ mod tests {
             "Z-up".to_string(),
             "floor".to_string(),
             "on a host that advertises it".to_string(),
-            "OBJ keeps its model units".to_string(),
+            "OBJ and ZIP keep model units".to_string(),
             "mold library export".to_string(),
         ] {
             assert!(
@@ -1867,11 +1867,11 @@ mod tests {
     #[test]
     fn mesh_export_picker_fits_its_rows_on_small_and_large_terminals() {
         use crate::app::Popup;
-        use mold_core::MeshExportFormat::{Apng, Gif, Glb, Obj, Ply, Stl, Webp};
+        use mold_core::MeshExportFormat::{Apng, Gif, Glb, Obj, Ply, Stl, Webp, Zip};
         use ratatui::layout::Rect;
         use ratatui::widgets::{Block, Borders};
 
-        let formats = vec![Glb, Obj, Stl, Ply, Gif, Apng, Webp];
+        let formats = vec![Glb, Obj, Zip, Stl, Ply, Gif, Apng, Webp];
         let theme = crate::ui::theme::Theme::default();
         let text = super::mesh_export_picker_lines(&formats, 0, &theme);
 

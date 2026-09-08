@@ -58,6 +58,15 @@ const DIT_PREFIX: &str = "model";
 const VAE_PREFIX: &str = "vae";
 const VISION_PREFIX: &str = "conditioner.main_image_encoder.model";
 
+fn ensure_quantized_shape_backend(is_cuda: bool, quantized: bool) -> Result<()> {
+    if quantized && !is_cuda {
+        bail!(
+            "quantized Hunyuan3D shape checkpoints are CUDA-only; select an fp16 tier on CPU or Metal"
+        );
+    }
+    Ok(())
+}
+
 fn checkpoint_header(
     path: &std::path::Path,
 ) -> Result<mold_core::safetensors_probe::SafetensorsHeader> {
@@ -477,6 +486,7 @@ impl Hunyuan3dEngine {
                 ..
             }) if tensor_dtypes.contains(&crate::artifact_format::TensorDType::F8E4M3)
         );
+        ensure_quantized_shape_backend(device.is_cuda(), quantized || fp8)?;
         let (dit, vb) = if quantized {
             let qvb = mold_candle::quantized::VarBuilder::from_gguf(&checkpoint, &device)
                 .with_context(|| format!("load Hunyuan3D GGUF at {}", checkpoint.display()))?;
@@ -496,11 +506,6 @@ impl Hunyuan3dEngine {
         } else {
             if fp8 {
                 super::quantization::validate_fp8_checkpoint(&checkpoint)?;
-            }
-            if fp8 && device.is_metal() {
-                bail!(
-                    "Hunyuan3D FP8 shape checkpoints require CUDA or CPU because Candle cannot widen F8E4M3 weights on Metal"
-                );
             }
             let vb = if fp8 {
                 crate::weight_loader::load_native_safetensors_with_progress(
@@ -965,10 +970,12 @@ impl Hunyuan3dEngine {
         let _ = crate::device::post_drop_free_vram_bytes(self.base.gpu_ordinal);
         let device = crate::device::create_device(self.base.gpu_ordinal, &self.base.progress)?;
         let dtype = super::backend::compute_dtype(&device);
-        let vb = if matches!(
+        let quantized = matches!(
             crate::artifact_format::probe(&checkpoint),
             Ok(crate::artifact_format::ArtifactStorageFormat::Gguf { .. })
-        ) {
+        );
+        ensure_quantized_shape_backend(device.is_cuda(), quantized)?;
+        let vb = if quantized {
             let qvb = mold_candle::quantized::VarBuilder::from_gguf(&checkpoint, &device)
                 .with_context(|| format!("load Hunyuan3D GGUF at {}", checkpoint.display()))?;
             dense_components_from_gguf(&qvb, dtype, &device)?
@@ -1680,6 +1687,17 @@ impl InferenceEngine for Hunyuan3dEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quantized_shape_execution_is_cuda_only() {
+        ensure_quantized_shape_backend(true, true).unwrap();
+        ensure_quantized_shape_backend(false, false).unwrap();
+        let error = ensure_quantized_shape_backend(false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("CUDA-only"), "{error}");
+        assert!(error.contains("fp16"), "{error}");
+    }
     use mold_core::safetensors_probe::SafetensorsHeader;
     use std::collections::BTreeMap;
 

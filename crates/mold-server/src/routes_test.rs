@@ -16248,6 +16248,38 @@ mod tests {
         .unwrap()
     }
 
+    fn gallery_textured_glb_fixture() -> Vec<u8> {
+        let mesh = mold_inference::hunyuan3d::mesh::Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            faces: vec![[0, 1, 2]],
+            normals: Some(vec![[0.0, 0.0, 1.0]; 3]),
+            uvs: Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+            vertex_colors: None,
+        };
+        let png = |rgb| {
+            let image = image::RgbImage::from_pixel(2, 2, image::Rgb(rgb));
+            let mut bytes = Vec::new();
+            image
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            bytes
+        };
+        mold_inference::hunyuan3d::glb::write_glb(
+            &mesh,
+            &mold_inference::hunyuan3d::glb::GlbMaterial {
+                base_color_texture: Some(png([12, 34, 56])),
+                metallic_roughness_texture: Some(png([78, 90, 123])),
+                normal_texture: Some(png([128, 128, 255])),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap()
+    }
+
     /// A mesh print's tile is DERIVED from the stored GLB, not a by-product
     /// of the render that made it. Every mesh mirrored onto a host — imported
     /// over `PUT /api/gallery/import`, or copied into the output directory —
@@ -16359,12 +16391,13 @@ mod tests {
             ..Default::default()
         };
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        let state = AppState::empty(
+        let mut state = AppState::empty(
             config,
             crate::state::QueueHandle::new(tx),
             AppState::empty_gpu_pool_for_test(),
             200,
         );
+        state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let mut events = state.events.subscribe();
         let app = app_with_state(state);
         let metadata = output_metadata("a mirrored mesh");
@@ -16375,17 +16408,23 @@ mod tests {
                     .header("content-type", "application/vnd.mold.gallery-import")
                     .body(Body::from(gallery_import_body(
                         Some(&metadata),
-                        &gallery_glb_fixture(),
+                        &gallery_textured_glb_fixture(),
                     )))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
-        assert!(matches!(
-            events.try_recv().unwrap(),
-            mold_core::ServerEvent::GalleryAdded { filename, .. } if filename == "mirrored.glb"
-        ));
+        let event = events.try_recv().unwrap();
+        let mold_core::ServerEvent::GalleryAdded { filename, image } = event else {
+            panic!("expected GalleryAdded")
+        };
+        assert_eq!(filename, "mirrored.glb");
+        assert_eq!(
+            image.expect("import event carries its row").assets.len(),
+            3,
+            "material actions must be available without a gallery refetch"
+        );
         let thumb_dir = mold_home.path().join("cache").join("thumbnails");
         for sidecar in
             mold_core::media_paths::mesh_poster_thumbnail_paths(&thumb_dir, "mirrored.glb")
@@ -20650,6 +20689,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn one_corrupt_glb_does_not_take_down_the_gallery_asset_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        seed_textured_mesh(&db, dir.path(), "chair.glb");
+        let path = dir.path().join("broken.glb");
+        std::fs::write(&path, b"not a glTF container").unwrap();
+        let mut record = mold_db::GenerationRecord::from_save(
+            dir.path(),
+            "broken.glb",
+            mold_core::OutputFormat::Glb,
+            output_metadata("broken mesh"),
+            mold_db::RecordSource::Server,
+            mold_core::time::now_epoch_ms(),
+        );
+        record.stat_from_disk(&path);
+        db.as_ref().as_ref().unwrap().upsert(&record).unwrap();
+        let app = app_with_state(state);
+
+        let rows = gallery_rows(&app, "/api/gallery").await;
+        assert_eq!(rows.len(), 2);
+        let valid = rows
+            .iter()
+            .find(|row| row["filename"] == "chair.glb")
+            .unwrap();
+        assert_eq!(valid["assets"].as_array().unwrap().len(), 3);
+        let broken = rows
+            .iter()
+            .find(|row| row["filename"] == "broken.glb")
+            .unwrap();
+        assert!(broken.get("assets").is_none());
     }
 
     fn drain_events(

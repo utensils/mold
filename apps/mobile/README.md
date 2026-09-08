@@ -248,7 +248,7 @@ pushed screen opened from the header.
   mesh, since there is no raster to stage as conditioning. A mesh print's
   sheet carries one **Export** control: a segmented picker of every container
   the host advertises on `capabilities.mesh.export_formats` — the stored GLB
-  itself, the OBJ, STL, and PLY transcodes (`mold library export` and the
+  itself, the OBJ, OBJ+PBR ZIP, STL, and PLY exports (`mold library export` and the
   `export_mesh` MCP tool perform the same ones), and one **Turntable** entry
   standing for the animated GIF / APNG / WebP — followed by the two verbs
   **Share…**, which opens the system share sheet, and **Save to Mold

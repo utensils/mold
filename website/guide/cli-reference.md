@@ -485,7 +485,7 @@ MCP exposes thirteen tools: `generate_image`, `generate_mesh`, `export_mesh`,
 `expand_prompt`, and `remix_prompt`. `generate_mesh` takes `image`, `model`,
 `steps`, `seed`, `octree`, `threshold`, and `target_faces` — the same bounds
 the generation profile advertises, read from one set of core constants — and
-`export_mesh` transcodes a stored `.glb` into OBJ, STL, or PLY by gallery
+`export_mesh` exports a stored `.glb` as OBJ, OBJ+PBR ZIP, STL, or PLY by gallery
 filename. The prompt-transform tools call
 `/api/expand` and `/api/remix` with the target model and an optional `context`
 object (canvas, frames, fps, references, LoRA names) so the host's rewrite

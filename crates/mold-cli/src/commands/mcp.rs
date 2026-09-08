@@ -3300,7 +3300,7 @@ fn builtin_tool_definitions() -> Value {
         {
             "name": "generate_mesh",
             "description": format!(
-                "Generate a 3D mesh from one image, or from semantically named front/left/back/right images with a Hunyuan3D 2mv model. There is no prompt; the images are the whole conditioning. The stored artifact is always GLB. Returns a rendered poster plus mesh statistics, and structuredContent.filename names the glTF in the gallery. To get OBJ, STL, or PLY, call export_mesh. Defaults: model {}, octree {}, threshold {}.",
+                "Generate a 3D mesh from one image, or from semantically named front/left/back/right images with a Hunyuan3D 2mv model. There is no prompt; the images are the whole conditioning. The stored artifact is always GLB. Returns a rendered poster plus mesh statistics, and structuredContent.filename names the glTF in the gallery. To get OBJ, an OBJ+PBR ZIP bundle, STL, or PLY, call export_mesh. Defaults: model {}, octree {}, threshold {}.",
                 mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL,
                 mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION,
                 mold_core::validation::MESH_DEFAULT_THRESHOLD
@@ -3390,7 +3390,7 @@ fn builtin_tool_definitions() -> Value {
         },
         {
             "name": "export_mesh",
-            "description": "Export one stored 3-D print as OBJ, STL, or PLY (or fetch the stored GLB unchanged), or as a 360° turntable animation (GIF, APNG, WebP). The gallery keeps its GLB; this returns a converted copy as an embedded resource named <stem>.<ext>, the same name mold library export writes. Each geometry container loses something the stored glTF carries — OBJ has no materials, STL has no shared vertices or UVs — which is why none of them is a generation target. A turntable is a RENDER of the mesh from the gallery poster's own view, framed once for the whole sweep and spun through a full turn; it is the way to share what a mesh looks like where no viewer can open a GLB. On a host that advertises capabilities.mesh.export_geometry a geometry container is written print-ready — stl and ply are scaled to 100 mm on their longest axis, turned z up and rested on the floor, obj keeps its model units and y up — and size_mm, up_axis and origin override that; against a host without that block the three arguments are refused rather than silently ignored. Only the formats the host advertises on capabilities.mesh.export_formats succeed (WebP needs a build with the webp feature).",
+            "description": "Export one stored 3-D print as OBJ, an OBJ+MTL+exact-PBR-map ZIP bundle, STL, or PLY (or fetch the stored GLB unchanged), or as a 360° turntable animation (GIF, APNG, WebP). The gallery keeps its GLB; this returns a converted copy as an embedded resource named <stem>.<ext>, the same name mold library export writes. Plain geometry containers lose something the stored glTF carries; ZIP keeps the material maps beside OBJ/MTL. A turntable is a RENDER of the mesh from the gallery poster's own view, framed once for the whole sweep and spun through a full turn; it is the way to share what a mesh looks like where no viewer can open a GLB. On a host that advertises capabilities.mesh.export_geometry a geometry container is written print-ready — stl and ply are scaled to 100 mm on their longest axis, turned z up and rested on the floor, obj and zip keep model units and y up — and size_mm, up_axis and origin override that; against a host without that block the three arguments are refused rather than silently ignored. Only the formats the host advertises on capabilities.mesh.export_formats succeed (WebP needs a build with the webp feature).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3400,7 +3400,7 @@ fn builtin_tool_definitions() -> Value {
                     },
                     "format": {
                         "type": "string",
-                        "enum": ["glb", "obj", "stl", "ply", "gif", "apng", "webp"],
+                        "enum": ["glb", "obj", "zip", "stl", "ply", "gif", "apng", "webp"],
                         "description": "Container to export as. 'glb' returns the stored bytes unchanged; 'gif', 'apng' and 'webp' render a turntable."
                     },
                     "playback": {
@@ -3893,7 +3893,7 @@ mod tests {
             .expect("export_mesh must be registered");
         assert_eq!(
             export["inputSchema"]["properties"]["format"]["enum"],
-            json!(["glb", "obj", "stl", "ply", "gif", "apng", "webp"])
+            json!(["glb", "obj", "zip", "stl", "ply", "gif", "apng", "webp"])
         );
         let props = &export["inputSchema"]["properties"];
         assert_eq!(props["playback"]["enum"], json!(["loop", "bounce"]));
@@ -4039,7 +4039,10 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(formats, ["glb", "obj", "stl", "ply", "gif", "apng", "webp"]);
+        assert_eq!(
+            formats,
+            ["glb", "obj", "zip", "stl", "ply", "gif", "apng", "webp"]
+        );
         assert_eq!(export["inputSchema"]["additionalProperties"], json!(false));
         assert_eq!(
             mesh_export_filename("chair.glb", mold_core::MeshExportFormat::Stl),

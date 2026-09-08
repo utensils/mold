@@ -6164,6 +6164,14 @@ mod tests {
                 false,
             ),
             (
+                MeshExportFormat::Zip,
+                "\"zip\"",
+                "zip",
+                "zip",
+                "application/zip",
+                false,
+            ),
+            (
                 MeshExportFormat::Stl,
                 "\"stl\"",
                 "stl",

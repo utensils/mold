@@ -9003,6 +9003,12 @@ async fn import_gallery_file(
                 )
                 .map(|record| {
                     let mut image = record.to_gallery_image();
+                    crate::generation_assets::attach_to_images(
+                        db,
+                        &dir_for_task,
+                        std::slice::from_ref(&record),
+                        std::slice::from_mut(&mut image),
+                    );
                     crate::thumbnails::stamp_poster_revision(&mut image);
                     Box::new(image)
                 })
@@ -9076,15 +9082,23 @@ async fn import_gallery_file(
                 })
                 .await;
             }
-            let image = db
-                .as_ref()
-                .as_ref()
-                .and_then(|db| db.get(&output_dir, &filename).ok().flatten())
-                .map(|record| {
-                    let mut image = record.to_gallery_image();
-                    crate::thumbnails::stamp_poster_revision(&mut image);
-                    Box::new(image)
-                });
+            let image = db.as_ref().as_ref().and_then(|database| {
+                database
+                    .get(&output_dir, &filename)
+                    .ok()
+                    .flatten()
+                    .map(|record| {
+                        let mut image = record.to_gallery_image();
+                        crate::generation_assets::attach_to_images(
+                            database,
+                            &output_dir,
+                            std::slice::from_ref(&record),
+                            std::slice::from_mut(&mut image),
+                        );
+                        crate::thumbnails::stamp_poster_revision(&mut image);
+                        Box::new(image)
+                    })
+            });
             state.events.publish(mold_core::ServerEvent::GalleryAdded {
                 filename: filename.clone(),
                 image,
@@ -10099,7 +10113,7 @@ async fn list_gallery(
                             image
                         })
                         .collect::<Vec<_>>();
-                    crate::generation_assets::attach_to_images(db, &dir, &rows, &mut images)?;
+                    crate::generation_assets::attach_to_images(db, &dir, &rows, &mut images);
                     images.sort_by_key(|image| {
                         std::cmp::Reverse((image.trashed_at.unwrap_or(0), image.timestamp))
                     });
@@ -10117,7 +10131,7 @@ async fn list_gallery(
                         &organization,
                         retention_days,
                     );
-                    crate::generation_assets::attach_to_images(db, &dir, &rows, &mut images)?;
+                    crate::generation_assets::attach_to_images(db, &dir, &rows, &mut images);
                     Ok(Some(images))
                 }
             }

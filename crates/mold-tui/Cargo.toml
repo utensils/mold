@@ -50,3 +50,4 @@ ureq = "3"
 tempfile = "3"
 serial_test = "3"
 wiremock = "0.6"
+zip = { version = "8.6", default-features = false }

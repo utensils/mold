@@ -81,7 +81,7 @@ pub(crate) fn attach_to_images(
     output_dir: &Path,
     records: &[mold_db::GenerationRecord],
     images: &mut [mold_core::GalleryImage],
-) -> anyhow::Result<()> {
+) {
     let by_name = records
         .iter()
         .map(|record| (record.filename.as_str(), record))
@@ -90,15 +90,24 @@ pub(crate) fn attach_to_images(
         let Some(record) = by_name.get(image.filename.as_str()) else {
             continue;
         };
-        ensure_indexed(db, output_dir, record)?;
-        if let Some(id) = record.id {
-            image.assets = mold_db::generation_assets::list_for_generation(db, id)?
-                .into_iter()
-                .map(|record| record.asset)
-                .collect();
+        let indexed = ensure_indexed(db, output_dir, record).and_then(|()| {
+            record.id.map_or_else(
+                || Ok(Vec::new()),
+                |id| mold_db::generation_assets::list_for_generation(db, id),
+            )
+        });
+        match indexed {
+            Ok(records) => {
+                image.assets = records.into_iter().map(|record| record.asset).collect();
+            }
+            Err(error) => {
+                tracing::warn!(
+                    filename = %record.filename,
+                    "generation asset indexing skipped one gallery row: {error:#}"
+                );
+            }
         }
     }
-    Ok(())
 }
 
 fn safe_download_name(name: &str) -> String {

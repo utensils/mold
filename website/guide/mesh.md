@@ -98,7 +98,7 @@ mesh. `-o` is the one place that is an error instead: a filename ending in
 `.png`, `.mp4` or `.wav` names a file this render will not write, and mold says
 so before a weight is read rather than after a two-minute render.
 
-## Export as OBJ, STL or PLY
+## Export as OBJ, OBJ+PBR ZIP, STL or PLY
 
 Everything except GLB is an **export**: a transcode of geometry that already
 exists, never a generation target, because each container loses something the
@@ -114,6 +114,7 @@ mold library export chair.glb --format ply --output -    # to stdout
 | ------ | --------------------------------------------------- | -------------------------------------- |
 | `glb`  | Geometry, normals, UVs, materials, embedded texture | Anything. This is the stored file.     |
 | `obj`  | Positions, normals, UVs. No materials.              | Blender, MeshLab, most DCC importers.  |
+| `zip`  | OBJ, MTL, and exact embedded PBR PNG maps.           | Portable painted-asset handoff.        |
 | `stl`  | Triangles and one normal each. No UVs, no colour.   | 3-D printing and CAD.                  |
 | `ply`  | Positions and per-vertex normals, vertices shared.  | Point-and-mesh tooling, research code. |
 
@@ -289,7 +290,7 @@ data** releases them; deleting the Library print remains a separate action.
 6. **Export** from the lightbox (web/desktop) or the viewer sheet (iPhone).
    An **Export as…** entry offers whatever the host advertises on
    `capabilities.mesh.export_formats` — never the stored GLB itself, which
-   Download already covers: OBJ, STL and PLY open a **print-ready** options
+   Download already covers: OBJ, ZIP, STL and PLY open a **print-ready** options
    sheet — size in millimetres with a live width × depth × height readout
    once the mesh is loaded, up axis, and origin, pre-filled from
    `capabilities.mesh.export_geometry`'s per-format defaults described in
@@ -337,13 +338,13 @@ poster in the Preview panel, and captions it with
 
 In the **Library**, a `.glb` tile shows its poster (fetched from the owning
 machine's thumbnail route; never the geometry through a raster decoder), and
-`x` opens an export picker offering OBJ, STL, PLY and the turntable formats
+`x` opens an export picker offering OBJ, ZIP, STL, PLY and the turntable formats
 (GIF, APNG, and WebP on a build that encodes it) — the list the owning
 machine advertises on `capabilities.mesh.export_formats`, or the same set
 from the in-process writer for a print that lives only on this machine,
 rendered through the same code the server uses. The picker has no knobs:
 a turntable renders at the defaults (one full turn, 36 frames, 512 px,
-10 fps, looping) and OBJ/STL/PLY export at their own per-format defaults
+10 fps, looping) and OBJ/ZIP/STL/PLY export at their own per-format defaults
 (the [Print-ready exports](#print-ready-exports) table above) — its hint
 says so, pointing at `mold library export` for bounce, once, a different
 size, or a different axis and origin. A local export and the equivalent

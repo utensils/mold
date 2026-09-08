@@ -1974,7 +1974,7 @@ fn recipe(
         && crate::identity::identity_qualified_model_with_family(input.model, Some(family));
     let output = if mesh_only {
         OutputCapabilitiesProfile {
-            // GLB is the only STORED form. OBJ, STL and PLY are offered as
+            // GLB is the only STORED form. OBJ, OBJ+PBR ZIP, STL and PLY are offered as
             // export transcodes from the gallery, never as generation
             // targets: each of them loses something the stored glTF carries
             // — materials and textures for OBJ, vertex identity and UVs for
@@ -1983,7 +1983,7 @@ fn recipe(
             formats: vec![OutputFormat::Glb],
             audio_requires_mp4: false,
             delivery_reason: Some(
-                "3-D delivery uses binary glTF; OBJ, STL and PLY are available as gallery exports."
+                "3-D delivery uses binary glTF; OBJ, OBJ+PBR ZIP, STL and PLY are available as gallery exports."
                     .to_string(),
             ),
         }

@@ -331,17 +331,12 @@ fn gallery_image_with_assets_and_filing(
 ) -> mold_core::GalleryImage {
     let mut image = gallery_image_with_filing(record, seeded);
     if let Some(db) = db {
-        if let Err(error) = crate::generation_assets::attach_to_images(
+        crate::generation_assets::attach_to_images(
             db,
             output_dir,
             std::slice::from_ref(record),
             std::slice::from_mut(&mut image),
-        ) {
-            tracing::warn!(
-                filename = %record.filename,
-                "generation asset indexing failed during publication: {error:#}"
-            );
-        }
+        );
     }
     image
 }

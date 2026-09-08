@@ -13,10 +13,12 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
 use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
 use candle_core::{DType, Device, Tensor};
+use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
 pub const POLICY_VERSION: &str = "hunyuan3d-shape-linear-v3";
@@ -26,6 +28,72 @@ pub const SUPPORTED_POLICY_VERSIONS: &[&str] = &[
     "hunyuan3d-shape-linear-v2",
     POLICY_VERSION,
 ];
+
+static TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Serialize converters targeting one path, then re-check the destination
+/// while holding the cross-process lock. The lock file deliberately remains
+/// on disk: `flock` state belongs to the open handle, so a crashed converter
+/// cannot strand a permanent lock and a later process can safely reuse it.
+struct DestinationClaim {
+    _lock: File,
+}
+
+impl DestinationClaim {
+    fn acquire(output: &Path) -> Result<Self> {
+        let parent = output.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("create quantized checkpoint directory {}", parent.display())
+        })?;
+        let filename = output
+            .file_name()
+            .context("quantized checkpoint output has no filename")?
+            .to_string_lossy();
+        let lock_path = parent.join(format!(".{filename}.quantize.lock"));
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("open quantization lock {}", lock_path.display()))?;
+        FileExt::lock_exclusive(&lock)
+            .with_context(|| format!("lock quantization destination {}", output.display()))?;
+        if output.exists() {
+            bail!(
+                "refusing to replace existing quantized checkpoint {}",
+                output.display()
+            );
+        }
+        Ok(Self { _lock: lock })
+    }
+}
+
+fn temporary_path(output: &Path) -> Result<PathBuf> {
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let filename = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("quantized checkpoint output has no UTF-8 filename")?;
+    let id = TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+    Ok(parent.join(format!(".{filename}.partial-{}-{id}", std::process::id())))
+}
+
+/// Atomically add a fully synced temporary file at an absent destination.
+/// A hard link is the portable same-filesystem no-replace primitive: unlike
+/// `rename`, it fails with AlreadyExists on Unix instead of replacing bytes.
+fn publish_no_replace(temporary: &Path, output: &Path) -> Result<()> {
+    std::fs::hard_link(temporary, output).with_context(|| {
+        format!(
+            "publish quantized checkpoint {} as {} without replacing an existing file",
+            temporary.display(),
+            output.display()
+        )
+    })?;
+    std::fs::remove_file(temporary)
+        .with_context(|| format!("remove conversion link {}", temporary.display()))?;
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShapeQuantization {
@@ -194,6 +262,148 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+/// Validate and describe a completed conversion that was published before
+/// its config registration committed. This makes `mold quantize` restartable
+/// across a process or power failure without trusting an unrelated file that
+/// happens to occupy the requested destination.
+pub fn recover_existing_checkpoint(
+    source: &Path,
+    output: &Path,
+    source_model: &str,
+    tier: ShapeQuantization,
+) -> Result<QuantizationReport> {
+    let source_bytes = source
+        .metadata()
+        .with_context(|| format!("inspect source checkpoint {}", source.display()))?
+        .len();
+    let source_sha256 = sha256_file(source)?;
+    let output_bytes = output
+        .metadata()
+        .with_context(|| format!("inspect retained checkpoint {}", output.display()))?
+        .len();
+
+    let mismatch = |field: &str| {
+        anyhow::anyhow!(
+            "retained checkpoint {} does not match the requested {field}",
+            output.display()
+        )
+    };
+    let (tensor_count, quantized_tensor_count) = if tier == ShapeQuantization::Fp8 {
+        validate_fp8_checkpoint(output)?;
+        let mapped = unsafe { candle_core::safetensors::MmapedSafetensors::new(output) }
+            .with_context(|| format!("map retained FP8 checkpoint {}", output.display()))?;
+        let read_bytes = |name: &str| -> Result<Vec<u8>> {
+            mapped
+                .load(name, &Device::Cpu)
+                .with_context(|| format!("read retained checkpoint metadata {name}"))?
+                .to_vec1::<u8>()
+                .with_context(|| format!("decode retained checkpoint metadata {name}"))
+        };
+        let read_string = |name: &str| -> Result<String> {
+            String::from_utf8(read_bytes(name)?)
+                .with_context(|| format!("retained checkpoint metadata {name} is not UTF-8"))
+        };
+        anyhow::ensure!(
+            read_string("mold_metadata.architecture")? == "hunyuan3d",
+            mismatch("architecture")
+        );
+        anyhow::ensure!(
+            read_string("mold_metadata.quantization_policy")? == FP8_POLICY_VERSION,
+            mismatch("quantization policy")
+        );
+        anyhow::ensure!(
+            read_string("mold_metadata.quantization_tier")? == tier.tag(),
+            mismatch("quantization tier")
+        );
+        anyhow::ensure!(
+            read_string("mold_metadata.source_model")? == source_model,
+            mismatch("source model")
+        );
+        anyhow::ensure!(
+            read_string("mold_metadata.source_sha256")? == source_sha256,
+            mismatch("source digest")
+        );
+        let encoded_size = read_bytes("mold_metadata.source_size")?;
+        anyhow::ensure!(encoded_size.len() == 8, mismatch("source size"));
+        anyhow::ensure!(
+            u64::from_le_bytes(encoded_size.try_into().expect("length checked")) == source_bytes,
+            mismatch("source size")
+        );
+        let tensors = mapped.tensors();
+        let quantized = tensors
+            .iter()
+            .filter(|(name, tensor)| {
+                name.ends_with(".weight") && tensor.dtype() == DType::F8E4M3.into()
+            })
+            .count();
+        let originals = tensors
+            .iter()
+            .filter(|(name, _)| {
+                !name.starts_with("mold_metadata.")
+                    && *name != "scaled_fp8"
+                    && !name.ends_with(".scale_weight")
+            })
+            .count();
+        (originals, quantized)
+    } else {
+        let mut file = File::open(output)
+            .with_context(|| format!("open retained GGUF checkpoint {}", output.display()))?;
+        let content = gguf_file::Content::read(&mut file)
+            .with_context(|| format!("read retained GGUF checkpoint {}", output.display()))?;
+        let metadata_string = |name: &str| match content.metadata.get(name) {
+            Some(gguf_file::Value::String(value)) => Ok(value.as_str()),
+            _ => Err(mismatch(name)),
+        };
+        anyhow::ensure!(
+            metadata_string("general.architecture")? == "hunyuan3d",
+            mismatch("architecture")
+        );
+        anyhow::ensure!(
+            SUPPORTED_POLICY_VERSIONS.contains(&metadata_string("mold.quantization.policy")?),
+            mismatch("quantization policy")
+        );
+        anyhow::ensure!(
+            metadata_string("mold.quantization.tier")? == tier.tag(),
+            mismatch("quantization tier")
+        );
+        anyhow::ensure!(
+            metadata_string("mold.source.model")? == source_model,
+            mismatch("source model")
+        );
+        anyhow::ensure!(
+            metadata_string("mold.source.sha256")? == source_sha256,
+            mismatch("source digest")
+        );
+        anyhow::ensure!(
+            matches!(
+                content.metadata.get("mold.source.size"),
+                Some(gguf_file::Value::U64(size)) if *size == source_bytes
+            ),
+            mismatch("source size")
+        );
+        let target = tier.ggml_dtype()?;
+        (
+            content.tensor_infos.len(),
+            content
+                .tensor_infos
+                .values()
+                .filter(|info| info.ggml_dtype == target)
+                .count(),
+        )
+    };
+
+    Ok(QuantizationReport {
+        source: source.to_path_buf(),
+        output: output.to_path_buf(),
+        source_sha256,
+        source_bytes,
+        output_bytes,
+        tensor_count,
+        quantized_tensor_count,
+        tier,
+    })
+}
+
 /// Convert one combined Hunyuan3D safetensors checkpoint into mold's
 /// deterministic GGUF layout. The source is read-only and the destination is
 /// created atomically; an existing destination is never replaced.
@@ -206,12 +416,7 @@ pub fn quantize_checkpoint(
     if tier == ShapeQuantization::Fp8 {
         return quantize_fp8_checkpoint(source, output, source_model);
     }
-    if output.exists() {
-        bail!(
-            "refusing to replace existing quantized checkpoint {}",
-            output.display()
-        );
-    }
+    let _destination = DestinationClaim::acquire(output)?;
     let source_bytes = source
         .metadata()
         .with_context(|| format!("inspect source checkpoint {}", source.display()))?
@@ -248,18 +453,7 @@ pub fn quantize_checkpoint(
         tensors.push((name.clone(), quantized));
     }
 
-    let parent = output.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("create quantized checkpoint directory {}", parent.display()))?;
-    let file_name = output
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("quantized checkpoint output has no UTF-8 filename")?;
-    let temporary = parent.join(format!(".{file_name}.partial-{}", std::process::id()));
-    if temporary.exists() {
-        std::fs::remove_file(&temporary)
-            .with_context(|| format!("remove stale conversion file {}", temporary.display()))?;
-    }
+    let temporary = temporary_path(output)?;
 
     let metadata = [
         (
@@ -305,13 +499,7 @@ pub fn quantize_checkpoint(
         writer.flush().context("flush Hunyuan3D GGUF")?;
         writer.get_ref().sync_all().context("sync Hunyuan3D GGUF")?;
         drop(writer);
-        std::fs::rename(&temporary, output).with_context(|| {
-            format!(
-                "publish quantized checkpoint {} as {}",
-                temporary.display(),
-                output.display()
-            )
-        })?;
+        publish_no_replace(&temporary, output)?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -345,12 +533,7 @@ fn quantize_fp8_checkpoint(
     output: &Path,
     source_model: &str,
 ) -> Result<QuantizationReport> {
-    if output.exists() {
-        bail!(
-            "refusing to replace existing quantized checkpoint {}",
-            output.display()
-        );
-    }
+    let _destination = DestinationClaim::acquire(output)?;
     let source_bytes = source
         .metadata()
         .with_context(|| format!("inspect source checkpoint {}", source.display()))?
@@ -419,18 +602,7 @@ fn quantize_fp8_checkpoint(
         Tensor::zeros(2, DType::F8E4M3, &Device::Cpu)?,
     );
 
-    let parent = output.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("create quantized checkpoint directory {}", parent.display()))?;
-    let file_name = output
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("quantized checkpoint output has no UTF-8 filename")?;
-    let temporary = parent.join(format!(".{file_name}.partial-{}", std::process::id()));
-    if temporary.exists() {
-        std::fs::remove_file(&temporary)
-            .with_context(|| format!("remove stale conversion file {}", temporary.display()))?;
-    }
+    let temporary = temporary_path(output)?;
     for (name, value) in [
         ("mold_metadata.architecture", "hunyuan3d"),
         ("mold_metadata.quantization_policy", FP8_POLICY_VERSION),
@@ -456,13 +628,7 @@ fn quantize_fp8_checkpoint(
             .open(&temporary)?
             .sync_all()
             .context("sync Hunyuan3D FP8 safetensors")?;
-        std::fs::rename(&temporary, output).with_context(|| {
-            format!(
-                "publish quantized checkpoint {} as {}",
-                temporary.display(),
-                output.display()
-            )
-        })?;
+        publish_no_replace(&temporary, output)?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -564,6 +730,21 @@ mod tests {
     use candle_core::{Shape, Tensor};
 
     use super::*;
+
+    #[test]
+    fn publication_never_replaces_an_existing_destination() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let temporary = directory.path().join("complete.partial");
+        let output = directory.path().join("shape-q8.gguf");
+        std::fs::write(&temporary, b"new conversion")?;
+        std::fs::write(&output, b"registered conversion")?;
+
+        let error = publish_no_replace(&temporary, &output).unwrap_err();
+        assert!(error.to_string().contains("without replacing"));
+        assert_eq!(std::fs::read(&output)?, b"registered conversion");
+        assert_eq!(std::fs::read(&temporary)?, b"new conversion");
+        Ok(())
+    }
 
     #[test]
     fn q8_policy_quantizes_only_transformer_matrix_weights() {
@@ -699,6 +880,14 @@ mod tests {
         let policy = stored["mold_metadata.quantization_policy"].to_vec1::<u8>()?;
         assert_eq!(std::str::from_utf8(&policy)?, FP8_POLICY_VERSION);
         validate_fp8_checkpoint(&output)?;
+        let recovered = recover_existing_checkpoint(
+            &source,
+            &output,
+            "hunyuan3d:test",
+            ShapeQuantization::Fp8,
+        )?;
+        assert_eq!(recovered.source_sha256, report.source_sha256);
+        assert_eq!(recovered.quantized_tensor_count, 1);
 
         let invalid = directory.path().join("missing-scale.safetensors");
         candle_core::safetensors::save(
@@ -807,6 +996,23 @@ mod tests {
             content.metadata.get("mold.source.sha256"),
             Some(gguf_file::Value::String(value)) if value == &report.source_sha256
         ));
+
+        // Publication and config registration are separate durable commits.
+        // A retry after the first succeeded and the second failed validates
+        // and reuses the completed bytes instead of starting hours of work
+        // over or leaving the checkpoint impossible to register.
+        let recovered = recover_existing_checkpoint(
+            &source,
+            &output,
+            "hunyuan3d-2.1:fp16",
+            ShapeQuantization::Q8,
+        )?;
+        assert_eq!(recovered, report);
+        let mismatch =
+            recover_existing_checkpoint(&source, &output, "hunyuan3d:fp16", ShapeQuantization::Q8)
+                .unwrap_err()
+                .to_string();
+        assert!(mismatch.contains("source model"), "{mismatch}");
 
         let error = quantize_checkpoint(
             &source,

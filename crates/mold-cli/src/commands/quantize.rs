@@ -11,7 +11,7 @@ pub fn run(
     output: Option<PathBuf>,
 ) -> Result<()> {
     let source_name = resolve_model_name(model);
-    let mut config = Config::load_or_default();
+    let config = Config::load_or_default();
     let manifest = find_manifest(&source_name);
     let configured = config.models.get(&source_name).cloned();
     let family = configured
@@ -43,30 +43,48 @@ pub fn run(
             .join(format!("shape-{tier}.{}", tier.file_extension()))
     });
 
-    eprintln!(
-        "Quantizing {} to {} as {}...",
-        paths.transformer.display(),
-        tier,
-        output.display()
-    );
-    let report = mold_inference::hunyuan3d::quantization::quantize_checkpoint(
-        &paths.transformer,
-        &output,
-        &source_name,
-        tier,
-    )?;
-
-    // Quantization can take several minutes. Reload immediately before the
-    // write so another completed conversion is not erased by this process's
-    // stale pre-conversion snapshot.
-    config = Config::load_or_default();
-    if config.models.contains_key(&derived_name) {
-        bail!(
-            "model `{derived_name}` was registered while quantization was running; \
-             the completed GGUF was retained at {}",
+    let recover = || {
+        mold_inference::hunyuan3d::quantization::recover_existing_checkpoint(
+            &paths.transformer,
+            &output,
+            &source_name,
+            tier,
+        )
+        .with_context(|| {
+            format!(
+                "validate retained checkpoint {} before registration",
+                output.display()
+            )
+        })
+    };
+    let report = if output.exists() {
+        eprintln!(
+            "Recovering completed {} conversion at {}...",
+            tier,
             output.display()
         );
-    }
+        recover()?
+    } else {
+        eprintln!(
+            "Quantizing {} to {} as {}...",
+            paths.transformer.display(),
+            tier,
+            output.display()
+        );
+        match mold_inference::hunyuan3d::quantization::quantize_checkpoint(
+            &paths.transformer,
+            &output,
+            &source_name,
+            tier,
+        ) {
+            Ok(report) => report,
+            // A concurrent converter can publish after the existence check.
+            // Its self-description must match byte-for-byte before this
+            // process is allowed to register it.
+            Err(_) if output.exists() => recover()?,
+            Err(error) => return Err(error),
+        }
+    };
 
     let mut derived = configured.unwrap_or_default();
     if let Some(manifest) = manifest {
@@ -99,10 +117,18 @@ pub fn run(
             .as_deref()
             .unwrap_or("Hunyuan3D shape model")
     ));
-    config.models.insert(derived_name.clone(), derived);
-    config
-        .save()
-        .context("register derived Hunyuan3D model; the completed GGUF was retained")?;
+    Config::update_locked(|config| {
+        if config.models.contains_key(&derived_name) {
+            bail!(
+                "model `{derived_name}` was registered while quantization was running; \
+                 the completed checkpoint was retained at {}",
+                output.display()
+            );
+        }
+        config.models.insert(derived_name.clone(), derived);
+        Ok(())
+    })
+    .context("register derived Hunyuan3D model; the completed GGUF was retained")?;
 
     eprintln!(
         "Created {derived_name}: {} bytes ({} of {} tensors quantized; source preserved at {})",
