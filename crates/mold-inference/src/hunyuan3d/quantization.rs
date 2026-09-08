@@ -18,8 +18,12 @@ use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
 use candle_core::{DType, Device};
 use sha2::{Digest, Sha256};
 
-pub const POLICY_VERSION: &str = "hunyuan3d-shape-linear-v2";
-pub const SUPPORTED_POLICY_VERSIONS: &[&str] = &["hunyuan3d-shape-linear-v1", POLICY_VERSION];
+pub const POLICY_VERSION: &str = "hunyuan3d-shape-linear-v3";
+pub const SUPPORTED_POLICY_VERSIONS: &[&str] = &[
+    "hunyuan3d-shape-linear-v1",
+    "hunyuan3d-shape-linear-v2",
+    POLICY_VERSION,
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShapeQuantization {
@@ -111,13 +115,22 @@ fn storage_dtype(
     dims: &[usize],
     source_dtype: DType,
     tier: ShapeQuantization,
+    moe_model: bool,
 ) -> Result<GgmlDType> {
     let quantized = tier.dtype();
+    // Hunyuan3D 2.1's dense path is substantially more sensitive below Q8.
+    // Its sparse experts hold most transformer parameters, so quantizing only
+    // those retains useful compression while preserving the always-active
+    // attention, dense MLP, shared expert, router, and modulation paths.
+    let qualified_moe_layer = !moe_model
+        || tier == ShapeQuantization::Q8
+        || name.contains(".moe.experts.");
     let eligible = name.starts_with("model.")
         && name.ends_with(".weight")
         && dims.len() == 2
         && !is_router(name)
         && !is_precision_sensitive(name)
+        && qualified_moe_layer
         && dims[1].is_multiple_of(quantized.block_size());
     if eligible {
         Ok(quantized)
@@ -184,6 +197,7 @@ pub fn quantize_checkpoint(
         .map(|(name, _)| name)
         .collect::<Vec<_>>();
     names.sort();
+    let moe_model = names.iter().any(|name| name.contains(".moe.experts."));
 
     let mut tensors = Vec::with_capacity(names.len());
     let mut quantized_tensor_count = 0;
@@ -194,7 +208,7 @@ pub fn quantize_checkpoint(
         if tensor.rank() == 0 {
             bail!("Hunyuan3D tensor {name} is scalar-shaped and cannot be represented in GGUF");
         }
-        let dtype = storage_dtype(name, tensor.dims(), tensor.dtype(), tier)?;
+        let dtype = storage_dtype(name, tensor.dims(), tensor.dtype(), tier, moe_model)?;
         if dtype == tier.dtype() {
             quantized_tensor_count += 1;
         }
@@ -309,6 +323,7 @@ mod tests {
                 &[2048, 2048],
                 DType::F16,
                 ShapeQuantization::Q8,
+                false,
             )
             .unwrap(),
             GgmlDType::Q8_0,
@@ -326,7 +341,7 @@ mod tests {
             ("model.final_layer.linear.weight", &[64, 1024][..]),
         ] {
             assert_eq!(
-                storage_dtype(name, dims, DType::F16, ShapeQuantization::Q8).unwrap(),
+                storage_dtype(name, dims, DType::F16, ShapeQuantization::Q8, false).unwrap(),
                 GgmlDType::F16,
                 "{name}",
             );
@@ -344,10 +359,50 @@ mod tests {
         ];
         for (tier, expected) in tiers {
             assert_eq!(
-                storage_dtype("model.block.weight", &[256, 256], DType::F16, tier).unwrap(),
+                storage_dtype(
+                    "model.block.weight",
+                    &[256, 256],
+                    DType::F16,
+                    tier,
+                    false,
+                )
+                .unwrap(),
                 expected,
             );
             assert_eq!(tier.to_string().parse::<ShapeQuantization>().unwrap(), tier);
+        }
+    }
+
+    #[test]
+    fn low_bit_moe_policy_quantizes_sparse_experts_only() {
+        assert_eq!(
+            storage_dtype(
+                "model.blocks.15.moe.experts.3.net.0.proj.weight",
+                &[8192, 2048],
+                DType::F16,
+                ShapeQuantization::Q4,
+                true,
+            )
+            .unwrap(),
+            GgmlDType::Q4K,
+        );
+        for name in [
+            "model.blocks.15.attn.to_q.weight",
+            "model.blocks.15.moe.shared_experts.net.0.proj.weight",
+            "model.blocks.9.mlp.fc1.weight",
+        ] {
+            assert_eq!(
+                storage_dtype(
+                    name,
+                    &[8192, 2048],
+                    DType::F16,
+                    ShapeQuantization::Q4,
+                    true,
+                )
+                .unwrap(),
+                GgmlDType::F16,
+                "{name}",
+            );
         }
     }
 

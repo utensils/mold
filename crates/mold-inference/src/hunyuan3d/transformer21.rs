@@ -4,6 +4,7 @@
 //! and Tencent 82920d64, hy3dshape/hy3dshape/models/denoisers/hunyuandit.py.
 //! The synthetic complete-forward fixture executes Tencent on CUDA.
 
+use candle_core::quantized::GgmlDType;
 use candle_core::{DType, Result, Tensor, D};
 use candle_nn::{LayerNorm, Linear, Module, RmsNorm, VarBuilder};
 
@@ -79,6 +80,16 @@ impl<'a> ShapeVarBuilder<'a> {
                     .transpose()?
                     .map(|bias| bias.dequantize(builder.device()))
                     .transpose()?;
+                if matches!(
+                    weight.dtype(),
+                    GgmlDType::F16 | GgmlDType::BF16 | GgmlDType::F32
+                ) {
+                    let weight = weight
+                        .dequantize(builder.device())?
+                        .to_dtype(*compute_dtype)?;
+                    let bias = bias.map(|bias| bias.to_dtype(*compute_dtype)).transpose()?;
+                    return Ok(ShapeLinear::Dense(Linear::new(weight, bias)));
+                }
                 Ok(ShapeLinear::Quantized(QuantizedLinear::new(
                     weight,
                     bias,
