@@ -9333,9 +9333,14 @@ mod tests {
         );
         assert_eq!(
             block.defaults.keys().cloned().collect::<Vec<_>>(),
-            vec!["obj".to_string(), "ply".to_string(), "stl".to_string()]
+            vec![
+                "obj".to_string(),
+                "ply".to_string(),
+                "stl".to_string(),
+                "zip".to_string(),
+            ]
         );
-        for format in [F::Obj, F::Stl, F::Ply] {
+        for format in [F::Obj, F::Zip, F::Stl, F::Ply] {
             assert_eq!(
                 block.defaults.get(format.as_str()).copied(),
                 super::mesh_export_geometry_defaults(format),
