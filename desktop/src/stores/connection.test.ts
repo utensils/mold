@@ -33,7 +33,7 @@ const defaults = {
   remoteApiKey: null,
   lastRoute: null,
   engineEnv: {},
-  theme: "mocha" as const,
+  theme: "mocha-dark" as const,
   matchSystem: false,
   notifications: true,
   dockBadge: true,

@@ -14,9 +14,17 @@ import LicenseSettingsPanel from "@studio/components/LicenseSettingsPanel.vue";
 import type { DeviceInfo } from "@studio/api/devices";
 import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import ConfigSettingsPanel from "../components/ConfigSettingsPanel.vue";
-import { matchSystem, theme, type ThemeId } from "../lib/theme";
-import { THEME_META } from "@ui/theme";
-import SwitchToggle from "@ui/components/SwitchToggle.vue";
+import { matchSystem, theme } from "../lib/theme";
+import {
+  THEME_FAMILY_META,
+  applyFamilyChoice,
+  applyToneChoice,
+  familyOf,
+  toneChoice,
+  type ThemeFamilyId,
+  type ToneChoice,
+} from "@ui/theme";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import { toast } from "../lib/toasts";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import {
@@ -47,8 +55,35 @@ const pairingTarget = computed(() => ({
   apiKey: pairingHost.value.apiKey ?? null,
 }));
 
-function setTheme(value: ThemeId) {
-  theme.value = value;
+/*
+ * Two independent controls: the select names a THEME, the tone control names
+ * the TONE. The select used to read "Mocha · dark" and sit beside a separate
+ * Match-system switch, so the two could contradict each other.
+ */
+const TONE_OPTIONS = [
+  { value: "system" as const, label: "System" },
+  { value: "light" as const, label: "Light" },
+  { value: "dark" as const, label: "Dark" },
+];
+
+const activeFamily = computed(() => familyOf(theme.value));
+const activeTone = computed<ToneChoice>(() =>
+  toneChoice({ theme: theme.value, matchSystem: matchSystem.value }),
+);
+
+function setFamily(value: ThemeFamilyId) {
+  const next = applyFamilyChoice(value, {
+    theme: theme.value,
+    matchSystem: matchSystem.value,
+  });
+  theme.value = next.theme;
+  matchSystem.value = next.matchSystem;
+}
+
+function setTone(choice: ToneChoice) {
+  const next = applyToneChoice(choice, theme.value);
+  theme.value = next.theme;
+  matchSystem.value = next.matchSystem;
 }
 
 // ── Account tokens (owned by the connected server) ─────────────────────
@@ -268,23 +303,32 @@ onBeforeUnmount(() => {
           data-test="theme-select"
           class="theme-select"
           aria-label="Theme"
-          :value="theme"
+          :value="activeFamily"
           @change="
-            setTheme(($event.target as HTMLSelectElement).value as ThemeId)
+            setFamily(
+              ($event.target as HTMLSelectElement).value as ThemeFamilyId,
+            )
           "
         >
-          <option v-for="meta in THEME_META" :key="meta.id" :value="meta.id">
-            {{ meta.label }} · {{ meta.tone }}
+          <option
+            v-for="meta in THEME_FAMILY_META"
+            :key="meta.id"
+            :value="meta.id"
+          >
+            {{ meta.label }}
           </option>
         </select>
       </div>
       <div class="row">
-        <span class="row__label">Match system appearance</span>
-        <SwitchToggle
-          data-test="theme-match-system"
-          :model-value="matchSystem"
-          label="Match system appearance"
-          @update:model-value="(v) => (matchSystem = v)"
+        <span class="row__label">Light or dark</span>
+        <SegmentedControl
+          data-test="theme-tone"
+          :model-value="activeTone"
+          :options="TONE_OPTIONS"
+          label="Light or dark"
+          variant="neutral"
+          compact
+          @update:model-value="setTone"
         />
       </div>
     </CardSurface>

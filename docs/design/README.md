@@ -179,11 +179,15 @@ Mechanical, no bounce. Live status dots pulse with a 1s two-step opacity
 
 ## 7 · Theme system
 
-Six themes — Mocha (default), Safelight, Blueprint (light), Graphite, Porcelain
+Five themes — Mocha (default), Safelight, Blueprint, Graphite, Nebula — each in a
+light and a dark tone (ten maps)
 (light), Nebula — each a complete `--mold-*` map: colour, one sans and one mono
 face, a 7-step type scale, and a theme-scoped radius scale. One `data-theme`
 attribute on the root selects the map; **Match system** resolves a pick to its
-light or dark partner through `THEME_PAIR` in `ui/theme.ts` before first paint.
+tone before first paint. A theme's identity is its typography, radii, density and
+accent hue; those hold across both of its tones, so **Match system** can never
+substitute a different theme. The picker names the theme and a separate
+**System · Light · Dark** control names the tone.
 No `prefers-color-scheme` in CSS. Text keeps WCAG AA on every plane and control
 borders keep 3:1; `desktop/src/styles/tokens.contrast.test.ts` proves it for all
 six. Radius is theme-scoped: components reference `--mold-radius-1/2/3`, never
@@ -195,7 +199,7 @@ a literal.
 | ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Tokens: six complete theme maps + the theme-invariant set; a fenced legacy bridge keeps the `--desk/--bath/…` names alive for web and the phone | `ui/tokens.css` (single source, consumed by `web/` and `desktop/`)                                                          |
 | Shell metrics, control heights, semantic surfaces, `--mold-state-*`                                                                             | `ui/mold-desktop.css`                                                                                                       |
-| Theme contract (`ThemeId`, `THEME_META`, `THEME_PAIR`, `migrateLegacyTheme`, `applyTheme`)                                                      | `ui/theme.ts`, re-exported by `desktop/src/lib/theme.ts` and consumed by `web/src/lib/theme.ts`                             |
+| Theme contract (`ThemeId`, `THEME_FAMILY_META`, `toneChoice`, `migrateLegacyTheme`, `applyTheme`)                                                      | `ui/theme.ts`, re-exported by `desktop/src/lib/theme.ts` and consumed by `web/src/lib/theme.ts`                             |
 | Desktop Tailwind layer (`bg-panel`, `text-fg-dim`, `rounded-control`, `text-micro`…)                                                            | `desktop/src/styles/tokens.css` + `base.css`; `tokens.legacy.test.ts` refuses the retired vocabulary                        |
 | Shared kit: shimmer, pulse, `.ms-toolbar-button`, `.ms-group-label`, `.ms-card-edge`, `.ms-lib-upscaled`                                        | `ui/kit.css`                                                                                                                |
 | Shared primitives (`SegmentedControl` `inline`, `SliderRow` `low`/`high`, `ModalPanel` header + `#description`, `DrawerPanel`)                  | `ui/components/` (Vue, token-var styled)                                                                                    |

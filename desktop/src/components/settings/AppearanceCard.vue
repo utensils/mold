@@ -1,22 +1,55 @@
 <script setup lang="ts">
 /*
- * Settings ▸ Look: the six themes as cards, the Match-system toggle, interface
- * scale, and the app-behaviour toggles beneath a divider. All of it drives
- * the existing appPrefs plumbing — nothing here blocks first use.
+ * Settings ▸ Look: the five themes as cards, the System · Light · Dark control,
+ * interface scale, and the app-behaviour toggles beneath a divider. All of it
+ * drives the existing appPrefs plumbing — nothing here blocks first use.
+ *
+ * A card names a THEME and nothing else; the tone control names the TONE. The
+ * two are independent, which is why there is no longer a Match-system switch
+ * sitting beside a card that already said "dark".
  */
 import { computed } from "vue";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import ToggleControl from "./ToggleControl.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
-import { THEME_META, THEME_PAIR, THEME_TONE, themeMeta, type ThemeId } from "../../lib/theme";
+import {
+  THEME_FAMILY_META,
+  applyFamilyChoice,
+  applyToneChoice,
+  familyOf,
+  themeFamilyMeta,
+  themeId,
+  toneChoice,
+  toneOf,
+  type ThemeFamilyId,
+  type ToneChoice,
+} from "../../lib/theme";
 import { shortcutLabel } from "../../lib/platform";
 
 const prefs = useAppPrefsStore();
 
-const matchSystemHelp = computed(() => {
-  const partner = THEME_PAIR[prefs.theme][THEME_TONE[prefs.theme] === "dark" ? "light" : "dark"];
-  const when = THEME_TONE[prefs.theme] === "dark" ? "in daylight" : "after dark";
-  return `Switches to ${themeMeta(partner).label} ${when}.`;
-});
+const TONE_OPTIONS = [
+  { value: "system" as const, label: "System" },
+  { value: "light" as const, label: "Light" },
+  { value: "dark" as const, label: "Dark" },
+];
+
+/** The card that reads as chosen, and the map each card's band paints from. */
+const activeFamily = computed(() => familyOf(prefs.theme));
+const tone = computed(() => toneOf(prefs.theme));
+const activeTone = computed<ToneChoice>(() =>
+  toneChoice({ theme: prefs.theme, matchSystem: prefs.matchSystem }),
+);
+
+const toneHelp = computed(() =>
+  prefs.matchSystem
+    ? `Follows this Mac: ${themeFamilyMeta(prefs.theme).label} switches between its light and dark tone.`
+    : `${themeFamilyMeta(prefs.theme).label} stays ${tone.value} whatever this Mac does.`,
+);
+
+function pickTone(choice: ToneChoice) {
+  void prefs.update(applyToneChoice(choice, prefs.theme));
+}
 
 const scaleHelp = computed(
   () =>
@@ -52,8 +85,10 @@ function toggleValue(key: (typeof BEHAVIOUR_TOGGLES)[number]["key"]): boolean {
   return prefs[key];
 }
 
-function pick(theme: ThemeId) {
-  void prefs.update({ theme });
+function pick(family: ThemeFamilyId) {
+  void prefs.update(
+    applyFamilyChoice(family, { theme: prefs.theme, matchSystem: prefs.matchSystem }),
+  );
 }
 </script>
 
@@ -62,15 +97,15 @@ function pick(theme: ThemeId) {
     <!-- Theme -->
     <div class="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Theme">
       <button
-        v-for="meta in THEME_META"
+        v-for="meta in THEME_FAMILY_META"
         :key="meta.id"
         type="button"
         role="radio"
-        :aria-checked="prefs.theme === meta.id"
+        :aria-checked="activeFamily === meta.id"
         :data-test="`theme-${meta.id}`"
         class="flex flex-col gap-1.5 rounded-control border p-2.5 text-left transition-colors duration-100"
         :class="
-          prefs.theme === meta.id
+          activeFamily === meta.id
             ? 'border-accent bg-accent-tint'
             : 'border-border hover:border-border-focus'
         "
@@ -86,7 +121,7 @@ function pick(theme: ThemeId) {
              the left, the wide canvas beside it, a surface card, an accent
              stripe. -->
         <span
-          :data-theme="meta.id"
+          :data-theme="themeId(meta.id, tone)"
           class="flex h-11 overflow-hidden rounded-inner border border-border"
           aria-hidden="true"
         >
@@ -96,23 +131,27 @@ function pick(theme: ThemeId) {
           <span class="ms-band__accent" />
         </span>
         <span class="text-sm font-semibold text-fg">{{ meta.label }}</span>
-        <span class="truncate font-mono text-micro text-fg-dim">{{ meta.toneLabel }}</span>
         <span class="text-micro text-fg-dim">{{ meta.blurb }}</span>
         <span class="truncate font-mono text-micro text-fg-dim">{{ meta.type }}</span>
       </button>
     </div>
 
-    <!-- Match system -->
+    <!-- Tone -->
     <div class="mt-3 flex items-center justify-between gap-4 py-1.5">
       <div class="min-w-0">
-        <div class="text-sm text-fg">Match system appearance</div>
-        <p class="mt-0.5 text-micro text-fg-dim">{{ matchSystemHelp }}</p>
+        <div class="text-sm text-fg">Light or dark</div>
+        <p class="mt-0.5 text-micro text-fg-dim">{{ toneHelp }}</p>
       </div>
-      <ToggleControl
-        :model-value="prefs.matchSystem"
-        aria-label="Match system appearance"
-        @commit="(v) => prefs.update({ matchSystem: v })"
-      />
+      <div class="shrink-0" data-test="tone-control">
+        <SegmentedControl
+          :model-value="activeTone"
+          :options="TONE_OPTIONS"
+          label="Light or dark"
+          variant="neutral"
+          compact
+          @update:model-value="pickTone"
+        />
+      </div>
     </div>
 
     <!-- Interface scale -->

@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn panel_block_focused_and_unfocused_render_without_panicking() {
-        let theme = Theme::mocha();
+        let theme = Theme::default();
         let area = Rect::new(0, 0, 20, 3);
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn kv_row_line_padding_left_aligns_label() {
-        let theme = Theme::mocha();
+        let theme = Theme::default();
         let line = kv_row_line(&theme, "k", "v", 8, false);
         // Two spans: label + value. Label is left-padded to 8 chars so the
         // value span starts at visual column 8.
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn kv_row_line_muted_does_not_change_label_width() {
-        let theme = Theme::mocha();
+        let theme = Theme::default();
         let plain = kv_row_line(&theme, "key", "value", 5, false);
         let muted = kv_row_line(&theme, "key", "value", 5, true);
         assert_eq!(plain.spans[0].content, muted.spans[0].content);

@@ -57,9 +57,52 @@ pub fn first_visible_row(selected_row: usize, total_rows: usize, visible_rows: u
 /// still holds at least one full card row (scrolling covers the rest)
 /// unless `available` itself can't.
 pub fn appearance_panel_height(inner_width: u16, available: u16) -> u16 {
-    let (_, rows) = card_grid(ThemePreset::ALL.len(), inner_width);
-    let desired = (rows as u16) * CARD_H + 2;
-    desired.min(available.max(CARD_H + 2))
+    let (_, rows) = card_grid(ThemePreset::FAMILIES.len(), inner_width);
+    let desired = (rows as u16) * CARD_H + TONE_ROW_H + 2;
+    desired.min(available.max(CARD_H + TONE_ROW_H + 2))
+}
+
+/// Rows the Light / Dark control occupies beneath the cards.
+pub const TONE_ROW_H: u16 = 1;
+
+/// Render the tone control — the other half of the picker. The cards name the
+/// THEME and this names the TONE; neither moves the other. There is no System
+/// position: a terminal has no OS appearance to follow, the emulator owns the
+/// background, and offering a choice that cannot resolve would be a lie.
+pub fn render_tone_row(
+    frame: &mut Frame,
+    theme: &Theme,
+    area: Rect,
+    current: ThemePreset,
+    focused: bool,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let pick = |label: &'static str, on: bool| {
+        Span::styled(
+            format!(" {label} "),
+            if on && focused {
+                Style::default().fg(theme.frame).bg(theme.accent)
+            } else if on {
+                Style::default().fg(theme.text).bg(theme.surface2)
+            } else {
+                Style::default().fg(theme.text_dim)
+            },
+        )
+    };
+    let label_style = if focused {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.text_dim)
+    };
+    let line = Line::from(vec![
+        Span::styled("Light or dark  ", label_style),
+        pick("Light", current.is_light()),
+        Span::raw(" "),
+        pick("Dark", !current.is_light()),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Render the theme card grid into `area` (the Appearance panel's inner
@@ -75,10 +118,16 @@ pub fn render_theme_cards(
         return;
     }
 
-    let presets = ThemePreset::ALL;
+    // Five cards, one per THEME, each painted in the tone in force. The tone
+    // itself is the Appearance panel's own Light / Dark row — a card that also
+    // named a tone would be a second, contradicting picker.
+    let presets: Vec<ThemePreset> = ThemePreset::FAMILIES
+        .iter()
+        .map(|p| p.with_tone(current.is_light()))
+        .collect();
     let (cols, rows) = card_grid(presets.len(), area.width);
     let visible_rows = (area.height / CARD_H) as usize;
-    let selected_idx = presets.iter().position(|p| *p == current).unwrap_or(0);
+    let selected_idx = current.family_index();
     let scroll = first_visible_row(selected_idx / cols, rows, visible_rows);
 
     for (i, preset) in presets.iter().enumerate() {
@@ -129,13 +178,15 @@ fn render_card(
         return;
     }
 
-    // Row 1 — the preset's own bg/accent/info hues (mockup sw1/sw2/sw3)
-    // plus the dim descriptor, truncated to the card width.
+    // Row 1 — a plane and the theme's two accents, plus the dim descriptor,
+    // truncated to the card width. The first dot is `surface2` rather than
+    // `bg`: a light theme's ground is within a percent or two of the card it
+    // sits on, so a bg dot renders invisible and the trio reads as two.
     let palette = preset.build();
     let desc_budget = (inner.width as usize).saturating_sub(4);
     let desc = truncate_with_ellipsis(preset.description(), desc_budget);
     let dots = Line::from(vec![
-        Span::styled("●", Style::default().fg(palette.bg)),
+        Span::styled("●", Style::default().fg(palette.surface2)),
         Span::styled("●", Style::default().fg(palette.accent)),
         Span::styled("●", Style::default().fg(palette.info)),
         Span::raw(" "),
@@ -162,7 +213,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    const PRESET_COUNT: usize = ThemePreset::ALL.len();
+    const PRESET_COUNT: usize = ThemePreset::FAMILIES.len();
 
     #[test]
     fn card_grid_never_zero_cols() {
@@ -179,13 +230,14 @@ mod tests {
     }
 
     #[test]
-    fn card_grid_fits_eleven_presets_at_80_cols() {
+    fn card_grid_fits_every_theme_at_80_cols() {
         // An 80-column terminal gives the Appearance panel a 78-cell
-        // inner width → 4 columns of 18-wide cards → 3 rows for the
-        // eleven presets.
+        // inner width → 4 columns of 18-wide cards → 2 rows for the five
+        // themes. Tone is not a card, so the grid holds five, not ten.
         let (cols, rows) = card_grid(PRESET_COUNT, 78);
-        assert_eq!((cols, rows), (4, 3));
-        assert!(cols * rows >= PRESET_COUNT, "grid must hold every preset");
+        assert_eq!(PRESET_COUNT, 5);
+        assert_eq!((cols, rows), (4, 2));
+        assert!(cols * rows >= PRESET_COUNT, "grid must hold every theme");
     }
 
     #[test]
@@ -247,24 +299,35 @@ mod tests {
             let (_, rows) = card_grid(PRESET_COUNT, width);
             let h = appearance_panel_height(width, 200);
             assert_eq!(
-                (h - 2) as usize,
+                (h - 2 - TONE_ROW_H) as usize,
                 rows * CARD_H as usize,
-                "width {width}: inner height must equal rows × CARD_H"
+                "width {width}: inner height must equal rows × CARD_H + the tone row"
             );
         }
     }
 
     #[test]
     fn appearance_panel_height_clips_to_whole_rows_when_short() {
-        // At 78 inner width the full grid wants 3×4+2 = 14 rows; with
-        // only 10 available the panel clips but still shows whole card
-        // rows (scrolling covers the rest).
-        let h = appearance_panel_height(78, 10);
-        assert_eq!(h, 10);
-        let visible_rows = (h - 2) / CARD_H;
+        // At 78 inner width the full grid wants 2×4 + 1 tone row + 2
+        // borders = 11; with only 8 available the panel clips but still
+        // shows a whole card row (scrolling covers the rest).
+        let h = appearance_panel_height(78, 8);
+        assert_eq!(h, 8);
+        let visible_rows = (h - 2 - TONE_ROW_H) / CARD_H;
         assert!(visible_rows >= 1, "at least one full card row visible");
         // Never taller than desired even when space is plentiful.
-        assert_eq!(appearance_panel_height(78, 100), 14);
+        assert_eq!(appearance_panel_height(78, 100), 11);
+    }
+
+    #[test]
+    fn the_swatch_trio_stays_visible_on_a_light_theme() {
+        // A light theme's bg is within a couple of percent of the card ground,
+        // so a bg dot renders invisible and the trio reads as two. The first
+        // dot is a raised plane instead — legible in both tones.
+        for preset in ThemePreset::ALL {
+            let t = preset.build();
+            assert_ne!(t.surface2, t.bg, "{preset:?} plane must differ from ground");
+        }
     }
 
     #[test]
@@ -276,7 +339,7 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let area = Rect::new(0, 0, w, h);
-                    render_theme_cards(frame, &theme, area, ThemePreset::StudioDark, true);
+                    render_theme_cards(frame, &theme, area, ThemePreset::MochaDark, true);
                 })
                 .unwrap();
         }
@@ -305,15 +368,17 @@ mod tests {
             out
         };
 
-        // Full-height grid shows both the first and last presets.
-        let full = render_with(ThemePreset::StudioDark, 78, 12);
-        assert!(full.contains("Studio Dark"), "{full}");
-        assert!(full.contains("Dracula"), "{full}");
+        // Full-height grid shows both the first and last themes.
+        let full = render_with(ThemePreset::MochaDark, 78, 12);
+        assert!(full.contains("Mocha"), "{full}");
+        assert!(full.contains("Nebula"), "{full}");
+        // Names only: no card says which tone it is.
+        assert!(!full.contains("Dark"), "{full}");
 
         // Clipped to one card row, the selection scrolls into view:
-        // selecting Dracula (last row) must render it, and hide row 0.
-        let clipped = render_with(ThemePreset::Dracula, 78, 4);
-        assert!(clipped.contains("Dracula"), "{clipped}");
-        assert!(!clipped.contains("Studio Dark"), "{clipped}");
+        // selecting the last theme must render it, and hide row 0.
+        let clipped = render_with(ThemePreset::NebulaLight, 78, 4);
+        assert!(clipped.contains("Nebula"), "{clipped}");
+        assert!(!clipped.contains("Mocha"), "{clipped}");
     }
 }

@@ -408,10 +408,11 @@ it. Running inference is revoked cooperatively at its next safe point.
 Open Settings from the sliders button in the header. Mobile settings currently
 cover:
 
-- **Look:** the six Mold Studio themes — Mocha, Safelight, Blueprint,
-  Graphite, Porcelain, Nebula
-- **Appearance:** **Match phone**, which swaps to the theme's light or dark
-  partner with iOS
+- **Look:** the five Mold Studio themes — Mocha, Safelight, Blueprint,
+  Graphite, Nebula — each in a light and a dark tone
+- **Light or dark:** **Match phone**, **Light** or **Dark**. Match phone
+  follows iOS between the chosen theme's own two tones; it never swaps the
+  theme itself
 - **Photos:** automatically save newly generated stills to the iPhone photo
   library (on by default)
 - **Model licenses:** review and accept the selected host's model licenses

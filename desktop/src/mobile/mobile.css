@@ -481,46 +481,74 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 
 /* One swatch per theme: chrome, content, data-series and accent, lifted from
    the maps in ui/tokens.css so the picker previews a look without applying it. */
-.mobile-theme-preview[data-theme="mocha"] {
+.mobile-theme-preview[data-theme="mocha-dark"] {
   --preview-bath: #181825;
   --preview-bench: #1e1e2e;
   --preview-halide: #74c7ec;
   --preview-safelight: #89b4fa;
 }
 
-.mobile-theme-preview[data-theme="safelight"] {
+.mobile-theme-preview[data-theme="mocha-light"] {
+  --preview-bath: #e6e9ef;
+  --preview-bench: #eff1f5;
+  --preview-halide: #0e7490;
+  --preview-safelight: #1a5ac4;
+}
+
+.mobile-theme-preview[data-theme="safelight-dark"] {
   --preview-bath: #171210;
   --preview-bench: #241c15;
   --preview-halide: #8fb4c4;
   --preview-safelight: #f79433;
 }
 
-.mobile-theme-preview[data-theme="blueprint"] {
+.mobile-theme-preview[data-theme="safelight-light"] {
+  --preview-bath: #f2e9db;
+  --preview-bench: #faf5ec;
+  --preview-halide: #2b6382;
+  --preview-safelight: #9a4f04;
+}
+
+.mobile-theme-preview[data-theme="blueprint-dark"] {
+  --preview-bath: #0b1320;
+  --preview-bench: #101a2b;
+  --preview-halide: #57c7e8;
+  --preview-safelight: #6ea8ff;
+}
+
+.mobile-theme-preview[data-theme="blueprint-light"] {
   --preview-bath: #e9eff7;
   --preview-bench: #f4f7fb;
   --preview-halide: #1d4ed8;
   --preview-safelight: #1d4ed8;
 }
 
-.mobile-theme-preview[data-theme="graphite"] {
+.mobile-theme-preview[data-theme="graphite-dark"] {
   --preview-bath: #141517;
   --preview-bench: #1b1c1e;
   --preview-halide: #6ba8e5;
   --preview-safelight: #f0a22e;
 }
 
-.mobile-theme-preview[data-theme="porcelain"] {
+.mobile-theme-preview[data-theme="graphite-light"] {
   --preview-bath: #f3f3f6;
   --preview-bench: #fbfbfd;
   --preview-halide: #2563a8;
   --preview-safelight: #0f766e;
 }
 
-.mobile-theme-preview[data-theme="nebula"] {
+.mobile-theme-preview[data-theme="nebula-dark"] {
   --preview-bath: #11090d;
   --preview-bench: #1b0c12;
   --preview-halide: #d08f92;
   --preview-safelight: #ff315d;
+}
+
+.mobile-theme-preview[data-theme="nebula-light"] {
+  --preview-bath: #f3ebe5;
+  --preview-bench: #fbf6f2;
+  --preview-halide: #2f5f9e;
+  --preview-safelight: #b3122f;
 }
 
 .mobile-theme-preview > span:first-child {

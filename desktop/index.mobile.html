@@ -1,49 +1,53 @@
 <!doctype html>
-<html lang="en" data-theme="safelight">
+<html lang="en" data-theme="safelight-dark">
   <head>
     <meta charset="UTF-8" />
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#12101d" />
+    <meta name="theme-color" content="#171210" />
     <meta name="mold-mobile-entry" content="mold-mobile-entry-v1" />
     <title>Mold</title>
     <script>
-      // Apply the saved mobile theme before first paint. Mirrors
-      // src/mobile/settings.ts: a named theme wins, the pre-redesign
-      // family + appearance pair migrates, and a fresh phone starts on
-      // Safelight.
+      // Apply the persisted Mold Studio theme before first paint so the app
+      // never flashes the wrong palette. Mirrors ui/theme.ts: a ThemeId is
+      // `<family>-<tone>`, so "Match system" is a suffix swap rather than a
+      // pairing table anyone has to keep in step. The two entry points and
+      // resolveTheme are pinned together by web/src/lib/prePaintTheme.test.ts.
       (function () {
-        var pair = {
-          mocha: ["mocha", "blueprint"],
-          blueprint: ["mocha", "blueprint"],
-          graphite: ["graphite", "porcelain"],
-          porcelain: ["graphite", "porcelain"],
-          safelight: ["safelight", "porcelain"],
-          nebula: ["nebula", "porcelain"],
+        var RENAMED = {
+          mocha: "mocha-dark",
+          safelight: "safelight-dark",
+          blueprint: "blueprint-light",
+          graphite: "graphite-dark",
+          porcelain: "graphite-light",
+          nebula: "nebula-dark",
         };
-        var theme = "safelight";
+        var ID = /^(mocha|safelight|blueprint|graphite|nebula)-(dark|light)$/;
+        var theme = "safelight-dark";
         var matchSystem = false;
         try {
           var raw = localStorage.getItem("mold.mobile.settings.v1");
           if (raw) {
             var parsed = JSON.parse(raw);
-            if (pair[parsed.theme]) {
+            var family = parsed.family !== undefined ? parsed.family : parsed.themeFamily;
+            if (ID.test(parsed.theme)) {
               theme = parsed.theme;
               matchSystem = parsed.matchSystem === true;
-            } else if (parsed.themeFamily === "mold") {
-              theme = parsed.theme === "light" ? "blueprint" : "mocha";
-              matchSystem = parsed.theme === "system";
-            } else {
-              if (parsed.theme === "light") theme = "porcelain";
+            } else if (RENAMED[parsed.theme]) {
+              theme = RENAMED[parsed.theme];
+              matchSystem = parsed.matchSystem === true;
+            } else if (parsed.theme !== undefined || family !== undefined) {
+              var base = family === "mold" ? "mocha" : "safelight";
+              theme = base + (parsed.theme === "light" ? "-light" : "-dark");
               matchSystem = parsed.theme === "system";
             }
           }
         } catch (e) {}
         if (matchSystem && window.matchMedia) {
           var light = window.matchMedia("(prefers-color-scheme: light)").matches;
-          theme = pair[theme][light ? 1 : 0];
+          theme = theme.replace(/-(dark|light)$/, light ? "-light" : "-dark");
         }
         document.documentElement.dataset.theme = theme;
       })();

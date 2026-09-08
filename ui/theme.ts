@@ -1,45 +1,51 @@
 /*
- * Mold Studio theme contract — shared by desktop, web, and the phone.
+ * Mold Studio theme contract — shared by desktop, web, the phone and the TUI.
  *
- * Six named themes (ui/tokens.css carries the maps). A surface persists ONE
- * ThemeId plus a `matchSystem` flag; when the flag is on, the OS appearance
- * picks between the chosen theme and its partner from THEME_PAIR, so the
- * stylesheet only ever sees a single `data-theme`. The Rust side of the
- * desktop app (desktop/src-tauri/src/settings.rs) mirrors THEME_PAIR's light
- * partners in `light_partner` and the legacy migration in `migrate_theme`.
+ * A theme is an IDENTITY: its typography, its corner radii, its density and its
+ * accent hue. Light-vs-dark is a TONE that identity is rendered in, not a second
+ * theme. So there are five families (ui/tokens.css carries the maps), each in two
+ * tones, and a ThemeId is simply `${family}-${tone}`.
+ *
+ * That makes tone DERIVABLE rather than tabulated. The predecessor of this file
+ * paired each theme with an unrelated partner by hand — Nebula's daylight partner
+ * was Porcelain — so "Match system" swapped the theme out from under the person
+ * who chose it. The partner of a theme is now the same theme in the other tone,
+ * and there is nothing left to keep in step.
+ *
+ * A surface persists ONE ThemeId plus a `matchSystem` flag. Pickers bind to
+ * `toneChoice` / `applyToneChoice` and show a System · Light · Dark control; a
+ * theme's own label never carries a tone. The Rust twin of this file is
+ * desktop/src-tauri/src/settings.rs; the TUI's is crates/mold-tui/src/ui/theme.rs.
  */
 
-export type ThemeId =
-  "mocha" | "safelight" | "blueprint" | "graphite" | "porcelain" | "nebula";
+export type ThemeFamilyId =
+  "mocha" | "safelight" | "blueprint" | "graphite" | "nebula";
 export type ThemeTone = "dark" | "light";
+export type ThemeId = `${ThemeFamilyId}-${ThemeTone}`;
 
-export interface ThemeMeta {
-  readonly id: ThemeId;
+/** What a picker offers: the tone control's three positions. */
+export type ToneChoice = "system" | ThemeTone;
+
+export interface ThemeFamilyMeta {
+  readonly id: ThemeFamilyId;
   readonly label: string;
-  readonly tone: ThemeTone;
-  /** The tone as the picker says it: "Dark · the original". `tone` stays the
-   *  machine value THEME_TONE and THEME_PAIR are keyed on. */
-  readonly toneLabel: string;
   /** "Sans · Mono" pairing, for the picker's type line. */
   readonly type: string;
+  /** One line about the identity — true of BOTH tones, never about a tone. */
   readonly blurb: string;
 }
 
-export const THEME_META: readonly ThemeMeta[] = [
+export const THEME_FAMILY_META: readonly ThemeFamilyMeta[] = [
   {
     id: "mocha",
     label: "Mocha",
-    tone: "dark",
-    toneLabel: "Dark · the original",
     type: "Inter · JetBrains Mono",
     blurb:
-      "Violet-leaning charcoal, one blue accent, nothing else raises its voice.",
+      "Violet-leaning neutrals, one blue accent, nothing else raises its voice.",
   },
   {
     id: "safelight",
     label: "Safelight",
-    tone: "dark",
-    toneLabel: "Dark · the app's own",
     type: "Schibsted Grotesk · Martian Mono",
     blurb:
       "The darkroom family: warm browns, amber for anything you press, softer corners.",
@@ -47,70 +53,63 @@ export const THEME_META: readonly ThemeMeta[] = [
   {
     id: "blueprint",
     label: "Blueprint",
-    tone: "light",
-    toneLabel: "Light · drafting table",
     type: "Archivo · Azeret Mono",
-    blurb:
-      "Cool daylight and drafting-table blue, set one notch tighter and smaller.",
+    blurb: "Drafting-table blue, set one notch tighter and smaller.",
   },
   {
     id: "graphite",
     label: "Graphite",
-    tone: "dark",
-    toneLabel: "Dark · neutral, warm signal",
     type: "IBM Plex Sans · IBM Plex Mono",
     blurb:
-      "True neutral greys, hairline separators, one amber signal for anything live.",
-  },
-  {
-    id: "porcelain",
-    label: "Porcelain",
-    tone: "light",
-    toneLabel: "Light · high-key, compact",
-    type: "Manrope · IBM Plex Mono",
-    blurb:
-      "Near-white panels on a soft grey desk, deep teal for anything you can press.",
+      "True neutral greys, hairline separators, one signal hue for anything live.",
   },
   {
     id: "nebula",
     label: "Nebula",
-    tone: "dark",
-    toneLabel: "Dark · oxblood & crimson",
     type: "Georgia · Geist Mono",
     blurb:
-      "Oxblood panels over near-black, hot crimson for actions, square corners.",
+      "Oxblood and hot crimson for actions, square corners, roomy leading.",
   },
 ];
 
-export const THEMES = [
+export const THEME_FAMILIES = [
   "mocha",
   "safelight",
   "blueprint",
   "graphite",
-  "porcelain",
   "nebula",
-] as const satisfies readonly ThemeId[];
+] as const satisfies readonly ThemeFamilyId[];
 
-export const DEFAULT_THEME: ThemeId = "mocha";
+export const THEME_TONES = [
+  "light",
+  "dark",
+] as const satisfies readonly ThemeTone[];
 
-export const THEME_TONE: Record<ThemeId, ThemeTone> = {
-  mocha: "dark",
-  safelight: "dark",
-  blueprint: "light",
-  graphite: "dark",
-  porcelain: "light",
-  nebula: "dark",
-};
+/** Every id, family-major. ui/tokens.css declares exactly this set. */
+export const THEMES: readonly ThemeId[] = THEME_FAMILIES.flatMap((family) =>
+  THEME_TONES.map((tone) => themeId(family, tone)),
+);
 
-/** Which theme a pick becomes when the system appearance flips. */
-export const THEME_PAIR: Record<ThemeId, { dark: ThemeId; light: ThemeId }> = {
-  mocha: { dark: "mocha", light: "blueprint" },
-  blueprint: { dark: "mocha", light: "blueprint" },
-  graphite: { dark: "graphite", light: "porcelain" },
-  porcelain: { dark: "graphite", light: "porcelain" },
-  safelight: { dark: "safelight", light: "porcelain" },
-  nebula: { dark: "nebula", light: "porcelain" },
-};
+export const DEFAULT_THEME: ThemeId = "mocha-dark";
+
+export function themeId(family: ThemeFamilyId, tone: ThemeTone): ThemeId {
+  return `${family}-${tone}`;
+}
+
+export function familyOf(id: ThemeId): ThemeFamilyId {
+  return id.slice(0, id.lastIndexOf("-")) as ThemeFamilyId;
+}
+
+export function toneOf(id: ThemeId): ThemeTone {
+  return id.endsWith("-light") ? "light" : "dark";
+}
+
+export function isThemeFamilyId(value: unknown): value is ThemeFamilyId {
+  return (
+    typeof value === "string" &&
+    (THEME_FAMILIES as readonly string[]).includes(value)
+  );
+}
 
 export function isThemeId(value: unknown): value is ThemeId {
   return (
@@ -118,8 +117,51 @@ export function isThemeId(value: unknown): value is ThemeId {
   );
 }
 
-export function themeMeta(id: ThemeId): ThemeMeta {
-  return THEME_META.find((meta) => meta.id === id)!;
+export function themeFamilyMeta(id: ThemeId | ThemeFamilyId): ThemeFamilyMeta {
+  const family = isThemeFamilyId(id) ? id : familyOf(id);
+  return THEME_FAMILY_META.find((meta) => meta.id === family)!;
+}
+
+/** The same theme in the other tone. Never a different family. */
+export function partnerTheme(id: ThemeId, tone: ThemeTone): ThemeId {
+  return themeId(familyOf(id), tone);
+}
+
+/* ── The picker's two controls ─────────────────────────────────────────────
+ * A theme entry carries only its name; one System · Light · Dark control sets
+ * the tone. Both project onto the SAME persisted `{ theme, matchSystem }`, so
+ * choosing a theme cannot change the tone and choosing a tone cannot change
+ * the theme. */
+
+export function toneChoice(saved: {
+  theme: ThemeId;
+  matchSystem: boolean;
+}): ToneChoice {
+  return saved.matchSystem ? "system" : toneOf(saved.theme);
+}
+
+/**
+ * Apply a tone choice to the theme in hand. `system` keeps the stored id's own
+ * tone as the fallback for a host that cannot read the OS appearance, which is
+ * why the flag and the suffix are both persisted.
+ */
+export function applyToneChoice(
+  choice: ToneChoice,
+  theme: ThemeId,
+): { theme: ThemeId; matchSystem: boolean } {
+  if (choice === "system") return { theme, matchSystem: true };
+  return { theme: partnerTheme(theme, choice), matchSystem: false };
+}
+
+/** Choosing a theme keeps whatever tone is in force. */
+export function applyFamilyChoice(
+  family: ThemeFamilyId,
+  saved: { theme: ThemeId; matchSystem: boolean },
+): { theme: ThemeId; matchSystem: boolean } {
+  return {
+    theme: themeId(family, toneOf(saved.theme)),
+    matchSystem: saved.matchSystem,
+  };
 }
 
 /** The concrete theme to paint for a pick, given the OS appearance. */
@@ -129,22 +171,42 @@ export function resolveTheme(
   prefersLight: boolean,
 ): ThemeId {
   if (!matchSystem) return theme;
-  return prefersLight ? THEME_PAIR[theme].light : THEME_PAIR[theme].dark;
+  return partnerTheme(theme, prefersLight ? "light" : "dark");
 }
 
 /**
- * The pre-redesign contract persisted `theme: system|dark|light` beside
- * `themeFamily: safelight|mold`. Every surface migrates a saved value through
- * this one table so an old install lands on the same theme everywhere.
+ * Ids persisted before tone became a suffix. `porcelain` is the merge: Graphite
+ * and Porcelain were one theme under two names, so Porcelain's palette lives on
+ * as Graphite's light tone.
+ */
+const RENAMED_THEMES: Readonly<Record<string, ThemeId>> = {
+  mocha: "mocha-dark",
+  safelight: "safelight-dark",
+  blueprint: "blueprint-light",
+  graphite: "graphite-dark",
+  porcelain: "graphite-light",
+  nebula: "nebula-dark",
+};
+
+/**
+ * Every saved value reaches a current ThemeId through this one function.
+ *
+ * Two generations precede the current shape: `theme: system|dark|light` beside
+ * `themeFamily: safelight|mold`, and then the six single-word ids. Both land in
+ * one hop, and an unreadable value falls back rather than failing — a theme this
+ * build cannot parse must never cost the user their saved machines.
  */
 export function migrateLegacyTheme(
   theme: unknown,
   family: unknown,
 ): { theme: ThemeId; matchSystem: boolean } {
   if (isThemeId(theme)) return { theme, matchSystem: false };
-  const dark: ThemeId = family === "mold" ? "mocha" : "safelight";
+  if (typeof theme === "string" && theme in RENAMED_THEMES) {
+    return { theme: RENAMED_THEMES[theme]!, matchSystem: false };
+  }
+  const dark: ThemeId = family === "mold" ? "mocha-dark" : "safelight-dark";
   if (theme === "light")
-    return { theme: THEME_PAIR[dark].light, matchSystem: false };
+    return { theme: partnerTheme(dark, "light"), matchSystem: false };
   if (theme === "system") return { theme: dark, matchSystem: true };
   return { theme: dark, matchSystem: false };
 }

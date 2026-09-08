@@ -39,7 +39,7 @@ function settings(updateChannel: AppSettings["updateChannel"] = "stable"): AppSe
     remoteApiKey: null,
     lastRoute: null,
     engineEnv: {},
-    theme: "mocha",
+    theme: "mocha-dark",
     matchSystem: false,
     notifications: true,
     dockBadge: true,

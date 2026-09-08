@@ -17,17 +17,24 @@ pub enum ConnectionMode {
     Off,
 }
 
-/// One of the six Mold Studio themes (ui/theme.ts is the TypeScript twin).
+/// One of the ten Mold Studio themes: five families in two tones each
+/// (ui/theme.ts is the TypeScript twin). Tone is a suffix, so the partner of a
+/// theme is the same theme in the other tone and there is no pairing table to
+/// keep in step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ThemeId {
     #[default]
-    Mocha,
-    Safelight,
-    Blueprint,
-    Graphite,
-    Porcelain,
-    Nebula,
+    MochaDark,
+    MochaLight,
+    SafelightDark,
+    SafelightLight,
+    BlueprintDark,
+    BlueprintLight,
+    GraphiteDark,
+    GraphiteLight,
+    NebulaDark,
+    NebulaLight,
 }
 
 impl ThemeId {
@@ -35,29 +42,50 @@ impl ThemeId {
         serde_json::from_value(serde_json::Value::String(value.to_string())).ok()
     }
 
-    /// The theme a dark pick becomes when the system appearance turns light —
-    /// the `light` half of `THEME_PAIR` in ui/theme.ts (a light pick never
-    /// reaches here, because migration only ever produces a dark pick first);
-    /// keep the two in step.
+    /// The same theme in its light tone. Never another family — Nebula used to
+    /// become Porcelain here, which took the chosen theme away in daylight.
     fn light_partner(self) -> Self {
         match self {
-            ThemeId::Mocha | ThemeId::Blueprint => ThemeId::Blueprint,
-            _ => ThemeId::Porcelain,
+            ThemeId::MochaDark | ThemeId::MochaLight => ThemeId::MochaLight,
+            ThemeId::SafelightDark | ThemeId::SafelightLight => ThemeId::SafelightLight,
+            ThemeId::BlueprintDark | ThemeId::BlueprintLight => ThemeId::BlueprintLight,
+            ThemeId::GraphiteDark | ThemeId::GraphiteLight => ThemeId::GraphiteLight,
+            ThemeId::NebulaDark | ThemeId::NebulaLight => ThemeId::NebulaLight,
         }
+    }
+
+    /// Ids persisted before tone became a suffix. `porcelain` is the merge:
+    /// Graphite and Porcelain were one theme under two names, so Porcelain's
+    /// palette lives on as Graphite's light tone. Mirrors `RENAMED_THEMES`
+    /// in ui/theme.ts.
+    fn from_renamed(value: &str) -> Option<Self> {
+        Some(match value {
+            "mocha" => ThemeId::MochaDark,
+            "safelight" => ThemeId::SafelightDark,
+            "blueprint" => ThemeId::BlueprintLight,
+            "graphite" => ThemeId::GraphiteDark,
+            "porcelain" => ThemeId::GraphiteLight,
+            "nebula" => ThemeId::NebulaDark,
+            _ => return None,
+        })
     }
 }
 
-/// The pre-redesign contract stored `theme: system|dark|light` beside
-/// `themeFamily: safelight|mold`. Map that pair onto a named theme plus the
-/// match-system flag. A theme that already parses as a `ThemeId` wins; anything
-/// unrecognized lands on the default without touching the flag.
+/// Two generations precede the current shape: `theme: system|dark|light`
+/// beside `themeFamily: safelight|mold`, and then the six single-word ids.
+/// Map either onto a current `ThemeId` plus the match-system flag. A theme
+/// that already parses wins; anything unrecognized lands on the default
+/// without touching the flag.
 fn migrate_theme(theme: Option<&str>, family: Option<&str>) -> (ThemeId, Option<bool>) {
     if let Some(id) = theme.and_then(ThemeId::parse) {
         return (id, None);
     }
+    if let Some(id) = theme.and_then(ThemeId::from_renamed) {
+        return (id, None);
+    }
     let dark = match family {
-        Some("mold") => ThemeId::Mocha,
-        _ => ThemeId::Safelight,
+        Some("mold") => ThemeId::MochaDark,
+        _ => ThemeId::SafelightDark,
     };
     match theme {
         Some("light") => (dark.light_partner(), Some(false)),
@@ -554,7 +582,7 @@ mod tests {
             engine_env: [("MOLD_VAE_TILED".to_string(), "force".to_string())]
                 .into_iter()
                 .collect(),
-            theme: ThemeId::Blueprint,
+            theme: ThemeId::BlueprintLight,
             match_system: true,
             notifications: false,
             dock_badge: true,
@@ -733,7 +761,7 @@ mod tests {
         let loaded = load(&path);
         assert!(loaded.notifications);
         assert!(loaded.dock_badge);
-        assert_eq!(loaded.theme, ThemeId::Safelight);
+        assert_eq!(loaded.theme, ThemeId::SafelightDark);
         assert!(!loaded.match_system);
         assert!(loaded.engine_env.is_empty());
         assert!(!loaded.runpod_include_hf_token);
@@ -747,7 +775,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(&path_in(&dir)), AppSettings::default());
         assert_eq!(AppSettings::default().mode, ConnectionMode::Local);
-        assert_eq!(AppSettings::default().theme, ThemeId::Mocha);
+        assert_eq!(AppSettings::default().theme, ThemeId::MochaDark);
         assert!(!AppSettings::default().match_system);
         assert_eq!(AppSettings::default().update_channel, UpdateChannel::Stable);
     }
@@ -811,7 +839,7 @@ mod tests {
             "only the unreadable key defaults"
         );
         assert_eq!(loaded.update_channel, UpdateChannel::Nightly);
-        assert_eq!(loaded.theme, ThemeId::Blueprint);
+        assert_eq!(loaded.theme, ThemeId::BlueprintLight);
         assert!(loaded.match_system);
         assert_eq!(loaded.ui_scale_percent, 120);
         assert_eq!(loaded.saved_hosts.len(), 1);
@@ -919,7 +947,7 @@ mod tests {
         assert_eq!(loaded.mode, ConnectionMode::Local);
         assert_eq!(loaded.update_channel, UpdateChannel::Stable);
         assert_eq!(loaded.ui_scale_percent, 100);
-        assert_eq!(loaded.theme, ThemeId::Blueprint);
+        assert_eq!(loaded.theme, ThemeId::BlueprintLight);
         assert!(!loaded.dock_badge);
         assert!(
             loaded.notifications,
@@ -963,7 +991,7 @@ mod tests {
         std::fs::write(&path, r#"{"mode":"local","futureField":42}"#).unwrap();
         // A file with no theme key predates the preference: a Safelight install.
         let expected = AppSettings {
-            theme: ThemeId::Safelight,
+            theme: ThemeId::SafelightDark,
             ..AppSettings::default()
         };
         assert_eq!(load(&path), expected);
@@ -972,14 +1000,15 @@ mod tests {
     #[test]
     fn legacy_theme_pair_migrates_to_a_named_theme() {
         // (appearance, family) -> (theme, matchSystem), the same table as
-        // ui/theme.ts migrateLegacyTheme.
+        // ui/theme.ts migrateLegacyTheme. A light appearance now lands on the
+        // family's OWN light tone rather than a different theme.
         let cases = [
-            ("dark", "safelight", ThemeId::Safelight, false),
-            ("light", "safelight", ThemeId::Porcelain, false),
-            ("system", "safelight", ThemeId::Safelight, true),
-            ("dark", "mold", ThemeId::Mocha, false),
-            ("light", "mold", ThemeId::Blueprint, false),
-            ("system", "mold", ThemeId::Mocha, true),
+            ("dark", "safelight", ThemeId::SafelightDark, false),
+            ("light", "safelight", ThemeId::SafelightLight, false),
+            ("system", "safelight", ThemeId::SafelightDark, true),
+            ("dark", "mold", ThemeId::MochaDark, false),
+            ("light", "mold", ThemeId::MochaLight, false),
+            ("system", "mold", ThemeId::MochaDark, true),
         ];
         for (theme, family, expected, match_system) in cases {
             let dir = tempfile::tempdir().unwrap();
@@ -1007,7 +1036,8 @@ mod tests {
         )
         .unwrap();
         let loaded = load(&path);
-        assert_eq!(loaded.theme, ThemeId::Blueprint);
+        // The Mold family's light appearance is Mocha's own light tone.
+        assert_eq!(loaded.theme, ThemeId::MochaLight);
         assert_eq!(loaded.update_channel, UpdateChannel::Nightly);
         assert_eq!(loaded.nav_rail_width, Some(240));
         assert_eq!(
@@ -1024,6 +1054,52 @@ mod tests {
     }
 
     #[test]
+    fn pre_tone_theme_ids_migrate_including_the_porcelain_merge() {
+        // The same table as RENAMED_THEMES in ui/theme.ts. Porcelain retires
+        // as a NAME: its palette is Graphite's light tone.
+        let cases = [
+            ("mocha", ThemeId::MochaDark),
+            ("safelight", ThemeId::SafelightDark),
+            ("blueprint", ThemeId::BlueprintLight),
+            ("graphite", ThemeId::GraphiteDark),
+            ("porcelain", ThemeId::GraphiteLight),
+            ("nebula", ThemeId::NebulaDark),
+        ];
+        for (saved, expected) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = path_in(&dir);
+            // A sibling field proves the whole document survives the rewrite:
+            // an unparseable theme must never cost the user their machines.
+            std::fs::write(
+                &path,
+                format!(r#"{{"theme":"{saved}","connectedHostIds":["hal9000-7680"]}}"#),
+            )
+            .unwrap();
+            let loaded = load(&path);
+            assert_eq!(loaded.theme, expected, "{saved}");
+            assert!(!loaded.match_system, "{saved}");
+            assert_eq!(loaded.connected_host_ids, vec!["hal9000-7680"], "{saved}");
+        }
+    }
+
+    #[test]
+    fn a_light_pick_is_its_own_family_in_daylight() {
+        // The regression this contract exists for: every partner keeps the
+        // family and only moves the tone.
+        for (pick, expected) in [
+            (ThemeId::MochaDark, ThemeId::MochaLight),
+            (ThemeId::SafelightDark, ThemeId::SafelightLight),
+            (ThemeId::BlueprintDark, ThemeId::BlueprintLight),
+            (ThemeId::GraphiteDark, ThemeId::GraphiteLight),
+            (ThemeId::NebulaDark, ThemeId::NebulaLight),
+        ] {
+            assert_eq!(pick.light_partner(), expected, "{pick:?}");
+            // Idempotent: a light pick is already its own light partner.
+            assert_eq!(expected.light_partner(), expected, "{expected:?}");
+        }
+    }
+
+    #[test]
     fn unknown_theme_falls_back_to_the_legacy_family_without_discarding_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir);
@@ -1033,7 +1109,7 @@ mod tests {
         )
         .unwrap();
         let loaded = load(&path);
-        assert_eq!(loaded.theme, ThemeId::Safelight);
+        assert_eq!(loaded.theme, ThemeId::SafelightDark);
         assert_eq!(loaded.ui_scale_percent, 120);
     }
 
@@ -1041,9 +1117,9 @@ mod tests {
     fn named_theme_round_trips_and_keeps_an_explicit_match_system() {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir);
-        std::fs::write(&path, r#"{"theme":"nebula","matchSystem":true}"#).unwrap();
+        std::fs::write(&path, r#"{"theme":"nebula-dark","matchSystem":true}"#).unwrap();
         let loaded = load(&path);
-        assert_eq!(loaded.theme, ThemeId::Nebula);
+        assert_eq!(loaded.theme, ThemeId::NebulaDark);
         assert!(loaded.match_system);
     }
 

@@ -2,10 +2,17 @@
  * Mold Studio — design tokens. THE single source for every GUI surface
  * (desktop, web, iPhone/Android). See docs/design/README.md §03.
  *
- * Six themes, selected by ONE root attribute: `data-theme="<id>"`, where the
- * id is a ThemeId from ui/theme.ts (mocha · safelight · blueprint · graphite ·
- * porcelain · nebula). "Match system" is resolved in JS (ui/theme.ts pairs each
- * theme with a light/dark partner), so the ROOT never carries more than one id.
+ * FIVE families, each in TWO tones, selected by ONE root attribute:
+ * `data-theme="<id>"`, where the id is a ThemeId from ui/theme.ts and is always
+ * `<family>-<tone>` (mocha · safelight · blueprint · graphite · nebula, each
+ * `-dark` and `-light`). A theme's identity is its typography, its radii, its
+ * density and its accent hue; those are the same in both of its tones, and only
+ * the colour plane flips. That is why "Match system" can never take the chosen
+ * theme away: the partner of a theme is the same theme in the other tone, which
+ * ui/theme.ts derives from the suffix rather than tabulating by hand.
+ *
+ * "Match system" is still resolved in JS, so the ROOT never carries more than
+ * one id, and there is no `prefers-color-scheme` query in this file.
  *
  * Each map is also selectable on a nested element, so a subtree can paint in a
  * theme the app is not wearing. That exists for exactly one job: the Look
@@ -26,8 +33,8 @@
  * a seven-step type scale, two leadings, a theme-scoped radius scale, the ink
  * for text on an accent fill, and the control-boundary stroke. Every block
  * declares every key — a partial map would inherit stale values from the
- * default. No component hard-codes a hex, a font, or a radius; a new theme is
- * added by extending this file and ui/theme.ts only.
+ * default. No component hard-codes a hex, a font, or a radius; a tone is added
+ * by extending this file and ui/theme.ts only.
  */
 
 :root {
@@ -75,7 +82,9 @@
   --mold-accent-tint: color-mix(in srgb, var(--mold-blue) 13%, transparent);
   --mold-scrim: color-mix(in srgb, var(--mold-bg-crust) 72%, transparent);
 
-  /* ── Mocha (default) · Dark · the original ─────────────────────── */
+  /* ── Mocha · Dark — the default map, so a document with no
+     data-theme still paints. Byte-identical to the named block below,
+     which tokens.contrast.test.ts pins. ──────────────────────────── */
   --mold-bg: #1e1e2e;
   --mold-bg-deep: #181825;
   --mold-bg-crust: #11111b;
@@ -118,8 +127,9 @@
   color-scheme: dark;
 }
 
-:root[data-theme="mocha"],
-[data-theme="mocha"] {
+/* ── Mocha · Dark · the original ──────────────────────────────────────────── */
+:root[data-theme="mocha-dark"],
+[data-theme="mocha-dark"] {
   --mold-bg: #1e1e2e;
   --mold-bg-deep: #181825;
   --mold-bg-crust: #11111b;
@@ -162,9 +172,54 @@
   color-scheme: dark;
 }
 
-/* ── Safelight · Dark · the darkroom family the app shipped with ───── */
-:root[data-theme="safelight"],
-[data-theme="safelight"] {
+/* ── Mocha · Light · Catppuccin Latte, the flavour's own light half ───────── */
+:root[data-theme="mocha-light"],
+[data-theme="mocha-light"] {
+  --mold-bg: #eff1f5;
+  --mold-bg-deep: #e6e9ef;
+  --mold-bg-crust: #dce0e8;
+  --mold-surface: #ffffff;
+  --mold-surface-2: #ccd0da;
+  --mold-surface-3: #bcc0cc;
+  --mold-text: #3c3f57;
+  --mold-text-2: #4c4f69;
+  --mold-text-dim: #585b71;
+  --mold-text-faint: #9ca0b0;
+  --mold-border: #d2d7e1;
+  --mold-border-focus: #1a5ac4;
+  --mold-border-control: color-mix(in srgb, var(--mold-text) 60%, transparent);
+  --mold-blue: #1a5ac4;
+  --mold-on-accent: var(--mold-surface);
+  --mold-success: #0d7a4e;
+  --mold-warning: #8a5200;
+  --mold-error: #c02b34;
+  --mold-star: #8a5200;
+  --mold-sapphire: #0e7490;
+  --mold-mauve: #7c3fbf;
+  --mold-teal: #0f766e;
+  --mold-lavender: #5257c4;
+  --mold-font-sans:
+    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mold-font-mono:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mold-fs-micro: 0.6875rem;
+  --mold-fs-xs: 0.75rem;
+  --mold-fs-sm: 0.8125rem;
+  --mold-fs-base: 0.875rem;
+  --mold-fs-md: 1rem;
+  --mold-fs-lg: 1.25rem;
+  --mold-fs-xl: 1.75rem;
+  --mold-lh-snug: 1.3;
+  --mold-lh-body: 1.5;
+  --mold-radius-1: 2px;
+  --mold-radius-2: 4px;
+  --mold-radius-3: 6px;
+  color-scheme: light;
+}
+
+/* ── Safelight · Dark · the darkroom family the app shipped with ──────────── */
+:root[data-theme="safelight-dark"],
+[data-theme="safelight-dark"] {
   --mold-bg: #241c15;
   --mold-bg-deep: #171210;
   --mold-bg-crust: #0a0805;
@@ -205,9 +260,95 @@
   color-scheme: dark;
 }
 
-/* ── Blueprint · Light · drafting table ────────────────────────────── */
-:root[data-theme="blueprint"],
-[data-theme="blueprint"] {
+/* ── Safelight · Light · the darkroom with the lights on ──────────────────── */
+:root[data-theme="safelight-light"],
+[data-theme="safelight-light"] {
+  --mold-bg: #faf5ec;
+  --mold-bg-deep: #f2e9db;
+  --mold-bg-crust: #e6dac7;
+  --mold-surface: #fffdf8;
+  --mold-surface-2: #eee2ce;
+  --mold-surface-3: #ddcbb0;
+  --mold-text: #2a2118;
+  --mold-text-2: #544434;
+  --mold-text-dim: #6f5b46;
+  --mold-text-faint: #ab9b85;
+  --mold-border: #e3d7c4;
+  --mold-border-focus: #9a4f04;
+  --mold-border-control: color-mix(in srgb, var(--mold-text) 52%, transparent);
+  --mold-blue: #9a4f04;
+  --mold-on-accent: var(--mold-surface);
+  --mold-success: #166b43;
+  --mold-warning: #8a5200;
+  --mold-error: #b23127;
+  --mold-star: #8a5200;
+  --mold-sapphire: #2b6382;
+  --mold-mauve: #8f3a63;
+  --mold-teal: #0f6f6a;
+  --mold-lavender: #4f5aa8;
+  --mold-font-sans: "Schibsted Grotesk", system-ui, sans-serif;
+  --mold-font-mono: "Martian Mono", ui-monospace, monospace;
+  --mold-fs-micro: 0.625rem;
+  --mold-fs-xs: 0.6875rem;
+  --mold-fs-sm: 0.8125rem;
+  --mold-fs-base: 0.875rem;
+  --mold-fs-md: 1rem;
+  --mold-fs-lg: 1.25rem;
+  --mold-fs-xl: 1.75rem;
+  --mold-lh-snug: 1.3;
+  --mold-lh-body: 1.5;
+  --mold-radius-1: 6px;
+  --mold-radius-2: 9px;
+  --mold-radius-3: 16px;
+  color-scheme: light;
+}
+
+/* ── Blueprint · Dark · cyanotype ─────────────────────────────────────────── */
+:root[data-theme="blueprint-dark"],
+[data-theme="blueprint-dark"] {
+  --mold-bg: #101a2b;
+  --mold-bg-deep: #0b1320;
+  --mold-bg-crust: #070d17;
+  --mold-surface: #17253a;
+  --mold-surface-2: #20314a;
+  --mold-surface-3: #2c405c;
+  --mold-text: #e6eefb;
+  --mold-text-2: #bccbe3;
+  --mold-text-dim: #93a5c2;
+  --mold-text-faint: #5b6d8c;
+  --mold-border: #25334a;
+  --mold-border-focus: #6ea8ff;
+  --mold-border-control: color-mix(in srgb, var(--mold-text) 45%, transparent);
+  --mold-blue: #6ea8ff;
+  --mold-on-accent: var(--mold-bg-deep);
+  --mold-success: #5ecf9a;
+  --mold-warning: #e8c34a;
+  --mold-error: #ff7a85;
+  --mold-star: #e8c34a;
+  --mold-sapphire: #57c7e8;
+  --mold-mauve: #b494f5;
+  --mold-teal: #4fc7bb;
+  --mold-lavender: #9ab0ff;
+  --mold-font-sans: "Archivo", system-ui, sans-serif;
+  --mold-font-mono: "Azeret Mono", ui-monospace, monospace;
+  --mold-fs-micro: 0.65625rem;
+  --mold-fs-xs: 0.71875rem;
+  --mold-fs-sm: 0.78125rem;
+  --mold-fs-base: 0.84375rem;
+  --mold-fs-md: 0.96875rem;
+  --mold-fs-lg: 1.1875rem;
+  --mold-fs-xl: 1.6875rem;
+  --mold-lh-snug: 1.25;
+  --mold-lh-body: 1.45;
+  --mold-radius-1: 2px;
+  --mold-radius-2: 4px;
+  --mold-radius-3: 6px;
+  color-scheme: dark;
+}
+
+/* ── Blueprint · Light · drafting table ───────────────────────────────────── */
+:root[data-theme="blueprint-light"],
+[data-theme="blueprint-light"] {
   --mold-bg: #f4f7fb;
   --mold-bg-deep: #e9eff7;
   --mold-bg-crust: #dde6f2;
@@ -248,9 +389,9 @@
   color-scheme: light;
 }
 
-/* ── Graphite · Dark · neutral, warm signal ────────────────────────── */
-:root[data-theme="graphite"],
-[data-theme="graphite"] {
+/* ── Graphite · Dark · neutral, warm signal ───────────────────────────────── */
+:root[data-theme="graphite-dark"],
+[data-theme="graphite-dark"] {
   --mold-bg: #1b1c1e;
   --mold-bg-deep: #141517;
   --mold-bg-crust: #0e0f10;
@@ -291,9 +432,9 @@
   color-scheme: dark;
 }
 
-/* ── Porcelain · Light · high-key, compact ─────────────────────────── */
-:root[data-theme="porcelain"],
-[data-theme="porcelain"] {
+/* ── Graphite · Light · high-key (the palette that shipped as Porcelain) ──── */
+:root[data-theme="graphite-light"],
+[data-theme="graphite-light"] {
   --mold-bg: #fbfbfd;
   --mold-bg-deep: #f3f3f6;
   --mold-bg-crust: #e9e9ee;
@@ -317,16 +458,16 @@
   --mold-mauve: #7a4fb0;
   --mold-teal: #0f766e;
   --mold-lavender: #5b62c7;
-  --mold-font-sans: "Manrope", system-ui, sans-serif;
+  --mold-font-sans: "IBM Plex Sans", system-ui, sans-serif;
   --mold-font-mono: "IBM Plex Mono", ui-monospace, monospace;
-  --mold-fs-micro: 0.65625rem;
-  --mold-fs-xs: 0.71875rem;
-  --mold-fs-sm: 0.78125rem;
-  --mold-fs-base: 0.84375rem;
-  --mold-fs-md: 0.96875rem;
-  --mold-fs-lg: 1.1875rem;
-  --mold-fs-xl: 1.6875rem;
-  --mold-lh-snug: 1.25;
+  --mold-fs-micro: 0.6875rem;
+  --mold-fs-xs: 0.75rem;
+  --mold-fs-sm: 0.8125rem;
+  --mold-fs-base: 0.875rem;
+  --mold-fs-md: 1rem;
+  --mold-fs-lg: 1.25rem;
+  --mold-fs-xl: 1.75rem;
+  --mold-lh-snug: 1.3;
   --mold-lh-body: 1.45;
   --mold-radius-1: 2px;
   --mold-radius-2: 4px;
@@ -334,9 +475,9 @@
   color-scheme: light;
 }
 
-/* ── Nebula · Dark · oxblood & crimson ─────────────────────────────── */
-:root[data-theme="nebula"],
-[data-theme="nebula"] {
+/* ── Nebula · Dark · oxblood & crimson ────────────────────────────────────── */
+:root[data-theme="nebula-dark"],
+[data-theme="nebula-dark"] {
   --mold-bg: #1b0c12;
   --mold-bg-deep: #11090d;
   --mold-bg-crust: #090407;
@@ -360,8 +501,6 @@
   --mold-mauve: #ff6c76;
   --mold-teal: #e0a090;
   --mold-lavender: #ff6c76;
-  /* Georgia is a system face (not OFL, so never bundled); Linux falls back to
-     Liberation Serif. */
   --mold-font-sans: Georgia, "Times New Roman", "Liberation Serif", serif;
   --mold-font-mono: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
   --mold-fs-micro: 0.6875rem;
@@ -377,6 +516,49 @@
   --mold-radius-2: 2px;
   --mold-radius-3: 6px;
   color-scheme: dark;
+}
+
+/* ── Nebula · Light · bone paper, oxblood ink ─────────────────────────────── */
+:root[data-theme="nebula-light"],
+[data-theme="nebula-light"] {
+  --mold-bg: #fbf6f2;
+  --mold-bg-deep: #f3ebe5;
+  --mold-bg-crust: #e8ddd5;
+  --mold-surface: #ffffff;
+  --mold-surface-2: #ecdfd8;
+  --mold-surface-3: #dcc9c0;
+  --mold-text: #2a0f16;
+  --mold-text-2: #5a3238;
+  --mold-text-dim: #78555a;
+  --mold-text-faint: #b09a9d;
+  --mold-border: #e2d3ca;
+  --mold-border-focus: #b3122f;
+  --mold-border-control: color-mix(in srgb, var(--mold-text) 52%, transparent);
+  --mold-blue: #b3122f;
+  --mold-on-accent: var(--mold-surface);
+  --mold-success: #1c7a52;
+  --mold-warning: #8a5200;
+  --mold-error: #c0392b;
+  --mold-star: #8a5200;
+  --mold-sapphire: #2f5f9e;
+  --mold-mauve: #8a3fa0;
+  --mold-teal: #0f6f74;
+  --mold-lavender: #5b52b8;
+  --mold-font-sans: Georgia, "Times New Roman", "Liberation Serif", serif;
+  --mold-font-mono: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
+  --mold-fs-micro: 0.6875rem;
+  --mold-fs-xs: 0.75rem;
+  --mold-fs-sm: 0.84375rem;
+  --mold-fs-base: 0.90625rem;
+  --mold-fs-md: 1.0625rem;
+  --mold-fs-lg: 1.3125rem;
+  --mold-fs-xl: 1.875rem;
+  --mold-lh-snug: 1.35;
+  --mold-lh-body: 1.6;
+  --mold-radius-1: 0px;
+  --mold-radius-2: 2px;
+  --mold-radius-3: 6px;
+  color-scheme: light;
 }
 
 /* Under reduced motion every duration collapses to near-zero; the shimmer

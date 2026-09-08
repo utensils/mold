@@ -15,18 +15,38 @@ beforeEach(() => {
 describe("web theme defaults", () => {
   it("defaults fresh visitors to Safelight until the web redesign lands", async () => {
     const { theme, matchSystem } = await importTheme();
-    expect(theme.value).toBe("safelight");
+    expect(theme.value).toBe("safelight-dark");
     expect(matchSystem.value).toBe(false);
   });
 
   it("preserves a valid saved theme and its match-system flag", async () => {
     localStorage.setItem(
       "mold.web.theme.v1",
-      JSON.stringify({ theme: "nebula", matchSystem: true }),
+      JSON.stringify({ theme: "nebula-dark", matchSystem: true }),
     );
     const { theme, matchSystem } = await importTheme();
-    expect(theme.value).toBe("nebula");
+    expect(theme.value).toBe("nebula-dark");
     expect(matchSystem.value).toBe(true);
+  });
+
+  it("migrates the pre-tone ids, including the Porcelain merge", async () => {
+    // Porcelain and Graphite were one theme under two names; the palette
+    // survives as Graphite's light tone.
+    for (const [saved, expected] of Object.entries({
+      mocha: "mocha-dark",
+      safelight: "safelight-dark",
+      blueprint: "blueprint-light",
+      graphite: "graphite-dark",
+      porcelain: "graphite-light",
+      nebula: "nebula-dark",
+    })) {
+      localStorage.setItem(
+        "mold.web.theme.v1",
+        JSON.stringify({ theme: saved }),
+      );
+      const { theme } = await importTheme();
+      expect(theme.value, saved).toBe(expected);
+    }
   });
 
   it("migrates the pre-redesign family + appearance pair", async () => {
@@ -35,7 +55,7 @@ describe("web theme defaults", () => {
       JSON.stringify({ family: "mold", theme: "light" }),
     );
     const { theme, matchSystem } = await importTheme();
-    expect(theme.value).toBe("blueprint");
+    expect(theme.value).toBe("mocha-light");
     expect(matchSystem.value).toBe(false);
   });
 
@@ -45,7 +65,7 @@ describe("web theme defaults", () => {
       JSON.stringify({ family: "safelight", theme: "system" }),
     );
     const { theme, matchSystem } = await importTheme();
-    expect(theme.value).toBe("safelight");
+    expect(theme.value).toBe("safelight-dark");
     expect(matchSystem.value).toBe(true);
   });
 
@@ -55,19 +75,19 @@ describe("web theme defaults", () => {
       JSON.stringify({ family: "vaporwave", theme: "sepia" }),
     );
     const { theme } = await importTheme();
-    expect(theme.value).toBe("safelight");
+    expect(theme.value).toBe("safelight-dark");
   });
 
   it("persists changes in the new shape and stamps one data-theme", async () => {
     const { theme, installTheme } = await importTheme();
     installTheme();
-    theme.value = "graphite";
+    theme.value = "graphite-dark";
     await Promise.resolve();
-    expect(document.documentElement.dataset.theme).toBe("graphite");
+    expect(document.documentElement.dataset.theme).toBe("graphite-dark");
     expect(
       JSON.parse(localStorage.getItem("mold.web.theme.v1") ?? "{}"),
     ).toEqual({
-      theme: "graphite",
+      theme: "graphite-dark",
       matchSystem: false,
     });
   });

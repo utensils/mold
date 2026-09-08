@@ -450,8 +450,9 @@ mod tests {
     fn with_theme_is_chainable() {
         use crate::ui::theme::ThemePreset;
         let params = crate::app::GenerateParams::from_config(&mold_core::Config::default());
-        let session = TuiSession::from_params("p", "n", &params).with_theme(ThemePreset::Dracula);
-        assert_eq!(session.theme.as_deref(), Some("dracula"));
+        let session =
+            TuiSession::from_params("p", "n", &params).with_theme(ThemePreset::NebulaLight);
+        assert_eq!(session.theme.as_deref(), Some("nebula-light"));
     }
 
     #[test]

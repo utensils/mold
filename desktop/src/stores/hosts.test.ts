@@ -169,7 +169,7 @@ function settings(overrides: Record<string, unknown> = {}) {
     remoteApiKey: null,
     lastRoute: null,
     engineEnv: {},
-    theme: "mocha",
+    theme: "mocha-dark",
     matchSystem: false,
     notifications: true,
     dockBadge: true,
@@ -2652,13 +2652,13 @@ describe("hosts store", () => {
     // Reconcile is parked on the per-host secret round-trip...
     await vi.waitFor(() => expect(secretGet).toHaveBeenCalled());
     // ...while a different writer (a theme toggle) lands in between.
-    await appSettingsSet({ ...(await appSettingsGet()), theme: "nebula" });
+    await appSettingsSet({ ...(await appSettingsGet()), theme: "nebula-dark" });
     releaseSecret();
     await reconcile;
     const final = (await appSettingsGet()) as ReturnType<typeof settings>;
     // The merge landed AND the interleaved write survived.
     expect(final.savedHosts.map((h: SavedHost) => h.id)).toEqual([hal.id]);
-    expect(final.theme).toBe("nebula");
+    expect(final.theme).toBe("nebula-dark");
   });
 
   it("serializes this store's settings writers so neither clobbers the other", async () => {

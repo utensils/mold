@@ -18,7 +18,7 @@ const tokens = readFileSync("../ui/tokens.css", "utf8");
 describe("mobile theme swatches", () => {
   it("copy each theme's chrome, content, telemetry, and accent hexes from ui/tokens.css", () => {
     const themes = [...tokens.matchAll(/\[data-theme="([\w-]+)"\] \{([^}]*)\}/g)];
-    expect(themes).toHaveLength(6);
+    expect(themes).toHaveLength(10);
     for (const [, id, body] of themes) {
       const token = (key: string) => body!.match(new RegExp(`--mold-${key}: (#[0-9a-f]{6});`))?.[1];
       const swatch = css.match(
@@ -37,12 +37,14 @@ describe("mobile theme swatches", () => {
 
 describe("mobile theme bootstrap", () => {
   it("paints fresh installs as Safelight before Vue mounts", () => {
-    expect(mobileHtml).toMatch(/<html[^>]*data-theme="safelight"/);
-    expect(mobileHtml).toContain('var theme = "safelight"');
+    expect(mobileHtml).toMatch(/<html[^>]*data-theme="safelight-dark"/);
+    expect(mobileHtml).toContain('var theme = "safelight-dark"');
     expect(mobileHtml).toContain('localStorage.getItem("mold.mobile.settings.v1")');
-    // The pre-redesign family + appearance pair still migrates before paint,
-    // and Match phone resolves to the partner theme before the first frame.
-    expect(mobileHtml).toContain('parsed.themeFamily === "mold"');
+    // Both older shapes still migrate before paint — the family + appearance
+    // pair, and the pre-tone ids — and the tone resolves in the same frame.
+    expect(mobileHtml).toContain("parsed.themeFamily");
+    expect(mobileHtml).toContain('family === "mold"');
+    expect(mobileHtml).toContain('porcelain: "graphite-light"');
     expect(mobileHtml).toContain('matchMedia("(prefers-color-scheme: light)")');
   });
 });
@@ -65,7 +67,7 @@ describe("mobile gallery viewer", () => {
     expect(sheet).toContain("background: var(--mold-bg-deep)");
     expect(sheet).toContain("color: var(--mold-text)");
     const themes = [...tokens.matchAll(/\[data-theme="([\w-]+)"\] \{([^}]*)\}/g)];
-    expect(themes).toHaveLength(6);
+    expect(themes).toHaveLength(10);
     const luminance = (hex: string) => {
       const channels = [1, 3, 5].map((offset) => {
         const value = parseInt(hex.slice(offset, offset + 2), 16) / 255;

@@ -21,7 +21,7 @@ interface PersistedTheme {
   matchSystem: boolean;
 }
 
-const DEFAULT: PersistedTheme = { theme: "safelight", matchSystem: false };
+const DEFAULT: PersistedTheme = { theme: "safelight-dark", matchSystem: false };
 
 function load(): PersistedTheme {
   try {

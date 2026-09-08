@@ -159,10 +159,18 @@ describe("CommandPalette command registry", () => {
     const texts = options.map((o) => o.text());
     expect(texts.some((t) => t.includes("Theme: Mocha"))).toBe(true);
     expect(texts.some((t) => t.includes("Theme: Safelight"))).toBe(true);
-    expect(texts.some((t) => t.includes("Match the system appearance"))).toBe(true);
+    // Tone is its own set of rows, and the one already in force is omitted.
+    expect(texts.some((t) => t.includes("Light or dark: match this Mac"))).toBe(true);
+    expect(texts.some((t) => t.includes("Light or dark: always light"))).toBe(true);
+    expect(texts.some((t) => t.includes("Light or dark: always dark"))).toBe(false);
+    // No theme row names a tone.
+    for (const text of texts.filter((t) => t.startsWith("Theme: "))) {
+      expect(text.split("\n")[0], text).not.toMatch(/\b(dark|light)\b/i);
+    }
 
+    // A theme row moves the theme and keeps the tone in force (dark here).
     await options.find((o) => o.text().includes("Theme: Safelight"))!.trigger("click");
-    expect(update).toHaveBeenCalledWith({ theme: "safelight" });
+    expect(update).toHaveBeenCalledWith({ theme: "safelight-dark", matchSystem: false });
     wrapper.unmount();
   });
 

@@ -22,7 +22,7 @@ images, Write more for me, Machines, Styles & disk, Style licences, My images &
 trash, Saving pictures & clips, Phone pairing, Speed & memory, Accounts &
 tokens, Profiles, Advanced, Updates & about. Search narrows the nav and the page
 together and `?section=` jumps (`about` folds into `updates`). Themes are the
-same contract every surface reads — `ThemeId`, `THEME_META`, `THEME_PAIR`,
+same contract every surface reads — `ThemeId`, `THEME_FAMILY_META`, `toneChoice`,
 `migrateLegacyTheme`, `applyTheme` in `ui/theme.ts` — with the Rust
 `AppSettings` persisting `{ theme, match_system }`.
 
@@ -355,7 +355,7 @@ desktop/
 ├── index.html  vite.config.ts  tsconfig.json  vitest.config.ts
 ├── src/
 │   ├── main.ts  App.vue  router.ts
-│   ├── styles/tokens.css  styles/base.css   # the Tailwind layer over ui/tokens.css (six themes, one data-theme)
+│   ├── styles/tokens.css  styles/base.css   # the Tailwind layer over ui/tokens.css (5 themes × 2 tones, one data-theme)
 │   ├── lib/
 │   │   ├── api/client.ts                    # typed fetch wrapper (base URL + X-Api-Key from IPC)
 │   │   ├── api/sse.ts                       # fetch-event-source helpers (POST-SSE, snapshots, reconnect)

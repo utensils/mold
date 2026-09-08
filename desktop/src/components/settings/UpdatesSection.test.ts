@@ -30,7 +30,7 @@ beforeEach(() => {
     remoteApiKey: null,
     lastRoute: null,
     engineEnv: {},
-    theme: "mocha",
+    theme: "mocha-dark",
     matchSystem: false,
     notifications: true,
     dockBadge: true,

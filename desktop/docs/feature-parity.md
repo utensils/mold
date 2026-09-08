@@ -387,7 +387,7 @@ the `POST /api/chain-jobs` body, so multi-host routing is unaffected.
 fields — `theme` (one of the six Mold Studio theme ids), `matchSystem`,
 `autoSavePhotos`, and `autoTagTitle` — defaulting fresh installs to
 Safelight with Photos auto-save and title auto-tagging both on (a saved
-`theme`/`themeFamily` pair from before the six themes migrates), while
+`theme`/`themeFamily` pair, and the pre-tone theme ids, both migrate), while
 preserving valid saved choices (`website/guide/iphone.md` is canonical for the
 user-facing defaults).
 `src/lib/theme.ts` is the shared desktop/mobile contract. Mobile

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { THEME_TONE, applyTheme, isThemeId, migrateLegacyTheme, type ThemeId } from "../lib/theme";
+import { applyTheme, isThemeId, migrateLegacyTheme, toneOf, type ThemeId } from "../lib/theme";
 
 /** What UIKit is told: follow the phone, or pin one trait. */
 export type NativeAppearance = "system" | "dark" | "light";
@@ -8,7 +8,7 @@ export const MOBILE_SETTINGS_STORAGE_KEY = "mold.mobile.settings.v1";
 
 export interface MobileSettings {
   theme: ThemeId;
-  /** Follow the phone's appearance: paint `theme` or its light/dark partner. */
+  /** Follow the phone's appearance: paint `theme` in the phone's tone. */
   matchSystem: boolean;
   autoSavePhotos: boolean;
   /** Settings ▸ Library "Tag new prints with their title" — the mirror the
@@ -19,7 +19,7 @@ export interface MobileSettings {
 }
 
 export const DEFAULT_MOBILE_SETTINGS: Readonly<MobileSettings> = {
-  theme: "safelight",
+  theme: "safelight-dark",
   matchSystem: false,
   autoSavePhotos: true,
   autoTagTitle: true,
@@ -139,7 +139,7 @@ export function applyMobileSettings(
 ): void {
   applyTheme(settings.theme, settings.matchSystem);
   void syncMobileNativeAppearance(
-    settings.matchSystem ? "system" : THEME_TONE[settings.theme],
+    settings.matchSystem ? "system" : toneOf(settings.theme),
     nativeInvoke,
   );
 }

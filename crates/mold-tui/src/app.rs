@@ -2306,7 +2306,12 @@ impl SettingsRow {
 /// keyboard at any time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsFocus {
+    /// The theme cards — five names, no tone.
     Appearance,
+    /// The Light / Dark row beneath them. A terminal has no OS appearance to
+    /// follow (the emulator owns the background), so there is no System
+    /// position here; the GUI surfaces carry all three.
+    AppearanceTone,
     #[default]
     Configuration,
 }
@@ -5418,11 +5423,14 @@ impl App {
                 self.generate.focus = self.generate.focus.prev(self.generate.negative_visible());
             }
             Action::FocusNext | Action::FocusPrev if self.active_view == View::Settings => {
-                // Two panes → next and prev are the same flip. Tab is the
-                // deterministic way to leave the Appearance card grid
-                // without moving (and live-applying) the theme selection.
+                // Tab is the deterministic way to leave the Appearance panel
+                // without moving (and live-applying) the theme selection. Its
+                // two rows — the cards and the tone — are one pane to Tab;
+                // Up/Down walk between them.
                 self.settings.focus = match self.settings.focus {
-                    SettingsFocus::Appearance => SettingsFocus::Configuration,
+                    SettingsFocus::Appearance | SettingsFocus::AppearanceTone => {
+                        SettingsFocus::Configuration
+                    }
                     SettingsFocus::Configuration => SettingsFocus::Appearance,
                 };
             }
@@ -8277,24 +8285,30 @@ impl App {
     /// on Configuration and Up is pressed at the first field, focus
     /// returns to Appearance.
     fn settings_navigate(&mut self, delta: i32) {
+        if self.settings.focus == SettingsFocus::AppearanceTone {
+            // Between the cards and the Configuration list.
+            self.settings.focus = if delta > 0 {
+                SettingsFocus::Configuration
+            } else {
+                SettingsFocus::Appearance
+            };
+            return;
+        }
         if self.settings.focus == SettingsFocus::Appearance {
             use crate::ui::theme::ThemePreset;
             let cols = self.settings.appearance_cols.max(1);
-            let idx = ThemePreset::ALL
-                .iter()
-                .position(|p| *p == self.settings.theme_preset)
-                .unwrap_or(0);
+            let light = self.settings.theme_preset.is_light();
+            let idx = self.settings.theme_preset.family_index();
             if delta > 0 {
                 let below = idx + cols;
-                if below < ThemePreset::ALL.len() {
-                    self.apply_theme_preset(ThemePreset::ALL[below]);
+                if below < ThemePreset::FAMILIES.len() {
+                    self.apply_theme_preset(ThemePreset::family_at(below, light));
                 } else {
-                    // Walked off the bottom of the card grid → enter the
-                    // Configuration list.
-                    self.settings.focus = SettingsFocus::Configuration;
+                    // Walked off the bottom of the card grid → the tone row.
+                    self.settings.focus = SettingsFocus::AppearanceTone;
                 }
             } else if idx >= cols {
-                self.apply_theme_preset(ThemePreset::ALL[idx - cols]);
+                self.apply_theme_preset(ThemePreset::family_at(idx - cols, light));
             }
             return;
         }
@@ -8308,9 +8322,10 @@ impl App {
         loop {
             let candidate = next as i32 + delta;
             if candidate < 0 || candidate >= len as i32 {
-                // Walked off the top of the list → hand focus back to Appearance.
+                // Walked off the top of the list → hand focus back to the
+                // Appearance panel, entering at its nearest row.
                 if delta < 0 {
-                    self.settings.focus = SettingsFocus::Appearance;
+                    self.settings.focus = SettingsFocus::AppearanceTone;
                 }
                 break;
             }
@@ -8322,21 +8337,29 @@ impl App {
         }
     }
 
-    /// Cycle the active theme preset by `delta` (wraps around).
+    /// Cycle the active THEME by `delta` (wraps around), keeping the tone.
     fn settings_cycle_theme(&mut self, delta: i32) {
         use crate::ui::theme::ThemePreset;
         let current = self.settings.theme_preset;
-        let len = ThemePreset::ALL.len() as i32;
-        let current_idx = ThemePreset::ALL
-            .iter()
-            .position(|p| *p == current)
-            .unwrap_or(0) as i32;
+        let len = ThemePreset::FAMILIES.len() as i32;
+        let current_idx = current.family_index() as i32;
         let next_idx = ((current_idx + delta).rem_euclid(len)) as usize;
-        self.apply_theme_preset(ThemePreset::ALL[next_idx]);
+        self.apply_theme_preset(ThemePreset::family_at(next_idx, current.is_light()));
+    }
+
+    /// Flip the tone, keeping the theme. The other half of the same rule:
+    /// a theme pick never moves the tone and a tone pick never moves the theme.
+    fn settings_toggle_tone(&mut self) {
+        let current = self.settings.theme_preset;
+        self.apply_theme_preset(current.with_tone(!current.is_light()));
     }
 
     /// Adjust the current settings field by delta (+1 or -1).
     fn settings_increment(&mut self, delta: i32) {
+        if self.settings.focus == SettingsFocus::AppearanceTone {
+            self.settings_toggle_tone();
+            return;
+        }
         if self.settings.focus == SettingsFocus::Appearance {
             self.settings_cycle_theme(delta);
             return;
@@ -12956,7 +12979,7 @@ mod tests {
         app.generate.progress.mark_generation_start();
 
         let before = app.settings.theme_preset;
-        assert_eq!(before, ThemePreset::StudioDark);
+        assert_eq!(before, ThemePreset::MochaDark);
 
         // Right arrow on Appearance cycles the preset. The new palette
         // must apply to `app.theme` immediately so the next render
@@ -13035,17 +13058,21 @@ mod tests {
         use crate::ui::theme::ThemePreset;
         crate::test_env::with_isolated_env(|_home| {
             let mut app = make_settings_test_app();
-            // Starts on the default (Studio Dark).
-            assert_eq!(app.settings.theme_preset, ThemePreset::StudioDark);
-            // Forward cycles to Studio Light and also rebuilds `app.theme`.
+            // Starts on the default (Mocha, dark tone).
+            assert_eq!(app.settings.theme_preset, ThemePreset::MochaDark);
+            // Forward cycles to Mocha's light tone and also rebuilds `app.theme`.
+            // Forward cycles to the next THEME, keeping the dark tone.
             app.settings_cycle_theme(1);
-            assert_eq!(app.settings.theme_preset, ThemePreset::StudioLight);
-            // `app.theme` should now match the Studio Light palette.
-            assert_eq!(app.theme.bg, ThemePreset::StudioLight.build().bg);
-            // Backward from Studio Dark (index 0) wraps to Dracula (last).
-            app.apply_theme_preset(ThemePreset::StudioDark);
+            assert_eq!(app.settings.theme_preset, ThemePreset::SafelightDark);
+            assert_eq!(app.theme.bg, ThemePreset::SafelightDark.build().bg);
+            // Backward from index 0 wraps to the last family, still dark.
+            app.apply_theme_preset(ThemePreset::MochaDark);
             app.settings_cycle_theme(-1);
-            assert_eq!(app.settings.theme_preset, ThemePreset::Dracula);
+            assert_eq!(app.settings.theme_preset, ThemePreset::NebulaDark);
+            // And in the light tone, cycling stays in the light tone.
+            app.apply_theme_preset(ThemePreset::MochaLight);
+            app.settings_cycle_theme(1);
+            assert_eq!(app.settings.theme_preset, ThemePreset::SafelightLight);
         });
     }
 
@@ -13068,17 +13095,18 @@ mod tests {
         let mut app = make_settings_test_app();
         app.settings.focus = SettingsFocus::Appearance;
         app.settings.appearance_cols = 4;
-        // Studio Dark (index 0) → Down walks the grid one row at a time:
-        // 0 → 4 (Mocha) → 8 (Tokyo) → off the bottom → Configuration.
+        // Five THEME cards in a 4-column grid: row 0 is Mocha..Graphite,
+        // row 1 is Nebula. Down then walks to the tone row and on into the
+        // Configuration list.
         app.settings_navigate(1);
-        assert_eq!(app.settings.theme_preset, ThemePreset::Mocha);
+        assert_eq!(app.settings.theme_preset, ThemePreset::NebulaDark);
         assert_eq!(app.settings.focus, SettingsFocus::Appearance);
         app.settings_navigate(1);
-        assert_eq!(app.settings.theme_preset, ThemePreset::Tokyo);
+        assert_eq!(app.settings.focus, SettingsFocus::AppearanceTone);
         app.settings_navigate(1);
         assert_eq!(app.settings.focus, SettingsFocus::Configuration);
         // The selection stays where it was when focus moved on.
-        assert_eq!(app.settings.theme_preset, ThemePreset::Tokyo);
+        assert_eq!(app.settings.theme_preset, ThemePreset::NebulaDark);
     }
 
     #[tokio::test]
@@ -13088,14 +13116,12 @@ mod tests {
         let mut app = make_settings_test_app();
         app.settings.focus = SettingsFocus::Appearance;
         app.settings.appearance_cols = 4;
-        app.apply_theme_preset(ThemePreset::Tokyo); // index 8, row 2
+        app.apply_theme_preset(ThemePreset::NebulaDark); // index 4, row 1
         app.settings_navigate(-1);
-        assert_eq!(app.settings.theme_preset, ThemePreset::Mocha); // index 4
+        assert_eq!(app.settings.theme_preset, ThemePreset::MochaDark); // index 0
+                                                                       // Top row: Up is a no-op — focus and selection both hold.
         app.settings_navigate(-1);
-        assert_eq!(app.settings.theme_preset, ThemePreset::StudioDark); // index 0
-                                                                        // Top row: Up is a no-op — focus and selection both hold.
-        app.settings_navigate(-1);
-        assert_eq!(app.settings.theme_preset, ThemePreset::StudioDark);
+        assert_eq!(app.settings.theme_preset, ThemePreset::MochaDark);
         assert_eq!(app.settings.focus, SettingsFocus::Appearance);
     }
 
@@ -13109,7 +13135,7 @@ mod tests {
         app.settings_navigate(1);
         // Row movement is a selection change → the running theme follows
         // immediately, exactly like Left/Right's linear cycle.
-        let expected = ThemePreset::Mocha.build();
+        let expected = ThemePreset::NebulaDark.build();
         assert_eq!(app.theme.bg, expected.bg);
         assert_eq!(app.theme.accent, expected.accent);
     }
@@ -13130,7 +13156,7 @@ mod tests {
         assert_eq!(app.settings.focus, SettingsFocus::Configuration);
         // Unlike ↓, Tab never touches (or live-applies) the selection.
         assert_eq!(app.settings.theme_preset, before);
-        assert_eq!(app.settings.theme_preset, ThemePreset::StudioDark);
+        assert_eq!(app.settings.theme_preset, ThemePreset::MochaDark);
     }
 
     #[tokio::test]
@@ -13143,7 +13169,7 @@ mod tests {
         app.settings.focus = SettingsFocus::Appearance;
         app.settings.appearance_cols = 0;
         app.settings_navigate(1);
-        assert_eq!(app.settings.theme_preset, ThemePreset::StudioLight);
+        assert_eq!(app.settings.theme_preset, ThemePreset::SafelightDark);
     }
 
     // ── Codex P2: Alt-key bypass from prompt textarea ─────────────
@@ -13735,7 +13761,23 @@ mod tests {
         let before = app.settings.theme_preset;
         app.settings_increment(1);
         assert_ne!(app.settings.theme_preset, before);
-        assert_eq!(app.settings.theme_preset, ThemePreset::StudioLight);
+        assert_eq!(app.settings.theme_preset, ThemePreset::SafelightDark);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_increment_on_the_tone_row_flips_the_tone_and_keeps_the_theme() {
+        use crate::ui::theme::ThemePreset;
+        let mut app = make_settings_test_app();
+        app.apply_theme_preset(ThemePreset::NebulaDark);
+        app.settings.focus = SettingsFocus::AppearanceTone;
+
+        app.settings_increment(1);
+        assert_eq!(app.settings.theme_preset, ThemePreset::NebulaLight);
+        assert_eq!(app.theme.bg, ThemePreset::NebulaLight.build().bg);
+
+        app.settings_increment(-1);
+        assert_eq!(app.settings.theme_preset, ThemePreset::NebulaDark);
     }
 
     #[tokio::test]
@@ -14477,7 +14519,7 @@ mod tests {
         assert!(out.contains(" Appearance "), "{out}");
         assert!(out.contains(" Configuration "), "{out}");
         // …and the theme hint `theme · <slug>` its theme-set flow greps.
-        assert!(out.contains("theme · studio-dark"), "{out}");
+        assert!(out.contains("theme · mocha-dark"), "{out}");
         // The Preferences section header renders at the top of the list.
         assert!(out.contains("Preferences"), "{out}");
         // The render recorded the card-grid columns for 2-D navigation:
@@ -20157,14 +20199,14 @@ mod tests {
         // latest choice on next launch.
         crate::test_env::with_isolated_env(|_home| {
             let mut app = make_settings_test_app();
-            app.apply_theme_preset(crate::ui::theme::ThemePreset::Dracula);
+            app.apply_theme_preset(crate::ui::theme::ThemePreset::NebulaLight);
 
             // Re-read via the public load path — confirms the change
             // actually made it into persistent storage.
             let loaded = crate::session::TuiSession::load();
             assert_eq!(
                 loaded.theme.as_deref(),
-                Some("dracula"),
+                Some("nebula-light"),
                 "apply_theme_preset should have persisted the theme immediately"
             );
         });
@@ -20282,7 +20324,7 @@ mod tests {
                 .unwrap_or_default();
             assert_eq!(
                 resolved,
-                crate::ui::theme::ThemePreset::StudioDark,
+                crate::ui::theme::ThemePreset::MochaDark,
                 "missing session must resolve to Studio Dark"
             );
             assert!(
@@ -20299,15 +20341,15 @@ mod tests {
         // garbage slug — it must fall back to the Studio Dark default.
         assert_eq!(
             crate::ui::theme::ThemePreset::from_slug(""),
-            crate::ui::theme::ThemePreset::StudioDark
+            crate::ui::theme::ThemePreset::MochaDark
         );
         assert_eq!(
             crate::ui::theme::ThemePreset::from_slug("not-a-real-theme"),
-            crate::ui::theme::ThemePreset::StudioDark
+            crate::ui::theme::ThemePreset::MochaDark
         );
         assert_eq!(
             crate::ui::theme::ThemePreset::default(),
-            crate::ui::theme::ThemePreset::StudioDark
+            crate::ui::theme::ThemePreset::MochaDark
         );
     }
 
@@ -20319,15 +20361,15 @@ mod tests {
         // something thinks the preset hasn't changed.
         crate::test_env::with_isolated_env(|_home| {
             let mut app = make_settings_test_app();
-            app.apply_theme_preset(crate::ui::theme::ThemePreset::Dracula);
-            app.apply_theme_preset(crate::ui::theme::ThemePreset::Nord);
-            app.apply_theme_preset(crate::ui::theme::ThemePreset::Gruvbox);
+            app.apply_theme_preset(crate::ui::theme::ThemePreset::NebulaLight);
+            app.apply_theme_preset(crate::ui::theme::ThemePreset::BlueprintDark);
+            app.apply_theme_preset(crate::ui::theme::ThemePreset::SafelightDark);
 
             let loaded = crate::session::TuiSession::load();
             assert_eq!(
                 loaded.theme.as_deref(),
-                Some("gruvbox"),
-                "latest theme (gruvbox) should be the persisted slug"
+                Some("safelight-dark"),
+                "latest theme (safelight-dark) should be the persisted slug"
             );
         });
     }
