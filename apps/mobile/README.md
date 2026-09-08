@@ -766,7 +766,10 @@ universal ARM64/x86_64 debug validation APK. Android 15 and 16 x86_64 emulators
 install that APK and exercise the actual Tauri WebView's destinations, native
 Settings Back dismissal, and live system text scaling. Android 15 also runs
 native credential, discovery, MediaStore, clipboard, content-URI, and
-authenticated-share instrumentation. These checks run for shared-mobile
+authenticated-share instrumentation. An isolated API28 instrumentation package
+also verifies refusal without storage permission and exact public Downloads
+bytes after an OS grant; this does not stand in for permission-dialog callback
+acceptance. These checks run for shared-mobile
 frontend changes as well as Kotlin changes. The app smoke uses Bun's built-in
 WebSocket support and requires a debug APK on an emulator:
 `bun scripts/tests/android-app-smoke.mjs`. Set `ADB`, `ANDROID_SERIAL`, or

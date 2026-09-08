@@ -25,6 +25,7 @@ on:
         "scripts/generate-android-icons.sh",
         "scripts/tests/android-release-assets.sh",
         "scripts/tests/android-app-smoke.mjs",
+        "scripts/tests/android-legacy-downloads.sh",
         "flake.nix",
         ".github/workflows/android.yml",
       ]
@@ -51,6 +52,7 @@ on:
         "scripts/generate-android-icons.sh",
         "scripts/tests/android-release-assets.sh",
         "scripts/tests/android-app-smoke.mjs",
+        "scripts/tests/android-legacy-downloads.sh",
         "flake.nix",
         ".github/workflows/android.yml",
       ]
@@ -108,6 +110,7 @@ jobs:
               - 'scripts/generate-android-icons.sh'
               - 'scripts/tests/android-release-assets.sh'
               - 'scripts/tests/android-app-smoke.mjs'
+              - 'scripts/tests/android-legacy-downloads.sh'
               - 'flake.nix'
               - '.github/workflows/android.yml'
 
@@ -190,6 +193,14 @@ jobs:
           script: |
             adb install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
             MOLD_ANDROID_EVIDENCE=/tmp/mold-android-36 bun scripts/tests/android-app-smoke.mjs
+      - name: Run Android 28 public Downloads acceptance
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 28
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          script: bash scripts/tests/android-legacy-downloads.sh
       - name: Retain Android app evidence
         if: always()
         uses: actions/upload-artifact@v4

@@ -576,6 +576,10 @@ require_text "$android" 'adb install -r apps/mobile/src-tauri/gen/android/app/bu
   "Android workflow does not install the app it built"
 require_text "$android" 'bun scripts/tests/android-app-smoke.mjs' \
   "Android workflow does not exercise app-level navigation"
+require_text "$android" 'api-level: 28' \
+  "Android workflow does not exercise legacy public Downloads"
+require_text "$android" 'bash scripts/tests/android-legacy-downloads.sh' \
+  "Android workflow omits the permission and public Downloads test"
 require_text "$android_gradle" 'com.google.mlkit:barcode-scanning:17.3.0' \
   "Android pairing does not bundle its barcode decoder for first-run and offline use"
 

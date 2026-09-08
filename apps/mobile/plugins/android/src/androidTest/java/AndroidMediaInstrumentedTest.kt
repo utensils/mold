@@ -1,10 +1,15 @@
 package com.utensils.mold.mobile_native
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Environment
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.util.Base64
 import androidx.test.core.app.ApplicationProvider
+import androidx.test.filters.SdkSuppress
+import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -22,6 +27,61 @@ class AndroidMediaInstrumentedTest {
     fun requestsLegacyMediaPermissionOnlyBeforeScopedStorage() {
         assertTrue(needsLegacyMediaWritePermission(28))
         assertFalse(needsLegacyMediaWritePermission(29))
+    }
+
+    /** Run alone on a fresh API28 instrumentation package, never the user's app.
+     * This checks the real public filesystem and OS grant, not a mocked SDK predicate.
+     */
+    @Test
+    @SdkSuppress(minSdkVersion = 28, maxSdkVersion = 28)
+    fun refusesSaveWithoutGrantThenWritesPublicDownloads() {
+        assertEquals(
+            PackageManager.PERMISSION_DENIED,
+            context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+        )
+        val bytes = "solid legacy\nendsolid legacy\n".toByteArray()
+        val name = "mold-api28-${System.nanoTime()}.stl"
+        @Suppress("DEPRECATION")
+        val destination = java.io.File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            "Mold/$name",
+        )
+        fun save(): AndroidMedia.SavedExport {
+            val host = startExportHost(bytes, "model/stl")
+            try {
+                return media.saveExportToMoldFolder(
+                    "http://127.0.0.1:${host.server.localPort}/api/gallery/export/source.glb",
+                    null, "{\"format\":\"stl\"}", name, "model/stl",
+                    "api28-${System.nanoTime()}",
+                )
+            } finally {
+                host.responder.join(5_000)
+                host.server.close()
+            }
+        }
+        try {
+            val refusal = runCatching { save() }.exceptionOrNull()
+            assertTrue("Missing permission must reject the save", refusal is IllegalStateException)
+            assertTrue(refusal!!.message!!.contains("Storage access is required"))
+            assertFalse(destination.exists())
+
+            // The system Storage dialog grants the read/write permission group.
+            // UiAutomation grants one permission at a time and does not simulate
+            // that group expansion, including READ added by Android's split rule.
+            val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+            automation.grantRuntimePermission(
+                context.packageName, Manifest.permission.READ_EXTERNAL_STORAGE,
+            )
+            automation.grantRuntimePermission(
+                context.packageName, Manifest.permission.WRITE_EXTERNAL_STORAGE,
+            )
+            val saved = save()
+            assertEquals("Downloads/Mold/$name", saved.label)
+            assertEquals(Uri.fromFile(destination).toString(), saved.location)
+            assertArrayEquals(bytes, destination.readBytes())
+        } finally {
+            destination.delete()
+        }
     }
 
     @Test
