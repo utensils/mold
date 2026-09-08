@@ -450,7 +450,9 @@ describe("LibraryPage", () => {
     window.dispatchEvent(new Event("online"));
     expect(listGalleryMock).toHaveBeenCalledTimes(1);
     let resolveRefresh!: (entries: GalleryImage[]) => void;
-    listGalleryMock.mockReturnValueOnce(new Promise((resolve) => (resolveRefresh = resolve)));
+    listGalleryMock.mockReturnValueOnce(
+      new Promise((resolve) => (resolveRefresh = resolve)),
+    );
     hidden.mockReturnValue(false);
     document.dispatchEvent(new Event("visibilitychange"));
     window.dispatchEvent(new Event("online"));
@@ -458,7 +460,11 @@ describe("LibraryPage", () => {
     resolveRefresh([cat, dog]);
     await flushPromises();
     expect(wrapper.get('[data-test="lb-key"]').text()).toBe("origin|cat.png");
-    expect(routeState.query).toEqual({ print: "cat.png", printHost: "origin", q: "cat" });
+    expect(routeState.query).toEqual({
+      print: "cat.png",
+      printHost: "origin",
+      q: "cat",
+    });
     window.dispatchEvent(new Event("online"));
     await flushPromises();
     expect(listGalleryMock).toHaveBeenCalledTimes(3);

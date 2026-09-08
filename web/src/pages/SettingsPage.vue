@@ -490,7 +490,7 @@ onBeforeUnmount(() => {
 .settings__title {
   margin: 0 0 22px;
   font-family: var(--f-display);
-  font-size: 24px;
+  font-size: 2rem;
   font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--rebate);
@@ -499,7 +499,7 @@ onBeforeUnmount(() => {
 .kicker {
   margin: 0 0 12px;
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 0.875rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink-3);
@@ -511,6 +511,7 @@ onBeforeUnmount(() => {
 
 .row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -521,7 +522,7 @@ onBeforeUnmount(() => {
 }
 
 .row__label {
-  font-size: 13.5px;
+  font-size: 0.875rem;
   color: var(--rebate);
 }
 
@@ -530,12 +531,13 @@ onBeforeUnmount(() => {
   margin-top: 3px;
   color: var(--ink-3);
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 0.875rem;
   text-transform: uppercase;
 }
 
 .field {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -543,52 +545,57 @@ onBeforeUnmount(() => {
 .env-badge {
   color: var(--ink-3);
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 0.875rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
 .input {
   width: 240px;
-  max-width: 52vw;
-  height: 34px;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: 44px;
   padding: 0 11px;
   border: 1px solid var(--ce);
   border-radius: var(--radius-control);
   background: var(--bath);
   color: var(--rebate);
   font-family: var(--f-mono);
-  font-size: 12px;
+  font-size: 1rem;
   outline: none;
 }
 
 .input:focus-visible,
-.select:focus-visible {
+.theme-select:focus-visible {
   outline: 2px solid var(--safelight);
   outline-offset: 1px;
 }
 
-.select {
-  height: 34px;
+.theme-select {
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: 44px;
   padding: 0 11px;
   border: 1px solid var(--ce);
   border-radius: var(--radius-control);
   background: var(--bath);
   color: var(--rebate);
   font-family: var(--f-mono);
-  font-size: 12px;
+  font-size: 1rem;
   outline: none;
 }
 
 .btn {
-  height: 34px;
+  min-height: 44px;
   padding: 0 14px;
   border: 1px solid var(--ce);
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--rebate);
   font-family: var(--f-body);
-  font-size: 12.5px;
+  font-size: 0.875rem;
   font-weight: 600;
   cursor: pointer;
   transition: background var(--dur-quick) var(--ease);
@@ -619,7 +626,7 @@ onBeforeUnmount(() => {
 .token-mask {
   flex: 1;
   min-width: 0;
-  height: 34px;
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
   padding: 0 12px;
@@ -628,13 +635,13 @@ onBeforeUnmount(() => {
   background: var(--bath);
   color: var(--ink-2);
   font-family: var(--f-mono);
-  font-size: 12.5px;
+  font-size: 0.875rem;
   letter-spacing: 0.04em;
 }
 
 .settings__note {
   margin: 12px 0 0;
-  font-size: 11.5px;
+  font-size: 0.875rem;
   color: var(--ink-3);
   line-height: 1.5;
 }
@@ -642,11 +649,12 @@ onBeforeUnmount(() => {
 /* About list — rows inside an unpadded card. */
 .about-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   padding: 11px 16px;
   border-bottom: 1px solid var(--edge);
-  font-size: 13px;
+  font-size: 0.875rem;
 }
 
 .about-row--last {
@@ -658,8 +666,10 @@ onBeforeUnmount(() => {
 }
 
 .about-row__val {
+  overflow-wrap: anywhere;
+  min-width: 0;
   font-family: var(--f-mono);
-  font-size: 11px;
+  font-size: 0.875rem;
   color: var(--rebate);
 }
 
