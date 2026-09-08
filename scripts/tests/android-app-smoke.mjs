@@ -103,6 +103,7 @@ try {
     // child-process stdout buffer before the app smoke test even starts.
     shell("screencap", "-p", "/sdcard/mold-boot-launcher-anr.png");
     run("pull", "/sdcard/mold-boot-launcher-anr.png", output + "/boot-launcher-anr.png");
+    shell("rm", "-f", "/sdcard/mold-boot-launcher-anr.png");
     shell("am", "force-stop", "com.android.launcher3");
   }
   shell("am", "start", "-n", "com.utensils.mold/.MainActivity");
