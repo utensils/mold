@@ -46,6 +46,8 @@ on:
       - "Cargo.toml"
       - ".github/workflows/desktop.yml"
       - ".github/workflows/desktop-distribution.yml"
+      - ".github/workflows/windows-nightly.yml"
+      - ".github/workflows/release.yml"
       - "scripts/check-desktop-nightly-main-head.sh"
       - "scripts/create-desktop-bundle-version.sh"
       - "scripts/create-desktop-dmg.sh"
@@ -114,6 +116,8 @@ jobs:
       rust_format: ${{ steps.filter.outputs.rust_format }}
     steps:
       - uses: actions/checkout@v6
+      - name: Verify packaging and publication contract
+        run: bash scripts/tests/desktop-nightly-race-guards.sh
       - uses: dorny/paths-filter@v3
         id: filter
         with:
