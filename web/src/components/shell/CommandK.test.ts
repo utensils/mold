@@ -430,6 +430,61 @@ describe("CommandK", () => {
     );
   });
 
+  it("offers retry for failed catalog search without closing the palette", async () => {
+    fetchCatalogSearchMock.mockRejectedValueOnce(new Error("offline"));
+    const wrapper = await openPalette();
+    await type(wrapper, "missing checkpoint");
+    expect(
+      items(wrapper).find((item) => item.id === "retry-catalog-search")?.hint,
+    ).toBe("Retry");
+    fetchCatalogSearchMock.mockResolvedValueOnce(EMPTY_CATALOG);
+    wrapper.findComponent(PalettePanel).vm.$emit("run", "retry-catalog-search");
+    await flushPromises();
+    expect(wrapper.emitted("close")).toBeUndefined();
+    expect(fetchCatalogSearchMock).toHaveBeenCalledTimes(2);
+    expect(
+      items(wrapper).some((item) => item.id === "retry-catalog-search"),
+    ).toBe(false);
+  });
+
+  it("keeps a valid keyboard selection after retry beside a local command", async () => {
+    fetchCatalogSearchMock.mockRejectedValueOnce(new Error("offline"));
+    const wrapper = await openPalette();
+    await type(wrapper, "Queue");
+    const panel = wrapper.findComponent(PalettePanel);
+    const input = panel.get("input");
+    const retryIndex = items(wrapper).findIndex(
+      (item) => item.id === "retry-catalog-search",
+    );
+    expect(retryIndex).toBeGreaterThan(0);
+    for (let i = 0; i < retryIndex; i++)
+      await input.trigger("keydown", { key: "ArrowDown" });
+    fetchCatalogSearchMock.mockResolvedValueOnce(EMPTY_CATALOG);
+    await input.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(wrapper.emitted("close")).toBeUndefined();
+    await input.trigger("keydown", { key: "Enter" });
+    expect(pushMock).toHaveBeenCalledWith("/queue");
+  });
+
+  it("ignores a failed search after the query changes", async () => {
+    let rejectOld!: (reason: Error) => void;
+    fetchCatalogSearchMock.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectOld = reject;
+        }),
+    );
+    const wrapper = await openPalette();
+    await type(wrapper, "missing checkpoint");
+    await type(wrapper, "Queue");
+    rejectOld(new Error("offline"));
+    await flushPromises();
+    expect(
+      items(wrapper).some((item) => item.id === "retry-catalog-search"),
+    ).toBe(false);
+  });
+
   it("discards a stale catalog response for an abandoned query", async () => {
     let releaseFirst: (v: FakeCatalogResponse) => void = () => {};
     fetchCatalogSearchMock.mockImplementationOnce(

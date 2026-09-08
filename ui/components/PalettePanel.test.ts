@@ -143,4 +143,16 @@ describe("PalettePanel", () => {
       "ms-palette-opt-open-library",
     );
   });
+  it("retains selection by identity and clamps a removed selection", async () => {
+    const wrapper = make();
+    const input = wrapper.get("input");
+    await input.trigger("keydown", { key: "ArrowDown" });
+    await wrapper.setProps({ items: [ITEMS[1], ITEMS[0]] });
+    expect(input.attributes("aria-activedescendant")).toBe(
+      "ms-palette-opt-open-library",
+    );
+    await wrapper.setProps({ items: [ITEMS[0]] });
+    await input.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("run")?.at(-1)).toEqual(["new-print"]);
+  });
 });

@@ -81,6 +81,30 @@ async function recordNavigation(label) {
   );
 }
 try {
+  // The runner unlocks immediately after sys.boot_completed; API35 Quickstep
+  // can time out before it owns a focused window and display its ANR over Mold.
+  // Recover only that recorded launcher boot failure, before starting the app.
+  // Never dismiss app errors or retry app assertions after the test begins.
+  const bootAnr = shell("dumpsys", "activity", "lastanr");
+  const firstAnrTask = bootAnr.match(/\* Task\{[^\n]+/)?.[0] ?? "";
+  if (
+    firstAnrTask.includes("type=home") &&
+    firstAnrTask.includes("I=com.android.launcher3/") &&
+    /^\s*Reason: Input dispatching timed out \(Application does not have a focused window\)\.\s*$/m.test(
+      bootAnr,
+    ) &&
+    /^  ResumedActivity: ActivityRecord\{[^\n]* com\.android\.launcher3\//m.test(
+      bootAnr,
+    ) &&
+    !bootAnr.includes("com.utensils.mold")
+  ) {
+    writeFileSync(output + "/boot-launcher-anr.txt", bootAnr);
+    writeFileSync(
+      output + "/boot-launcher-anr.png",
+      execFileSync(adb, ["-s", serial, "exec-out", "screencap", "-p"]),
+    );
+    shell("am", "force-stop", "com.android.launcher3");
+  }
   shell("am", "start", "-n", "com.utensils.mold/.MainActivity");
   const pid = await until(
     () => shell("pidof", "com.utensils.mold"),

@@ -8,13 +8,41 @@ logic; `ui/` owns tokens and low-level primitives; `web/` and `desktop/` own
 surface navigation and platform adapters. Web intentionally requires current
 server and storage schemas, while desktop and iPhone retain native
 compatibility normalization. Browser routes are `/create`, `/library`,
-`/models`, `/machines`, `/machines/:id` (host detail), and `/settings`; retired
+`/queue`, `/create/3d` (durable mesh workflows), `/models`, `/machines`,
+`/machines/:id` (host detail), and `/settings`; retired
 routes are not redirected and every unmatched URL renders Page Not Found.
-Desktop routes the same paths under redesign titles — New image, Queue, My
-images, Styles, Machines — and adds `/queue` and `/machines/runpod`; every
+Web and desktop share the redesign titles New image, Queue, My images,
+Styles, and Machines. Desktop additionally exposes `/machines/runpod`; every
 legacy path (`/generate`, `/gallery`, `/chains`, `/history`, `/jobs`,
 `/hosts/:id`, `/runpod`, `/create/chain`) is a permanent redirect rather than a
 404, so a deep link or a persisted last route keeps resolving.
+
+### Browser and mobile redesign boundaries
+
+Web uses browser history and shareable Queue/Library URLs; it does not copy
+native window controls or a mobile Back gesture. Queue has one shell-owned
+live-activity authority shared with Create and the navigation summary.
+Downloads stay separate from generation work. Machine connections are direct
+from the browser, with server-assisted LAN discovery only when advertised;
+credentials and unfinished private media are excluded from copied links.
+Browser theme and title-tag preferences remain browser-local, while engine
+configuration and profiles change the serving host. Catalog/license requests
+retain their original installation target.
+
+The browser's Machines actions are available by button and right-click, with
+keyboard menu navigation and focus restoration. Configuration retains dirty
+edits in other rows during Save/Reset and offers explicit retry after failed
+reads. Command-palette remote search failure is distinct from no matches;
+local commands remain usable and Retry keeps the palette open. Web layouts
+reflow at enlarged text sizes instead of adopting the desktop window geometry.
+
+Android and iOS share `desktop/src/mobile`; native adapters own permissions,
+media handoff, keyboard/insets, and platform Back. Destination swipe navigation
+is removed; component-owned overlay, viewer and row gestures remain. Shape and
+size is collapsed with a visible Change disclosure on compact mobile screens.
+Android uses the signed GitHub APK distribution channel, not a claimed Play
+Store release. Current acceptance evidence and remaining platform gates are
+tracked in [the redesign plan](../../docs/design/web-android-redesign-plan.md).
 
 ---
 
@@ -26,7 +54,7 @@ map. Defaults come from the model's `ModelConfig` unless overridden.
 
 | Param                                            | Type                           | Default                   | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------------------------------ | ------------------------------ | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `prompt`                                         | string                         | —                         | Required, except for `ltx2` requests that carry visual conditioning (`source_image`, non-empty `keyframes`, `source_video[_path]`, `extend_video[_path]`), where an empty string is accepted. Legacy `ltx-video` remains prompt-required and rejects image conditioning because Mold's legacy engine is text-to-video only. One rule: `mold_core::prompt_required_for` server-side, `studio/lib/promptRequirement.ts` on web/desktop/iPhone (also owns the shared placeholder + guidance copy). Empty ⇒ expansion skipped and `expand` cleared, and no prompt-history row. Saves no VRAM; expect near-static motion. stdin-pipeable in CLI. |
+| `prompt` | string | — | The generation profile advertises Required, Optional, or Ignored through `capabilities.prompt`, resolved for the actual conditioning by `generation_profile::prompt_requirement_for_family` and shared client prompt guidance. Hunyuan3D shape has no text encoder and ignores prompts; conditioned LTX-2 permits an empty prompt. Other families require one. Dedicated mesh workflow requests have their own advertised input contract. |
 | `negative_prompt`                                | string?                        | model/config              | Only effective on CFG families (SD1.5, SDXL, SD3, Wuerstchen). Ignored by distilled/flow-matching families. CLI `-n/--negative-prompt`; `--no-negative` forces empty unconditional.                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `model`                                          | string                         | `default_model`           | `model:tag` resolution — see §2.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `width` / `height`                               | u32                            | model native              | Snapped to multiples of 16, megapixel-clamped. img2img defaults to fitted source size; qwen-image-edit derives from first edit image (~1024² target area).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -336,7 +364,7 @@ the `POST /api/chain-jobs` body, so multi-host routing is unaffected.
 
 - **Single model at a time**: `tokio::Mutex` + `spawn_blocking`. `AppState.model_cache` = LRU (max 3, `MOLD_MAX_CACHED_MODELS`) with `ModelResidency { Gpu, Parked }` — eviction removes the entry rather than adding a third state, and at most one engine is GPU-resident.
 - **Job states** (`JobLifecycle`): `Queued` → `Running`, plus `Paused` (durable work recovered after a restart, listed but never hydrated until an operator resumes it) and `Held` (attempt cap exceeded, or the recorded request could not be reconciled — listed with a `held_reason`, never auto-run, cleared with `DELETE /api/queue/:id` or returned to the queue with `POST /api/queue/:id/retry`); target-GPU editable only while Queued. The durable backlog is uncapped; `--queue-size`/`MOLD_QUEUE_SIZE` (default 200) bounds only the hydrated runtime window, while legacy attached requests can still receive 503 when that window is full. Look-ahead/deferral tuning envs.
-- Endpoints: `GET /api/queue`, `PATCH /api/queue/:id` (retarget GPU, or reorder within the queue via `position` — gated by `capabilities.queue.can_reorder`), `GET /api/queue/:id`, `DELETE /api/queue/:id`, `POST /api/queue/:id/retry`, `GET /api/queue/:id/preview`, SSE progress (`generate/stream`, includes `Queued`/step progress). Web reconciles through `web/src/composables/useQueueReconciler.ts` and renders the queue in the Machines workspace plus the shared `studio/components/QueueEntryDetail.vue`.
+- Endpoints: `GET /api/queue`, `PATCH /api/queue/:id` (retarget GPU, or reorder within the queue via `position` — gated by `capabilities.queue.can_reorder`), `GET /api/queue/:id`, `DELETE /api/queue/:id`, `POST /api/queue/:id/retry`, `GET /api/queue/:id/preview`, SSE progress (`generate/stream`, includes `Queued`/step progress). Web reconciles through `web/src/composables/useQueueReconciler.ts` and renders the Queue destination and Machines detail with the shared `studio/components/QueueEntryDetail.vue`.
 - **Desktop parity (Jobs view)**: multi-GPU hosts render per-GPU queue lanes (`lib/queueLanes.ts`, sharing the web lane logic). Current servers use the exact schedulable ordinals from authoritative `/api/devices`; older servers fall back to additive `/api/status.gpus`. Queued rows drag between lanes of the **same** host or move via right-click "Move to GPU N"; both call `jobs.reassignGpu` → `PATCH /api/queue/:id` on the owning host, then re-sync from the server (never optimistic; 404/409/422 → error toast + refetch). Cross-host drops are rejected (`resolveDropAction`) — jobs cannot migrate between servers. Queued rows also reorder within a host's queue (`PATCH /api/queue/:id` with `position`, gated by `capabilities.queue.can_reorder`); the shared queue mirrors in the Machines workspace. Single-GPU hosts keep the flat list.
 - **Queue row detail (desktop, web, iPhone)**: one shared model — `studio/lib/queueEntryDetail.ts` — behind `studio/components/QueueEntryDetail.vue`, opened from the desktop drawer, the web Machines row, and the iPhone bottom sheet. It renders the prompt, the Create inspector's own setting groups, the shared `resolveQueueWait` waiting vocabulary, and the facts a payload-free durable row still carries (submitted time, durability, replay, dispatch attempts, the plan's lane and estimate), plus a hold reason and error in full with a Copy control and the running row's `GET /api/queue/:id/preview` snapshot. `GET /api/queue` merges the live registry — whose rows carry `metadata` — with the durable SQLite projection, which deliberately never selects `request_json`, so a job admitted through `POST /api/generation-batches` has no listed request until the feeder hydrates it; the panel says so in the machine's own terms and never asks anyone to upgrade a server. Desktop additionally falls back to this app's copy of the request it submitted, so its own work is never blank. Actions route to the exact authenticated host: **Reuse settings** through the same mapper Library Reuse uses, **Cancel** (queued always, running where `capabilities.queue.cooperative_cancellation` is advertised) behind the plain shared confirm on desktop/web and an inline two-step on iPhone, and **Retry** for a held row the host fenced, using the durable batch authority the submitting client holds.
 - **iPhone generation queue**: every submitted batch member keeps its own remote target, POST-SSE lifecycle, progress label, result, and Cancel action. The composer remains available while work is queued; concurrent streams are capped so held generation connections do not starve gallery/download traffic.
