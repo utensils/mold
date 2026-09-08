@@ -50,6 +50,24 @@ const restartOnly = {
 };
 
 describe("shared device lifecycle presentation", () => {
+  it("distinguishes unknown authority from an advertised refusal", () => {
+    for (const caps of [
+      null,
+      undefined,
+      {},
+      { devices: {} },
+      { devices: { lifecycle: false } },
+      { devices: { lifecycle: true }, dispatch: {} },
+    ]) {
+      expect(deviceLifecycleMessage(caps)).toContain("not been confirmed");
+      expect(canMutateDevice(device(), caps)).toBe(false);
+    }
+    expect(
+      deviceLifecycleMessage({
+        devices: { lifecycle: false, restart_enable: false },
+      }),
+    ).toContain("unavailable on this server");
+  });
   it("requires both lifecycle support and authoritative V2 for live mutation", () => {
     expect(canMutateDevice(device(), authoritative)).toBe(true);
     expect(canMutateDevice(device(), restartOnly)).toBe(false);

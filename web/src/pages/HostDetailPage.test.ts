@@ -1149,6 +1149,14 @@ describe("HostDetailPage — saved host actions", () => {
 });
 
 describe("HostDetailPage — partial read recovery", () => {
+  it("does not call unread GPU capabilities unsupported", async () => {
+    poll.devices.value = [makeDevice(0)];
+    hostCapabilitiesCall.mockRejectedValue(new Error("capability read failed"));
+    const w = await mountDetail();
+    expect(w.text()).toContain("not been confirmed");
+    expect(w.text()).not.toContain("Live GPU controls are unavailable");
+  });
+
   it.each(["models", "downloads"])(
     "does not present a failed %s read as an empty list",
     async (section) => {
@@ -1203,10 +1211,11 @@ describe("HostDetailPage — partial read recovery", () => {
 });
 
 describe("HostDetailPage — models", () => {
-  it("lists installed models with a loaded badge", async () => {
+  it("lists installed styles with friendly and exact identity plus a loaded badge", async () => {
     models = [
       {
         name: "flux-dev:q8",
+        display_name: "Studio portrait",
         family: "flux",
         size_gb: 12,
         is_loaded: true,
@@ -1235,6 +1244,8 @@ describe("HostDetailPage — models", () => {
       },
     ];
     const w = await mountDetail();
+    expect(w.get(".md-models__identity").text()).toContain("Studio portrait");
+    expect(w.get(".md-models__id").text()).toBe("flux-dev:q8");
     // Only the downloaded model is installed.
     expect(w.findAll('[data-test="model-row"]')).toHaveLength(1);
     expect(w.find('[data-test="model-loaded"]').exists()).toBe(true);

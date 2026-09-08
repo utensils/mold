@@ -17,6 +17,7 @@ const props = withDefaults(
     mutable?: boolean;
     restartEnable?: boolean;
     showControls?: boolean;
+    capabilitiesKnown?: boolean;
     busyDeviceIds?: readonly string[];
   }>(),
   {
@@ -24,6 +25,7 @@ const props = withDefaults(
     mutable: false,
     restartEnable: false,
     showControls: false,
+    capabilitiesKnown: true,
     busyDeviceIds: () => [],
   },
 );
@@ -92,6 +94,8 @@ const laneCount = computed(
 );
 const lifecycleNote = computed(() => {
   if (!props.showControls || props.devices.length === 0) return null;
+  if (!props.capabilitiesKnown)
+    return "GPU control capabilities have not been confirmed yet.";
   if (props.mutable) {
     return "Disabling a busy GPU lets its current stage finish, then removes it from scheduling.";
   }

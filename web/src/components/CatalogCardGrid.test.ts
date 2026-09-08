@@ -190,7 +190,7 @@ describe("CatalogCardGrid provider resilience", () => {
     const w = mount(CatalogCardGrid);
 
     expect(w.text()).toContain("The catalog is catching up.");
-    expect(w.text()).not.toContain("No models found.");
+    expect(w.text()).not.toContain("No styles found.");
   });
 });
 
@@ -370,7 +370,7 @@ describe("CatalogCardGrid client-side filtering", () => {
     mockState.resultCount = ref(0);
     mockState.hasMore = ref(false);
     const w = mount(CatalogCardGrid);
-    expect(w.text()).toContain("No models found.");
+    expect(w.text()).toContain("No styles found.");
     expect(w.text()).not.toContain("Refresh catalog");
   });
 
@@ -380,7 +380,7 @@ describe("CatalogCardGrid client-side filtering", () => {
     mockState.resultCount = ref(0);
     mockState.hasMore = ref(false);
     const w = mount(CatalogCardGrid);
-    expect(w.text()).toContain("No models found.");
+    expect(w.text()).toContain("No styles found.");
   });
 });
 

@@ -1,0 +1,1 @@
+- Keep unread or incomplete GPU capabilities visibly unconfirmed, and finish Styles naming and readable exact model identity in web machine details.
