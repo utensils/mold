@@ -42,6 +42,17 @@ function device(index: number, patch: Partial<DeviceInfo> = {}): DeviceInfo {
 }
 
 describe("DevicePanel", () => {
+  it("labels an unread capability authority as unknown", () => {
+    const wrapper = mount(DevicePanel, {
+      props: {
+        devices: [device(0)],
+        showControls: true,
+        capabilitiesKnown: false,
+      },
+    });
+    expect(wrapper.text()).toContain("not been confirmed");
+    expect(wrapper.text()).not.toContain("unavailable on this server");
+  });
   it("separates a remote Metal budget from installed shared RAM", () => {
     const metal = device(0, { backend: "metal", device_kind: "metal" });
     metal.memory.metal_memory = {

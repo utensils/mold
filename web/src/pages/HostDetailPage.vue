@@ -12,6 +12,7 @@ import CardSurface from "@ui/components/CardSurface.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
+import { deviceLifecycleCapabilitiesKnown } from "@studio/lib/deviceLifecycle";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import {
@@ -1173,7 +1174,16 @@ onBeforeUnmount(() => {
               class="md-models__row"
               data-test="model-row"
             >
-              <span class="md-models__name">{{ modelDisplayName(model) }}</span>
+              <span class="md-models__identity">
+                <span class="md-models__name">{{
+                  modelDisplayName(model)
+                }}</span>
+                <span
+                  v-if="modelDisplayName(model) !== model.name"
+                  class="md-models__id"
+                  >{{ model.name }}</span
+                >
+              </span>
               <span
                 v-if="model.is_loaded"
                 class="md-models__loaded"
@@ -1241,6 +1251,7 @@ onBeforeUnmount(() => {
           <DevicePanel
             :devices="poll?.devices.value ?? []"
             :plan="queuePlan"
+            :capabilities-known="deviceLifecycleCapabilitiesKnown(caps)"
             :mutable="
               caps?.devices?.lifecycle === true &&
               caps?.dispatch?.v2_authoritative === true
@@ -1726,14 +1737,11 @@ onBeforeUnmount(() => {
 }
 
 .md-models__name {
-  flex: 1;
   min-width: 0;
-  font-family: var(--f-mono);
-  font-size: 0.78125rem;
+  font-family: var(--f-body);
+  font-size: 0.875rem;
   color: var(--rebate);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .md-models__loaded {
@@ -1781,5 +1789,18 @@ onBeforeUnmount(() => {
   font-family: var(--f-mono);
   font-size: 0.78125rem;
   color: var(--rebate);
+}
+
+.md-models__identity {
+  flex: 1;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.md-models__id {
+  font-family: var(--f-mono);
+  font-size: 0.75rem;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
 }
 </style>

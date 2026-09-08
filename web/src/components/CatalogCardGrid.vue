@@ -251,7 +251,7 @@ async function startBatch(): Promise<void> {
       "
       class="flex flex-col items-center justify-center gap-2 py-16 text-ink-3"
     >
-      <p class="text-sm">No models found.</p>
+      <p class="text-sm">No styles found.</p>
       <p class="text-xs">
         No catalog entry matches every filter you've set — try widening one.
       </p>

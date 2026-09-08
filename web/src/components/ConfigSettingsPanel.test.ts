@@ -200,6 +200,7 @@ describe("ConfigSettingsPanel", () => {
     const wrapper = mount(ConfigSettingsPanel);
     await flushPromises();
     await wrapper.get('[data-test="profile-select"]').setValue("quality");
+    await flushPromises();
     await wrapper.get('[data-test="profile-name"]').setValue("drafts");
     await wrapper.get('[data-test="profile-create"]').trigger("click");
     await flushPromises();
@@ -271,5 +272,96 @@ describe("ConfigSettingsPanel", () => {
     expect(wrapper.find('[data-test="config-auto-tag-title"]').exists()).toBe(
       true,
     );
+  });
+  it("retains unrelated unsaved drafts when another setting is saved", async () => {
+    const wrapper = mount(ConfigSettingsPanel);
+    await flushPromises();
+    await wrapper
+      .get('[data-test="config-future.option"]')
+      .setValue("unfinished edit");
+    await wrapper.get('[data-test="config-default_steps"]').setValue("32");
+    await wrapper.get('[data-test="save-default_steps"]').trigger("click");
+    await flushPromises();
+    expect(
+      (
+        wrapper.get('[data-test="config-future.option"]')
+          .element as HTMLInputElement
+      ).value,
+    ).toBe("unfinished edit");
+  });
+
+  it("keeps the last form and draft visible after a refresh failure, then retries", async () => {
+    const wrapper = mount(ConfigSettingsPanel);
+    await flushPromises();
+    await wrapper
+      .get('[data-test="config-future.option"]')
+      .setValue("unfinished edit");
+    const original = globalThis.fetch;
+    let fail = true;
+    globalThis.fetch = vi.fn(async (input, init) =>
+      String(input) === "/api/config" && !init?.method && fail
+        ? response({}, 503)
+        : original(input, init),
+    ) as typeof fetch;
+    await wrapper.get('[data-test="save-default_steps"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-test="config-load-error"]').exists()).toBe(true);
+    expect(
+      (
+        wrapper.get('[data-test="config-future.option"]')
+          .element as HTMLInputElement
+      ).value,
+    ).toBe("unfinished edit");
+    fail = false;
+    await wrapper.get('[data-test="config-retry"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-test="config-load-error"]').exists()).toBe(
+      false,
+    );
+    expect(
+      (
+        wrapper.get('[data-test="config-future.option"]')
+          .element as HTMLInputElement
+      ).value,
+    ).toBe("unfinished edit");
+  });
+
+  it("does not leave the old profile editable when the switched profile cannot load", async () => {
+    const wrapper = mount(ConfigSettingsPanel);
+    await flushPromises();
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input, init) =>
+      String(input) === "/api/config" && !init?.method
+        ? response({}, 503)
+        : original(input, init),
+    ) as typeof fetch;
+    await wrapper.get('[data-test="profile-select"]').setValue("quality");
+    await flushPromises();
+    expect(wrapper.find('[data-test="config-load-error"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="save-default_steps"]').exists()).toBe(
+      false,
+    );
+  });
+  it("retains a profile name when creation fails", async () => {
+    const wrapper = mount(ConfigSettingsPanel);
+    await flushPromises();
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input, init) =>
+      String(input) === "/api/config/profile"
+        ? response({}, 503)
+        : original(input, init),
+    ) as typeof fetch;
+    await wrapper
+      .get('[data-test="profile-name"]')
+      .setValue("unfinished profile");
+    await wrapper.get('[data-test="profile-create"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-test="config-action-error"]').exists()).toBe(
+      true,
+    );
+    expect(
+      (wrapper.get('[data-test="profile-name"]').element as HTMLInputElement)
+        .value,
+    ).toBe("unfinished profile");
   });
 });

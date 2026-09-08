@@ -9,6 +9,7 @@
  * the last-good metrics.
  */
 import { computed } from "vue";
+import Icon from "@ui/components/Icon.vue";
 import CardSurface from "@ui/components/CardSurface.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import StatusDot from "./StatusDot.vue";
@@ -17,11 +18,17 @@ import { deriveHostCardGpu, formatGb } from "./machineTelemetry";
 import { HOST_RECONNECTING_LABEL } from "@studio/lib/hostConnectivity";
 import type { HostEntry } from "../../lib/hostRegistry";
 
-const props = defineProps<{ host: HostEntry; primary?: boolean }>();
+const props = defineProps<{
+  host: HostEntry;
+  primary?: boolean;
+  actionsOpen?: boolean;
+}>();
 const emit = defineEmits<{
   open: [id: string];
   reconnect: [id: string];
-  contextMenu: [payload: { host: HostEntry; x: number; y: number }];
+  contextMenu: [
+    payload: { host: HostEntry; x: number; y: number; opener: HTMLElement },
+  ];
 }>();
 
 const disconnected = computed(() => props.host.connected === false);
@@ -95,13 +102,6 @@ function open() {
   emit("open", props.host.id);
 }
 
-function onKey(event: KeyboardEvent) {
-  if (event.key === "Enter" || event.key === " ") {
-    event.preventDefault();
-    open();
-  }
-}
-
 function retry(event: Event) {
   event.stopPropagation();
   void poll.refresh();
@@ -113,7 +113,17 @@ function reconnect(event: Event) {
 }
 
 function openContextMenu(event: MouseEvent) {
-  emit("contextMenu", { host: props.host, x: event.clientX, y: event.clientY });
+  const opener = (event.currentTarget as HTMLElement)
+    .closest("[data-test=host-card]")
+    ?.querySelector<HTMLElement>("[data-test=host-actions]");
+  if (!opener) return;
+  const rect = opener.getBoundingClientRect();
+  emit("contextMenu", {
+    host: props.host,
+    x: event.type === "contextmenu" ? event.clientX : rect.left,
+    y: event.type === "contextmenu" ? event.clientY : rect.bottom,
+    opener,
+  });
 }
 </script>
 
@@ -127,17 +137,35 @@ function openContextMenu(event: MouseEvent) {
   <CardSurface v-else>
     <div
       class="hc"
-      :role="disconnected ? undefined : 'button'"
-      :tabindex="disconnected ? undefined : 0"
       data-test="host-card"
-      :aria-label="disconnected ? undefined : `Open ${host.name}`"
-      @click="open"
-      @keydown="onKey"
       @contextmenu.prevent.stop="openContextMenu"
     >
       <div class="hc__head">
         <StatusDot :state="dotState" />
-        <span class="hc__name" data-test="host-name">{{ host.name }}</span>
+        <button
+          v-if="!disconnected"
+          type="button"
+          class="hc__name hc__open"
+          data-test="host-open"
+          :aria-label="`Open ${host.name}`"
+          @click="open"
+        >
+          <span data-test="host-name">{{ host.name }}</span>
+        </button>
+        <span v-else class="hc__name" data-test="host-name">{{
+          host.name
+        }}</span>
+        <button
+          type="button"
+          class="hc__actions"
+          data-test="host-actions"
+          :aria-label="`Actions for ${host.name}`"
+          aria-haspopup="menu"
+          :aria-expanded="actionsOpen ?? false"
+          @click="openContextMenu"
+        >
+          <Icon name="more" :size="18" />
+        </button>
       </div>
       <div class="hc__gpu" data-test="host-gpu">{{ gpuLine }}</div>
 
@@ -196,15 +224,7 @@ function openContextMenu(event: MouseEvent) {
 
 <style scoped>
 .hc {
-  cursor: pointer;
   color: var(--rebate);
-  outline: none;
-}
-
-.hc:focus-visible {
-  outline: 2px solid var(--safelight);
-  outline-offset: 3px;
-  border-radius: 8px;
 }
 
 .hc__head {
@@ -214,7 +234,26 @@ function openContextMenu(event: MouseEvent) {
   gap: 10px;
 }
 
+.hc__actions,
+.hc__open {
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.hc__open {
+  text-align: left;
+  padding: 0;
+}
+.hc__actions {
+  min-width: 44px;
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+}
 .hc__name {
+  flex: 1;
   overflow-wrap: anywhere;
   min-width: 0;
   font-size: 0.90625rem;

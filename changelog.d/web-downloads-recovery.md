@@ -1,0 +1,2 @@
+- Keep concurrent web downloads visible, distinguish load failures from empty lists, and preserve live progress during refresh.
+- Make download errors and actions readable at enlarged text sizes, with reliable keyboard focus and a scrollable phone panel.

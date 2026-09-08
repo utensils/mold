@@ -26,6 +26,17 @@ export function deviceLifecycleMode(
   return "unsupported";
 }
 
+/** An omitted field is unknown; only explicit facts can rule out both paths. */
+export function deviceLifecycleCapabilitiesKnown(
+  capabilities: DeviceLifecycleCapabilities | null | undefined,
+): boolean {
+  if (deviceLifecycleMode(capabilities) !== "unsupported") return true;
+  const liveDenied =
+    capabilities?.devices?.lifecycle === false ||
+    capabilities?.dispatch?.v2_authoritative === false;
+  return liveDenied && capabilities?.devices?.restart_enable === false;
+}
+
 export function canMutateDevice(
   device: DeviceInfo,
   capabilities: DeviceLifecycleCapabilities | null | undefined,
@@ -67,6 +78,8 @@ export function deviceStateLabel(device: DeviceInfo): string {
 export function deviceLifecycleMessage(
   capabilities: DeviceLifecycleCapabilities | null | undefined,
 ): string {
+  if (!deviceLifecycleCapabilitiesKnown(capabilities))
+    return "GPU control capabilities have not been confirmed yet.";
   switch (deviceLifecycleMode(capabilities)) {
     case "live":
       return "Disabling a busy GPU lets its current stage finish, then removes it from scheduling.";

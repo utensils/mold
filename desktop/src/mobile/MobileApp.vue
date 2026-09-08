@@ -1,5 +1,10 @@
 <script setup lang="ts">
 import { useMobileBack } from "./useMobileBack";
+import { createMobileComposerDraft } from "./mobileComposerDraft";
+import {
+  discardUnavailableMobileDraftMedia,
+  unavailableMobileDraftMedia,
+} from "./mobileDraftMedia";
 import { MOBILE_QUEUE_SECTIONS, mobileQueueSection } from "./queueSections";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
@@ -734,6 +739,9 @@ const discovering = ref(false);
 const pairing = ref(false);
 const pairingScannerOpen = ref(false);
 let pairingScannerCancelled = false;
+useMobileBack(pairingScannerOpen, () => {
+  void cancelPairingScan();
+});
 let stopPairingDeepLinks: (() => void) | null = null;
 const hostError = ref("");
 const models = ref<ModelEntry[]>([]);
@@ -851,6 +859,16 @@ watch(
   { deep: true },
 );
 const form = reactive<GenerateForm>(newGenerateForm());
+const composerDraft = createMobileComposerDraft();
+const composerDraftReady = ref(false);
+const restoredComposerModel = ref<string | null>(null);
+const composerDraftError = ref("");
+const composerDraftSaveError = ref("");
+const composerDraftMissing = ref<string[]>([]);
+let composerDraftTimer: ReturnType<typeof setTimeout> | null = null;
+let composerDraftEdit = 0;
+let savedComposerDraftEdit = -1;
+let composerDraftFlush: { edit: number; promise: Promise<void> } | null = null;
 // The shared builder defaults `fileUnderAutoTag` to FALSE so a surface with no
 // File under UI can never auto-tag invisibly. The phone HAS the removable
 // ghost chip, so it opts in from its own preference — and keeps opting in
@@ -1365,6 +1383,9 @@ async function listMobileQueue(host: MobileHost, target: ApiTarget): Promise<Que
 const selectedHost = computed(() =>
   connectedHosts.value.find((host) => host.id === selectedHostId.value),
 );
+// Choose the first-run destination before rendering. Async restoration must
+// never overwrite a destination the user has already selected.
+if (!selectedHost.value) tab.value = "hosts";
 
 // --- Generation routing -----------------------------------------------------
 // The phone is remote-only: Auto and Most capable choose between CONNECTED
@@ -1941,6 +1962,77 @@ let previousStillSource = "";
 let previousStillResolution: SourceResolutionResult | null = null;
 let previousStillAutomaticResolution: SourceDimensions | null = null;
 const canvasIntent = ref<CanvasIntent>("model-default");
+
+function flushComposerDraft(): Promise<void> {
+  if (composerDraftTimer !== null) clearTimeout(composerDraftTimer);
+  composerDraftTimer = null;
+  if (!composerDraftReady.value || composerDraftError.value) return Promise.resolve();
+  const edit = composerDraftEdit;
+  if (savedComposerDraftEdit === edit) return Promise.resolve();
+  if (composerDraftFlush?.edit === edit) return composerDraftFlush.promise;
+  const promise = (async () => {
+    let saved = false;
+    try {
+      saved = await composerDraft.save(form, canvasIntent.value);
+    } catch {
+      /* Surface persistent recovery below. */
+    }
+    if (saved) savedComposerDraftEdit = edit;
+    if (edit !== composerDraftEdit) return;
+    composerDraftSaveError.value = saved
+      ? ""
+      : "This draft could not be saved on this device. Keep the app open and retry before leaving.";
+  })();
+  composerDraftFlush = { edit, promise };
+  void promise.finally(() => {
+    if (composerDraftFlush?.promise === promise) composerDraftFlush = null;
+  });
+  return promise;
+}
+function scheduleComposerDraft(): void {
+  if (!composerDraftReady.value) return;
+  composerDraftMissing.value = unavailableMobileDraftMedia(form);
+  ++composerDraftEdit;
+  if (composerDraftTimer !== null) clearTimeout(composerDraftTimer);
+  composerDraftTimer = setTimeout(() => {
+    void flushComposerDraft();
+  }, 300);
+}
+watch([form, canvasIntent], scheduleComposerDraft, { deep: true });
+function hideComposerDraft(): void {
+  if (document.visibilityState === "hidden") void flushComposerDraft();
+}
+async function restoreComposerDraft(): Promise<void> {
+  composerDraftReady.value = false;
+  const restored = await composerDraft.restore();
+  if (unmounted) return;
+  if (restored.form) {
+    restoredComposerModel.value = restored.form.model || null;
+    Object.assign(form, restored.form);
+    form.fileUnderAutoTag = mobileSettings.autoTagTitle;
+    canvasIntent.value = restored.canvasIntent ?? "model-default";
+  }
+  composerDraftError.value = restored.error;
+  composerDraftMissing.value = restored.missing;
+  await nextTick();
+  composerDraftReady.value = true;
+}
+async function resetUnreadableComposerDraft(): Promise<void> {
+  try {
+    await composerDraft.clear();
+    savedComposerDraftEdit = -1;
+    composerDraftError.value = "";
+    void flushComposerDraft();
+  } catch {
+    composerDraftError.value = "The saved draft could not be cleared. Try again.";
+  }
+}
+function discardMissingComposerMedia(): void {
+  Object.assign(form, discardUnavailableMobileDraftMedia(form));
+  composerDraftMissing.value = [];
+  void nextTick(flushComposerDraft);
+}
+
 let preservedSourceReplacement = "";
 function setCanvasIntent(intent: CanvasIntent) {
   canvasIntent.value = intent;
@@ -2203,10 +2295,16 @@ const promptFieldPlaceholder = computed(() =>
   promptPlaceholder(promptConditioning.value, "Describe the print…"),
 );
 const developBlockerReason = computed<string | null>(() => {
+  if (!composerDraftReady.value) return "Restoring your unfinished draft…";
+  if (composerDraftError.value) return composerDraftError.value;
+  if (composerDraftMissing.value.length)
+    return "Some saved media is unavailable. Reattach it or discard the unavailable media before generating.";
   // An empty prompt is self-evident beside the composer and does not warrant
   // a persistent banner. Everything outside the visible composer names the
   // exact correction beside the pinned action.
   if (!form.model.trim()) return "Choose a model before generating.";
+  if (form.model === restoredComposerModel.value && !selectedGenerationModel.value)
+    return `The saved style ${form.model} is not available on a connected machine. Reconnect its machine or choose another style.`;
   if (quickExpansionSnapshot.value && quickStaleReasons.value.length > 0) {
     return "The prepared rewrite no longer matches these settings. Use a recovery action above.";
   }
@@ -4780,7 +4878,7 @@ async function refreshModels(): Promise<boolean> {
     const selectedEntry = selectedGenerationModel.value;
     if (selectedEntry) {
       reconcileModelCapabilities(form, selectedEntry);
-    } else if (generationModels.value[0]) {
+    } else if (generationModels.value[0] && form.model !== restoredComposerModel.value) {
       const section = !form.model ? lastUsedStyles.lastSection : null;
       const rememberedName = section ? lastUsedStyles.bySection[section] : null;
       const remembered = generationModels.value.find((entry) => entry.name === rememberedName);
@@ -4880,7 +4978,8 @@ async function refreshRoutingModels(): Promise<void> {
   if (!automaticRouting.value) return;
   const selectedEntry = generationModels.value.find((entry) => entry.name === form.model);
   if (selectedEntry) reconcileModelCapabilities(form, selectedEntry);
-  else if (generationModels.value[0]) applyModelDefaults(form, generationModels.value[0]);
+  else if (generationModels.value[0] && form.model !== restoredComposerModel.value)
+    applyModelDefaults(form, generationModels.value[0]);
 }
 
 /**
@@ -6521,6 +6620,8 @@ async function presentSettledGeneration(
 }
 
 async function generate(): Promise<void> {
+  if (!composerDraftReady.value || composerDraftError.value || composerDraftMissing.value.length)
+    return;
   clearSelectedQueueRender();
   fileUnderDropNotice.value = "";
   const prepared = preparedBatch.value;
@@ -11165,6 +11266,10 @@ watch(resultPreviewError, (error) => {
 });
 
 onMounted(async () => {
+  document.addEventListener("visibilitychange", hideComposerDraft);
+  window.addEventListener("pagehide", flushComposerDraft);
+  await restoreComposerDraft();
+  if (unmounted) return;
   document.addEventListener("focusin", handleKeyboardFocusIn, true);
   document.addEventListener("focusout", handleKeyboardFocusOut, true);
   window.addEventListener("scroll", syncVisualViewportOffset, true);
@@ -11231,12 +11336,13 @@ onMounted(async () => {
     // makes the automatic policies model-aware on the first Develop.
     if (automaticRouting.value) void refreshRoutingModels();
     void refreshMobileActivity();
-  } else {
-    tab.value = "hosts";
   }
 });
 
 onBeforeUnmount(() => {
+  void flushComposerDraft();
+  document.removeEventListener("visibilitychange", hideComposerDraft);
+  window.removeEventListener("pagehide", flushComposerDraft);
   unmounted = true;
   stopViewerUpscalePoll();
   clearSelectedQueueRender();
@@ -11444,6 +11550,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       ref="mobileContent"
       class="mobile-content"
       :class="{ 'is-library': !settingsOpen && tab === 'gallery' }"
+      :inert="!composerDraftReady || undefined"
       @touchstart="beginMobileTouch"
       @touchmove="moveMobileTouch"
       @touchend="finishMobileTouch"
@@ -11473,6 +11580,38 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         <span v-else-if="viewPullDistance > 0">Pull to refresh</span>
       </div>
       <template v-if="!settingsOpen && tab === 'generate'">
+        <div
+          v-if="composerDraftError || composerDraftMissing.length || composerDraftSaveError"
+          class="mobile-draft-recovery"
+          role="alert"
+          data-test="mobile-draft-recovery"
+        >
+          <template v-if="composerDraftError">
+            <p>{{ composerDraftError }}</p>
+            <button class="secondary-button" @click="restoreComposerDraft">
+              Retry restoration
+            </button>
+            <button class="secondary-button" @click="resetUnreadableComposerDraft">
+              Discard saved draft
+            </button>
+          </template>
+          <template v-else-if="composerDraftMissing.length">
+            <p>
+              {{ composerDraftMissing.length }} saved media item{{
+                composerDraftMissing.length === 1 ? " is" : "s are"
+              }}
+              unavailable. Reattach the missing media, or discard it to continue with your other
+              settings.
+            </p>
+            <button class="secondary-button" @click="discardMissingComposerMedia">
+              Discard unavailable media
+            </button>
+          </template>
+          <template v-else>
+            <p>{{ composerDraftSaveError }}</p>
+            <button class="secondary-button" @click="flushComposerDraft">Retry saving draft</button>
+          </template>
+        </div>
         <div v-if="!selectedHost" class="empty-state">
           <div>
             <h1 class="section-title">Connect a machine</h1>

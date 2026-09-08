@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import CardSurface from "@ui/components/CardSurface.vue";
 import Icon from "@ui/components/Icon.vue";
 import type { IconName } from "@ui/icons";
@@ -44,6 +44,14 @@ const search = ref("");
 const unavailableMessage = ref("");
 const drafts = reactive<Record<string, ConfigValue>>({});
 const saving = ref<string | null>(null);
+const loading = ref(false);
+const loaded = ref(false);
+const actionError = ref("");
+const profilesError = ref("");
+let loadSequence = 0;
+let alive = true;
+let pendingProfileReset = false;
+const busy = computed(() => loading.value || saving.value !== null);
 
 const sectionPresentation: Record<
   (typeof CONFIG_SECTIONS)[number],
@@ -71,24 +79,46 @@ const sectionPresentation: Record<
   },
 };
 
-async function load() {
+async function load(replaceDraft: string | true | null = null) {
+  const sequence = ++loadSequence;
+  const current = () => alive && sequence === loadSequence;
+  loading.value = true;
   try {
     const config = await fetchConfig();
+    if (!current()) return;
+    const previous = new Map(rows.value.map((row) => [row.key, row.value]));
     rows.value = config.filter((row) => !row.key.startsWith("tui."));
-    for (const row of rows.value) drafts[row.key] = row.value;
+    for (const row of rows.value) {
+      if (
+        pendingProfileReset ||
+        replaceDraft === true ||
+        replaceDraft === row.key ||
+        !(row.key in drafts) ||
+        drafts[row.key] === previous.get(row.key)
+      )
+        drafts[row.key] = row.value;
+    }
     unavailableMessage.value = "";
+    pendingProfileReset = false;
+    loaded.value = true;
   } catch (error) {
-    unavailableMessage.value =
-      error instanceof Error ? error.message : String(error);
-    toast("error", error instanceof Error ? error.message : String(error));
+    if (current())
+      unavailableMessage.value =
+        error instanceof Error ? error.message : String(error);
     return;
+  } finally {
+    if (current()) loading.value = false;
   }
   try {
     const profileList = await fetchProfiles();
+    if (!current()) return;
     profiles.value = profileList.profiles;
     activeProfile.value = profileList.active;
+    profilesError.value = "";
   } catch {
-    // Config remains editable when profile listing alone is unavailable.
+    if (current())
+      profilesError.value =
+        "Could not refresh profiles. Existing settings remain available.";
   }
 }
 
@@ -132,26 +162,30 @@ function typedDraft(row: ConfigRow): ConfigValue {
 }
 
 async function save(row: ConfigRow) {
+  if (busy.value) return;
+  actionError.value = "";
   saving.value = row.key;
   try {
     await writeConfig(row.key, typedDraft(row));
     toast("success", `${schemaForRow(row).label} saved`);
-    await load();
+    if (alive) await load(row.key);
   } catch (error) {
-    toast("error", error instanceof Error ? error.message : String(error));
+    actionError.value = error instanceof Error ? error.message : String(error);
   } finally {
     saving.value = null;
   }
 }
 
 async function reset(row: ConfigRow) {
+  if (busy.value) return;
+  actionError.value = "";
   saving.value = row.key;
   try {
     await resetConfig(row.key);
     toast("success", `${schemaForRow(row).label} reset`);
-    await load();
+    if (alive) await load(row.key);
   } catch (error) {
-    toast("error", error instanceof Error ? error.message : String(error));
+    actionError.value = error instanceof Error ? error.message : String(error);
   } finally {
     saving.value = null;
   }
@@ -163,23 +197,38 @@ async function selectProfile(name: string) {
 }
 
 async function createProfile() {
+  if (busy.value) return;
   const name = profileName.value.trim();
   if (!name) return;
-  await changeProfile(name);
-  profileName.value = "";
+  if (await changeProfile(name)) profileName.value = "";
 }
 
 async function changeProfile(name: string) {
+  if (busy.value) return false;
+  saving.value = "profile";
+  actionError.value = "";
   try {
     await switchProfile(name);
+    if (!alive) return;
+    activeProfile.value = name;
+    pendingProfileReset = true;
+    loaded.value = false;
     toast("success", `Profile switched to ${name}`);
-    await load();
+    await load(true);
+    return loaded.value;
   } catch (error) {
-    toast("error", error instanceof Error ? error.message : String(error));
+    actionError.value = error instanceof Error ? error.message : String(error);
+    return false;
+  } finally {
+    saving.value = null;
   }
 }
 
-onMounted(load);
+onMounted(() => load());
+onBeforeUnmount(() => {
+  alive = false;
+  ++loadSequence;
+});
 </script>
 
 <template>
@@ -199,11 +248,28 @@ onMounted(load);
       />
     </div>
 
-    <CardSurface v-if="unavailableMessage" class="config-card">
-      Configuration is unavailable right now. {{ unavailableMessage }}
+    <CardSurface
+      v-if="unavailableMessage"
+      class="config-card"
+      role="alert"
+      data-test="config-load-error"
+    >
+      <p>Could not refresh configuration. {{ unavailableMessage }}</p>
+      <button
+        type="button"
+        class="btn"
+        :disabled="busy"
+        data-test="config-retry"
+        @click="load()"
+      >
+        Retry
+      </button>
     </CardSurface>
-
-    <template v-else>
+    <p v-if="loading && !loaded" role="status">Loading configuration…</p>
+    <p v-if="actionError" role="alert" data-test="config-action-error">
+      {{ actionError }}
+    </p>
+    <template v-if="loaded">
       <CardSurface class="config-card">
         <div class="profile-row">
           <label for="profile_select">Profile</label>
@@ -212,6 +278,7 @@ onMounted(load);
             class="input"
             data-test="profile-select"
             :value="activeProfile"
+            :disabled="busy"
             @change="selectProfile(($event.target as HTMLSelectElement).value)"
           >
             <option v-for="profile in profiles" :key="profile" :value="profile">
@@ -222,17 +289,25 @@ onMounted(load);
             v-model="profileName"
             class="input"
             data-test="profile-name"
+            aria-label="New profile name"
+            :disabled="busy"
             placeholder="New profile"
           />
           <button
             class="btn"
             data-test="profile-create"
-            :disabled="!profileName.trim()"
+            :disabled="busy || !profileName.trim()"
             @click="createProfile"
           >
             Create & switch
           </button>
         </div>
+        <p v-if="profilesError" role="status" class="config-help">
+          {{ profilesError }}
+          <button type="button" class="btn" :disabled="busy" @click="load()">
+            Retry profiles
+          </button>
+        </p>
         <p class="config-help">
           Profiles keep generation and expansion preferences separate.
         </p>
@@ -278,21 +353,35 @@ onMounted(load);
               >
             </div>
             <div class="config-editor">
-              <input
+              <label
                 v-if="schema.editor === 'toggle'"
-                :id="`config-${row.key}`"
-                v-model="drafts[row.key]"
-                :data-test="`config-${row.key}`"
-                type="checkbox"
-                :disabled="row.source === 'env' || schema.liveReadOnly"
-              />
+                class="config-toggle-target"
+              >
+                <input
+                  :id="`config-${row.key}`"
+                  v-model="drafts[row.key]"
+                  :data-test="`config-${row.key}`"
+                  type="checkbox"
+                  :disabled="
+                    row.source === 'env' ||
+                    schema.liveReadOnly ||
+                    saving === row.key ||
+                    saving === 'profile'
+                  "
+                />
+              </label>
               <select
                 v-else-if="schema.editor === 'select'"
                 :id="`config-${row.key}`"
                 v-model="drafts[row.key]"
                 class="input"
                 :data-test="`config-${row.key}`"
-                :disabled="row.source === 'env' || schema.liveReadOnly"
+                :disabled="
+                  row.source === 'env' ||
+                  schema.liveReadOnly ||
+                  saving === row.key ||
+                  saving === 'profile'
+                "
               >
                 <option
                   v-for="option in schema.options"
@@ -312,16 +401,17 @@ onMounted(load);
                 :min="schema.min"
                 :max="schema.max"
                 :step="schema.step"
-                :disabled="row.source === 'env' || schema.liveReadOnly"
+                :disabled="
+                  row.source === 'env' ||
+                  schema.liveReadOnly ||
+                  saving === row.key ||
+                  saving === 'profile'
+                "
               />
               <button
                 class="btn"
                 :data-test="`save-${row.key}`"
-                :disabled="
-                  row.source === 'env' ||
-                  schema.liveReadOnly ||
-                  saving === row.key
-                "
+                :disabled="row.source === 'env' || schema.liveReadOnly || busy"
                 @click="save(row)"
               >
                 Save
@@ -333,7 +423,7 @@ onMounted(load);
                   row.source === 'env' ||
                   schema.liveReadOnly ||
                   !canResetConfig(row.key) ||
-                  saving === row.key
+                  busy
                 "
                 :title="
                   canResetConfig(row.key)
@@ -363,12 +453,14 @@ onMounted(load);
               >
             </div>
             <div class="config-editor">
-              <input
-                :id="`config-${AUTO_TAG_SCHEMA.key}`"
-                v-model="autoTagTitle"
-                data-test="config-auto-tag-title"
-                type="checkbox"
-              />
+              <label class="config-toggle-target">
+                <input
+                  :id="`config-${AUTO_TAG_SCHEMA.key}`"
+                  v-model="autoTagTitle"
+                  data-test="config-auto-tag-title"
+                  type="checkbox"
+                />
+              </label>
             </div>
           </div>
         </CardSurface>
@@ -381,12 +473,20 @@ onMounted(load);
 </template>
 
 <style scoped>
+.config-toggle-target {
+  width: 44px;
+  min-height: 44px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
 .config-panel {
   margin: 32px 0 24px;
 }
 .config-panel__heading {
   display: flex;
   align-items: end;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 12px;
@@ -395,17 +495,18 @@ onMounted(load);
   margin: 2px 0 0;
   color: var(--rebate);
   font-family: var(--f-display);
-  font-size: 19px;
+  font-size: 1.1875rem;
 }
 .kicker {
   margin: 0;
-  font: 10px var(--f-mono);
+  font: 0.875rem var(--f-mono);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink-3);
 }
 .config-search {
   width: 220px;
+  max-width: 100%;
 }
 .config-card {
   margin-bottom: 18px;
@@ -419,7 +520,7 @@ onMounted(load);
 .config-group__heading h3 {
   margin: 0;
   color: var(--rebate);
-  font: 600 13px var(--f-body);
+  font: 600 0.875rem var(--f-body);
 }
 .config-group__plate {
   width: 32px;
@@ -435,7 +536,7 @@ onMounted(load);
 .config-group__summary {
   margin: 2px 0 0;
   color: var(--ink-3);
-  font-size: 11px;
+  font-size: 0.875rem;
 }
 .config-card--accented {
   background: color-mix(in srgb, var(--halide) 3%, var(--bench));
@@ -443,7 +544,7 @@ onMounted(load);
 }
 .config-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(250px, auto);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 16px;
   align-items: center;
   padding: 14px 16px;
@@ -452,23 +553,27 @@ onMounted(load);
 .config-row:last-child {
   border-bottom: 0;
 }
+.config-copy {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .config-copy label {
   color: var(--rebate);
-  font-size: 13px;
+  font-size: 0.875rem;
   font-weight: 600;
 }
 .config-copy p,
 .config-help {
   margin: 4px 0;
   color: var(--ink-3);
-  font-size: 11.5px;
+  font-size: 0.875rem;
   line-height: 1.4;
 }
 .source,
 .env-lock {
   margin-right: 7px;
   color: var(--ink-3);
-  font: 10px var(--f-mono);
+  font: 0.875rem var(--f-mono);
 }
 .source {
   padding: 2px 5px;
@@ -480,6 +585,7 @@ onMounted(load);
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
 }
 .profile-row {
@@ -487,13 +593,16 @@ onMounted(load);
   flex-wrap: wrap;
 }
 .input {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   min-height: 44px;
   padding: 0 11px;
   border: 1px solid var(--ce);
   border-radius: var(--radius-control);
   background: var(--bath);
   color: var(--rebate);
-  font: 12px var(--f-mono);
+  font: 0.875rem var(--f-mono);
 }
 .btn {
   min-height: 44px;
@@ -502,7 +611,7 @@ onMounted(load);
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--rebate);
-  font: 600 12px var(--f-body);
+  font: 600 0.875rem var(--f-body);
   cursor: pointer;
 }
 .btn--ghost {
@@ -517,7 +626,7 @@ onMounted(load);
   color: var(--ink-3);
   text-align: center;
 }
-@media (max-width: 640px) {
+@media (max-width: 900px) {
   .config-panel__heading,
   .config-row {
     display: flex;
@@ -532,6 +641,9 @@ onMounted(load);
     flex-wrap: wrap;
   }
   .config-editor .input {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
     flex: 1 1 150px;
     min-width: 0;
   }

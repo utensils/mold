@@ -51,6 +51,8 @@ const installTargets = useModelInstallTargets();
 const query = ref("");
 const catalogEntries = ref<SearchableCatalogEntry[]>([]);
 const catalogBusy = ref(false);
+const catalogError = ref(false);
+const RETRY_CATALOG = "retry-catalog-search";
 const host = ref<HTMLElement | { $el?: unknown } | null>(null);
 const { onKeydown } = useOverlayFocus(toRef(props, "open"), host, () =>
   emit("close"),
@@ -146,6 +148,17 @@ const installRows = computed<Command[]>(() =>
 const filtered = computed(() => [
   ...filterCommands(commands.value, query.value),
   ...installRows.value,
+  ...(catalogError.value
+    ? [
+        {
+          id: RETRY_CATALOG,
+          section: "Styles",
+          label: "Could not search styles",
+          hint: "Retry",
+          run: retryCatalog,
+        },
+      ]
+    : []),
 ]);
 
 const items = computed(() =>
@@ -160,7 +173,15 @@ const items = computed(() =>
 function run(id: string) {
   const command = filtered.value.find((c) => c.id === id);
   if (command) command.run();
-  emit("close");
+  if (id !== RETRY_CATALOG) emit("close");
+}
+
+function retryCatalog() {
+  if (!props.open || catalogBusy.value || !shouldSearchCatalog(query.value))
+    return;
+  catalogError.value = false;
+  catalogBusy.value = true;
+  void searchCatalog(query.value.trim(), ++searchEpoch);
 }
 
 function clearDebounce() {
@@ -193,8 +214,9 @@ async function searchCatalog(q: string, epoch: number) {
       }));
   } catch {
     if (epoch !== searchEpoch) return;
-    // The palette still works offline; it just stops offering installs.
+    // Keep local commands usable and distinguish failed remote search from empty.
     catalogEntries.value = [];
+    catalogError.value = true;
   } finally {
     if (epoch === searchEpoch) catalogBusy.value = false;
   }
@@ -208,6 +230,7 @@ watch(query, (q) => {
   // Enter queue a model the user is no longer looking at — a multi-gigabyte
   // download they never asked for. The busy line covers the gap.
   catalogEntries.value = [];
+  catalogError.value = false;
   if (!shouldSearchCatalog(q)) {
     catalogBusy.value = false;
     return;
@@ -229,6 +252,7 @@ watch(
     }
     query.value = "";
     catalogEntries.value = [];
+    catalogError.value = false;
     // One poll so a palette opened from Library still knows the fleet's
     // inventory; the routing composable dedupes concurrent refreshes.
     void routing.refresh().catch(() => {
@@ -237,12 +261,16 @@ watch(
   },
 );
 
-onBeforeUnmount(clearDebounce);
+onBeforeUnmount(() => {
+  clearDebounce();
+  ++searchEpoch;
+});
 </script>
 
 <template>
   <PalettePanel
     ref="host"
+    class="web-command-palette"
     :open="open"
     :query="query"
     :items="items"
@@ -254,3 +282,53 @@ onBeforeUnmount(clearDebounce);
     @keydown="onKeydown"
   />
 </template>
+
+<style scoped>
+.web-command-palette {
+  position: fixed;
+  padding: clamp(8px, 8vh, 84px) 8px;
+}
+.web-command-palette :deep(.ms-palette__panel) {
+  max-width: 100%;
+  max-height: calc(100svh - 2 * clamp(8px, 8vh, 84px));
+}
+.web-command-palette :deep(.ms-palette__input) {
+  font-size: 1rem;
+  min-height: 44px;
+}
+.web-command-palette :deep(.ms-palette__esc) {
+  font-size: 0.75rem;
+}
+.web-command-palette :deep(.ms-palette__row) {
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+}
+.web-command-palette :deep(.ms-palette__section) {
+  font-size: 0.75rem;
+  width: auto;
+  grid-column: 1;
+}
+.web-command-palette :deep(.ms-palette__label) {
+  font-size: 0.9375rem;
+  grid-column: 1 / -1;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.web-command-palette :deep(.ms-palette__hint) {
+  font-size: 0.8125rem;
+  grid-column: 1 / -1;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.web-command-palette :deep(.ms-palette__arrow) {
+  grid-column: 2;
+  grid-row: 1;
+}
+.web-command-palette :deep(.ms-palette__busy),
+.web-command-palette :deep(.ms-palette__empty) {
+  font-size: 0.875rem;
+}
+</style>

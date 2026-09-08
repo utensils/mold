@@ -1,0 +1,1 @@
+- Keep the mobile destination you selected while startup restores saved drafts and host state, instead of unexpectedly returning to Machines.

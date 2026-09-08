@@ -45,9 +45,18 @@ watch(
 );
 
 watch(
-  () => props.query,
-  () => {
-    highlighted.value = 0;
+  [() => props.query, () => props.items],
+  ([query, items], [previousQuery, previousItems]) => {
+    if (query !== previousQuery) {
+      highlighted.value = 0;
+      return;
+    }
+    const selectedId = previousItems[highlighted.value]?.id;
+    const retained = items.findIndex((item) => item.id === selectedId);
+    highlighted.value =
+      retained >= 0
+        ? retained
+        : Math.min(highlighted.value, Math.max(0, items.length - 1));
   },
 );
 

@@ -1,7 +1,8 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { computed, nextTick, ref } from "vue";
+import { computed, defineComponent, h, nextTick, ref } from "vue";
 import CommandK from "./CommandK.vue";
+import DownloadsPopover from "./DownloadsPopover.vue";
 import PalettePanel from "@ui/components/PalettePanel.vue";
 import { matchSystem, theme } from "../../lib/theme";
 import {
@@ -165,6 +166,70 @@ describe("CommandK", () => {
     vi.useRealTimers();
     theme.value = "safelight";
     matchSystem.value = false;
+  });
+
+  it("returns to the palette opener after opening and closing Downloads", async () => {
+    vi.useRealTimers();
+    const palette = ref(false);
+    const downloads = ref(false);
+    const openDownloads = () => {
+      downloads.value = true;
+    };
+    window.addEventListener("mold:open-downloads", openDownloads);
+    const wrapper = mount(
+      defineComponent({
+        setup: () => () =>
+          h("div", [
+            h(
+              "button",
+              {
+                onClick: () => {
+                  palette.value = true;
+                },
+              },
+              "Commands",
+            ),
+            h(CommandK, {
+              open: palette.value,
+              onClose: () => {
+                palette.value = false;
+              },
+            }),
+            h(DownloadsPopover, {
+              open: downloads.value,
+              loaded: true,
+              active: [],
+              queued: [],
+              history: [],
+              etaByJob: {},
+              rateByJob: {},
+              onClose: () => {
+                downloads.value = false;
+              },
+            }),
+          ]),
+      }),
+      { attachTo: document.body },
+    );
+    try {
+      const opener = wrapper.get("button").element as HTMLButtonElement;
+      opener.focus();
+      opener.click();
+      await flushPromises();
+      wrapper.getComponent(PalettePanel).vm.$emit("run", "action-downloads");
+      await flushPromises();
+      expect(document.activeElement).toBe(
+        wrapper.get('[data-test="downloads-popover"]').element,
+      );
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", cancelable: true }),
+      );
+      await flushPromises();
+      expect(document.activeElement).toBe(opener);
+    } finally {
+      window.removeEventListener("mold:open-downloads", openDownloads);
+      wrapper.unmount();
+    }
   });
 
   it("offers navigation, action, and theme commands", async () => {
@@ -363,6 +428,61 @@ describe("CommandK", () => {
       "error",
       "Couldn't queue Qwen Image: host is gone",
     );
+  });
+
+  it("offers retry for failed catalog search without closing the palette", async () => {
+    fetchCatalogSearchMock.mockRejectedValueOnce(new Error("offline"));
+    const wrapper = await openPalette();
+    await type(wrapper, "missing checkpoint");
+    expect(
+      items(wrapper).find((item) => item.id === "retry-catalog-search")?.hint,
+    ).toBe("Retry");
+    fetchCatalogSearchMock.mockResolvedValueOnce(EMPTY_CATALOG);
+    wrapper.findComponent(PalettePanel).vm.$emit("run", "retry-catalog-search");
+    await flushPromises();
+    expect(wrapper.emitted("close")).toBeUndefined();
+    expect(fetchCatalogSearchMock).toHaveBeenCalledTimes(2);
+    expect(
+      items(wrapper).some((item) => item.id === "retry-catalog-search"),
+    ).toBe(false);
+  });
+
+  it("keeps a valid keyboard selection after retry beside a local command", async () => {
+    fetchCatalogSearchMock.mockRejectedValueOnce(new Error("offline"));
+    const wrapper = await openPalette();
+    await type(wrapper, "Queue");
+    const panel = wrapper.findComponent(PalettePanel);
+    const input = panel.get("input");
+    const retryIndex = items(wrapper).findIndex(
+      (item) => item.id === "retry-catalog-search",
+    );
+    expect(retryIndex).toBeGreaterThan(0);
+    for (let i = 0; i < retryIndex; i++)
+      await input.trigger("keydown", { key: "ArrowDown" });
+    fetchCatalogSearchMock.mockResolvedValueOnce(EMPTY_CATALOG);
+    await input.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(wrapper.emitted("close")).toBeUndefined();
+    await input.trigger("keydown", { key: "Enter" });
+    expect(pushMock).toHaveBeenCalledWith("/queue");
+  });
+
+  it("ignores a failed search after the query changes", async () => {
+    let rejectOld!: (reason: Error) => void;
+    fetchCatalogSearchMock.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectOld = reject;
+        }),
+    );
+    const wrapper = await openPalette();
+    await type(wrapper, "missing checkpoint");
+    await type(wrapper, "Queue");
+    rejectOld(new Error("offline"));
+    await flushPromises();
+    expect(
+      items(wrapper).some((item) => item.id === "retry-catalog-search"),
+    ).toBe(false);
   });
 
   it("discards a stale catalog response for an abandoned query", async () => {

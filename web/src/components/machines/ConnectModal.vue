@@ -38,6 +38,7 @@ const name = ref("");
 const apiKey = ref("");
 const probing = ref(false);
 const error = ref<string | null>(null);
+const discoveryError = ref<string | null>(null);
 const connected = ref<HostEntry | null>(null);
 const discoveryAvailable = ref(false);
 const checkingDiscovery = ref(false);
@@ -45,7 +46,9 @@ const scanning = ref(false);
 const discovered = ref<DiscoveryPeer[]>([]);
 const selectedPeer = ref<DiscoveryPeer | null>(null);
 let openSequence = 0;
+let capabilitySequence = 0;
 let discoveryRefreshInFlight = false;
+let discoverySequence = 0;
 let discoveryTimer: ReturnType<typeof setInterval> | null = null;
 const host = ref<HTMLElement | { $el?: unknown } | null>(null);
 const isOpen = computed(() => props.open);
@@ -71,6 +74,15 @@ function stopDiscoveryRefresh() {
   discoveryTimer = null;
 }
 
+function invalidateStep() {
+  ++openSequence;
+  ++discoverySequence;
+  discoveryRefreshInFlight = false;
+  probing.value = false;
+  scanning.value = false;
+  stopDiscoveryRefresh();
+}
+
 function reset() {
   stopDiscoveryRefresh();
   step.value = 1;
@@ -85,20 +97,19 @@ function reset() {
   checkingDiscovery.value = true;
   scanning.value = false;
   discovered.value = [];
+  discoveryError.value = null;
   selectedPeer.value = null;
 }
 
 watch(
   () => props.open,
   async (open) => {
-    const sequence = ++openSequence;
-    if (!open) {
-      stopDiscoveryRefresh();
-      return;
-    }
+    invalidateStep();
+    const sequence = ++capabilitySequence;
+    if (!open) return;
     reset();
     const capabilities = await hostCapabilities(originHost());
-    if (sequence !== openSequence || !props.open) return;
+    if (sequence !== capabilitySequence || !props.open) return;
     discoveryAvailable.value = capabilities.discovery?.can_browse === true;
     checkingDiscovery.value = false;
   },
@@ -106,39 +117,70 @@ watch(
 );
 
 function close() {
-  stopDiscoveryRefresh();
+  ++capabilitySequence;
+  invalidateStep();
   emit("close");
 }
 
 function toStep2() {
+  invalidateStep();
   mode.value = "remote";
   error.value = null;
   step.value = 2;
 }
 
 async function refreshDiscovery(initial = false) {
-  if (discoveryRefreshInFlight) return;
+  if (
+    discoveryRefreshInFlight ||
+    !props.open ||
+    mode.value !== "lan" ||
+    step.value !== 2
+  )
+    return;
+  const sequence = ++discoverySequence;
+  const owner = openSequence;
+  const current = () =>
+    sequence === discoverySequence &&
+    owner === openSequence &&
+    props.open &&
+    mode.value === "lan" &&
+    step.value === 2;
   discoveryRefreshInFlight = true;
   if (initial) scanning.value = true;
   try {
-    discovered.value = await hostDiscoveryPeers(originHost());
-    error.value = null;
+    const peers = await hostDiscoveryPeers(originHost());
+    if (!current()) return;
+    discovered.value = peers;
+    discoveryError.value = null;
   } catch {
-    error.value = "Couldn't scan this server's local network. Try again.";
+    if (current())
+      discoveryError.value =
+        "Couldn't scan this server's local network. Try again.";
   } finally {
-    discoveryRefreshInFlight = false;
-    if (initial) scanning.value = false;
+    if (current()) {
+      discoveryRefreshInFlight = false;
+      scanning.value = false;
+    }
   }
 }
 
 async function browseLan() {
   if (!discoveryAvailable.value) return;
+  invalidateStep();
+  const sequence = openSequence;
   mode.value = "lan";
   selectedPeer.value = null;
   apiKey.value = "";
   error.value = null;
   step.value = 2;
   await refreshDiscovery(true);
+  if (
+    sequence !== openSequence ||
+    !props.open ||
+    step.value !== 2 ||
+    mode.value !== "lan"
+  )
+    return;
   stopDiscoveryRefresh();
   discoveryTimer = setInterval(() => {
     if (props.open && mode.value === "lan" && step.value === 2) {
@@ -148,7 +190,7 @@ async function browseLan() {
 }
 
 function back() {
-  stopDiscoveryRefresh();
+  invalidateStep();
   error.value = null;
   selectedPeer.value = null;
   step.value = 1;
@@ -169,17 +211,21 @@ async function connectTo(
   displayName: string,
   advertisedInstanceId?: string | null,
 ) {
+  if (probing.value || !props.open || step.value !== 2) return;
+  const sequence = openSequence;
+  const key = apiKey.value.trim();
   const probe: HostEntry = {
     id: hostIdFromUrl(url),
     name: displayName.trim() || url,
     url,
   };
-  if (apiKey.value.trim()) probe.apiKey = apiKey.value.trim();
+  if (key) probe.apiKey = key;
 
   probing.value = true;
   error.value = null;
   try {
     const status = await hostStatus(probe);
+    if (sequence !== openSequence || !props.open || step.value !== 2) return;
     const instanceId = status.instance_id || advertisedInstanceId;
     // Desktop parity: with no typed display name, the server's own hostname
     // labels the machine — never the raw URL, which reads as debris in every
@@ -189,21 +235,23 @@ async function connectTo(
     const entry = addHost({
       url,
       name: resolvedName,
-      ...(apiKey.value.trim() ? { apiKey: apiKey.value.trim() } : {}),
+      ...(key ? { apiKey: key } : {}),
       ...(instanceId ? { instanceId } : {}),
     });
     connected.value = entry;
     stopDiscoveryRefresh();
     step.value = 3;
   } catch (e) {
+    if (sequence !== openSequence || !props.open) return;
     const message = e instanceof Error ? e.message : String(e);
     error.value = describeError(message, url);
   } finally {
-    probing.value = false;
+    if (sequence === openSequence) probing.value = false;
   }
 }
 
 async function connect() {
+  if (probing.value) return;
   if (mode.value === "lan" && selectedPeer.value) {
     await connectTo(
       selectedPeer.value.url,
@@ -221,6 +269,7 @@ async function connect() {
 }
 
 async function pickDiscovered(peer: DiscoveryPeer) {
+  if (probing.value) return;
   apiKey.value = "";
   error.value = null;
   if (peer.auth_required) {
@@ -235,12 +284,16 @@ function done() {
   emit("close");
 }
 
-onBeforeUnmount(stopDiscoveryRefresh);
+onBeforeUnmount(() => {
+  ++capabilitySequence;
+  invalidateStep();
+});
 </script>
 
 <template>
   <ModalPanel
     ref="host"
+    class="connect-modal"
     :open="open"
     :width="480"
     :steps="3"
@@ -261,6 +314,7 @@ onBeforeUnmount(stopDiscoveryRefresh);
           class="cm__type"
           data-on="true"
           data-test="type-remote"
+          @click="toStep2"
         >
           <span class="cm__type-icon"><Icon name="machines" :size="18" /></span>
           <span class="cm__type-body">
@@ -287,8 +341,8 @@ onBeforeUnmount(stopDiscoveryRefresh);
               Find mold machines visible from this server
             </span>
             <span v-else class="cm__type-desc">
-              Browsers can't discover LAN hosts — use the desktop app or enter
-              an address.
+              This server does not advertise network discovery. Enter an address
+              to connect.
             </span>
           </span>
         </button>
@@ -305,6 +359,7 @@ onBeforeUnmount(stopDiscoveryRefresh);
         <div class="cm__field">
           <Icon name="lock" :size="14" />
           <input
+            :disabled="probing"
             id="cm-address"
             v-model="address"
             class="cm__input"
@@ -319,6 +374,7 @@ onBeforeUnmount(stopDiscoveryRefresh);
         <label class="cm__label" for="cm-name">Display name</label>
         <div class="cm__field">
           <input
+            :disabled="probing"
             id="cm-name"
             v-model="name"
             class="cm__input"
@@ -334,6 +390,7 @@ onBeforeUnmount(stopDiscoveryRefresh);
         >
         <div class="cm__field">
           <input
+            :disabled="probing"
             id="cm-key"
             v-model="apiKey"
             type="password"
@@ -361,7 +418,9 @@ onBeforeUnmount(stopDiscoveryRefresh);
           Looking for mold machines…
         </div>
         <div
-          v-else-if="!error && visiblePeers.length === 0"
+          v-else-if="
+            !discoveryError && visiblePeers.length === 0 && !selectedPeer
+          "
           class="cm__discovery-state"
           data-test="discovery-empty"
         >
@@ -406,6 +465,7 @@ onBeforeUnmount(stopDiscoveryRefresh);
           <label class="cm__label" for="cm-discovery-key">API key</label>
           <div class="cm__field">
             <input
+              :disabled="probing"
               id="cm-discovery-key"
               v-model="apiKey"
               type="password"
@@ -419,12 +479,29 @@ onBeforeUnmount(stopDiscoveryRefresh);
         </template>
       </template>
 
-      <p v-if="error" class="cm__error" data-test="connect-error">
+      <div
+        v-if="mode === 'lan' && discoveryError"
+        class="cm__error"
+        role="alert"
+        data-test="discovery-error"
+      >
+        <p>{{ discoveryError }}</p>
+        <button
+          type="button"
+          class="cm__btn cm__btn--ghost"
+          :disabled="scanning"
+          data-test="discovery-retry"
+          @click="refreshDiscovery(true)"
+        >
+          Retry discovery
+        </button>
+      </div>
+      <p v-if="error" class="cm__error" role="alert" data-test="connect-error">
         {{ error }}
       </p>
       <div v-else-if="mode === 'remote'" class="cm__note">
         <span class="cm__note-dot" />
-        Connection is direct — no data leaves your network.
+        Your browser connects directly to this address.
       </div>
     </template>
 
@@ -479,7 +556,7 @@ onBeforeUnmount(stopDiscoveryRefresh);
         {{ probing ? "Connecting…" : "Connect" }}
       </button>
       <button
-        v-else
+        v-else-if="step === 3"
         type="button"
         class="cm__btn cm__btn--primary"
         data-test="connect-done"
@@ -492,16 +569,29 @@ onBeforeUnmount(stopDiscoveryRefresh);
 </template>
 
 <style scoped>
+.connect-modal {
+  position: fixed;
+  padding: 8px;
+}
+.connect-modal :deep(.ms-modal__panel) {
+  max-width: 100%;
+  max-height: calc(100svh - 16px);
+  overflow-y: auto;
+}
+.connect-modal :deep(.ms-modal__footer) {
+  flex-wrap: wrap;
+}
+
 .cm__title {
   font-family: var(--f-display);
-  font-size: 20px;
+  font-size: 1.25rem;
   font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--rebate);
 }
 
 .cm__sub {
-  font-size: 12.5px;
+  font-size: 0.875rem;
   color: var(--ink-3);
   margin: 5px 0 18px;
   line-height: 1.5;
@@ -556,6 +646,8 @@ onBeforeUnmount(stopDiscoveryRefresh);
 }
 
 .cm__type-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -563,12 +655,12 @@ onBeforeUnmount(stopDiscoveryRefresh);
 }
 
 .cm__type-name {
-  font-size: 13.5px;
+  font-size: 0.875rem;
   font-weight: 600;
 }
 
 .cm__type-desc {
-  font-size: 11.5px;
+  font-size: 0.875rem;
   color: var(--ink-3);
   line-height: 1.4;
 }
@@ -579,7 +671,7 @@ onBeforeUnmount(stopDiscoveryRefresh);
 
 .cm__label {
   display: block;
-  font-size: 12px;
+  font-size: 0.875rem;
   color: var(--ink-2);
   font-weight: 600;
   margin: 16px 0 7px;
@@ -610,6 +702,7 @@ onBeforeUnmount(stopDiscoveryRefresh);
 }
 
 .cm__input {
+  min-height: 44px;
   flex: 1;
   min-width: 0;
   background: transparent;
@@ -617,7 +710,7 @@ onBeforeUnmount(stopDiscoveryRefresh);
   outline: none;
   color: var(--rebate);
   font-family: var(--f-mono);
-  font-size: 13px;
+  font-size: 1rem;
 }
 
 .cm__input::placeholder {
@@ -629,7 +722,7 @@ onBeforeUnmount(stopDiscoveryRefresh);
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11.5px;
+  font-size: 0.875rem;
   color: var(--ink-3);
 }
 
@@ -649,7 +742,7 @@ onBeforeUnmount(stopDiscoveryRefresh);
   border: 1px dashed var(--ce);
   border-radius: 12px;
   color: var(--ink-3);
-  font-size: 12px;
+  font-size: 0.875rem;
   line-height: 1.5;
   text-align: center;
 }
@@ -662,6 +755,7 @@ onBeforeUnmount(stopDiscoveryRefresh);
 
 .cm__peer {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   padding: 12px;
@@ -676,18 +770,20 @@ onBeforeUnmount(stopDiscoveryRefresh);
 }
 
 .cm__peer-body {
+  overflow-wrap: anywhere;
+  flex-basis: 10rem;
   min-width: 0;
   flex: 1;
   display: flex;
   flex-direction: column;
   gap: 2px;
   color: var(--ink-2);
-  font-size: 11.5px;
+  font-size: 0.875rem;
 }
 
 .cm__peer-body strong {
   color: var(--rebate);
-  font-size: 13px;
+  font-size: 1rem;
 }
 
 .cm__peer-body small {
@@ -695,12 +791,13 @@ onBeforeUnmount(stopDiscoveryRefresh);
 }
 
 .cm__peer-connect {
+  min-height: 44px;
   border: 1px solid var(--ce);
   border-radius: 8px;
   background: transparent;
   color: var(--safelight);
   padding: 8px 11px;
-  font-size: 11.5px;
+  font-size: 0.875rem;
   font-weight: 600;
   cursor: pointer;
 }
@@ -711,8 +808,9 @@ onBeforeUnmount(stopDiscoveryRefresh);
 }
 
 .cm__error {
+  overflow-wrap: anywhere;
   margin-top: 16px;
-  font-size: 12.5px;
+  font-size: 0.875rem;
   color: var(--stop);
   line-height: 1.45;
 }
@@ -738,9 +836,10 @@ onBeforeUnmount(stopDiscoveryRefresh);
 }
 
 .cm__btn {
+  min-height: 44px;
   border-radius: 10px;
   padding: 11px 16px;
-  font-size: 13px;
+  font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
 }

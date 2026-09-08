@@ -3,6 +3,9 @@ import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/tes
 import { createPinia, type Pinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IDBFactory } from "fake-indexeddb";
+import * as mobileDraftModule from "./mobileComposerDraft";
+import { createMobileComposerDraft, MOBILE_COMPOSER_DRAFT_KEY } from "./mobileComposerDraft";
+import { clearMemoryDraftsForTest } from "@studio/lib/draftMediaStore";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
 import type { GalleryImage, ModelEntry, ServerStatus } from "../lib/api/types";
 import { applyModelDefaults, newGenerateForm, type GenerateForm } from "../lib/generateForm";
@@ -7730,6 +7733,173 @@ describe("MobileApp create settings reset", () => {
   });
 });
 
+describe("MobileApp durable composer", () => {
+  function mediaStore() {
+    Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: new IDBFactory() });
+    clearMemoryDraftsForTest();
+  }
+  it("restores before inventory defaults and flushes edits on page hide", async () => {
+    mediaStore();
+    const draft = newGenerateForm();
+    draft.prompt = "Unfinished draft";
+    draft.title = "Unfinished title";
+    draft.model = "unavailable-authored-model";
+    draft.width = 768;
+    draft.height = 512;
+    draft.sourceImage = "SOURCE_BYTES";
+    draft.identityImage = { filename: "face.png", base64: "FACE_BYTES" };
+    await createMobileComposerDraft().save(draft, "manual");
+    clearMemoryDraftsForTest();
+    wrapper = mountMobileApp();
+    await vi.waitFor(() =>
+      expect(wrapper!.getComponent(MobileLoraControls).props("form").prompt).toBe(
+        "Unfinished draft",
+      ),
+    );
+    await flushPromises();
+    const live = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    expect(live).toMatchObject({
+      title: "Unfinished title",
+      model: "unavailable-authored-model",
+      width: 768,
+      height: 512,
+      sourceImage: "SOURCE_BYTES",
+      identityImage: draft.identityImage,
+    });
+    live.prompt = "Edited before background";
+    await nextTick();
+    window.dispatchEvent(new Event("pagehide"));
+    await vi.waitFor(() =>
+      expect(JSON.parse(localStorage.getItem(MOBILE_COMPOSER_DRAFT_KEY)!).form.prompt).toBe(
+        "Edited before background",
+      ),
+    );
+    const raw = localStorage.getItem(MOBILE_COMPOSER_DRAFT_KEY)!;
+    expect(raw).not.toMatch(/SOURCE_BYTES|FACE_BYTES/);
+    wrapper.unmount();
+    wrapper = null;
+    await flushPromises();
+    clearMemoryDraftsForTest();
+    wrapper = mountMobileApp();
+    await vi.waitFor(() =>
+      expect(wrapper!.getComponent(MobileLoraControls).props("form").prompt).toBe(
+        "Edited before background",
+      ),
+    );
+    expect(wrapper.getComponent(MobileLoraControls).props("form").identityImage).toEqual(
+      draft.identityImage,
+    );
+  });
+
+  it("reconciles a restored available model against its current profile without losing authored input", async () => {
+    mediaStore();
+    const draft = newGenerateForm();
+    draft.model = meshModel.name;
+    draft.family = meshModel.family;
+    draft.prompt = "Retain original words even when ignored";
+    draft.title = "My object";
+    draft.sourceImage = "SOURCE_BYTES";
+    await createMobileComposerDraft().save(draft, "manual");
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target: unknown, path: string, init?: RequestInit) =>
+      path === "/api/models" ? Promise.resolve([meshModel]) : base(target, path, init),
+    );
+    wrapper = mountMobileApp();
+    await vi.waitFor(() =>
+      expect(
+        wrapper!.getComponent(MobileLoraControls).props("form").recipeCapabilities?.canvasless,
+      ).toBe(true),
+    );
+    const live = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    expect(live).toMatchObject({
+      prompt: draft.prompt,
+      title: draft.title,
+      sourceImage: "SOURCE_BYTES",
+      model: meshModel.name,
+      width: 0,
+      height: 0,
+      outputFormat: "glb",
+    });
+  });
+
+  it("does not override a selected destination when delayed startup finishes", async () => {
+    localStorage.setItem("mold.mobile.hosts.v1", "[]");
+    localStorage.removeItem("mold.mobile.selected-host.v1");
+    let finishRestore!: (value: { error: string; missing: never[] }) => void;
+    const restoring = new Promise<{ error: string; missing: never[] }>((resolve) => {
+      finishRestore = resolve;
+    });
+    const factory = vi.spyOn(mobileDraftModule, "createMobileComposerDraft").mockReturnValue({
+      restore: () => restoring,
+      save: async () => true,
+      clear: async () => {},
+    });
+    try {
+      wrapper = mountMobileApp();
+      await nextTick();
+      expect(wrapper.get("[data-test='mobile-tab-hosts']").attributes("aria-current")).toBe("page");
+      await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+      finishRestore({ error: "", missing: [] });
+      await flushPromises();
+      expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
+        "page",
+      );
+    } finally {
+      factory.mockRestore();
+    }
+  });
+
+  it("coalesces hidden, pagehide and teardown into one save for the same edit", async () => {
+    const save = vi.fn(() => new Promise<boolean>(() => {}));
+    const factory = vi.spyOn(mobileDraftModule, "createMobileComposerDraft").mockReturnValue({
+      restore: async () => ({ error: "", missing: [] }),
+      save,
+      clear: async () => {},
+    });
+    try {
+      wrapper = mountMobileApp();
+      await flushPromises();
+      const live = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+      live.prompt = "Save once when leaving";
+      await nextTick();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("pagehide"));
+      wrapper.unmount();
+      wrapper = null;
+      expect(save).toHaveBeenCalledTimes(1);
+      visibility.mockRestore();
+    } finally {
+      factory.mockRestore();
+    }
+  });
+
+  it("blocks missing-source generation until explicit recovery preserves the other settings", async () => {
+    mediaStore();
+    const draft = newGenerateForm();
+    draft.prompt = "Keep these words";
+    draft.title = "Keep this title";
+    draft.sourceImage = "EVICTED_BYTES";
+    await createMobileComposerDraft().save(draft, "manual");
+    mediaStore();
+    wrapper = mountMobileApp();
+    await vi.waitFor(() =>
+      expect(wrapper!.find("[data-test='mobile-draft-recovery']").exists()).toBe(true),
+    );
+    expect(wrapper.get("[data-test='mobile-draft-recovery']").text()).toContain(
+      "saved media item is unavailable",
+    );
+    const live = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    expect(live.sourceImage).toBe("");
+    await wrapper.get("[data-test='mobile-draft-recovery'] button").trigger("click");
+    await flushPromises();
+    expect(live.sourceImage).toBeNull();
+    expect(live.prompt).toBe("Keep these words");
+    expect(live.title).toBe("Keep this title");
+    expect(wrapper.find("[data-test='mobile-draft-recovery']").exists()).toBe(false);
+  });
+});
+
 describe("MobileApp primary navigation", () => {
   it("opens Queue without losing the Make draft or its scroll position", async () => {
     wrapper = mountMobileApp();
@@ -10428,32 +10598,38 @@ describe("MobileApp host and catalog coordination", () => {
     expect(scanPairingQr).not.toHaveBeenCalled();
   });
 
-  it("cancels Android pairing through the native session and settles the pending scan", async () => {
-    isNativeAndroidRuntime.mockReturnValue(true);
-    const pendingScan = deferred<{ content: string }>();
-    invoke.mockImplementation((command: string) => {
-      if (command === "scan_android_pairing_code") return pendingScan.promise;
-      if (command === "cancel_android_pairing_scan") {
-        pendingScan.reject("cancelled");
+  it.each(["button", "back"] as const)(
+    "cancels Android pairing through %s and settles the pending scan",
+    async (dismissal) => {
+      isNativeAndroidRuntime.mockReturnValue(true);
+      const pendingScan = deferred<{ content: string }>();
+      invoke.mockImplementation((command: string) => {
+        if (command === "scan_android_pairing_code") return pendingScan.promise;
+        if (command === "cancel_android_pairing_scan") {
+          pendingScan.reject("cancelled");
+          return Promise.resolve(null);
+        }
         return Promise.resolve(null);
-      }
-      return Promise.resolve(null);
-    });
+      });
 
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
-    await wrapper.get("[data-test='mobile-scan-pairing']").trigger("click");
-    await flushPromises();
-    await wrapper.get("[data-test='mobile-pair-scanner-cancel']").trigger("click");
-    await flushPromises();
+      wrapper = mountMobileApp();
+      await flushPromises();
+      await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+      await wrapper.get("[data-test='mobile-scan-pairing']").trigger("click");
+      await flushPromises();
+      if (dismissal === "back") window.dispatchEvent(new PopStateEvent("popstate"));
+      else await wrapper.get("[data-test='mobile-pair-scanner-cancel']").trigger("click");
+      await flushPromises();
 
-    expect(invoke).toHaveBeenCalledWith("cancel_android_pairing_scan");
-    expect(cancelBarcodeScanner).not.toHaveBeenCalled();
-    expect(wrapper.find("[data-test='mobile-pair-scanner']").exists()).toBe(false);
-    expect(wrapper.find(".error-text").exists()).toBe(false);
-    expect(wrapper.get("[data-test='mobile-scan-pairing']").attributes("disabled")).toBeUndefined();
-  });
+      expect(invoke).toHaveBeenCalledWith("cancel_android_pairing_scan");
+      expect(cancelBarcodeScanner).not.toHaveBeenCalled();
+      expect(wrapper.find("[data-test='mobile-pair-scanner']").exists()).toBe(false);
+      expect(wrapper.find(".error-text").exists()).toBe(false);
+      expect(
+        wrapper.get("[data-test='mobile-scan-pairing']").attributes("disabled"),
+      ).toBeUndefined();
+    },
+  );
 
   it("cancels the native Android pairing session when the app unmounts", async () => {
     isNativeAndroidRuntime.mockReturnValue(true);

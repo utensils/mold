@@ -275,7 +275,7 @@ function addAnother() {
       data-test="lora-hint-empty"
     >
       no loras installed for this model. pull one from
-      <RouterLink to="/models" class="lp__accent">Models</RouterLink> and it
+      <RouterLink to="/models" class="lp__accent">Styles</RouterLink> and it
       shows up here.
     </p>
   </section>

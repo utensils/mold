@@ -22,6 +22,7 @@ function mountPopover(props: Record<string, unknown>) {
   return mount(DownloadsPopover, {
     props: {
       open: true,
+      loaded: true,
       active: [],
       queued: [],
       history: [],
@@ -126,12 +127,27 @@ describe("DownloadsPopover", () => {
         }) as never,
       ],
     });
-    expect(wrapper.text()).toContain("Recently installed");
+    expect(wrapper.text()).toContain("Recent downloads");
     expect(wrapper.text()).toContain("z-image:turbo");
     expect(wrapper.text()).toContain("3.4 GB");
+    expect(wrapper.text()).toContain("network blip");
     const btn = wrapper.get("[data-test=retry-h2]");
     await btn.trigger("click");
     expect(wrapper.emitted("retry")?.[0]).toEqual(["flux-dev:q4"]);
+  });
+
+  it("distinguishes loading and retryable failure from an empty inventory", async () => {
+    const wrapper = mountPopover({ loaded: false, loading: true });
+    expect(wrapper.text()).toContain("Loading downloads");
+    expect(wrapper.text()).not.toContain("No downloads yet");
+    await wrapper.setProps({ loading: false, error: "Offline" } as never);
+    expect(wrapper.text()).toContain("Offline");
+    expect(wrapper.text()).not.toContain("No downloads yet");
+    await wrapper.get(".dl-recovery button").trigger("click");
+    expect(wrapper.emitted("refresh")).toHaveLength(1);
+    await wrapper.setProps({ loaded: true, error: null } as never);
+    expect(wrapper.text()).toContain("No downloads yet");
+    wrapper.unmount();
   });
 
   it("closes from the header button", async () => {
@@ -158,6 +174,64 @@ function baseProps() {
 }
 
 describe("DownloadsPopover dismissal", () => {
+  it("moves focus into the anchored panel and restores its connected opener", async () => {
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
+    const wrapper = mount(DownloadsPopover, {
+      props: baseProps(),
+      attachTo: document.body,
+    });
+    await flushPromises();
+    expect(document.activeElement).toBe(
+      wrapper.get('[data-test="downloads-popover"]').element,
+    );
+    await wrapper.setProps({ open: false });
+    expect(document.activeElement).toBe(opener);
+    wrapper.unmount();
+    opener.remove();
+  });
+  it("focuses the anchored panel when an open phone sheet becomes wide", async () => {
+    const original = window.matchMedia;
+    let listener: (() => void) | undefined;
+    const media = {
+      matches: true,
+      addEventListener: (_: string, fn: () => void) => {
+        listener = fn;
+      },
+      removeEventListener() {},
+    };
+    window.matchMedia = (() => media) as unknown as typeof window.matchMedia;
+    const wrapper = mount(DownloadsPopover, {
+      props: baseProps(),
+      attachTo: document.body,
+    });
+    try {
+      await flushPromises();
+      expect(wrapper.find(".ms-sheet").exists()).toBe(true);
+      media.matches = false;
+      listener?.();
+      await flushPromises();
+      expect(document.activeElement).toBe(
+        wrapper.get('[data-test="downloads-popover"]').element,
+      );
+    } finally {
+      wrapper.unmount();
+      window.matchMedia = original;
+    }
+  });
+  it("does not dismiss when another overlay consumes Escape", async () => {
+    const wrapper = mountPopover({});
+    await flushPromises();
+    const event = new KeyboardEvent("keydown", {
+      key: "Escape",
+      cancelable: true,
+    });
+    event.preventDefault();
+    document.dispatchEvent(event);
+    expect(wrapper.emitted("close")).toBeUndefined();
+    wrapper.unmount();
+  });
   it("closes on Escape from anywhere, not just when focus is inside it", async () => {
     // The handler used to sit on the <aside>, which never receives key events
     // because opening the popover doesn't focus it — so Escape did nothing.
