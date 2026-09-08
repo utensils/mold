@@ -546,16 +546,15 @@ require_text "$android" 'name: Classify Android changes' \
 android_build_filter="$(extract_filter "$android" build)"
 grep -Fq "desktop/src/mobile/**" <<< "$android_build_filter" \
   || fail "Android build classifier omits the shared mobile frontend"
-android_native_filter="$(extract_filter "$android" native_tests)"
-grep -Fq "apps/mobile/plugins/android/**" <<< "$android_native_filter" \
-  || fail "Android native-test classifier omits the Kotlin bridge"
-require_text "$android" 'targets: aarch64-linux-android' \
-  "Android workflow does not install its Rust target"
+grep -Fq "apps/mobile/plugins/**" <<< "$android_build_filter" \
+  || fail "Android build classifier omits the Kotlin bridge"
+require_text "$android" 'targets: aarch64-linux-android,x86_64-linux-android' \
+  "Android workflow does not install device and emulator Rust targets"
 require_text "$android" '"ndk;27.0.12077973"' \
   "Android workflow does not pin the repository NDK"
 require_text "$android" \
-  'run: cargo tauri android build --debug --apk --target aarch64 --ci' \
-  "Android workflow does not build the ARM64 APK"
+  'run: cargo tauri android build --debug --apk --target aarch64 --target x86_64 --ci' \
+  "Android workflow does not build matching device and emulator APK ABIs"
 require_text "$release_workflow" 'build-android-apk:' \
   "Release workflow does not build the signed Android APK"
 require_text "$release_workflow" 'targets: aarch64-linux-android,armv7-linux-androideabi' \
@@ -571,6 +570,12 @@ require_text "$android" 'api-level: 35' \
 require_text "$android" \
   './gradlew --no-daemon :tauri-plugin-mold-mobile-native:connectedDebugAndroidTest' \
   "Android workflow does not run native instrumentation tests"
+require_text "$android" 'api-level: 36' \
+  "Android workflow does not exercise Android 16"
+require_text "$android" 'adb install -r apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk' \
+  "Android workflow does not install the app it built"
+require_text "$android" 'bun scripts/tests/android-app-smoke.mjs' \
+  "Android workflow does not exercise app-level navigation"
 require_text "$android_gradle" 'com.google.mlkit:barcode-scanning:17.3.0' \
   "Android pairing does not bundle its barcode decoder for first-run and offline use"
 

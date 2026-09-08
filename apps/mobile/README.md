@@ -762,10 +762,16 @@ folder is `$(xcrun simctl get_app_container booted com.utensils.mold data)/Docum
 
 `.github/workflows/android.yml` runs for Android and shared-mobile changes. It
 classifies the changed paths before spending Android build time and builds an
-ARM64 debug validation APK. The Android 15 emulator and native credential,
-discovery, MediaStore, clipboard, content-URI, and authenticated-share
-instrumentation tests run only when the Kotlin/generated Android surface
-changed.
+universal ARM64/x86_64 debug validation APK. Android 15 and 16 x86_64 emulators
+install that APK and exercise the actual Tauri WebView's destinations, native
+Settings Back dismissal, and live system text scaling. Android 15 also runs
+native credential, discovery, MediaStore, clipboard, content-URI, and
+authenticated-share instrumentation. These checks run for shared-mobile
+frontend changes as well as Kotlin changes. The app smoke uses Bun's built-in
+WebSocket support and requires a debug APK on an emulator:
+`bun scripts/tests/android-app-smoke.mjs`. Set `ADB`, `ANDROID_SERIAL`, or
+`MOLD_ANDROID_EVIDENCE` when needed; it restores the previous font scale and
+selected destination and never submits a generation.
 
 `.github/workflows/release.yml` builds the signed ARM64/ARMv7 universal APK on
 every non-scheduled `main` and `v*` run. It verifies the APK signature, publishes
