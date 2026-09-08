@@ -69,6 +69,7 @@ class IdentityPhotoArgs {
 }
 
 private const val LEGACY_MEDIA_WRITE = "legacyMediaWrite"
+private const val IDENTITY_CAMERA = "identityCamera"
 
 private sealed interface PendingLegacyMedia {
     data class Image(val dataB64: String) : PendingLegacyMedia
@@ -79,6 +80,7 @@ private sealed interface PendingLegacyMedia {
 
 @TauriPlugin(
     permissions = [
+        Permission(strings = [Manifest.permission.CAMERA], alias = IDENTITY_CAMERA),
         Permission(
             strings = [Manifest.permission.WRITE_EXTERNAL_STORAGE],
             alias = LEGACY_MEDIA_WRITE,
@@ -89,6 +91,7 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
     private val vault = CredentialVault(hostActivity.applicationContext)
     private val media = AndroidMedia(hostActivity.applicationContext)
     private val identityPhoto = AndroidIdentityPhoto(hostActivity.applicationContext)
+    private var identityPickPending = false
     private var pendingIdentityCamera: AndroidIdentityPhoto.CameraTarget? = null
     private var pendingLegacyMedia: PendingLegacyMedia? = null
     private var textScaleWebView: WeakReference<WebView>? = null
@@ -230,28 +233,65 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
     @Command
     fun pickIdentityPhoto(invoke: Invoke) {
         val source = invoke.parseArgs(IdentityPhotoArgs::class.java).source
-        val intent = when (source) {
-            "library" -> {
-                pendingIdentityCamera = null
-                identityPhoto.libraryIntent()
-            }
-            "camera" -> {
-                val target = identityPhoto.createCameraTarget()
-                pendingIdentityCamera = target
-                identityPhoto.cameraIntent(target)
-            }
-            else -> {
-                invoke.reject("unknown identity photo source $source")
+        synchronized(this) {
+            if (identityPickPending) {
+                invoke.reject("An identity photo picker is already open.")
                 return
             }
+            identityPickPending = true
         }
-        if (intent.resolveActivity(hostActivity.packageManager) == null) {
-            pendingIdentityCamera?.file?.delete()
-            pendingIdentityCamera = null
-            invoke.reject("No Android app can open that identity photo source.")
+        if (source == "camera" && getPermissionState(IDENTITY_CAMERA) !== PermissionState.GRANTED) {
+            try {
+                requestPermissionForAlias(IDENTITY_CAMERA, invoke, "identityCameraPermissionCallback")
+            } catch (error: Exception) {
+                synchronized(this) { identityPickPending = false }
+                invoke.reject(error.message ?: "Could not request camera access.")
+            }
             return
         }
-        startActivityForResult(invoke, intent, "identityPhotoResult")
+        launchIdentityPhoto(invoke, source)
+    }
+
+    @PermissionCallback
+    fun identityCameraPermissionCallback(invoke: Invoke) {
+        if (!synchronized(this) { identityPickPending }) {
+            invoke.reject("No identity photo picker is waiting for camera access.")
+            return
+        }
+        if (getPermissionState(IDENTITY_CAMERA) !== PermissionState.GRANTED) {
+            synchronized(this) { identityPickPending = false }
+            invoke.reject("Camera access is required to take an identity photo.")
+            return
+        }
+        launchIdentityPhoto(invoke, "camera")
+    }
+
+    private fun launchIdentityPhoto(invoke: Invoke, source: String) {
+        try {
+            val intent = when (source) {
+                "library" -> {
+                    pendingIdentityCamera = null
+                    identityPhoto.libraryIntent()
+                }
+                "camera" -> {
+                    val target = identityPhoto.createCameraTarget()
+                    pendingIdentityCamera = target
+                    identityPhoto.cameraIntent(target)
+                }
+                else -> {
+                    throw IllegalArgumentException("unknown identity photo source $source")
+                }
+            }
+            if (intent.resolveActivity(hostActivity.packageManager) == null) {
+                throw IllegalStateException("No Android app can open that identity photo source.")
+            }
+            startActivityForResult(invoke, intent, "identityPhotoResult")
+        } catch (error: Exception) {
+            pendingIdentityCamera?.file?.delete()
+            pendingIdentityCamera = null
+            synchronized(this) { identityPickPending = false }
+            invoke.reject(error.message ?: "Could not open the identity photo picker.")
+        }
     }
 
     @Command
@@ -266,6 +306,7 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
 
     @ActivityCallback
     fun identityPhotoResult(invoke: Invoke, result: ActivityResult) {
+        synchronized(this) { identityPickPending = false }
         val camera = pendingIdentityCamera.also { pendingIdentityCamera = null }
         if (result.resultCode == Activity.RESULT_CANCELED) {
             camera?.file?.delete()
