@@ -699,13 +699,13 @@ The default is **Mocha**, dark. Each theme keeps its own dual-accent role
 model: its accent marks focus, selection, and primary actions, while the
 cooler _info_ hue marks live state and telemetry.
 
-| Theme     | Slugs                                | Notes                                            |
-| --------- | ------------------------------------ | ------------------------------------------------ |
-| Mocha     | `mocha-dark`, `mocha-light`          | Default. Violet-leaning neutrals, one blue accent |
-| Safelight | `safelight-dark`, `safelight-light`  | The darkroom family: warm browns, amber press     |
-| Blueprint | `blueprint-dark`, `blueprint-light`  | Drafting blue; the dark tone is a cyanotype       |
-| Graphite  | `graphite-dark`, `graphite-light`    | True neutral greys, one warm signal               |
-| Nebula    | `nebula-dark`, `nebula-light`        | Oxblood and hot crimson                           |
+| Theme     | Slugs                               | Notes                                             |
+| --------- | ----------------------------------- | ------------------------------------------------- |
+| Mocha     | `mocha-dark`, `mocha-light`         | Default. Violet-leaning neutrals, one blue accent |
+| Safelight | `safelight-dark`, `safelight-light` | The darkroom family: warm browns, amber press     |
+| Blueprint | `blueprint-dark`, `blueprint-light` | Drafting blue; the dark tone is a cyanotype       |
+| Graphite  | `graphite-dark`, `graphite-light`   | True neutral greys, one warm signal               |
+| Nebula    | `nebula-dark`, `nebula-light`       | Oxblood and hot crimson                           |
 
 Every slug the TUI used to ship still loads and maps to the nearest theme,
 so an existing `tui.theme` is never lost: `studio-dark`, `studio` and
