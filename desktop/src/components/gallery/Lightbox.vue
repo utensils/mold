@@ -4,6 +4,7 @@ import { useOverlayStack } from "@ui/lib/overlayStack";
 import Icon from "@ui/components/Icon.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import MeshExportDialog from "@ui/components/MeshExportDialog.vue";
+import VideoSoundToggle from "./VideoSoundToggle.vue";
 import AuthedMedia from "./AuthedMedia.vue";
 import CollectionPicker from "../library/CollectionPicker.vue";
 import TagEditor from "../library/TagEditor.vue";
@@ -636,6 +637,7 @@ async function performVideoExport(options: VideoExportOptions) {
         <Icon name="reuse" :size="13" />
         Use these settings
       </button>
+      <VideoSoundToggle v-if="video" />
       <button
         ref="closeBtn"
         type="button"

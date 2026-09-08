@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useVideoPlaybackStore } from "../../stores/videoPlayback";
 import MeshViewer from "@studio/components/MeshViewer.vue";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
@@ -55,6 +56,8 @@ const props = withDefaults(
     priority: "visible",
   },
 );
+
+const videoPlayback = useVideoPlaybackStore();
 
 const src = ref<string | null>(null);
 const failed = ref(false);
@@ -231,6 +234,9 @@ onUnmounted(() => {
   <video
     v-if="video && src"
     :src="src"
+    :muted="videoPlayback.muted"
+    :volume="videoPlayback.volume"
+    @volumechange="videoPlayback.syncFromPlayer"
     class="h-full w-full object-contain"
     :controls="controls"
     loop
