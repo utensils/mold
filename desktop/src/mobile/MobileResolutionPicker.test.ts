@@ -77,16 +77,18 @@ describe("MobileResolutionPicker", () => {
     expect(wrapper.emitted("canvas-intent")).toBeUndefined();
   });
 
-  it("keeps aspect ratios visible while primary size details are collapsed", async () => {
+  it("collapses shape and size behind a clearly labeled primary disclosure", async () => {
     const { wrapper, state } = mountPicker(1024, 1024, "flux", null, null, "model-default", true);
     const details = wrapper.get(".mobile-size-disclosure");
     expect(details.attributes("open")).toBeUndefined();
-    expect(
-      wrapper.get("[data-test='mobile-resolution-shape']").element.closest("details"),
-    ).toBeNull();
+    expect(wrapper.get("[data-test='mobile-resolution-shape']").element.closest("details")).toBe(
+      details.element,
+    );
     expect(
       wrapper.get("[data-test='mobile-resolution-announcement']").element.closest("details"),
     ).toBeNull();
+    expect(details.get("summary").text()).toContain("Shape and size");
+    expect(details.get("summary").text()).toContain("Change");
     await wrapper.get("[data-shape='9:16']").trigger("click");
     expect(state).toMatchObject({ width: 576, height: 1024 });
     expect(details.get("summary").text()).toContain("576 × 1024 px");

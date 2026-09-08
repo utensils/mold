@@ -5614,6 +5614,11 @@ button:disabled {
 
 .mobile-size-disclosure > summary {
   display: flex;
+  padding: 12px;
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  list-style: none;
   align-items: center;
   justify-content: space-between;
   min-height: var(--mobile-touch-target, 44px);
@@ -5866,4 +5871,31 @@ button:disabled {
   font-family: var(--font-utility);
   font-size: var(--text-data);
   overflow-wrap: anywhere;
+}
+
+.mobile-size-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+.mobile-size-summary-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.mobile-size-summary-label small {
+  overflow-wrap: anywhere;
+}
+.mobile-size-summary-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--mold-blue);
+  flex-shrink: 0;
+}
+.mobile-size-disclosure[open] .mobile-size-summary-action svg {
+  transform: rotate(180deg);
+}
+.mobile-size-disclosure > summary:focus-visible {
+  outline: 2px solid var(--mold-blue);
+  outline-offset: 3px;
 }

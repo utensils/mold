@@ -103,6 +103,15 @@ function writableMeshForm(): NonNullable<GenerateForm["mesh"]> {
 const textureControl = computed(() => meshCaps.value?.texture ?? null);
 const textureAvailable = computed(() => textureControl.value?.mode === "adjustable");
 const textureEnabled = computed(() => meshForm.value.texture === true);
+const textureStatus = computed(
+  () =>
+    textureControl.value?.reason ||
+    (textureControl.value?.mode === "fixed"
+      ? "This style does not expose adjustable PBR materials."
+      : textureControl.value?.mode === "hidden"
+        ? "PBR materials are not available for this style on this machine."
+        : "This machine has not reported material controls for this style."),
+);
 const textureResolution = computed(
   () => meshForm.value.textureResolution ?? meshCaps.value?.texture_default_resolution ?? 0,
 );
@@ -185,13 +194,13 @@ const selectedQuality = computed(() => activeQualityPreset(quality.value, props.
 <template>
   <template v-if="section !== 'details'">
     <fieldset
-      v-if="textureAvailable"
+      v-if="meshCaps || guidanceCaps.canvasless"
       class="mobile-mesh-materials"
       :disabled="disabled"
       data-test="mobile-mesh-materials"
     >
       <legend class="mobile-mesh-legend">Color / PBR</legend>
-      <div class="mobile-generate-toggle-row">
+      <div v-if="textureAvailable" class="mobile-generate-toggle-row">
         <span
           ><strong>PBR materials</strong
           ><small>Paint color, metal, roughness, and surface detail.</small></span
@@ -203,8 +212,11 @@ const selectedQuality = computed(() => activeQualityPreset(quality.value, props.
           @update:model-value="setTexture"
         />
       </div>
+      <p v-else class="mobile-resolution-note" data-test="mobile-mesh-texture-status">
+        {{ textureStatus }}
+      </p>
       <SegmentedControl
-        v-if="textureEnabled && textureResolutions.length"
+        v-if="textureAvailable && textureEnabled && textureResolutions.length"
         :model-value="textureResolution"
         :options="textureResolutions"
         label="Texture resolution"

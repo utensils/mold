@@ -13,7 +13,16 @@
  * The page owns the reuse/source/delete side effects; this component just emits
  * the intent. Keyboard: ←/→ navigate, Esc closes.
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
+import { useOverlayStack } from "@ui/lib/overlayStack";
+import { useRootFocusOnOpen } from "@ui/lib/useRootFocusOnOpen";
 import MeshExportDialog from "@ui/components/MeshExportDialog.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
 import PrintOrganizer from "../library/PrintOrganizer.vue";
@@ -90,6 +99,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   (e: "close"): void;
+  (e: "copy-link", item: GalleryImage): void;
   (e: "prev"): void;
   (e: "next"): void;
   (e: "reuse", item: GalleryImage): void;
@@ -471,39 +481,103 @@ function updateWide() {
 }
 
 // ── Keyboard ────────────────────────────────────────────────────────────────
+const viewerRoot = ref<HTMLElement | null>(null);
+const viewerOpen = computed(() => props.item !== null);
+const { isTop } = useOverlayStack(viewerOpen, "web-print-viewer");
+useRootFocusOnOpen(viewerRoot, () => viewerOpen.value);
+let opener: HTMLElement | null = null;
+let savedOverflow: string | null = null;
+const FOCUSABLE =
+  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
 function onKey(e: KeyboardEvent) {
-  if (!props.item) return;
+  if (!props.item || !isTop() || e.defaultPrevented) return;
   if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopImmediatePropagation();
     if (menuOpen.value) menuOpen.value = false;
     else emit("close");
-  } else if (e.key === "ArrowLeft" && props.hasPrev) {
+    return;
+  }
+  if (e.key === "Tab" && viewerRoot.value) {
+    const stops = [
+      ...viewerRoot.value.querySelectorAll<HTMLElement>(FOCUSABLE),
+    ].filter((el) => el.getClientRects().length > 0);
+    const first = stops[0],
+      last = stops[stops.length - 1];
+    const active = document.activeElement;
+    if (!first || !last) {
+      e.preventDefault();
+      viewerRoot.value.focus();
+    } else if (
+      e.shiftKey &&
+      (active === first || active === viewerRoot.value)
+    ) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    } else if (!viewerRoot.value.contains(active)) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    }
+    return;
+  }
+  const target =
+    e.target instanceof Element ? e.target : document.activeElement;
+  if (
+    target?.closest(
+      'input,textarea,select,[contenteditable="true"],video,audio',
+    )
+  )
+    return;
+  if (e.key === "ArrowLeft" && props.hasPrev) {
+    e.preventDefault();
     emit("prev");
   } else if (e.key === "ArrowRight" && props.hasNext) {
+    e.preventDefault();
     emit("next");
   }
 }
-
+function releaseViewer() {
+  if (savedOverflow !== null) document.body.style.overflow = savedOverflow;
+  savedOverflow = null;
+  if (opener?.isConnected) opener.focus();
+  opener = null;
+}
 onMounted(() => {
   updateWide();
   window.addEventListener("resize", updateWide);
   window.addEventListener("keydown", onKey);
 });
-
 onBeforeUnmount(() => {
   window.removeEventListener("resize", updateWide);
   window.removeEventListener("keydown", onKey);
-  if (typeof document !== "undefined") document.body.style.overflow = "";
+  releaseViewer();
 });
-
-// Lock body scroll while open; reset the overflow menu on item change.
+watch(
+  viewerOpen,
+  (open) => {
+    if (open) {
+      opener =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      savedOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+    } else releaseViewer();
+  },
+  { immediate: true },
+);
+watch(wide, async () => {
+  await nextTick();
+  if (viewerOpen.value && !viewerRoot.value?.contains(document.activeElement))
+    viewerRoot.value?.focus();
+});
 watch(
   () => props.item,
-  (open, prev) => {
-    if (typeof document !== "undefined") {
-      document.body.style.overflow = open ? "hidden" : "";
-    }
-    if (!prev || !open || prev.filename !== open.filename)
-      menuOpen.value = false;
+  () => {
+    menuOpen.value = false;
   },
 );
 
@@ -616,6 +690,8 @@ async function performVideoExport(options: VideoExportOptions) {
   <Transition name="fade">
     <div
       v-if="item"
+      ref="viewerRoot"
+      tabindex="-1"
       class="lb"
       :class="wide ? 'lb--wide' : 'lb--full'"
       role="dialog"
@@ -961,6 +1037,14 @@ async function performVideoExport(options: VideoExportOptions) {
               Download
             </a>
             <span v-else class="lb__quiet lb__quiet--off">Download</span>
+            <button
+              type="button"
+              class="lb__quiet"
+              data-test="copy-print-link"
+              @click="item && emit('copy-link', item)"
+            >
+              Copy link
+            </button>
           </div>
           <button
             v-if="canExportVideo"
@@ -1287,6 +1371,14 @@ async function performVideoExport(options: VideoExportOptions) {
               Save
             </a>
             <span v-else class="lb__quiet lb__quiet--off">Save</span>
+            <button
+              type="button"
+              class="lb__quiet"
+              data-test="copy-print-link"
+              @click="item && emit('copy-link', item)"
+            >
+              Copy link
+            </button>
           </div>
           <button
             v-if="canExportVideo"
@@ -1417,11 +1509,11 @@ async function performVideoExport(options: VideoExportOptions) {
 }
 .lb__blocked-title {
   font-family: var(--f-display);
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 700;
 }
 .lb__blocked-body {
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.45;
   opacity: 0.78;
 }
@@ -1487,7 +1579,7 @@ async function performVideoExport(options: VideoExportOptions) {
 }
 .lb__kicker {
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 0.625rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink-3);
@@ -1497,7 +1589,7 @@ async function performVideoExport(options: VideoExportOptions) {
 }
 .lb__pos {
   font-family: var(--f-mono);
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--ink-3);
 }
 .lb__pos--light {
@@ -1568,7 +1660,7 @@ async function performVideoExport(options: VideoExportOptions) {
   color: var(--rebate);
   padding: 9px 11px;
   border-radius: var(--radius-control-sm);
-  font-size: 13px;
+  font-size: 0.8125rem;
   cursor: pointer;
 }
 .lb__menu button:hover {
@@ -1579,7 +1671,7 @@ async function performVideoExport(options: VideoExportOptions) {
 }
 
 .lb__prompt {
-  font-size: 14px;
+  font-size: 0.875rem;
   line-height: 1.5;
   color: var(--rebate);
   margin: 0 0 20px;
@@ -1607,7 +1699,7 @@ async function performVideoExport(options: VideoExportOptions) {
 }
 .lb__copy {
   font-family: var(--f-mono);
-  font-size: 10.5px;
+  font-size: 0.65625rem;
 }
 .lb__rowcopy {
   text-align: right;
@@ -1627,10 +1719,11 @@ async function performVideoExport(options: VideoExportOptions) {
   flex-direction: column;
   gap: 11px;
   font-family: var(--f-mono);
-  font-size: 11.5px;
+  font-size: 0.71875rem;
 }
 .lb__row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
 }
@@ -1640,7 +1733,8 @@ async function performVideoExport(options: VideoExportOptions) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .lb__row--long span:last-child {
   white-space: normal;
@@ -1659,7 +1753,7 @@ async function performVideoExport(options: VideoExportOptions) {
   color: var(--on-accent);
   padding: 13px;
   border-radius: var(--radius-control-lg);
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 700;
   margin-bottom: 9px;
   display: flex;
@@ -1679,6 +1773,7 @@ async function performVideoExport(options: VideoExportOptions) {
 
 .lb__pair {
   display: flex;
+  flex-wrap: wrap;
   gap: 9px;
 }
 .lb__export {
@@ -1686,13 +1781,16 @@ async function performVideoExport(options: VideoExportOptions) {
   margin-top: 10px;
 }
 .lb__quiet {
-  flex: 1;
+  flex: 1 1 5rem;
+  min-width: 0;
+  min-height: 44px;
+  overflow-wrap: anywhere;
   border: 1px solid var(--ce);
   background: transparent;
   color: var(--ink-2);
   padding: 11px;
   border-radius: var(--radius-control);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   font-weight: 600;
   text-align: center;
   text-decoration: none;
@@ -1718,7 +1816,7 @@ async function performVideoExport(options: VideoExportOptions) {
 .lb__purge {
   margin: 0 0 14px;
   font-family: var(--f-mono);
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--warning);
 }
 
@@ -1736,6 +1834,7 @@ async function performVideoExport(options: VideoExportOptions) {
   flex-direction: column;
 }
 .lb__topbar {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1743,8 +1842,9 @@ async function performVideoExport(options: VideoExportOptions) {
   color: var(--on-media);
 }
 .lb__circle {
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
   border-radius: 50%;
   border: 0;
   background: rgba(255, 255, 255, 0.16);
@@ -1771,8 +1871,8 @@ async function performVideoExport(options: VideoExportOptions) {
   background: transparent;
 }
 .lb__stage--full .lb__nav {
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   background: rgba(0, 0, 0, 0.45);
 }
 .lb__stage--full .lb__nav svg {
@@ -1787,6 +1887,9 @@ async function performVideoExport(options: VideoExportOptions) {
 }
 
 .lb__sheet {
+  max-height: 65%;
+  overflow-y: auto;
+  flex: 0 1 auto;
   background: var(--bench);
   border-top: 1px solid var(--edge);
   border-radius: 20px 20px 0 0;
@@ -1794,7 +1897,7 @@ async function performVideoExport(options: VideoExportOptions) {
   color: var(--rebate);
 }
 .lb__sheet .lb__prompt {
-  font-size: 14px;
+  font-size: 0.875rem;
   margin-bottom: 13px;
 }
 .lb__sheet .lb__prompt-wrap {
@@ -1803,7 +1906,7 @@ async function performVideoExport(options: VideoExportOptions) {
 .lb__mobile-meta {
   margin: 0 0 8px;
   color: var(--ink-2);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.4;
 }
 .lb__chips {
@@ -1812,9 +1915,11 @@ async function performVideoExport(options: VideoExportOptions) {
   gap: 6px;
   margin-bottom: 16px;
   font-family: var(--f-mono);
-  font-size: 10.5px;
+  font-size: 0.65625rem;
 }
 .lb__chip {
+  max-width: 100%;
+  overflow-wrap: anywhere;
   border: 1px solid var(--edge);
   background: var(--bath);
   color: var(--ink-2);

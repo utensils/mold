@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import Icon from "@ui/components/Icon.vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import { resolutionValidationError, resolutionValidationWarning } from "../lib/generateValidation";
@@ -168,33 +169,28 @@ function matchSource(): void {
 
 <template>
   <fieldset v-if="!canvasless" class="mobile-resolution-picker" :disabled="disabled">
-    <legend class="mobile-resolution-legend">Shape and size</legend>
-    <div class="mobile-resolution-group">
-      <span class="mobile-resolution-label">Shape</span>
-      <ShapePicker
-        :model-value="shapeId"
-        :options="shapeOptions"
-        :approximate="shapeApproximate"
-        :disabled="disabled"
-        label="Aspect ratio"
-        data-test="mobile-resolution-shape"
-        @update:model-value="setShape"
-      />
-    </div>
-
-    <p
-      class="sr-only"
-      data-test="mobile-resolution-announcement"
-      aria-live="polite"
-      aria-atomic="true"
-    >
-      Selected resolution: {{ width }} by {{ height }} pixels, {{ currentAspect }},
-      {{ currentOrientation }}.
-    </p>
+    <legend class="sr-only">Shape and size</legend>
     <details :open="!compact || !!resolutionError" class="mobile-size-disclosure">
       <summary>
-        <span>Size</span><small>{{ width }} × {{ height }} px</small>
+        <span class="mobile-size-summary-label"
+          >Shape and size<small>{{ currentAspect }} · {{ width }} × {{ height }} px</small></span
+        >
+        <span class="mobile-size-summary-action" aria-hidden="true"
+          >Change <Icon name="chevron-down" :size="18"
+        /></span>
       </summary>
+      <div class="mobile-resolution-group">
+        <span class="mobile-resolution-label">Shape</span>
+        <ShapePicker
+          :model-value="shapeId"
+          :options="shapeOptions"
+          :approximate="shapeApproximate"
+          :disabled="disabled"
+          label="Aspect ratio"
+          data-test="mobile-resolution-shape"
+          @update:model-value="setShape"
+        />
+      </div>
 
       <div
         v-if="sourceResolution"
@@ -285,6 +281,15 @@ function matchSource(): void {
         Custom dimensions snap to multiples of {{ alignment }} for model compatibility.
       </p>
     </details>
+    <p
+      class="sr-only"
+      data-test="mobile-resolution-announcement"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      Selected resolution: {{ width }} by {{ height }} pixels, {{ currentAspect }},
+      {{ currentOrientation }}.
+    </p>
     <p
       v-if="resolutionError"
       class="mobile-generate-validation"

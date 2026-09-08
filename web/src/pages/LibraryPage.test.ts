@@ -471,6 +471,73 @@ describe("LibraryPage", () => {
     wrapper.unmount();
   });
 
+  it("opens a print URL after loading and restores Back/Forward without mutating media", async () => {
+    routeState.query = { print: "cat.png", printHost: "origin", q: "cat" };
+    const wrapper = await mounted();
+    expect(wrapper.get('[data-test="lb-key"]').text()).toBe("origin|cat.png");
+    reactive(routeState).query = { q: "cat" };
+    await flushPromises();
+    expect(wrapper.find('[data-test="lightbox"]').exists()).toBe(false);
+    expect(wrapper.get('[data-test="grid-count"]').text()).toBe("1");
+    reactive(routeState).query = {
+      print: "cat.png",
+      printHost: "origin",
+      q: "cat",
+    };
+    await flushPromises();
+    expect(wrapper.get('[data-test="lb-key"]').text()).toBe("origin|cat.png");
+    expect(deleteMock).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("keeps a configured empty machine filter without claiming it is unavailable", async () => {
+    const STUDIO = {
+      id: "studio-7680",
+      name: "studio",
+      url: "http://studio:7680",
+    };
+    localStorage.setItem("mold.web.hosts.v1", JSON.stringify([STUDIO]));
+    routeState.query = { host: STUDIO.id };
+    const wrapper = await mounted();
+    expect(
+      wrapper.find('[data-test="library-link-unavailable"]').exists(),
+    ).toBe(false);
+    expect(
+      wrapper
+        .findAll('[data-test="gallery-host-filter"]')
+        .some((button) => button.text() === STUDIO.name),
+    ).toBe(true);
+    expect(wrapper.find('[data-test="grid-count"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("keeps an unknown linked machine explicit without connecting it", async () => {
+    routeState.query = {
+      host: "unknown",
+      print: "cat.png",
+      printHost: "unknown",
+    };
+    const wrapper = await mounted();
+    expect(wrapper.find('[data-test="lightbox"]').exists()).toBe(false);
+    expect(
+      wrapper.get('[data-test="library-link-unavailable"]').text(),
+    ).toContain("linked machine");
+    expect(hostGalleryMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: "unknown" }),
+    );
+    wrapper.unmount();
+  });
+
+  it("opening a print creates a history entry retaining its current view", async () => {
+    routeState.query = { q: "cat" };
+    const wrapper = await mounted();
+    await wrapper.get('[data-test="grid-open"]').trigger("click");
+    expect(pushMock).toHaveBeenCalledWith({
+      query: { q: "cat", print: "cat.png", printHost: "origin" },
+    });
+    wrapper.unmount();
+  });
+
   it("narrows the grid as the user searches", async () => {
     const wrapper = await mounted();
     await wrapper.find("[data-test='gallery-search']").setValue("dog");
@@ -937,6 +1004,14 @@ describe("LibraryPage multi-host identity", () => {
       expect.objectContaining({ id: "archive-7680" }),
       "oldest.png",
     );
+    // Deleting the last print on this machine must not silently show another
+    // machine's media. Explicitly return to All to inspect the surviving copy.
+    expect(wrapper.find("[data-test='grid-keys']").exists()).toBe(false);
+    const allHosts = wrapper
+      .findAll("[data-test='gallery-host-filter']")
+      .find((button) => button.text().includes("All"));
+    await allHosts!.trigger("click");
+    await flushPromises();
     expect(wrapper.find("[data-test='grid-keys']").text()).toBe(
       "archive-7680|oldest.png",
     );

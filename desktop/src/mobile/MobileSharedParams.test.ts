@@ -394,16 +394,28 @@ describe("MobileSharedParams mesh controls", () => {
     expect(wrapper.find("[data-test='mobile-mesh-materials']").exists()).toBe(false);
   });
 
-  it("does not offer a PBR switch when the host fixes the texture stage", () => {
+  it("explains a fixed PBR stage without inventing an adjustable switch", () => {
     const recipe = hunyuan3dRecipe();
-    recipe.capabilities.mesh!.texture = { mode: "fixed", required: false };
-    expect(
-      mountMesh(meshForm(), meshModel(recipe)).find("[data-test='mobile-mesh-materials']").exists(),
-    ).toBe(false);
+    recipe.capabilities.mesh!.texture = { mode: "fixed", required: true };
+    const wrapper = mountMesh(meshForm(), meshModel(recipe));
+    expect(wrapper.find("[data-test='mobile-mesh-texture-toggle']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-mesh-texture-status']").text()).toContain(
+      "does not expose adjustable PBR materials",
+    );
   });
 
-  it("does not offer color PBR when the recipe hides painting", () => {
-    expect(mountMesh(meshForm()).find("[data-test='mobile-mesh-materials']").exists()).toBe(false);
+  it("explains the host's unavailable PBR reason instead of silently hiding color controls", () => {
+    const recipe = hunyuan3dRecipe();
+    recipe.capabilities.mesh!.texture = {
+      mode: "hidden",
+      required: false,
+      reason: "Painting is unavailable on this machine.",
+    };
+    const wrapper = mountMesh(meshForm(), meshModel(recipe));
+    expect(wrapper.find("[data-test='mobile-mesh-texture-toggle']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-mesh-texture-status']").text()).toBe(
+      "Painting is unavailable on this machine.",
+    );
   });
 
   it("renders no mesh group for a recipe that advertises none", () => {

@@ -75,10 +75,9 @@ export function promptRequirementForRecipe(
  */
 export type PromptConditioningInput = {
   /**
-   * The resolved generation recipe for the selected model. When present it
-   * is the authority and the family fields below are never consulted for
-   * the prompt rule; absent (or `null`) means an older host, and the legacy
-   * family rule answers.
+   * The resolved generation recipe for the selected model. A present prompt
+   * block is authoritative. An absent recipe or prompt block uses the legacy
+   * family rule for older hosts.
    */
   recipe?: PromptRecipe | null;
   /** Desktop / mobile `GenerateForm`. */
@@ -122,14 +121,16 @@ export function hasVisualConditioning(
 /**
  * The prompt requirement for the request this input describes: the recipe's
  * advertised mode resolved against the input's conditioning, or the legacy
- * family rule when the input carries no recipe.
+ * family rule when the input carries no advertised prompt block.
  */
 export function promptRequirementFor(
   input: PromptConditioningInput | null | undefined,
 ): PromptRequirement {
   if (!input) return "required";
   const conditioned = hasVisualConditioning(input);
-  if (input.recipe)
+  // A profile may predate this additive block. Match generationCapabilities:
+  // only a present prompt rule overrides the legacy family contract.
+  if (input.recipe?.capabilities.prompt)
     return promptRequirementForRecipe(input.recipe, conditioned);
   const legacy = legacyPromptRequirementForFamily(conditioningFamily(input));
   return legacy === "optional" && !conditioned ? "required" : legacy;

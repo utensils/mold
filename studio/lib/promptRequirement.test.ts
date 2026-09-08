@@ -176,6 +176,20 @@ describe("promptRequired / promptOptional", () => {
     ).toBe(true);
   });
 
+  it("uses the shared legacy rule when an older recipe omits its prompt block", () => {
+    const recipe = hunyuan3dRecipe();
+    delete (recipe.capabilities as { prompt?: unknown }).prompt;
+    expect(promptRequirementFor({ family: "hunyuan3d", recipe })).toBe(
+      "required",
+    );
+    expect(promptRequired({ family: "hunyuan3d", recipe })).toBe(true);
+    expect(
+      promptRequirementFor({ family: "ltx2", recipe, sourceImage: "image" }),
+    ).toBe("optional");
+    expect(promptRequirementFor({ family: "ltx2", recipe })).toBe("required");
+    expect(promptRequirementForRecipe(recipe, true)).toBe("required");
+  });
+
   it("uses the legacy family rule when the input carries no recipe", () => {
     expect(promptRequirementFor({ family: "ltx2", sourceImage: "b64" })).toBe(
       "optional",

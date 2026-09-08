@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { libraryLink } from "../lib/libraryLinks";
 import { workspaceLabel } from "../lib/workspaces";
 /*
  * Library workspace (Mold Studio W5, spec §06 + V3 "Shelf"). One workspace,
@@ -304,6 +305,10 @@ watch(
 
 function syncOrganizationToUrl() {
   const query = { ...route.query };
+  if (!selected.value) {
+    delete query.print;
+    delete query.printHost;
+  }
   if (scope.value === "prints") delete query.scope;
   else query.scope = scope.value;
   if (scope.value === "collections" && collectionSlug.value)
@@ -321,14 +326,14 @@ function setScope(next: Scope) {
   scope.value = next;
   if (next !== "collections") collectionSlug.value = null;
   clearSelection();
-  closeLightbox();
+  closeLightbox(false);
   syncOrganizationToUrl();
 }
 function openCollection(slug: string | null) {
   scope.value = "collections";
   collectionSlug.value = slug;
   clearSelection();
-  closeLightbox();
+  closeLightbox(false);
   syncOrganizationToUrl();
 }
 function toggleFavoritesOnly() {
@@ -1375,7 +1380,10 @@ async function emptyTrash() {
 
 // ── Filtering ────────────────────────────────────────────────────────────────
 const hostOptions = computed(() => {
-  const options = new Map<string, string>();
+  const options = new Map<string, string>([
+    [ORIGIN_HOST_ID, "this server"],
+    ...listHosts().map((host) => [host.id, host.name] as [string, string]),
+  ]);
   for (const entry of scopeRaw.value) {
     const id = entry.hostId ?? ORIGIN_HOST_ID;
     options.set(id, entry.hostLabel ?? getHost(id)?.name ?? id);
@@ -1409,14 +1417,30 @@ const kindFiltered = computed(() => {
   });
 });
 
-watch(hostOptions, (options) => {
-  if (
+watch(
+  () => route.query.host,
+  (value) => {
+    hostFilter.value = typeof value === "string" && value ? value : "all";
+  },
+  { immediate: true },
+);
+function setHostFilter(value: string) {
+  hostFilter.value = value;
+  closeLightbox(false);
+  const query = { ...route.query };
+  delete query.print;
+  delete query.printHost;
+  if (value === "all") delete query.host;
+  else query.host = value;
+  void router.push({ query });
+}
+const missingLinkedHost = computed(
+  () =>
     hostFilter.value !== "all" &&
-    !options.some((option) => option.id === hostFilter.value)
-  ) {
-    hostFilter.value = "all";
-  }
-});
+    !loading.value &&
+    hostFilter.value !== ORIGIN_HOST_ID &&
+    !getHost(hostFilter.value),
+);
 
 const organizationFiltered = computed(() => {
   if (scope.value === "trash") return kindFiltered.value;
@@ -1610,14 +1634,28 @@ const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
 const lightbox = ref<InstanceType<typeof Lightbox> | null>(null);
 
+function printQuery(item: GalleryImage) {
+  return {
+    ...route.query,
+    print: item.filename,
+    printHost: (item as HostGalleryImage).hostId ?? ORIGIN_HOST_ID,
+  };
+}
 function openItem(item: GalleryImage) {
   const key = keyOf(item);
   selectedIndex.value = filtered.value.findIndex((e) => keyOf(e) === key);
   selected.value = item;
+  void router.push({ query: printQuery(item) });
 }
-function closeLightbox() {
+function closeLightbox(syncUrl = true) {
   selected.value = null;
   selectedIndex.value = -1;
+  if (syncUrl && route.query.print) {
+    const query = { ...route.query };
+    delete query.print;
+    delete query.printHost;
+    void router.replace({ query });
+  }
 }
 function stepLightbox(delta: number) {
   if (selectedIndex.value < 0) return;
@@ -1626,6 +1664,66 @@ function stepLightbox(delta: number) {
   if (next < 0 || next >= list.length) return;
   selectedIndex.value = next;
   selected.value = list[next] ?? null;
+  if (selected.value)
+    void router.replace({ query: printQuery(selected.value) });
+}
+// A print link never fetches an arbitrary URL or connects a new machine. It
+// selects a matching visible physical copy from the ordinary gallery listing.
+function hydrateLinkedPrint() {
+  const filename = route.query.print,
+    host = route.query.printHost;
+  if (typeof filename !== "string" || !filename) return;
+  const hostId = typeof host === "string" && host ? host : ORIGIN_HOST_ID;
+  const matches = (item: HostGalleryImage) =>
+    item.filename === filename && (item.hostId ?? ORIGIN_HOST_ID) === hostId;
+  const physical = scopeRaw.value.find(matches);
+  const index = filtered.value.findIndex(
+    (item) =>
+      matches(item) ||
+      (hostFilter.value === "all" && copiesOf(item).some(matches)),
+  );
+  selectedIndex.value = index;
+  selected.value = index >= 0 ? (physical ?? filtered.value[index]!) : null;
+}
+watch(
+  [() => route.query.print, () => route.query.printHost],
+  ([filename]) => {
+    if (typeof filename !== "string" || !filename) closeLightbox(false);
+    else hydrateLinkedPrint();
+  },
+  { immediate: true },
+);
+// Listing/organization refresh must not dismiss a just-opened local selection
+// while its router.push is still pending. Only a URL change closes the viewer.
+watch(filtered, hydrateLinkedPrint);
+const missingLinkedPrint = computed(
+  () =>
+    typeof route.query.print === "string" && !loading.value && !selected.value,
+);
+async function copyLibraryLink(item?: GalleryImage) {
+  const query: Record<string, unknown> = item
+    ? printQuery(item)
+    : { ...route.query };
+  if (!item) {
+    delete query.print;
+    delete query.printHost;
+  }
+  try {
+    await navigator.clipboard.writeText(
+      libraryLink(window.location.origin, query),
+    );
+    toast(
+      "success",
+      item
+        ? "Print link copied. The recipient needs access to its machine."
+        : "View link copied. The recipient needs access to the same machines.",
+    );
+  } catch {
+    toast(
+      "error",
+      "Could not copy the link. Allow clipboard access and try again.",
+    );
+  }
 }
 
 let reuseEpoch = 0;
@@ -2324,6 +2422,14 @@ onBeforeUnmount(() => {
       />
 
       <span class="gal__flex"></span>
+      <button
+        type="button"
+        class="gal__select"
+        data-test="copy-view-link"
+        @click="copyLibraryLink()"
+      >
+        Copy view link
+      </button>
 
       <template v-if="scope === 'collections'">
         <label class="gal__search">
@@ -2539,7 +2645,7 @@ onBeforeUnmount(() => {
       :host-filter="hostFilter"
       @toggle-favorites="toggleFavoritesOnly"
       @toggle-tag="toggleTag"
-      @set-host="hostFilter = $event"
+      @set-host="setHostFilter"
     />
     <LibraryChipRow
       v-else-if="scope === 'trash'"
@@ -2550,7 +2656,7 @@ onBeforeUnmount(() => {
       :active-tags="[]"
       :host-options="hostOptions"
       :host-filter="hostFilter"
-      @set-host="hostFilter = $event"
+      @set-host="setHostFilter"
     />
 
     <!-- Trash retention banner. -->
@@ -3091,6 +3197,28 @@ onBeforeUnmount(() => {
       </button>
     </Transition>
 
+    <p
+      v-if="missingLinkedHost || missingLinkedPrint"
+      class="gal__link-notice"
+      role="status"
+      data-test="library-link-unavailable"
+    >
+      {{
+        missingLinkedHost
+          ? "The linked machine is not available in this view."
+          : "This print is not available in the current view. Check the filters and its machine connection."
+      }}
+      <button
+        v-if="missingLinkedHost"
+        type="button"
+        class="gal__select"
+        data-test="clear-linked-host"
+        @click="setHostFilter('all')"
+      >
+        Show all machines
+      </button>
+      <router-link to="/machines">Check machines</router-link>
+    </p>
     <Lightbox
       ref="lightbox"
       :item="selected"
@@ -3106,9 +3234,10 @@ onBeforeUnmount(() => {
       :in-trash="scope === 'trash'"
       :collections="lightboxCollectionRows"
       :tag-suggestions="tags"
-      @close="closeLightbox"
+      @close="closeLightbox()"
       @prev="stepLightbox(-1)"
       @next="stepLightbox(1)"
+      @copy-link="copyLibraryLink"
       @reuse="onReuse"
       @use-source="onUseAsSource"
       @upscale="onUpscale"
@@ -3144,6 +3273,19 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.gal__link-notice {
+  padding: 16px;
+  margin: 16px 0;
+  color: var(--mold-text);
+  background: var(--mold-bg);
+  border: 1px solid var(--mold-border-control);
+  line-height: 1.5;
+}
+.gal__link-notice a {
+  color: var(--mold-blue);
+  text-decoration: underline;
+}
+
 .gal {
   position: relative;
   width: 100%;

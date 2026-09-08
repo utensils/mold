@@ -134,6 +134,34 @@ describe("Lightbox (desktop two-pane)", () => {
     );
   });
 
+  it("keeps arrow keys in the title editor and restores the opener when closed", async () => {
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
+    const wrapper = mountWide({ canOrganize: true });
+    document.body.append(wrapper.element);
+    await wrapper.vm.$nextTick();
+    expect(document.body.style.overflow).toBe("hidden");
+    await wrapper.get('[data-test="title-edit"]').trigger("click");
+    const input = wrapper.get<HTMLInputElement>(
+      '[data-test="title-input"]',
+    ).element;
+    input.focus();
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }),
+    );
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+    );
+    expect(wrapper.emitted("prev")).toBeUndefined();
+    expect(wrapper.emitted("next")).toBeUndefined();
+    await wrapper.setProps({ item: null });
+    expect(document.activeElement).toBe(opener);
+    expect(document.body.style.overflow).toBe("");
+    wrapper.unmount();
+    opener.remove();
+  });
+
   it("navigates with arrow keys and closes on Escape", async () => {
     const wrapper = mountWide();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
