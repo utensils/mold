@@ -603,11 +603,11 @@ describe("ControlsAside", () => {
       .find((b) => b.text() === label)!;
   }
 
-  it("maps the seed control to Random/Fixed and reveals the seed input when fixed", async () => {
+  it("maps the seed control to Surprise me/Keep and reveals the seed input when fixed", async () => {
     const wrapper = factory({ seedMode: "random", seed: null });
     expect(wrapper.find("[data-test='controls-seed']").exists()).toBe(false);
 
-    await seedButton(wrapper, "Fixed").trigger("click");
+    await seedButton(wrapper, "Keep").trigger("click");
     const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
       GenerateFormState,
     ];

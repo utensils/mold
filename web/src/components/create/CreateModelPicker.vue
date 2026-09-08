@@ -9,12 +9,11 @@
  */
 import { computed } from "vue";
 import { RouterLink } from "vue-router";
+import { isModelRuntimeUnavailable } from "@studio/lib/modelRuntimeAvailability";
 import Icon from "@ui/components/Icon.vue";
 import type { ModelInfoExtended } from "../../types";
-import {
-  modelDisplayName,
-  modelDisplayNameForId,
-} from "@studio/lib/modelDisplay";
+import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
+import { styleDisplayName } from "@studio/lib/styleLabel";
 import { familyLabel } from "@studio/lib/modelFamily";
 
 const props = defineProps<{
@@ -62,7 +61,7 @@ const groups = computed(() => {
 const description = computed(() => {
   const m = current.value;
   if (!m) return "";
-  const parts = [m.family];
+  const parts = [familyLabel(m.family)];
   if (m.size_gb > 0) parts.push(`${m.size_gb.toFixed(1)} GB`);
   parts.push(m.is_loaded ? "loaded" : "on disk");
   return parts.join(" · ");
@@ -71,16 +70,16 @@ const description = computed(() => {
 function onChange(event: Event) {
   const name = (event.target as HTMLSelectElement).value;
   const m = props.models.find((x) => x.name === name);
-  if (m) emit("select", m);
+  if (m && !isModelRuntimeUnavailable(m)) emit("select", m);
 }
 </script>
 
 <template>
   <div class="mp" data-test="create-model-picker">
     <div class="mp__head">
-      <span class="mp__kicker">Model</span>
+      <span class="mp__kicker">Style</span>
       <RouterLink :to="browseTo ?? '/models'" class="mp__browse">
-        Browse all
+        Browse more
         <Icon name="chevron-right" :size="12" />
       </RouterLink>
     </div>
@@ -88,11 +87,17 @@ function onChange(event: Event) {
       class="mp__select"
       data-test="model-select"
       :value="groups.length === 0 && !missingOption ? '' : model"
-      aria-label="Model"
+      aria-label="Style"
       @change="onChange"
     >
-      <option v-if="groups.length === 0 && !missingOption" value="" disabled>
-        {{ emptyLabel ?? "No models installed" }}
+      <option
+        v-if="!missingOption && (!model || groups.length === 0)"
+        value=""
+        disabled
+      >
+        {{
+          groups.length ? "Choose a style" : (emptyLabel ?? "No styles ready")
+        }}
       </option>
       <option
         v-if="missingOption"
@@ -107,11 +112,18 @@ function onChange(event: Event) {
         :key="group.family"
         :label="familyLabel(group.family)"
       >
-        <option v-for="m in group.list" :key="m.name" :value="m.name">
-          {{ modelDisplayName(m) }}
+        <option
+          v-for="m in group.list"
+          :key="m.name"
+          :value="m.name"
+          :disabled="isModelRuntimeUnavailable(m)"
+        >
+          {{ styleDisplayName(m)
+          }}{{ isModelRuntimeUnavailable(m) ? " · Download only" : "" }}
         </option>
       </optgroup>
     </select>
+    <p v-if="current" class="mp__id">{{ current.name }}</p>
     <p v-if="description" class="mp__desc" data-test="model-desc">
       {{ description }}
     </p>
@@ -119,6 +131,13 @@ function onChange(event: Event) {
 </template>
 
 <style scoped>
+.mp__id {
+  margin-top: 8px;
+  font-family: var(--mold-font-mono);
+  font-size: 0.75rem;
+  color: var(--mold-text-dim);
+  overflow-wrap: anywhere;
+}
 .mp {
   background: var(--bench);
   border: 1px solid var(--edge);

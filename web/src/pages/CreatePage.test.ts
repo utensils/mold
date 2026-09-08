@@ -228,6 +228,7 @@ vi.mock("../composables/useGenerateStream", async (importOriginal) => ({
 function installedModelRow(name: string, family: string) {
   return {
     name,
+    description: "",
     family,
     size_gb: 12,
     is_loaded: false,
@@ -421,14 +422,67 @@ describe("CreatePage layout and behavior", () => {
     expect(submitMock).toHaveBeenCalled();
   });
 
+  it("parks incompatible conditioning through the mounted output doors", async () => {
+    const still = installedModelRow("flux-dev:fp16", "flux");
+    const clip = installedModelRow("wan22-i2v-a14b:q8", "wan");
+    const mesh = installedModelRow("hunyuan3d-2.1:fp16", "hunyuan3d");
+    hostModelsMock.mockResolvedValue([still, clip, mesh]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    const source = {
+      kind: "upload" as const,
+      filename: "source.png",
+      base64: "SOURCE",
+    };
+    const mask = {
+      kind: "upload" as const,
+      filename: "mask.png",
+      base64: "MASK",
+    };
+    form.state.value.prompt = "A quiet shore";
+    form.state.value.imageAttachments = [source];
+    form.state.value.maskImage = mask;
+    await nextTick();
+    const baseline = form.toRequest(still);
+    expect(baseline.source_image).toBe("SOURCE");
+    expect(baseline.mask_image).toBe("MASK");
+    for (const [label, model] of [
+      ["Short clip", clip],
+      ["3-D object", mesh],
+      ["Still picture", still],
+    ] as const) {
+      const button = wrapper
+        .get("[data-test='web-output-kind']")
+        .findAll("button")
+        .find((b) => b.text() === label)!;
+      await button.trigger("click");
+      await flushPromises();
+      expect(form.state.value.model).toBe(model.name);
+      expect(form.state.value.imageAttachments).toEqual([source]);
+      expect(form.state.value.maskImage).toEqual(mask);
+      const request = form.toRequest(model);
+      expect(request.source_image).toBe("SOURCE");
+      if (model !== still) expect(request.mask_image).toBeUndefined();
+      else {
+        expect(request.mask_image).toBe(baseline.mask_image);
+        expect(request.prompt).toBe(baseline.prompt);
+      }
+    }
+    expect(
+      wrapper.getComponent({ name: "CreateModelPicker" }).props("browseTo"),
+    ).toBe("/models?type=image");
+    wrapper.unmount();
+  });
+
   it("uses the Mold Studio composer + controls-region workspace", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     expect(wrapper.get("[data-test='generate-shell']").classes()).toContain(
-      "max-w-[1600px]",
+      "workspace-page",
     );
     expect(wrapper.get("[data-test='generate-workspace']").classes()).toContain(
-      "md:grid-cols-[minmax(0,1fr)_340px]",
+      "min-[900px]:grid-cols-[minmax(0,1fr)_300px]",
     );
   });
 
@@ -659,7 +713,7 @@ describe("CreatePage layout and behavior", () => {
     expect(streamSelectMock).toHaveBeenCalledWith("stale-error");
   });
 
-  it("orders phone Create as prompt, controls, actions, canvas, then recent", async () => {
+  it("orders compact Create as result, prompt, controls, actions, then recent", async () => {
     vi.stubGlobal(
       "matchMedia",
       vi.fn(() => ({
@@ -688,7 +742,7 @@ describe("CreatePage layout and behavior", () => {
       "composer-submit",
       "recent-grid",
     ].map((test) => wrapper.get(`[data-test='${test}']`).element);
-    markers.splice(markers.length - 1, 0, canvas);
+    markers.splice(1, 0, canvas);
     for (let index = 1; index < markers.length; index += 1) {
       expect(
         markers[index - 1]!.compareDocumentPosition(markers[index]!) &
@@ -780,6 +834,12 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.imageAttachments[0]?.filename).toBe(entry.filename);
     expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
     expect(form.state.value.upscaleModel).toBe("real-esrgan-x4plus:fp16");
+    const details = wrapper.get(".create-more-settings");
+    expect((details.element as HTMLDetailsElement).open).toBe(true);
+    (details.element as HTMLDetailsElement).open = false;
+    await details.trigger("toggle");
+    await nextTick();
+    expect((details.element as HTMLDetailsElement).open).toBe(false);
     globalThis.fetch = originalFetch;
   });
 
@@ -1480,7 +1540,7 @@ describe("CreatePage layout and behavior", () => {
     await nextTick();
 
     const title = wrapper.get("[data-test='print-title']");
-    expect(title.attributes("placeholder")).toBe("Untitled print");
+    expect(title.attributes("placeholder")).toBe("Name (optional)");
     await title.setValue("  Smurf 04  ");
     expect(form.state.value.title).toBe("  Smurf 04  ");
     expect(wrapper.find("[data-test='print-title-error']").exists()).toBe(
@@ -1630,7 +1690,15 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.text()).toContain("Mask image needs a source image.");
   });
 
-  it("blocks submission on an STG block list it cannot parse", async () => {
+  it.each([899, 900])("reveals invalid STG settings at %ipx", async (width) => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: width < 900,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
     hostModelsMock.mockResolvedValue([
       installedModelRow("ltx-2-19b-distilled:fp8", "ltx2"),
     ]);
@@ -1653,6 +1721,19 @@ describe("CreatePage layout and behavior", () => {
 
     expect(submitMock).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("STG blocks:");
+    if (width >= 900) {
+      expect(
+        (wrapper.get(".create-more-settings").element as HTMLDetailsElement)
+          .open,
+      ).toBe(true);
+    } else {
+      expect(
+        wrapper.getComponent({ name: "AdvancedDrawer" }).props("mobile"),
+      ).toBe(true);
+    }
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("prompt", vi.fn());
   });
 
   it("blocks submission on a skip stride the wire cannot carry", async () => {
@@ -4486,7 +4567,11 @@ function pageStubs() {
       template:
         "<aside data-test='controls-stub'><slot name='file-under'/></aside>",
     },
-    AdvancedDrawer: { name: "AdvancedDrawer", template: "<div />" },
+    AdvancedDrawer: {
+      name: "AdvancedDrawer",
+      props: ["mobile"],
+      template: "<div />",
+    },
     ActivityStrip: {
       name: "ActivityStrip",
       props: ["jobs"],

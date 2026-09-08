@@ -146,6 +146,26 @@ body {
     min-height: 44px;
   }
 
+  /* Keep a 44px touch target without painting a 44px-tall track. */
+  [data-test="generate-shell"] .ms-slider__input {
+    background-color: transparent;
+    background-image: linear-gradient(
+      to right,
+      var(--mold-blue) var(--ms-slider-fill, 0%),
+      var(--mold-border-control) var(--ms-slider-fill, 0%)
+    );
+    background-size: 100% 4px;
+    background-position: center;
+    background-repeat: no-repeat;
+  }
+
+  [data-test="generate-shell"] .ms-slider__input:disabled {
+    background-image: linear-gradient(
+      var(--mold-border-control),
+      var(--mold-border-control)
+    );
+  }
+
   [data-test="generate-shell"] input,
   [data-test="generate-shell"] textarea,
   [data-test="generate-shell"] select {
@@ -183,4 +203,15 @@ body {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* Pixel ladders must also reflow with enlarged text when they have two sizes. */
+.create-page .ms-res .ms-seg {
+  flex-wrap: wrap;
+}
+.create-page .ms-res .ms-seg__btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  justify-content: center;
 }

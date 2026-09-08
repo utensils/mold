@@ -19,7 +19,8 @@ import SourceMediaPanel from "../components/create/SourceMediaPanel.vue";
 import IdentityPanel from "../components/create/IdentityPanel.vue";
 import FileUnderGroup from "../components/create/FileUnderGroup.vue";
 import { useActivityRows } from "../composables/useActivityRows";
-import { workspaceLabel } from "../lib/workspaces";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import { useCreateOutputKind } from "../composables/useCreateOutputKind";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
@@ -802,7 +803,7 @@ async function copyErrorMessage(message: string): Promise<void> {
 // Phone surface → the Advanced sheet instead of the inline power column.
 let phoneQuery: MediaQueryList | null =
   typeof window !== "undefined" && typeof window.matchMedia === "function"
-    ? window.matchMedia("(max-width: 639px)")
+    ? window.matchMedia("(max-width: 899px)")
     : null;
 const isPhone = ref(phoneQuery?.matches ?? false);
 function syncPhone() {
@@ -1321,7 +1322,8 @@ const estimateTarget = computed(() =>
 const installedModels = computed(() =>
   models.value.filter((m) => m.downloaded && isStandaloneGenerationModel(m)),
 );
-const composerModels = computed(() => installedModels.value);
+const output = useCreateOutputKind(form, installedModels, currentFamily);
+const composerModels = output.pickerModels;
 
 // Cold start (spec §08 G10): nothing installed to generate with. Only after the
 // first load resolves, so the guide replaces the empty canvas rather than
@@ -1331,7 +1333,7 @@ const showColdStart = computed(
 );
 
 function selectModel(model: ModelInfoExtended) {
-  form.applyModelDefaults(model);
+  output.selectStyle(model);
 }
 
 // The persisted model can name something the routing target doesn't have — it
@@ -1378,7 +1380,7 @@ watch(
       }
       return;
     }
-    const first = installedModels.value[0];
+    const first = output.initialStyle();
     if (first) form.applyModelDefaults(first);
   },
   { immediate: true },
@@ -4453,25 +4455,43 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div
-    data-test="generate-shell"
-    class="mx-auto w-full max-w-[1600px] px-4 pb-24 pt-5"
-  >
+  <div data-test="generate-shell" class="workspace-page create-page">
+    <header class="create-header">
+      <h1
+        class="font-display text-2xl font-bold tracking-tight text-ink"
+        data-test="phone-create-title"
+      >
+        {{ output.title.value }}
+      </h1>
+      <SegmentedControl
+        wrap
+        :model-value="output.kind.value"
+        :options="output.options"
+        label="Output type"
+        data-test="web-output-kind"
+        @update:model-value="output.selectKind"
+      />
+      <p v-if="output.notice.value" role="status" class="text-sm text-ink-2">
+        {{ output.notice.value }}
+        <router-link
+          :to="output.browseTo.value"
+          class="text-safelight underline"
+          >Browse styles</router-link
+        >
+      </p>
+      <router-link
+        v-if="output.kind.value === 'mesh'"
+        to="/create/3d"
+        class="text-sm text-safelight underline"
+        >3-D workflows</router-link
+      >
+    </header>
     <div
       data-test="generate-workspace"
-      class="grid gap-4 md:grid-cols-[minmax(0,1fr)_340px]"
+      class="grid gap-6 min-[900px]:grid-cols-[minmax(0,1fr)_300px]"
     >
       <!-- Center: activity + composer + canvas + recent -->
       <main class="flex min-w-0 flex-col gap-4">
-        <h1
-          class="font-display text-2xl font-bold tracking-tight text-ink"
-          data-test="phone-create-title"
-        >
-          {{ workspaceLabel("create") }}
-        </h1>
-        <router-link to="/create/3d" class="text-sm text-safelight underline"
-          >3-D workflows</router-link
-        >
         <ActivityStrip
           :jobs="localActivityJobs"
           :shared="sharedActivityRows"
@@ -4482,6 +4502,54 @@ onBeforeUnmount(() => {
           @open="openJob"
           @shared-open="openLiveWork"
         />
+
+        <section class="create-result" aria-label="Result">
+          <div
+            v-if="canvasMode === 'empty' && showColdStart"
+            class="flex min-h-[300px] items-center justify-center rounded-card-lg border border-edge bg-bench p-6 shadow-[inset_0_1px_0_var(--card-hi)]"
+          >
+            <ColdStartGuide />
+          </div>
+          <ResultCanvas
+            v-else
+            :mode="canvasMode"
+            :empty-guidance="emptyCanvasGuidance"
+            :progress="genProgress"
+            :stage="genStage"
+            :preview-src="
+              selectedQueueRender?.preview?.preview_image
+                ? `data:image/png;base64,${selectedQueueRender.preview.preview_image}`
+                : (runningJob?.previewUrl ?? undefined)
+            "
+            :progress-fraction="genProgress / 100"
+            :develop-seed="
+              runningJob?.seedVisual ?? selectedQueueRender?.source.jobId
+            "
+            :develop-phase="developPhase"
+            :print-width="
+              selectedQueueRender?.width ?? runningJob?.request.width
+            "
+            :print-height="
+              selectedQueueRender?.height ?? runningJob?.request.height
+            "
+            :result-src="resultSrc"
+            :result-video-src="resultVideoSrc"
+            :result-audio-src="resultAudioSrc"
+            :result-mesh-src="resultMeshSrc"
+            :result-caption="resultCaption"
+            :error="latestErrorMessage"
+            :error-copy="latestErrorCopy"
+            :variations="variations"
+            :variation-batch-id="preparedBatch?.batchId"
+            :queueing-variations="queueingVariations"
+            @update:variations="variations = $event"
+            @use-variation="useVariation"
+            @discard="discardVariations"
+            @queue="queueVariations"
+            @context-menu="openCanvasContextMenu"
+            @click="canvasMode === 'result' ? openLatestResult() : undefined"
+          />
+        </section>
 
         <div class="flex items-center gap-2">
           <!-- Print title (D5): a real field bound to the form, not a
@@ -4496,7 +4564,7 @@ onBeforeUnmount(() => {
               :value="form.state.value.title ?? ''"
               type="text"
               maxlength="160"
-              placeholder="Untitled print"
+              placeholder="Name (optional)"
               aria-label="Print title"
               class="w-full min-w-0 max-w-[28rem] rounded-control border border-transparent bg-transparent px-2 py-1 font-display text-[15px] font-semibold text-ink outline-none transition placeholder:font-medium placeholder:text-ink-3 hover:border-ce focus:border-safelight"
               data-test="print-title"
@@ -4568,8 +4636,8 @@ onBeforeUnmount(() => {
                 :models="composerModels"
                 :model="form.state.value.model"
                 :missing-model="missingModelId"
-                browse-to="/models"
-                empty-label="No models installed"
+                :browse-to="output.browseTo.value"
+                empty-label="No styles ready"
                 @select="selectModel"
               />
               <ControlsAside
@@ -4741,50 +4809,6 @@ onBeforeUnmount(() => {
           {{ singleShotPreservationNote }}
         </div>
 
-        <div
-          v-if="canvasMode === 'empty' && showColdStart"
-          class="flex min-h-[300px] items-center justify-center rounded-card-lg border border-edge bg-bench p-6 shadow-[inset_0_1px_0_var(--card-hi)]"
-        >
-          <ColdStartGuide />
-        </div>
-        <ResultCanvas
-          v-else
-          :mode="canvasMode"
-          :empty-guidance="emptyCanvasGuidance"
-          :progress="genProgress"
-          :stage="genStage"
-          :preview-src="
-            selectedQueueRender?.preview?.preview_image
-              ? `data:image/png;base64,${selectedQueueRender.preview.preview_image}`
-              : (runningJob?.previewUrl ?? undefined)
-          "
-          :progress-fraction="genProgress / 100"
-          :develop-seed="
-            runningJob?.seedVisual ?? selectedQueueRender?.source.jobId
-          "
-          :develop-phase="developPhase"
-          :print-width="selectedQueueRender?.width ?? runningJob?.request.width"
-          :print-height="
-            selectedQueueRender?.height ?? runningJob?.request.height
-          "
-          :result-src="resultSrc"
-          :result-video-src="resultVideoSrc"
-          :result-audio-src="resultAudioSrc"
-          :result-mesh-src="resultMeshSrc"
-          :result-caption="resultCaption"
-          :error="latestErrorMessage"
-          :error-copy="latestErrorCopy"
-          :variations="variations"
-          :variation-batch-id="preparedBatch?.batchId"
-          :queueing-variations="queueingVariations"
-          @update:variations="variations = $event"
-          @use-variation="useVariation"
-          @discard="discardVariations"
-          @queue="queueVariations"
-          @context-menu="openCanvasContextMenu"
-          @click="canvasMode === 'result' ? openLatestResult() : undefined"
-        />
-
         <section>
           <div class="mb-2 flex items-center justify-between">
             <span class="font-display text-[15px] font-semibold text-rebate"
@@ -4803,16 +4827,15 @@ onBeforeUnmount(() => {
         </section>
       </main>
 
-      <!-- Right: controls region — model + basics + inline Advanced (spec §06
-           v0.12 surface split). On phones the Advanced column collapses into
-           the Advanced sheet, opened from the button inside ControlsAside. -->
+      <!-- Primary controls stay visible. Extra settings disclose inline on
+           wide screens and use the same controls in a sheet below 900px. -->
       <div v-if="!isPhone" class="flex min-w-0 flex-col gap-4">
         <CreateModelPicker
           :models="composerModels"
           :model="form.state.value.model"
           :missing-model="missingModelId"
-          browse-to="/models"
-          empty-label="No models installed"
+          :browse-to="output.browseTo.value"
+          empty-label="No styles ready"
           @select="selectModel"
         />
         <ControlsAside
@@ -4868,27 +4891,35 @@ onBeforeUnmount(() => {
           :models="models"
           :notice="identityRestoreNotice"
         />
-        <!-- Tablet+ : inline, always-visible Advanced column. -->
-        <AdvancedDrawer
-          :mobile="false"
-          v-model="form.state.value"
-          :family="currentFamily"
-          :adv-count="advCount"
-          :placement-gpus="gpuListForPlacement"
-          :models="models"
-          :routing-request="durationRoutingRequest"
-          :can-extend="canExtend"
-          :extend-default-overlap-frames="extendDefaultOverlapFrames"
-          @open-picker="showPicker = true"
-          @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
-          @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
-          @clear-source="onClearSource"
-          @open-end-frame-picker="showEndFramePicker = true"
-          @clear-end-frame="onClearEndFrame"
-          @open-mask="showMask = true"
-          @append-prompt="onAppendPromptPhrase"
-          @canvas-intent="setCanvasIntent"
-        />
+        <details
+          class="create-more-settings"
+          :open="showAdvanced"
+          @toggle="showAdvanced = ($event.target as HTMLDetailsElement).open"
+        >
+          <summary>
+            More settings <span v-if="advCount">{{ advCount }}</span>
+          </summary>
+          <AdvancedDrawer
+            :mobile="false"
+            v-model="form.state.value"
+            :family="currentFamily"
+            :adv-count="advCount"
+            :placement-gpus="gpuListForPlacement"
+            :models="models"
+            :routing-request="durationRoutingRequest"
+            :can-extend="canExtend"
+            :extend-default-overlap-frames="extendDefaultOverlapFrames"
+            @open-picker="showPicker = true"
+            @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
+            @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
+            @clear-source="onClearSource"
+            @open-end-frame-picker="showEndFramePicker = true"
+            @clear-end-frame="onClearEndFrame"
+            @open-mask="showMask = true"
+            @append-prompt="onAppendPromptPhrase"
+            @canvas-intent="setCanvasIntent"
+          />
+        </details>
       </div>
     </div>
 
@@ -5105,6 +5136,42 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.create-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.create-header h1 {
+  flex: 1 1 180px;
+}
+.create-header :deep(.ms-seg) {
+  flex: 0 1 520px;
+  min-width: 0;
+}
+.create-header p {
+  flex-basis: 100%;
+}
+.create-result {
+  min-width: 0;
+}
+.create-more-settings {
+  border-top: 1px solid var(--mold-border);
+  padding-top: 16px;
+}
+.create-more-settings summary {
+  cursor: pointer;
+  padding: 8px 0;
+  font-size: 0.875rem;
+  color: var(--mold-text-2);
+}
+@media (max-width: 899px) {
+  .create-header :deep(.ms-seg) {
+    flex-basis: 100%;
+  }
+}
+
 .recent-context {
   position: fixed;
   z-index: 70;

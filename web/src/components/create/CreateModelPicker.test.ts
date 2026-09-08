@@ -22,6 +22,33 @@ function model(overrides: Partial<ModelInfoExtended> = {}): ModelInfoExtended {
 }
 
 describe("CreateModelPicker", () => {
+  it.each([
+    ["Detailed still images", undefined, "Detailed still images"],
+    ["  ", "Studio style", "Studio style"],
+    ["", undefined, "FLUX"],
+  ])(
+    "leads built-in styles with a friendly label (%s)",
+    (description, display_name, expected) => {
+      const wrapper = mount(CreateModelPicker, {
+        props: {
+          models: [
+            model({
+              name: "flux-dev:q8",
+              family: "flux",
+              description,
+              display_name,
+            }),
+          ],
+          model: "flux-dev:q8",
+        },
+        global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+      });
+      expect(wrapper.get("option").text()).toBe(expected);
+      expect(wrapper.get("option").attributes("value")).toBe("flux-dev:q8");
+      expect(wrapper.get(".mp__id").text()).toBe("flux-dev:q8");
+    },
+  );
+
   it("shows a human-readable catalog name while preserving the id as its value", () => {
     const wrapper = mount(CreateModelPicker, {
       props: { models: [model()], model: "cv:23423432" },
