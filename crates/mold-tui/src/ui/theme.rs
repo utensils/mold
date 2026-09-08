@@ -2,140 +2,201 @@ use ratatui::style::{Color, Modifier, Style};
 
 /// A named colour palette preset.
 ///
-/// The TUI ships eleven presets: the four Mold Studio themes from the
-/// pre-redesign spec (kept for the terminal; the mockup is
-/// `docs/design/mold-tui-proposed.html`) followed by the seven legacy
-/// palettes. Studio Dark is the default and matches the desktop/web Mold
-/// dark tokens; Catppuccin Mocha is retained as the single-blue baseline the
-/// TUI shipped before the Studio redesign.
+/// The TUI carries the SAME ten themes as every other surface: the five Mold
+/// Studio families (ui/theme.ts) in two tones each. Its slugs are the GUI's
+/// `ThemeId` values verbatim, and every colour is derived from that family's
+/// map in `ui/tokens.css` — `theme_presets_match_the_design_system` reads that
+/// file and pins the derivation, which is what the eleven-preset palette this
+/// replaced never had. Its `Mocha` was Catppuccin's, not the app's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemePreset {
     #[default]
-    StudioDark,
-    StudioLight,
+    MochaDark,
+    MochaLight,
     SafelightDark,
     SafelightLight,
-    Mocha,
-    Latte,
-    Ristretto,
-    Gruvbox,
-    Tokyo,
-    Nord,
-    Dracula,
+    BlueprintDark,
+    BlueprintLight,
+    GraphiteDark,
+    GraphiteLight,
+    NebulaDark,
+    NebulaLight,
 }
 
 impl ThemePreset {
-    /// All presets in display order (used by the Appearance swatch grid) —
-    /// Studio family first, then the legacy palettes in their historical
-    /// order.
-    pub const ALL: [ThemePreset; 11] = [
-        ThemePreset::StudioDark,
-        ThemePreset::StudioLight,
+    /// All presets in display order (used by the Appearance swatch grid),
+    /// family-major and dark tone first — the same order as `THEMES`.
+    pub const ALL: [ThemePreset; 10] = [
+        ThemePreset::MochaDark,
+        ThemePreset::MochaLight,
         ThemePreset::SafelightDark,
         ThemePreset::SafelightLight,
-        ThemePreset::Mocha,
-        ThemePreset::Latte,
-        ThemePreset::Ristretto,
-        ThemePreset::Gruvbox,
-        ThemePreset::Tokyo,
-        ThemePreset::Nord,
-        ThemePreset::Dracula,
+        ThemePreset::BlueprintDark,
+        ThemePreset::BlueprintLight,
+        ThemePreset::GraphiteDark,
+        ThemePreset::GraphiteLight,
+        ThemePreset::NebulaDark,
+        ThemePreset::NebulaLight,
     ];
 
-    /// Short display label (title-case).
+    /// The five families, in picker order, each represented by its dark tone.
+    /// A picker names the THEME and offers the tone separately, so the grid
+    /// walks these five and paints each in whichever tone is in force.
+    pub const FAMILIES: [ThemePreset; 5] = [
+        ThemePreset::MochaDark,
+        ThemePreset::SafelightDark,
+        ThemePreset::BlueprintDark,
+        ThemePreset::GraphiteDark,
+        ThemePreset::NebulaDark,
+    ];
+
+    /// This preset's position in [`ThemePreset::FAMILIES`].
+    pub fn family_index(self) -> usize {
+        ThemePreset::FAMILIES
+            .iter()
+            .position(|p| p.label() == self.label())
+            .unwrap_or(0)
+    }
+
+    /// The family at `index`, in `self`'s current tone.
+    pub fn family_at(index: usize, light: bool) -> Self {
+        ThemePreset::FAMILIES[index.min(ThemePreset::FAMILIES.len() - 1)].with_tone(light)
+    }
+
+    /// The theme's name, with no tone in it.
     pub fn label(self) -> &'static str {
         match self {
-            ThemePreset::StudioDark => "Studio Dark",
-            ThemePreset::StudioLight => "Studio Light",
-            ThemePreset::SafelightDark => "Safelight Dark",
-            ThemePreset::SafelightLight => "Safelight Light",
-            ThemePreset::Mocha => "Mocha",
-            ThemePreset::Latte => "Latte",
-            ThemePreset::Ristretto => "Ristretto",
-            ThemePreset::Gruvbox => "Gruvbox",
-            ThemePreset::Tokyo => "Tokyo",
-            ThemePreset::Nord => "Nord",
-            ThemePreset::Dracula => "Dracula",
+            ThemePreset::MochaDark | ThemePreset::MochaLight => "Mocha",
+            ThemePreset::SafelightDark | ThemePreset::SafelightLight => "Safelight",
+            ThemePreset::BlueprintDark | ThemePreset::BlueprintLight => "Blueprint",
+            ThemePreset::GraphiteDark | ThemePreset::GraphiteLight => "Graphite",
+            ThemePreset::NebulaDark | ThemePreset::NebulaLight => "Nebula",
         }
     }
 
-    /// Kebab-case slug, used for config / session persistence.
+    /// Whether this preset is the light or the dark tone of its family.
+    pub fn is_light(self) -> bool {
+        matches!(
+            self,
+            ThemePreset::MochaLight
+                | ThemePreset::SafelightLight
+                | ThemePreset::BlueprintLight
+                | ThemePreset::GraphiteLight
+                | ThemePreset::NebulaLight
+        )
+    }
+
+    /// The same family in the requested tone. Never another family.
+    pub fn with_tone(self, light: bool) -> Self {
+        match (self, light) {
+            (ThemePreset::MochaDark | ThemePreset::MochaLight, false) => ThemePreset::MochaDark,
+            (ThemePreset::MochaDark | ThemePreset::MochaLight, true) => ThemePreset::MochaLight,
+            (ThemePreset::SafelightDark | ThemePreset::SafelightLight, false) => {
+                ThemePreset::SafelightDark
+            }
+            (ThemePreset::SafelightDark | ThemePreset::SafelightLight, true) => {
+                ThemePreset::SafelightLight
+            }
+            (ThemePreset::BlueprintDark | ThemePreset::BlueprintLight, false) => {
+                ThemePreset::BlueprintDark
+            }
+            (ThemePreset::BlueprintDark | ThemePreset::BlueprintLight, true) => {
+                ThemePreset::BlueprintLight
+            }
+            (ThemePreset::GraphiteDark | ThemePreset::GraphiteLight, false) => {
+                ThemePreset::GraphiteDark
+            }
+            (ThemePreset::GraphiteDark | ThemePreset::GraphiteLight, true) => {
+                ThemePreset::GraphiteLight
+            }
+            (ThemePreset::NebulaDark | ThemePreset::NebulaLight, false) => ThemePreset::NebulaDark,
+            (ThemePreset::NebulaDark | ThemePreset::NebulaLight, true) => ThemePreset::NebulaLight,
+        }
+    }
+
+    /// Kebab-case slug, used for config / session persistence. Identical to
+    /// the GUI's `ThemeId`, so one vocabulary covers every surface.
     pub fn slug(self) -> &'static str {
         match self {
-            ThemePreset::StudioDark => "studio-dark",
-            ThemePreset::StudioLight => "studio-light",
+            ThemePreset::MochaDark => "mocha-dark",
+            ThemePreset::MochaLight => "mocha-light",
             ThemePreset::SafelightDark => "safelight-dark",
             ThemePreset::SafelightLight => "safelight-light",
-            ThemePreset::Mocha => "mocha",
-            ThemePreset::Latte => "latte",
-            ThemePreset::Ristretto => "ristretto",
-            ThemePreset::Gruvbox => "gruvbox",
-            ThemePreset::Tokyo => "tokyo",
-            ThemePreset::Nord => "nord",
-            ThemePreset::Dracula => "dracula",
+            ThemePreset::BlueprintDark => "blueprint-dark",
+            ThemePreset::BlueprintLight => "blueprint-light",
+            ThemePreset::GraphiteDark => "graphite-dark",
+            ThemePreset::GraphiteLight => "graphite-light",
+            ThemePreset::NebulaDark => "nebula-dark",
+            ThemePreset::NebulaLight => "nebula-light",
         }
     }
 
-    /// Parse a slug back into a preset. Unknown slugs fall back to the
-    /// Studio Dark default. `studio` and `safelight` are accepted as
-    /// input-only aliases for the dark variants (the design mockup uses the
-    /// bare names for its dark presets).
+    /// Parse a slug back into a preset.
+    ///
+    /// Every retired slug still resolves, mapped to the nearest surviving
+    /// family by accent hue — a saved `tui.theme` must never fail to load or
+    /// silently reset. Unknown slugs fall back to the default.
     pub fn from_slug(slug: &str) -> Self {
         match slug.trim().to_ascii_lowercase().as_str() {
-            "studio-dark" | "studio" => ThemePreset::StudioDark,
-            "studio-light" => ThemePreset::StudioLight,
-            "safelight-dark" | "safelight" => ThemePreset::SafelightDark,
+            "mocha-dark" | "mocha" => ThemePreset::MochaDark,
+            "mocha-light" | "latte" | "studio-light" => ThemePreset::MochaLight,
+            "safelight-dark" | "safelight" | "gruvbox" => ThemePreset::SafelightDark,
             "safelight-light" => ThemePreset::SafelightLight,
-            "mocha" => ThemePreset::Mocha,
-            "latte" => ThemePreset::Latte,
-            "ristretto" => ThemePreset::Ristretto,
-            "gruvbox" => ThemePreset::Gruvbox,
-            "tokyo" | "tokyonight" | "tokyo-night" => ThemePreset::Tokyo,
-            "nord" => ThemePreset::Nord,
-            "dracula" => ThemePreset::Dracula,
-            _ => ThemePreset::StudioDark,
+            // Cool blue grounds land on the new cyanotype.
+            "blueprint-dark" | "tokyo" | "tokyonight" | "tokyo-night" | "nord" => {
+                ThemePreset::BlueprintDark
+            }
+            "blueprint-light" | "blueprint" => ThemePreset::BlueprintLight,
+            "graphite-dark" | "graphite" => ThemePreset::GraphiteDark,
+            // Porcelain retired as a name; its palette is Graphite's light tone.
+            "graphite-light" | "porcelain" => ThemePreset::GraphiteLight,
+            // Ristretto's #fd6883 is the crimson family.
+            "nebula-dark" | "nebula" | "ristretto" => ThemePreset::NebulaDark,
+            "nebula-light" => ThemePreset::NebulaLight,
+            // Studio Dark and Dracula were both violet-leaning charcoals.
+            "studio-dark" | "studio" | "dracula" => ThemePreset::MochaDark,
+            _ => ThemePreset::default(),
         }
     }
 
-    /// Swatch colour shown in the Appearance grid — usually the accent hue.
+    /// Swatch colour shown in the Appearance grid — the accent hue.
     pub fn swatch(self) -> Color {
         self.build().accent
     }
 
     /// Short palette descriptor for the theme card (dim text beside the
-    /// swatch dots) — the design mockup's card copy for the Studio /
-    /// Safelight / Mocha presets, terse palette words for the rest.
+    /// swatch dots). Describes the IDENTITY, never the tone — the tone is the
+    /// Appearance control's job.
     pub fn description(self) -> &'static str {
         match self {
-            ThemePreset::StudioDark | ThemePreset::StudioLight => "dual accent",
-            ThemePreset::SafelightDark | ThemePreset::SafelightLight => "warm · dual accent",
-            ThemePreset::Mocha => "single blue",
-            ThemePreset::Latte => "light · blue",
-            ThemePreset::Ristretto => "warm espresso",
-            ThemePreset::Gruvbox => "retro warm",
-            ThemePreset::Tokyo => "night blue",
-            ThemePreset::Nord => "cold muted",
-            ThemePreset::Dracula => "purple · cyan",
+            ThemePreset::MochaDark | ThemePreset::MochaLight => "violet neutrals · blue",
+            ThemePreset::SafelightDark | ThemePreset::SafelightLight => "warm · amber",
+            ThemePreset::BlueprintDark | ThemePreset::BlueprintLight => "drafting blue",
+            ThemePreset::GraphiteDark | ThemePreset::GraphiteLight => "true neutral · signal",
+            ThemePreset::NebulaDark | ThemePreset::NebulaLight => "oxblood · crimson",
         }
     }
 
     /// Build a concrete [`Theme`] for this preset.
     pub fn build(self) -> Theme {
         match self {
-            ThemePreset::StudioDark => Theme::studio_dark(),
-            ThemePreset::StudioLight => Theme::studio_light(),
+            ThemePreset::MochaDark => Theme::mocha_dark(),
+            ThemePreset::MochaLight => Theme::mocha_light(),
             ThemePreset::SafelightDark => Theme::safelight_dark(),
             ThemePreset::SafelightLight => Theme::safelight_light(),
-            ThemePreset::Mocha => Theme::mocha(),
-            ThemePreset::Latte => Theme::latte(),
-            ThemePreset::Ristretto => Theme::ristretto(),
-            ThemePreset::Gruvbox => Theme::gruvbox(),
-            ThemePreset::Tokyo => Theme::tokyo(),
-            ThemePreset::Nord => Theme::nord(),
-            ThemePreset::Dracula => Theme::dracula(),
+            ThemePreset::BlueprintDark => Theme::blueprint_dark(),
+            ThemePreset::BlueprintLight => Theme::blueprint_light(),
+            ThemePreset::GraphiteDark => Theme::graphite_dark(),
+            ThemePreset::GraphiteLight => Theme::graphite_light(),
+            ThemePreset::NebulaDark => Theme::nebula_dark(),
+            ThemePreset::NebulaLight => Theme::nebula_light(),
         }
     }
 }
+
+/// The accent tint behind a selected row. Mirrors `--mold-accent-tint`
+/// (13 % of the accent), pre-blended because a terminal cell has no alpha.
+const ACCENT_TINT_PCT: u16 = 13;
 
 /// Blend `fg` over `bg` at `alpha_pct` percent opacity, returning a solid
 /// colour. Terminal cells can't express alpha, so the CSS `rgba(...)`
@@ -201,303 +262,266 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::studio_dark()
+        ThemePreset::default().build()
     }
 }
 
 impl Theme {
     /// Historical alias retained so external callers that reference
-    /// `Theme::dark()` keep compiling. Now points at the Studio Dark
-    /// default.
+    /// `Theme::dark()` keep compiling. Now points at the default.
     pub fn dark() -> Self {
-        Self::studio_dark()
+        ThemePreset::default().build()
     }
 
-    /// Studio Dark — the Mold-family dark theme and the TUI default.
-    pub fn studio_dark() -> Self {
+    /// Mocha Dark — violet-leaning neutrals, one blue accent.
+    pub fn mocha_dark() -> Self {
         Self {
-            bg: Color::Rgb(0x13, 0x11, 0x1d),
-            frame: Color::Rgb(0x0c, 0x0a, 0x14),
-            surface: Color::Rgb(0x22, 0x1c, 0x34),
-            surface2: Color::Rgb(0x2e, 0x27, 0x43),
-            border: Color::Rgb(0x3a, 0x33, 0x52),
-            border_focus: Color::Rgb(0xe8, 0x79, 0xf9),
-            text: Color::Rgb(0xf3, 0xef, 0xfb),
-            text_dim: Color::Rgb(0x90, 0x89, 0xa8),
-            faint: Color::Rgb(0x64, 0x5d, 0x7c),
-            accent: Color::Rgb(0xe8, 0x79, 0xf9),
-            info: Color::Rgb(0x5c, 0xd0, 0xff),
-            success: Color::Rgb(0x6e, 0xe7, 0xa5),
-            warning: Color::Rgb(0xf5, 0xc4, 0x51),
-            error: Color::Rgb(0xfb, 0x71, 0x85),
-            highlight: blend((0xe8, 0x79, 0xf9), (0x13, 0x11, 0x1d), 15),
-            progress_fill: Color::Rgb(0xe8, 0x79, 0xf9),
-            progress_empty: Color::Rgb(0x2e, 0x27, 0x43),
-            tab_active: Color::Rgb(0xe8, 0x79, 0xf9),
-            tab_inactive: Color::Rgb(0x90, 0x89, 0xa8),
+            bg: Color::Rgb(0x1e, 0x1e, 0x2e),
+            frame: Color::Rgb(0x18, 0x18, 0x25),
+            surface: Color::Rgb(0x31, 0x32, 0x44),
+            surface2: Color::Rgb(0x45, 0x47, 0x5a),
+            border: Color::Rgb(0x45, 0x47, 0x5a),
+            border_focus: Color::Rgb(0x89, 0xb4, 0xfa),
+            text: Color::Rgb(0xcd, 0xd6, 0xf4),
+            text_dim: Color::Rgb(0x97, 0x9d, 0xb2),
+            faint: Color::Rgb(0x58, 0x5b, 0x70),
+            accent: Color::Rgb(0x89, 0xb4, 0xfa),
+            info: Color::Rgb(0x74, 0xc7, 0xec),
+            success: Color::Rgb(0xa6, 0xe3, 0xa1),
+            warning: Color::Rgb(0xf9, 0xe2, 0xaf),
+            error: Color::Rgb(0xf3, 0x8b, 0xa8),
+            highlight: blend((0x89, 0xb4, 0xfa), (0x1e, 0x1e, 0x2e), ACCENT_TINT_PCT),
+            progress_fill: Color::Rgb(0x89, 0xb4, 0xfa),
+            progress_empty: Color::Rgb(0x45, 0x47, 0x5a),
+            tab_active: Color::Rgb(0x89, 0xb4, 0xfa),
+            tab_inactive: Color::Rgb(0x97, 0x9d, 0xb2),
         }
     }
 
-    /// Studio Light — the Mold-family light theme.
-    pub fn studio_light() -> Self {
+    /// Mocha Light — Catppuccin Latte, the flavour's own light half.
+    pub fn mocha_light() -> Self {
         Self {
-            bg: Color::Rgb(0xf6, 0xf4, 0xfb),
-            frame: Color::Rgb(0xe5, 0xe0, 0xf1),
-            surface: Color::Rgb(0xef, 0xea, 0xf8),
-            surface2: Color::Rgb(0xe3, 0xdc, 0xf2),
-            border: Color::Rgb(0xcf, 0xc6, 0xe4),
-            border_focus: Color::Rgb(0xa2, 0x1c, 0xaf),
-            text: Color::Rgb(0x22, 0x14, 0x30),
-            text_dim: Color::Rgb(0x5f, 0x56, 0x73),
-            faint: Color::Rgb(0x9a, 0x90, 0xb2),
-            accent: Color::Rgb(0xa2, 0x1c, 0xaf),
+            bg: Color::Rgb(0xef, 0xf1, 0xf5),
+            frame: Color::Rgb(0xe6, 0xe9, 0xef),
+            surface: Color::Rgb(0xff, 0xff, 0xff),
+            surface2: Color::Rgb(0xcc, 0xd0, 0xda),
+            border: Color::Rgb(0xd2, 0xd7, 0xe1),
+            border_focus: Color::Rgb(0x1a, 0x5a, 0xc4),
+            text: Color::Rgb(0x3c, 0x3f, 0x57),
+            text_dim: Color::Rgb(0x58, 0x5b, 0x71),
+            faint: Color::Rgb(0x9c, 0xa0, 0xb0),
+            accent: Color::Rgb(0x1a, 0x5a, 0xc4),
             info: Color::Rgb(0x0e, 0x74, 0x90),
-            success: Color::Rgb(0x0f, 0x8a, 0x54),
-            warning: Color::Rgb(0xa0, 0x6a, 0x12),
-            error: Color::Rgb(0xb4, 0x23, 0x3b),
-            highlight: blend((0xa2, 0x1c, 0xaf), (0xf6, 0xf4, 0xfb), 12),
-            progress_fill: Color::Rgb(0xa2, 0x1c, 0xaf),
-            progress_empty: Color::Rgb(0xe3, 0xdc, 0xf2),
-            tab_active: Color::Rgb(0xa2, 0x1c, 0xaf),
-            tab_inactive: Color::Rgb(0x5f, 0x56, 0x73),
+            success: Color::Rgb(0x0d, 0x7a, 0x4e),
+            warning: Color::Rgb(0x8a, 0x52, 0x00),
+            error: Color::Rgb(0xc0, 0x2b, 0x34),
+            highlight: blend((0x1a, 0x5a, 0xc4), (0xef, 0xf1, 0xf5), ACCENT_TINT_PCT),
+            progress_fill: Color::Rgb(0x1a, 0x5a, 0xc4),
+            progress_empty: Color::Rgb(0xcc, 0xd0, 0xda),
+            tab_active: Color::Rgb(0x1a, 0x5a, 0xc4),
+            tab_inactive: Color::Rgb(0x58, 0x5b, 0x71),
         }
     }
 
-    /// Safelight Dark — the warm darkroom-family dark theme.
+    /// Safelight Dark — the darkroom family: warm browns, amber press.
     pub fn safelight_dark() -> Self {
         Self {
-            bg: Color::Rgb(0x17, 0x12, 0x10),
-            frame: Color::Rgb(0x12, 0x10, 0x0b),
-            surface: Color::Rgb(0x24, 0x1c, 0x15),
-            surface2: Color::Rgb(0x33, 0x26, 0x19),
-            border: Color::Rgb(0x46, 0x3a, 0x2a),
+            bg: Color::Rgb(0x24, 0x1c, 0x15),
+            frame: Color::Rgb(0x17, 0x12, 0x10),
+            surface: Color::Rgb(0x33, 0x26, 0x19),
+            surface2: Color::Rgb(0x45, 0x34, 0x24),
+            border: Color::Rgb(0x3f, 0x37, 0x2f),
             border_focus: Color::Rgb(0xf7, 0x94, 0x33),
             text: Color::Rgb(0xf1, 0xe8, 0xda),
-            text_dim: Color::Rgb(0xa2, 0x93, 0x7d),
-            faint: Color::Rgb(0x6f, 0x63, 0x53),
+            text_dim: Color::Rgb(0xa2, 0x98, 0x88),
+            faint: Color::Rgb(0x6a, 0x61, 0x58),
             accent: Color::Rgb(0xf7, 0x94, 0x33),
             info: Color::Rgb(0x8f, 0xb4, 0xc4),
             success: Color::Rgb(0x8f, 0xd3, 0x9a),
-            warning: Color::Rgb(0xf5, 0xc4, 0x51),
+            warning: Color::Rgb(0xf5, 0xa6, 0x23),
             error: Color::Rgb(0xe5, 0x71, 0x5a),
-            highlight: blend((0xf7, 0x94, 0x33), (0x17, 0x12, 0x10), 15),
+            highlight: blend((0xf7, 0x94, 0x33), (0x24, 0x1c, 0x15), ACCENT_TINT_PCT),
             progress_fill: Color::Rgb(0xf7, 0x94, 0x33),
-            progress_empty: Color::Rgb(0x33, 0x26, 0x19),
+            progress_empty: Color::Rgb(0x45, 0x34, 0x24),
             tab_active: Color::Rgb(0xf7, 0x94, 0x33),
-            tab_inactive: Color::Rgb(0xa2, 0x93, 0x7d),
+            tab_inactive: Color::Rgb(0xa2, 0x98, 0x88),
         }
     }
 
-    /// Safelight Light — the warm darkroom-family light theme.
+    /// Safelight Light — the darkroom with the lights on.
     pub fn safelight_light() -> Self {
         Self {
-            bg: Color::Rgb(0xf7, 0xf1, 0xe6),
-            frame: Color::Rgb(0xec, 0xe2, 0xcf),
-            surface: Color::Rgb(0xf0, 0xe7, 0xd5),
-            surface2: Color::Rgb(0xe6, 0xdc, 0xc7),
-            border: Color::Rgb(0xd8, 0xcb, 0xb0),
-            border_focus: Color::Rgb(0x9b, 0x4d, 0x00),
-            text: Color::Rgb(0x23, 0x1d, 0x16),
-            text_dim: Color::Rgb(0x6b, 0x5f, 0x4d),
-            faint: Color::Rgb(0x9a, 0x8c, 0x74),
-            accent: Color::Rgb(0x9b, 0x4d, 0x00),
-            info: Color::Rgb(0x3f, 0x65, 0x70),
-            success: Color::Rgb(0x2f, 0x7d, 0x4f),
-            warning: Color::Rgb(0xa0, 0x6a, 0x12),
-            error: Color::Rgb(0xa9, 0x36, 0x29),
-            highlight: blend((0x9b, 0x4d, 0x00), (0xf7, 0xf1, 0xe6), 13),
-            progress_fill: Color::Rgb(0x9b, 0x4d, 0x00),
-            progress_empty: Color::Rgb(0xe6, 0xdc, 0xc7),
-            tab_active: Color::Rgb(0x9b, 0x4d, 0x00),
-            tab_inactive: Color::Rgb(0x6b, 0x5f, 0x4d),
+            bg: Color::Rgb(0xfa, 0xf5, 0xec),
+            frame: Color::Rgb(0xf2, 0xe9, 0xdb),
+            surface: Color::Rgb(0xff, 0xfd, 0xf8),
+            surface2: Color::Rgb(0xee, 0xe2, 0xce),
+            border: Color::Rgb(0xe3, 0xd7, 0xc4),
+            border_focus: Color::Rgb(0x9a, 0x4f, 0x04),
+            text: Color::Rgb(0x2a, 0x21, 0x18),
+            text_dim: Color::Rgb(0x6f, 0x5b, 0x46),
+            faint: Color::Rgb(0xab, 0x9b, 0x85),
+            accent: Color::Rgb(0x9a, 0x4f, 0x04),
+            info: Color::Rgb(0x2b, 0x63, 0x82),
+            success: Color::Rgb(0x16, 0x6b, 0x43),
+            warning: Color::Rgb(0x8a, 0x52, 0x00),
+            error: Color::Rgb(0xb2, 0x31, 0x27),
+            highlight: blend((0x9a, 0x4f, 0x04), (0xfa, 0xf5, 0xec), ACCENT_TINT_PCT),
+            progress_fill: Color::Rgb(0x9a, 0x4f, 0x04),
+            progress_empty: Color::Rgb(0xee, 0xe2, 0xce),
+            tab_active: Color::Rgb(0x9a, 0x4f, 0x04),
+            tab_inactive: Color::Rgb(0x6f, 0x5b, 0x46),
         }
     }
 
-    /// Catppuccin Mocha — the pre-Studio default, retained as the
-    /// single-blue baseline (info = sky, per the design mockup).
-    pub fn mocha() -> Self {
+    /// Blueprint Dark — cyanotype: prussian ground, drafting blue.
+    pub fn blueprint_dark() -> Self {
         Self {
-            bg: Color::Rgb(30, 30, 46),               // #1e1e2e
-            frame: Color::Rgb(24, 24, 37),            // #181825
-            surface: Color::Rgb(49, 50, 68),          // #313244
-            surface2: Color::Rgb(69, 71, 90),         // #45475a
-            border: Color::Rgb(69, 71, 90),           // #45475a
-            border_focus: Color::Rgb(137, 180, 250),  // #89b4fa (blue)
-            text: Color::Rgb(205, 214, 244),          // #cdd6f4
-            text_dim: Color::Rgb(127, 132, 156),      // #7f849c
-            faint: Color::Rgb(108, 112, 134),         // #6c7086 (overlay0)
-            accent: Color::Rgb(137, 180, 250),        // #89b4fa (blue)
-            info: Color::Rgb(137, 220, 235),          // #89dceb (sky)
-            success: Color::Rgb(166, 227, 161),       // #a6e3a1 (green)
-            warning: Color::Rgb(249, 226, 175),       // #f9e2af (yellow)
-            error: Color::Rgb(243, 139, 168),         // #f38ba8 (red)
-            highlight: Color::Rgb(69, 71, 90),        // #45475a
-            progress_fill: Color::Rgb(137, 180, 250), // #89b4fa
-            progress_empty: Color::Rgb(49, 50, 68),   // #313244
-            tab_active: Color::Rgb(137, 180, 250),    // #89b4fa
-            tab_inactive: Color::Rgb(127, 132, 156),  // #7f849c
+            bg: Color::Rgb(0x10, 0x1a, 0x2b),
+            frame: Color::Rgb(0x0b, 0x13, 0x20),
+            surface: Color::Rgb(0x17, 0x25, 0x3a),
+            surface2: Color::Rgb(0x20, 0x31, 0x4a),
+            border: Color::Rgb(0x25, 0x33, 0x4a),
+            border_focus: Color::Rgb(0x6e, 0xa8, 0xff),
+            text: Color::Rgb(0xe6, 0xee, 0xfb),
+            text_dim: Color::Rgb(0x93, 0xa5, 0xc2),
+            faint: Color::Rgb(0x5b, 0x6d, 0x8c),
+            accent: Color::Rgb(0x6e, 0xa8, 0xff),
+            info: Color::Rgb(0x57, 0xc7, 0xe8),
+            success: Color::Rgb(0x5e, 0xcf, 0x9a),
+            warning: Color::Rgb(0xe8, 0xc3, 0x4a),
+            error: Color::Rgb(0xff, 0x7a, 0x85),
+            highlight: blend((0x6e, 0xa8, 0xff), (0x10, 0x1a, 0x2b), ACCENT_TINT_PCT),
+            progress_fill: Color::Rgb(0x6e, 0xa8, 0xff),
+            progress_empty: Color::Rgb(0x20, 0x31, 0x4a),
+            tab_active: Color::Rgb(0x6e, 0xa8, 0xff),
+            tab_inactive: Color::Rgb(0x93, 0xa5, 0xc2),
         }
     }
 
-    /// Catppuccin Latte — a light counterpart to Mocha.
-    pub fn latte() -> Self {
+    /// Blueprint Light — drafting table, cool daylight.
+    pub fn blueprint_light() -> Self {
         Self {
-            bg: Color::Rgb(239, 241, 245),           // #eff1f5
-            frame: Color::Rgb(230, 233, 239),        // #e6e9ef
-            surface: Color::Rgb(230, 233, 239),      // #e6e9ef
-            surface2: Color::Rgb(220, 224, 232),     // #dce0e8
-            border: Color::Rgb(204, 208, 218),       // #ccd0da
-            border_focus: Color::Rgb(30, 102, 245),  // #1e66f5 (blue)
-            text: Color::Rgb(76, 79, 105),           // #4c4f69
-            text_dim: Color::Rgb(108, 111, 133),     // #6c6f85
-            faint: Color::Rgb(156, 160, 176),        // #9ca0b0 (overlay0)
-            accent: Color::Rgb(30, 102, 245),        // #1e66f5
-            info: Color::Rgb(4, 165, 229),           // #04a5e5 (sky)
-            success: Color::Rgb(64, 160, 43),        // #40a02b
-            warning: Color::Rgb(223, 142, 29),       // #df8e1d
-            error: Color::Rgb(210, 15, 57),          // #d20f39
-            highlight: Color::Rgb(220, 224, 232),    // #dce0e8
-            progress_fill: Color::Rgb(30, 102, 245), // #1e66f5
-            progress_empty: Color::Rgb(220, 224, 232),
-            tab_active: Color::Rgb(30, 102, 245),
-            tab_inactive: Color::Rgb(108, 111, 133),
+            bg: Color::Rgb(0xf4, 0xf7, 0xfb),
+            frame: Color::Rgb(0xe9, 0xef, 0xf7),
+            surface: Color::Rgb(0xff, 0xff, 0xff),
+            surface2: Color::Rgb(0xdc, 0xe6, 0xf4),
+            border: Color::Rgb(0xcf, 0xdc, 0xec),
+            border_focus: Color::Rgb(0x1d, 0x4e, 0xd8),
+            text: Color::Rgb(0x0d, 0x1b, 0x2e),
+            text_dim: Color::Rgb(0x52, 0x62, 0x7a),
+            faint: Color::Rgb(0x94, 0xa5, 0xbb),
+            accent: Color::Rgb(0x1d, 0x4e, 0xd8),
+            info: Color::Rgb(0x1d, 0x4e, 0xd8),
+            success: Color::Rgb(0x0f, 0x7b, 0x5f),
+            warning: Color::Rgb(0x8a, 0x52, 0x00),
+            error: Color::Rgb(0xc0, 0x2b, 0x34),
+            highlight: blend((0x1d, 0x4e, 0xd8), (0xf4, 0xf7, 0xfb), ACCENT_TINT_PCT),
+            progress_fill: Color::Rgb(0x1d, 0x4e, 0xd8),
+            progress_empty: Color::Rgb(0xdc, 0xe6, 0xf4),
+            tab_active: Color::Rgb(0x1d, 0x4e, 0xd8),
+            tab_inactive: Color::Rgb(0x52, 0x62, 0x7a),
         }
     }
 
-    /// Ristretto — warm espresso-toned dark theme from Monokai Pro.
-    /// Accent is the signature `#fd6883` pink-red, matched to the swatch
-    /// defined in the mold design system.
-    pub fn ristretto() -> Self {
+    /// Graphite Dark — true neutral greys, warm signal.
+    pub fn graphite_dark() -> Self {
         Self {
-            bg: Color::Rgb(44, 37, 37),               // #2c2525
-            frame: Color::Rgb(35, 29, 29),            // #231d1d
-            surface: Color::Rgb(64, 56, 56),          // #403838
-            surface2: Color::Rgb(77, 68, 68),         // #4d4444
-            border: Color::Rgb(91, 83, 73),           // #5b5349
-            border_focus: Color::Rgb(253, 104, 131),  // #fd6883 (pink-red)
-            text: Color::Rgb(255, 241, 243),          // #fff1f3
-            text_dim: Color::Rgb(114, 105, 106),      // #72696a
-            faint: Color::Rgb(95, 87, 87),            // #5f5757
-            accent: Color::Rgb(253, 104, 131),        // #fd6883
-            info: Color::Rgb(133, 218, 204),          // #85dacc (blue-green)
-            success: Color::Rgb(173, 218, 120),       // #adda78
-            warning: Color::Rgb(249, 204, 108),       // #f9cc6c
-            error: Color::Rgb(243, 141, 112),         // #f38d70 (orange — distinct from accent)
-            highlight: Color::Rgb(64, 56, 56),        // #403838
-            progress_fill: Color::Rgb(253, 104, 131), // #fd6883
-            progress_empty: Color::Rgb(64, 56, 56),
-            tab_active: Color::Rgb(253, 104, 131),
-            tab_inactive: Color::Rgb(114, 105, 106),
+            bg: Color::Rgb(0x1b, 0x1c, 0x1e),
+            frame: Color::Rgb(0x14, 0x15, 0x17),
+            surface: Color::Rgb(0x23, 0x25, 0x28),
+            surface2: Color::Rgb(0x2e, 0x31, 0x34),
+            border: Color::Rgb(0x2c, 0x2e, 0x32),
+            border_focus: Color::Rgb(0xf0, 0xa2, 0x2e),
+            text: Color::Rgb(0xec, 0xed, 0xef),
+            text_dim: Color::Rgb(0x8a, 0x8e, 0x93),
+            faint: Color::Rgb(0x67, 0x6b, 0x70),
+            accent: Color::Rgb(0xf0, 0xa2, 0x2e),
+            info: Color::Rgb(0x6b, 0xa8, 0xe5),
+            success: Color::Rgb(0x58, 0xc0, 0x8a),
+            warning: Color::Rgb(0xe8, 0xc3, 0x4a),
+            error: Color::Rgb(0xe5, 0x65, 0x4b),
+            highlight: blend((0xf0, 0xa2, 0x2e), (0x1b, 0x1c, 0x1e), ACCENT_TINT_PCT),
+            progress_fill: Color::Rgb(0xf0, 0xa2, 0x2e),
+            progress_empty: Color::Rgb(0x2e, 0x31, 0x34),
+            tab_active: Color::Rgb(0xf0, 0xa2, 0x2e),
+            tab_inactive: Color::Rgb(0x8a, 0x8e, 0x93),
         }
     }
 
-    /// Gruvbox Dark (hard).
-    pub fn gruvbox() -> Self {
+    /// Graphite Light — high-key neutrals (shipped as Porcelain).
+    pub fn graphite_light() -> Self {
         Self {
-            bg: Color::Rgb(29, 32, 33),              // #1d2021
-            frame: Color::Rgb(40, 40, 40),           // #282828
-            surface: Color::Rgb(50, 48, 47),         // #32302f
-            surface2: Color::Rgb(60, 56, 54),        // #3c3836
-            border: Color::Rgb(80, 73, 69),          // #504945
-            border_focus: Color::Rgb(131, 165, 152), // #83a598 (aqua)
-            text: Color::Rgb(235, 219, 178),         // #ebdbb2
-            text_dim: Color::Rgb(168, 153, 132),     // #a89984
-            faint: Color::Rgb(124, 111, 100),        // #7c6f64 (fg4)
-            accent: Color::Rgb(131, 165, 152),       // #83a598
-            info: Color::Rgb(142, 192, 124),         // #8ec07c (bright aqua)
-            success: Color::Rgb(184, 187, 38),       // #b8bb26
-            warning: Color::Rgb(250, 189, 47),       // #fabd2f
-            error: Color::Rgb(251, 73, 52),          // #fb4934
-            highlight: Color::Rgb(60, 56, 54),       // #3c3836
-            progress_fill: Color::Rgb(131, 165, 152),
-            progress_empty: Color::Rgb(60, 56, 54),
-            tab_active: Color::Rgb(131, 165, 152),
-            tab_inactive: Color::Rgb(168, 153, 132),
+            bg: Color::Rgb(0xfb, 0xfb, 0xfd),
+            frame: Color::Rgb(0xf3, 0xf3, 0xf6),
+            surface: Color::Rgb(0xff, 0xff, 0xff),
+            surface2: Color::Rgb(0xe6, 0xe6, 0xeb),
+            border: Color::Rgb(0xe1, 0xe1, 0xe7),
+            border_focus: Color::Rgb(0x0f, 0x76, 0x6e),
+            text: Color::Rgb(0x16, 0x17, 0x1a),
+            text_dim: Color::Rgb(0x63, 0x66, 0x6d),
+            faint: Color::Rgb(0xa0, 0xa3, 0xab),
+            accent: Color::Rgb(0x0f, 0x76, 0x6e),
+            info: Color::Rgb(0x25, 0x63, 0xa8),
+            success: Color::Rgb(0x17, 0x79, 0x5a),
+            warning: Color::Rgb(0x8a, 0x52, 0x00),
+            error: Color::Rgb(0xc0, 0x39, 0x2b),
+            highlight: blend((0x0f, 0x76, 0x6e), (0xfb, 0xfb, 0xfd), ACCENT_TINT_PCT),
+            progress_fill: Color::Rgb(0x0f, 0x76, 0x6e),
+            progress_empty: Color::Rgb(0xe6, 0xe6, 0xeb),
+            tab_active: Color::Rgb(0x0f, 0x76, 0x6e),
+            tab_inactive: Color::Rgb(0x63, 0x66, 0x6d),
         }
     }
 
-    /// Tokyo Night (storm).
-    pub fn tokyo() -> Self {
+    /// Nebula Dark — oxblood panels, hot crimson.
+    pub fn nebula_dark() -> Self {
         Self {
-            bg: Color::Rgb(26, 27, 38),              // #1a1b26
-            frame: Color::Rgb(22, 22, 30),           // #16161e
-            surface: Color::Rgb(36, 40, 59),         // #24283b
-            surface2: Color::Rgb(41, 46, 66),        // #292e42
-            border: Color::Rgb(59, 66, 97),          // #3b4261
-            border_focus: Color::Rgb(122, 162, 247), // #7aa2f7
-            text: Color::Rgb(192, 202, 245),         // #c0caf5
-            text_dim: Color::Rgb(130, 139, 184),     // #828bb8
-            faint: Color::Rgb(86, 95, 137),          // #565f89 (comment)
-            accent: Color::Rgb(122, 162, 247),       // #7aa2f7
-            info: Color::Rgb(125, 207, 255),         // #7dcfff (cyan)
-            success: Color::Rgb(158, 206, 106),      // #9ece6a
-            warning: Color::Rgb(224, 175, 104),      // #e0af68
-            error: Color::Rgb(247, 118, 142),        // #f7768e
-            highlight: Color::Rgb(41, 46, 66),       // #292e42
-            progress_fill: Color::Rgb(122, 162, 247),
-            progress_empty: Color::Rgb(41, 46, 66),
-            tab_active: Color::Rgb(122, 162, 247),
-            tab_inactive: Color::Rgb(130, 139, 184),
+            bg: Color::Rgb(0x1b, 0x0c, 0x12),
+            frame: Color::Rgb(0x11, 0x09, 0x0d),
+            surface: Color::Rgb(0x24, 0x10, 0x18),
+            surface2: Color::Rgb(0x33, 0x16, 0x1f),
+            border: Color::Rgb(0x35, 0x2d, 0x2f),
+            border_focus: Color::Rgb(0xff, 0x31, 0x5d),
+            text: Color::Rgb(0xff, 0xf8, 0xee),
+            text_dim: Color::Rgb(0xa9, 0x8d, 0x8f),
+            faint: Color::Rgb(0x7a, 0x62, 0x66),
+            accent: Color::Rgb(0xff, 0x31, 0x5d),
+            info: Color::Rgb(0xd0, 0x8f, 0x92),
+            success: Color::Rgb(0x86, 0xc7, 0x9a),
+            warning: Color::Rgb(0xff, 0xb0, 0x5c),
+            error: Color::Rgb(0xff, 0x6c, 0x76),
+            highlight: blend((0xff, 0x31, 0x5d), (0x1b, 0x0c, 0x12), ACCENT_TINT_PCT),
+            progress_fill: Color::Rgb(0xff, 0x31, 0x5d),
+            progress_empty: Color::Rgb(0x33, 0x16, 0x1f),
+            tab_active: Color::Rgb(0xff, 0x31, 0x5d),
+            tab_inactive: Color::Rgb(0xa9, 0x8d, 0x8f),
         }
     }
 
-    /// Nord — cold, muted palette.
-    pub fn nord() -> Self {
+    /// Nebula Light — bone paper, oxblood ink.
+    pub fn nebula_light() -> Self {
         Self {
-            bg: Color::Rgb(46, 52, 64),              // #2e3440
-            frame: Color::Rgb(36, 41, 51),           // #242933
-            surface: Color::Rgb(59, 66, 82),         // #3b4252
-            surface2: Color::Rgb(67, 76, 94),        // #434c5e
-            border: Color::Rgb(67, 76, 94),          // #434c5e
-            border_focus: Color::Rgb(136, 192, 208), // #88c0d0
-            text: Color::Rgb(216, 222, 233),         // #d8dee9
-            text_dim: Color::Rgb(136, 143, 161),     // #888fa1
-            faint: Color::Rgb(97, 110, 136),         // #616e88
-            accent: Color::Rgb(136, 192, 208),       // #88c0d0
-            info: Color::Rgb(129, 161, 193),         // #81a1c1 (nord9 blue)
-            success: Color::Rgb(163, 190, 140),      // #a3be8c
-            warning: Color::Rgb(235, 203, 139),      // #ebcb8b
-            error: Color::Rgb(191, 97, 106),         // #bf616a
-            highlight: Color::Rgb(76, 86, 106),      // #4c566a
-            progress_fill: Color::Rgb(136, 192, 208),
-            progress_empty: Color::Rgb(59, 66, 82),
-            tab_active: Color::Rgb(136, 192, 208),
-            tab_inactive: Color::Rgb(136, 143, 161),
+            bg: Color::Rgb(0xfb, 0xf6, 0xf2),
+            frame: Color::Rgb(0xf3, 0xeb, 0xe5),
+            surface: Color::Rgb(0xff, 0xff, 0xff),
+            surface2: Color::Rgb(0xec, 0xdf, 0xd8),
+            border: Color::Rgb(0xe2, 0xd3, 0xca),
+            border_focus: Color::Rgb(0xb3, 0x12, 0x2f),
+            text: Color::Rgb(0x2a, 0x0f, 0x16),
+            text_dim: Color::Rgb(0x78, 0x55, 0x5a),
+            faint: Color::Rgb(0xb0, 0x9a, 0x9d),
+            accent: Color::Rgb(0xb3, 0x12, 0x2f),
+            info: Color::Rgb(0x2f, 0x5f, 0x9e),
+            success: Color::Rgb(0x1c, 0x7a, 0x52),
+            warning: Color::Rgb(0x8a, 0x52, 0x00),
+            error: Color::Rgb(0xc0, 0x39, 0x2b),
+            highlight: blend((0xb3, 0x12, 0x2f), (0xfb, 0xf6, 0xf2), ACCENT_TINT_PCT),
+            progress_fill: Color::Rgb(0xb3, 0x12, 0x2f),
+            progress_empty: Color::Rgb(0xec, 0xdf, 0xd8),
+            tab_active: Color::Rgb(0xb3, 0x12, 0x2f),
+            tab_inactive: Color::Rgb(0x78, 0x55, 0x5a),
         }
     }
-
-    /// Dracula — high-contrast purple/cyan.
-    ///
-    /// Since the Studio redesign the focused border matches the purple
-    /// accent (`accent == border_focus` invariant); the signature cyan
-    /// moved to the `info` role.
-    pub fn dracula() -> Self {
-        Self {
-            bg: Color::Rgb(40, 42, 54),              // #282a36
-            frame: Color::Rgb(33, 34, 44),           // #21222c
-            surface: Color::Rgb(68, 71, 90),         // #44475a
-            surface2: Color::Rgb(68, 71, 90),        // #44475a
-            border: Color::Rgb(98, 114, 164),        // #6272a4
-            border_focus: Color::Rgb(189, 147, 249), // #bd93f9 (purple, = accent)
-            text: Color::Rgb(248, 248, 242),         // #f8f8f2
-            text_dim: Color::Rgb(152, 160, 192),     // lighter version of comment
-            faint: Color::Rgb(98, 114, 164),         // #6272a4 (comment)
-            accent: Color::Rgb(189, 147, 249),       // #bd93f9 (purple)
-            info: Color::Rgb(139, 233, 253),         // #8be9fd (cyan)
-            success: Color::Rgb(80, 250, 123),       // #50fa7b
-            warning: Color::Rgb(241, 250, 140),      // #f1fa8c
-            error: Color::Rgb(255, 85, 85),          // #ff5555
-            highlight: Color::Rgb(68, 71, 90),       // #44475a
-            progress_fill: Color::Rgb(189, 147, 249),
-            progress_empty: Color::Rgb(68, 71, 90),
-            tab_active: Color::Rgb(189, 147, 249),
-            tab_inactive: Color::Rgb(152, 160, 192),
-        }
-    }
-
-    // ── Style helpers ───────────────────────────────────────────────
-
-    /// Base style applied to the entire frame background.
     pub fn base(&self) -> Style {
         Style::default().bg(self.bg).fg(self.text)
     }
@@ -656,98 +680,158 @@ mod tests {
     }
 
     #[test]
-    fn default_preset_is_studio_dark() {
-        assert_eq!(ThemePreset::default(), ThemePreset::StudioDark);
-        assert_eq!(Theme::default().bg, Theme::studio_dark().bg);
+    fn default_preset_is_mocha_dark() {
+        assert_eq!(ThemePreset::default(), ThemePreset::MochaDark);
+        assert_eq!(Theme::default().bg, Theme::mocha_dark().bg);
     }
 
     #[test]
-    fn unknown_slug_falls_back_to_studio_dark() {
-        assert_eq!(ThemePreset::from_slug("🐠"), ThemePreset::StudioDark);
-        assert_eq!(ThemePreset::from_slug(""), ThemePreset::StudioDark);
+    fn unknown_slug_falls_back_to_the_default() {
+        assert_eq!(ThemePreset::from_slug("🐠"), ThemePreset::MochaDark);
+        assert_eq!(ThemePreset::from_slug(""), ThemePreset::MochaDark);
     }
 
     #[test]
-    fn all_eleven_design_system_themes_ship() {
-        // Spec §05: the four Studio themes ship as TUI presets alongside the
-        // seven legacy palettes. Missing any of them is a gap in the
-        // Appearance picker.
+    fn ships_exactly_the_ten_design_system_themes() {
+        // One vocabulary across every surface: these slugs are the GUI's
+        // ThemeId set, and nothing else ships. The eleven-preset palette this
+        // replaced had five themes with no counterpart anywhere else, and a
+        // `Mocha` that was Catppuccin's rather than the app's.
         let slugs: Vec<&str> = ThemePreset::ALL.iter().map(|p| p.slug()).collect();
-        assert_eq!(slugs.len(), 11);
+        assert_eq!(slugs.len(), 10);
         for expected in [
-            "studio-dark",
-            "studio-light",
+            "mocha-dark",
+            "mocha-light",
             "safelight-dark",
             "safelight-light",
-            "mocha",
-            "latte",
-            "ristretto",
-            "gruvbox",
-            "tokyo",
-            "nord",
-            "dracula",
+            "blueprint-dark",
+            "blueprint-light",
+            "graphite-dark",
+            "graphite-light",
+            "nebula-dark",
+            "nebula-light",
         ] {
             assert!(
                 slugs.contains(&expected),
                 "theme `{expected}` is missing from ThemePreset::ALL",
             );
         }
+        for retired in [
+            "studio-dark",
+            "studio-light",
+            "ristretto",
+            "gruvbox",
+            "tokyo",
+            "nord",
+            "dracula",
+        ] {
+            assert!(!slugs.contains(&retired), "`{retired}` should have retired");
+        }
+    }
+
+    /// Every colour a preset builds, read back out of the shared token map.
+    fn tokens_for(slug: &str) -> std::collections::HashMap<String, Color> {
+        let css = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui/tokens.css"),
+        )
+        .expect("ui/tokens.css is the shared token source");
+        let needle = format!("[data-theme=\"{slug}\"] {{");
+        let start = css
+            .find(&needle)
+            .unwrap_or_else(|| panic!("no map for {slug}"));
+        let body = &css[start + needle.len()..];
+        let body = &body[..body.find('}').expect("map is closed")];
+
+        let mut map = std::collections::HashMap::new();
+        for line in body.lines() {
+            let Some((key, value)) = line.trim().split_once(':') else {
+                continue;
+            };
+            let key = key.trim().trim_start_matches("--mold-");
+            let value = value.trim().trim_end_matches(';').trim();
+            if let Some(hex) = value.strip_prefix('#') {
+                if hex.len() == 6 {
+                    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap();
+                    map.insert(key.to_string(), Color::Rgb(byte(0), byte(2), byte(4)));
+                }
+            }
+        }
+        map
     }
 
     #[test]
-    fn studio_presets_match_spec_hexes() {
-        // The regression guard equivalent of
-        // `ristretto_swatch_matches_design_system` — pin bg / accent / info
-        // to the mockup token values so hue drift is caught.
-        let cases = [
-            (
-                ThemePreset::StudioDark,
-                (0x13, 0x11, 0x1d),
-                (0xe8, 0x79, 0xf9),
-                (0x5c, 0xd0, 0xff),
-            ),
-            (
-                ThemePreset::StudioLight,
-                (0xf6, 0xf4, 0xfb),
-                (0xa2, 0x1c, 0xaf),
-                (0x0e, 0x74, 0x90),
-            ),
-            (
-                ThemePreset::SafelightDark,
-                (0x17, 0x12, 0x10),
-                (0xf7, 0x94, 0x33),
-                (0x8f, 0xb4, 0xc4),
-            ),
-            (
-                ThemePreset::SafelightLight,
-                (0xf7, 0xf1, 0xe6),
-                (0x9b, 0x4d, 0x00),
-                (0x3f, 0x65, 0x70),
-            ),
-        ];
-        for (preset, bg, accent, info) in cases {
+    fn theme_presets_match_the_design_system() {
+        // The guard the TUI never had. Its palette used to be an independent
+        // set of hexes with no link to ui/tokens.css, which is how its `Mocha`
+        // came to be a different Mocha from the app's. Every field here is a
+        // stated derivation, checked against the one token source.
+        for preset in ThemePreset::ALL {
             let t = preset.build();
-            assert_eq!(t.bg, Color::Rgb(bg.0, bg.1, bg.2), "{preset:?} bg");
-            assert_eq!(
-                t.accent,
-                Color::Rgb(accent.0, accent.1, accent.2),
-                "{preset:?} accent"
-            );
-            assert_eq!(
-                t.info,
-                Color::Rgb(info.0, info.1, info.2),
-                "{preset:?} info"
-            );
+            let m = tokens_for(preset.slug());
+            let tok = |k: &str| {
+                *m.get(k)
+                    .unwrap_or_else(|| panic!("{k} in {}", preset.slug()))
+            };
+
+            assert_eq!(t.bg, tok("bg"), "{preset:?} bg");
+            assert_eq!(t.frame, tok("bg-deep"), "{preset:?} frame");
+            assert_eq!(t.surface, tok("surface"), "{preset:?} surface");
+            assert_eq!(t.surface2, tok("surface-2"), "{preset:?} surface2");
+            assert_eq!(t.border, tok("border"), "{preset:?} border");
+            assert_eq!(t.text, tok("text"), "{preset:?} text");
+            assert_eq!(t.text_dim, tok("text-dim"), "{preset:?} text_dim");
+            assert_eq!(t.faint, tok("text-faint"), "{preset:?} faint");
+            assert_eq!(t.accent, tok("blue"), "{preset:?} accent");
+            // The dual-accent model's second hue.
+            assert_eq!(t.info, tok("sapphire"), "{preset:?} info");
+            assert_eq!(t.success, tok("success"), "{preset:?} success");
+            assert_eq!(t.warning, tok("warning"), "{preset:?} warning");
+            assert_eq!(t.error, tok("error"), "{preset:?} error");
+            assert_eq!(t.progress_empty, tok("surface-2"), "{preset:?} trough");
         }
     }
 
     #[test]
-    fn studio_and_safelight_aliases_map_to_dark_variants() {
-        assert_eq!(ThemePreset::from_slug("studio"), ThemePreset::StudioDark);
-        assert_eq!(
-            ThemePreset::from_slug("safelight"),
-            ThemePreset::SafelightDark
-        );
+    fn every_family_ships_both_tones_and_pairs_with_itself() {
+        // The regression the whole contract exists for: a tone flip must keep
+        // the theme. Nebula used to become Porcelain in daylight.
+        for preset in ThemePreset::ALL {
+            let light = preset.with_tone(true);
+            let dark = preset.with_tone(false);
+            assert!(light.is_light(), "{preset:?} light tone");
+            assert!(!dark.is_light(), "{preset:?} dark tone");
+            assert_eq!(light.label(), preset.label(), "{preset:?} keeps its name");
+            assert_eq!(dark.label(), preset.label(), "{preset:?} keeps its name");
+            // Idempotent.
+            assert_eq!(light.with_tone(true), light);
+            assert_eq!(dark.with_tone(false), dark);
+        }
+        assert_eq!(ThemePreset::ALL.iter().filter(|p| p.is_light()).count(), 5);
+    }
+
+    #[test]
+    fn every_retired_slug_still_resolves() {
+        // A saved `tui.theme` must never fail to load or silently reset.
+        for (retired, expected) in [
+            ("studio-dark", ThemePreset::MochaDark),
+            ("studio", ThemePreset::MochaDark),
+            ("dracula", ThemePreset::MochaDark),
+            ("studio-light", ThemePreset::MochaLight),
+            ("latte", ThemePreset::MochaLight),
+            ("mocha", ThemePreset::MochaDark),
+            ("safelight", ThemePreset::SafelightDark),
+            ("gruvbox", ThemePreset::SafelightDark),
+            ("tokyo", ThemePreset::BlueprintDark),
+            ("tokyo-night", ThemePreset::BlueprintDark),
+            ("nord", ThemePreset::BlueprintDark),
+            ("blueprint", ThemePreset::BlueprintLight),
+            ("graphite", ThemePreset::GraphiteDark),
+            ("porcelain", ThemePreset::GraphiteLight),
+            ("nebula", ThemePreset::NebulaDark),
+            ("ristretto", ThemePreset::NebulaDark),
+        ] {
+            assert_eq!(ThemePreset::from_slug(retired), expected, "{retired}");
+        }
     }
 
     #[test]
@@ -762,55 +846,38 @@ mod tests {
     }
 
     #[test]
-    fn sel_bg_blend_matches_css_rgba() {
-        // The mockup expresses selection tints as CSS rgba over the theme
-        // bg; terminals need solids. Pin the pre-blended values.
+    fn selection_tint_is_the_pre_blended_accent_tint() {
+        // `--mold-accent-tint` is 13 % of the accent; a terminal cell has no
+        // alpha, so it is pre-blended over the theme background.
+        assert_eq!(ACCENT_TINT_PCT, 13);
         assert_eq!(
-            blend((0xe8, 0x79, 0xf9), (0x13, 0x11, 0x1d), 15),
-            Color::Rgb(0x33, 0x21, 0x3e)
+            blend((0xff, 0x31, 0x5d), (0x1b, 0x0c, 0x12), 13),
+            ThemePreset::NebulaDark.build().highlight
         );
         assert_eq!(
-            blend((0xa2, 0x1c, 0xaf), (0xf6, 0xf4, 0xfb), 12),
-            Color::Rgb(0xec, 0xda, 0xf2)
-        );
-        assert_eq!(
-            blend((0xf7, 0x94, 0x33), (0x17, 0x12, 0x10), 15),
-            Color::Rgb(0x39, 0x26, 0x15)
-        );
-        assert_eq!(
-            blend((0x9b, 0x4d, 0x00), (0xf7, 0xf1, 0xe6), 13),
-            Color::Rgb(0xeb, 0xdc, 0xc8)
+            blend((0x1a, 0x5a, 0xc4), (0xef, 0xf1, 0xf5), 13),
+            ThemePreset::MochaLight.build().highlight
         );
     }
 
     #[test]
-    fn descriptions_match_the_mockup_card_copy() {
-        // The theme cards pin the mockup's descriptor strings for the
-        // Studio pair, the Safelight pair, and Mocha; every preset must
-        // have a non-empty descriptor so cards never render a blank row.
-        assert_eq!(ThemePreset::StudioDark.description(), "dual accent");
-        assert_eq!(ThemePreset::StudioLight.description(), "dual accent");
-        assert_eq!(
-            ThemePreset::SafelightDark.description(),
-            "warm · dual accent"
-        );
-        assert_eq!(
-            ThemePreset::SafelightLight.description(),
-            "warm · dual accent"
-        );
-        assert_eq!(ThemePreset::Mocha.description(), "single blue");
+    fn a_theme_card_names_the_theme_and_never_its_tone() {
+        // Tone is the Appearance control's job; a card that also said "dark"
+        // is what made the two read as contradicting pickers.
         for preset in ThemePreset::ALL {
-            assert!(!preset.description().is_empty(), "{preset:?}");
+            let label = preset.label().to_ascii_lowercase();
+            assert!(!label.contains("dark"), "{preset:?} label");
+            // "Safelight" is a name, not a tone — match a whole word only.
+            assert!(
+                !label
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|w| w == "light"),
+                "{preset:?} label",
+            );
+            assert!(!preset.description().is_empty(), "{preset:?} description");
+            let description = preset.description().to_ascii_lowercase();
+            assert!(!description.contains("dark"), "{preset:?} description");
         }
-    }
-
-    #[test]
-    fn ristretto_swatch_matches_design_system() {
-        // The design-system swatch for Ristretto is `#fd6883` — an easy
-        // regression guard in case the accent hex drifts.
-        assert_eq!(
-            ThemePreset::Ristretto.swatch(),
-            Color::Rgb(0xfd, 0x68, 0x83),
-        );
+        assert_eq!(ThemePreset::FAMILIES.len(), 5);
     }
 }

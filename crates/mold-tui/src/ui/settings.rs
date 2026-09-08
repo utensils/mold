@@ -19,7 +19,9 @@ use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarStat
 
 use crate::app::{App, SettingsFieldType, SettingsFocus, SettingsRow};
 
-use super::theme_cards::{appearance_panel_height, card_grid, render_theme_cards};
+use super::theme_cards::{
+    appearance_panel_height, card_grid, render_theme_cards, render_tone_row, TONE_ROW_H,
+};
 use super::widgets::panel_block;
 
 /// Fixed label-column width for Configuration rows — wide enough for the
@@ -52,9 +54,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     render_configuration(frame, app, config_area);
 }
 
-/// Top panel — the theme card grid.
+/// Top panel — the theme cards, then the Light / Dark row.
 fn render_appearance(frame: &mut Frame, app: &mut App, area: Rect) {
-    let focused = app.settings.focus == SettingsFocus::Appearance;
+    let cards_focused = app.settings.focus == SettingsFocus::Appearance;
+    let tone_focused = app.settings.focus == SettingsFocus::AppearanceTone;
+    let focused = cards_focused || tone_focused;
     // The hint shows the canonical slug (identical to the lowercased label
     // for single-word presets) — `scripts/tui-uat.sh theme-set` parses it.
     let hint = format!("theme · {}", app.settings.theme_preset.slug());
@@ -67,9 +71,34 @@ fn render_appearance(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     // Record the rendered column count so ↑/↓ move by exactly one visual
     // row (the same pattern gallery uses for its grid).
-    let (cols, _) = card_grid(crate::ui::theme::ThemePreset::ALL.len(), inner.width);
+    let (cols, _) = card_grid(crate::ui::theme::ThemePreset::FAMILIES.len(), inner.width);
     app.settings.appearance_cols = cols;
-    render_theme_cards(frame, &app.theme, inner, app.settings.theme_preset, focused);
+
+    // The tone row is the last line of the panel; the cards take the rest.
+    let tone_h = TONE_ROW_H.min(inner.height);
+    let cards = Rect {
+        height: inner.height - tone_h,
+        ..inner
+    };
+    let tone = Rect {
+        y: inner.y + inner.height - tone_h,
+        height: tone_h,
+        ..inner
+    };
+    render_theme_cards(
+        frame,
+        &app.theme,
+        cards,
+        app.settings.theme_preset,
+        cards_focused,
+    );
+    render_tone_row(
+        frame,
+        &app.theme,
+        tone,
+        app.settings.theme_preset,
+        tone_focused,
+    );
 }
 
 /// Bottom panel — the scrollable list of editable fields.

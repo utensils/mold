@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import {
   listQueue,
@@ -14,7 +14,17 @@ import { apiJsonTo } from "../lib/api/client";
 import type { ServerCapabilities, ServerStatus } from "../lib/api/types";
 import { describeTransportError } from "../lib/api/errors";
 import { openExternal } from "../lib/openExternal";
-import { THEME_META } from "../lib/theme";
+import {
+  THEME_FAMILY_META,
+  applyFamilyChoice,
+  applyToneChoice,
+  familyOf,
+  themeId,
+  toneChoice,
+  toneOf,
+  type ThemeFamilyId,
+  type ToneChoice,
+} from "../lib/theme";
 import { mobileHostTarget, type MobileHost } from "./hosts";
 import { MOBILE_AUTO_ROUTING_HINT, MOBILE_CAPABLE_ROUTING_HINT } from "./generateTarget";
 import type { MobileSettings } from "./settings";
@@ -236,6 +246,37 @@ watch(
 onBeforeUnmount(() => {
   stopDeviceServices();
 });
+
+/*
+ * Two independent controls: the list names a THEME, this names the TONE.
+ * "Match phone" was a switch beside a list that already said "dark", so the
+ * two disagreed; System is now simply one of the three tone positions.
+ */
+const TONE_OPTIONS = [
+  { value: "system" as const, label: "Match phone", help: "Follow your phone’s appearance" },
+  { value: "light" as const, label: "Light", help: "Always the light tone" },
+  { value: "dark" as const, label: "Dark", help: "Always the dark tone" },
+];
+
+const activeFamily = computed(() => familyOf(props.settings.theme));
+const tone = computed(() => toneOf(props.settings.theme));
+const activeTone = computed<ToneChoice>(() =>
+  toneChoice({ theme: props.settings.theme, matchSystem: props.settings.matchSystem }),
+);
+
+function pickFamily(family: ThemeFamilyId) {
+  emit(
+    "update",
+    applyFamilyChoice(family, {
+      theme: props.settings.theme,
+      matchSystem: props.settings.matchSystem,
+    }),
+  );
+}
+
+function pickTone(choice: ToneChoice) {
+  emit("update", applyToneChoice(choice, props.settings.theme));
+}
 </script>
 
 <template>
@@ -250,27 +291,31 @@ onBeforeUnmount(() => {
         <legend>Look</legend>
         <div class="mobile-theme-options">
           <label
-            v-for="meta in THEME_META"
+            v-for="meta in THEME_FAMILY_META"
             :key="meta.id"
             class="mobile-theme-option"
-            :data-selected="settings.theme === meta.id"
+            :data-selected="activeFamily === meta.id"
           >
             <input
               class="sr-only"
               type="radio"
               name="mobile-theme"
               :value="meta.id"
-              :checked="settings.theme === meta.id"
-              @change="emit('update', { theme: meta.id })"
+              :checked="activeFamily === meta.id"
+              @change="pickFamily(meta.id)"
             />
-            <span class="mobile-theme-preview" :data-theme="meta.id" aria-hidden="true">
+            <span
+              class="mobile-theme-preview"
+              :data-theme="themeId(meta.id, tone)"
+              aria-hidden="true"
+            >
               <span />
               <span />
               <span />
             </span>
             <span class="mobile-theme-option-copy">
               <strong>{{ meta.label }}</strong>
-              <small>{{ meta.toneLabel }} · {{ meta.type }}</small>
+              <small>{{ meta.type }}</small>
             </span>
             <span class="mobile-settings-check" aria-hidden="true">✓</span>
           </label>
@@ -278,17 +323,23 @@ onBeforeUnmount(() => {
       </fieldset>
 
       <fieldset class="mobile-settings-fieldset">
-        <legend>Appearance</legend>
-        <label class="mobile-appearance-option" :data-selected="settings.matchSystem">
+        <legend>Light or dark</legend>
+        <label
+          v-for="option in TONE_OPTIONS"
+          :key="option.value"
+          class="mobile-appearance-option"
+          :data-selected="activeTone === option.value"
+        >
           <input
             class="sr-only"
-            type="checkbox"
-            name="mobile-theme-match-system"
-            :checked="settings.matchSystem"
-            @change="emit('update', { matchSystem: ($event.target as HTMLInputElement).checked })"
+            type="radio"
+            name="mobile-theme-tone"
+            :value="option.value"
+            :checked="activeTone === option.value"
+            @change="pickTone(option.value)"
           />
-          <strong>Match phone</strong>
-          <small>Follow your phone’s light or dark appearance</small>
+          <strong>{{ option.label }}</strong>
+          <small>{{ option.help }}</small>
         </label>
       </fieldset>
     </section>

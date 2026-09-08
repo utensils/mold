@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { THEME_TONE, applyTheme, isThemeId, migrateLegacyTheme, type ThemeId } from "../lib/theme";
+import { applyTheme, isThemeId, migrateLegacyTheme, toneOf, type ThemeId } from "../lib/theme";
 
 /** What UIKit is told: follow the phone, or pin one trait. */
 export type NativeAppearance = "system" | "dark" | "light";
@@ -8,7 +8,7 @@ export const MOBILE_SETTINGS_STORAGE_KEY = "mold.mobile.settings.v1";
 
 export interface MobileSettings {
   theme: ThemeId;
-  /** Follow the phone's appearance: paint `theme` or its light/dark partner. */
+  /** Follow the phone's appearance: paint `theme` in the phone's tone. */
   matchSystem: boolean;
   autoSavePhotos: boolean;
   /** Settings ▸ Library "Tag new prints with their title" — the mirror the
@@ -19,7 +19,7 @@ export interface MobileSettings {
 }
 
 export const DEFAULT_MOBILE_SETTINGS: Readonly<MobileSettings> = {
-  theme: "safelight",
+  theme: "safelight-dark",
   matchSystem: false,
   autoSavePhotos: true,
   autoTagTitle: true,
@@ -71,15 +71,15 @@ export function loadMobileSettings(
       string,
       unknown
     >;
-    // A pre-redesign file carries `theme: system|dark|light` + `themeFamily`;
-    // the shared table maps that pair onto a named theme.
+    // A pre-redesign file carries `theme: system|dark|light` + `themeFamily`,
+    // and a pre-tone one a single-word id; the shared table maps either onto a
+    // current theme AND keeps the `matchSystem` saved beside it.
     const migrated =
-      isThemeId(parsed.theme) || parsed.theme === undefined
+      parsed.theme === undefined
         ? null
-        : migrateLegacyTheme(parsed.theme, parsed.themeFamily);
+        : migrateLegacyTheme(parsed.theme, parsed.themeFamily, parsed.matchSystem);
     return {
-      theme:
-        migrated?.theme ?? (isThemeId(parsed.theme) ? parsed.theme : DEFAULT_MOBILE_SETTINGS.theme),
+      theme: migrated?.theme ?? DEFAULT_MOBILE_SETTINGS.theme,
       matchSystem:
         migrated?.matchSystem ??
         (typeof parsed.matchSystem === "boolean"
@@ -139,7 +139,7 @@ export function applyMobileSettings(
 ): void {
   applyTheme(settings.theme, settings.matchSystem);
   void syncMobileNativeAppearance(
-    settings.matchSystem ? "system" : THEME_TONE[settings.theme],
+    settings.matchSystem ? "system" : toneOf(settings.theme),
     nativeInvoke,
   );
 }

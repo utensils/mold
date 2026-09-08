@@ -49,7 +49,7 @@ scripts/tui-uat.sh db-dump                           # Pretty-print settings + m
 
 # Settings helpers
 scripts/tui-uat.sh settings-focus <appearance|configuration>
-scripts/tui-uat.sh theme-set <slug>  # studio-dark|studio-light|safelight-dark|safelight-light|mocha|latte|ristretto|gruvbox|tokyo|nord|dracula
+scripts/tui-uat.sh theme-set <slug>  # <mocha|safelight|blueprint|graphite|nebula>-<dark|light>
 
 # Model + per-model prefs helpers
 scripts/tui-uat.sh model <name>                      # Full picker dance — Parameters → Model → type filter → Enter. Pass the exact `model:tag` to avoid matching the wrong variant.
@@ -210,7 +210,7 @@ trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true; [ -n "${MOLD_HOME:-}" 
 # Round 1: fresh isolated env, set theme via helper, write a prompt
 scripts/tui-uat.sh launch --fresh --local
 eval "$(scripts/tui-uat.sh env)"              # exports MOLD_HOME + MOLD_DB_PATH
-scripts/tui-uat.sh theme-set dracula          # cycles + asserts
+scripts/tui-uat.sh theme-set nebula-light     # cycles + asserts
 scripts/tui-uat.sh view create
 scripts/tui-uat.sh send "a test prompt"       # single arg is sent as literal text
 scripts/tui-uat.sh send escape                # exit textarea focus
@@ -218,7 +218,7 @@ scripts/tui-uat.sh send ctrl+c                # quit (writes settings + model_pr
 
 # Round 2: relaunch with the *same* MOLD_HOME → DB survives
 scripts/tui-uat.sh launch --env "MOLD_HOME=$MOLD_HOME" --local
-scripts/tui-uat.sh db-assert tui.theme dracula
+scripts/tui-uat.sh db-assert tui.theme nebula-light
 scripts/tui-uat.sh db-assert tui.last_prompt "a test prompt"
 scripts/tui-uat.sh screenshot /tmp/uat-persistence.png
 scripts/tui-uat.sh quit
@@ -341,8 +341,8 @@ set -e
 trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true' EXIT INT TERM
 scripts/tui-uat.sh launch --fresh --local
 scripts/tui-uat.sh view settings
-scripts/tui-uat.sh theme-set gruvbox
-scripts/tui-uat.sh db-assert tui.theme gruvbox
+scripts/tui-uat.sh theme-set safelight-dark
+scripts/tui-uat.sh db-assert tui.theme safelight-dark
 scripts/tui-uat.sh view create
 scripts/tui-uat.sh assert "flux2-klein"
 scripts/tui-uat.sh view library && scripts/tui-uat.sh assert "Library"

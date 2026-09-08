@@ -1,6 +1,11 @@
 import { WORKSPACES, SETTINGS_DESTINATION } from "./workspaces";
 import { matchSystem, theme } from "./theme";
-import { THEME_META } from "@ui/theme";
+import {
+  THEME_FAMILY_META,
+  applyFamilyChoice,
+  applyToneChoice,
+  toneChoice,
+} from "@ui/theme";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "./hostRouting";
 import {
   buildInstallModelCommands,
@@ -180,24 +185,39 @@ export function baseCommands(ctx: CommandContext): Command[] {
   ];
 
   const themes: Command[] = [
-    ...THEME_META.map((meta) => ({
+    // A theme row keeps the tone in force; a tone row keeps the theme.
+    ...THEME_FAMILY_META.map((meta) => ({
       id: `theme-${meta.id}`,
       section: "Theme",
       label: `${meta.label} theme`,
       run: () => {
-        theme.value = meta.id;
+        const next = applyFamilyChoice(meta.id, {
+          theme: theme.value,
+          matchSystem: matchSystem.value,
+        });
+        theme.value = next.theme;
+        matchSystem.value = next.matchSystem;
       },
     })),
-    {
-      id: "theme-match-system",
-      section: "Theme",
-      label: matchSystem.value
-        ? "Stop matching system appearance"
-        : "Match system appearance",
-      run: () => {
-        matchSystem.value = !matchSystem.value;
-      },
-    },
+    ...(["system", "light", "dark"] as const)
+      .filter(
+        (choice) =>
+          choice !==
+          toneChoice({ theme: theme.value, matchSystem: matchSystem.value }),
+      )
+      .map((choice) => ({
+        id: `tone-${choice}`,
+        section: "Theme",
+        label:
+          choice === "system"
+            ? "Light or dark: match system"
+            : `Light or dark: always ${choice}`,
+        run: () => {
+          const next = applyToneChoice(choice, theme.value);
+          theme.value = next.theme;
+          matchSystem.value = next.matchSystem;
+        },
+      })),
   ];
 
   return [...go, ...actions, ...themes];

@@ -95,7 +95,7 @@ TUI's version of the GUI surfaces' ⌘K launcher. Type to filter, **Up**/
 **Down** to select, **Enter** to run, **Esc** to close. It covers
 navigation (all five workspaces), actions (toggle
 Advanced, connect a machine, randomize seed, expand prompt, retry held
-prints, prompt history, help, quit), and switching between all eleven theme
+prints, prompt history, help, quit), and switching between all ten theme
 presets.
 
 ## Create View
@@ -488,16 +488,23 @@ per-model generation defaults persist to the SQLite settings DB at
 
 ### Appearance
 
-The Appearance panel renders the eleven theme presets as bordered cards;
-three swatch dots showing each preset's background, accent, and info hues,
-the preset name, and a short palette descriptor. The selected card carries
-the focus-colored border, and the panel header shows the active slug as
-`theme · <slug>`.
+The Appearance panel renders the five themes as bordered cards — three
+swatch dots showing that theme's background, accent, and info hues, its
+name, and a short descriptor — with a **Light or dark** row beneath them.
+A card names the theme and never its tone; the row names the tone. Choosing
+a theme keeps the tone you are in, and choosing a tone keeps the theme. The
+selected card carries the focus-colored border, and the panel header shows
+the active id as `theme · <slug>`.
+
+There is no **System** position here: a terminal has no OS appearance to
+follow — the emulator owns everything outside the frame — so the TUI offers
+Light and Dark only, while the desktop, web, and phone carry all three.
 
 Arrow keys move the selection in two dimensions: Up/Down move by grid rows
-(Down past the bottom row drops into the Configuration list), while
-Left/Right and +/- cycle linearly through every preset. Every move applies
-the theme immediately and persists it under `tui.theme`. On short terminals
+and then onto the Light-or-dark row (Down again drops into the Configuration
+list), while Left/Right and +/- cycle linearly — through the themes on the
+cards, and between Light and Dark on the tone row. Every move applies
+immediately and persists under `tui.theme`. On short terminals
 the grid scrolls by whole card rows to keep the selection visible.
 
 ### Preferences
@@ -681,28 +688,28 @@ captures).
 
 ## Theme
 
-The TUI ships eleven theme presets, selectable live from **Settings →
-Appearance**; a grid of theme cards navigated with the arrow keys
-(Left/Right also cycle linearly), applying immediately; the choice persists
-in the metadata DB under `tui.theme`.
+The TUI carries the **same five themes as every other Mold surface**, each
+in a light and a dark tone — ten palettes in all, every colour derived from
+the shared design tokens the desktop, web, and phone read. Pick one live
+from **Settings → Appearance**: a grid of theme cards navigated with the
+arrow keys (Left/Right also cycle linearly), plus a Light-or-dark row,
+applying immediately and persisting in the metadata DB under `tui.theme`.
 
-The default is **Studio Dark** (the same Mold Studio look as the desktop,
-web, and iPhone apps) with its dual-accent role model: the warm _safelight_
-accent marks focus, selection, and primary actions, while the cool _halide_
-accent marks info and live state.
+The default is **Mocha**, dark. Each theme keeps its own dual-accent role
+model: its accent marks focus, selection, and primary actions, while the
+cooler _info_ hue marks live state and telemetry.
 
-| Preset          | Slug              | Notes                                    |
-| --------------- | ----------------- | ---------------------------------------- |
-| Studio Dark     | `studio-dark`     | Default. Mold family, dual accent        |
-| Studio Light    | `studio-light`    | Mold family, dual accent                 |
-| Safelight Dark  | `safelight-dark`  | Warm darkroom family, dual accent        |
-| Safelight Light | `safelight-light` | Warm darkroom family, dual accent        |
-| Mocha           | `mocha`           | Catppuccin Mocha; the pre-Studio default |
-| Latte           | `latte`           | Catppuccin Latte (light)                 |
-| Ristretto       | `ristretto`       | Monokai Ristretto                        |
-| Gruvbox         | `gruvbox`         | Gruvbox Dark (hard)                      |
-| Tokyo           | `tokyo`           | Tokyo Night (storm)                      |
-| Nord            | `nord`            | Nord                                     |
-| Dracula         | `dracula`         | Dracula                                  |
+| Theme     | Slugs                               | Notes                                             |
+| --------- | ----------------------------------- | ------------------------------------------------- |
+| Mocha     | `mocha-dark`, `mocha-light`         | Default. Violet-leaning neutrals, one blue accent |
+| Safelight | `safelight-dark`, `safelight-light` | The darkroom family: warm browns, amber press     |
+| Blueprint | `blueprint-dark`, `blueprint-light` | Drafting blue; the dark tone is a cyanotype       |
+| Graphite  | `graphite-dark`, `graphite-light`   | True neutral greys, one warm signal               |
+| Nebula    | `nebula-dark`, `nebula-light`       | Oxblood and hot crimson                           |
 
-`studio` and `safelight` are accepted as slug aliases for the dark variants.
+Every slug the TUI used to ship still loads and maps to the nearest theme,
+so an existing `tui.theme` is never lost: `studio-dark`, `studio` and
+`dracula` → Mocha dark; `studio-light` and `latte` → Mocha light; `gruvbox`
+→ Safelight dark; `tokyo` and `nord` → Blueprint dark; `ristretto` → Nebula
+dark; `porcelain` → Graphite light. The bare family names (`mocha`,
+`safelight`, `blueprint`, `graphite`, `nebula`) are accepted as aliases.

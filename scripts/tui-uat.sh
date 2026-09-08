@@ -832,7 +832,7 @@ cmd_settings_focus() {
     require_session
     local target="${1:-}"
     if [ -z "$target" ]; then
-        echo "ERROR: $0 settings-focus <appearance|configuration>" >&2
+        echo "ERROR: $0 settings-focus <appearance|appearance-tone|configuration>" >&2
         exit 1
     fi
     local term_id
@@ -853,6 +853,28 @@ cmd_settings_focus() {
             for _ in $(seq 1 50); do
                 send_one_key "$term_id" k
             done
+            ;;
+        appearance-tone|AppearanceTone)
+            # The Light / Dark row sits between the cards and the
+            # Configuration list. Approach it from BELOW: walking down from
+            # the cards moves — and live-applies — the theme selection on the
+            # way, so `theme-set` would land on the wrong theme. Up from
+            # Configuration's first row touches nothing. Stop the moment the
+            # key hints say Light/Dark, the only text that names this focus;
+            # one press further would walk on into the cards.
+            cmd_settings_focus configuration >/dev/null
+            local _i
+            for _i in $(seq 1 60); do
+                if capture | grep -q "Light/Dark"; then
+                    break
+                fi
+                send_one_key "$term_id" k
+                sleep 0.05
+            done
+            if ! capture | grep -q "Light/Dark"; then
+                echo "ERROR: could not focus the Light/Dark row." >&2
+                return 1
+            fi
             ;;
         configuration|Configuration)
             # Normalize to Appearance first (see above), then Tab flips
@@ -969,46 +991,61 @@ cmd_theme_set() {
     require_session
     local slug="${1:-}"
     if [ -z "$slug" ]; then
-        echo "ERROR: $0 theme-set <studio-dark|studio-light|safelight-dark|safelight-light|mocha|latte|ristretto|gruvbox|tokyo|nord|dracula>" >&2
+        echo "ERROR: $0 theme-set <mocha|safelight|blueprint|graphite|nebula>-<dark|light>" >&2
         exit 1
     fi
-    # Presets in display order — must match `ThemePreset::ALL` in
-    # crates/mold-tui/src/ui/theme.rs.
-    local -a presets=(studio-dark studio-light safelight-dark safelight-light mocha latte ristretto gruvbox tokyo nord dracula)
+    # A theme id is <family>-<tone>: the cards pick the family, the tone row
+    # picks the tone. Families in display order — must match
+    # `ThemePreset::FAMILIES` in crates/mold-tui/src/ui/theme.rs.
+    local -a families=(mocha safelight blueprint graphite nebula)
+    local want_family="${slug%-*}" want_tone="${slug##*-}"
     local want_idx=-1 i
-    for i in "${!presets[@]}"; do
-        if [ "${presets[$i]}" = "$slug" ]; then
+    for i in "${!families[@]}"; do
+        if [ "${families[$i]}" = "$want_family" ]; then
             want_idx=$i
             break
         fi
     done
-    if [ $want_idx -lt 0 ]; then
-        echo "ERROR: unknown theme '$slug'. Valid: ${presets[*]}" >&2
+    if [ $want_idx -lt 0 ] || { [ "$want_tone" != dark ] && [ "$want_tone" != light ]; }; then
+        echo "ERROR: unknown theme '$slug'. Valid: ${families[*]} × dark|light" >&2
         exit 1
     fi
 
-    # Make sure we're on Settings + Appearance focus.
     cmd_view settings >/dev/null
-    cmd_settings_focus appearance >/dev/null
+    local term_id cur_slug cur_family cur_tone cur_idx
+    term_id=$(load_state)
 
-    # Find the currently-active theme from the header (`theme · <slug>`)
-    # and cycle forward to the target.
-    local cur_slug cur_idx
+    # TONE FIRST, then the family. Focusing a pane normalizes through the card
+    # grid, which live-applies whatever card it lands on, so the family cycle
+    # has to be the LAST thing that happens — and it re-reads the header
+    # immediately before it runs. The tone row never moves the family.
+    cur_tone=$(capture | grep -o 'theme · [a-z-]*' | head -1 | awk '{print $3}')
+    cur_tone="${cur_tone##*-}"
+    if [ -z "$cur_tone" ]; then
+        echo "ERROR: couldn't read current theme from Appearance header." >&2
+        return 1
+    fi
+    if [ "$cur_tone" != "$want_tone" ]; then
+        cmd_settings_focus appearance-tone >/dev/null
+        send_one_key "$term_id" "+"
+        sleep 0.05
+    fi
+
+    cmd_settings_focus appearance >/dev/null
     cur_slug=$(capture | grep -o 'theme · [a-z-]*' | head -1 | awk '{print $3}')
     if [ -z "$cur_slug" ]; then
         echo "ERROR: couldn't read current theme from Appearance header." >&2
         return 1
     fi
-    for i in "${!presets[@]}"; do
-        if [ "${presets[$i]}" = "$cur_slug" ]; then
+    cur_family="${cur_slug%-*}"
+    for i in "${!families[@]}"; do
+        if [ "${families[$i]}" = "$cur_family" ]; then
             cur_idx=$i
             break
         fi
     done
-    local total=${#presets[@]}
+    local total=${#families[@]}
     local delta=$(( (want_idx - cur_idx + total) % total ))
-    local term_id
-    term_id=$(load_state)
     for _ in $(seq 1 $delta); do
         send_one_key "$term_id" "+"
         sleep 0.05
@@ -1136,12 +1173,12 @@ DB / persistence helpers:
 
 Settings helpers:
   settings-focus <pane>           Move Settings-view focus to
-                                  'appearance' or 'configuration'
-  theme-set <slug>                Cycle to a named theme — one of
-                                  studio-dark, studio-light,
-                                  safelight-dark, safelight-light,
-                                  mocha, latte, ristretto, gruvbox,
-                                  tokyo, nord, dracula
+                                  'appearance', 'appearance-tone' or
+                                  'configuration'
+  theme-set <slug>                Pick a theme and its tone — a slug is
+                                  <family>-<tone>, where family is one of
+                                  mocha, safelight, blueprint, graphite,
+                                  nebula and tone is dark or light
 
 KEYS
   Special:  enter, escape, tab, space, up, down, left, right,

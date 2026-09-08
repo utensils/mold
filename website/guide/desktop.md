@@ -7,7 +7,7 @@ The remote-only companions have dedicated [iPhone](/guide/iphone) and
 
 Mold Studio is the native desktop app for macOS, Linux, and Windows. It puts
 making a picture, the queue, everything you have made, your styles, your
-machines, and settings in one focused window, in plain words, with six themes
+machines, and settings in one focused window, in plain words, with five themes
 that keep attention on your work.
 
 ::: info
@@ -321,7 +321,7 @@ the phone keep Create / Library / Models until their own redesign.
   **Saving pictures & clips**, **Phone pairing**, **Speed & memory**,
   **Accounts & tokens**, **Profiles**, **Advanced**, and **Updates & about**.
   Typing in the search field narrows the nav and the page together, and nothing
-  is hidden behind an accordion. Look holds the six themes and the **Match
+  is hidden behind an accordion. Look holds the five themes and the **Light or dark
   system appearance** toggle; Machines keeps this device, its API key, and the
   Mold home, with connecting and forgetting other machines living in the
   Machines workspace; **Styles & disk** holds where styles are kept, where
@@ -458,15 +458,17 @@ right-click menus. Choose 80–130% from **Settings → Look → Interface size*
 use the View menu and keyboard shortcuts. The selected level is restored on
 the next launch.
 
-**Look** offers six Mold Studio themes: Mocha (the default), Safelight,
-Graphite, and Nebula are dark; Blueprint and Porcelain are light. Each card
-shows a band of that theme's own surfaces above its name, the tone it strikes,
-and the type pairing it brings. Each theme also brings its own corner radius,
-and **Match system appearance** swaps a pick for its light or dark partner when
-macOS changes. Saved choices
-from earlier releases migrate to the nearest theme (Safelight stays
-Safelight; the Mold palette becomes Mocha or Blueprint; System becomes the
-match toggle). New iPhone installs start with Safelight (see
+**Look** offers five Mold Studio themes — Mocha (the default), Safelight,
+Blueprint, Graphite and Nebula — each in a light and a dark tone. Each card
+shows a band of that theme's own surfaces above its name, and the type pairing
+it brings; every theme also brings its own corner radius. A card names the
+theme and never a tone, because the tone is a separate **System · Light ·
+Dark** control beneath: choosing a theme keeps the tone you are in, and
+choosing a tone keeps the theme. On **System** the app follows macOS between
+that theme's own two tones, so the theme you picked is never swapped for a
+different one. Saved choices from earlier releases migrate to the nearest
+theme (Safelight stays Safelight, now with a light tone of its own; Porcelain
+becomes Graphite's light tone; System becomes the System position). New iPhone installs start with Safelight (see
 [iPhone → Settings](/guide/iphone)). Every theme keeps text and interactive
 boundaries at WCAG AA contrast; an empty generation canvas follows the selected chrome, while actual
 generated media remains on a color-stable viewing surface.

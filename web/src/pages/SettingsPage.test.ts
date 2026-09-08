@@ -117,7 +117,7 @@ describe("SettingsPage", () => {
   });
   afterEach(() => {
     globalThis.fetch = originalFetch;
-    theme.value = "safelight";
+    theme.value = "safelight-dark";
     matchSystem.value = false;
     vi.restoreAllMocks();
   });
@@ -225,18 +225,37 @@ describe("SettingsPage", () => {
     expect(wrapper.text()).toContain("disabled");
   });
 
-  it("persists the theme through the shared lib/theme refs", async () => {
+  it("persists the theme through the shared lib/theme refs, keeping the tone", async () => {
     const wrapper = mount(SettingsPage);
+    // The select offers names only — no option carries a tone.
+    const options = wrapper.findAll('[data-test="theme-select"] option');
+    expect(options.map((o) => o.text())).toEqual([
+      "Mocha",
+      "Safelight",
+      "Blueprint",
+      "Graphite",
+      "Nebula",
+    ]);
+
     await wrapper.get('[data-test="theme-select"]').setValue("graphite");
     await flushPromises();
-    expect(theme.value).toBe("graphite");
+    expect(theme.value).toBe("graphite-dark");
   });
 
-  it("persists match-system through the shared lib/theme refs", async () => {
+  it("persists the tone through the shared lib/theme refs, keeping the theme", async () => {
     const wrapper = mount(SettingsPage);
-    await wrapper.get('[data-test="theme-match-system"]').trigger("click");
+    const tone = wrapper.get('[data-test="theme-tone"]');
+    const system = tone.findAll("button").find((b) => b.text() === "System");
+    await system?.trigger("click");
     await flushPromises();
     expect(matchSystem.value).toBe(true);
+    expect(theme.value).toBe("safelight-dark");
+
+    const light = tone.findAll("button").find((b) => b.text() === "Light");
+    await light?.trigger("click");
+    await flushPromises();
+    expect(matchSystem.value).toBe(false);
+    expect(theme.value).toBe("safelight-light");
   });
 
   it("keeps credential status unknown after a failed read and retries inline", async () => {

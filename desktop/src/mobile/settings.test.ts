@@ -24,19 +24,19 @@ afterEach(() => {
 describe("mobile settings persistence", () => {
   it("defaults new and corrupt installs to Safelight and Photos auto-save", () => {
     expect(DEFAULT_MOBILE_SETTINGS).toEqual({
-      theme: "safelight",
+      theme: "safelight-dark",
       matchSystem: false,
       autoSavePhotos: true,
       autoTagTitle: true,
     });
     expect(loadMobileSettings(memoryStorage())).toEqual({
-      theme: "safelight",
+      theme: "safelight-dark",
       matchSystem: false,
       autoSavePhotos: true,
       autoTagTitle: true,
     });
     expect(loadMobileSettings(memoryStorage("not json"))).toEqual({
-      theme: "safelight",
+      theme: "safelight-dark",
       matchSystem: false,
       autoSavePhotos: true,
       autoTagTitle: true,
@@ -46,10 +46,10 @@ describe("mobile settings persistence", () => {
   it("keeps each valid field when another stored value is unknown", () => {
     expect(
       loadMobileSettings(
-        memoryStorage(JSON.stringify({ theme: "graphite", matchSystem: "yes", future: true })),
+        memoryStorage(JSON.stringify({ theme: "graphite-dark", matchSystem: "yes", future: true })),
       ),
     ).toEqual({
-      theme: "graphite",
+      theme: "graphite-dark",
       matchSystem: false,
       autoSavePhotos: true,
       autoTagTitle: true,
@@ -57,7 +57,7 @@ describe("mobile settings persistence", () => {
     expect(
       loadMobileSettings(memoryStorage(JSON.stringify({ theme: "sepia", autoSavePhotos: false }))),
     ).toEqual({
-      theme: "safelight",
+      theme: "safelight-dark",
       matchSystem: false,
       autoSavePhotos: false,
       autoTagTitle: true,
@@ -68,7 +68,7 @@ describe("mobile settings persistence", () => {
     expect(
       loadMobileSettings(memoryStorage(JSON.stringify({ theme: "dark", themeFamily: "mold" }))),
     ).toEqual({
-      theme: "mocha",
+      theme: "mocha-dark",
       matchSystem: false,
       autoSavePhotos: true,
       autoTagTitle: true,
@@ -78,7 +78,7 @@ describe("mobile settings persistence", () => {
         memoryStorage(JSON.stringify({ theme: "system", themeFamily: "safelight" })),
       ),
     ).toEqual({
-      theme: "safelight",
+      theme: "safelight-dark",
       matchSystem: true,
       autoSavePhotos: true,
       autoTagTitle: true,
@@ -89,20 +89,20 @@ describe("mobile settings persistence", () => {
     const storage = memoryStorage();
     const nativeInvoke = vi.fn().mockResolvedValue(undefined);
     const next = updateMobileSettings(
-      { theme: "mocha", matchSystem: true, autoSavePhotos: true, autoTagTitle: true },
-      { theme: "porcelain", matchSystem: false },
+      { theme: "mocha-dark", matchSystem: true, autoSavePhotos: true, autoTagTitle: true },
+      { theme: "graphite-light", matchSystem: false },
       storage,
       nativeInvoke,
     );
 
     expect(next).toEqual({
-      theme: "porcelain",
+      theme: "graphite-light",
       matchSystem: false,
       autoSavePhotos: true,
       autoTagTitle: true,
     });
     expect(JSON.parse(storage.value() ?? "{}")).toEqual(next);
-    expect(document.documentElement.dataset.theme).toBe("porcelain");
+    expect(document.documentElement.dataset.theme).toBe("graphite-light");
     // UIKit is told the painted theme's tone so status-bar glyphs stay readable.
     expect(nativeInvoke).toHaveBeenCalledWith("set_mobile_appearance", {
       appearance: "light",
@@ -113,7 +113,7 @@ describe("mobile settings persistence", () => {
     const nativeInvoke = vi.fn().mockResolvedValue(undefined);
 
     updateMobileSettings(
-      { theme: "mocha", matchSystem: false, autoSavePhotos: true, autoTagTitle: true },
+      { theme: "mocha-dark", matchSystem: false, autoSavePhotos: true, autoTagTitle: true },
       { matchSystem: true },
       memoryStorage(),
       nativeInvoke,
@@ -127,7 +127,7 @@ describe("mobile settings persistence", () => {
   it("persists an explicit Photos auto-save preference", () => {
     const storage = memoryStorage();
     const next = updateMobileSettings(
-      { theme: "safelight", matchSystem: true, autoSavePhotos: true, autoTagTitle: true },
+      { theme: "safelight-dark", matchSystem: true, autoSavePhotos: true, autoTagTitle: true },
       { autoSavePhotos: false },
       storage,
     );
@@ -147,6 +147,14 @@ describe("mobile settings persistence", () => {
     ).toBe(true);
   });
 
+  it("keeps Match phone on while renaming a pre-tone theme", () => {
+    const saved = loadMobileSettings(
+      memoryStorage(JSON.stringify({ theme: "porcelain", matchSystem: true })),
+    );
+    expect(saved.theme).toBe("graphite-light");
+    expect(saved.matchSystem).toBe(true);
+  });
+
   it("migrates an install saved before File under to tagging prints with their title", () => {
     // A pre-File-under blob has no `autoTagTitle` key at all; the product
     // default is on, and every other saved choice survives the migration.
@@ -155,7 +163,9 @@ describe("mobile settings persistence", () => {
     );
 
     expect(saved).toEqual({
-      theme: "blueprint",
+      // The Mold family's light appearance is Mocha's own light tone now,
+      // not Blueprint — a different theme the person never chose.
+      theme: "mocha-light",
       matchSystem: false,
       autoSavePhotos: false,
       autoTagTitle: true,
@@ -165,7 +175,7 @@ describe("mobile settings persistence", () => {
   it("persists an explicit auto-tag opt-out", () => {
     const storage = memoryStorage();
     const next = updateMobileSettings(
-      { theme: "safelight", matchSystem: true, autoSavePhotos: true, autoTagTitle: true },
+      { theme: "safelight-dark", matchSystem: true, autoSavePhotos: true, autoTagTitle: true },
       { autoTagTitle: false },
       storage,
     );

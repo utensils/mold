@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { THEMES, THEME_TONE, type ThemeId } from "@ui/theme";
+import { THEMES, toneOf, type ThemeId } from "@ui/theme";
 
 // The palette is owned by the shared design system (ui/tokens.css); the
 // desktop app only maps it into Tailwind. Guard every theme at the source so a
@@ -135,14 +135,14 @@ const px = (value: string) => {
 const INK_PLANES = ["bg-crust", "bg-deep", "bg", "surface"] as const;
 const CHROME_PLANES = ["bg-crust", "bg-deep", "bg"] as const;
 
-describe("six-theme contrast (style guide §08)", () => {
+describe("ten-map contrast (style guide §08)", () => {
   for (const id of THEMES) {
     const theme = themeMap(id);
 
     it(`${id} declares every key of the map`, () => {
       // A partial map would inherit stale values from the :root default.
       for (const key of THEME_KEYS) expect(theme[key], key).toBeDefined();
-      expect(theme.colorScheme).toBe(THEME_TONE[id]);
+      expect(theme.colorScheme).toBe(toneOf(id));
     });
 
     it(`${id} keeps every readable text rank at WCAG AA on every plane it touches`, () => {
@@ -197,7 +197,7 @@ describe("six-theme contrast (style guide §08)", () => {
       // lightest surface on light ones, and it must clear AA on every fill a
       // label can sit on (primary action, badges, seam chips).
       const ink = colour(theme, "on-accent");
-      expect(ink).toBe(colour(theme, THEME_TONE[id] === "dark" ? "bg-deep" : "surface"));
+      expect(ink).toBe(colour(theme, toneOf(id) === "dark" ? "bg-deep" : "surface"));
       for (const fill of ["blue", "success", "warning", "error", "star"]) {
         expect(contrast(ink, colour(theme, fill)), `ink on ${fill}`).toBeGreaterThanOrEqual(4.5);
       }
@@ -244,7 +244,7 @@ describe("six-theme contrast (style guide §08)", () => {
         m[2]!.replace(/\s+/g, " ").trim(),
       ]),
     );
-    for (const [key, value] of Object.entries(themeMap("mocha"))) {
+    for (const [key, value] of Object.entries(themeMap("mocha-dark"))) {
       if (key === "colorScheme") continue;
       expect(root[key], key).toBe(value);
     }

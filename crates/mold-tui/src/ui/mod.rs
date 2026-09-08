@@ -314,7 +314,15 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
             ("Esc", "Back"),
         ],
         View::Settings => {
-            if app.settings.focus == crate::app::SettingsFocus::Appearance {
+            if app.settings.focus == crate::app::SettingsFocus::AppearanceTone {
+                vec![
+                    ("\u{2190}/\u{2192}", "Light/Dark"),
+                    ("k", "Themes"),
+                    ("j", "Config"),
+                    ("Esc", "Back"),
+                    ("q", "Quit"),
+                ]
+            } else if app.settings.focus == crate::app::SettingsFocus::Appearance {
                 vec![
                     ("\u{2190}/\u{2192}", "Theme"),
                     ("j", "Config"),

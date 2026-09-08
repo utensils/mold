@@ -16,7 +16,7 @@ import { useToastStore } from "../../stores/toasts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useQueueActivity } from "../../composables/useQueueActivity";
 import { useQueueCommands } from "../../composables/useQueueCommands";
-import { THEME_META } from "../../lib/theme";
+import { THEME_FAMILY_META, applyFamilyChoice, applyToneChoice, toneChoice } from "../../lib/theme";
 import { NAV_ROUTES } from "../../lib/shortcuts";
 import { altShortcutLabel, shiftShortcutLabel, shortcutLabel } from "../../lib/platform";
 import { matchCommands, type Matchable } from "../../lib/palette";
@@ -391,28 +391,41 @@ const staticCommands = computed<Command[]>(() => {
       keywords: ["get", "install", "pull", "browse", "catalog", "models"],
       run: () => go("/models?tab=discover"),
     },
-    ...THEME_META.map((meta) => ({
+    // A theme row keeps the tone in force; a tone row keeps the theme.
+    ...THEME_FAMILY_META.map((meta) => ({
       id: `theme-${meta.id}`,
       title: `Theme: ${meta.label}`,
       subtitle: meta.blurb,
-      keywords: ["theme", "look", "appearance", "color", meta.tone, meta.label.toLowerCase()],
+      keywords: ["theme", "look", "appearance", "color", meta.label.toLowerCase()],
       run: () => {
-        void appPrefs.update({ theme: meta.id });
+        void appPrefs.update(
+          applyFamilyChoice(meta.id, {
+            theme: appPrefs.theme,
+            matchSystem: appPrefs.matchSystem,
+          }),
+        );
         close();
       },
     })),
-    {
-      id: "appear-match-system",
-      title: appPrefs.matchSystem
-        ? "Stop matching the system appearance"
-        : "Match the system appearance",
-      subtitle: "Swap to the paired light or dark theme when macOS does",
-      keywords: ["theme", "appearance", "system", "auto", "light", "dark"],
-      run: () => {
-        void appPrefs.update({ matchSystem: !appPrefs.matchSystem });
-        close();
-      },
-    },
+    ...(["system", "light", "dark"] as const)
+      .filter(
+        (choice) =>
+          choice !== toneChoice({ theme: appPrefs.theme, matchSystem: appPrefs.matchSystem }),
+      )
+      .map((choice) => ({
+        id: `tone-${choice}`,
+        title:
+          choice === "system" ? "Light or dark: match this Mac" : `Light or dark: always ${choice}`,
+        subtitle:
+          choice === "system"
+            ? "Follow the system appearance, keeping the theme you chose"
+            : `Keep the theme you chose in its ${choice} tone`,
+        keywords: ["theme", "appearance", "tone", "system", "auto", "light", "dark"],
+        run: () => {
+          void appPrefs.update(applyToneChoice(choice, appPrefs.theme));
+          close();
+        },
+      })),
   ];
   if (activePrintRepeatable.value) {
     cmds.push({

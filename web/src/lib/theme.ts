@@ -2,7 +2,6 @@ import { ref, watch } from "vue";
 import {
   applyTheme,
   installSystemThemeSync,
-  isThemeId,
   migrateLegacyTheme,
   type ThemeId,
 } from "@ui/theme";
@@ -21,7 +20,7 @@ interface PersistedTheme {
   matchSystem: boolean;
 }
 
-const DEFAULT: PersistedTheme = { theme: "safelight", matchSystem: false };
+const DEFAULT: PersistedTheme = { theme: "safelight-dark", matchSystem: false };
 
 function load(): PersistedTheme {
   try {
@@ -30,14 +29,12 @@ function load(): PersistedTheme {
       const parsed: unknown = JSON.parse(raw);
       if (typeof parsed === "object" && parsed !== null) {
         const candidate = parsed as Record<string, unknown>;
-        if (isThemeId(candidate.theme)) {
-          return {
-            theme: candidate.theme,
-            matchSystem: candidate.matchSystem === true,
-          };
-        }
         if (candidate.theme !== undefined || candidate.family !== undefined) {
-          return migrateLegacyTheme(candidate.theme, candidate.family);
+          return migrateLegacyTheme(
+            candidate.theme,
+            candidate.family,
+            candidate.matchSystem,
+          );
         }
       }
     }

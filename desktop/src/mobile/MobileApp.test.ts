@@ -5604,7 +5604,7 @@ describe("MobileApp generation queue", () => {
     localStorage.setItem(
       "mold.mobile.settings.v1",
       JSON.stringify({
-        theme: "safelight",
+        theme: "safelight-dark",
         matchSystem: true,
         autoSavePhotos: false,
       }),
@@ -7530,18 +7530,20 @@ describe("MobileApp settings", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
 
-    await wrapper.get('input[name="mobile-theme"][value="porcelain"]').setValue(true);
+    await wrapper.get('input[name="mobile-theme"][value="graphite"]').setValue(true);
     await flushPromises();
 
-    expect(document.documentElement.dataset.theme).toBe("porcelain");
+    // The phone starts on Safelight dark, so choosing Graphite keeps the
+    // dark tone: a theme pick moves the theme and nothing else.
+    expect(document.documentElement.dataset.theme).toBe("graphite-dark");
     expect(JSON.parse(localStorage.getItem("mold.mobile.settings.v1") ?? "{}")).toEqual({
-      theme: "porcelain",
+      theme: "graphite-dark",
       matchSystem: false,
       autoSavePhotos: true,
       autoTagTitle: true,
     });
 
-    await wrapper.get('input[name="mobile-theme-match-system"]').setValue(true);
+    await wrapper.get('input[name="mobile-theme-tone"][value="system"]').setValue(true);
     expect(JSON.parse(localStorage.getItem("mold.mobile.settings.v1") ?? "{}").matchSystem).toBe(
       true,
     );
@@ -13017,7 +13019,7 @@ describe("MobileApp Create File under", () => {
   it("drops the ghost tag when the Settings auto-tag preference is off", async () => {
     localStorage.setItem(
       "mold.mobile.settings.v1",
-      JSON.stringify({ theme: "safelight", matchSystem: true, autoTagTitle: false }),
+      JSON.stringify({ theme: "safelight-dark", matchSystem: true, autoTagTitle: false }),
     );
     await openCreateWithFiling();
 

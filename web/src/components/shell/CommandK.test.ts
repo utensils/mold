@@ -164,7 +164,7 @@ describe("CommandK", () => {
   });
   afterEach(() => {
     vi.useRealTimers();
-    theme.value = "safelight";
+    theme.value = "safelight-dark";
     matchSystem.value = false;
   });
 
@@ -620,13 +620,17 @@ describe("CommandK", () => {
     const wrapper = await openPalette();
     const palette = wrapper.findComponent(PalettePanel);
 
+    // A theme row moves the theme and keeps the tone in force.
     palette.vm.$emit("run", "theme-graphite");
     await nextTick();
-    expect(theme.value).toBe("graphite");
+    expect(theme.value).toBe("graphite-dark");
+    expect(matchSystem.value).toBe(false);
 
-    palette.vm.$emit("run", "theme-match-system");
+    // A tone row moves the tone and keeps the theme.
+    palette.vm.$emit("run", "tone-system");
     await nextTick();
     expect(matchSystem.value).toBe(true);
+    expect(theme.value).toBe("graphite-dark");
   });
 
   it("selects a model and opens create when a model command runs", async () => {
