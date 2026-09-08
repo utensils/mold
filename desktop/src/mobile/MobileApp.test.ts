@@ -10571,32 +10571,38 @@ describe("MobileApp host and catalog coordination", () => {
     expect(scanPairingQr).not.toHaveBeenCalled();
   });
 
-  it("cancels Android pairing through the native session and settles the pending scan", async () => {
-    isNativeAndroidRuntime.mockReturnValue(true);
-    const pendingScan = deferred<{ content: string }>();
-    invoke.mockImplementation((command: string) => {
-      if (command === "scan_android_pairing_code") return pendingScan.promise;
-      if (command === "cancel_android_pairing_scan") {
-        pendingScan.reject("cancelled");
+  it.each(["button", "back"] as const)(
+    "cancels Android pairing through %s and settles the pending scan",
+    async (dismissal) => {
+      isNativeAndroidRuntime.mockReturnValue(true);
+      const pendingScan = deferred<{ content: string }>();
+      invoke.mockImplementation((command: string) => {
+        if (command === "scan_android_pairing_code") return pendingScan.promise;
+        if (command === "cancel_android_pairing_scan") {
+          pendingScan.reject("cancelled");
+          return Promise.resolve(null);
+        }
         return Promise.resolve(null);
-      }
-      return Promise.resolve(null);
-    });
+      });
 
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
-    await wrapper.get("[data-test='mobile-scan-pairing']").trigger("click");
-    await flushPromises();
-    await wrapper.get("[data-test='mobile-pair-scanner-cancel']").trigger("click");
-    await flushPromises();
+      wrapper = mountMobileApp();
+      await flushPromises();
+      await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+      await wrapper.get("[data-test='mobile-scan-pairing']").trigger("click");
+      await flushPromises();
+      if (dismissal === "back") window.dispatchEvent(new PopStateEvent("popstate"));
+      else await wrapper.get("[data-test='mobile-pair-scanner-cancel']").trigger("click");
+      await flushPromises();
 
-    expect(invoke).toHaveBeenCalledWith("cancel_android_pairing_scan");
-    expect(cancelBarcodeScanner).not.toHaveBeenCalled();
-    expect(wrapper.find("[data-test='mobile-pair-scanner']").exists()).toBe(false);
-    expect(wrapper.find(".error-text").exists()).toBe(false);
-    expect(wrapper.get("[data-test='mobile-scan-pairing']").attributes("disabled")).toBeUndefined();
-  });
+      expect(invoke).toHaveBeenCalledWith("cancel_android_pairing_scan");
+      expect(cancelBarcodeScanner).not.toHaveBeenCalled();
+      expect(wrapper.find("[data-test='mobile-pair-scanner']").exists()).toBe(false);
+      expect(wrapper.find(".error-text").exists()).toBe(false);
+      expect(
+        wrapper.get("[data-test='mobile-scan-pairing']").attributes("disabled"),
+      ).toBeUndefined();
+    },
+  );
 
   it("cancels the native Android pairing session when the app unmounts", async () => {
     isNativeAndroidRuntime.mockReturnValue(true);

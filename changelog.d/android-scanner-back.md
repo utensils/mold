@@ -1,0 +1,2 @@
+### Fixed
+- Android Back now closes the pairing scanner and releases its camera session without leaving the app.

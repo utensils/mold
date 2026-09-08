@@ -739,6 +739,9 @@ const discovering = ref(false);
 const pairing = ref(false);
 const pairingScannerOpen = ref(false);
 let pairingScannerCancelled = false;
+useMobileBack(pairingScannerOpen, () => {
+  void cancelPairingScan();
+});
 let stopPairingDeepLinks: (() => void) | null = null;
 const hostError = ref("");
 const models = ref<ModelEntry[]>([]);
