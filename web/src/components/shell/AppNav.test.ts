@@ -84,7 +84,7 @@ function mountNav() {
       // The notifications bell reads its Pinia store.
       plugins: [createPinia()],
       stubs: {
-        RouterLink: { template: "<a><slot /></a>" },
+        RouterLink: { props: ["to"], template: '<a :href="to"><slot /></a>' },
       },
     },
   });
@@ -128,10 +128,14 @@ describe("AppNav", () => {
     ).toBe("true");
   });
 
-  it("navigates when a pill is clicked", async () => {
+  it("uses browser links for workspace navigation", () => {
     const wrapper = mountNav();
-    await wrapper.get('[data-test="nav-models"]').trigger("click");
-    expect(pushMock).toHaveBeenCalledWith("/models");
+    expect(wrapper.get('[data-test="nav-models"]').attributes("href")).toBe(
+      "/models",
+    );
+    expect(wrapper.get('[data-test="nav-queue"]').attributes("href")).toBe(
+      "/queue",
+    );
   });
 
   it("shows the downloads badge with the active + queued count", () => {

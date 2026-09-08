@@ -18,6 +18,8 @@ import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import SourceMediaPanel from "../components/create/SourceMediaPanel.vue";
 import IdentityPanel from "../components/create/IdentityPanel.vue";
 import FileUnderGroup from "../components/create/FileUnderGroup.vue";
+import { useActivityRows } from "../composables/useActivityRows";
+import { workspaceLabel } from "../lib/workspaces";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
@@ -95,6 +97,8 @@ import {
 } from "@studio/lib/wanRecipe";
 import {
   pendingGenerationHandoff,
+  pendingLocalJobHandoff,
+  takeLocalJobHandoff,
   takeGenerationHandoff,
 } from "../composables/useGenerationHandoff";
 import {
@@ -152,10 +156,7 @@ import {
 import { useLiveActivity } from "../composables/useLiveActivity";
 import { useOpenLiveWork } from "../composables/useOpenLiveWork";
 import { ORIGIN_HOST_ID, listHosts } from "../lib/hostRegistry";
-import {
-  localRowHiddenFromStrip,
-  sharedRowIsLocallyOwned,
-} from "../lib/activityDedup";
+
 import { fetchMergedGallery } from "../lib/multiHostGallery";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
 import {
@@ -874,27 +875,9 @@ const stream = useGenerateStream(
   // Same offer, same policy as the pre-submission dead end.
   (job) => void offerHeldMissingModelPull(job),
 );
-/** Server-owned rows survive this tab and client. Avoid duplicating work that
- * the current Create session is still streaming — but a LOCAL row that has
- * already settled as a failure loses to the live server row, because a host
- * that retained the job across a restart is still rendering it. */
-const sharedActivityRows = computed(() =>
-  liveActivity.rows.value.filter((row) => {
-    if (row.kind === "generation") {
-      return !sharedRowIsLocallyOwned(row, stream.jobs.value, ORIGIN_HOST_ID);
-    }
-    return true;
-  }),
-);
-
-/** The other half of that dedup: a settled row the server's view supersedes —
- * a live fleet row for the same job, or a detached settle whose fate the host
- * owns — is dropped here, so a resumed job renders once and never as failed. */
-const localActivityJobs = computed(() =>
-  stream.jobs.value.filter(
-    (job) =>
-      !localRowHiddenFromStrip(job, liveActivity.rows.value, ORIGIN_HOST_ID),
-  ),
+const { sharedActivityRows, localActivityJobs } = useActivityRows(
+  stream.jobs,
+  liveActivity.rows,
 );
 
 async function refreshGallery() {
@@ -4419,6 +4402,17 @@ async function onWindowDrop(event: DragEvent): Promise<void> {
   await applyDropToForm(routed, image);
 }
 
+watch(
+  pendingLocalJobHandoff(),
+  () => {
+    const id = takeLocalJobHandoff();
+    if (!id) return;
+    const job = stream.jobs.value.find((candidate) => candidate.id === id);
+    if (job) openJob(job);
+  },
+  { immediate: true },
+);
+
 onMounted(async () => {
   if (phoneQuery) {
     phoneQuery.addEventListener?.("change", syncPhone);
@@ -4470,12 +4464,14 @@ onBeforeUnmount(() => {
       <!-- Center: activity + composer + canvas + recent -->
       <main class="flex min-w-0 flex-col gap-4">
         <h1
-          v-if="isPhone"
           class="font-display text-2xl font-bold tracking-tight text-ink"
           data-test="phone-create-title"
         >
-          Create
+          {{ workspaceLabel("create") }}
         </h1>
+        <router-link to="/create/3d" class="text-sm text-safelight underline"
+          >3-D workflows</router-link
+        >
         <ActivityStrip
           :jobs="localActivityJobs"
           :shared="sharedActivityRows"

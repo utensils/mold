@@ -23,3 +23,18 @@ export function takeGenerationHandoff(): GenerationHandoff | null {
 export function pendingGenerationHandoff(): Ref<GenerationHandoff | null> {
   return pending;
 }
+
+// A local selection is consumed once by Create's existing full request restore.
+// Navigation itself never selects a job or mutates the draft.
+const localJobHandoff = ref<string | null>(null);
+export function setLocalJobHandoff(id: string): void {
+  localJobHandoff.value = id;
+}
+export function pendingLocalJobHandoff(): Ref<string | null> {
+  return localJobHandoff;
+}
+export function takeLocalJobHandoff(): string | null {
+  const id = localJobHandoff.value;
+  localJobHandoff.value = null;
+  return id;
+}

@@ -1,3 +1,4 @@
+import { WORKSPACES, SETTINGS_DESTINATION } from "./workspaces";
 import { matchSystem, theme } from "./theme";
 import { THEME_META } from "@ui/theme";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "./hostRouting";
@@ -53,26 +54,12 @@ const GO: Array<{
   path: string;
   keywords?: string[];
 }> = [
-  {
-    id: "go-library",
-    label: "Library",
-    path: "/library",
-    keywords: ["gallery", "prints"],
-  },
-  {
-    id: "go-create",
-    label: "Create",
-    path: "/create",
-    keywords: ["generate", "compose"],
-  },
-  { id: "go-models", label: "Models", path: "/models", keywords: ["catalog"] },
-  {
-    id: "go-machines",
-    label: "Machines",
-    path: "/machines",
-    keywords: ["hosts", "gpu"],
-  },
-  { id: "go-settings", label: "Settings", path: "/settings" },
+  ...[...WORKSPACES, SETTINGS_DESTINATION].map((workspace) => ({
+    id: `go-${workspace.name}`,
+    label: workspace.label,
+    path: workspace.path,
+    keywords: workspace.keywords,
+  })),
   {
     id: "go-library-images",
     label: "Browse image prints",
@@ -87,13 +74,13 @@ const GO: Array<{
   },
   {
     id: "go-models-installed",
-    label: "Installed models",
+    label: "Downloaded styles",
     path: "/models?tab=installed",
     keywords: ["local"],
   },
   {
     id: "go-models-discover",
-    label: "Discover models",
+    label: "Browse styles",
     path: "/models?tab=discover",
     keywords: ["catalog", "pull"],
   },

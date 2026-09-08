@@ -1,6 +1,6 @@
 @import "tailwindcss";
 @import "../../ui/tokens.css";
-@import "../../ui/fonts/fonts.legacy.css";
+@import "../../ui/fonts/fonts.css";
 @import "../../ui/kit.css";
 
 /*
@@ -34,15 +34,27 @@
   --color-on-media: var(--on-media);
   --color-print: var(--print);
 
-  --radius-control-sm: 6px;
-  --radius-control: 9px;
-  --radius-control-lg: 10px;
-  --radius-card: 12px;
-  --radius-card-lg: 16px;
+  --radius-control-sm: var(--mold-radius-1);
+  --radius-control: var(--mold-radius-2);
+  --radius-control-lg: var(--mold-radius-2);
+  --radius-card: var(--mold-radius-2);
+  --radius-card-lg: var(--mold-radius-3);
   --radius-pill: 20px;
 
-  --shadow-raised: 0 12px 32px rgba(0, 0, 0, 0.5);
-  --shadow-float: 0 40px 90px -20px rgba(0, 0, 0, 0.6);
+  --shadow-raised: var(--mold-shadow-md);
+  --shadow-float: var(--mold-shadow-md);
+}
+
+/* Scoped CSS still reads the compatibility names. Keep those consumers on
+ * the same theme geometry as Tailwind utilities during the page migration. */
+:root {
+  --radius-control-sm: var(--mold-radius-1);
+  --radius-control: var(--mold-radius-2);
+  --radius-control-lg: var(--mold-radius-2);
+  --radius-card: var(--mold-radius-2);
+  --radius-card-lg: var(--mold-radius-3);
+  --shadow-raised: var(--mold-shadow-md);
+  --shadow-float: var(--mold-shadow-md);
 }
 
 /* Wordmark gradient (spec §02, prototype [data-brand]): the "mold" wordmark is
@@ -138,5 +150,37 @@ body {
   [data-test="generate-shell"] textarea,
   [data-test="generate-shell"] select {
     font-size: max(16px, 1em);
+  }
+}
+
+/* Shared page geometry: browser scrolling and zoom remain native. */
+.workspace-page {
+  width: 100%;
+  max-width: 1120px;
+  margin-inline: auto;
+  padding: 28px clamp(16px, 3vw, 32px) 48px;
+}
+.workspace-heading {
+  font-size: clamp(1.75rem, 3vw, 2.25rem);
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--mold-text);
+}
+.workspace-description {
+  margin-block: 8px 24px;
+  color: var(--mold-text-dim);
+  line-height: 1.5;
+}
+:where(a, button, input, select, textarea, summary):focus-visible {
+  outline: 2px solid var(--mold-blue);
+  outline-offset: 3px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

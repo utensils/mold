@@ -1,14 +1,8 @@
 <script setup lang="ts">
-/*
- * Global web chrome (spec §04, prototype WEB + MOBILE WEB frames). Wide
- * viewports get a single 56px bar — logo + wordmark, the four workspace
- * pills, search, Downloads, account. Below 640px it collapses to a compact
- * 52px bar (logo, Downloads icon, hamburger) that opens the bottom nav sheet.
- *
- * Downloads opens the existing drawer via the shared `mold:open-downloads`
- * window event (App listens); the ⌘K palette uses the same channel.
- */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+/* Browser chrome shares destination names with the menu and command palette.
+ * The wide bar wraps for enlarged text; compact navigation opens a sheet.
+ * Downloads remains independent from generation activity. */
+import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
@@ -20,7 +14,7 @@ import {
   markGalleryVisited,
   useNotificationSignals,
 } from "../../lib/notifications";
-import type { IconName } from "@ui/icons";
+import { WORKSPACES, type Workspace } from "../../lib/workspaces";
 import { useStatusPoll } from "../../composables/useStatusPoll";
 import { useHostRouting } from "../../composables/useHostRouting";
 import { useLiveActivity } from "../../composables/useLiveActivity";
@@ -37,17 +31,6 @@ const routing = useHostRouting();
 const liveActivity = useLiveActivity(routing);
 const openLiveWork = useOpenLiveWork(routing);
 
-onMounted(() => {
-  if (import.meta.env.TEST) return;
-  routing.start();
-  liveActivity.start();
-});
-onBeforeUnmount(() => {
-  if (import.meta.env.TEST) return;
-  liveActivity.stop();
-  routing.stop();
-});
-
 // Cross-workspace badge signals (spec §08 G11): a fresh-prints accent dot on
 // the Library pill (cleared on entering the Library) and a stop-tinted dot on
 // the Machines pill while any registered host is offline.
@@ -60,66 +43,18 @@ watch(
   { immediate: true },
 );
 
-function pillDot(pill: Pill): "accent" | "stop" | null {
+function pillDot(pill: Workspace): "accent" | "stop" | null {
   if (pill.name === "library" && freshPrintCount.value > 0) return "accent";
   if (pill.name === "machines" && hasOfflineHost.value) return "stop";
   return null;
 }
 
-interface Pill {
-  name: string;
-  label: string;
-  icon: IconName;
-  path: string;
-  match: string[];
-}
-
-const pills: Pill[] = [
-  {
-    name: "library",
-    label: "Library",
-    icon: "library",
-    path: "/library",
-    match: ["library"],
-  },
-  {
-    name: "create",
-    label: "Create",
-    icon: "create",
-    path: "/create",
-    match: ["create"],
-  },
-  {
-    name: "mesh-workflow",
-    label: "3-D",
-    icon: "create",
-    path: "/create/3d",
-    match: ["mesh-workflow"],
-  },
-  {
-    name: "models",
-    label: "Models",
-    icon: "models",
-    path: "/models",
-    match: ["models"],
-  },
-  {
-    name: "machines",
-    label: "Machines",
-    icon: "machines",
-    path: "/machines",
-    match: ["machines", "host-detail"],
-  },
-];
+const pills = WORKSPACES;
 
 const activeName = computed(() => String(route.name ?? ""));
-function isActive(pill: Pill) {
+function isActive(pill: Workspace) {
   return pill.match.includes(activeName.value);
 }
-function go(pill: Pill) {
-  if (!isActive(pill)) void router.push(pill.path);
-}
-
 // Downloads badge — active + queued jobs, hidden at zero.
 const badgeCount = computed(
   () =>
@@ -158,7 +93,7 @@ const menuOpen = ref(false);
     >
       <span aria-hidden="true">●</span> Engine reconnecting
     </div>
-    <!-- Wide bar (≥640px) -->
+    <!-- Wide browser navigation -->
     <div class="bar bar--wide">
       <router-link to="/create" class="brand" aria-label="mold home">
         <img
@@ -168,20 +103,19 @@ const menuOpen = ref(false);
           height="22"
           class="brand__logo"
         />
-        <span class="brand__word brand-gradient">mold</span>
+        <span class="brand__word">Mold</span>
       </router-link>
 
       <nav class="seg-group" aria-label="Workspaces">
-        <button
+        <router-link
           v-for="pill in pills"
           :key="pill.name"
-          type="button"
+          :to="pill.path"
           class="seg-pill"
           :data-on="isActive(pill) ? 'true' : undefined"
           :data-active="isActive(pill) ? 'true' : 'false'"
           :data-test="`nav-${pill.name}`"
           :aria-current="isActive(pill) ? 'page' : undefined"
-          @click="go(pill)"
         >
           {{ pill.label }}
           <span
@@ -191,7 +125,7 @@ const menuOpen = ref(false);
             :data-test="`nav-dot-${pill.name}`"
             aria-hidden="true"
           />
-        </button>
+        </router-link>
       </nav>
 
       <div class="spacer" />
@@ -234,7 +168,7 @@ const menuOpen = ref(false);
       >
     </div>
 
-    <!-- Compact bar (<640px) -->
+    <!-- Compact browser navigation -->
     <div class="bar bar--compact">
       <router-link to="/create" class="brand" aria-label="mold home">
         <img
@@ -244,7 +178,7 @@ const menuOpen = ref(false);
           height="20"
           class="brand__logo"
         />
-        <span class="brand__word brand__word--sm brand-gradient">mold</span>
+        <span class="brand__word brand__word--sm">Mold</span>
       </router-link>
 
       <div class="spacer" />
@@ -320,19 +254,20 @@ const menuOpen = ref(false);
 
 .bar--wide {
   display: none;
-  height: 56px;
-  gap: 16px;
-  padding: 0 20px;
+  min-height: 64px;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 20px;
 }
 
 .bar--compact {
   display: flex;
-  height: 52px;
-  gap: 9px;
-  padding: 0 14px;
+  min-height: 56px;
+  gap: 4px;
+  padding: 0 12px;
 }
 
-@media (min-width: 640px) {
+@media (min-width: 1120px) {
   .bar--wide {
     display: flex;
   }
@@ -374,6 +309,7 @@ const menuOpen = ref(false);
 /* ── Workspace pills ───────────────────────────────────────────────── */
 .seg-group {
   display: flex;
+  flex-wrap: wrap;
   gap: 3px;
   padding: 3px;
   background: color-mix(in srgb, var(--rebate) 7%, transparent);
@@ -385,10 +321,14 @@ const menuOpen = ref(false);
   border: 0;
   background: transparent;
   color: var(--ink-2);
-  padding: 7px 14px;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 12px;
+  text-decoration: none;
   border-radius: var(--radius-control-sm);
   font-family: var(--f-body);
-  font-size: 12.5px;
+  font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
   transition:
@@ -432,7 +372,7 @@ const menuOpen = ref(false);
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 36px;
+  min-height: 40px;
   width: 210px;
   /* Shrinkable so the wide bar never overflows on narrow tablet widths. */
   flex: 0 1 210px;
@@ -469,7 +409,7 @@ const menuOpen = ref(false);
   background: transparent;
   color: var(--rebate);
   font-family: var(--f-body);
-  font-size: 12px;
+  font-size: 0.8125rem;
   outline: none;
 }
 
@@ -484,14 +424,14 @@ const menuOpen = ref(false);
   align-items: center;
   gap: 7px;
   flex: 0 0 auto;
-  height: 36px;
+  min-height: 40px;
   padding: 0 13px;
   border: 1px solid var(--ce);
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--ink-2);
   font-family: var(--f-body);
-  font-size: 12.5px;
+  font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
   transition: color var(--dur-quick) var(--ease);
@@ -521,16 +461,16 @@ const menuOpen = ref(false);
 
 /* ── Account avatar ────────────────────────────────────────────────── */
 .avatar {
-  width: 36px;
-  height: 36px;
-  flex: 0 0 36px;
+  width: 40px;
+  min-height: 40px;
+  flex: 0 0 40px;
   border-radius: 50%;
   background: color-mix(in srgb, var(--rebate) 10%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
   font-family: var(--f-mono);
-  font-size: 12px;
+  font-size: 0.8125rem;
   color: var(--ink-2);
   text-decoration: none;
 }

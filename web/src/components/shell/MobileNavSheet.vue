@@ -1,15 +1,11 @@
 <script setup lang="ts">
-/*
- * Phone-web navigation sheet (spec §04, prototype m-web nav sheet). A bottom
- * SheetPanel of the five destinations — Gallery, Create, Models, Machines,
- * Settings — each a NavItem row. Tapping a row navigates and closes. Renders
- * inside the app frame via SheetPanel's absolute overlay.
- */
+/* Compact browser navigation: real links preserve open-in-new-tab and
+ * history, while the shared overlay hook owns focus and Escape. */
 import { computed, ref, toRef } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { useRoute } from "vue-router";
 import SheetPanel from "@ui/components/SheetPanel.vue";
-import NavItem from "@ui/components/NavItem.vue";
-import type { IconName } from "@ui/icons";
+import Icon from "@ui/components/Icon.vue";
+import { WORKSPACES, SETTINGS_DESTINATION } from "../../lib/workspaces";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 
 const props = defineProps<{ open: boolean }>();
@@ -20,68 +16,10 @@ const { onKeydown } = useOverlayFocus(toRef(props, "open"), host, () =>
 );
 
 const route = useRoute();
-const router = useRouter();
 
-interface Destination {
-  name: string;
-  label: string;
-  icon: IconName;
-  path: string;
-  /** Route names that light this row up. */
-  match: string[];
-}
-
-const destinations: Destination[] = [
-  {
-    name: "library",
-    label: "Library",
-    icon: "library",
-    path: "/library",
-    match: ["library"],
-  },
-  {
-    name: "create",
-    label: "Create",
-    icon: "create",
-    path: "/create",
-    match: ["create"],
-  },
-  {
-    name: "mesh-workflow",
-    label: "3-D studio",
-    icon: "create",
-    path: "/create/3d",
-    match: ["mesh-workflow"],
-  },
-  {
-    name: "models",
-    label: "Models",
-    icon: "models",
-    path: "/models",
-    match: ["models"],
-  },
-  {
-    name: "machines",
-    label: "Machines",
-    icon: "machines",
-    path: "/machines",
-    match: ["machines", "host-detail"],
-  },
-  {
-    name: "settings",
-    label: "Settings",
-    icon: "settings",
-    path: "/settings",
-    match: ["settings"],
-  },
-];
+const destinations = [...WORKSPACES, SETTINGS_DESTINATION];
 
 const activeName = computed(() => String(route.name ?? ""));
-
-function go(dest: Destination) {
-  if (!dest.match.includes(activeName.value)) void router.push(dest.path);
-  emit("close");
-}
 </script>
 
 <template>
@@ -89,20 +27,42 @@ function go(dest: Destination) {
     ref="host"
     :open="open"
     variant="bottom"
-    title=""
+    title="Navigation"
     @close="emit('close')"
     @keydown="onKeydown"
   >
     <nav class="flex flex-col gap-0.5" aria-label="Navigation">
-      <NavItem
+      <router-link
         v-for="dest in destinations"
         :key="dest.name"
-        :icon="dest.icon"
-        :label="dest.label"
-        :active="dest.match.includes(activeName)"
+        :to="dest.path"
+        class="mobile-workspace-link"
+        :aria-current="dest.match.includes(activeName) ? 'page' : undefined"
         :data-test="`mobile-nav-${dest.name}`"
-        @select="go(dest)"
-      />
+        @click="emit('close')"
+      >
+        <Icon :name="dest.icon" :size="20" />
+        {{ dest.label }}
+      </router-link>
     </nav>
   </SheetPanel>
 </template>
+
+<style scoped>
+.mobile-workspace-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 12px;
+  color: var(--mold-text-2);
+  border-radius: var(--mold-radius-2);
+  font-size: 1rem;
+  text-decoration: none;
+}
+.mobile-workspace-link[aria-current="page"] {
+  background: var(--mold-accent-tint);
+  box-shadow: inset 0 0 0 1px var(--mold-blue);
+  color: var(--mold-text);
+}
+</style>
