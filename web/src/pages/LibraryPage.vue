@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { workspaceLabel } from "../lib/workspaces";
 /*
  * Library workspace (Mold Studio W5, spec §06 + V3 "Shelf"). One workspace,
  * three scopes in its header — **Prints | Collections | Trash** — synced to
@@ -2293,7 +2294,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="gal" :data-scope="scope">
     <header class="gal__head">
-      <h1 class="gal__title">Library</h1>
+      <h1 class="gal__title">{{ workspaceLabel("library") }}</h1>
       <span class="gal__count" data-test="gallery-count"
         >{{ countLabel
         }}<span v-if="unreachableLabel" class="gal__unreachable">

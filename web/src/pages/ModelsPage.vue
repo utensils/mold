@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { workspaceLabel } from "../lib/workspaces";
 /*
  * Models workspace (spec §03/§06, prototype WEB MODELS lines 1582-1616). One
  * header with an Installed | Discover segmented control. Installed lists the
@@ -111,7 +112,7 @@ onMounted(() => {
 <template>
   <div class="models min-w-0 w-full">
     <header class="models__header">
-      <h1 class="models__title">Models</h1>
+      <h1 class="models__title">{{ workspaceLabel("models") }}</h1>
       <div class="models__spacer" />
       <SegmentedControl
         class="models__tabs"

@@ -25,6 +25,9 @@ describe("router", () => {
     await router.push("/");
     expect(router.currentRoute.value.name).toBe("create");
 
+    await router.push("/queue");
+    expect(router.currentRoute.value.name).toBe("queue");
+
     await router.push("/library");
     expect(router.currentRoute.value.name).toBe("library");
 

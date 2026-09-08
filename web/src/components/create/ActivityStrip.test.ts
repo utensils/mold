@@ -295,14 +295,39 @@ describe("ActivityStrip", () => {
     expect(wrapper.text()).toContain("1 other queued print");
   });
 
-  it("opens queued prints with Space", async () => {
+  it("uses a native button to open queued prints", async () => {
     const queued = makeJob({ id: "job-2", workStarted: false });
     const wrapper = mount(ActivityStrip, { props: { jobs: [queued] } });
 
-    await wrapper
-      .get("[data-test='activity-queued-job-2']")
-      .trigger("keydown", { key: " " });
+    const button = wrapper.get("[data-test='activity-queued-job-2']");
+    expect(button.element.tagName).toBe("BUTTON");
+    await button.trigger("click");
     expect((wrapper.emitted("open")?.[0]?.[0] as Job).id).toBe(queued.id);
+  });
+
+  it("keeps keyboard events on row actions from opening the row", async () => {
+    const wrapper = mount(ActivityStrip, {
+      props: {
+        expanded: true,
+        jobs: [
+          makeJob({ id: "held", workStarted: false, retryable: true }),
+          makeFailedJob("failed", 10),
+        ],
+      },
+    });
+    for (const [action, id] of [
+      ["retry", "held"],
+      ["cancel", "held"],
+      ["dismiss", "failed"],
+    ]) {
+      const button = wrapper.get(`[data-test="activity-${action}-${id}"]`);
+      expect(button.element.closest('[role="button"]')).toBeNull();
+      for (const key of ["Enter", " "])
+        await button.trigger("keydown", { key });
+      expect(wrapper.emitted("open")).toBeUndefined();
+      await button.trigger("click");
+      expect(wrapper.emitted(action)?.[0]).toEqual([id]);
+    }
   });
 
   it("falls back to the stage line when no percent is available", () => {
@@ -352,8 +377,8 @@ describe("ActivityStrip", () => {
       wrapper.get("[data-test='activity-error-job-1']").text(),
     ).not.toContain("LTX-2 audio output is unavailable");
     await wrapper
-      .get("[data-test='activity-error-job-1']")
-      .trigger("keydown", { key: " " });
+      .get("[data-test='activity-error-job-1'] .activity__error-body")
+      .trigger("click");
     expect((wrapper.emitted("open")?.[0]?.[0] as Job).id).toBe(failed.id);
     await wrapper.get("[data-test='activity-dismiss-job-1']").trigger("click");
     expect(wrapper.emitted("dismiss")?.[0]).toEqual(["job-1"]);

@@ -30,13 +30,15 @@ import { compareNewestSubmitted } from "@studio/lib/activityOrder";
 const props = withDefaults(
   defineProps<{
     jobs: Job[];
+    /** Queue shows every waiting/error row; the Create strip stays compact. */
+    expanded?: boolean;
     /** Server-owned work discovered after a reload or in another client. */
     shared?: FleetActiveWork[];
     /** Live dispatch order per host from `/api/queue`. Absent (or missing an
      * entry) simply means the pill says "Queued" and nothing more. */
     queueStatus?: QueueStatusIndex | null;
   }>(),
-  { shared: () => [], queueStatus: null },
+  { shared: () => [], queueStatus: null, expanded: false },
 );
 
 /** "Next up" / "#2 in line", or "Waiting for memory" when the scheduler really
@@ -102,10 +104,12 @@ const partition = computed(() =>
 
 /** Failed prints the strip is still holding, in partition order. */
 const errors = computed(() =>
-  partition.value.attention.flatMap((vm) => {
-    const job = props.jobs.find((j) => `print:${j.id}` === vm.key);
-    return job ? [job] : [];
-  }),
+  props.expanded
+    ? props.jobs.filter((job) => job.state === "error" && job.error)
+    : partition.value.attention.flatMap((vm) => {
+        const job = props.jobs.find((j) => `print:${j.id}` === vm.key);
+        return job ? [job] : [];
+      }),
 );
 
 function percentFor(job: Job): number | null {
@@ -163,7 +167,9 @@ const newestQueued = computed(() => {
   );
 });
 const summarizedQueuedCount = computed(() =>
-  Math.max(0, queued.value.length - (newestQueued.value ? 1 : 0)),
+  props.expanded
+    ? 0
+    : Math.max(0, queued.value.length - (newestQueued.value ? 1 : 0)),
 );
 
 type WebActivityRow =
@@ -191,16 +197,17 @@ const activeRows = computed<WebActivityRow[]>(() =>
       kind: "print",
       print,
     })),
-    ...(newestQueued.value
-      ? [
-          {
-            key: `print:${newestQueued.value.id}`,
-            createdAtMs: newestQueued.value.startedAt,
-            kind: "print" as const,
-            print: newestQueued.value,
-          },
-        ]
-      : []),
+    ...(props.expanded
+      ? queued.value
+      : newestQueued.value
+        ? [newestQueued.value]
+        : []
+    ).map((print) => ({
+      key: `print:${print.id}`,
+      createdAtMs: print.startedAt,
+      kind: "print" as const,
+      print,
+    })),
   ].sort(compareNewestSubmitted),
 );
 const active = computed(
@@ -208,7 +215,7 @@ const active = computed(
     running.value.length > 0 ||
     queued.value.length > 0 ||
     partition.value.active.length > 0 ||
-    partition.value.attention.length > 0 ||
+    errors.value.length > 0 ||
     props.shared.length > 0,
 );
 </script>
@@ -289,16 +296,13 @@ const active = computed(
       </div>
 
       <div v-else class="activity__queued">
-        <span
-          class="activity__pill"
-          :data-test="`activity-queued-${row.print.id}`"
-          role="button"
-          tabindex="0"
-          @click="emit('open', row.print)"
-          @keydown.enter.prevent="emit('open', row.print)"
-          @keydown.space.prevent="emit('open', row.print)"
-        >
-          <span class="activity__pill-text">
+        <div class="activity__pill">
+          <button
+            type="button"
+            class="activity__pill-text"
+            :data-test="`activity-queued-${row.print.id}`"
+            @click="emit('open', row.print)"
+          >
             <span
               v-if="hostBadge(row.print)"
               class="activity__host"
@@ -314,12 +318,13 @@ const active = computed(
             <span v-if="row.print.holdError" class="activity__hold-error">
               · {{ row.print.holdError }}
             </span>
-          </span>
+          </button>
           <button
             v-if="row.print.retryable"
             type="button"
             class="activity__row-action"
             :disabled="row.print.retrying"
+            :aria-label="`Retry ${promptFor(row.print)}`"
             :data-test="`activity-retry-${row.print.id}`"
             @click.stop="emit('retry', row.print.id)"
           >
@@ -336,7 +341,7 @@ const active = computed(
             <span v-if="row.print.cancelling" class="data-mono">…</span>
             <Icon v-else name="close" :size="12" />
           </button>
-        </span>
+        </div>
       </div>
     </template>
 
@@ -355,15 +360,15 @@ const active = computed(
       class="activity__error"
       role="alert"
       :data-test="`activity-error-${job.id}`"
-      tabindex="0"
-      @click="emit('open', job)"
-      @keydown.enter.prevent="emit('open', job)"
-      @keydown.space.prevent="emit('open', job)"
     >
-      <span class="activity__error-body">
+      <button
+        type="button"
+        class="activity__error-body"
+        @click="emit('open', job)"
+      >
         <span class="activity__error-prompt">{{ promptFor(job) }}</span>
         <span>{{ terminalLabel(job) }}</span>
-      </span>
+      </button>
       <button
         type="button"
         class="activity__dismiss"
@@ -558,6 +563,16 @@ const active = computed(
   padding: 5px 8px 5px 12px;
 }
 
+.activity__pill-text,
+.activity__error-body {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
 .activity__pill-text {
   font-size: 11.5px;
   color: var(--ink-2);

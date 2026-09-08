@@ -30,11 +30,13 @@ function load(): Record<string, ActivityHostSnapshot> {
 
 const snapshots = ref(load());
 const epochs: Record<string, number> = {};
-let timer: ReturnType<typeof setInterval> | null = null;
+let timer: ReturnType<typeof setTimeout> | null = null;
 let consumers = 0;
 let refreshing = false;
+let pollEpoch = 0;
 
 export function useLiveActivity(routing: HostRouting) {
+  let started = false;
   async function refresh() {
     if (refreshing) return;
     refreshing = true;
@@ -86,18 +88,25 @@ export function useLiveActivity(routing: HostRouting) {
     rows: computed(() => mergeFleetActivity(Object.values(snapshots.value))),
     refresh,
     start() {
+      if (started) return;
+      started = true;
       consumers += 1;
-      if (timer) return;
+      if (consumers > 1) return;
+      const epoch = ++pollEpoch;
       const poll = async () => {
         await refresh();
-        if (consumers > 0) timer = setTimeout(poll, POLL_MS);
+        if (consumers > 0 && epoch === pollEpoch)
+          timer = setTimeout(poll, POLL_MS);
       };
       timer = setTimeout(poll, 0);
     },
     stop() {
+      if (!started) return;
+      started = false;
       consumers = Math.max(0, consumers - 1);
-      if (consumers || !timer) return;
-      clearInterval(timer);
+      if (consumers) return;
+      pollEpoch += 1;
+      if (timer !== null) clearTimeout(timer);
       timer = null;
     },
   };

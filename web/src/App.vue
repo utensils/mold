@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, provide, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, provide, ref } from "vue";
 import { useRoute } from "vue-router";
 import ToastShelf from "@ui/components/ToastShelf.vue";
 import DownloadsPopover from "./components/shell/DownloadsPopover.vue";
@@ -17,6 +17,8 @@ import {
 import { useCatalog } from "./composables/useCatalog";
 import { useGenerateStream } from "./composables/useGenerateStream";
 import { startGenerateQueueReconciler } from "./composables/useQueueReconciler";
+import { useHostRouting } from "./composables/useHostRouting";
+import { useLiveActivity } from "./composables/useLiveActivity";
 import { installNotifications } from "./lib/notifications";
 import {
   useResources,
@@ -36,6 +38,12 @@ const downloads = useDownloads();
 // user is on.
 const stream = useGenerateStream();
 const reconciler = startGenerateQueueReconciler(stream);
+
+// One fleet activity loop belongs to the shell. Page and navigation consumers
+// read the same singleton, including while Create is unmounted.
+const routing = useHostRouting();
+const liveActivity = useLiveActivity(routing);
+onMounted(() => liveActivity.start());
 
 // Downloads popover (spec §06). Opened by the AppNav button and ⌘K palette,
 // both of which dispatch the shared `mold:open-downloads` window event.
@@ -78,6 +86,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
   off();
   reconciler.stop();
+  liveActivity.stop();
   teardownNotifications();
 });
 
