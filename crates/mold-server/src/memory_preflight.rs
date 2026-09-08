@@ -614,11 +614,12 @@ const WAN_REQUEST_AWARE_HEADROOM_BYTES: u64 = 2_000_000_000;
 ///
 /// The #1059 margin run isolated the 1.3B transformer/VAE phase at
 /// 8,184,725,504 allocated Metal bytes. The CUDA-calibrated request-aware
-/// formula predicted 6.2 GB because it removed the generic 2 GB allowance;
-/// retaining that allowance lands within 18 MB of the observation. Keep a
-/// further 256 MiB so admission stays above the measured peak rather than
-/// balancing on allocator noise.
-const WAN_METAL_ALLOCATOR_MARGIN_BYTES: u64 = 256 * 1024 * 1024;
+/// formula originally predicted 6.2 GB because it removed the generic 2 GB
+/// allowance. Later activation calibration lowered that request estimate far
+/// enough that the former 256 MiB margin fell below the retained observation.
+/// Keep a further 768 MiB so admission remains above the measured peak with
+/// roughly the original 256 MiB of allocator variation still available.
+const WAN_METAL_ALLOCATOR_MARGIN_BYTES: u64 = 768 * 1024 * 1024;
 
 /// Device memory a face-identity render needs beside the checkpoint it
 /// conditions.
@@ -3003,7 +3004,11 @@ mod fail_closed_tests {
             false,
         );
         assert_eq!(old_boundary.fits_available_memory, Some(false));
-        assert!(old_boundary.peak_memory_bytes > 8_184_725_504);
+        assert!(
+            old_boundary.peak_memory_bytes > 8_184_725_504,
+            "estimated {} bytes",
+            old_boundary.peak_memory_bytes
+        );
 
         let corrected_boundary = estimate_generation_memory_for_request(
             &request,
