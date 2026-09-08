@@ -1,0 +1,1 @@
+- **Android theme contrast.** Restore the selected native status/navigation-bar appearance on each recreated Activity, keeping dark-theme system icons readable after changing navigation mode.
