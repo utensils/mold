@@ -114,6 +114,12 @@ const loadMoreQueueError = ref("");
 const cancellingIds = ref<string[]>([]);
 const mutatingDeviceIds = ref(new Set<string>());
 const models = ref<ModelInfoExtended[]>([]);
+const modelsLoaded = ref(false);
+const modelsLoading = ref(false);
+const modelsError = ref("");
+const downloadsLoaded = ref(false);
+const downloadsLoading = ref(false);
+const downloadsError = ref("");
 const downloads = ref<DownloadJobWire[]>([]);
 const targetId = ref(getGenerateTargetId());
 
@@ -378,14 +384,25 @@ async function reloadModels(
   epoch = sessionEpoch,
   signal?: AbortSignal,
 ) {
-  if (!entry) return;
+  if (!entry || !isCurrentSession(entry, epoch) || signal?.aborted) return;
   const generation = ++modelRequestGeneration;
+  modelsLoading.value = true;
   try {
     const next = await hostModels(entry, signal);
-    if (generation === modelRequestGeneration && isCurrentSession(entry, epoch))
+    if (
+      generation === modelRequestGeneration &&
+      isCurrentSession(entry, epoch)
+    ) {
       models.value = next;
-  } catch {
-    /* keep stale */
+      modelsLoaded.value = true;
+      modelsError.value = "";
+    }
+  } catch (error) {
+    if (generation === modelRequestGeneration && isCurrentSession(entry, epoch))
+      modelsError.value = `Could not load installed styles: ${errMsg(error)}`;
+  } finally {
+    if (generation === modelRequestGeneration && isCurrentSession(entry, epoch))
+      modelsLoading.value = false;
   }
 }
 
@@ -394,8 +411,9 @@ async function reloadDownloads(
   epoch = sessionEpoch,
   signal?: AbortSignal,
 ) {
-  if (!entry) return;
+  if (!entry || !isCurrentSession(entry, epoch) || signal?.aborted) return;
   const generation = ++downloadRequestGeneration;
+  downloadsLoading.value = true;
   try {
     const listing = await hostDownloads(entry, signal);
     const active = [
@@ -406,10 +424,23 @@ async function reloadDownloads(
     if (
       generation === downloadRequestGeneration &&
       isCurrentSession(entry, epoch)
-    )
+    ) {
       downloads.value = active;
-  } catch {
-    /* keep stale */
+      downloadsLoaded.value = true;
+      downloadsError.value = "";
+    }
+  } catch (error) {
+    if (
+      generation === downloadRequestGeneration &&
+      isCurrentSession(entry, epoch)
+    )
+      downloadsError.value = `Could not load downloads: ${errMsg(error)}`;
+  } finally {
+    if (
+      generation === downloadRequestGeneration &&
+      isCurrentSession(entry, epoch)
+    )
+      downloadsLoading.value = false;
   }
 }
 
@@ -798,6 +829,8 @@ function reloadAll(
   epoch: number,
   signal: AbortSignal,
 ): Promise<void> {
+  if (!isCurrentSession(entry, epoch) || signal.aborted)
+    return Promise.resolve();
   if (reloadAllInFlight) {
     reloadAllPending = true;
     return reloadAllInFlight;
@@ -862,7 +895,13 @@ function startHostSession() {
   queueContinued.value = false;
   loadMoreQueueError.value = "";
   models.value = [];
+  modelsLoaded.value = false;
+  modelsLoading.value = false;
+  modelsError.value = "";
   downloads.value = [];
+  downloadsLoaded.value = false;
+  downloadsLoading.value = false;
+  downloadsError.value = "";
   hostName.value = host.value?.name ?? "";
   if (!entry) return;
   sessionAbort = new AbortController();
@@ -875,6 +914,7 @@ function startHostSession() {
     { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
     deviceEventsAbort.signal,
     () => {
+      if (!isCurrentSession(entry, epoch) || signal.aborted) return;
       void poll.refresh();
       // The queued follow-up is single-flight, but the now-stale queue answer
       // must not become visible while the current wave settles.
@@ -918,7 +958,9 @@ onBeforeUnmount(() => {
 <template>
   <!-- w-full: see MachinesPage — an mx-auto child of the column-flex app
        frame shrinks to content width without it. -->
-  <div class="mx-auto w-full max-w-[1800px] px-4 pb-40 pt-6 sm:px-6 lg:px-10">
+  <div
+    class="machine-detail mx-auto w-full max-w-[1800px] px-4 pb-40 pt-6 sm:px-6 lg:px-10"
+  >
     <router-link to="/machines" class="md-back" data-test="detail-back">
       <Icon name="chevron-left" :size="16" /> Machines
     </router-link>
@@ -1091,15 +1133,40 @@ onBeforeUnmount(() => {
         </CardSurface>
 
         <CardSurface class="md-models">
-          <div class="md-label">Installed models</div>
+          <div class="md-label">Installed styles</div>
+          <div
+            v-if="modelsError"
+            class="md-read-error"
+            role="alert"
+            data-test="models-error"
+          >
+            <p>{{ modelsError }}</p>
+            <p v-if="modelsLoaded">Showing the last known styles.</p>
+            <button
+              type="button"
+              class="md-read-retry"
+              data-test="models-retry"
+              :disabled="modelsLoading || !online"
+              @click="reloadModels()"
+            >
+              {{ modelsLoading ? "Retrying…" : "Retry" }}
+            </button>
+          </div>
+          <p v-else-if="!modelsLoaded" class="md-models__empty" role="status">
+            {{
+              disconnected
+                ? "Connect this machine to see its styles."
+                : "Loading styles…"
+            }}
+          </p>
           <p
-            v-if="installed.length === 0"
+            v-if="modelsLoaded && !modelsError && installed.length === 0"
             class="md-models__empty"
             data-test="models-empty"
           >
-            No models installed.
+            No styles installed.
           </p>
-          <div v-else class="md-models__list">
+          <div v-if="installed.length > 0" class="md-models__list">
             <div
               v-for="model in installed"
               :key="model.name"
@@ -1226,14 +1293,39 @@ onBeforeUnmount(() => {
         :data-dimmed="reconnecting ? 'true' : undefined"
       >
         <div class="md-label">Downloads</div>
+        <div
+          v-if="downloadsError"
+          class="md-read-error"
+          role="alert"
+          data-test="downloads-error"
+        >
+          <p>{{ downloadsError }}</p>
+          <p v-if="downloadsLoaded">Showing the last known downloads.</p>
+          <button
+            type="button"
+            class="md-read-retry"
+            data-test="downloads-retry"
+            :disabled="downloadsLoading || !online"
+            @click="reloadDownloads()"
+          >
+            {{ downloadsLoading ? "Retrying…" : "Retry" }}
+          </button>
+        </div>
+        <p v-else-if="!downloadsLoaded" class="md-dl__empty" role="status">
+          {{
+            disconnected
+              ? "Connect this machine to see its downloads."
+              : "Loading downloads…"
+          }}
+        </p>
         <p
-          v-if="downloads.length === 0"
+          v-if="downloadsLoaded && !downloadsError && downloads.length === 0"
           class="md-dl__empty"
           data-test="downloads-empty"
         >
           No active downloads.
         </p>
-        <div v-else class="md-dl__list">
+        <div v-if="downloads.length > 0" class="md-dl__list">
           <div
             v-for="job in downloads"
             :key="job.id"
@@ -1281,12 +1373,38 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.machine-detail {
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+}
+
+.md-read-error {
+  color: var(--stop);
+  overflow-wrap: anywhere;
+  font-size: 0.875rem;
+}
+.md-read-retry {
+  min-height: 44px;
+  padding: 4px 12px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  background: var(--bench);
+  color: var(--rebate);
+  font: inherit;
+  cursor: pointer;
+}
+.md-read-retry:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 .md-back {
   display: inline-flex;
   align-items: center;
   gap: 2px;
   color: var(--safelight);
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
 }
 
@@ -1294,11 +1412,12 @@ onBeforeUnmount(() => {
 .md-models__empty,
 .md-dl__empty {
   margin: 0;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   color: var(--ink-3);
 }
 
 .md-head {
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1307,14 +1426,14 @@ onBeforeUnmount(() => {
 
 .md-name {
   font-family: var(--f-display);
-  font-size: 19px;
+  font-size: 1.1875rem;
   font-weight: 700;
   color: var(--rebate);
 }
 
 .md-addr {
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 0.75rem;
   color: var(--ink-3);
 }
 
@@ -1323,24 +1442,25 @@ onBeforeUnmount(() => {
 }
 
 .md-target {
+  min-height: 44px;
   border: 1px solid var(--ce);
   background: transparent;
   color: var(--ink-2);
   padding: 8px 13px;
   border-radius: 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
 }
 
 .md-action {
-  min-height: 36px;
+  min-height: 44px;
   border: 1px solid var(--ce);
   background: transparent;
   color: var(--ink-2);
   padding: 0 11px;
   border-radius: 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
 }
 
@@ -1364,18 +1484,19 @@ onBeforeUnmount(() => {
   border: 1px solid var(--ce);
   border-radius: 10px;
   background: color-mix(in srgb, var(--stop) 10%, transparent);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   color: var(--ink-2);
 }
 
 .md-retry {
+  min-height: 44px;
   margin-left: auto;
   border: 1px solid var(--ce);
   background: transparent;
   color: var(--ink-2);
   padding: 5px 12px;
   border-radius: 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
 }
@@ -1404,7 +1525,7 @@ onBeforeUnmount(() => {
 
 .md-telemetry {
   grid-area: telemetry;
-  min-width: 280px;
+  min-width: 0;
 }
 
 .md-models {
@@ -1438,37 +1559,41 @@ onBeforeUnmount(() => {
 }
 
 .md-library__row {
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   gap: 10px;
   min-height: 32px;
 }
 .md-library__row + .md-library__row {
+  flex-wrap: wrap;
   margin-top: 8px;
 }
 .md-library__k {
   flex: 1;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   color: var(--ink-2);
 }
 .md-library__v {
   font-family: var(--f-mono);
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--rebate);
 }
 .md-library__select {
-  height: 30px;
+  max-width: 100%;
+  min-height: 44px;
+  height: max(44px, 2em);
   padding: 0 8px;
   border: 1px solid var(--ce);
   border-radius: var(--radius-control);
   background: var(--bath);
   color: var(--rebate);
   font-family: var(--f-body);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 .md-library__help {
   margin: 6px 0 10px;
-  font-size: 11.5px;
+  font-size: 0.75rem;
   line-height: 1.45;
   color: var(--ink-3);
 }
@@ -1476,14 +1601,15 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 30px;
+  min-height: 44px;
+  height: auto;
   padding: 0 10px;
   border: 1px solid color-mix(in srgb, var(--stop) 50%, transparent);
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--stop);
   font-family: var(--f-body);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
 }
@@ -1499,7 +1625,7 @@ onBeforeUnmount(() => {
 
 .md-label {
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 0.75rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink-3);
@@ -1508,16 +1634,18 @@ onBeforeUnmount(() => {
 
 .md-gpu {
   font-family: var(--f-mono);
-  font-size: 11.5px;
+  font-size: 0.75rem;
   color: var(--ink-3);
   margin-bottom: 16px;
 }
 
 .md-metric {
+  flex-wrap: wrap;
+  gap: 4px;
   display: flex;
   justify-content: space-between;
   font-family: var(--f-mono);
-  font-size: 11px;
+  font-size: 0.75rem;
   color: var(--ink-2);
   margin-bottom: 6px;
 }
@@ -1535,13 +1663,15 @@ onBeforeUnmount(() => {
 }
 
 .md-tiles {
+  flex-wrap: wrap;
   display: flex;
   gap: 10px;
   margin-top: 18px;
 }
 
 .md-tile {
-  flex: 1;
+  flex: 1 1 8rem;
+  min-width: 0;
   background: var(--bath);
   border: 1px solid var(--edge);
   border-radius: 9px;
@@ -1550,7 +1680,7 @@ onBeforeUnmount(() => {
 
 .md-tile__k {
   font-family: var(--f-mono);
-  font-size: 9px;
+  font-size: 0.75rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--ink-3);
@@ -1558,7 +1688,7 @@ onBeforeUnmount(() => {
 
 .md-tile__v {
   font-family: var(--f-mono);
-  font-size: 16px;
+  font-size: 1rem;
   margin-top: 3px;
   color: var(--rebate);
 }
@@ -1569,13 +1699,13 @@ onBeforeUnmount(() => {
   gap: 6px;
   margin-top: 16px;
   font-family: var(--f-mono);
-  font-size: 11px;
+  font-size: 0.75rem;
   color: var(--ink-3);
 }
 
 .md-models__list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr));
   gap: 2px;
   max-height: clamp(180px, 32vh, 320px);
   overflow-y: auto;
@@ -1599,7 +1729,7 @@ onBeforeUnmount(() => {
   flex: 1;
   min-width: 0;
   font-family: var(--f-mono);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   color: var(--rebate);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1608,7 +1738,7 @@ onBeforeUnmount(() => {
 
 .md-models__loaded {
   font-family: var(--f-mono);
-  font-size: 9px;
+  font-size: 0.75rem;
   color: var(--safelight);
 }
 
@@ -1639,6 +1769,8 @@ onBeforeUnmount(() => {
 }
 
 .md-dl__head {
+  flex-wrap: wrap;
+  gap: 8px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1647,7 +1779,7 @@ onBeforeUnmount(() => {
 
 .md-dl__name {
   font-family: var(--f-mono);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   color: var(--rebate);
 }
 </style>

@@ -41,6 +41,8 @@ let caps: HostCapabilities;
 let queueEntries: QueueEntry[];
 let models: ModelInfoExtended[];
 let downloadsListing: DownloadsListingWire;
+const hostModelsCall = vi.fn();
+const hostDownloadsCall = vi.fn();
 
 const cancelQueueJob = vi.fn().mockResolvedValue(undefined);
 const setQueueJobLane = vi.fn().mockResolvedValue(undefined);
@@ -111,8 +113,8 @@ vi.mock("../components/machines/hostClient", () => ({
   hostQueue: (...args: unknown[]) => hostQueueCall(...args),
   setHostDeviceEnabled: () =>
     Promise.resolve({ devices: poll.devices.value ?? [], plan_version: 0 }),
-  hostModels: () => Promise.resolve(models),
-  hostDownloads: () => Promise.resolve(downloadsListing),
+  hostModels: (...args: unknown[]) => hostModelsCall(...args),
+  hostDownloads: (...args: unknown[]) => hostDownloadsCall(...args),
   // Wrappers defer reading the vi.fns until call time (the factory is hoisted
   // above their declarations).
   cancelQueueJob: (...a: unknown[]) => cancelQueueJob(...a),
@@ -265,6 +267,10 @@ beforeEach(() => {
   queueEntries = [];
   models = [];
   downloadsListing = { active: null, active_jobs: [], queued: [], history: [] };
+  hostModelsCall.mockReset().mockImplementation(() => Promise.resolve(models));
+  hostDownloadsCall
+    .mockReset()
+    .mockImplementation(() => Promise.resolve(downloadsListing));
   cancelQueueJob.mockClear();
   toastMock.mockClear();
   setQueueJobLane.mockClear();
@@ -1142,6 +1148,60 @@ describe("HostDetailPage — saved host actions", () => {
   });
 });
 
+describe("HostDetailPage — partial read recovery", () => {
+  it.each(["models", "downloads"])(
+    "does not present a failed %s read as an empty list",
+    async (section) => {
+      const request = section === "models" ? hostModelsCall : hostDownloadsCall;
+      request.mockRejectedValueOnce(new Error("read unavailable"));
+      const w = await mountDetail();
+      expect(w.get(`[data-test="${section}-error"]`).text()).toContain(
+        "read unavailable",
+      );
+      expect(w.find(`[data-test="${section}-empty"]`).exists()).toBe(false);
+      await w.get(`[data-test="${section}-retry"]`).trigger("click");
+      await flushPromises();
+      expect(w.find(`[data-test="${section}-error"]`).exists()).toBe(false);
+      expect(w.find(`[data-test="${section}-empty"]`).exists()).toBe(true);
+    },
+  );
+
+  it("ignores a queued snapshot callback from a prior machine", async () => {
+    const w = await mountDetail();
+    const oldRefresh = subscribeToDeviceSnapshots.mock.calls[0]![2];
+    const pending = deferred<ModelInfoExtended[]>();
+    hostModelsCall.mockImplementationOnce(() => pending.promise);
+    const second = addHost({ url: "192.168.1.22:7680", name: "Second" });
+    routeHolder.id = second.id;
+    await flushPromises();
+    oldRefresh();
+    await flushPromises();
+    expect(hostModelsCall).toHaveBeenCalledTimes(2);
+    expect(hostDownloadsCall).toHaveBeenCalledTimes(2);
+    pending.resolve([]);
+    await flushPromises();
+    expect(w.find('[data-test="models-empty"]').exists()).toBe(true);
+  });
+
+  it("ignores an old machine's inventory failure after navigating to another", async () => {
+    let rejectOld!: (error: Error) => void;
+    hostModelsCall.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectOld = reject;
+        }),
+    );
+    const w = await mountDetail();
+    const second = addHost({ url: "192.168.1.21:7680", name: "Second" });
+    routeHolder.id = second.id;
+    await flushPromises();
+    rejectOld(new Error("old machine failed"));
+    await flushPromises();
+    expect(w.find('[data-test="models-error"]').exists()).toBe(false);
+    expect(w.find('[data-test="models-empty"]').exists()).toBe(true);
+  });
+});
+
 describe("HostDetailPage — models", () => {
   it("lists installed models with a loaded badge", async () => {
     models = [
@@ -1178,6 +1238,14 @@ describe("HostDetailPage — models", () => {
     // Only the downloaded model is installed.
     expect(w.findAll('[data-test="model-row"]')).toHaveLength(1);
     expect(w.find('[data-test="model-loaded"]').exists()).toBe(true);
+    hostModelsCall.mockRejectedValueOnce(new Error("inventory unavailable"));
+    subscribeToDeviceSnapshots.mock.calls[0]![2]();
+    await flushPromises();
+    expect(w.get('[data-test="models-error"]').text()).toContain(
+      "last known styles",
+    );
+    expect(w.findAll('[data-test="model-row"]')).toHaveLength(1);
+    expect(w.find('[data-test="models-empty"]').exists()).toBe(false);
   });
 });
 
