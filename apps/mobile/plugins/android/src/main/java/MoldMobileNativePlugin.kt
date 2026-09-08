@@ -2,11 +2,8 @@ package com.utensils.mold.mobile_native
 
 import android.Manifest
 import android.app.Activity
-import android.content.res.Configuration
 import android.content.Intent
-import android.graphics.Color
 import android.os.Build
-import android.webkit.WebView
 import androidx.activity.result.ActivityResult
 import app.tauri.PermissionState
 import app.tauri.annotation.Command
@@ -18,9 +15,7 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
-import androidx.core.view.WindowCompat
 import org.json.JSONObject
-import java.lang.ref.WeakReference
 
 @InvokeArg
 class HostKeyArgs {
@@ -94,23 +89,7 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
     private var identityPickPending = false
     private var pendingIdentityCamera: AndroidIdentityPhoto.CameraTarget? = null
     private var pendingLegacyMedia: PendingLegacyMedia? = null
-    private var textScaleWebView: WeakReference<WebView>? = null
-    private lateinit var pairingScanner: AndroidPairingScanner
-
-    override fun load(webView: WebView) {
-        super.load(webView)
-        textScaleWebView = WeakReference(webView)
-        applyAndroidTextScale(webView, hostActivity.resources.configuration.fontScale)
-        pairingScanner = AndroidPairingScanner(hostActivity, webView)
-    }
-
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        val scale = newConfig.fontScale
-        hostActivity.runOnUiThread {
-            textScaleWebView?.get()?.let { applyAndroidTextScale(it, scale) }
-        }
-    }
+    private var pairingScanner: AndroidPairingScanner? = null
 
     @Command
     fun setApiKey(invoke: Invoke) {
@@ -296,12 +275,23 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
 
     @Command
     fun scanPairingCode(invoke: Invoke) {
-        pairingScanner.scan(invoke)
+        hostActivity.runOnUiThread {
+            resolveOrReject(invoke, "open pairing camera") {
+                val surface = AndroidNativeSurface.snapshot()
+                val scanner = pairingScanner?.takeIf { it.matches(surface) } ?: run {
+                    pairingScanner?.dispose()
+                    AndroidPairingScanner(surface.activity, surface.webView).also { pairingScanner = it }
+                }
+                scanner.scan(invoke)
+            }
+        }
     }
 
     @Command
     fun cancelPairingScan(invoke: Invoke) {
-        pairingScanner.cancel(invoke)
+        hostActivity.runOnUiThread {
+            pairingScanner?.cancel(invoke) ?: invoke.resolve()
+        }
     }
 
     @ActivityCallback
@@ -346,31 +336,7 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
         val args = invoke.parseArgs(AppearanceArgs::class.java)
         hostActivity.runOnUiThread {
             resolveOrReject(invoke, "update appearance") {
-                val dark = when (args.appearance) {
-                    "dark" -> true
-                    "light" -> false
-                    "system" -> (hostActivity.resources.configuration.uiMode and
-                        Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
-                    else -> throw IllegalArgumentException("unknown appearance ${args.appearance}")
-                }
-                WindowCompat.getInsetsController(
-                    hostActivity.window,
-                    hostActivity.window.decorView,
-                ).apply {
-                    isAppearanceLightStatusBars = !dark
-                    isAppearanceLightNavigationBars = !dark
-                }
-                // Native system bars sit outside the WebView; mirror the Safelight desk tokens.
-                val chromeColor = Color.parseColor(if (dark) "#0A0805" else "#E6DCC7")
-                hostActivity.window.apply {
-                    statusBarColor = chromeColor
-                    navigationBarColor = chromeColor
-                    decorView.setBackgroundColor(chromeColor)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        isStatusBarContrastEnforced = false
-                        isNavigationBarContrastEnforced = false
-                    }
-                }
+                AndroidNativeSurface.setAppearance(args.appearance)
                 invoke.resolve()
             }
         }

@@ -1,0 +1,1 @@
+- **Android pairing.** Start scans on the current Activity and WebView after recreation, cancel obsolete camera sessions, and restore preview backgrounds only once during cleanup.

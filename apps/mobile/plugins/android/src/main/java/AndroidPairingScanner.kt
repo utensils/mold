@@ -16,6 +16,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.DefaultLifecycleObserver
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import com.google.mlkit.vision.barcode.BarcodeScanner
@@ -56,18 +57,62 @@ internal class PairingScanSession<T> {
     }
 }
 
+/** Restore only the background this preview actually replaced, once. */
+internal class PairingPreviewBackground(private val view: WebView) {
+    private var captured = false
+    private var original: Drawable? = null
+
+    fun makeTransparent() {
+        if (captured) return
+        original = view.background
+        captured = true
+        view.setBackgroundColor(Color.TRANSPARENT)
+    }
+
+    fun restore() {
+        if (!captured) return
+        view.background = original
+        captured = false
+        original = null
+    }
+}
+
 /** CameraX + bundled ML Kit scanner with deterministic cancellation semantics. */
 internal class AndroidPairingScanner(
     private val activity: Activity,
     private val webView: WebView,
-) {
+) : DefaultLifecycleObserver {
     private val session = PairingScanSession<Invoke>()
     private var previewView: PreviewView? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private var decoder: BarcodeScanner? = null
-    private var webViewBackground: Drawable? = null
+    private val previewBackground = PairingPreviewBackground(webView)
+
+    private var disposed = false
+
+    init {
+        (activity as? LifecycleOwner)?.lifecycle?.addObserver(this)
+    }
+
+    fun matches(surface: NativeSurfaceSnapshot): Boolean =
+        !disposed && activity === surface.activity && webView === surface.webView
+
+    fun dispose() {
+        if (disposed) return
+        disposed = true
+        val pending = session.cancel()
+        cleanupCamera()
+        pending?.value?.reject("cancelled")
+        (activity as? LifecycleOwner)?.lifecycle?.removeObserver(this)
+    }
+
+    override fun onDestroy(owner: LifecycleOwner) = dispose()
 
     fun scan(invoke: Invoke) {
+        if (disposed) {
+            invoke.reject("The camera surface is no longer available.")
+            return
+        }
         if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) !=
             PackageManager.PERMISSION_GRANTED
         ) {
@@ -107,8 +152,7 @@ internal class AndroidPairingScanner(
                 )
             }
             parent.addView(previewView)
-            webViewBackground = webView.background
-            webView.setBackgroundColor(Color.TRANSPARENT)
+            previewBackground.makeTransparent()
             webView.bringToFront()
 
             decoder = BarcodeScanning.getClient(
@@ -193,10 +237,8 @@ internal class AndroidPairingScanner(
         cameraProvider = null
         decoder?.close()
         decoder = null
-        val parent = webView.parent as? ViewGroup
-        previewView?.let { parent?.removeView(it) }
+        previewView?.let { (it.parent as? ViewGroup)?.removeView(it) }
         previewView = null
-        webView.background = webViewBackground
-        webViewBackground = null
+        previewBackground.restore()
     }
 }
