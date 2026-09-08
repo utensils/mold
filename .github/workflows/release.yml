@@ -286,7 +286,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "86"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
+        run: cargo build --release -p mold-ai --features cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 86 target/release/build
@@ -393,7 +393,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "89"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features h3-cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
+        run: cargo build --release -p mold-ai --features h3-cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 89 target/release/build
@@ -498,7 +498,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "100"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
+        run: cargo build --release -p mold-ai --features cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 100 target/release/build
@@ -605,7 +605,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "120"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
+        run: cargo build --release -p mold-ai --features cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 120 target/release/build

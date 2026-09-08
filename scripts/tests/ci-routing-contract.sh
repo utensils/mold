@@ -323,6 +323,18 @@ require_text "$release_workflow" \
 require_text "$release_workflow" \
   "--features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid  # macOS" \
   "the documented macOS source install omits Hunyuan3D texture baking"
+cuda_release_features="cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
+[[ "$(grep -Fc -- "cargo build --release -p mold-ai --features $cuda_release_features" "$release_workflow")" -eq 3 ]] \
+  || fail "the sm86/sm100/sm120 CUDA release recipes do not all ship the Hunyuan3D mesh stack"
+require_text "$release_workflow" \
+  "cargo build --release -p mold-ai --features h3-cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight" \
+  "the sm89 CUDA release recipe omits the Hunyuan3D mesh stack"
+require_text "$desktop" \
+  "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features h3-cuda,cudnn,pulid,webp,mesh-texture,mesh-matting,mesh-delight -- -D warnings" \
+  "the Linux CUDA desktop lint omits the Hunyuan3D mesh stack"
+require_text "$desktop" \
+  "bunx tauri build --features h3-cuda,cudnn,pulid,webp,mesh-texture,mesh-matting,mesh-delight --bundles appimage --ci -v" \
+  "the Linux CUDA AppImage omits the Hunyuan3D mesh stack"
 require_text "$ci" \
   "nix run nixpkgs#actionlint -- .github/workflows/*.yml" \
   "main release validation has no protected actionlint proof"
