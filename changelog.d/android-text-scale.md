@@ -1,1 +1,2 @@
 - **Android text preferences.** Follow system text size at launch and when it changes without restarting the app or losing the draft. Android About correctly names the GitHub APK update channel.
+- **Mobile overlay recovery.** Android Back dismisses image pickers, crop sheets, and mask editors. Dismissed image selections cannot apply late downloads. Short Android landscape screens keep readiness explanations in the scrolling form, and rotation preserves focused-editor recovery.

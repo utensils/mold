@@ -1632,6 +1632,40 @@ describe("MobileApp Create output", () => {
     ).toBe(false);
   });
 
+  it("moves Android short-landscape readiness into the form and restores it on rotation", async () => {
+    const width = Object.getOwnPropertyDescriptor(window, "innerWidth")!;
+    const height = Object.getOwnPropertyDescriptor(window, "innerHeight")!;
+    try {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 });
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: 400 });
+      isNativeAndroidRuntime.mockReturnValue(true);
+      installModels([]);
+      wrapper = mountMobileApp();
+      await flushPromises();
+      expect(wrapper.get('[data-test="mobile-inline-readiness"]').text()).toContain(
+        "Choose a model",
+      );
+      expect(
+        wrapper
+          .get('[data-test="mobile-create-action"]')
+          .find('[data-test="mobile-develop-blocker"]')
+          .exists(),
+      ).toBe(false);
+      expect(
+        wrapper.get('[data-test="mobile-develop-button"]').attributes("aria-describedby"),
+      ).toBe("mobile-create-readiness-message");
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 426 });
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
+      window.dispatchEvent(new Event("resize"));
+      await flushPromises();
+      expect(wrapper.get('[data-test="mobile-create-action"]').text()).toContain("Choose a model");
+      expect(wrapper.findAll('[data-test="mobile-develop-blocker"]')).toHaveLength(1);
+    } finally {
+      Object.defineProperty(window, "innerWidth", width);
+      Object.defineProperty(window, "innerHeight", height);
+    }
+  });
+
   it("keeps a corrective explanation beside a disabled persistent Develop action", async () => {
     installModels([]);
     wrapper = mountMobileApp();
@@ -7280,6 +7314,40 @@ describe("MobileApp foreground resume", () => {
       else Reflect.deleteProperty(window, "visualViewport");
       Object.defineProperty(window, "innerHeight", { value: originalHeight, configurable: true });
       Object.defineProperty(window, "innerWidth", { value: originalWidth, configurable: true });
+    }
+  });
+
+  it("restores a focused editor when window resize precedes visual viewport rotation", async () => {
+    const originalViewport = Object.getOwnPropertyDescriptor(window, "visualViewport");
+    const originalWidth = window.innerWidth;
+    const originalHeight = window.innerHeight;
+    const viewport = Object.assign(new EventTarget(), { height: 844, offsetTop: 0 });
+    vi.useFakeTimers();
+    try {
+      Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+      Object.defineProperty(window, "visualViewport", { value: viewport, configurable: true });
+      Object.defineProperty(window, "innerWidth", { value: 393, configurable: true });
+      Object.defineProperty(window, "innerHeight", { value: 844, configurable: true });
+      wrapper = mountMobileApp();
+      await flushPromises();
+      (fieldControl("Prompt").element as HTMLTextAreaElement).focus();
+      await vi.advanceTimersByTimeAsync(500);
+      invoke.mockClear();
+      Object.defineProperty(window, "innerWidth", { value: 844, configurable: true });
+      Object.defineProperty(window, "innerHeight", { value: 393, configurable: true });
+      viewport.height = 393;
+      window.dispatchEvent(new Event("resize"));
+      viewport.dispatchEvent(new Event("resize"));
+      await vi.advanceTimersByTimeAsync(400);
+      expect(invoke).toHaveBeenCalledWith("restore_mobile_viewport");
+    } finally {
+      wrapper?.unmount();
+      wrapper = null;
+      if (originalViewport) Object.defineProperty(window, "visualViewport", originalViewport);
+      else Reflect.deleteProperty(window, "visualViewport");
+      Object.defineProperty(window, "innerWidth", { value: originalWidth, configurable: true });
+      Object.defineProperty(window, "innerHeight", { value: originalHeight, configurable: true });
+      vi.useRealTimers();
     }
   });
 
