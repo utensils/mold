@@ -57,6 +57,26 @@ function formFor(family: string): GenerateForm {
 }
 
 describe("InspectorPanel — layout", () => {
+  it("hides raster controls when a mesh model has no usable profile", () => {
+    const form = formFor("hunyuan3d");
+    form.model = "hunyuan3d-2.1:fp16";
+    form.width = 1024;
+    form.height = 1024;
+    useModelStore().all = [
+      {
+        name: form.model,
+        family: form.family,
+        downloaded: true,
+        default_width: 1024,
+        default_height: 1024,
+      } as ModelEntry,
+    ];
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    expect(wrapper.findComponent(ShapePicker).exists()).toBe(false);
+    expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("disables ineffective distilled guidance and re-enables a guided recipe", async () => {
     const form = formFor("ltx2");
     form.model = "ltx-2.3-22b-distilled:fp8";

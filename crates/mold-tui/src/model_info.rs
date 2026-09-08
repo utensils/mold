@@ -47,6 +47,8 @@ pub struct ModelCapabilities {
     /// family-only catalog (no profile) offers no mesh rows at all rather
     /// than inventing bounds the server might not honour.
     pub mesh: Option<mold_core::MeshCapabilitiesProfile>,
+    /// No pixel size control, even while optional mesh capabilities are unavailable.
+    pub canvasless: bool,
     /// The ordered reference-image contract the selected recipe advertises
     /// (`capabilities.reference_images`), copied verbatim. `Some` is what
     /// shows the References row; `None` means this model has no reference
@@ -136,6 +138,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: None,
         };
@@ -159,6 +162,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: Some(Scheduler::Ddim),
         },
@@ -180,6 +184,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: Some(Scheduler::Ddim),
         },
@@ -201,6 +206,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: None,
         },
@@ -222,6 +228,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: None,
         },
@@ -243,6 +250,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: None,
         },
@@ -271,6 +279,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: None,
         },
@@ -292,6 +301,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: None,
         },
@@ -313,6 +323,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: None,
         },
@@ -334,6 +345,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: None,
         },
@@ -355,6 +367,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: None,
         },
@@ -376,6 +389,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: true,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: None,
         },
@@ -405,6 +419,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: true,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: None,
         },
@@ -433,6 +448,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: true,
             reference_images: None,
             default_scheduler: None,
         },
@@ -454,6 +470,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_video_upscale: false,
             supports_flow_shift: false,
             mesh: None,
+            canvasless: false,
             reference_images: None,
             default_scheduler: None,
         },
@@ -610,6 +627,9 @@ pub fn apply_recipe_capabilities(
     recipe: Option<&mold_core::GenerationCapabilitiesProfile>,
 ) {
     caps.mesh = recipe.and_then(|recipe| recipe.mesh.clone());
+    if let Some(recipe) = recipe {
+        caps.canvasless = recipe.mesh.is_some();
+    }
     // `reference_images` is `Option` on the wire and its ABSENCE means an
     // older server — one whose flux2-dev and qwen-image-edit references still
     // work. So a profile that does not carry the block leaves

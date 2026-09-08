@@ -56,18 +56,22 @@ beforeEach(() => setActivePinia(createPinia()));
 afterEach(() => (document.body.innerHTML = ""));
 
 describe("SourceImageWell — canvasless 3-D recipes", () => {
-  it("offers no source fit, strength or mask for an attached mesh source", async () => {
-    const selectedModel = modelWith("hunyuan3d-mini-turbo:fp16", "hunyuan3d", hunyuan3dRecipe());
-    const wrapper = mount(SourceImageWell, {
-      props: { form: formFor("hunyuan3d", selectedModel.name), selectedModel },
-      attachTo: document.body,
-    });
-    await flushPromises();
-    expect(wrapper.find("[data-test='source-media-wells']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='source-fit-policy']").exists()).toBe(false);
-    expect(wrapper.vm.maskAvailable).toBe(false);
-    expect(wrapper.text()).not.toContain("Prompt strength");
-  });
+  it.each([true, false])(
+    "offers no source fit, strength or mask with advertised profile %s",
+    async (advertised) => {
+      const selectedModel = modelWith("hunyuan3d-mini-turbo:fp16", "hunyuan3d", hunyuan3dRecipe());
+      if (!advertised) delete selectedModel.generation_profile;
+      const wrapper = mount(SourceImageWell, {
+        props: { form: formFor("hunyuan3d", selectedModel.name), selectedModel },
+        attachTo: document.body,
+      });
+      await flushPromises();
+      expect(wrapper.find("[data-test='source-media-wells']").exists()).toBe(true);
+      expect(wrapper.find("[data-test='source-fit-policy']").exists()).toBe(false);
+      expect(wrapper.vm.maskAvailable).toBe(false);
+      expect(wrapper.text()).not.toContain("Prompt strength");
+    },
+  );
 
   it("keeps source fit, strength and the mask for a raster recipe", async () => {
     const selectedModel = modelWith("sdxl-base:fp16", "sdxl", sdxlRecipe());

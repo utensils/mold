@@ -377,6 +377,26 @@ describe("MobileResolutionPicker", () => {
    * correct rather than malformed input. Blocking on `width < 1` here would
    * disable Develop for every 3-D print.
    */
+
+  it("hides raster controls for a mesh model with no usable profile and stale dimensions", () => {
+    const wrapper = mount(MobileResolutionPicker, {
+      props: {
+        family: meshModel.family,
+        model: {
+          ...meshModel,
+          generation_profile: undefined,
+          default_width: 1024,
+          default_height: 1024,
+        },
+        width: 1024,
+        height: 1024,
+      },
+    });
+    expect(wrapper.find(".mobile-resolution-picker").exists()).toBe(false);
+    expect(wrapper.emitted("validity-change")).toEqual([[true]]);
+    wrapper.unmount();
+  });
+
   it("renders nothing and stays valid on a canvasless recipe", () => {
     const wrapper = mount(MobileResolutionPicker, {
       props: {

@@ -301,9 +301,9 @@ pub fn visible_rows(caps: &ModelCapabilities, adv: &AdvancedState) -> Vec<Create
     let mut rows = vec![CreateRow::Field(ParamField::Model)];
     // A mesh recipe has no canvas (its profile's resolution domain is
     // `None`, and the request's width/height are ignored), so a Size row
-    // would offer a knob that changes nothing. The mesh block is the one
-    // capability signal the form carries for that recipe.
-    if caps.mesh.is_none() {
+    // would offer a knob that changes nothing, including before the
+    // optional mesh-controls profile has arrived.
+    if !caps.canvasless {
         rows.push(CreateRow::Field(ParamField::Size));
     }
     rows.extend([
@@ -1268,7 +1268,7 @@ mod tests {
 
         let family_only = capabilities_for_family("hunyuan3d");
         assert!(family_only.mesh.is_none());
-        assert!(visible_rows(&family_only, &AdvancedState::default())
+        assert!(!visible_rows(&family_only, &AdvancedState::default())
             .contains(&CreateRow::Field(ParamField::Size)));
 
         let catalog = mold_core::build_model_catalog(&Config::default(), None, false);

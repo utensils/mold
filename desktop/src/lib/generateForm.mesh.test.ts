@@ -73,6 +73,25 @@ function meshForm() {
 }
 
 describe("selecting a Hunyuan3D recipe", () => {
+  it("keeps a missing-profile mesh request canvasless without inventing mesh features", () => {
+    const model = hunyuanModel();
+    delete model.generation_profile;
+    const form = newGenerateForm();
+    form.model = model.name;
+    form.family = model.family;
+    applyModelDefaults(form, model);
+    expect(form.outputFormat).toBe("glb");
+    expect([form.width, form.height]).toEqual([0, 0]);
+    form.sourceImage = "c291cmNl";
+    form.maskImage = "bWFzaw==";
+    form.sourceFit = { mode: "crop-fill" };
+    const request = buildRequest(form);
+    expect(request).toMatchObject({ width: 0, height: 0, output_format: "glb" });
+    expect(request).not.toHaveProperty("source_fit");
+    expect(request).not.toHaveProperty("mask_image");
+    expect(request).not.toHaveProperty("mesh");
+  });
+
   it("pins glb, takes the recipe's zero canvas, and snapshots the mesh controls", () => {
     const form = meshForm();
     expect(form.outputFormat).toBe("glb");

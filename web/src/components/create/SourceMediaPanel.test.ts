@@ -190,6 +190,32 @@ describe("SourceMediaPanel — per-model source-image contract (#772)", () => {
 });
 
 describe("SourceMediaPanel — source fit", () => {
+  it("does not fit a mesh source to a pixel canvas when the profile is unavailable", () => {
+    const wrapper = factory(
+      "hunyuan3d",
+      {
+        model: "hunyuan3d-2.1:fp16",
+        imageAttachments: [
+          { kind: "upload", filename: "source.png", base64: "AA" },
+        ],
+      },
+      {
+        models: [
+          {
+            name: "hunyuan3d-2.1:fp16",
+            family: "hunyuan3d",
+            source_image: "required",
+            default_width: 1024,
+            default_height: 1024,
+          },
+        ],
+      },
+    );
+    expect(wrapper.text()).toContain("source.png");
+    expect(wrapper.find("[aria-label='Fit to canvas']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("offers all five source-fit policies once an image is attached", () => {
     const wrapper = factory("sdxl", {
       imageAttachments: [
