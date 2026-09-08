@@ -1007,6 +1007,93 @@ describe("LibraryView Use these settings retained source media", () => {
     wrapper.unmount();
   });
 
+  it.each(["legacy", "offline"])(
+    "restores the producing host's source media when the preferred local mirror is %s",
+    async (state) => {
+      const video: GalleryImage = {
+        ...prints[0]!,
+        filename: "mirrored-ltx.mp4",
+        format: "mp4",
+        metadata: { ...prints[0]!.metadata, seed: 9, source_image_sha256: "a".repeat(64) },
+      };
+      const inventory = {
+        availability: "available" as const,
+        members: [
+          {
+            member_id: "m".repeat(64),
+            role: "source_image",
+            display_name: "city.png",
+            size_bytes: 3,
+          },
+        ],
+      };
+      if (state === "offline") retainedInventoryMock.mockRejectedValueOnce(new Error("offline"));
+      else
+        retainedInventoryMock.mockResolvedValueOnce({
+          availability: "unavailable_legacy",
+          members: [],
+        });
+      retainedInventoryMock.mockResolvedValueOnce(inventory);
+      const { wrapper } = await mountView(
+        video,
+        (gallery) => {
+          gallery.buckets.local!.items = [video];
+        },
+        "/library",
+        true,
+      );
+      const before = useToastStore().items.length;
+      await reuseFromContextMenu(wrapper);
+      expect(retainedInventoryMock).toHaveBeenCalledWith(video.filename, {
+        baseUrl: "http://127.0.0.1:7680",
+        apiKey: "local-key",
+      });
+      expect(retainedInventoryMock).toHaveBeenCalledWith(video.filename, plato);
+      expect(useComposerStore().retainedSource).toEqual({
+        filename: video.filename,
+        origin: plato,
+        inventory,
+      });
+      expect(useToastStore().items.length).toBe(before);
+      wrapper.unmount();
+    },
+  );
+
+  it("ignores an older print's inventory after a new composer restore", async () => {
+    const video: GalleryImage = {
+      ...prints[0]!,
+      filename: "mirrored-ltx.mp4",
+      format: "mp4",
+      metadata: { ...prints[0]!.metadata, seed: 9, source_image_sha256: "a".repeat(64) },
+    };
+    let resolveInventory!: (inventory: unknown) => void;
+    retainedInventoryMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveInventory = resolve;
+        }),
+    );
+    const { wrapper } = await mountView(
+      video,
+      (gallery) => {
+        gallery.buckets.local!.items = [video];
+      },
+      "/library",
+      true,
+    );
+    await reuseFromContextMenu(wrapper);
+    const composer = useComposerStore();
+    composer.set({ metadata: prints[1]!.metadata });
+    const before = useToastStore().items.length;
+    resolveInventory({ availability: "unavailable_legacy", members: [] });
+    await flushPromises();
+    expect(retainedInventoryMock).toHaveBeenCalledTimes(1);
+    expect(composer.retainedSource).toBeNull();
+    expect(composer.prefill).toEqual({ metadata: prints[1]!.metadata });
+    expect(useToastStore().items.length).toBe(before);
+    wrapper.unmount();
+  });
+
   it("discloses the auth state when the origin host refuses the probe", async () => {
     // The one case the "connect this machine with an API key" sentence is
     // about: a host that enforces keys, reached with none. The shared probe

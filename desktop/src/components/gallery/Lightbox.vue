@@ -360,6 +360,10 @@ function imageMenu(): MenuEntry[] {
       ? []
       : [
           {
+            label: "Reuse settings",
+            action: primaryAction,
+          },
+          {
             label: "Use as source",
             disabled: props.audio || props.mesh,
             action: () => emit("useSource"),
@@ -962,7 +966,7 @@ async function performVideoExport(options: VideoExportOptions) {
 
         <!-- the secondary actions -->
         <div class="mt-auto flex flex-col gap-2 pt-2">
-          <div class="flex gap-2">
+          <div class="flex flex-wrap gap-2">
             <button
               v-if="!fromTrash"
               type="button"
@@ -1025,7 +1029,7 @@ async function performVideoExport(options: VideoExportOptions) {
               {{ generationAssetLabel(asset) }}
             </button>
           </div>
-          <div class="flex gap-2">
+          <div class="flex flex-wrap gap-2">
             <button
               v-if="canExportVideo"
               type="button"
