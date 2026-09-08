@@ -638,7 +638,17 @@ it is not a completion checklist with assumed passes.
   including H3 payload provenance. The Nix source hash is
   `sha256-CREJfuti4jbOkCce8ywfGjtdquCGjW0QQqQr9WUpvJQ=`; the same archive-prefetch
   method reproduced the previous pinned hash before computing this one.
-  `candle-cudnn-pin-contract-v1.log` passes the single-identity contract. The
+  `candle-cudnn-pin-contract-v1.log` passes the single-identity contract.
+- **Correction (2026-09-08).** The pin above held on the campaign branch only.
+  The merge that shipped this work to `main` (#1620) carried the consumer code,
+  the rules entry and this record, but pinned Candle `c34de9b7`, which contains
+  neither correction — so both were inert on every CUDA build from that merge
+  until the pin was moved to the merge commit
+  `bf2cd29a791dbc053df826b4377d092c3809d17f`, Nix archive hash
+  `sha256-yCwX+XdtJKY6oXp++9d9kw6opSJlRHV69Khc9LwaSQo=`. Neither
+  `sha256-CREJfuti4jbOkCce8ywfGjtdquCGjW0QQqQr9WUpvJQ=` above nor
+  `sha256-9Q+34Aow5+d9xzz6uedU6zTbKYtyOugbUEOyXRCnLbU=` below was ever the
+  shipped hash. The
   independent real512 Torch VAE comparison remains required after this backend
   correction; the numerical regression alone does not close it.
 
@@ -1087,7 +1097,9 @@ it is not a completion checklist with assumed passes.
 - All dependency declarations, both Candle-containing lockfiles, and H3's
   backend provenance point to that commit. The Nix source archive hash is
   `sha256-9Q+34Aow5+d9xzz6uedU6zTbKYtyOugbUEOyXRCnLbU=`. Single-Candle identity,
-  desktop lock sync and desktop Nix source-hash contracts pass. Full upscaler
+  desktop lock sync and desktop Nix source-hash contracts pass. (Campaign branch only —
+  see the 2026-09-08 correction above; the revision that actually shipped is
+  the merge `bf2cd29a791dbc053df826b4377d092c3809d17f`.) Full upscaler
   comparison against the original unsubstituted oracle remains the exit gate.
 - That original-oracle comparison now passes on both full 512-to-2048 view-00
   streams. Albedo (`paint-upscaler-explicit-first-albedo00-v1`) has zero error

@@ -52,8 +52,8 @@ pub const H3_FLASH_ATTN_PACKAGE_VERSION: &str = "0.11.0";
 /// record naming a payload that was not compiled is worse than none.
 pub const H3_FLASH_ATTN_SOURCE: &str = concat!(
     "git+https://github.com/utensils/candle.git",
-    "?rev=c34de9b7c16aa92ed159982128954562b7c16ab8",
-    "#c34de9b7c16aa92ed159982128954562b7c16ab8"
+    "?rev=bf2cd29a791dbc053df826b4377d092c3809d17f",
+    "#bf2cd29a791dbc053df826b4377d092c3809d17f"
 );
 pub const H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY: (u16, u16) = (8, 9);
 /// v2 (#1399): the archive-checksum field became the source-identity field.
