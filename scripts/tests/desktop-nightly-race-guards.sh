@@ -30,7 +30,7 @@ grep -Fq 'run: cargo test --manifest-path src-tauri/Cargo.toml' <<< "$rust_job" 
   || fail "the native desktop gate no longer runs the test suite"
 
 linux_job="$(sed -n '/^  desktop-linux:/,/^  desktop-nightly:/p' "$workflow")"
-grep -Fq 'bunx tauri build --features h3-cuda,cudnn,pulid,webp --bundles appimage --ci -v' <<< "$linux_job" \
+grep -Fq 'bunx tauri build --features h3-cuda,cudnn,pulid,webp,mesh-texture,mesh-matting,mesh-delight --bundles appimage --ci -v' <<< "$linux_job" \
   || fail "main pushes have no Linux packaging proof"
 grep -Fq "if: github.event_name != 'pull_request'" <<< "$linux_job" \
   || fail "Linux packaging is not reserved for main pushes"
@@ -116,7 +116,7 @@ desktop_workflow="$repo_root/.github/workflows/desktop.yml"
   || fail "every desktop platform must compile the shipped WebP and PuLID feature edges"
 grep -Fq 'bunx tauri build --features pulid,webp --bundles nsis --ci -v' "$desktop_workflow" \
   || fail "the Windows desktop build does not ship WebP export"
-grep -Fq 'bunx tauri build --features h3-cuda,cudnn,pulid,webp --bundles appimage --ci -v' "$desktop_workflow" \
+grep -Fq 'bunx tauri build --features h3-cuda,cudnn,pulid,webp,mesh-texture,mesh-matting,mesh-delight --bundles appimage --ci -v' "$desktop_workflow" \
   || fail "the Linux desktop build does not ship WebP export"
 grep -Fq 'bunx tauri build --features pulid,webp --bundles nsis --ci -v' "$repo_root/.github/workflows/windows-nightly.yml" \
   || fail "the Windows nightly desktop build does not ship WebP export"
