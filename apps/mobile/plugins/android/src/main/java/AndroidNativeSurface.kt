@@ -4,22 +4,35 @@ import android.app.Activity
 import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
+import android.webkit.WebView
 import androidx.core.view.WindowCompat
 import java.lang.ref.WeakReference
+
+internal data class NativeSurfaceSnapshot(val activity: Activity, val webView: WebView)
 
 /** Window state belongs to the current Activity, not a once-loaded Tauri plugin. */
 object AndroidNativeSurface {
     private var activity = WeakReference<Activity>(null)
+    private var webView = WeakReference<WebView>(null)
     private var appearance: String? = null
 
-    fun bind(owner: Activity) {
+    fun bind(owner: Activity, view: WebView) {
         activity = WeakReference(owner)
+        webView = WeakReference(view)
         reapply(owner)
     }
 
     fun clear(owner: Activity) {
         if (activity.get() !== owner) return
         activity.clear()
+        webView.clear()
+    }
+
+    internal fun snapshot(): NativeSurfaceSnapshot {
+        val owner = activity.get()?.takeUnless { it.isDestroyed }
+            ?: error("The app window is not available")
+        val view = webView.get() ?: error("The app view is not available")
+        return NativeSurfaceSnapshot(owner, view)
     }
 
     fun setAppearance(value: String) {

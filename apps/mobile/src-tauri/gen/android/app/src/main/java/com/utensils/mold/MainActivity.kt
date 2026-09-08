@@ -18,7 +18,7 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     currentWebView = webView
-    AndroidNativeSurface.bind(this)
+    AndroidNativeSurface.bind(this, webView)
     applyAndroidTextScale(webView, resources.configuration.fontScale)
     AndroidOverlayBack(this, webView)
   }

@@ -4,7 +4,6 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.os.Build
-import android.webkit.WebView
 import androidx.activity.result.ActivityResult
 import app.tauri.PermissionState
 import app.tauri.annotation.Command
@@ -90,12 +89,7 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
     private var identityPickPending = false
     private var pendingIdentityCamera: AndroidIdentityPhoto.CameraTarget? = null
     private var pendingLegacyMedia: PendingLegacyMedia? = null
-    private lateinit var pairingScanner: AndroidPairingScanner
-
-    override fun load(webView: WebView) {
-        super.load(webView)
-        pairingScanner = AndroidPairingScanner(hostActivity, webView)
-    }
+    private var pairingScanner: AndroidPairingScanner? = null
 
     @Command
     fun setApiKey(invoke: Invoke) {
@@ -281,12 +275,23 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
 
     @Command
     fun scanPairingCode(invoke: Invoke) {
-        pairingScanner.scan(invoke)
+        hostActivity.runOnUiThread {
+            resolveOrReject(invoke, "open pairing camera") {
+                val surface = AndroidNativeSurface.snapshot()
+                val scanner = pairingScanner?.takeIf { it.matches(surface) } ?: run {
+                    pairingScanner?.dispose()
+                    AndroidPairingScanner(surface.activity, surface.webView).also { pairingScanner = it }
+                }
+                scanner.scan(invoke)
+            }
+        }
     }
 
     @Command
     fun cancelPairingScan(invoke: Invoke) {
-        pairingScanner.cancel(invoke)
+        hostActivity.runOnUiThread {
+            pairingScanner?.cancel(invoke) ?: invoke.resolve()
+        }
     }
 
     @ActivityCallback
