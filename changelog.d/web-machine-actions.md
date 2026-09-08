@@ -1,0 +1,1 @@
+- **Make machine actions accessible.** Machines now have a visible actions button and separate Open, Retry, and Connect controls. The menu supports keyboard navigation, restores focus, and stays within small or enlarged-text viewports.

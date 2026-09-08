@@ -1,12 +1,15 @@
-import { mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { enableAutoUnmount, mount } from "@vue/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick, ref } from "vue";
 import type { HostStatus } from "../components/machines/hostClient";
 import type { ResourceSnapshot } from "../types";
 import MachinesPage from "./MachinesPage.vue";
 import ConnectModal from "../components/machines/ConnectModal.vue";
 
-const { toastMock } = vi.hoisted(() => ({ toastMock: vi.fn() }));
+const { toastMock, pushMock } = vi.hoisted(() => ({
+  toastMock: vi.fn(),
+  pushMock: vi.fn(),
+}));
 
 vi.mock("../lib/toasts", () => ({
   toast: toastMock,
@@ -34,7 +37,7 @@ vi.mock("../components/machines/hostClient", () => ({
 }));
 
 vi.mock("vue-router", () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: pushMock }),
   useRoute: () => ({ query: {} }),
 }));
 
@@ -60,12 +63,19 @@ function makeStatus(over: Partial<HostStatus> = {}): HostStatus {
 
 const mountPage = () =>
   mount(MachinesPage, {
+    attachTo: document.body,
     global: { stubs: { ConnectModal: true } },
   });
+
+enableAutoUnmount(afterEach);
+afterEach(() => {
+  document.body.innerHTML = "";
+});
 
 beforeEach(() => {
   localStorage.clear();
   toastMock.mockClear();
+  pushMock.mockClear();
   poll = {
     status: ref<HostStatus | null>(null),
     resources: ref<ResourceSnapshot | null>(null),
@@ -128,6 +138,65 @@ describe("MachinesPage", () => {
     document.body.dispatchEvent(
       new PointerEvent("pointerdown", { bubbles: true }),
     );
+    await nextTick();
+    expect(w.find('[data-test="machine-context-menu"]').exists()).toBe(false);
+  });
+
+  it("opens visible machine actions, moves focus, and restores the opener on Escape", async () => {
+    poll.loading.value = false;
+    poll.online.value = true;
+    poll.status.value = makeStatus();
+    const w = mountPage();
+    const opener = w.get('[data-test="host-actions"]');
+    await opener.trigger("click");
+    await nextTick();
+    const menu = w.get('[data-test="machine-context-menu"]');
+    const buttons = menu.findAll("button:not(:disabled)");
+    expect(opener.attributes("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(buttons[0]!.element);
+    await buttons[0]!.trigger("keydown", { key: "ArrowUp" });
+    expect(document.activeElement).toBe(buttons.at(-1)!.element);
+    await buttons.at(-1)!.trigger("keydown", { key: "Home" });
+    expect(document.activeElement).toBe(buttons[0]!.element);
+    await buttons[0]!.trigger("keydown", { key: "ArrowDown" });
+    expect(document.activeElement).toBe(buttons[1]!.element);
+    await buttons[1]!.trigger("keydown", { key: "Escape" });
+    expect(w.find('[data-test="machine-context-menu"]').exists()).toBe(false);
+    expect(document.activeElement).toBe(opener.element);
+    expect(opener.attributes("aria-expanded")).toBe("false");
+  });
+
+  it("keeps Retry keyboard events separate from opening machine details", async () => {
+    poll.loading.value = false;
+    const w = mountPage();
+    const retry = w.get('[data-test="host-retry"]');
+    expect(retry.element.closest('[role="button"]')).toBeNull();
+    await retry.trigger("keydown", { key: "Enter" });
+    await retry.trigger("click");
+    expect(poll.refresh).toHaveBeenCalledTimes(1);
+    expect(pushMock).not.toHaveBeenCalled();
+    await w.get('[data-test="host-open"]').trigger("click");
+    expect(pushMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("clamps an edge context menu and closes on Tab or resize", async () => {
+    poll.loading.value = false;
+    const w = mountPage();
+    await w
+      .get('[data-test="host-card"]')
+      .trigger("contextmenu", { clientX: 5000, clientY: 5000 });
+    await nextTick();
+    const menu = w.get('[data-test="machine-context-menu"]');
+    expect(
+      Number.parseFloat((menu.element as HTMLElement).style.left),
+    ).toBeLessThan(window.innerWidth);
+    expect(
+      Number.parseFloat((menu.element as HTMLElement).style.top),
+    ).toBeLessThan(window.innerHeight);
+    await menu.find("button:not(:disabled)").trigger("keydown", { key: "Tab" });
+    expect(w.find('[data-test="machine-context-menu"]').exists()).toBe(false);
+    await w.get('[data-test="host-actions"]').trigger("click");
+    window.dispatchEvent(new Event("resize"));
     await nextTick();
     expect(w.find('[data-test="machine-context-menu"]').exists()).toBe(false);
   });

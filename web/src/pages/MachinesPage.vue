@@ -7,7 +7,7 @@
  * With no remotes the origin card plus the add card stand in for an empty
  * state (G4).
  */
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import CardSurface from "@ui/components/CardSurface.vue";
 import Icon from "@ui/components/Icon.vue";
@@ -33,7 +33,14 @@ const router = useRouter();
 const route = useRoute();
 const hosts = ref<HostEntry[]>(listKnownHosts());
 const connectOpen = ref(false);
-const contextMenu = ref<{ host: HostEntry; x: number; y: number } | null>(null);
+type MachineMenu = {
+  host: HostEntry;
+  x: number;
+  y: number;
+  opener: HTMLElement;
+};
+const contextMenu = ref<MachineMenu | null>(null);
+const contextMenuElement = ref<HTMLElement | null>(null);
 watch(
   () => route.query.add,
   (add) => {
@@ -50,18 +57,53 @@ function onStorage(event: StorageEvent) {
   if (event.key === HOSTS_STORAGE_KEY) refreshHosts();
 }
 
-function closeContextMenu() {
+function closeContextMenu(restoreFocus = true) {
+  const opener = contextMenu.value?.opener;
   contextMenu.value = null;
+  if (restoreFocus && opener?.isConnected) opener.focus();
+}
+
+function menuItems() {
+  return Array.from(
+    contextMenuElement.value?.querySelectorAll<HTMLButtonElement>(
+      "button:not(:disabled)",
+    ) ?? [],
+  );
+}
+
+function onMenuKey(event: KeyboardEvent) {
+  if (event.key === "Tab") {
+    closeContextMenu();
+    return;
+  }
+  const items = menuItems();
+  const index = items.indexOf(document.activeElement as HTMLButtonElement);
+  let next: number;
+  if (event.key === "ArrowDown") next = (index + 1) % items.length;
+  else if (event.key === "ArrowUp")
+    next = (index - 1 + items.length) % items.length;
+  else if (event.key === "Home") next = 0;
+  else if (event.key === "End") next = items.length - 1;
+  else return;
+  event.preventDefault();
+  items[next]?.focus();
+}
+
+function onWindowResize() {
+  closeContextMenu();
 }
 
 function onDocumentPointer(event: PointerEvent) {
   const target = event.target as HTMLElement | null;
   if (!target?.closest("[data-test='machine-context-menu']"))
-    closeContextMenu();
+    closeContextMenu(false);
 }
 
 function onWindowKey(event: KeyboardEvent) {
-  if (event.key === "Escape") closeContextMenu();
+  if (event.key === "Escape" && contextMenu.value && !event.defaultPrevented) {
+    event.preventDefault();
+    closeContextMenu();
+  }
 }
 
 onMounted(() => {
@@ -69,6 +111,7 @@ onMounted(() => {
   window.addEventListener("storage", onStorage);
   document.addEventListener("pointerdown", onDocumentPointer);
   window.addEventListener("keydown", onWindowKey);
+  window.addEventListener("resize", onWindowResize);
   void hostStatus(originHost())
     .then((status) => {
       reconcileOriginInstanceId(status.instance_id ?? "");
@@ -82,6 +125,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("storage", onStorage);
   document.removeEventListener("pointerdown", onDocumentPointer);
   window.removeEventListener("keydown", onWindowKey);
+  window.removeEventListener("resize", onWindowResize);
 });
 
 function openDetail(id: string) {
@@ -98,8 +142,18 @@ function reconnect(id: string) {
   if (host) toast("success", `${host.name} reconnected.`);
 }
 
-function openHostContext(payload: { host: HostEntry; x: number; y: number }) {
+async function openHostContext(payload: MachineMenu) {
   contextMenu.value = payload;
+  await nextTick();
+  if (contextMenu.value?.opener !== payload.opener) return;
+  const rect = contextMenuElement.value?.getBoundingClientRect();
+  if (!rect) return;
+  contextMenu.value = {
+    ...payload,
+    x: Math.max(8, Math.min(payload.x, window.innerWidth - rect.width - 8)),
+    y: Math.max(8, Math.min(payload.y, window.innerHeight - rect.height - 8)),
+  };
+  menuItems()[0]?.focus();
 }
 
 function contextOpen() {
@@ -193,6 +247,7 @@ async function contextForget() {
         :key="host.id"
         :host="host"
         :primary="host.id === ORIGIN_HOST_ID"
+        :actions-open="contextMenu?.host.id === host.id"
         @open="openDetail"
         @reconnect="reconnect"
         @context-menu="openHostContext"
@@ -222,7 +277,10 @@ async function contextForget() {
 
     <div
       v-if="contextMenu"
+      ref="contextMenuElement"
       class="machine-context"
+      :aria-label="`Actions for ${contextMenu.host.name}`"
+      @keydown="onMenuKey"
       data-test="machine-context-menu"
       role="menu"
       :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
@@ -256,6 +314,7 @@ async function contextForget() {
       <div
         v-if="contextMenu.host.id !== ORIGIN_HOST_ID"
         class="machine-context__separator"
+        role="separator"
       />
       <button
         v-if="
@@ -342,7 +401,11 @@ async function contextForget() {
 .machine-context {
   position: fixed;
   z-index: 80;
-  min-width: 210px;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100svh - 16px);
+  overflow: auto;
+  box-sizing: border-box;
   padding: 5px;
   border: 1px solid var(--ce);
   border-radius: 9px;
@@ -354,7 +417,8 @@ async function contextForget() {
   display: block;
   width: 100%;
   min-height: 44px;
-  padding: 0 10px;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
   border: 0;
   border-radius: 5px;
   background: transparent;
