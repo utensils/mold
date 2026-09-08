@@ -114,7 +114,7 @@ mold library export chair.glb --format ply --output -    # to stdout
 | ------ | --------------------------------------------------- | -------------------------------------- |
 | `glb`  | Geometry, normals, UVs, materials, embedded texture | Anything. This is the stored file.     |
 | `obj`  | Positions, normals, UVs. No materials.              | Blender, MeshLab, most DCC importers.  |
-| `zip`  | OBJ, MTL, and exact embedded PBR PNG maps.           | Portable painted-asset handoff.        |
+| `zip`  | OBJ, MTL, and exact embedded PBR PNG maps.          | Portable painted-asset handoff.        |
 | `stl`  | Triangles and one normal each. No UVs, no colour.   | 3-D printing and CAD.                  |
 | `ply`  | Positions and per-vertex normals, vertices shared.  | Point-and-mesh tooling, research code. |
 
