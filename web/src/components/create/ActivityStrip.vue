@@ -548,7 +548,7 @@ const active = computed(
 
 .activity__error {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 9px;
   border: 1px solid color-mix(in srgb, var(--stop) 45%, var(--edge));
   background: color-mix(in srgb, var(--stop) 10%, var(--bench));
@@ -573,6 +573,9 @@ const active = computed(
 }
 
 .activity__dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
   border-radius: 4px;
   padding: 2px;

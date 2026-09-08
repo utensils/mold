@@ -8,3 +8,4 @@
 - **Stable 3-D Studio drafts.** Routine machine telemetry updates no longer
   reload workflow capabilities or reset the selected workflow and inputs.
 - Align desktop 3-D Studio with the shared toolbar, canvas, and inspector design. Add Auto and Most capable routing that keeps every workflow stage on one eligible machine, retains the workflow owner for progress and results, and avoids reloading unchanged result media.
+- Center the web queue's failed-job dismiss icon in its touch target and vertically align it with wrapped error text.
