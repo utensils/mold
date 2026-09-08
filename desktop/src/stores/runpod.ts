@@ -12,6 +12,30 @@ import {
 } from "../lib/runpod";
 import { useHostsStore } from "./hosts";
 
+interface RunPodMutationState {
+  mutating: string | null;
+  operationError: string | null;
+}
+
+async function runMutation<T>(
+  state: RunPodMutationState,
+  mutation: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  state.mutating = mutation;
+  state.operationError = null;
+  try {
+    return await operation();
+  } catch (error) {
+    state.operationError = friendlyRunPodError(
+      error instanceof Error ? error.message : String(error),
+    );
+    throw error;
+  } finally {
+    state.mutating = null;
+  }
+}
+
 export const useRunPodStore = defineStore("runpod", {
   state: () => ({
     overview: emptyRunPodOverview() as RunPodOverview,
@@ -58,71 +82,33 @@ export const useRunPodStore = defineStore("runpod", {
       this.loaded = true;
     },
     async create(input: RunPodCreateInput) {
-      this.mutating = "create";
-      this.operationError = null;
-      try {
+      return runMutation(this, "create", async () => {
         await ipc.runpodCreate(input);
         await this.load();
-      } catch (error) {
-        this.operationError = friendlyRunPodError(
-          error instanceof Error ? error.message : String(error),
-        );
-        throw error;
-      } finally {
-        this.mutating = null;
-      }
+      });
     },
     async createNetworkVolume(input: RunPodNetworkVolumeCreateInput) {
-      this.mutating = "volume:create";
-      this.operationError = null;
-      try {
+      return runMutation(this, "volume:create", async () => {
         const volume = await ipc.runpodNetworkVolumeCreate(input);
         await this.load();
         return volume;
-      } catch (error) {
-        this.operationError = friendlyRunPodError(
-          error instanceof Error ? error.message : String(error),
-        );
-        throw error;
-      } finally {
-        this.mutating = null;
-      }
+      });
     },
     async updateNetworkVolume(input: RunPodNetworkVolumeUpdateInput) {
-      this.mutating = `volume:update:${input.id}`;
-      this.operationError = null;
-      try {
+      return runMutation(this, `volume:update:${input.id}`, async () => {
         const volume = await ipc.runpodNetworkVolumeUpdate(input);
         await this.load();
         return volume;
-      } catch (error) {
-        this.operationError = friendlyRunPodError(
-          error instanceof Error ? error.message : String(error),
-        );
-        throw error;
-      } finally {
-        this.mutating = null;
-      }
+      });
     },
     async deleteNetworkVolume(id: string) {
-      this.mutating = `volume:delete:${id}`;
-      this.operationError = null;
-      try {
+      return runMutation(this, `volume:delete:${id}`, async () => {
         await ipc.runpodNetworkVolumeDelete(id);
         await this.load();
-      } catch (error) {
-        this.operationError = friendlyRunPodError(
-          error instanceof Error ? error.message : String(error),
-        );
-        throw error;
-      } finally {
-        this.mutating = null;
-      }
+      });
     },
     async act(action: "start" | "stop" | "delete", id: string) {
-      this.mutating = `${action}:${id}`;
-      this.operationError = null;
-      try {
+      return runMutation(this, `${action}:${id}`, async () => {
         if (action === "start") await ipc.runpodStart(id);
         else if (action === "stop") await ipc.runpodStop(id);
         else {
@@ -169,14 +155,7 @@ export const useRunPodStore = defineStore("runpod", {
           }
         }
         await this.load();
-      } catch (error) {
-        this.operationError = friendlyRunPodError(
-          error instanceof Error ? error.message : String(error),
-        );
-        throw error;
-      } finally {
-        this.mutating = null;
-      }
+      });
     },
     clearOperationError() {
       this.operationError = null;
