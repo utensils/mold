@@ -9670,6 +9670,72 @@ async function setCollectionMembershipFor(
 
 // ── Select-mode bulk actions ───────────────────────────────────────────────
 
+const gallerySaveBusy = ref(false);
+const gallerySaveStatus = ref("");
+let gallerySaveSelectionVersion = 0;
+watch(
+  [gallerySelection, gallerySelectMode],
+  () => {
+    gallerySaveSelectionVersion++;
+    if (!gallerySaveBusy.value) gallerySaveStatus.value = "";
+  },
+  { flush: "sync" },
+);
+const gallerySaveTargets = computed(() =>
+  selectedRepresentatives().filter(
+    (print) =>
+      isStillImageFile(print.filename) ||
+      isVideoItem(print) ||
+      print.filename.toLowerCase().endsWith(".glb"),
+  ),
+);
+async function saveSelectedGalleryPrints(): Promise<void> {
+  if (gallerySaveBusy.value || !gallerySaveTargets.value.length) return;
+  const targets = [...gallerySaveTargets.value];
+  const skipped = gallerySelection.value.size - targets.length;
+  const selectionVersion = gallerySaveSelectionVersion;
+  gallerySaveBusy.value = true;
+  let saved = 0;
+  let firstError = "";
+  try {
+    for (const [index, print] of targets.entries()) {
+      gallerySaveStatus.value = `Saving ${index + 1} of ${targets.length}…`;
+      try {
+        if (isMeshItem(print)) {
+          await invoke("save_export_to_mold_folder", {
+            url: `${print.target.baseUrl}/api/gallery/export/${encodeURIComponent(print.filename)}`,
+            apiKey: print.target.apiKey,
+            request: { format: "glb" },
+            filename: print.filename,
+            reuseKey: `${print.target.baseUrl}\n${print.filename}\n${JSON.stringify({ format: "glb" })}`,
+          });
+        } else if (isVideoItem(print)) {
+          const url = await streamableMediaUrl(galleryMediaPath(print.filename, "host"), {
+            target: print.target,
+            cacheKey: print.cacheKey,
+            allowLegacyBlob: false,
+          });
+          await invoke("save_video_to_photos", { url });
+        } else {
+          const response = await apiFetchTo(print.target, galleryMediaPath(print.filename, "host"));
+          await invoke("save_image_to_photos", {
+            dataB64: await blobToBase64(await response.blob()),
+          });
+        }
+        saved++;
+      } catch (error) {
+        firstError ||= `${print.filename}: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    gallerySaveStatus.value =
+      selectionVersion === gallerySaveSelectionVersion
+        ? `Saved ${saved} of ${targets.length}.${skipped ? ` ${skipped} selected ${skipped === 1 ? "print has" : "prints have"} no supported local-save format.` : ""} Photos and videos go to Photos; meshes go to the Mold folder.${firstError ? ` ${firstError}` : ""}`
+        : "";
+  } finally {
+    gallerySaveBusy.value = false;
+  }
+}
+
 async function favoriteSelected(): Promise<void> {
   if (organizationBusy.value || gallerySelection.value.size === 0) return;
   galleryDeleteConfirming.value = false;
@@ -12903,6 +12969,19 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               Remove
             </button>
           </template>
+          <button
+            v-if="!galleryDeleteConfirming && libraryScope !== 'trash'"
+            type="button"
+            :disabled="!gallerySaveTargets.length || gallerySaveBusy"
+            title="Save selected photos and videos to Photos, and GLB meshes to the Mold folder"
+            data-test="mobile-gallery-save"
+            @click="saveSelectedGalleryPrints"
+          >
+            {{ gallerySaveBusy ? "Saving…" : "Save locally" }}
+          </button>
+          <span v-if="gallerySaveStatus" role="status" data-test="mobile-gallery-save-status">{{
+            gallerySaveStatus
+          }}</span>
           <button
             v-if="
               !galleryDeleteConfirming && libraryScope !== 'trash' && singleSelectedUpscalePrint

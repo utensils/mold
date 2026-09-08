@@ -60,6 +60,8 @@ import {
 } from "@studio/lib/libraryOrganization";
 import { defaultSourceFitPolicy } from "@studio/lib/sourceFit";
 import { blobToBase64 } from "../lib/base64";
+import { downloadVideoExport } from "@studio/lib/videoExport";
+import { downloadFilename } from "../lib/libraryOrganization";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
 import {
   requestConfirm,
@@ -1131,10 +1133,14 @@ const selectedEntries = computed(() =>
     .filter((e): e is HostGalleryImage => !!e),
 );
 const selectionCopies = computed(() => copiesOfKeys([...selection.value]));
-const selectionOrganizes = computed(() =>
-  selectionCopies.value.some((copy) =>
-    hostOrganizes(snapshots.value, copy.hostId),
-  ),
+const selectionOrganizes = computed(
+  () =>
+    selectedEntries.value.length > 0 &&
+    selectedEntries.value.every((entry) =>
+      copiesOfKeys([keyOf(entry)]).some((copy) =>
+        hostOrganizes(snapshots.value, copy.hostId),
+      ),
+    ),
 );
 const selectionTrashes = computed(
   () =>
@@ -1194,6 +1200,39 @@ const lightboxCollectionRows = computed(() =>
 const selectionHostsLabel = computed(() =>
   [...new Set(selectionCopies.value.map((c) => c.hostLabel))].join(" · "),
 );
+
+const downloadBusy = ref(false);
+const downloadProgress = ref("");
+async function downloadSelected() {
+  if (downloadBusy.value || !selectedEntries.value.length) return;
+  const targets = [...selectedEntries.value];
+  downloadBusy.value = true;
+  let downloaded = 0;
+  let firstError = "";
+  try {
+    for (const [index, entry] of targets.entries()) {
+      downloadProgress.value = `Downloading ${index + 1} of ${targets.length}…`;
+      try {
+        const host = hostById(entry.hostId);
+        if (!host) throw new Error("The media host is no longer connected.");
+        downloadVideoExport(
+          await fetchGalleryBlob(host, entry.filename),
+          downloadFilename(entry),
+        );
+        downloaded++;
+      } catch (error) {
+        firstError ||= `${entry.filename}: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    toast(
+      firstError ? "error" : "success",
+      `Started ${downloaded} of ${targets.length} downloads.${firstError ? ` ${firstError}` : " Your browser may ask you to allow multiple downloads."}`,
+    );
+  } finally {
+    downloadBusy.value = false;
+    downloadProgress.value = "";
+  }
+}
 
 function bulkFavorite() {
   const favorite = !selectionAllFavorite.value;
@@ -3076,6 +3115,25 @@ onBeforeUnmount(() => {
           </template>
 
           <template v-else>
+            <button
+              type="button"
+              class="gal__bar-btn"
+              :disabled="selection.size === 0 || downloadBusy"
+              data-test="bulk-download"
+              @click="downloadSelected"
+            >
+              {{ downloadBusy ? downloadProgress : "Download" }}
+            </button>
+            <button
+              v-if="currentCollection"
+              type="button"
+              class="gal__bar-btn"
+              :disabled="selection.size === 0 || !selectionOrganizes"
+              data-test="bulk-remove-from-collection"
+              @click="removeSelectedFromCollection"
+            >
+              Remove from collection
+            </button>
             <template v-if="canOrganize">
               <Popover
                 :open="bulkCollectionsOpen"

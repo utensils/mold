@@ -12451,6 +12451,112 @@ describe("MobileApp Library organization", () => {
     expect(wrapper?.find("[data-test='mobile-library-chip-tag']").exists()).toBe(false);
   });
 
+  it("disables native bulk save for legacy OBJ and retains original GLB saving", async () => {
+    installLibraryApi();
+    const baseApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((route, path, init) =>
+      path === "/api/gallery"
+        ? Promise.resolve([
+            libraryPrint("legacy.obj", nowSecs + 5, { format: "obj" }),
+            libraryPrint("original.glb", nowSecs + 4, { format: "glb" }),
+          ])
+        : baseApi(route, path, init),
+    );
+    await openLibrary();
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    const tiles = wrapper!.findAll("[data-test='gallery-item']");
+    await tiles
+      .find((tile) => tile.attributes("aria-label")?.includes("legacy.obj"))!
+      .trigger("click");
+    expect(wrapper?.get("[data-test='mobile-gallery-save']").attributes("disabled")).toBeDefined();
+    await tiles
+      .find((tile) => tile.attributes("aria-label")?.includes("original.glb"))!
+      .trigger("click");
+    await wrapper?.get("[data-test='mobile-gallery-save']").trigger("click");
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith(
+      "save_export_to_mold_folder",
+      expect.objectContaining({
+        url: `${target.baseUrl}/api/gallery/export/original.glb`,
+        apiKey: target.apiKey,
+        filename: "original.glb",
+        request: { format: "glb" },
+      }),
+    );
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "save_export_to_mold_folder"),
+    ).toHaveLength(1);
+    expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
+      "Saved 1 of 1",
+    );
+    expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
+      "1 selected print has no supported local-save format",
+    );
+  });
+
+  it("does not publish an old batch outcome after selection changes during saving", async () => {
+    installLibraryApi();
+    await openLibrary();
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    const tiles = wrapper!.findAll("[data-test='gallery-item']");
+    await tiles[0]!.trigger("click");
+    let finishSave!: () => void;
+    invoke.mockImplementation((command: string) =>
+      command === "save_image_to_photos"
+        ? new Promise<void>((resolve) => {
+            finishSave = resolve;
+          })
+        : Promise.resolve(null),
+    );
+    await wrapper?.get("[data-test='mobile-gallery-save']").trigger("click");
+    await flushPromises();
+    expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
+      "Saving 1 of 1",
+    );
+    await tiles[1]!.trigger("click");
+    finishSave();
+    await flushPromises();
+    expect(wrapper?.find("[data-test='mobile-gallery-save-status']").exists()).toBe(false);
+    expect(
+      wrapper?.get("[data-test='mobile-gallery-save']").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it("saves selected originals locally and reports a partial failure", async () => {
+    installLibraryApi();
+    await openLibrary();
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    const tiles = wrapper!.findAll("[data-test='gallery-item']");
+    await tiles[0]!.trigger("click");
+    await tiles[1]!.trigger("click");
+    apiFetchTo.mockImplementation(async () => new Response(new Blob(["original"])));
+    let count = 0;
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "save_image_to_photos" && ++count === 1)
+        throw new Error("Photos unavailable");
+      return null;
+    });
+    await wrapper?.get("[data-test='mobile-gallery-save']").trigger("click");
+    await flushPromises();
+    expect(count).toBe(2);
+    expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
+      "Saved 1 of 2",
+    );
+    expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
+      "Photos unavailable",
+    );
+    await tiles[0]!.trigger("click");
+    expect(wrapper?.find("[data-test='mobile-gallery-save-status']").exists()).toBe(false);
+    await wrapper?.get("[data-test='mobile-gallery-save']").trigger("click");
+    await flushPromises();
+    expect(wrapper?.get("[data-test='mobile-gallery-save-status']").text()).toContain(
+      "Saved 1 of 1",
+    );
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    await wrapper?.get("[data-test='mobile-gallery-select']").trigger("click");
+    expect(wrapper?.find("[data-test='mobile-gallery-save-status']").exists()).toBe(false);
+  });
+
   it("fans a bulk favorite out through /api/gallery/organize", async () => {
     installLibraryApi();
     await openLibrary();
