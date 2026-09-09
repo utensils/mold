@@ -2376,6 +2376,31 @@ describe("a 3-D run is one gallery item", () => {
     expect(withQuery).toEqual(withoutQuery);
   });
 
+  /*
+   * A trashed print carries its own purge countdown and its own Restore, so
+   * hiding one behind a lead would let retention purge something nobody was
+   * shown. The live-only index makes that true by accident today; it stops
+   * being an accident the moment one machine has a print live that another
+   * has trashed, because the shared filename puts the trashed row in the live
+   * index.
+   */
+  it("never collapses the Trash, even when the live index knows the name", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    // Live: the whole run, so every filename is in the index.
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 2),
+      runImage("source.png", 2, "generated_image", 0),
+    ]);
+    // Trashed on another machine: the same two names.
+    gallery.trashBuckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 2),
+      runImage("source.png", 2, "generated_image", 0),
+    ]) as never;
+    gallery.scope = "trash";
+    expect(gallery.basePrints.map((p) => p.item.filename)).toEqual(["object.glb", "source.png"]);
+  });
+
   it("indexes every member back to its run and its part in it", () => {
     const gallery = seedRun();
     const index = gallery.meshWorkflowIndex;

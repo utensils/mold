@@ -78,6 +78,8 @@ import { clearSessionScrollForTests } from "@studio/lib/libraryOrganization";
 installMemoryLocalStorage();
 
 const PRINTS = 2_000;
+/** Three albums, so `collectionCounts` has more than one list to collapse. */
+const ALBUM_IDS = ["alb-1", "alb-2", "alb-3"];
 const VIEWPORT_WIDTH = 1200;
 const VIEWPORT_HEIGHT = 800;
 /** Rows of 220 px tiles at 1200 px hold ~5–7 prints; 800 px shows ~4 rows,
@@ -91,6 +93,10 @@ function print(index: number): GalleryImage {
     size_bytes: 100_000 + index,
     favorite: index % 5 === 0,
     tags: index % 3 === 0 ? ["portrait"] : [],
+    // Album membership matters here: every organization assertion in this file
+    // used to be made over a gallery with NO collections at all, so the
+    // per-album path was measured by nothing.
+    collections: index % 4 === 0 ? [ALBUM_IDS[index % ALBUM_IDS.length]!] : [],
     metadata: {
       prompt: `print ${index}`,
       model: "flux-dev:q8",
@@ -179,7 +185,17 @@ async function mountGrid() {
   for (let i = 0; i < PRINTS; i++) items.push(print(i));
   counters.localImages = items;
   gallery.buckets.local = { items, loading: false, error: null, loaded: true };
-  gallery.collectionsByHost["local"] = { items: [], loaded: true } as never;
+  gallery.collectionsByHost["local"] = {
+    items: ALBUM_IDS.map((id, i) => ({
+      id,
+      name: `Album ${i + 1}`,
+      slug: `album-${i + 1}`,
+      count: 0,
+      created_at: 0,
+      updated_at: 0,
+    })),
+    loaded: true,
+  } as never;
 
   const wrapper = mount(LibraryView, {
     attachTo: document.body,
@@ -260,6 +276,44 @@ describe("Library grid at 2 000 prints", () => {
       "stack badges in the DOM",
       wrapper.findAll("[data-test='workflow-stack-badge']").length,
       tiles.length,
+    );
+    wrapper.unmount();
+  });
+
+  /*
+   * An album's card count is a per-album collapse, so it is the one place a
+   * future refactor is likely to reach for `organizationOf` inside the loop
+   * and turn a cached lookup into a gallery scan per card. The invariant is
+   * that reading every album's count after mount costs NOTHING beyond what is
+   * already cached.
+   */
+  it("counts every album off the cached indexes", async () => {
+    const { wrapper, gallery } = await mountGrid();
+    // The view fetches collections on open and the harness answers []; seed
+    // after that so the albums survive to be counted.
+    gallery.collectionsByHost["local"] = {
+      items: ALBUM_IDS.map((id, i) => ({
+        id,
+        name: `Album ${i + 1}`,
+        slug: `album-${i + 1}`,
+        count: 0,
+        created_at: 0,
+        updated_at: 0,
+      })),
+      loaded: true,
+    } as never;
+    await nextTick();
+    counters.reset();
+
+    const counts = ALBUM_IDS.map((_, i) => gallery.collectionCounts(`album-${i + 1}`));
+    // Non-vacuous: the fixture files every fourth print, so the albums are
+    // not empty and the collapse really ran over each of them.
+    expect(counts.reduce((a, b) => a + b, 0)).toBeGreaterThan(0);
+    expectOpsUnder("unionOrganization while counting albums", counters.unionOrganization, 0);
+    expectOpsUnder(
+      "mesh workflow index passes while counting albums",
+      counters.meshWorkflowIndex,
+      0,
     );
     wrapper.unmount();
   });

@@ -728,9 +728,14 @@ export const useGalleryStore = defineStore("gallery", {
      * prints the user cannot see.
      */
     basePrints(): MergedPrint[] {
-      const scoped = this.scope === "trash" ? this.trashMerged : this.merged;
+      const inTrash = this.scope === "trash";
+      const scoped = inTrash ? this.trashMerged : this.merged;
       const albums = this.hidesHiddenAlbums ? scoped.filter(this.visibleInDefaultLibrary) : scoped;
-      return this.collapseToLeads(albums);
+      // THE TRASH IS NEVER COLLAPSED, and this says so rather than relying on
+      // the index being live-only to make it true by accident. That accident
+      // holds only until one host has a print live that another has trashed,
+      // where the shared filename would put a trashed row in the live index.
+      return inTrash ? albums : this.collapseToLeads(albums);
     },
     /** Header count before host, kind, search, and organization narrowing —
      *  scope-independent, so switching to the Trash never rewrites it. */
