@@ -2171,7 +2171,10 @@ describe("a 3-D run is one gallery item", () => {
    * two used to disagree: "Everything 6" beside three tiles. */
   it("counts what the grid shows while browsing", () => {
     const gallery = seedRun();
-    expect(gallery.basePrintCount).toBe(gallery.filtered.length);
+    // The absolute number first: comparing the two computeds ALONE passes when
+    // both are wrong the same way — with no collapse at all this read 5 and 5.
+    expect(gallery.filtered).toHaveLength(2);
+    expect(gallery.basePrintCount).toBe(2);
   });
 
   /*
