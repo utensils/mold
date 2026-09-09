@@ -86,6 +86,30 @@ describe("the 3-D Studio wears the shell", () => {
     expect(announced.length).toBe(labels.length);
   });
 
+  /*
+   * "3-D" is the lexicon's spelling wherever a kind is named, and deriving the
+   * chip's empty-state copy from its label lowercased it to "Choose a 3-d
+   * style" — which a visual UAT caught and no test did. The placeholder is
+   * authored by the caller now.
+   */
+  it("never derives a kind's name by lowercasing it", () => {
+    const chip = readFileSync(
+      resolve(__dirname, "../../desktop/src/components/mesh/MeshStyleChip.vue"),
+      "utf8",
+    );
+    expect(chip).not.toContain("Choose a ${label.toLowerCase()}");
+    expect(chip).toContain("placeholder");
+    const view = readFileSync(
+      resolve(__dirname, "../../desktop/src/views/MeshWorkflowView.vue"),
+      "utf8",
+    );
+    expect(view).toContain('placeholder="Choose a 3-D style"');
+    expect(view).toContain('placeholder="Choose a picture style"');
+    // The lexicon's spelling, not a case-folded one, anywhere a kind is named.
+    expect(view).not.toContain("3-d style");
+    expect(view).not.toContain("3-d object");
+  });
+
   /* Plain words in sans; the format's own vocabulary stays in the mono truth. */
   it("names the geometry fields in plain words", () => {
     expect(source).toContain("WHICH WAY IS UP");

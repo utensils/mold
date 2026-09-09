@@ -22,6 +22,13 @@ const props = defineProps<{
   selected: ModelEntry | null;
   /** The plain word for what this chip picks: "3-D style" / "Picture style". */
   label: string;
+  /**
+   * What the chip says with nothing picked yet.
+   *
+   * Authored, never derived: lowercasing the label produced "Choose a 3-d
+   * style", and "3-D" is the lexicon's spelling wherever a kind is named.
+   */
+  placeholder: string;
   /** The menu's mono kicker, and where its Browse more goes. */
   kicker: string;
   browseTarget: string;
@@ -43,7 +50,7 @@ const styleLabel = computed(() => {
 });
 const styleId = computed(() => props.selected?.name ?? "");
 const testId = computed(
-  () => `mesh-style-chip-${props.label.toLowerCase().replace(/[^a-z]+/g, "-")}`,
+  () => `mesh-style-chip-${props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
 );
 </script>
 
@@ -70,7 +77,7 @@ const testId = computed(
         @click="toggle"
       >
         <Icon name="layers" :size="13" />
-        <span class="ms-chip__label">{{ styleLabel || `Choose a ${label.toLowerCase()}` }}</span>
+        <span class="ms-chip__label">{{ styleLabel || placeholder }}</span>
         <span v-if="styleId && styleId !== styleLabel" class="ms-chip__id">{{ styleId }}</span>
         <span class="ms-chip__caret">▼</span>
       </button>
