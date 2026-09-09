@@ -4,7 +4,10 @@ import { storeToRefs } from "pinia";
 import { useRoute } from "vue-router";
 import MeshWorkflowStudio from "@studio/components/MeshWorkflowStudio.vue";
 import { useMeshWorkflowDraftStore } from "@studio/stores/meshWorkflowDraft";
-import { meshWorkflowIdFromQuery } from "@studio/lib/meshWorkflowProvenance";
+import {
+  meshWorkflowHostFromQuery,
+  meshWorkflowIdFromQuery,
+} from "@studio/lib/meshWorkflowProvenance";
 import { meshWorkflowModes, type WorkflowModel } from "@studio/lib/meshWorkflowAuthoring";
 import {
   supportsMeshWorkflow,
@@ -86,6 +89,23 @@ watch(
   },
   { immediate: true },
 );
+/*
+ * A durable workflow lives on ONE machine, so the link that opens it names
+ * that machine too. Without this a queue row from another host asked whichever
+ * machine the studio happened to be browsing and was told the workflow does
+ * not exist. A link that does not say (an older one) leaves the pin alone.
+ */
+watch(
+  () => meshWorkflowHostFromQuery(route.query),
+  (hostId) => {
+    if (!hostId || !hosts.all.some((host) => host.id === hostId)) return;
+    browseHostId.value = hostId;
+    routing.value = hostId;
+    draft.persist();
+  },
+  { immediate: true },
+);
+
 watch(routing, (value) => {
   if (value && value !== "capable") browseHostId.value = value;
   draft.persist();

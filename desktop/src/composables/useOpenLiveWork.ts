@@ -43,7 +43,7 @@ export function useOpenLiveWork() {
         // arrives here looking like any other print. New image cannot resume
         // it: the stages, Cancel, Resume and history live only under
         // /api/mesh-workflows. Route to the surface that owns the work.
-        const workflow = meshWorkflowRouteFor(selection.metadata);
+        const workflow = meshWorkflowRouteFor(selection.metadata, row.hostId);
         if (workflow) {
           await router.push(workflow);
           return;

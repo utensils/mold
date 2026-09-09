@@ -571,6 +571,8 @@ describe("useQueueCommands — a 3-D workflow's row opens its own studio", () =>
       print: {
         clientId: "job-1",
         status: "complete",
+        // A workflow lives on ONE machine, so the row has to carry which.
+        hostId: "hal9000-7680",
         request: metadata,
         result: { filename: "print.glb" },
       },
@@ -595,7 +597,7 @@ describe("useQueueCommands — a 3-D workflow's row opens its own studio", () =>
     );
     expect(push).toHaveBeenCalledWith({
       path: "/create/3d",
-      query: { workflow: "workflow-1" },
+      query: { workflow: "workflow-1", host: "hal9000-7680" },
     });
   });
 

@@ -8,7 +8,9 @@
   land on New image under its 3-D section, which cannot resume a durable
   workflow at all — its stages, Cancel, Resume and history live only in the
   Studio. Prints and queue rows made by a workflow now carry which workflow
-  made them, and every door routes there.
+  made them and which machine ran them, and every door routes there — a
+  workflow on another machine opens against that machine, not whichever one
+  the studio was last browsing.
 - **⌘↩ generates in the 3-D Studio.** It used to leave the view and render a
   picture in New image while the status bar advertised the shortcut as though
   it worked.

@@ -214,6 +214,31 @@ describe("MeshWorkflowView shell integration", () => {
   });
 
   /*
+   * A durable workflow lives on ONE machine. A link carrying only the id sent
+   * a queue row from another machine to whichever one this view happened to be
+   * browsing, which then reported the workflow gone instead of showing its
+   * progress and its Resume / Cancel controls.
+   */
+  it("binds to the machine the link names before loading the workflow", async () => {
+    routeQuery.value = { workflow: "workflow-7", host: "renderbox-7680" };
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.get("[data-test='target-url']").text()).toBe("http://renderbox:7680");
+    expect(wrapper.get("[data-test='target-key']").text()).toBe("remote-secret");
+    expect(wrapper.get("[data-test='open-workflow']").text()).toBe("workflow-7");
+    wrapper.unmount();
+  });
+
+  /* A machine this app does not know is not a reason to move the pin. */
+  it("leaves the machine alone when the link names one it does not have", async () => {
+    routeQuery.value = { workflow: "workflow-7", host: "a-machine-we-forgot" };
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.get("[data-test='target-url']").text()).toBe("http://127.0.0.1:49152");
+    wrapper.unmount();
+  });
+
+  /*
    * Before this, ⌘↩ raised the Generate intent AND pushed `/create`: pressing
    * it here left the view and rendered a picture, while the status bar
    * advertised the hint as though it worked.

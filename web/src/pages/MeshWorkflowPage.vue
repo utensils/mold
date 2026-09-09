@@ -9,7 +9,10 @@ import {
 import type { WorkflowModel } from "@studio/lib/meshWorkflowAuthoring";
 import MeshWorkflowHostPicker from "@studio/components/MeshWorkflowHostPicker.vue";
 import { useRoute } from "vue-router";
-import { meshWorkflowIdFromQuery } from "@studio/lib/meshWorkflowProvenance";
+import {
+  meshWorkflowHostFromQuery,
+  meshWorkflowIdFromQuery,
+} from "@studio/lib/meshWorkflowProvenance";
 import { useHostRouting } from "../composables/useHostRouting";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import { ORIGIN_HOST_ID } from "../lib/hostRegistry";
@@ -19,6 +22,22 @@ const route = useRoute();
 // The queue row's route back here; routing is the shell's job, so the shared
 // studio is handed the id rather than reading the router itself.
 const openWorkflow = computed(() => meshWorkflowIdFromQuery(route.query));
+
+/*
+ * A durable workflow lives on ONE machine, so the link that opens it names
+ * that machine too — otherwise a queue row from another host asks whichever
+ * machine this page happens to be browsing and is told it does not exist.
+ * A link that does not say (an older one) leaves the selection alone.
+ */
+watch(
+  () => meshWorkflowHostFromQuery(route.query),
+  (hostId) => {
+    if (!hostId || !routing.hosts.value.some((host) => host.id === hostId))
+      return;
+    selectHost(hostId);
+  },
+  { immediate: true },
+);
 const selectedHostId = ref("");
 const selectedHost = computed(
   () =>

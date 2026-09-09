@@ -55,7 +55,7 @@ export function useOpenLiveWork(routing: HostRouting) {
         // arrives here looking like any other print. Create cannot resume a
         // durable workflow — its stages, Cancel, Resume and history live only
         // under /api/mesh-workflows.
-        const workflow = meshWorkflowRouteFor(selection.metadata);
+        const workflow = meshWorkflowRouteFor(selection.metadata, row.hostId);
         if (workflow) {
           await router.push(workflow);
           return;

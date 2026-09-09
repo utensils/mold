@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   isMeshWorkflowLead,
   MESH_WORKFLOW_LEAD_ROLE,
+  meshWorkflowHostFromQuery,
   meshWorkflowIdFromQuery,
   meshWorkflowProvenanceOf,
   meshWorkflowRouteFor,
@@ -29,6 +30,34 @@ describe("3-D workflow provenance", () => {
       path: "/create/3d",
       query: { workflow: "workflow-1" },
     });
+  });
+
+  /*
+   * A durable workflow lives on ONE machine: every read, poll, resume, cancel
+   * and result fetch is bound to that host's authenticated target. A link
+   * carrying only the id sent a queue row from another machine to whichever
+   * one the studio happened to be browsing, which answered that the workflow
+   * does not exist.
+   */
+  it("names the machine that ran it, so the link cannot ask the wrong server", () => {
+    expect(meshWorkflowRouteFor(run, "hal9000-7680")?.query).toEqual({
+      workflow: "workflow-1",
+      host: "hal9000-7680",
+    });
+  });
+
+  /* A caller that cannot know the machine leaves the studio's pin alone. */
+  it("omits the machine rather than guessing one", () => {
+    for (const hostId of [undefined, null, "", "   "])
+      expect(meshWorkflowRouteFor(run, hostId)?.query.host).toBeUndefined();
+  });
+
+  it("reads the machine a deep link names, and nothing else", () => {
+    expect(meshWorkflowHostFromQuery({ host: "hal9000-7680" })).toBe(
+      "hal9000-7680",
+    );
+    for (const query of [null, undefined, {}, { host: 7 }])
+      expect(meshWorkflowHostFromQuery(query as never)).toBe("");
   });
 
   /*

@@ -445,7 +445,7 @@ export function useQueueCommands(): QueueCommands {
   function openPrint(job: Job) {
     // Work a 3-D workflow made belongs to the 3-D Studio; New image cannot
     // resume a durable workflow, only re-render one of its stages.
-    const workflow = meshWorkflowRouteFor(job.request ?? job.result?.metadata);
+    const workflow = meshWorkflowRouteFor(job.request ?? job.result?.metadata, job.hostId);
     if (workflow) {
       void router.push(workflow);
       return;

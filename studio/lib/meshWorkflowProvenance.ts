@@ -15,9 +15,20 @@
 /** The role whose print represents the whole run. */
 export const MESH_WORKFLOW_LEAD_ROLE = "final_glb";
 
-/** The 3-D Studio's route, and the query it reads a workflow id from. */
+/** The 3-D Studio's route, and the queries it reads a workflow from. */
 export const MESH_WORKFLOW_ROUTE = "/create/3d";
 export const MESH_WORKFLOW_QUERY = "workflow";
+/**
+ * The machine that owns the workflow.
+ *
+ * A durable workflow lives on ONE machine — every read, poll, resume, cancel
+ * and result fetch is bound to that host's authenticated target, and a host
+ * change remounts the studio so identities never cross machines. So a route
+ * carrying only the id is not enough on a fleet: a queue row from `hal9000`
+ * opened while the studio is browsing this Mac would ask the wrong server and
+ * be told the workflow does not exist.
+ */
+export const MESH_WORKFLOW_HOST_QUERY = "host";
 
 export interface MeshWorkflowProvenance {
   job_id: string;
@@ -77,20 +88,46 @@ export function isMeshWorkflowLead(
  */
 export function meshWorkflowRouteFor(
   carrier: MeshWorkflowProvenanceCarrier | null | undefined,
+  /** The machine that ran it. Omitted only when the caller cannot know. */
+  hostId?: string | null,
 ): { path: string; query: Record<string, string> } | null {
   const provenance = meshWorkflowProvenanceOf(carrier);
   if (!provenance) return null;
+  const host = hostId?.trim() ?? "";
   return {
     path: MESH_WORKFLOW_ROUTE,
-    query: { [MESH_WORKFLOW_QUERY]: provenance.job_id },
+    query: {
+      [MESH_WORKFLOW_QUERY]: provenance.job_id,
+      ...(host ? { [MESH_WORKFLOW_HOST_QUERY]: host } : {}),
+    },
   };
+}
+
+function queryString(
+  query: Record<string, unknown> | null | undefined,
+  key: string,
+): string {
+  const raw = query?.[key];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === "string" ? value.trim() : "";
 }
 
 /** The workflow a `?workflow=` query names, if it names one. */
 export function meshWorkflowIdFromQuery(
   query: Record<string, unknown> | null | undefined,
 ): string {
-  const raw = query?.[MESH_WORKFLOW_QUERY];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  return typeof value === "string" ? value.trim() : "";
+  return queryString(query, MESH_WORKFLOW_QUERY);
+}
+
+/**
+ * The machine a `?host=` query names.
+ *
+ * Empty means the link did not say — an older link, or a caller that could not
+ * know — and the studio keeps whichever machine it is already browsing rather
+ * than guessing.
+ */
+export function meshWorkflowHostFromQuery(
+  query: Record<string, unknown> | null | undefined,
+): string {
+  return queryString(query, MESH_WORKFLOW_HOST_QUERY);
 }

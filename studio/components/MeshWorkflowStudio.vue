@@ -258,9 +258,18 @@ async function bootstrap(): Promise<void> {
   ++selectionEpoch;
   clearPoll();
   revokeResult();
-  // A deep link names the workflow to open on; without one this is a fresh
-  // visit, and the draft's own selection does not survive a host change.
-  selectedId.value = props.openWorkflow?.trim() ?? "";
+  /*
+   * A deep link names the workflow to open on. Without one, the selection is
+   * kept whenever this is the SAME machine — `bootstrap` also runs on every
+   * mount, so clearing unconditionally meant a trip to the Queue and back
+   * emptied the canvas even though the draft beneath it survived. A host
+   * change does clear it: the workflow belongs to the machine that ran it.
+   */
+  const deepLink = props.openWorkflow?.trim() ?? "";
+  const sameMachine =
+    ownedTarget.value.baseUrl === props.target.baseUrl &&
+    (ownedTarget.value.apiKey ?? null) === (props.target.apiKey ?? null);
+  selectedId.value = deepLink || (sameMachine ? selectedId.value : "");
   detail.value = null;
   ownedTarget.value = { ...props.target };
   ownerLabel.value = props.hostLabel ?? "";
