@@ -95,15 +95,9 @@ export function formatUptime(seconds: number): string {
   return `${days}d ${hours % 24}h`;
 }
 
-/** Compact relative timestamp for MRU lists ("just now", "5m ago", "3d ago"). */
-export function timeAgo(thenMs: number, nowMs: number = Date.now()): string {
-  const seconds = Math.max(0, Math.floor((nowMs - thenMs) / 1000));
-  if (seconds < 60) return "just now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(thenMs).toLocaleDateString();
-}
+/** Compact relative timestamp for MRU lists ("just now", "5m ago", "3d ago").
+ *
+ * Re-exported from `@studio/lib/relativeTime`, which owns it: `studio/` is the
+ * lower layer and cannot import from a shell, and the 3-D Studio's Recent list
+ * needs exactly these words. Every existing caller keeps importing it here. */
+export { timeAgo } from "@studio/lib/relativeTime";

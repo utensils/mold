@@ -38,6 +38,7 @@ import {
   type WorkflowModel,
 } from "../lib/meshWorkflowAuthoring";
 import { autoGrowRows } from "../lib/autogrow";
+import { timeAgo } from "../lib/relativeTime";
 import { isMeshFamily } from "../lib/legacyRecipeRules";
 import { useMeshWorkflowDraftStore } from "../stores/meshWorkflowDraft";
 import MeshViewer from "./MeshViewer.vue";
@@ -173,6 +174,52 @@ const canSubmit = computed(() => {
  * The Y/Z wording is `ui/components/MeshGeometryFields.vue`'s own, so the
  * import side and the export side name the same axes the same way.
  */
+/**
+ * The inspector's tabs — the peer of New image's Settings | Starters | Recent.
+ *
+ * Reuse already worked (`restoreWorkflowDraft`), but its only door was a bare
+ * `<select>` whose rows read "Text to 3-D · completed": no thumbnail, no
+ * prompt, no date, and no verb. A person could not tell that picking one
+ * restored the whole recipe, which is why saving and reusing a workflow read
+ * as missing rather than merely hidden.
+ */
+type InspectorTab = "settings" | "recent";
+const inspectorTab = ref<InspectorTab>("settings");
+const inspectorTabs = computed(() => [
+  { id: "settings" as const, label: "Settings", count: 0 },
+  { id: "recent" as const, label: "Recent", count: jobs.value.length },
+]);
+
+const WORKFLOW_MODE_LABEL: Record<string, string> = {
+  text_to_mesh: "From words",
+  mesh_roundtrip: "Rebuild",
+  mesh_texture: "Add texture",
+};
+/** The workflow's own toolbar word; a newer host's mode still reads as itself. */
+function workflowModeLabel(mode: string): string {
+  return WORKFLOW_MODE_LABEL[mode] ?? mode.replace(/_/g, " ");
+}
+
+/**
+ * What a past run is waiting on, said the way the queue says it — running
+ * shows its stage, everything else says its state plainly.
+ */
+function workflowStatusLine(job: MeshWorkflowJobSummary): string {
+  const when = timeAgo(job.updated_at_ms || job.created_at_ms);
+  if (job.state === "running" || job.state === "queued") {
+    const stage = job.current_stage_kind
+      ? stageLabel(job.current_stage_kind)
+      : "Preparing";
+    return `${stage} · ${job.current_stage + 1}/${job.stage_count} · ${when}`;
+  }
+  return `${job.state} · ${when}`;
+}
+
+/** Start over without leaving the machine or the styles this session is using. */
+function startNewWorkflow(): void {
+  draft.clear();
+}
+
 const textureSizeOptions = [
   { value: 1024, label: "1024" },
   { value: 2048, label: "2048" },
@@ -750,22 +797,26 @@ onBeforeUnmount(() => {
         <span v-if="ownerLabel && selectedId" class="mesh-studio__owner">{{
           ownerLabel
         }}</span>
+        <button
+          v-if="desktop"
+          type="button"
+          class="ms-toolbar-button"
+          data-test="mesh-new-workflow"
+          :disabled="busy || (!selectedId && !draft.dirty)"
+          title="Start a new 3-D workflow"
+          @click="startNewWorkflow"
+        >
+          New workflow
+        </button>
         <select
+          v-else
           v-model="selectedId"
           :disabled="busy"
           aria-label="Previous 3-D workflow"
         >
           <option value="">New workflow</option>
           <option v-for="job in jobs" :key="job.id" :value="job.id">
-            {{
-              job.mode === "text_to_mesh"
-                ? "Text to 3-D"
-                : job.mode === "mesh_roundtrip"
-                  ? "Rebuild mesh"
-                  : "Texture mesh"
-            }}
-            ·
-            {{ job.state }}
+            {{ workflowModeLabel(job.mode) }} · {{ job.state }}
           </option>
         </select>
         <slot name="machine" :busy="busy" />
@@ -779,223 +830,285 @@ onBeforeUnmount(() => {
       <slot name="inspector-resize" />
       <form class="mesh-studio__composer" @submit.prevent="submit">
         <fieldset class="mesh-studio__fields" :disabled="busy">
-          <div v-if="desktop" class="mesh-studio__inspector-heading">
-            Settings
-          </div>
-          <SegmentedControl
-            v-if="!desktop"
-            v-model="mode"
-            :options="modeOptions"
-            :disabled="busy || loading"
-            label="3-D workflow"
-            variant="neutral"
-          />
-
-          <slot
-            v-if="!desktop"
-            name="mesh-picker"
-            :models="
-              meshModels.filter((model) =>
-                meshWorkflowModes(model).includes(mode),
-              )
-            "
-            :selected="meshModelName"
-            :select="(name: string) => (meshModelName = name)"
-            :disabled="busy"
+          <div
+            v-if="desktop"
+            class="mesh-studio__inspector-heading"
+            role="tablist"
+            aria-label="3-D settings"
           >
-            <label>
-              3-D style
-              <select v-model="meshModelName" data-test="mesh-workflow-model">
-                <option
-                  v-for="model in meshModels.filter((model) =>
-                    meshWorkflowModes(model).includes(mode),
-                  )"
-                  :key="model.name"
-                  :value="model.name"
-                >
-                  {{ modelLabel(model) }}
-                </option>
-              </select>
-            </label>
-          </slot>
+            <button
+              v-for="tab in inspectorTabs"
+              :key="tab.id"
+              type="button"
+              role="tab"
+              class="mesh-studio__tab"
+              :data-test="`mesh-tab-${tab.id}`"
+              :data-on="inspectorTab === tab.id ? 'true' : undefined"
+              :aria-selected="inspectorTab === tab.id"
+              @click.prevent="inspectorTab = tab.id"
+            >
+              {{ tab.label
+              }}<span v-if="tab.count" class="mesh-studio__tab-count">{{
+                tab.count
+              }}</span>
+            </button>
+          </div>
 
-          <template v-if="mode === 'text_to_mesh'">
-            <template v-if="!desktop">
-              <label>
-                Describe the object
-                <textarea
-                  v-model="prompt"
-                  rows="5"
-                  placeholder="A hand-carved wooden fox, centered on a plain background"
-                />
-              </label>
-              <slot
-                name="image-picker"
-                :models="imageModels"
-                :selected="imageModelName"
-                :select="(name: string) => (imageModelName = name)"
-                :disabled="busy"
-              >
-                <label>
-                  Picture style
-                  <select v-model="imageModelName">
-                    <option
-                      v-for="model in imageModels"
-                      :key="model.name"
-                      :value="model.name"
-                    >
-                      {{ modelLabel(model) }}
-                    </option>
-                  </select>
-                </label>
-              </slot>
-            </template>
-            <div
-              v-if="textureAvailable"
-              class="mesh-studio__check"
-              data-test="mesh-workflow-texture"
-            >
-              <SwitchToggle
-                v-model="texture"
-                :disabled="busy"
-                label="Paint PBR materials after geometry"
-              />
-              <span class="mesh-studio__check-label" aria-hidden="true"
-                >Paint PBR materials after geometry</span
-              >
-            </div>
-            <p
-              v-else
-              class="mesh-studio__availability"
-              data-test="mesh-workflow-texture-unavailable"
-            >
-              PBR painting is unavailable on this machine. Geometry generation
-              remains available.
+          <!--
+            Recent workflows: the door that reuse always had and never showed.
+            A row says what was made, what it is doing now, and — in the
+            accent, in the app's own words — that picking it brings the whole
+            recipe back.
+          -->
+          <div
+            v-if="desktop && inspectorTab === 'recent'"
+            class="mesh-studio__recent"
+            data-test="mesh-recent"
+          >
+            <p v-if="!jobs.length" class="mesh-studio__recent-empty">
+              Nothing made here yet. Your finished 3-D objects appear in this
+              list, and one click brings their settings back.
             </p>
-          </template>
+            <button
+              v-for="job in jobs"
+              :key="job.id"
+              type="button"
+              class="mesh-studio__recent-row"
+              :data-test="`mesh-recent-${job.id}`"
+              :data-on="selectedId === job.id ? 'true' : undefined"
+              :disabled="busy"
+              @click="draft.selectWorkflow(job.id, targetIdentity(ownedTarget))"
+            >
+              <span class="mesh-studio__recent-title">{{
+                workflowModeLabel(job.mode)
+              }}</span>
+              <span class="mesh-studio__recent-meta">{{
+                workflowStatusLine(job)
+              }}</span>
+              <span class="mesh-studio__recent-reuse"
+                >Use these settings again</span
+              >
+            </button>
+          </div>
 
-          <template v-else>
-            <label class="mesh-studio__file">
-              Source mesh (GLB or OBJ)
-              <input
-                type="file"
-                accept=".glb,.obj,model/gltf-binary,model/obj"
-                @change="
-                  meshFile =
-                    ($event.target as HTMLInputElement).files?.[0] ?? null
-                "
-              />
-              <span>{{ meshFile?.name || "Choose a mesh" }}</span>
-            </label>
-            <label v-if="mode === 'mesh_texture'" class="mesh-studio__file">
-              Appearance image
-              <input
-                type="file"
-                accept="image/png,image/jpeg"
-                @change="
-                  appearanceFile =
-                    ($event.target as HTMLInputElement).files?.[0] ?? null
-                "
-              />
-              <span>{{ appearanceFile?.name || "Choose an image" }}</span>
-            </label>
-            <div class="mesh-studio__field">
+          <template v-if="!desktop || inspectorTab === 'settings'">
+            <SegmentedControl
+              v-if="!desktop"
+              v-model="mode"
+              :options="modeOptions"
+              :disabled="busy || loading"
+              label="3-D workflow"
+              variant="neutral"
+            />
+
+            <slot
+              v-if="!desktop"
+              name="mesh-picker"
+              :models="
+                meshModels.filter((model) =>
+                  meshWorkflowModes(model).includes(mode),
+                )
+              "
+              :selected="meshModelName"
+              :select="(name: string) => (meshModelName = name)"
+              :disabled="busy"
+            >
+              <label>
+                3-D style
+                <select v-model="meshModelName" data-test="mesh-workflow-model">
+                  <option
+                    v-for="model in meshModels.filter((model) =>
+                      meshWorkflowModes(model).includes(mode),
+                    )"
+                    :key="model.name"
+                    :value="model.name"
+                  >
+                    {{ modelLabel(model) }}
+                  </option>
+                </select>
+              </label>
+            </slot>
+
+            <template v-if="mode === 'text_to_mesh'">
+              <template v-if="!desktop">
+                <label>
+                  Describe the object
+                  <textarea
+                    v-model="prompt"
+                    rows="5"
+                    placeholder="A hand-carved wooden fox, centered on a plain background"
+                  />
+                </label>
+                <slot
+                  name="image-picker"
+                  :models="imageModels"
+                  :selected="imageModelName"
+                  :select="(name: string) => (imageModelName = name)"
+                  :disabled="busy"
+                >
+                  <label>
+                    Picture style
+                    <select v-model="imageModelName">
+                      <option
+                        v-for="model in imageModels"
+                        :key="model.name"
+                        :value="model.name"
+                      >
+                        {{ modelLabel(model) }}
+                      </option>
+                    </select>
+                  </label>
+                </slot>
+              </template>
+              <div
+                v-if="textureAvailable"
+                class="mesh-studio__check"
+                data-test="mesh-workflow-texture"
+              >
+                <SwitchToggle
+                  v-model="texture"
+                  :disabled="busy"
+                  label="Paint PBR materials after geometry"
+                />
+                <span class="mesh-studio__check-label" aria-hidden="true"
+                  >Paint PBR materials after geometry</span
+                >
+              </div>
+              <p
+                v-else
+                class="mesh-studio__availability"
+                data-test="mesh-workflow-texture-unavailable"
+              >
+                PBR painting is unavailable on this machine. Geometry generation
+                remains available.
+              </p>
+            </template>
+
+            <template v-else>
+              <label class="mesh-studio__file">
+                Source mesh (GLB or OBJ)
+                <input
+                  type="file"
+                  accept=".glb,.obj,model/gltf-binary,model/obj"
+                  @change="
+                    meshFile =
+                      ($event.target as HTMLInputElement).files?.[0] ?? null
+                  "
+                />
+                <span>{{ meshFile?.name || "Choose a mesh" }}</span>
+              </label>
+              <label v-if="mode === 'mesh_texture'" class="mesh-studio__file">
+                Appearance image
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  @change="
+                    appearanceFile =
+                      ($event.target as HTMLInputElement).files?.[0] ?? null
+                  "
+                />
+                <span>{{ appearanceFile?.name || "Choose an image" }}</span>
+              </label>
+              <div class="mesh-studio__field">
+                <span class="ms-group-label mesh-studio__label"
+                  >Which way is up</span
+                >
+                <SegmentedControl
+                  v-if="desktop"
+                  v-model="upAxis"
+                  :options="upAxisOptions"
+                  :disabled="busy"
+                  label="Which way is up"
+                  variant="neutral"
+                  compact
+                />
+                <select v-else v-model="upAxis" aria-label="Which way is up">
+                  <option value="y">Y up</option>
+                  <option value="z">Z up</option>
+                </select>
+                <p class="mesh-studio__truth">{{ upAxisTruth }}</p>
+              </div>
+              <div class="mesh-studio__field">
+                <span class="ms-group-label mesh-studio__label"
+                  >How big one unit is</span
+                >
+                <input
+                  v-model.number="metersPerUnit"
+                  class="mesh-studio__number"
+                  type="number"
+                  min="0.000001"
+                  max="1000000"
+                  step="any"
+                  aria-label="How big one unit is"
+                />
+                <p class="mesh-studio__truth">
+                  {{ metersPerUnit }} m per unit · what the file calls 1
+                </p>
+              </div>
+            </template>
+
+            <div
+              v-if="
+                (mode === 'text_to_mesh' && texture) || mode === 'mesh_texture'
+              "
+              class="mesh-studio__field"
+            >
               <span class="ms-group-label mesh-studio__label"
-                >Which way is up</span
+                >Texture size</span
               >
               <SegmentedControl
                 v-if="desktop"
-                v-model="upAxis"
-                :options="upAxisOptions"
+                v-model="textureResolution"
+                :options="textureSizeOptions"
                 :disabled="busy"
-                label="Which way is up"
+                label="Texture size"
                 variant="neutral"
                 compact
               />
-              <select v-else v-model="upAxis" aria-label="Which way is up">
-                <option value="y">Y up</option>
-                <option value="z">Z up</option>
-              </select>
-              <p class="mesh-studio__truth">{{ upAxisTruth }}</p>
-            </div>
-            <div class="mesh-studio__field">
-              <span class="ms-group-label mesh-studio__label"
-                >How big one unit is</span
+              <select
+                v-else
+                v-model.number="textureResolution"
+                aria-label="Texture size"
               >
-              <input
-                v-model.number="metersPerUnit"
-                class="mesh-studio__number"
-                type="number"
-                min="0.000001"
-                max="1000000"
-                step="any"
-                aria-label="How big one unit is"
-              />
+                <option :value="1024">1024</option>
+                <option :value="2048">2048</option>
+                <option :value="4096">4096</option>
+              </select>
               <p class="mesh-studio__truth">
-                {{ metersPerUnit }} m per unit · what the file calls 1
+                {{ textureResolution }} px · bigger takes longer to paint
               </p>
             </div>
+            <div
+              v-if="delightAvailable && mode !== 'mesh_roundtrip'"
+              class="mesh-studio__check"
+            >
+              <SwitchToggle
+                v-model="delight"
+                :disabled="busy"
+                label="Remove baked lighting and highlights before building the mesh"
+              />
+              <span class="mesh-studio__check-label" aria-hidden="true"
+                >Remove baked lighting and highlights before building the
+                mesh</span
+              >
+            </div>
+            <button
+              v-if="!desktop"
+              class="mesh-studio__primary"
+              type="submit"
+              :disabled="!canSubmit"
+            >
+              {{
+                busy
+                  ? "Preparing…"
+                  : mode === "text_to_mesh"
+                    ? "Build 3-D object"
+                    : mode === "mesh_roundtrip"
+                      ? "Rebuild mesh"
+                      : "Paint mesh"
+              }}
+            </button>
           </template>
-
-          <div
-            v-if="
-              (mode === 'text_to_mesh' && texture) || mode === 'mesh_texture'
-            "
-            class="mesh-studio__field"
-          >
-            <span class="ms-group-label mesh-studio__label">Texture size</span>
-            <SegmentedControl
-              v-if="desktop"
-              v-model="textureResolution"
-              :options="textureSizeOptions"
-              :disabled="busy"
-              label="Texture size"
-              variant="neutral"
-              compact
-            />
-            <select
-              v-else
-              v-model.number="textureResolution"
-              aria-label="Texture size"
-            >
-              <option :value="1024">1024</option>
-              <option :value="2048">2048</option>
-              <option :value="4096">4096</option>
-            </select>
-            <p class="mesh-studio__truth">
-              {{ textureResolution }} px · bigger takes longer to paint
-            </p>
-          </div>
-          <div
-            v-if="delightAvailable && mode !== 'mesh_roundtrip'"
-            class="mesh-studio__check"
-          >
-            <SwitchToggle
-              v-model="delight"
-              :disabled="busy"
-              label="Remove baked lighting and highlights before building the mesh"
-            />
-            <span class="mesh-studio__check-label" aria-hidden="true"
-              >Remove baked lighting and highlights before building the
-              mesh</span
-            >
-          </div>
-          <button
-            v-if="!desktop"
-            class="mesh-studio__primary"
-            type="submit"
-            :disabled="!canSubmit"
-          >
-            {{
-              busy
-                ? "Preparing…"
-                : mode === "text_to_mesh"
-                  ? "Build 3-D object"
-                  : mode === "mesh_roundtrip"
-                    ? "Rebuild mesh"
-                    : "Paint mesh"
-            }}
-          </button>
         </fieldset>
       </form>
 
@@ -1112,7 +1225,23 @@ onBeforeUnmount(() => {
                 :selected="meshModelName"
                 :select="(name: string) => (meshModelName = name)"
                 :disabled="busy"
-              />
+              >
+                <select
+                  v-model="meshModelName"
+                  data-test="mesh-workflow-model"
+                  aria-label="3-D style"
+                >
+                  <option
+                    v-for="model in meshModels.filter((model) =>
+                      meshWorkflowModes(model).includes(mode),
+                    )"
+                    :key="model.name"
+                    :value="model.name"
+                  >
+                    {{ modelLabel(model) }}
+                  </option>
+                </select>
+              </slot>
               <slot
                 v-if="mode === 'text_to_mesh'"
                 name="image-picker"
@@ -1120,7 +1249,17 @@ onBeforeUnmount(() => {
                 :selected="imageModelName"
                 :select="(name: string) => (imageModelName = name)"
                 :disabled="busy"
-              />
+              >
+                <select v-model="imageModelName" aria-label="Picture style">
+                  <option
+                    v-for="model in imageModels"
+                    :key="model.name"
+                    :value="model.name"
+                  >
+                    {{ modelLabel(model) }}
+                  </option>
+                </select>
+              </slot>
               <span class="ms-composer__spacer" />
               <button
                 class="ms-composer__generate"
@@ -1527,6 +1666,86 @@ onBeforeUnmount(() => {
   background: var(--mold-bg-deep);
   color: var(--mold-text);
   font-size: var(--mold-fs-xs);
+  font-weight: 600;
+}
+
+/* The inspector's tab strip — the same 26px control ladder InspectorPanel's
+ * tabs sit on, inside the one-toolbar-tall header. */
+.mesh-studio--desktop .mesh-studio__inspector-heading {
+  gap: 2px;
+  padding: 0 8px;
+  font-weight: 400;
+}
+.mesh-studio--desktop .mesh-studio__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  justify-content: center;
+  height: var(--mold-ctl-md, 26px);
+  padding: 0;
+  border: 0;
+  border-radius: var(--mold-radius-1);
+  background: transparent;
+  color: var(--mold-text-2);
+  font-family: var(--mold-font-sans);
+  font-size: var(--mold-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.mesh-studio--desktop .mesh-studio__tab[data-on="true"] {
+  background: var(--mold-row-selected);
+  color: var(--mold-text);
+}
+.mesh-studio--desktop .mesh-studio__tab-count {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
+}
+
+/* Recent workflows: one row per past run — what it made, what it is doing,
+ * and the accent line naming what a click does. */
+.mesh-studio--desktop .mesh-studio__recent {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.mesh-studio--desktop .mesh-studio__recent-empty {
+  margin: 0;
+  color: var(--mold-text-dim);
+  font-size: var(--mold-fs-xs);
+  line-height: var(--mold-lh-body);
+}
+.mesh-studio--desktop .mesh-studio__recent-row {
+  display: grid;
+  gap: 3px;
+  padding: 9px 11px;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-surface);
+  text-align: left;
+  cursor: pointer;
+}
+.mesh-studio--desktop .mesh-studio__recent-row:hover:not(:disabled) {
+  border-color: var(--mold-border-focus);
+}
+.mesh-studio--desktop .mesh-studio__recent-row[data-on="true"] {
+  border-color: var(--mold-blue);
+  box-shadow: inset 0 0 0 1px var(--mold-blue);
+}
+.mesh-studio--desktop .mesh-studio__recent-title {
+  color: var(--mold-text);
+  font-size: var(--mold-fs-xs);
+  font-weight: 600;
+}
+.mesh-studio--desktop .mesh-studio__recent-meta {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
+}
+.mesh-studio--desktop .mesh-studio__recent-reuse {
+  color: var(--mold-blue);
+  font-size: var(--mold-fs-micro);
   font-weight: 600;
 }
 

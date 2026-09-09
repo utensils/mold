@@ -13,6 +13,9 @@ import { setMeshWorkflowDraftStorage } from "../stores/meshWorkflowDraft";
  * cases hydrating each other's prompts.
  */
 beforeEach(() => {
+  // `clearAllMocks` resets calls but NOT a `mockResolvedValue`, so one case's
+  // job listing kept answering in the next.
+  listMeshWorkflows.mockResolvedValue({ jobs: [] });
   setActivePinia(createPinia());
   setMeshWorkflowDraftStorage({
     getItem: () => null,
@@ -595,6 +598,133 @@ describe("the composer is the one place a 3-D object is authored", () => {
     await flushPromises();
     expect(wrapper.text()).not.toContain("TEXTURE SIZE");
     expect(wrapper.text()).toContain("Texture size");
+    wrapper.unmount();
+  });
+});
+
+describe("saving and reusing a 3-D workflow", () => {
+  /*
+   * Reuse always worked — selecting a past job restores its draft through
+   * `restoreWorkflowDraft`. Its only door was a bare `<select>` whose rows
+   * read "Text to 3-D · completed": no verb, no date, no sense that picking
+   * one brought the whole recipe back. That is why it read as missing rather
+   * than merely hidden.
+   */
+  it("lists past workflows with what they are doing and what a click does", async () => {
+    const { listMeshWorkflows } = await import("../api/meshWorkflows");
+    const now = Date.now();
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [
+        {
+          contract_version: 1,
+          id: "workflow-1",
+          state: "running",
+          mode: "text_to_mesh",
+          stage_count: 6,
+          current_stage: 2,
+          current_stage_kind: "shape",
+          created_at_ms: now - 60_000,
+          updated_at_ms: now - 60_000,
+        },
+        {
+          contract_version: 1,
+          id: "workflow-2",
+          state: "completed",
+          mode: "mesh_texture",
+          stage_count: 3,
+          current_stage: 2,
+          created_at_ms: now - 7_200_000,
+          updated_at_ms: now - 7_200_000,
+        },
+      ],
+    } as never);
+
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+
+    // The tab names itself and counts what it holds.
+    expect(wrapper.get("[data-test='mesh-tab-recent']").text()).toContain(
+      "Recent",
+    );
+    expect(wrapper.get("[data-test='mesh-tab-recent']").text()).toContain("2");
+
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    const first = wrapper.get("[data-test='mesh-recent-workflow-1']");
+    // The workflow's own toolbar word, not a private vocabulary.
+    expect(first.text()).toContain("From words");
+    // Running says the stage it is on, the way the queue does.
+    expect(first.text()).toContain("Build geometry");
+    expect(first.text()).toContain("3/6");
+    expect(first.text()).toContain("1m ago");
+    // And the accent line names what a click does, in the app's own words.
+    expect(first.text()).toContain("Use these settings again");
+
+    const second = wrapper.get("[data-test='mesh-recent-workflow-2']");
+    expect(second.text()).toContain("Add texture");
+    expect(second.text()).toContain("completed");
+    expect(second.text()).toContain("2h ago");
+    wrapper.unmount();
+  });
+
+  it("says plainly when a machine has made nothing yet", async () => {
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    expect(wrapper.get("[data-test='mesh-recent']").text()).toContain(
+      "Nothing made here yet",
+    );
+    wrapper.unmount();
+  });
+
+  /* The two tabs are exclusive: Recent must not sit under the settings. */
+  it("shows one tab at a time", async () => {
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+    expect(wrapper.find("[data-test='mesh-recent']").exists()).toBe(false);
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    expect(wrapper.find("[data-test='mesh-recent']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='mesh-workflow-texture']").exists()).toBe(
+      false,
+    );
+    wrapper.unmount();
+  });
+
+  /* Starting fresh clears the authored work, never the machine or the styles. */
+  it("starts a new workflow without forgetting the styles in use", async () => {
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("a hand-carved wooden fox");
+    const style = wrapper.get<HTMLSelectElement>(
+      "[data-test='mesh-workflow-model']",
+    ).element.value;
+
+    await wrapper.get("[data-test='mesh-new-workflow']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get<HTMLTextAreaElement>("textarea").element.value).toBe("");
+    expect(
+      wrapper.get<HTMLSelectElement>("[data-test='mesh-workflow-model']")
+        .element.value,
+    ).toBe(style);
     wrapper.unmount();
   });
 });
