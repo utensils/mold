@@ -348,64 +348,9 @@ defineExpose({ focus, expand, record });
 </template>
 
 <style scoped>
-.ms-composer {
-  display: flex;
-  flex-direction: column;
-  border-top: var(--mold-bw) solid var(--mold-border);
-  padding: 12px 14px 14px;
-  background: var(--mold-bg);
-}
-.ms-composer__card {
-  display: flex;
-  flex-direction: column;
-  border: var(--mold-bw) solid var(--mold-border);
-  border-radius: var(--mold-radius-2);
-  background: var(--mold-bg-deep);
-  transition: border-color var(--mold-dur-quick) var(--mold-ease-out);
-}
-.ms-composer__card:focus-within {
-  border-color: var(--mold-border-focus);
-}
-.ms-composer__prompt-row {
-  display: flex;
-  align-items: baseline;
-  gap: 16px;
-  padding: 12px 14px 6px;
-}
-.ms-composer__input {
-  flex: 1;
-  min-width: 0;
-  width: 100%;
-  box-sizing: border-box;
-  border: 0;
-  background: transparent;
-  color: var(--mold-text);
-  font-family: var(--mold-font-sans);
-  font-size: var(--mold-fs-base);
-  line-height: var(--mold-lh-body);
-  resize: none;
-  outline: none;
-  min-height: 24px;
-  max-height: 160px;
-  overflow-x: hidden;
-}
-.ms-composer__input::placeholder {
-  color: var(--mold-text-dim);
-}
 .ms-composer__estimate {
   flex-shrink: 0;
   white-space: nowrap;
-}
-.ms-composer__controls {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 10px 10px 12px;
-}
-.ms-composer__spacer {
-  flex: 1;
-  min-width: 16px;
 }
 .ms-chip {
   position: relative;
@@ -519,39 +464,5 @@ defineExpose({ focus, expand, record });
 }
 .ms-composer__blocker {
   margin-top: 8px;
-}
-.ms-composer__generate {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  flex-shrink: 0;
-  height: var(--mold-ctl-lg);
-  padding: 0 16px;
-  border: 0;
-  border-radius: var(--mold-radius-2);
-  background: var(--mold-blue);
-  color: var(--mold-on-accent);
-  font-size: var(--mold-fs-sm);
-  font-weight: 600;
-  letter-spacing: -0.005em;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: filter var(--mold-dur-quick) var(--mold-ease-out);
-}
-.ms-composer__generate:hover:not(:disabled) {
-  filter: brightness(1.05);
-}
-.ms-composer__generate:active:not(:disabled) {
-  transform: translateY(1px);
-}
-.ms-composer__generate:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-.ms-composer__key {
-  font-family: var(--mold-font-mono);
-  font-size: var(--mold-fs-micro);
-  opacity: 0.7;
 }
 </style>

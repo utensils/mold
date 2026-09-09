@@ -14,15 +14,17 @@ import {
   type MeshWorkflowRequirements,
   type MeshWorkflowRoute,
 } from "@studio/lib/meshWorkflowRouting";
-import ModelPicker from "../components/create/ModelPicker.vue";
+import MeshStyleChip from "../components/mesh/MeshStyleChip.vue";
 import PanelResizeHandle from "../components/shell/PanelResizeHandle.vue";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { dragWidth } from "../lib/panelResize";
+import { MIN_CANVAS_HEIGHT } from "../lib/benchLayout";
 import type { ModelEntry } from "../lib/api/types";
 import HostChip from "../components/create/HostChip.vue";
 import { useHostsStore } from "../stores/hosts";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useUiStore } from "../stores/ui";
+import { shortcutLabel } from "../lib/platform";
 
 const hosts = useHostsStore();
 const prefs = useAppPrefsStore();
@@ -176,7 +178,11 @@ async function resolveTarget(requirements: MeshWorkflowRequirements): Promise<Me
     ref="studio"
     :target="target"
     :open-workflow="openWorkflow"
-    :style="{ '--mesh-inspector-width': inspectorWidth + 'px' }"
+    :generate-shortcut="shortcutLabel('↩')"
+    :style="{
+      '--mesh-inspector-width': inspectorWidth + 'px',
+      '--mesh-canvas-floor': MIN_CANVAS_HEIGHT + 'px',
+    }"
     :available-models="availableModels"
     :resolve-target="resolveTarget"
     :host-label="selectedHost?.label ?? ''"
@@ -193,30 +199,28 @@ async function resolveTarget(requirements: MeshWorkflowRequirements): Promise<Me
       />
     </template>
     <template #mesh-picker="{ models, selected, select, disabled }">
-      <div class="mesh-style-field">
-        <span class="ms-group-label">3-D style</span>
-        <ModelPicker
-          :models="pickerModels(models)"
-          :selected="pickerModels(models).find((m) => m.name === selected) ?? null"
-          :disabled-reason="disabled ? () => 'Preparing workflow' : null"
-          kicker="3-D object styles"
-          browse-target="/models?type=mesh"
-          @pick="(model) => select(model.name)"
-        />
-      </div>
+      <MeshStyleChip
+        :models="pickerModels(models)"
+        :selected="pickerModels(models).find((m) => m.name === selected) ?? null"
+        :disabled-reason="disabled ? 'Preparing workflow' : null"
+        label="3-D style"
+        placeholder="Choose a 3-D style"
+        kicker="3-D object styles"
+        browse-target="/models?type=mesh"
+        @pick="(model) => select(model.name)"
+      />
     </template>
     <template #image-picker="{ models, selected, select, disabled }">
-      <div class="mesh-style-field">
-        <span class="ms-group-label">Picture style</span>
-        <ModelPicker
-          :models="pickerModels(models)"
-          :selected="pickerModels(models).find((m) => m.name === selected) ?? null"
-          :disabled-reason="disabled ? () => 'Preparing workflow' : null"
-          kicker="Still picture styles"
-          browse-target="/models?type=image"
-          @pick="(model) => select(model.name)"
-        />
-      </div>
+      <MeshStyleChip
+        :models="pickerModels(models)"
+        :selected="pickerModels(models).find((m) => m.name === selected) ?? null"
+        :disabled-reason="disabled ? 'Preparing workflow' : null"
+        label="Picture style"
+        placeholder="Choose a picture style"
+        kicker="Still picture styles"
+        browse-target="/models?type=image"
+        @pick="(model) => select(model.name)"
+      />
     </template>
     <template #machine="{ busy }">
       <HostChip v-model="routing" :disabled="busy" always-show-routing />
@@ -235,12 +239,6 @@ async function resolveTarget(requirements: MeshWorkflowRequirements): Promise<Me
   bottom: 0;
   z-index: 10;
 }
-.mesh-style-field {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-}
-
 .mesh-workflow-unavailable {
   display: grid;
   place-content: center;

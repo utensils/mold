@@ -1,8 +1,16 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
 import { storeToRefs } from "pinia";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import type {
   MeshWorkflowRequirements,
   MeshWorkflowRoute,
@@ -29,6 +37,7 @@ import {
   type WorkflowGenerateRequest,
   type WorkflowModel,
 } from "../lib/meshWorkflowAuthoring";
+import { autoGrowRows } from "../lib/autogrow";
 import { isMeshFamily } from "../lib/legacyRecipeRules";
 import { useMeshWorkflowDraftStore } from "../stores/meshWorkflowDraft";
 import MeshViewer from "./MeshViewer.vue";
@@ -50,6 +59,15 @@ const props = defineProps<{
    * component is handed the id rather than reading the router itself.
    */
   openWorkflow?: string | null;
+  /**
+   * The platform's spelling of the Generate chord, e.g. `⌘↩` or `Ctrl↩`.
+   *
+   * Passed in rather than hard-coded: `studio/` cannot read the shell's
+   * platform table, and desktop ships Linux and Windows builds where New
+   * image's composer says `Ctrl↩`. Absent renders no keycap, which is right
+   * for web — it binds no keyboard Generate on any surface.
+   */
+  generateShortcut?: string | null;
   resolveTarget?: (
     requirements: MeshWorkflowRequirements,
   ) => Promise<MeshWorkflowRoute>;
@@ -145,11 +163,66 @@ const canSubmit = computed(() => {
     metersPerUnit.value > 0
   );
 });
+/**
+ * What the empty canvas invites, in the words this workflow needs — the peer
+ * of New image's `emptyCanvasGuidance`.
+ */
+/*
+ * Plain word in sans, technical truth in mono, on the same row (README §1).
+ * "Up axis" and "Metres per unit" are the file format's words, not a person's.
+ * The Y/Z wording is `ui/components/MeshGeometryFields.vue`'s own, so the
+ * import side and the export side name the same axes the same way.
+ */
+const textureSizeOptions = [
+  { value: 1024, label: "1024" },
+  { value: 2048, label: "2048" },
+  { value: 4096, label: "4096" },
+];
+const upAxisOptions = [
+  { value: "y" as const, label: "Y up" },
+  { value: "z" as const, label: "Z up" },
+];
+const upAxisTruth = computed(() =>
+  upAxis.value === "y"
+    ? "Y-up · as stored (glTF, Blender OBJ)"
+    : "Z-up · slicers, CAD, Blender STL/PLY",
+);
+
+const emptyCanvasGuidance = computed(() =>
+  mode.value === "text_to_mesh"
+    ? "Describe an object below, pick a 3-D style, and press Generate. Everything runs on your own machine."
+    : mode.value === "mesh_roundtrip"
+      ? "Choose a mesh in the settings, then press Generate. Everything runs on your own machine."
+      : "Choose a mesh and the picture to paint it with, then press Generate.",
+);
+
 const settled = computed(() =>
   detail.value
     ? ["completed", "failed", "cancelled"].includes(detail.value.state)
     : true,
 );
+
+const composerPrompt = ref<HTMLTextAreaElement | null>(null);
+
+/*
+ * The description grows with what is typed, capped, exactly as New image's
+ * does. Without it a `rows="1"` field scrolled inside one line — worse than
+ * the `rows="5"` box in the rail it replaced.
+ */
+function growComposer(): void {
+  if (composerPrompt.value) autoGrowRows(composerPrompt.value);
+}
+watch(prompt, () => void nextTick(growComposer));
+onMounted(() => void nextTick(growComposer));
+
+/** The primary-modifier Return from inside the description, the way every
+ *  composer behaves. Both modifiers are accepted because this layer cannot
+ *  read the shell's platform table; the visible keycap is the caller's. */
+function onComposerKeydown(event: KeyboardEvent): void {
+  if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+  event.preventDefault();
+  if (canSubmit.value) void submit();
+}
 
 function modelLabel(model: WorkflowModel): string {
   return model.display_name?.trim() || model.name;
@@ -719,6 +792,7 @@ onBeforeUnmount(() => {
           />
 
           <slot
+            v-if="!desktop"
             name="mesh-picker"
             :models="
               meshModels.filter((model) =>
@@ -746,34 +820,36 @@ onBeforeUnmount(() => {
           </slot>
 
           <template v-if="mode === 'text_to_mesh'">
-            <label>
-              Describe the object
-              <textarea
-                v-model="prompt"
-                rows="5"
-                placeholder="A hand-carved wooden fox, centered on a plain background"
-              />
-            </label>
-            <slot
-              name="image-picker"
-              :models="imageModels"
-              :selected="imageModelName"
-              :select="(name: string) => (imageModelName = name)"
-              :disabled="busy"
-            >
+            <template v-if="!desktop">
               <label>
-                Picture style
-                <select v-model="imageModelName">
-                  <option
-                    v-for="model in imageModels"
-                    :key="model.name"
-                    :value="model.name"
-                  >
-                    {{ modelLabel(model) }}
-                  </option>
-                </select>
+                Describe the object
+                <textarea
+                  v-model="prompt"
+                  rows="5"
+                  placeholder="A hand-carved wooden fox, centered on a plain background"
+                />
               </label>
-            </slot>
+              <slot
+                name="image-picker"
+                :models="imageModels"
+                :selected="imageModelName"
+                :select="(name: string) => (imageModelName = name)"
+                :disabled="busy"
+              >
+                <label>
+                  Picture style
+                  <select v-model="imageModelName">
+                    <option
+                      v-for="model in imageModels"
+                      :key="model.name"
+                      :value="model.name"
+                    >
+                      {{ modelLabel(model) }}
+                    </option>
+                  </select>
+                </label>
+              </slot>
+            </template>
             <div
               v-if="textureAvailable"
               class="mesh-studio__check"
@@ -784,7 +860,9 @@ onBeforeUnmount(() => {
                 :disabled="busy"
                 label="Paint PBR materials after geometry"
               />
-              Paint PBR materials after geometry
+              <span class="mesh-studio__check-label" aria-hidden="true"
+                >Paint PBR materials after geometry</span
+              >
             </div>
             <p
               v-else
@@ -821,39 +899,73 @@ onBeforeUnmount(() => {
               />
               <span>{{ appearanceFile?.name || "Choose an image" }}</span>
             </label>
-            <div class="mesh-studio__row">
-              <label>
-                Up axis
-                <select v-model="upAxis">
-                  <option value="y">Y up</option>
-                  <option value="z">Z up</option>
-                </select>
-              </label>
-              <label>
-                Metres per unit
-                <input
-                  v-model.number="metersPerUnit"
-                  type="number"
-                  min="0.000001"
-                  max="1000000"
-                  step="any"
-                />
-              </label>
+            <div class="mesh-studio__field">
+              <span class="ms-group-label mesh-studio__label"
+                >Which way is up</span
+              >
+              <SegmentedControl
+                v-if="desktop"
+                v-model="upAxis"
+                :options="upAxisOptions"
+                :disabled="busy"
+                label="Which way is up"
+                variant="neutral"
+                compact
+              />
+              <select v-else v-model="upAxis" aria-label="Which way is up">
+                <option value="y">Y up</option>
+                <option value="z">Z up</option>
+              </select>
+              <p class="mesh-studio__truth">{{ upAxisTruth }}</p>
+            </div>
+            <div class="mesh-studio__field">
+              <span class="ms-group-label mesh-studio__label"
+                >How big one unit is</span
+              >
+              <input
+                v-model.number="metersPerUnit"
+                class="mesh-studio__number"
+                type="number"
+                min="0.000001"
+                max="1000000"
+                step="any"
+                aria-label="How big one unit is"
+              />
+              <p class="mesh-studio__truth">
+                {{ metersPerUnit }} m per unit · what the file calls 1
+              </p>
             </div>
           </template>
 
-          <label
+          <div
             v-if="
               (mode === 'text_to_mesh' && texture) || mode === 'mesh_texture'
             "
+            class="mesh-studio__field"
           >
-            Texture size
-            <select v-model.number="textureResolution">
+            <span class="ms-group-label mesh-studio__label">Texture size</span>
+            <SegmentedControl
+              v-if="desktop"
+              v-model="textureResolution"
+              :options="textureSizeOptions"
+              :disabled="busy"
+              label="Texture size"
+              variant="neutral"
+              compact
+            />
+            <select
+              v-else
+              v-model.number="textureResolution"
+              aria-label="Texture size"
+            >
               <option :value="1024">1024</option>
               <option :value="2048">2048</option>
               <option :value="4096">4096</option>
             </select>
-          </label>
+            <p class="mesh-studio__truth">
+              {{ textureResolution }} px · bigger takes longer to paint
+            </p>
+          </div>
           <div
             v-if="delightAvailable && mode !== 'mesh_roundtrip'"
             class="mesh-studio__check"
@@ -863,9 +975,13 @@ onBeforeUnmount(() => {
               :disabled="busy"
               label="Remove baked lighting and highlights before building the mesh"
             />
-            Remove baked lighting and highlights before building the mesh
+            <span class="mesh-studio__check-label" aria-hidden="true"
+              >Remove baked lighting and highlights before building the
+              mesh</span
+            >
           </div>
           <button
+            v-if="!desktop"
             class="mesh-studio__primary"
             type="submit"
             :disabled="!canSubmit"
@@ -873,81 +989,154 @@ onBeforeUnmount(() => {
             {{
               busy
                 ? "Preparing…"
-                : desktop
-                  ? "Generate"
-                  : mode === "text_to_mesh"
-                    ? "Build 3-D object"
-                    : mode === "mesh_roundtrip"
-                      ? "Rebuild mesh"
-                      : "Paint mesh"
+                : mode === "text_to_mesh"
+                  ? "Build 3-D object"
+                  : mode === "mesh_roundtrip"
+                    ? "Rebuild mesh"
+                    : "Paint mesh"
             }}
           </button>
         </fieldset>
       </form>
 
-      <article class="mesh-studio__result">
-        <MeshViewer
-          v-if="resultSrc"
-          :src="resultSrc"
-          :poster="resultPoster"
-          auto-rotate
-          expandable
-          alt="Generated 3-D object"
-        />
-        <div v-else-if="detail" class="mesh-studio__progress">
-          <h2>
-            {{
-              detail.state === "completed"
-                ? "Publishing result…"
-                : "Workflow progress"
-            }}
-          </h2>
-          <ol>
-            <li
-              v-for="stage in detail.stages"
-              :key="stage.index"
-              :data-state="stage.state"
-            >
-              <span class="mesh-studio__dot" />
-              <span>{{ stageLabel(stage.kind) }}</span>
-              <strong>{{ stage.state }}</strong>
-            </li>
-          </ol>
-          <p v-if="detail.error" class="mesh-studio__error">
-            {{ detail.error }}
-          </p>
-          <div class="mesh-studio__actions">
-            <button
-              v-if="['queued', 'running'].includes(detail.state)"
-              type="button"
-              :disabled="busy"
-              @click="cancel"
-            >
-              Cancel
-            </button>
-            <button
-              v-if="['paused', 'failed'].includes(detail.state)"
-              type="button"
-              :disabled="busy"
-              @click="resume"
-            >
-              Resume
-            </button>
-            <button
-              v-if="settled"
-              type="button"
-              :disabled="busy"
-              @click="remove"
-            >
-              Delete workflow data
-            </button>
+      <div class="mesh-studio__main">
+        <article class="mesh-studio__result">
+          <MeshViewer
+            v-if="resultSrc"
+            :src="resultSrc"
+            :poster="resultPoster"
+            auto-rotate
+            expandable
+            alt="Generated 3-D object"
+          />
+          <div v-else-if="detail" class="mesh-studio__progress">
+            <h2>
+              {{
+                detail.state === "completed"
+                  ? "Publishing result…"
+                  : "Workflow progress"
+              }}
+            </h2>
+            <ol>
+              <li
+                v-for="stage in detail.stages"
+                :key="stage.index"
+                :data-state="stage.state"
+              >
+                <span class="mesh-studio__dot" />
+                <span>{{ stageLabel(stage.kind) }}</span>
+                <strong>{{ stage.state }}</strong>
+              </li>
+            </ol>
+            <p v-if="detail.error" class="mesh-studio__error">
+              {{ detail.error }}
+            </p>
+            <div class="mesh-studio__actions">
+              <button
+                v-if="['queued', 'running'].includes(detail.state)"
+                type="button"
+                :disabled="busy"
+                @click="cancel"
+              >
+                Cancel
+              </button>
+              <button
+                v-if="['paused', 'failed'].includes(detail.state)"
+                type="button"
+                :disabled="busy"
+                @click="resume"
+              >
+                Resume
+              </button>
+              <button
+                v-if="settled"
+                type="button"
+                :disabled="busy"
+                @click="remove"
+              >
+                Delete workflow data
+              </button>
+            </div>
           </div>
-        </div>
-        <div v-else class="mesh-studio__empty">
-          <strong>Your 3-D object appears here</strong>
-          <span>Choose a workflow and its inputs to begin.</span>
-        </div>
-      </article>
+          <div v-else class="mesh-studio__empty">
+            <EmptyStateBlock
+              v-if="desktop"
+              data-test="mesh-empty-canvas"
+              brand
+              icon="layers"
+              headline="Your 3-D object appears here"
+              :guidance="emptyCanvasGuidance"
+            />
+            <template v-else>
+              <strong>Your 3-D object appears here</strong>
+              <span>Choose a workflow and its inputs to begin.</span>
+            </template>
+          </div>
+        </article>
+
+        <!--
+        The composer, exactly where New image puts it (README §3): the
+        description, the chips that pick the recipe, and one accent Generate
+        carrying the shortcut the shell actually honours here. It used to sit
+        at the foot of the inspector, which is what made this surface read as
+        a form dropped into the shell rather than a view of the app.
+      -->
+        <form
+          v-if="desktop"
+          class="ms-composer mesh-studio__bar"
+          data-test="mesh-composer"
+          @submit.prevent="submit"
+        >
+          <div class="ms-composer__card">
+            <div v-if="mode === 'text_to_mesh'" class="ms-composer__prompt-row">
+              <textarea
+                v-model="prompt"
+                data-selectable
+                ref="composerPrompt"
+                rows="1"
+                aria-label="Describe the object"
+                placeholder="Describe the object — “a hand-carved wooden fox, on a plain background”"
+                class="ms-composer__input"
+                :disabled="busy"
+                @keydown="onComposerKeydown"
+              />
+            </div>
+            <div class="ms-composer__controls">
+              <slot
+                name="mesh-picker"
+                :models="
+                  meshModels.filter((model) =>
+                    meshWorkflowModes(model).includes(mode),
+                  )
+                "
+                :selected="meshModelName"
+                :select="(name: string) => (meshModelName = name)"
+                :disabled="busy"
+              />
+              <slot
+                v-if="mode === 'text_to_mesh'"
+                name="image-picker"
+                :models="imageModels"
+                :selected="imageModelName"
+                :select="(name: string) => (imageModelName = name)"
+                :disabled="busy"
+              />
+              <span class="ms-composer__spacer" />
+              <button
+                class="ms-composer__generate"
+                data-test="mesh-generate"
+                type="submit"
+                :disabled="!canSubmit"
+              >
+                {{ busy ? "Preparing…" : "Generate" }}
+                <kbd v-if="generateShortcut" class="ms-composer__key">{{
+                  generateShortcut
+                }}</kbd>
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
     </div>
   </section>
 </template>
@@ -1018,9 +1207,18 @@ onBeforeUnmount(() => {
   font-size: var(--mold-fs-xs);
   font-weight: 500;
 }
-.mesh-studio select,
-.mesh-studio textarea,
-.mesh-studio input[type="number"] {
+/*
+ * The rail's own fields. Every selector here EXCLUDES the composer's input:
+ * an SFC's scoped style is unlayered and `ui/kit.css` sits in
+ * `@layer components`, so an unlayered element selector outranks the kit
+ * whatever the specificity (`.claude/rules/desktop.md`, invariant 1). Without
+ * the exclusion the composer's description rendered as a bordered, opaque,
+ * resizable box with a native grip inside the composer card — nothing like
+ * New image's, which is the whole point of having one.
+ */
+.mesh-studio select:not(.ms-composer__input),
+.mesh-studio textarea:not(.ms-composer__input),
+.mesh-studio input[type="number"]:not(.ms-composer__input) {
   width: 100%;
   border: 1px solid var(--mold-border);
   border-radius: var(--mold-radius-1);
@@ -1028,7 +1226,7 @@ onBeforeUnmount(() => {
   color: var(--mold-text);
   padding: 10px;
 }
-.mesh-studio textarea {
+.mesh-studio textarea:not(.ms-composer__input) {
   resize: vertical;
   line-height: 1.45;
 }
@@ -1057,11 +1255,6 @@ onBeforeUnmount(() => {
   padding: 14px;
   color: var(--mold-text);
   cursor: pointer;
-}
-.mesh-studio__row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
 }
 .mesh-studio__primary {
   margin-top: auto;
@@ -1177,17 +1370,46 @@ onBeforeUnmount(() => {
   background: var(--mold-canvas);
 }
 .mesh-studio--desktop .mesh-studio__header {
-  height: 40px;
-  flex-shrink: 0;
+  height: var(--mold-shell-viewbar-h, 40px);
+  flex: 0 0 var(--mold-shell-viewbar-h, 40px);
   align-items: center;
   flex-direction: row;
-  gap: 12px;
+  gap: 10px;
   max-width: none;
   width: 100%;
   margin: 0;
-  padding: 0 12px;
+  padding: 0 14px;
   border-bottom: var(--mold-bw) solid var(--mold-border);
-  background: var(--mold-bg-crust);
+  /* The shell's chrome plane, the same one CreateHeader sits on — the crust
+   * is the tile bed and read a shade off beside the New image toolbar. */
+  background: var(--mold-chrome);
+}
+
+/* The canvas column: the result takes the height and the composer sits on its
+ * bottom edge, both inside the grid's first column so the inspector keeps its
+ * own scroll (README §"3-D Studio workflows"). */
+.mesh-studio--desktop .mesh-studio__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /*
+   * A floor, bound from the shell's one layout authority (the desktop view
+   * passes `--mesh-canvas-floor` from `benchLayout`'s `MIN_CANVAS_HEIGHT`).
+   * The composer's style menus open UPWARD in place, so without a guaranteed
+   * canvas the top of a long style list is silently cut by the view toolbar —
+   * which is the same reason New image binds its canvas floor rather than
+   * hard-coding one beside the layout.
+   */
+  min-height: var(--mesh-canvas-floor, 320px);
+  overflow: hidden;
+}
+.mesh-studio--desktop .mesh-studio__bar {
+  flex-shrink: 0;
+}
+.mesh-studio--desktop .mesh-studio__empty {
+  display: grid;
+  place-content: center;
+  height: 100%;
 }
 .mesh-studio--desktop .mesh-studio__header-actions {
   display: flex;
@@ -1224,14 +1446,29 @@ onBeforeUnmount(() => {
   border-left: var(--mold-bw) solid var(--mold-border);
   background: var(--mold-bg-deep);
 }
-.mesh-studio--desktop .mesh-studio__result {
+/* The canvas column owns the grid cell; the result takes the height inside it
+ * and the composer sits on its bottom edge. */
+.mesh-studio--desktop .mesh-studio__main {
   grid-column: 1;
   grid-row: 1;
+}
+.mesh-studio--desktop .mesh-studio__result {
+  flex: 1;
   min-width: 0;
   min-height: 0;
   padding: 24px;
   border: 0;
   background: var(--mold-canvas);
+  /*
+   * Fixed chrome never shrinks and the canvas absorbs the slack (README §3) —
+   * that is what the composer's `flex-shrink: 0` above is for, and it is why
+   * the whole surface no longer scrolls away.
+   *
+   * The canvas itself still SCROLLS, though: `hidden` clipped the stage list
+   * at both ends on a short window (it is `justify-content: center`), which
+   * put Cancel and Resume out of reach with no scrollbar to find them. The
+   * viewer sets its own `height: 100%`, so this never adds a bar for a result.
+   */
   overflow: auto;
 }
 .mesh-studio--desktop .mesh-studio__result :deep(.mesh-viewer) {
@@ -1244,14 +1481,9 @@ onBeforeUnmount(() => {
   padding: 0 8px;
   font-size: var(--mold-fs-xs);
 }
-.mesh-studio--desktop textarea {
+.mesh-studio--desktop textarea:not(.ms-composer__input) {
   padding: 8px;
   font-size: var(--mold-fs-sm);
-}
-.mesh-studio--desktop .mesh-studio__primary {
-  padding: 8px 12px;
-  font-size: var(--mold-fs-sm);
-  font-weight: 600;
 }
 .mesh-studio__owner {
   font: var(--mold-fs-micro) var(--mold-font-mono);
@@ -1277,18 +1509,67 @@ onBeforeUnmount(() => {
   }
 }
 
+/* Exactly one view toolbar tall, so its bottom rule lands on the toolbar's —
+ * the same metric `InspectorPanel`'s tab strip binds. It also has to be
+ * STICKY: it lives inside the scrolling settings form, so it used to slide up
+ * out of the panel on the first scroll and leave the rail unlabelled. */
 .mesh-studio--desktop .mesh-studio__inspector-heading {
-  height: var(--mold-shell-viewbar-h);
-  min-height: var(--mold-shell-viewbar-h);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: var(--mold-shell-viewbar-h, 40px);
+  min-height: var(--mold-shell-viewbar-h, 40px);
   display: flex;
   align-items: center;
-  margin: -16px -16px 0;
+  margin: -16px -16px 4px;
   padding: 0 14px;
   border-bottom: var(--mold-bw) solid var(--mold-border);
-  background: var(--mold-bg);
+  background: var(--mold-bg-deep);
   color: var(--mold-text);
   font-size: var(--mold-fs-xs);
   font-weight: 600;
+}
+
+/*
+ * Field rhythm: the group label, the control, then one line of mono truth
+ * beneath it (README §1).
+ *
+ * These are NOT desktop-only. The markup they replaced was a `<label>`, which
+ * picked up `.mesh-studio label`'s grid, gap, colour and size — so scoping the
+ * replacements to `--desktop` left web with bare `<div>`s and an unstyled
+ * truth line. Only the uppercase is desktop's presentation.
+ */
+.mesh-studio__field {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: var(--mold-text-2);
+  font-size: var(--mold-fs-xs);
+  font-weight: 500;
+}
+.mesh-studio--desktop .mesh-studio__field {
+  gap: 8px;
+}
+.mesh-studio--desktop .mesh-studio__label {
+  text-transform: uppercase;
+}
+.mesh-studio__truth {
+  margin: 0;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  font-weight: 400;
+  color: var(--mold-text-dim);
+}
+.mesh-studio input[type="number"].mesh-studio__number {
+  height: var(--mold-ctl-md, 26px);
+  width: 12ch;
+  padding: 0 8px;
+  border: var(--mold-bw) solid var(--mold-border-control);
+  border-radius: var(--mold-radius-1);
+  background: var(--mold-bg);
+  color: var(--mold-text);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
 }
 .mesh-studio--desktop .mesh-studio__check {
   flex-direction: row-reverse;

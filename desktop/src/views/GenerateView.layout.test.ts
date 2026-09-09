@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
 
@@ -29,6 +31,8 @@ function tagFor(source: string, testId: string): string {
 function classesFor(source: string, testId: string): string {
   return tagFor(source, testId).match(/class="([^"]*)"/s)?.[1] ?? "";
 }
+
+const kitSource = readFileSync(resolve(__dirname, "../../../ui/kit.css"), "utf8");
 
 describe("GenerateView layout", () => {
   it("keeps the composer pinned inside the shell while the canvas shrinks", () => {
@@ -75,8 +79,12 @@ describe("GenerateView layout", () => {
     }
     expect(benchLayoutSource).not.toContain("clampBenchHeight");
     // The one-shot composer is a card under the canvas whose control row
-    // carries Generate, so its actions have no bottom edge of their own.
-    expect(composerCardSource).toMatch(/\.ms-composer__controls\s*\{[^}]*display:\s*flex/s);
+    // carries Generate, so its actions have no bottom edge of their own. The
+    // rule itself moved to `ui/kit.css` when the 3-D Studio adopted the same
+    // anatomy — one vocabulary for every making-view, so this asserts the kit
+    // owns it and that this view has not grown a second copy.
+    expect(kitSource).toMatch(/\.ms-composer__controls\s*\{[^}]*display:\s*flex/s);
+    expect(composerCardSource).not.toMatch(/\n\.ms-composer__controls\s*\{/);
     expect(tagFor(composerCardSource, "generate-button")).toContain("ms-composer__generate");
   });
 

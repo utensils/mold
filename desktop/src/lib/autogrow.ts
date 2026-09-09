@@ -1,18 +1,8 @@
 /**
- * Grow a textarea vertically with its content, capped at `maxRows` (then it
- * scrolls internally). Deliberately JS instead of CSS `field-sizing`, which
- * WKWebView doesn't reliably support yet.
+ * Grow a textarea vertically with its content.
+ *
+ * Re-exported from `@studio/lib/autogrow`, which owns it: `studio/` is the
+ * lower layer and the 3-D Studio's composer needs the same behaviour New
+ * image's has. Every existing caller keeps importing it here.
  */
-export function autoGrowRows(el: HTMLTextAreaElement, maxRows = 8): void {
-  const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20;
-  const maxHeight = Math.round(lineHeight * maxRows);
-  // Collapse first so scrollHeight reports the true content height.
-  el.style.height = "auto";
-  const next = Math.min(el.scrollHeight, maxHeight);
-  if (next > 0) el.style.height = `${next}px`;
-  el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
-  // WebKit's UA default leaves overflow-x at auto; with the app's 10px styled
-  // scrollbars and subpixel width rounding under webview zoom, that surfaces a
-  // phantom horizontal bar even when empty. Text wraps, so never scroll x.
-  el.style.overflowX = "hidden";
-}
+export { autoGrowRows } from "@studio/lib/autogrow";
