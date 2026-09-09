@@ -319,6 +319,18 @@ with Generate at its foot". Putting the prompt where every other making-view
 puts it is what makes the surface read as part of the app, and it gives ⌘↩ an
 obvious home.)
 
+**Reuse is a door, not a dropdown.** The desktop rail is **Settings | Recent**,
+the peer of New image's tab strip, with a mono count. A Recent row says what
+was made in the toolbar's own words, what it is doing in the queue's vocabulary
+(the stage and `n/N` while it runs, `Finished` / `Stopped` / `Failed`
+otherwise — never the raw wire state), and carries the accent **Use these
+settings again** line. Clicking restores explicitly rather than through a
+watcher, because the row you are most likely to click is the one already open.
+A workflow's FILES cannot be restored, so a supplied-mesh run says which to
+choose again rather than leaving Generate disabled for no visible reason, and
+opening a run never clears an attachment you already made. **New workflow**
+clears the authored work and keeps the machine and the styles in use.
+
 **The draft belongs to a store, never to the view.** The router lazy-loads this
 surface and nothing keeps it alive, so a component-local ref loses the
 description, both styles, the attachments, the stage settings and the machine

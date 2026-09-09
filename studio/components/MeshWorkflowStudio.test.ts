@@ -2,7 +2,10 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { setMeshWorkflowDraftStorage } from "../stores/meshWorkflowDraft";
+import {
+  setMeshWorkflowDraftStorage,
+  useMeshWorkflowDraftStore,
+} from "../stores/meshWorkflowDraft";
 
 /*
  * The 3-D Studio draft is a module-scoped store, so a case that leaves a
@@ -13,6 +16,9 @@ import { setMeshWorkflowDraftStorage } from "../stores/meshWorkflowDraft";
  * cases hydrating each other's prompts.
  */
 beforeEach(() => {
+  // `clearAllMocks` resets calls but NOT a `mockResolvedValue`, so one case's
+  // job listing kept answering in the next.
+  listMeshWorkflows.mockResolvedValue({ jobs: [] });
   setActivePinia(createPinia());
   setMeshWorkflowDraftStorage({
     getItem: () => null,
@@ -595,6 +601,369 @@ describe("the composer is the one place a 3-D object is authored", () => {
     await flushPromises();
     expect(wrapper.text()).not.toContain("TEXTURE SIZE");
     expect(wrapper.text()).toContain("Texture size");
+    wrapper.unmount();
+  });
+});
+
+describe("saving and reusing a 3-D workflow", () => {
+  /*
+   * Reuse always worked — selecting a past job restores its draft through
+   * `restoreWorkflowDraft`. Its only door was a bare `<select>` whose rows
+   * read "Text to 3-D · completed": no verb, no date, no sense that picking
+   * one brought the whole recipe back. That is why it read as missing rather
+   * than merely hidden.
+   */
+  it("lists past workflows with what they are doing and what a click does", async () => {
+    const { listMeshWorkflows } = await import("../api/meshWorkflows");
+    const now = Date.now();
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [
+        {
+          contract_version: 1,
+          id: "workflow-1",
+          state: "running",
+          mode: "text_to_mesh",
+          stage_count: 6,
+          current_stage: 2,
+          current_stage_kind: "shape",
+          created_at_ms: now - 60_000,
+          updated_at_ms: now - 60_000,
+        },
+        {
+          contract_version: 1,
+          id: "workflow-2",
+          state: "completed",
+          mode: "mesh_texture",
+          stage_count: 3,
+          current_stage: 2,
+          created_at_ms: now - 7_200_000,
+          updated_at_ms: now - 7_200_000,
+        },
+      ],
+    } as never);
+
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+
+    // The tab names itself and counts what it holds.
+    expect(wrapper.get("[data-test='mesh-tab-recent']").text()).toContain(
+      "Recent",
+    );
+    expect(wrapper.get("[data-test='mesh-tab-recent']").text()).toContain("2");
+
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    const first = wrapper.get("[data-test='mesh-recent-workflow-1']");
+    // The workflow's own toolbar word, not a private vocabulary.
+    expect(first.text()).toContain("From words");
+    // Running says the stage it is on, the way the queue does.
+    expect(first.text()).toContain("Build geometry");
+    expect(first.text()).toContain("3/6");
+    expect(first.text()).toContain("1m ago");
+    // And the accent line names what a click does, in the app's own words.
+    expect(first.text()).toContain("Use these settings again");
+
+    const second = wrapper.get("[data-test='mesh-recent-workflow-2']");
+    expect(second.text()).toContain("Add texture");
+    // The queue's own word, never the raw wire state (lexicon §2).
+    expect(second.text()).toContain("Finished");
+    expect(second.text()).not.toContain("completed");
+    expect(second.text()).toContain("2h ago");
+    wrapper.unmount();
+  });
+
+  /*
+   * The lexicon table forbids the raw wire words ("Being made / Waiting /
+   * Finished", never "active, queued, done"), and these are the same words
+   * `lib/queueRows.ts` puts on a print's row — so a finished workflow and a
+   * finished print read alike.
+   */
+  it("says a settled run's state in the queue's own words", async () => {
+    const { listMeshWorkflows } = await import("../api/meshWorkflows");
+    const now = Date.now();
+    const row = (id: string, state: string) => ({
+      contract_version: 1,
+      id,
+      state,
+      mode: "text_to_mesh",
+      stage_count: 3,
+      current_stage: 2,
+      created_at_ms: now,
+      updated_at_ms: now,
+    });
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [row("a", "completed"), row("b", "failed"), row("c", "cancelled")],
+    } as never);
+
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    expect(wrapper.get("[data-test='mesh-recent-a']").text()).toContain(
+      "Finished",
+    );
+    expect(wrapper.get("[data-test='mesh-recent-b']").text()).toContain(
+      "Failed",
+    );
+    expect(wrapper.get("[data-test='mesh-recent-c']").text()).toContain(
+      "Stopped",
+    );
+    for (const raw of ["completed", "cancelled"])
+      expect(wrapper.text(), raw).not.toContain(raw);
+    wrapper.unmount();
+  });
+
+  /* A state this build has never heard of still reads as itself. */
+  it("shows an unknown state rather than nothing", async () => {
+    const { listMeshWorkflows } = await import("../api/meshWorkflows");
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [
+        {
+          contract_version: 1,
+          id: "z",
+          state: "reticulating",
+          mode: "text_to_mesh",
+          stage_count: 3,
+          current_stage: 0,
+          created_at_ms: Date.now(),
+          updated_at_ms: Date.now(),
+        },
+      ],
+    } as never);
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    expect(wrapper.get("[data-test='mesh-recent-z']").text()).toContain(
+      "reticulating",
+    );
+    wrapper.unmount();
+  });
+
+  it("says plainly when a machine has made nothing yet", async () => {
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    expect(wrapper.get("[data-test='mesh-recent']").text()).toContain(
+      "Nothing made here yet",
+    );
+    wrapper.unmount();
+  });
+
+  /* The two tabs are exclusive: Recent must not sit under the settings. */
+  it("shows one tab at a time", async () => {
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+    expect(wrapper.find("[data-test='mesh-recent']").exists()).toBe(false);
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    expect(wrapper.find("[data-test='mesh-recent']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='mesh-workflow-texture']").exists()).toBe(
+      false,
+    );
+    wrapper.unmount();
+  });
+
+  /* Starting fresh clears the authored work, never the machine or the styles. */
+  it("starts a new workflow without forgetting the styles in use", async () => {
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("a hand-carved wooden fox");
+    const style = wrapper.get<HTMLSelectElement>(
+      "[data-test='mesh-workflow-model']",
+    ).element.value;
+
+    await wrapper.get("[data-test='mesh-new-workflow']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get<HTMLTextAreaElement>("textarea").element.value).toBe("");
+    expect(
+      wrapper.get<HTMLSelectElement>("[data-test='mesh-workflow-model']")
+        .element.value,
+    ).toBe(style);
+    wrapper.unmount();
+  });
+});
+
+describe("Recent keeps its promise", () => {
+  const target = { baseUrl: "http://local:7680", apiKey: null };
+  const now = Date.now();
+  const job = (id: string, over: Record<string, unknown> = {}) => ({
+    contract_version: 1,
+    id,
+    state: "completed",
+    mode: "text_to_mesh",
+    stage_count: 3,
+    current_stage: 2,
+    created_at_ms: now,
+    updated_at_ms: now,
+    ...over,
+  });
+
+  /*
+   * The single commonest click: the row that is ALREADY selected — after a
+   * submit, after a deep link from the Queue, or after an earlier click. It
+   * renders highlighted, so it reads as the live row. Assigning `selectedId`
+   * to its existing value fires no watcher, so "Use these settings again" did
+   * nothing at all: no restore, no message, no press feedback.
+   */
+  it("restores even when the clicked row is the one already open", async () => {
+    const { listMeshWorkflows, getMeshWorkflow } =
+      await import("../api/meshWorkflows");
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [job("run-1")],
+    } as never);
+    vi.mocked(getMeshWorkflow).mockResolvedValue({
+      id: "run-1",
+      state: "completed",
+      mode: "text_to_mesh",
+      stages: [],
+      request: {
+        mode: "text_to_mesh",
+        image_request: {
+          model: "z-image-turbo:q8",
+          prompt: "the original run",
+        },
+        mesh_request: {
+          model: "hunyuan3d-mini-turbo:fp16",
+          mesh: { texture: false },
+        },
+      },
+    } as never);
+
+    // Arrive with it already open, the way a queue row does.
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: { target, desktop: true, openWorkflow: "run-1" },
+    });
+    await flushPromises();
+    await wrapper
+      .get("[data-test='mesh-composer'] textarea")
+      .setValue("edited away");
+
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    await wrapper.get("[data-test='mesh-recent-run-1']").trigger("click");
+    await flushPromises();
+
+    expect(
+      wrapper.get<HTMLTextAreaElement>("[data-test='mesh-composer'] textarea")
+        .element.value,
+    ).toBe("the original run");
+    wrapper.unmount();
+  });
+
+  /*
+   * A row's sentence comes from the LISTING, not from `detail`, so polling
+   * only the open workflow left a running row reading "1/3 · just now" for the
+   * whole run — and still saying it after the mesh was on the canvas.
+   */
+  it("refreshes the listing while a workflow runs, not just its detail", async () => {
+    vi.useFakeTimers();
+    const { listMeshWorkflows, getMeshWorkflow } =
+      await import("../api/meshWorkflows");
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [job("run-1", { state: "running", current_stage: 0 })],
+    } as never);
+    vi.mocked(getMeshWorkflow).mockResolvedValue({
+      id: "run-1",
+      state: "running",
+      mode: "text_to_mesh",
+      stages: [],
+    } as never);
+
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: { target, desktop: true, openWorkflow: "run-1" },
+    });
+    await flushPromises();
+    const before = vi.mocked(listMeshWorkflows).mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(800);
+    await flushPromises();
+    expect(vi.mocked(listMeshWorkflows).mock.calls.length).toBeGreaterThan(
+      before,
+    );
+
+    wrapper.unmount();
+    vi.useRealTimers();
+  });
+
+  /*
+   * A `File` cannot be restored from a past request, so clearing the wells
+   * destroyed the person's own attachment and put nothing in its place.
+   */
+  it("keeps an attached file when a past run is opened", async () => {
+    const { listMeshWorkflows, getMeshWorkflow } =
+      await import("../api/meshWorkflows");
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [job("run-1")],
+    } as never);
+    vi.mocked(getMeshWorkflow).mockResolvedValue({
+      id: "run-1",
+      state: "completed",
+      mode: "text_to_mesh",
+      stages: [],
+      request: {
+        mode: "text_to_mesh",
+        image_request: { model: "z-image-turbo:q8", prompt: "restored" },
+        mesh_request: {
+          model: "hunyuan3d-mini-turbo:fp16",
+          mesh: { texture: false },
+        },
+      },
+    } as never);
+
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: { target, desktop: true },
+    });
+    await flushPromises();
+    const draft = useMeshWorkflowDraftStore();
+    draft.meshFile = new File(["glb"], "mine.glb");
+
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    await wrapper.get("[data-test='mesh-recent-run-1']").trigger("click");
+    await flushPromises();
+    expect(draft.meshFile?.name).toBe("mine.glb");
+    wrapper.unmount();
+  });
+
+  /* A 300px rail is not a place for two hundred bordered cards. */
+  it("bounds how many past runs it lists", async () => {
+    const { listMeshWorkflows } = await import("../api/meshWorkflows");
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: Array.from({ length: 200 }, (_, i) => job(`run-${i}`)),
+    } as never);
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: { target, desktop: true },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    const rows = wrapper.findAll("[data-test^='mesh-recent-run-']");
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBeLessThanOrEqual(24);
     wrapper.unmount();
   });
 });

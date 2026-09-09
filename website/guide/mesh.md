@@ -250,6 +250,14 @@ delight, shape, paint, and finalization are checkpointed, a shutdown parks unfin
 work, and **Resume** continues the same child job after restart. Settled
 workflow-owned inputs and stage copies remain available until **Delete workflow
 data** releases them; deleting the Library print remains a separate action.
+On the desktop app the settings rail carries **Settings | Recent**. Recent
+lists that machine's past workflows — what each one made, what stage it is on
+or how it ended, and how long ago — and one click brings its whole recipe back:
+the mode, both styles and every stage setting. A supplied mesh cannot come back
+(a file is not something an app can re-open for you), so Rebuild and Add
+texture say which file to choose again. **New workflow** on the toolbar starts
+fresh without forgetting the machine or the styles you are using.
+
 Choose **Run workflow on** before authoring to bind the whole studio session to
 one connected machine. Its models, previous workflows, uploads, progress,
 resume/cancel actions, and final GLB all stay on that machine; authenticated
