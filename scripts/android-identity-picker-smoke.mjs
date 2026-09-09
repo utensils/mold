@@ -3,32 +3,31 @@
 // generation is needed. CDP controls the real Tauri WebView, not a browser copy.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import {
+  resolveDeadlineMs,
+  until as untilWith,
+} from "./lib/android-smoke-wait.mjs";
 
 const adb = process.env.ADB ?? "adb";
 const serial = process.env.ANDROID_SERIAL ?? "emulator-5554";
 const output =
   process.env.MOLD_ANDROID_EVIDENCE ?? "/tmp/mold-android-identity-picker";
+// A `uiautomator dump` of a full screen and an `exec-out screencap` both
+// outgrow execFileSync's 1 MB default; ENOBUFS there kills the run outright.
+const ADB_MAX_BUFFER = 32 * 1024 * 1024;
 const run = (...args) =>
-  execFileSync(adb, ["-s", serial, ...args], { encoding: "utf8" }).trim();
+  execFileSync(adb, ["-s", serial, ...args], {
+    encoding: "utf8",
+    maxBuffer: ADB_MAX_BUFFER,
+  }).trim();
 const shell = (...args) => run("shell", ...args);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
-async function until(read, label) {
-  const deadline = Date.now() + 30_000;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const value = await read();
-      if (value) return value;
-    } catch (error) {
-      lastError = error;
-    }
-    await sleep(200);
-  }
-  throw new Error("Timed out: " + label, { cause: lastError });
-}
+/** The deadline every wait in this script shares; see the shared module. */
+const timeoutMs = resolveDeadlineMs(process.env.MOLD_ANDROID_SMOKE_TIMEOUT_MS);
+const until = (read, label) => untilWith(read, label, { timeoutMs });
 
 assert(
   shell("getprop", "ro.kernel.qemu") === "1",
@@ -219,8 +218,16 @@ try {
     assert(!early, source + " did not open: " + JSON.stringify(early));
     writeFileSync(
       output + "/" + source + ".png",
-      execFileSync(adb, ["-s", serial, "exec-out", "screencap", "-p"]),
+      execFileSync(adb, ["-s", serial, "exec-out", "screencap", "-p"], {
+        maxBuffer: ADB_MAX_BUFFER,
+      }),
     );
+    // Deliberately NOT wrapped in `actUntil` like the CI smoke test's Back is.
+    // The hazard is the same — a dropped press waits out the whole deadline —
+    // but this script is manual-only (no workflow runs it; it needs a device
+    // and the isolated redesign UAT package), so the change could not be
+    // verified before shipping. It gains the shared deadline and the richer
+    // timeout message either way.
     shell("input", "keyevent", "KEYCODE_BACK");
     const result = await until(
       () => evaluate("window.__pickerUat"),

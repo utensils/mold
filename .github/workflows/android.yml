@@ -27,6 +27,7 @@ on:
         "scripts/tests/android-app-smoke.mjs",
         "scripts/tests/android-legacy-downloads.sh",
         "scripts/tests/android-legacy-media-smoke.mjs",
+        "scripts/lib/android-smoke-*.mjs",
         "flake.nix",
         ".github/workflows/android.yml",
       ]
@@ -55,6 +56,7 @@ on:
         "scripts/tests/android-app-smoke.mjs",
         "scripts/tests/android-legacy-downloads.sh",
         "scripts/tests/android-legacy-media-smoke.mjs",
+        "scripts/lib/android-smoke-*.mjs",
         "flake.nix",
         ".github/workflows/android.yml",
       ]
@@ -114,6 +116,7 @@ jobs:
               - 'scripts/tests/android-app-smoke.mjs'
               - 'scripts/tests/android-legacy-downloads.sh'
               - 'scripts/tests/android-legacy-media-smoke.mjs'
+              - 'scripts/lib/android-smoke-*.mjs'
               - 'flake.nix'
               - '.github/workflows/android.yml'
 
@@ -165,6 +168,8 @@ jobs:
         run: cargo tauri --version | grep -F '2.11.4'
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
+      - name: Verify Android smoke wait policy
+        run: bun test scripts/lib/android-smoke-wait.test.mjs
       - name: Verify Android launcher assets
         run: bash scripts/tests/android-release-assets.sh
       - name: Build Android validation APK

@@ -2,33 +2,37 @@
 // generation is needed. CDP controls the real Tauri WebView, not a browser copy.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import {
+  actUntil,
+  resolveDeadlineMs,
+  until as untilWith,
+} from "../lib/android-smoke-wait.mjs";
 import { runLegacyMediaSmoke } from "./android-legacy-media-smoke.mjs";
 
 const adb = process.env.ADB ?? "adb";
 const serial = process.env.ANDROID_SERIAL ?? "emulator-5554";
 const output =
   process.env.MOLD_ANDROID_EVIDENCE ?? "/tmp/mold-android-app-smoke";
+// `exec-out screencap` and `dumpsys` both outgrow execFileSync's 1 MB default,
+// which aborts the whole script with ENOBUFS while it is capturing the evidence
+// for some OTHER failure — losing the answer and reporting the wrong question.
+const ADB_MAX_BUFFER = 32 * 1024 * 1024;
 const run = (...args) =>
-  execFileSync(adb, ["-s", serial, ...args], { encoding: "utf8" }).trim();
+  execFileSync(adb, ["-s", serial, ...args], {
+    encoding: "utf8",
+    maxBuffer: ADB_MAX_BUFFER,
+  }).trim();
 const shell = (...args) => run("shell", ...args);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
-async function until(read, label) {
-  const deadline = Date.now() + 30_000;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const value = await read();
-      if (value) return value;
-    } catch (error) {
-      lastError = error;
-    }
-    await sleep(200);
-  }
-  throw new Error("Timed out: " + label, { cause: lastError });
-}
+/** The deadline every wait in this script shares; see the shared module. */
+const timeoutMs = resolveDeadlineMs(process.env.MOLD_ANDROID_SMOKE_TIMEOUT_MS);
+/** ~3s between Back presses: slow enough that a panel still animating shut is
+ *  never raced into a second press, quick enough to recover a dropped key. */
+const BACK_REDISPATCH_EVERY_ATTEMPTS = 15;
+const until = (read, label) => untilWith(read, label, { timeoutMs });
 
 assert(
   shell("getprop", "ro.kernel.qemu") === "1",
@@ -224,9 +228,16 @@ try {
     originalTab = await evaluate(
       'document.querySelector(".mobile-tab[aria-current=page]").dataset.test',
     );
+    // Tap, then wait for the tap to have landed — re-tapping if it did not.
+    // A synthetic touch is occasionally swallowed by the CI emulator, and the
+    // evidence from every timed-out run shows the app still on the PREVIOUS
+    // tab, rendered and responsive, with no ANR: waiting longer on a screen no
+    // tap reached only makes the same failure slower.
+    const tap = (name, read, label) =>
+      actUntil(() => click(name), read, label, { timeoutMs });
     for (const tab of ["generate", "queue", "gallery", "catalog", "hosts"]) {
-      await click("mobile-tab-" + tab);
-      await until(
+      await tap(
+        "mobile-tab-" + tab,
         () =>
           evaluate(
             "document.querySelector(" +
@@ -236,24 +247,57 @@ try {
         "select " + tab,
       );
     }
-    await click("mobile-open-settings");
-    await until(
+    await tap(
+      "mobile-open-settings",
       () => evaluate('!!document.querySelector(".is-settings-open")'),
       "settings opens",
     );
     await recordNavigation("before native Back");
-    shell("input", "keyevent", "4");
-    await until(
+    /*
+     * The hardware Back key goes missing the way a synthetic touch does:
+     * `navigation.json` from the API 36 failure shows `settingsOpen: true` and
+     * `historyLength: 2` unchanged across all 148 polls — the identical state
+     * the API 35 run recorded a moment before it PASSED, so the app was fine
+     * and the press had no effect.
+     *
+     * WHY it had none is not settled, and the retry does not depend on which
+     * it is. `AndroidOverlayBack.kt` gives the renderer 1s to answer, and its
+     * injected script is guarded by `Date.now() < deadline`, so a press whose
+     * JS is delayed past that window does nothing at all — no close, no exit —
+     * while this script is evaluating over CDP every 200ms. That is at least
+     * as likely as the emulator losing the key, and it is a real product
+     * question rather than a test one — filed as #1665.
+     *
+     * Back is the one action here that is not idempotent, and over-pressing it
+     * does not fail an assertion — it ENDS THE APP. A second press arriving
+     * after the panel has closed finds nothing to consume, so `useMobileBack`
+     * returns without `preventDefault`, the native plugin reads
+     * `consumed != "true"` and calls `delegate()`, and the activity finishes.
+     * So it re-presses on a much slower cadence than a tab tap, and `actUntil`
+     * re-reads immediately beforehand.
+     *
+     * The condition is therefore the WHOLE post-state, not just "a tab is
+     * selected". Waiting only for the tab bar would be satisfied by an app
+     * that had been Back'd clean out of settings AND one press further, and
+     * the run would go green here and fail three steps later with a timeout
+     * naming the wrong thing.
+     */
+    await actUntil(
+      () => shell("input", "keyevent", "4"),
       () =>
-        evaluate('!!document.querySelector(".mobile-tab[aria-current=page]")'),
-      "native Back dismisses settings",
+        evaluate(
+          '(() => { const tab = document.querySelector(".mobile-tab[aria-current=page]");' +
+            ' return !document.querySelector(".is-settings-open") && !!tab &&' +
+            ' tab.dataset.test === "mobile-tab-hosts"; })()',
+        ),
+      "native Back dismisses settings, and lands on Machines",
+      { timeoutMs, redispatchEvery: BACK_REDISPATCH_EVERY_ATTEMPTS },
     );
-    assert(
-      await evaluate(
-        'document.querySelector(".mobile-tab[aria-current=page]").dataset.test === "mobile-tab-hosts"',
-      ),
-      "Back changed the underlying destination",
-    );
+    // The depth is deliberately NOT in the condition above: no artifact
+    // records what it is after a healthy Back, and gating CI on a guessed
+    // value would fail a run that was fine. Record it instead — the next green
+    // run tells us, and then it can be asserted.
+    await recordNavigation("after native Back");
     const metrics = () =>
       evaluate(
         '({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, font: parseFloat(getComputedStyle(document.querySelector(".mobile-wordmark")).fontSize) })',
@@ -261,11 +305,17 @@ try {
     shell("settings", "put", "system", "font_scale", "1");
     await sleep(500);
     const normal = await metrics();
-    shell("settings", "put", "system", "font_scale", "2");
-    const large = await until(async () => {
-      const m = await metrics();
-      return m.font >= normal.font * 1.9 && m;
-    }, "live system font scale");
+    // Idempotent: writing the same scale again is a no-op, so this one simply
+    // re-applies until the WebView reflows.
+    const large = await actUntil(
+      () => shell("settings", "put", "system", "font_scale", "2"),
+      async () => {
+        const m = await metrics();
+        return m.font >= normal.font * 1.9 && m;
+      },
+      "live system font scale",
+      { timeoutMs },
+    );
     assert(
       large.scrollWidth <= large.width + 1,
       "Large text causes horizontal overflow",
