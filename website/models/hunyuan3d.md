@@ -158,11 +158,11 @@ mold run hunyuan3d-mini-turbo --image chair.png --output - | some-gltf-viewer
 
 ## Controls
 
-| Flag               | Default | What it does                                               |
-| ------------------ | ------- | ---------------------------------------------------------- |
-| `--octree`         | 256     | Query-grid resolution. The detail knob; **cost is cubic**. |
-| `--mesh-threshold` | 0.6     | Iso-level. Lower recovers thin features and adds noise.    |
-| `--target-faces`   | see below | Decimate to approximately this triangle count.            |
+| Flag               | Default   | What it does                                               |
+| ------------------ | --------- | ---------------------------------------------------------- |
+| `--octree`         | 256       | Query-grid resolution. The detail knob; **cost is cubic**. |
+| `--mesh-threshold` | 0.6       | Iso-level. Lower recovers thin features and adds noise.    |
+| `--target-faces`   | see below | Decimate to approximately this triangle count.             |
 
 `--target-faces` behaves differently depending on whether you asked for a
 texture. A geometry-only export keeps the full-density surface, which is what
