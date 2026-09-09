@@ -2183,6 +2183,63 @@ pub const MESH_MAX_TARGET_FACES: u32 = 2_000_000;
 /// anything.
 pub const MESH_MIN_TARGET_FACES: u32 = 100;
 
+/// Triangle budget the mesh handed to the PBR paint stage is decimated to
+/// when the request names no `target_faces`.
+///
+/// Tencent never hands an undecimated marching-cubes mesh to the UV
+/// unwrapper. `hy3dpaint/textureGenPipeline.py:93` defaults `use_remesh=True`
+/// and `:107-109` routes the mesh through `remesh_mesh`
+/// (`hy3dpaint/utils/simplify_mesh_utils.py:19-20`), which is
+/// `mesh_simplify_trimesh(inputpath, outputpath, target_count=40000)` at
+/// `:23`, quadric-decimating anything larger at `:35-36` before
+/// `mesh_uv_wrap` runs at `:119`. Mold's paint stage is a port of that
+/// pipeline, so it takes the same budget.
+///
+/// This is a real cost, not hygiene. xatlas's chart segmentation is
+/// superlinear in face count and single-threaded per connected component:
+/// measured on retained Hunyuan3D meshes, unwrapping 226,896 triangles takes
+/// 49.8 s where the same mesh at this budget takes 5.5 s plus 1.0 s to
+/// decimate, and a geometrically busy 455k-triangle shape ran for over an
+/// hour (#1666). Geometry-only runs are untouched — they never unwrap, and a
+/// dense surface is the point of a printable export.
+pub const MESH_TEXTURE_DEFAULT_TARGET_FACES: u32 = 40_000;
+
+/// The decimation target a request actually renders with.
+///
+/// THE decision, so the engine, the advertised profile, and saved provenance
+/// cannot disagree. An explicit `target_faces` is authoritative in both
+/// directions — a caller who asks for a dense textured mesh gets one, and
+/// pays for it. Absent, a textured run takes
+/// [`MESH_TEXTURE_DEFAULT_TARGET_FACES`] and a geometry-only run keeps the
+/// raw surface-net output.
+pub fn resolve_mesh_target_faces(options: &crate::MeshRequestOptions) -> Option<u32> {
+    options
+        .target_faces
+        .or_else(|| (options.texture == Some(true)).then_some(MESH_TEXTURE_DEFAULT_TARGET_FACES))
+}
+
+/// Write the resolved decimation target into a textured request that named
+/// none.
+///
+/// Same seam and same reason as [`materialize_extend_overlap_frames`]: the
+/// prepared request is what executes and what `OutputMetadata` is built from,
+/// so a textured print whose geometry was decimated to 40,000 triangles says
+/// so rather than claiming it kept the raw surface. Idempotent, and a
+/// geometry-only request is never given one.
+///
+/// It is belt and braces, not the only guard: preparation runs AFTER the
+/// durable row's `request_json` is written and that column is never rewritten,
+/// so the stored row can still read `target_faces: null`. Every reader of that
+/// row resolves through [`resolve_mesh_target_faces`] — the engine directly,
+/// display through `MeshRequestOptions::resolved_with_defaults_for_model` — so
+/// the answer is the same either way. That is the point of having one
+/// function rather than one mutation.
+pub fn materialize_mesh_target_faces(req: &mut GenerateRequest) {
+    if let Some(mesh) = req.mesh.as_mut() {
+        mesh.target_faces = resolve_mesh_target_faces(mesh);
+    }
+}
+
 /// Query-grid resolution an omitted `mesh.octree_resolution` renders at.
 /// Upstream's own default (`comfy_extras/nodes_hunyuan3d.py`,
 /// `VAEDecodeHunyuan3D`), and what the generation profile advertises.
@@ -3749,6 +3806,98 @@ mod tests {
             ..Default::default()
         });
         super::validate_mesh_request(&req, Some("hunyuan3d")).unwrap();
+    }
+
+    /// Upstream never unwraps an undecimated marching-cubes mesh
+    /// (`textureGenPipeline.py:93` `use_remesh=True` ->
+    /// `simplify_mesh_utils.py:23` `target_count=40000`), and neither does
+    /// mold. Absence is only "the raw surface" for a geometry-only run.
+    #[test]
+    fn a_textured_run_takes_the_upstream_face_budget_and_an_explicit_target_wins() {
+        let geometry_only = crate::types::MeshRequestOptions::default();
+        assert_eq!(super::resolve_mesh_target_faces(&geometry_only), None);
+
+        let textured = crate::types::MeshRequestOptions {
+            texture: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::resolve_mesh_target_faces(&textured),
+            Some(super::MESH_TEXTURE_DEFAULT_TARGET_FACES)
+        );
+
+        // A caller who wants a dense textured mesh gets one, in both
+        // directions — above the budget and below it.
+        for asked in [200_000, 5_000] {
+            let explicit = crate::types::MeshRequestOptions {
+                texture: Some(true),
+                target_faces: Some(asked),
+                ..Default::default()
+            };
+            assert_eq!(super::resolve_mesh_target_faces(&explicit), Some(asked));
+        }
+
+        // And a geometry-only request keeps whatever it asked for.
+        let dense = crate::types::MeshRequestOptions {
+            target_faces: Some(750_000),
+            ..Default::default()
+        };
+        assert_eq!(super::resolve_mesh_target_faces(&dense), Some(750_000));
+    }
+
+    /// The budget has to reach saved provenance, or a textured print claims a
+    /// raw surface it does not have and Reuse restores the wrong request.
+    #[test]
+    fn the_materialized_face_budget_reaches_output_metadata() {
+        let mut req = mesh_request("hunyuan3d:fp16");
+        req.mesh = Some(crate::types::MeshRequestOptions {
+            texture: Some(true),
+            ..Default::default()
+        });
+        super::materialize_mesh_target_faces(&mut req);
+        assert_eq!(
+            req.mesh.as_ref().unwrap().target_faces,
+            Some(super::MESH_TEXTURE_DEFAULT_TARGET_FACES)
+        );
+        // Idempotent.
+        super::materialize_mesh_target_faces(&mut req);
+        assert_eq!(
+            req.mesh.as_ref().unwrap().target_faces,
+            Some(super::MESH_TEXTURE_DEFAULT_TARGET_FACES)
+        );
+        let metadata = crate::OutputMetadata::from_generate_request(&req, 7, None, "test");
+        assert_eq!(
+            metadata.mesh.as_ref().and_then(|mesh| mesh.target_faces),
+            Some(super::MESH_TEXTURE_DEFAULT_TARGET_FACES)
+        );
+
+        // A geometry-only request is never given one, before or after.
+        let mut geometry = mesh_request("hunyuan3d:fp16");
+        geometry.mesh = Some(crate::types::MeshRequestOptions::default());
+        super::materialize_mesh_target_faces(&mut geometry);
+        assert_eq!(geometry.mesh.as_ref().unwrap().target_faces, None);
+    }
+
+    /// The advertised budget and the one the engine applies are one constant.
+    #[test]
+    fn the_advertised_texture_face_budget_is_the_enforced_one() {
+        let manifest = crate::manifest::find_manifest("hunyuan3d:fp16")
+            .expect("hunyuan3d ships in the built-in manifest");
+        let profile = crate::generation_profile::generation_profile_for_manifest(manifest);
+        let mesh = profile
+            .recipes
+            .first()
+            .expect("hunyuan3d advertises a recipe")
+            .capabilities
+            .mesh
+            .as_ref()
+            .expect("a mesh recipe advertises a mesh block");
+        assert_eq!(
+            mesh.target_faces_texture_default,
+            Some(super::MESH_TEXTURE_DEFAULT_TARGET_FACES)
+        );
+        assert!(mesh.target_faces_texture_default.unwrap() >= mesh.target_faces_min);
+        assert!(mesh.target_faces_texture_default.unwrap() <= mesh.target_faces_max);
     }
 
     #[test]

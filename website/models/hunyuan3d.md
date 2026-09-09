@@ -162,7 +162,17 @@ mold run hunyuan3d-mini-turbo --image chair.png --output - | some-gltf-viewer
 | ------------------ | ------- | ---------------------------------------------------------- |
 | `--octree`         | 256     | Query-grid resolution. The detail knob; **cost is cubic**. |
 | `--mesh-threshold` | 0.6     | Iso-level. Lower recovers thin features and adds noise.    |
-| `--target-faces`   | none    | Decimate to approximately this triangle count.             |
+| `--target-faces`   | see below | Decimate to approximately this triangle count.            |
+
+`--target-faces` behaves differently depending on whether you asked for a
+texture. A geometry-only export keeps the full-density surface, which is what
+you want for printing. A **textured** render decimates to 40,000 triangles when
+you name no value, because that is what Tencent's own paint pipeline does
+before it unwraps UVs — and UV unwrapping is superlinear in triangle count, so
+an undecimated shape can take minutes to over an hour on one CPU core. Name a
+value and it is used as-is, in both directions; the host advertises the budget
+it will apply as `capabilities.mesh.target_faces_texture_default`, and every
+authoring surface shows it in the field's placeholder.
 
 The threshold is a level on the same `[0, 1]` occupancy scale ComfyUI's
 `VoxelToMesh` node thresholds, so a value that works in ComfyUI works here

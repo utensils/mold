@@ -15,7 +15,7 @@ import MobileSeedPicker from "./MobileSeedPicker.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
-import { emptyMeshForm } from "@studio/lib/meshControls";
+import { emptyMeshForm, meshTargetFacesPlaceholder } from "@studio/lib/meshControls";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { controlNote, effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import type { CanvasIntent } from "@studio/lib/outputShape";
@@ -175,6 +175,12 @@ function setTargetFaces(event: Event): void {
   const parsed = Math.round(Number(raw));
   writableMeshForm().targetFaces = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
+// Blank on a textured run means the host's advertised budget, not "every
+// detail" — say the number rather than promise something else.
+const targetFacesPlaceholder = computed(() => {
+  const budget = meshTargetFacesPlaceholder(meshForm.value, meshCaps.value);
+  return budget === null ? "keep every detail" : budget.toLocaleString("en-US");
+});
 const targetFacesError = computed(() =>
   meshTargetFacesError(meshForm.value.targetFaces, meshCaps.value),
 );
@@ -412,7 +418,7 @@ const selectedQuality = computed(() => activeQualityPreset(quality.value, props.
           class="control"
           type="number"
           inputmode="numeric"
-          placeholder="keep every detail"
+          :placeholder="targetFacesPlaceholder"
           :value="meshForm.targetFaces ?? ''"
           :min="meshCaps.target_faces_min"
           :max="meshCaps.target_faces_max"

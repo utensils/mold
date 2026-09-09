@@ -151,7 +151,9 @@ fetched by filename. Its optional `octree` (the advertised allowlist; cost is
 cubic), `threshold` (0–1 iso-level, ComfyUI `VoxelToMesh` scale), and
 `target_faces`, `matting`, and `delight` mirror `--octree`, `--mesh-threshold`,
 `--target-faces`, `--matting`, and `--delight`;
-omit them for the recipe's defaults. The older `octree_resolution` and
+omit them for the recipe's defaults. An omitted `target_faces` keeps the raw
+surface on a geometry-only request and takes
+`capabilities.mesh.target_faces_texture_default` when `texture` is true. The older `octree_resolution` and
 `mesh_threshold` names are declared in the schema as deprecated aliases.
 
 `export_mesh` converts one stored `.glb` into `obj`, `zip`, `stl`, or `ply` (`glb`

@@ -5,6 +5,7 @@ import {
   meshFormFromMetadata,
   meshRequestFromForm,
   meshStatsLabel,
+  meshTargetFacesPlaceholder,
   type MeshFormState,
 } from "./meshControls";
 
@@ -173,5 +174,30 @@ describe("meshStatsLabel", () => {
   it("omits the size when bounds are unknown", () => {
     expect(meshStatsLabel(10, 20, null)).toBe("20 tris · 10 verts");
     expect(meshStatsLabel(null, null, null)).toBe("");
+  });
+});
+
+describe("meshTargetFacesPlaceholder", () => {
+  // A blank field on a textured run does not keep the raw surface any more —
+  // the host decimates to its advertised budget, so the control has to say
+  // which number that is (#1666).
+  it("shows the advertised budget for a textured run", () => {
+    expect(
+      meshTargetFacesPlaceholder({ ...emptyMeshForm(), texture: true }, caps()),
+    ).toBe(40_000);
+  });
+
+  it("shows nothing for a geometry-only run, which does keep the raw surface", () => {
+    expect(meshTargetFacesPlaceholder(emptyMeshForm(), caps())).toBeNull();
+  });
+
+  it("shows nothing when the host advertises no budget", () => {
+    const { target_faces_texture_default: _omitted, ...older } = caps();
+    expect(
+      meshTargetFacesPlaceholder({ ...emptyMeshForm(), texture: true }, older),
+    ).toBeNull();
+    expect(
+      meshTargetFacesPlaceholder({ ...emptyMeshForm(), texture: true }, null),
+    ).toBeNull();
   });
 });

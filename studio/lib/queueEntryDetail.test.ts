@@ -343,6 +343,44 @@ describe("queueEntryDetailModel", () => {
     expect(facts.get("Starts in")).toBeDefined();
   });
 
+  // `estimated_finish_unix_ms` is stamped once when the lease is granted and
+  // never refreshed, from an estimator with no bucket for UV unwrap,
+  // decimation or paint. An overrun mesh job therefore reported "Finishes in
+  // 0s" for the rest of its run (#1666).
+  it("shows a finish estimate that is still ahead and hides one that has passed", () => {
+    const plan = (finish: number): QueuePlan => ({
+      plan_version: 1,
+      state_version: 1,
+      optimizer_state: "clean",
+      dirty_since_unix_ms: null,
+      next_replan_at_unix_ms: null,
+      work_items: [
+        {
+          work_id: "w1",
+          parent_id: "job-1",
+          work_kind: "generation",
+          priority_class: "normal",
+          queue_rank: 0,
+          bypass_count: 0,
+          estimate_confidence: "high",
+          gpu: 2,
+          estimated_finish_unix_ms: finish,
+        },
+      ],
+    });
+    const facts = (finish: number) =>
+      new Map(
+        model({ plan: plan(finish) }).facts.map((field) => [
+          field.label,
+          field.value,
+        ]),
+      );
+    // nowMs is 1_700_000_060_000.
+    expect(facts(1_700_000_090_000).get("Finishes in")).toBe("30s");
+    expect(facts(1_700_000_000_000).has("Finishes in")).toBe(false);
+    expect(facts(1_700_000_060_000).has("Finishes in")).toBe(false);
+  });
+
   it("keeps the raw model id available while displaying the resolved name", () => {
     const detail = model();
     expect(detail.modelLabel).toBe("FLUX.1 [dev] Q8");

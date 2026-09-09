@@ -24,11 +24,10 @@ fn scheduler_phase(
 ) -> &'static str {
     match work.activity_phase {
         QueueActivityPhase::Cpu => "running",
-        QueueActivityPhase::Active
-            if progress
-                .and_then(|value| value.stage_current.or(value.step))
-                .is_some() =>
-        {
+        // `QueueJobProgress::is_executing` is the shared decision; `/api/queue`
+        // asks the same one, so the two surfaces cannot label a job
+        // differently (#1666).
+        QueueActivityPhase::Active if progress.is_some_and(|value| value.is_executing()) => {
             "running"
         }
         // Only registry-backed generations have a model-loading progress
@@ -395,4 +394,115 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
         items,
         unavailable_kinds,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mold_core::queue_progress::QueueJobProgress;
+
+    fn active_work() -> mold_core::QueueWorkItem {
+        mold_core::QueueWorkItem {
+            activity_phase: QueueActivityPhase::Active,
+            ..Default::default()
+        }
+    }
+
+    /// A named stage is work, counter or no counter.
+    ///
+    /// `QueueJobProgress::apply` clears `stage_current` on every `StageStart`,
+    /// and several long stages report only that — "Unwrapping mesh",
+    /// "Sampling", "Baking PBR textures". Keying the phase on the counter
+    /// alone published `phase: "loading"` for a mesh that had been unwrapping
+    /// for an hour (#1666).
+    #[test]
+    fn a_named_stage_without_a_counter_is_running_not_loading() {
+        let work = active_work();
+        let named = QueueJobProgress {
+            stage: Some("Unwrapping mesh".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(scheduler_phase(&work, Some(&named)), "running");
+
+        let counted = QueueJobProgress {
+            stage: Some("Unwrapping mesh".to_string()),
+            stage_current: Some(140),
+            stage_total: Some(400),
+            ..Default::default()
+        };
+        assert_eq!(scheduler_phase(&work, Some(&counted)), "running");
+    }
+
+    /// Weight loading NAMES its stages too — "Loading UNet (GPU)" — and it is
+    /// exactly what `loading` means. Clients also select byte formatting from
+    /// that label, so classifying a weight load as `running` would print raw
+    /// byte counts instead of "2.5 GB / 12.9 GB".
+    #[test]
+    fn a_named_stage_that_is_a_weight_load_or_a_download_is_still_loading() {
+        let work = active_work();
+        let weights = QueueJobProgress {
+            stage: Some("Loading UNet (GPU)".to_string()),
+            weight_load: Some(mold_core::queue_progress::QueueJobWeightLoad {
+                bytes_loaded: 2_539_086_011,
+                bytes_total: 12_923_897_280,
+                component: "UNet".to_string(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(scheduler_phase(&work, Some(&weights)), "loading");
+
+        let pulling = QueueJobProgress {
+            stage: Some("Downloading upscaler".to_string()),
+            download: Some(mold_core::queue_progress::QueueJobDownload {
+                filename: "model.safetensors".to_string(),
+                file_index: 0,
+                total_files: 1,
+                bytes_downloaded: 1,
+                bytes_total: 2,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(scheduler_phase(&work, Some(&pulling)), "loading");
+    }
+
+    /// Model loading is exactly the case with no stage name — which is what
+    /// lets the caller substitute the "Loading model" label — so it must keep
+    /// reading as `loading`.
+    #[test]
+    fn a_progress_record_with_no_stage_is_still_loading() {
+        let work = active_work();
+        let loading = QueueJobProgress::default();
+        assert_eq!(scheduler_phase(&work, Some(&loading)), "loading");
+        // Scheduler-owned work with no registry progress at all is running.
+        assert_eq!(scheduler_phase(&work, None), "running");
+    }
+
+    /// `/api/queue` and `/api/activity` must never disagree about one job.
+    #[test]
+    fn the_queue_plan_and_the_activity_feed_ask_one_predicate() {
+        for progress in [
+            QueueJobProgress::default(),
+            QueueJobProgress {
+                stage: Some("Unwrapping mesh".to_string()),
+                ..Default::default()
+            },
+            QueueJobProgress {
+                stage: Some("Loading UNet (GPU)".to_string()),
+                weight_load: Some(mold_core::queue_progress::QueueJobWeightLoad {
+                    bytes_loaded: 1,
+                    bytes_total: 2,
+                    component: "UNet".to_string(),
+                }),
+                ..Default::default()
+            },
+        ] {
+            let activity = scheduler_phase(&active_work(), Some(&progress));
+            let queue = if progress.is_executing() {
+                "running"
+            } else {
+                "loading"
+            };
+            assert_eq!(activity, queue, "{progress:?}");
+        }
+    }
 }

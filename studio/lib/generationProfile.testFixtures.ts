@@ -111,6 +111,7 @@ export function hunyuan3dRecipe(): GenerationRecipeProfile {
         },
         target_faces_min: 100,
         target_faces_max: 2_000_000,
+        target_faces_texture_default: 40_000,
         texture: {
           mode: "hidden",
           required: false,

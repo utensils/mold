@@ -2880,8 +2880,14 @@ pub struct MeshRequestOptions {
     /// Upstream's default is 0.6, not 0.5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<f32>,
-    /// Decimate to approximately this many triangles. Absent keeps the raw
-    /// surface-net output, which is dense and regular.
+    /// Decimate to approximately this many triangles.
+    ///
+    /// Absent keeps the raw surface-net output on a geometry-only run, which
+    /// is dense and regular. On a TEXTURED run absent resolves to
+    /// `validation::MESH_TEXTURE_DEFAULT_TARGET_FACES` instead — Tencent's
+    /// paint pipeline remeshes before it unwraps, and an undecimated shape
+    /// makes the UV stage take minutes to hours. See
+    /// `validation::resolve_mesh_target_faces`, which is the one decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_faces: Option<u32>,
     /// Run the PBR texture stage. Requires the paint bundle to be installed;
@@ -2912,9 +2918,9 @@ impl MeshRequestOptions {
     /// through the built-in manifest. The octree resolution and iso-level
     /// are filled from the same `validation::MESH_DEFAULT_*` constants the
     /// engine falls back to, so the recorded values are the ones that
-    /// rendered; a decimation target and the texture stage stay as
-    /// requested, because absence there IS the rendered choice (raw surface,
-    /// geometry only).
+    /// rendered, and the decimation target resolves the same way the paint
+    /// stage resolves it. The texture stage stays as requested, because
+    /// absence there IS the rendered choice (geometry only).
     pub fn provenance_for_request(req: &GenerateRequest) -> Option<Self> {
         let is_mesh_request = req.mesh.is_some()
             || req.output_format.is_some_and(|format| format.is_mesh())
@@ -2934,8 +2940,11 @@ impl MeshRequestOptions {
     /// The same options with the octree resolution and iso-level filled from
     /// the engine's own defaults — what a mesh print RECORDS, so provenance
     /// names the values that rendered rather than "whatever the default was
-    /// that day". A decimation target and the texture stage stay as given:
-    /// absence there is the rendered choice (raw surface, geometry only).
+    /// that day". The decimation target resolves through
+    /// [`crate::validation::resolve_mesh_target_faces`], because on a
+    /// textured run absence is NOT the rendered choice: the paint stage
+    /// decimates to the upstream budget. The texture stage itself stays as
+    /// given — absence there really is geometry only.
     pub fn resolved_with_defaults(&self) -> Self {
         self.resolved_with_defaults_for_model("")
     }
@@ -2951,7 +2960,7 @@ impl MeshRequestOptions {
             threshold: self.threshold.or(Some(
                 crate::validation::mesh_default_threshold_for_model(model) as f32,
             )),
-            target_faces: self.target_faces,
+            target_faces: crate::validation::resolve_mesh_target_faces(self),
             texture: self.texture,
             texture_resolution: self.texture_resolution,
             // Provenance records what this binary can actually execute. An

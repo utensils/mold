@@ -11,8 +11,42 @@ fn main() {
         }
         cc::Build::new()
             .cpp(true)
-            .std("c++11")
+            // The pinned oracle, xatlas-python 0.0.9, compiles this exact
+            // revision through CMake with `CMAKE_CXX_STANDARD 17` and
+            // `CMAKE_BUILD_TYPE=Release`, i.e. `-O3 -DNDEBUG`. Both halves
+            // matter and neither changes a valid result.
+            //
+            // NDEBUG resolves `XA_DEBUG` to 0 (xatlas.cpp:56-60). Without it
+            // all 155 `XA_DEBUG_ASSERT` sites compile in: two branches on
+            // every `Array::operator[]`, and a redundant `sqrtf` inside every
+            // `normalize()` for its `isNormalized` check. Measured on four
+            // retained Hunyuan3D meshes (226k-455k triangles) that is ~17% of
+            // the unwrap, for byte-identical UVs.
+            //
+            // C++17 is also what makes the single-threaded scheduler below
+            // compile: `TaskGroupHandle` carries a default member initializer,
+            // so `destroyGroup({ i })` (xatlas.cpp:3310 in the pinned
+            // revision) is aggregate initialization from C++14 onward and
+            // ill-formed in C++11.
+            .std("c++17")
             .opt_level(3)
+            .define("NDEBUG", None)
+            // Run xatlas on the calling thread. Upstream's own switch: the
+            // `#ifndef` guard is at xatlas.cpp:71-73 in the pinned revision
+            // and the inline scheduler it selects is at :3304-3400 there.
+            //
+            // The threaded `TaskScheduler` sizes its pool at
+            // `hardware_concurrency() - 1` with no way to cap it, and waits in
+            // a bare `while (group.ref > 0) std::this_thread::yield();`
+            // (:3235-3236 upstream). This is a MEASUREMENT, not a claim that
+            // the phases are serial — chart parameterization does fan out per
+            // chart. On four retained Hunyuan3D meshes (226k-455k triangles)
+            // on a 128-core host: 127 threads and 3.06 cores consumed, more
+            // system time than user, against 1.00 core here for 7% more wall
+            // clock and byte-identical UVs. Two cores of pure spin on a host
+            // that is also serving GPU work costs more than 7% of a stage the
+            // paint face budget already cut to seconds.
+            .define("XA_MULTITHREADED", "0")
             .file("vendor/xatlas/xatlas.cpp")
             .file("vendor/xatlas/bridge.cpp")
             .include("vendor/xatlas")

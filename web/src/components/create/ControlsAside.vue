@@ -24,7 +24,11 @@ import {
   effectiveGenerationRecipe,
   resolutionProfileFinding,
 } from "@studio/lib/generationProfile";
-import { emptyMeshForm, type MeshFormState } from "@studio/lib/meshControls";
+import {
+  emptyMeshForm,
+  meshTargetFacesPlaceholder,
+  type MeshFormState,
+} from "@studio/lib/meshControls";
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
 import type { GenerateRoutingRequest } from "@studio/lib/chainRouting";
 import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
@@ -131,6 +135,21 @@ const thresholdValue = computed(
 );
 const thresholdNote = computed(() => controlNote(thresholdControl.value));
 const targetFacesValue = computed(() => meshForm.value.targetFaces);
+// A textured run decimates to the host's advertised budget when this is
+// blank, so say which number that is instead of promising a raw surface.
+const targetFacesDefault = computed(() =>
+  meshTargetFacesPlaceholder(meshForm.value, meshProfile.value),
+);
+const targetFacesPlaceholder = computed(() =>
+  targetFacesDefault.value === null
+    ? "keep raw surface"
+    : targetFacesDefault.value.toLocaleString("en-US"),
+);
+const targetFacesHint = computed(() =>
+  targetFacesDefault.value === null
+    ? "Leave blank to keep the raw surface —"
+    : `Leave blank and a textured run decimates to ${targetFacesDefault.value.toLocaleString("en-US")} triangles —`,
+);
 const mattingControl = computed(() => meshProfile.value?.matting ?? null);
 const mattingOptions = computed(() =>
   (mattingControl.value?.choices ?? []).map((value) => ({
@@ -460,13 +479,13 @@ function lockLastSeed() {
           type="number"
           :min="meshProfile.target_faces_min"
           :max="meshProfile.target_faces_max"
-          placeholder="keep raw surface"
+          :placeholder="targetFacesPlaceholder"
           :value="targetFacesValue ?? ''"
           @input="setTargetFaces(($event.target as HTMLInputElement).value)"
         />
       </div>
       <p class="controls__hint">
-        Leave blank to keep the raw surface —
+        {{ targetFacesHint }}
         {{ meshProfile.target_faces_min }}–{{ meshProfile.target_faces_max }}
         triangles when decimating.
       </p>

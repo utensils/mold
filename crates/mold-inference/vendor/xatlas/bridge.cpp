@@ -3,11 +3,19 @@
 #include <cstdint>
 #include <memory>
 
-using Continue = bool (*)(const void *);
+// `category` is `xatlas::ProgressCategory` widened, or `MOLD_XATLAS_NO_CATEGORY`
+// for the bare cancellation probes below, which carry no progress. `percent` is
+// clamped to 0..=100. Returning false cancels, as xatlas's own ProgressFunc does.
+#define MOLD_XATLAS_NO_CATEGORY UINT32_MAX
+using Continue = bool (*)(const void *state, uint32_t category, uint32_t percent);
 struct Callback { Continue proceed; const void *state; };
-static bool progress(xatlas::ProgressCategory, int, void *data) {
+static bool progress(xatlas::ProgressCategory category, int percent, void *data) {
     const auto *callback = static_cast<const Callback *>(data);
-    return callback->proceed(callback->state);
+    const uint32_t clamped = percent <= 0 ? 0u : (percent >= 100 ? 100u : static_cast<uint32_t>(percent));
+    // xatlas hands us both on every callback (xatlas.cpp:3086 fires only when
+    // the whole percent moves). Dropping them is why a stage that ran for an
+    // hour reported nothing at all.
+    return callback->proceed(callback->state, static_cast<uint32_t>(category), clamped);
 }
 
 extern "C" void *mold_xatlas_generate(const float *positions, uint32_t vertex_count,
@@ -17,7 +25,7 @@ extern "C" void *mold_xatlas_generate(const float *positions, uint32_t vertex_co
     try {
         Callback callback{proceed, state};
         std::unique_ptr<xatlas::Atlas, decltype(&xatlas::Destroy)> atlas(xatlas::Create(), xatlas::Destroy);
-        if (!atlas || !proceed(state)) return nullptr;
+        if (!atlas || !proceed(state, MOLD_XATLAS_NO_CATEGORY, 0)) return nullptr;
         xatlas::SetProgressCallback(atlas.get(), progress, &callback);
         xatlas::MeshDecl mesh;
         mesh.vertexPositionData = positions;
@@ -31,7 +39,7 @@ extern "C" void *mold_xatlas_generate(const float *positions, uint32_t vertex_co
         // default ChartOptions/PackOptions, including automatic atlas size.
         xatlas::Generate(atlas.get());
         xatlas::SetProgressCallback(atlas.get());
-        if (!proceed(state) || atlas->meshCount != 1 || !atlas->width || !atlas->height) return nullptr;
+        if (!proceed(state, MOLD_XATLAS_NO_CATEGORY, 0) || atlas->meshCount != 1 || !atlas->width || !atlas->height) return nullptr;
         const auto &output = atlas->meshes[0];
         if (!output.vertexCount || output.indexCount != index_count) return nullptr;
         for (uint32_t i = 0; i < output.vertexCount; ++i) {

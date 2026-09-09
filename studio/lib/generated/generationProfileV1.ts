@@ -111,6 +111,16 @@ octree_resolutions: Array<number>, octree_default: number,
  */
 threshold: FloatControl, target_faces_min: number, target_faces_max: number,
 /**
+ * Triangle budget a TEXTURED run decimates to when the request names no
+ * `target_faces`, mirroring Tencent's own paint pipeline. Geometry-only
+ * runs have no default and keep the raw surface, which is why this is
+ * one advertised number rather than a `target_faces_default`.
+ *
+ * `None` means an older server, never "no budget" — a client shows the
+ * control unprefilled there, exactly as it did before.
+ */
+target_faces_texture_default?: number | null,
+/**
  * The PBR texture stage. `Hidden` in every build that ships without the
  * paint bundle, with the reason a client shows instead of the control.
  */

@@ -185,8 +185,10 @@ pushed screen opened from the header.
   Shape/Resolution/exact-size/Fit-to-canvas/Strength/Mask/Negative disappear
   and a **Mesh** control group takes their place — Octree over the advertised
   allowlist (default 256), an Iso threshold slider, an optional Target faces
-  field within the advertised bounds that keeps the raw surface when left
-  blank, and the advertised Auto/On/Off background-removal policy. Auto
+  field within the advertised bounds whose placeholder is what leaving it
+  blank actually does — the raw surface on a geometry-only run, and the
+  advertised `target_faces_texture_default` on a textured one — and the
+  advertised Auto/On/Off background-removal policy. Auto
   preserves useful supplied alpha and runs U²-Net for opaque inputs. The
   prompt field becomes an optional note with placeholder copy
   explaining the model renders from the source image alone, and Develop

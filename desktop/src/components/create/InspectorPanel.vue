@@ -41,6 +41,7 @@ import { activeQualityPreset, qualityPresets, type QualityPreset } from "../../l
 import { meshDetailLadder } from "../../lib/meshDetailLadder";
 import { controlNote, effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { type CanvasIntent } from "@studio/lib/outputShape";
+import { meshTargetFacesPlaceholder } from "@studio/lib/meshControls";
 import { useOutputShape } from "../../composables/useOutputShape";
 import {
   meshTargetFacesError,
@@ -325,6 +326,21 @@ function setTargetFaces(raw: string) {
  * bounds inline, as Steps does, instead of snapping the typed value. */
 const targetFacesError = computed(() =>
   meshTargetFacesError(props.form.mesh.targetFaces, meshProfile.value),
+);
+/** A textured render decimates to the host's advertised budget when this is
+ * blank, so name the number rather than promise every detail. */
+const targetFacesDefault = computed(() =>
+  meshTargetFacesPlaceholder(props.form.mesh, meshProfile.value),
+);
+const targetFacesPlaceholder = computed(() =>
+  targetFacesDefault.value === null
+    ? "keep every detail"
+    : targetFacesDefault.value.toLocaleString("en-US"),
+);
+const targetFacesHint = computed(() =>
+  targetFacesDefault.value === null
+    ? "Leave the face budget blank to keep every detail —"
+    : `Leave the face budget blank and a textured render simplifies to ${targetFacesDefault.value.toLocaleString("en-US")} triangles —`,
 );
 const advancedCount = computed(() => advancedActiveCount(props.form));
 const showGenerateAudio = computed(() => caps.value.offersAudioControl);
@@ -800,7 +816,7 @@ function resetSettings() {
             inputmode="numeric"
             :min="meshProfile.target_faces_min"
             :max="meshProfile.target_faces_max"
-            placeholder="keep every detail"
+            :placeholder="targetFacesPlaceholder"
             :value="form.mesh.targetFaces ?? ''"
             :aria-invalid="targetFacesError ? 'true' : undefined"
             class="ms-seed__input ms-card__faces font-mono text-micro"
@@ -856,9 +872,10 @@ function resetSettings() {
         </div>
         <p class="ms-field__hint">
           Start from a photo of one object. You'll get a turntable preview and can export .obj or
-          .glb. Leave the face budget blank to keep every detail —
-          {{ meshProfile.target_faces_min }}–{{ meshProfile.target_faces_max }} triangles when
-          simplifying.
+          .glb. {{ targetFacesHint }} {{ meshProfile.target_faces_min }}–{{
+            meshProfile.target_faces_max
+          }}
+          triangles when simplifying.
         </p>
       </div>
 

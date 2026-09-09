@@ -352,7 +352,38 @@ struct Ticker<'a> {
     total: u32,
 }
 
-impl Ticker<'_> {
+impl<'a> Ticker<'a> {
+    fn new(cb: ProgressFn<'a>, total: u32) -> Self {
+        Self {
+            cb,
+            current: 0,
+            total,
+        }
+    }
+
+    /// Report an absolute position, firing the callback only when the whole
+    /// percent moves.
+    ///
+    /// The extraction stages tick a fixed handful of times, so they call the
+    /// callback on every tick. Decimation calls this once per collapse —
+    /// hundreds of thousands of times on a dense mesh — and every fired
+    /// callback is an SSE progress event, so it has to be throttled at the
+    /// source rather than downstream.
+    fn set(&mut self, current: u32) -> anyhow::Result<()> {
+        if self.total == 0 {
+            return Ok(());
+        }
+        // u64: `simplify_surface` also runs on a mesh a caller uploaded, and
+        // `u32 * 100` overflows above ~42.9M triangles.
+        let percent = |value: u32| u64::from(value) * 100 / u64::from(self.total);
+        let before = percent(self.current);
+        self.current = current.min(self.total);
+        if percent(self.current) == before && self.current != self.total {
+            return Ok(());
+        }
+        (self.cb)(self.current, self.total)
+    }
+
     fn tick(&mut self) -> anyhow::Result<()> {
         if self.current < self.total {
             self.current += 1;
@@ -893,6 +924,20 @@ pub fn compute_smooth_normals(mesh: &mut Mesh) {
 /// (`engine.rs:453-457` does exactly this), and UV/color assignment for this
 /// family happens after decimation, not before.
 pub fn simplify(mesh: &Mesh, target_faces: usize) -> anyhow::Result<Mesh> {
+    simplify_with_progress(mesh, target_faces, &mut |_, _| Ok(()))
+}
+
+/// [`simplify`], reporting `(faces removed, faces to remove)` as it goes.
+///
+/// The collapse loop is single-threaded and can run for seconds on a dense
+/// surface, so it needs the same tick every other long CPU stage has: without
+/// one it is invisible to `/api/activity` and, because the tick is also where
+/// the caller returns `Err`, a cancel is not observed until it finishes.
+pub fn simplify_with_progress(
+    mesh: &Mesh,
+    target_faces: usize,
+    progress: ProgressFn<'_>,
+) -> anyhow::Result<Mesh> {
     // Never hand back something worse than we were given, and never start from
     // indices that would panic the adjacency build.
     mesh.validate()?;
@@ -901,7 +946,7 @@ pub fn simplify(mesh: &Mesh, target_faces: usize) -> anyhow::Result<Mesh> {
     }
 
     let mut state = Simplifier::new(mesh);
-    state.run(target_faces);
+    state.run(target_faces, progress)?;
     let out = state.into_mesh();
     // Cheap next to the decimation itself, and the one thing this function
     // must never get wrong.
@@ -1361,7 +1406,12 @@ impl Simplifier {
         }
     }
 
-    fn run(&mut self, target_faces: usize) {
+    fn run(&mut self, target_faces: usize, progress: ProgressFn<'_>) -> anyhow::Result<()> {
+        // Progress is measured in faces retired toward the target, which is
+        // monotone and finishes at 100% even when the loop stops early on a
+        // mesh with no legal collapse left.
+        let doomed = self.live_faces.saturating_sub(target_faces) as u32;
+        let mut ticker = Ticker::new(progress, doomed);
         let mut heap: BinaryHeap<Candidate> = BinaryHeap::new();
         // A set, not a `Vec` + linear scan: a 300k-face mesh has ~450k unique
         // edges, and deduplicating those quadratically is the difference
@@ -1413,7 +1463,12 @@ impl Simplifier {
             };
             self.apply_collapse(u, v, p, &dying, &surviving);
             self.push_edges_around(&mut heap, u);
+            ticker.set(
+                doomed.saturating_sub((self.live_faces.saturating_sub(target_faces)) as u32),
+            )?;
         }
+        ticker.finish()?;
+        Ok(())
     }
 
     fn into_mesh(self) -> Mesh {
@@ -1930,6 +1985,62 @@ mod tests {
             assert!(!seen.contains(&key), "duplicate face {face:?}");
             seen.push(key);
         }
+    }
+
+    /// Decimation now runs on every textured render, and it used to run
+    /// silently inside "Extracting surface" — no progress, and no cancel until
+    /// the collapse loop finished (#1666).
+    #[test]
+    fn simplify_reports_monotone_progress_and_finishes_at_the_total() {
+        let sphere = icosphere(3);
+        let target = sphere.face_count() / 4;
+        let mut seen: Vec<(u32, u32)> = Vec::new();
+        let out = simplify_with_progress(&sphere, target, &mut |current, total| {
+            seen.push((current, total));
+            Ok(())
+        })
+        .unwrap();
+        assert!(out.face_count() <= target);
+
+        assert!(!seen.is_empty(), "decimation reported no progress at all");
+        assert!(seen.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        let (last, total) = *seen.last().unwrap();
+        assert_eq!(last, total, "the last report must be 100%");
+        assert!(seen.iter().all(|&(current, t)| current <= t && t == total));
+        // Throttled at the source: one event per whole percent, not one per
+        // collapse, because every event is an SSE frame.
+        assert!(
+            seen.len() <= 101,
+            "{} progress events for at most 101 percents",
+            seen.len()
+        );
+    }
+
+    /// The tick is where the caller returns `Err`, so it is also the only
+    /// place a cancel can be observed.
+    #[test]
+    fn simplify_stops_when_the_progress_tick_cancels() {
+        let sphere = icosphere(3);
+        let error = simplify_with_progress(&sphere, sphere.face_count() / 4, &mut |_, _| {
+            anyhow::bail!("cancelled")
+        })
+        .expect_err("a cancelling tick must stop decimation");
+        assert!(error.to_string().contains("cancelled"), "{error}");
+    }
+
+    /// A mesh already at or under the budget is untouched, and reports
+    /// nothing, so the common textured re-render costs nothing.
+    #[test]
+    fn simplify_below_the_target_is_a_no_op() {
+        let sphere = icosphere(2);
+        let mut ticks = 0usize;
+        let out = simplify_with_progress(&sphere, sphere.face_count() + 1, &mut |_, _| {
+            ticks += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(out.face_count(), sphere.face_count());
+        assert_eq!(ticks, 0);
     }
 
     #[test]

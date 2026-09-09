@@ -1541,6 +1541,12 @@ async fn prepare_generation_inner(
     // with the family admission already resolved, is what keeps saved
     // provenance equal to what actually rendered (#783).
     mold_core::validation::materialize_extend_overlap_frames(request, resolved_family.as_deref());
+    // And once more for the mesh face budget. A textured run that named no
+    // `target_faces` renders decimated to the upstream budget, so the
+    // admitted request has to say so — the queue row's `metadata` IS this
+    // request, `OutputMetadata` is built from it, and "Reuse settings"
+    // restores it (#1666).
+    mold_core::validation::materialize_mesh_target_faces(request);
 
     // Same discipline for the creation-time filing: `OutputMetadata` is built
     // from this request while the gallery row is seeded through a path that
@@ -6547,7 +6553,10 @@ fn enrich_queue_plan_runtime(
             continue;
         };
         let progress = progress.unwrap_or_default();
-        let running = progress.step.is_some() || progress.stage_current.is_some();
+        // Same predicate `/api/activity`'s `scheduler_phase` asks, so a job
+        // cannot read "running" on one surface and "Loading model" on the
+        // other (#1666).
+        let running = progress.is_executing();
         work.runtime_phase = Some(if running { "running" } else { "loading" }.to_string());
         work.runtime_stage = progress.stage.clone().or_else(|| {
             progress

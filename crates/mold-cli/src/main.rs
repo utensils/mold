@@ -191,7 +191,8 @@ struct MeshArgs {
     mesh_threshold: Option<f32>,
 
     /// Decimate the mesh to approximately this many triangles.
-    /// Omitted keeps the raw surface-net output.
+    /// Omitted keeps the raw surface-net output for a geometry-only export,
+    /// and takes the recipe's textured-run budget when --texture is set.
     #[arg(long, value_name = "N", help_heading = "3D")]
     target_faces: Option<u32>,
 

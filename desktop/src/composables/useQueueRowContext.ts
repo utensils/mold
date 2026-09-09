@@ -84,9 +84,12 @@ export function useQueueRowContext(): QueueRowContextReader {
       const finish = queueWorkItemFor(queues[ref.hostId]?.plan, ref.id)?.estimated_finish_unix_ms;
       return {
         wait: queueStatusFor(index, ref.hostId, ref.id),
+        // A lease stamps this once and never refreshes it, so an overrun job
+        // reads as "Finishes in 0s" for the rest of its run (#1666). Past its
+        // own estimate the honest answer is that there isn't one.
         etaSeconds:
-          typeof finish === "number" && Number.isFinite(finish)
-            ? Math.max(0, Math.round((finish - at) / 1000))
+          typeof finish === "number" && Number.isFinite(finish) && finish > at
+            ? Math.round((finish - at) / 1000)
             : null,
         queuePaused: queues[ref.hostId]?.paused === true,
       };
