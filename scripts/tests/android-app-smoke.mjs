@@ -29,6 +29,9 @@ const assert = (condition, message) => {
 };
 /** The deadline every wait in this script shares; see the shared module. */
 const timeoutMs = resolveDeadlineMs(process.env.MOLD_ANDROID_SMOKE_TIMEOUT_MS);
+/** ~3s between Back presses: slow enough that a panel still animating shut is
+ *  never raced into a second press, quick enough to recover a dropped key. */
+const BACK_REDISPATCH_EVERY_ATTEMPTS = 15;
 const until = (read, label) => untilWith(read, label, { timeoutMs });
 
 assert(
@@ -250,11 +253,24 @@ try {
       "settings opens",
     );
     await recordNavigation("before native Back");
-    shell("input", "keyevent", "4");
-    await until(
+    /*
+     * The hardware Back key gets dropped exactly as a synthetic touch does:
+     * `navigation.json` from the API 36 failure shows `settingsOpen: true` and
+     * `historyLength: 2` unchanged across all 148 polls — the identical state
+     * the API 35 run recorded a moment before it PASSED, so the app was fine
+     * and the key never arrived.
+     *
+     * Back is the one action here that is not idempotent — a second press with
+     * the panel already dismissed would pop the tab navigation instead — so it
+     * re-presses on a much slower cadence than a tab tap, and only ever right
+     * after a poll has just read the panel as still open.
+     */
+    await actUntil(
+      () => shell("input", "keyevent", "4"),
       () =>
         evaluate('!!document.querySelector(".mobile-tab[aria-current=page]")'),
       "native Back dismisses settings",
+      { timeoutMs, redispatchEvery: BACK_REDISPATCH_EVERY_ATTEMPTS },
     );
     assert(
       await evaluate(
@@ -269,11 +285,17 @@ try {
     shell("settings", "put", "system", "font_scale", "1");
     await sleep(500);
     const normal = await metrics();
-    shell("settings", "put", "system", "font_scale", "2");
-    const large = await until(async () => {
-      const m = await metrics();
-      return m.font >= normal.font * 1.9 && m;
-    }, "live system font scale");
+    // Idempotent: writing the same scale again is a no-op, so this one simply
+    // re-applies until the WebView reflows.
+    const large = await actUntil(
+      () => shell("settings", "put", "system", "font_scale", "2"),
+      async () => {
+        const m = await metrics();
+        return m.font >= normal.font * 1.9 && m;
+      },
+      "live system font scale",
+      { timeoutMs },
+    );
     assert(
       large.scrollWidth <= large.width + 1,
       "Large text causes horizontal overflow",

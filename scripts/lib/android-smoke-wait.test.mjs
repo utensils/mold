@@ -130,6 +130,57 @@ describe("actUntil", () => {
     expect(landed).toBe(true);
   });
 
+  /*
+   * The property that makes it safe to retry an action that is NOT idempotent
+   * (the hardware Back key): a re-dispatch only ever follows a poll that has
+   * just read the condition as false, and nothing is dispatched once it holds.
+   * A blind timer would press Back again after the panel had already closed,
+   * popping the navigation underneath it.
+   */
+  test("never dispatches again once the condition holds", async () => {
+    const clock = fakeClock();
+    const order = [];
+    let landed = false;
+    await actUntil(
+      () => {
+        order.push("act");
+        // The action lands on the second dispatch.
+        if (order.filter((o) => o === "act").length >= 2) landed = true;
+      },
+      () => {
+        order.push("read");
+        return landed;
+      },
+      "native Back dismisses settings",
+      { ...clock, timeoutMs: 30_000, redispatchEvery: 5 },
+    );
+    // Every dispatch after the first is immediately preceded by a false read,
+    // and none follows the read that returned true.
+    expect(order[0]).toBe("act");
+    expect(order.at(-1)).toBe("read");
+    for (let i = 1; i < order.length; i++)
+      if (order[i] === "act") expect(order[i - 1]).toBe("read");
+    expect(order.filter((o) => o === "act")).toHaveLength(2);
+  });
+
+  test("a slower cadence dispatches less often over the same wait", async () => {
+    const counts = [];
+    for (const redispatchEvery of [5, 15]) {
+      const clock = fakeClock();
+      let taps = 0;
+      await actUntil(
+        () => {
+          taps += 1;
+        },
+        () => false,
+        "back",
+        { ...clock, timeoutMs: 30_000, redispatchEvery },
+      ).catch(() => {});
+      counts.push(taps);
+    }
+    expect(counts[1]).toBeLessThan(counts[0]);
+  });
+
   test("still fails when the action never takes effect", async () => {
     const clock = fakeClock();
     let taps = 0;
