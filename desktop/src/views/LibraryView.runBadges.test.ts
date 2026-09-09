@@ -1,0 +1,221 @@
+/**
+ * The two badges a 3-D run puts on a tile, mounted for real.
+ *
+ * Both live in the tile's bottom-left badge ROW, and that row is shared with
+ * the host chip, the Upscaled mark and the media-kind word. A guard on the row
+ * that named only those three swallowed the run's badges on any tile whose
+ * media needs no kind word — which is every ordinary still, and so every
+ * intermediate a run publishes. The badges are exactly what tells those
+ * near-identical PNGs apart, so the bug hid the feature where it was needed.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { createPinia, setActivePinia } from "pinia";
+import { createMemoryHistory, createRouter } from "vue-router";
+import { defineComponent, nextTick } from "vue";
+
+const state = vi.hoisted(() => ({ localImages: [] as unknown[] }));
+
+vi.mock("../lib/api/client", () => ({
+  apiFetch: vi.fn(),
+  apiFetchTo: vi.fn().mockResolvedValue(new Response()),
+  apiJsonTo: vi.fn(),
+  conditionalApiJsonTo: vi.fn().mockResolvedValue([]),
+  currentTarget: () => ({ baseUrl: "http://x", apiKey: null }),
+}));
+vi.mock("../lib/ipc", () => ({
+  inTauri: () => false,
+  ipc: {
+    localGalleryDelete: vi.fn(),
+    localGalleryList: vi.fn(async () => ({ images: state.localImages, target: null })),
+    revealOutputFile: vi.fn(),
+    saveOutputBytes: vi.fn(),
+  },
+}));
+
+import LibraryView from "./LibraryView.vue";
+import { useConnectionStore } from "../stores/connection";
+import { useGalleryStore } from "../stores/gallery";
+import { useHostsStore } from "../stores/hosts";
+import type { GalleryImage, ServerCapabilities } from "../lib/api/types";
+import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
+import { clearSessionScrollForTests } from "@studio/lib/libraryOrganization";
+
+installMemoryLocalStorage();
+
+const VIEWPORT_WIDTH = 1200;
+const VIEWPORT_HEIGHT = 800;
+
+/** One print a 3-D run published, carrying the server-minted provenance. */
+const runPrint = (
+  filename: string,
+  timestamp: number,
+  role: string,
+  stage: number,
+  job = "run-1",
+): GalleryImage =>
+  ({
+    filename,
+    timestamp,
+    size_bytes: 1_000 + stage,
+    favorite: false,
+    tags: [],
+    metadata: {
+      prompt: "a hand-carved wooden fox",
+      model: "hunyuan3d-mini-turbo:fp16",
+      seed: 4242,
+      mesh_workflow: { job_id: job, mode: "text_to_mesh", role, stage_index: stage },
+    },
+  }) as unknown as GalleryImage;
+
+const stub = { template: "<div />" };
+const mediaStub = defineComponent({
+  name: "AuthedMedia",
+  props: { path: { type: String, required: true } },
+  template: "<div class='media-stub' />",
+});
+
+let restoreLayout: (() => void) | null = null;
+
+/** happy-dom lays nothing out; give every element the viewport's box so the
+ *  virtualizer and the justified layout render real tiles. */
+function fakeLayout() {
+  const proto = HTMLElement.prototype;
+  const rect = Object.getOwnPropertyDescriptor(Element.prototype, "getBoundingClientRect");
+  const saved = ["clientWidth", "clientHeight", "offsetWidth", "offsetHeight"].map(
+    (name) => [name, Object.getOwnPropertyDescriptor(proto, name)] as const,
+  );
+  Object.defineProperty(Element.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value: () => ({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: VIEWPORT_WIDTH,
+      bottom: VIEWPORT_HEIGHT,
+      width: VIEWPORT_WIDTH,
+      height: VIEWPORT_HEIGHT,
+      toJSON: () => ({}),
+    }),
+  });
+  for (const name of ["clientWidth", "offsetWidth"])
+    Object.defineProperty(proto, name, { configurable: true, get: () => VIEWPORT_WIDTH });
+  for (const name of ["clientHeight", "offsetHeight"])
+    Object.defineProperty(proto, name, { configurable: true, get: () => VIEWPORT_HEIGHT });
+  restoreLayout = () => {
+    if (rect) Object.defineProperty(Element.prototype, "getBoundingClientRect", rect);
+    for (const [name, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(proto, name, descriptor);
+      else delete (proto as unknown as Record<string, unknown>)[name];
+    }
+  };
+}
+
+async function mountGrid(items: GalleryImage[]) {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: "/library", component: stub },
+      { path: "/create", component: stub },
+      { path: "/create/3d", component: stub },
+    ],
+  });
+  await router.push("/library");
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  const connection = useConnectionStore();
+  connection.info = null;
+  connection.status = "error";
+  const hosts = useHostsStore();
+  hosts.capabilities["local"] = {
+    gallery: { can_delete: true, organize: true, trash: { enabled: true, retention_days: 30 } },
+  } as unknown as ServerCapabilities;
+  const gallery = useGalleryStore();
+  state.localImages = items;
+  gallery.buckets.local = { items, loading: false, error: null, loaded: true };
+  gallery.collectionsByHost["local"] = { items: [], loaded: true } as never;
+
+  const wrapper = mount(LibraryView, {
+    attachTo: document.body,
+    global: {
+      plugins: [pinia, router],
+      stubs: { AuthedMedia: mediaStub, HostFilterChips: stub, HistoryDrawer: stub },
+    },
+  });
+  await flushPromises();
+  await nextTick();
+  return { wrapper, gallery };
+}
+
+const badgeTexts = (wrapper: { findAll: (s: string) => { text: () => string }[] }, test: string) =>
+  wrapper.findAll(`[data-test="${test}"]`).map((n) => n.text().trim());
+
+beforeEach(() => {
+  clearSessionScrollForTests();
+  fakeLayout();
+});
+afterEach(() => {
+  restoreLayout?.();
+  restoreLayout = null;
+  document.body.innerHTML = "";
+});
+
+describe("a 3-D run's tile badges", () => {
+  /*
+   * The reason the role badge exists: opened, a run shows a GLB poster and two
+   * PNGs of the same subject. Without the step names the two pictures are
+   * indistinguishable, which is the state this shipped in.
+   */
+  it("names every step inside an opened run, pictures included", async () => {
+    const { wrapper, gallery } = await mountGrid([
+      runPrint("object.glb", 4, "final_glb", 2),
+      runPrint("matted.png", 3, "matted_image", 1),
+      runPrint("source.png", 2, "generated_image", 0),
+    ]);
+    gallery.workflowId = "run-1";
+    await nextTick();
+    await flushPromises();
+
+    expect(badgeTexts(wrapper, "workflow-role-badge").sort()).toEqual([
+      "Background removed",
+      "Source picture",
+      "The 3-D object",
+    ]);
+    wrapper.unmount();
+  });
+
+  /*
+   * A run whose mesh has not landed — still rendering, or trashed on its own —
+   * leads with its latest picture. It still collapses to one tile, so it still
+   * has to say that more is inside; otherwise it is indistinguishable from an
+   * ordinary print and nothing hints that it opens.
+   */
+  it("marks the stack even when a picture leads the run", async () => {
+    const { wrapper } = await mountGrid([
+      runPrint("matted.png", 3, "matted_image", 1),
+      runPrint("source.png", 2, "generated_image", 0),
+    ]);
+
+    expect(badgeTexts(wrapper, "workflow-stack-badge")).toEqual(["2"]);
+    wrapper.unmount();
+  });
+
+  /* And an ordinary print still wears nothing at all. */
+  it("leaves a print no run made unmarked", async () => {
+    const { wrapper } = await mountGrid([
+      {
+        filename: "plain.png",
+        timestamp: 9,
+        size_bytes: 10,
+        favorite: false,
+        tags: [],
+        metadata: { prompt: "p", model: "flux-dev:q8", seed: 1 },
+      } as unknown as GalleryImage,
+    ]);
+
+    expect(badgeTexts(wrapper, "workflow-stack-badge")).toEqual([]);
+    expect(badgeTexts(wrapper, "workflow-role-badge")).toEqual([]);
+    wrapper.unmount();
+  });
+});

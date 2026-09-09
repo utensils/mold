@@ -56,6 +56,21 @@ describe("the Library's 3-D run doors", () => {
   });
 
   /* Absence is an ordinary print or an older host — no door at all. */
+  /*
+   * One set, one word. The drill-in chip said "3 prints", the context menu
+   * said "3 assets" and the tile's assistive label said "3 pictures" — three
+   * names for the same three things, one of which ("pictures") is wrong for a
+   * set whose lead is a 3-D object. `prints` is what the rest of the view
+   * already calls a gallery row ("Deleted N prints everywhere").
+   */
+  it("calls a run's members by one name", () => {
+    expect(viewSource).toContain('`3-D object · ${count} ${count === 1 ? "print" : "prints"}`');
+    expect(viewSource).toContain("`Show the ${membership.memberCount} prints`");
+    expect(viewSource).toContain("`One 3-D run, ${tile.model.workflowCount} prints`");
+    for (const wrong of ["memberCount} assets", "workflowCount} pictures"])
+      expect(viewSource).not.toContain(wrong);
+  });
+
   it("offers no door for a print no workflow made", () => {
     expect(meshWorkflowRouteFor({}, "local")).toBeNull();
   });

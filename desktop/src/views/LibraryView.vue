@@ -1195,7 +1195,7 @@ function meshWorkflowEntries(entry: MergedPrint): MenuEntry[] {
   if (membership.memberCount > 1) {
     const open = gallery.workflowId === membership.jobId;
     entries.push({
-      label: open ? "Back to everything" : `Show the ${membership.memberCount} assets`,
+      label: open ? "Back to everything" : `Show the ${membership.memberCount} prints`,
       action: () => {
         gallery.workflowId = open ? null : membership.jobId;
       },
@@ -2852,9 +2852,23 @@ onUnmounted(() => {
               </span>
               <!-- Word badges share the bottom-left corner in one row and yield
                  together to the rising edge code on hover — they live in the
-                 tile's bottom margin and must never overlap it. -->
+                 tile's bottom margin and must never overlap it.
+
+                 EVERY badge inside must be named in this guard. Listing only
+                 the host chip, Upscaled and the media kind swallowed both of a
+                 3-D run's marks on any tile needing no kind word — which is
+                 every ordinary still, and so every picture a run publishes:
+                 the step names vanished from exactly the near-identical PNGs
+                 they exist to tell apart, and a run led by a picture rather
+                 than a mesh wore no stack mark at all. -->
               <span
-                v-if="showBadges || tile.model.upscaled || tile.model.kindBadge"
+                v-if="
+                  showBadges ||
+                  tile.model.upscaled ||
+                  tile.model.kindBadge ||
+                  tile.model.workflowRole ||
+                  tile.model.workflowCount > 1
+                "
                 class="absolute bottom-1.5 left-1.5 flex max-w-[85%] items-center gap-1 transition-opacity duration-100 group-hover:opacity-0"
               >
                 <span v-if="tile.model.upscaled" data-test="upscaled-badge" class="ms-lib-upscaled">
@@ -2883,7 +2897,7 @@ onUnmounted(() => {
                   v-if="!tile.model.workflowRole && tile.model.workflowCount > 1"
                   data-test="workflow-stack-badge"
                   class="ms-lib-kind ms-lib-stack"
-                  :aria-label="`One 3-D run, ${tile.model.workflowCount} pictures`"
+                  :aria-label="`One 3-D run, ${tile.model.workflowCount} prints`"
                 >
                   <Icon name="layers" :size="10" aria-hidden="true" />
                   {{ tile.model.workflowCount }}
