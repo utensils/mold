@@ -93,9 +93,10 @@ function print(index: number): GalleryImage {
     size_bytes: 100_000 + index,
     favorite: index % 5 === 0,
     tags: index % 3 === 0 ? ["portrait"] : [],
-    // Album membership matters here: every organization assertion in this file
-    // used to be made over a gallery with NO collections at all, so the
-    // per-album path was measured by nothing.
+    // Album membership for the one test that seeds the albums after mount.
+    // Everywhere else these ids resolve to nothing (the collections bucket is
+    // empty), so this is inert for every other assertion in the file — it does
+    // NOT give them album coverage, and did not change any existing budget.
     collections: index % 4 === 0 ? [ALBUM_IDS[index % ALBUM_IDS.length]!] : [],
     metadata: {
       prompt: `print ${index}`,
@@ -185,17 +186,11 @@ async function mountGrid() {
   for (let i = 0; i < PRINTS; i++) items.push(print(i));
   counters.localImages = items;
   gallery.buckets.local = { items, loading: false, error: null, loaded: true };
-  gallery.collectionsByHost["local"] = {
-    items: ALBUM_IDS.map((id, i) => ({
-      id,
-      name: `Album ${i + 1}`,
-      slug: `album-${i + 1}`,
-      count: 0,
-      created_at: 0,
-      updated_at: 0,
-    })),
-    loaded: true,
-  } as never;
+  // No collections are seeded here on purpose: the view fetches them on open
+  // and, with no reachable target, `fetchCollections` assigns `items: []` —
+  // a seed placed before mount is wiped. The one test that needs albums seeds
+  // them AFTER mount and says so.
+  gallery.collectionsByHost["local"] = { items: [], loaded: true } as never;
 
   const wrapper = mount(LibraryView, {
     attachTo: document.body,
@@ -303,12 +298,27 @@ describe("Library grid at 2 000 prints", () => {
       loaded: true,
     } as never;
     await nextTick();
-    counters.reset();
 
+    /*
+     * Warm EXPLICITLY. Re-seeding the collections invalidates the organization
+     * index, and this used to depend on the component's own render effect
+     * happening to rebuild it before the counters were read — if that
+     * incidental render ever stopped, the first read would do the 2 000-call
+     * rebuild itself and this would go red for a reason that is not its
+     * invariant. Read once to warm, reset, then measure the second read.
+     */
+    const warm = ALBUM_IDS.map((_, i) => gallery.collectionCounts(`album-${i + 1}`));
+    counters.reset();
     const counts = ALBUM_IDS.map((_, i) => gallery.collectionCounts(`album-${i + 1}`));
-    // Non-vacuous: the fixture files every fourth print, so the albums are
-    // not empty and the collapse really ran over each of them.
-    expect(counts.reduce((a, b) => a + b, 0)).toBeGreaterThan(0);
+
+    /*
+     * An EXACT total, not merely "more than zero": every fourth print is
+     * filed, and none of them belongs to a 3-D run, so the collapse is the
+     * identity here. A merely non-zero count would not notice the counting
+     * itself breaking.
+     */
+    expect(counts).toEqual(warm);
+    expect(counts.reduce((a, b) => a + b, 0)).toBe(PRINTS / 4);
     expectOpsUnder("unionOrganization while counting albums", counters.unionOrganization, 0);
     expectOpsUnder(
       "mesh workflow index passes while counting albums",

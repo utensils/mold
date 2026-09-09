@@ -272,9 +272,8 @@ describe("a 3-D run's tile badges", () => {
   /*
    * The layers badge is a STACK marker: it says this tile stands for prints
    * that are not drawn. Under `Pictures` the mesh lead is removed by kind, so
-   * the run's three pictures all render — and each one wore a "4" claiming to
-   * hide three others while nothing at all was hidden. Three adjacent tiles,
-   * each pointing at the other two.
+   * the run's pictures all render — and each one wore the run's full count,
+   * claiming to hide siblings that were standing right beside it.
    */
   it("marks no stack where the run is scattered rather than collapsed", async () => {
     const { wrapper, gallery } = await mountGrid([
@@ -291,6 +290,36 @@ describe("a 3-D run's tile badges", () => {
 
     // Scattered: all three pictures stand, and none of them hides anything.
     expect(wrapper.findAll(".ms-lib-tile")).toHaveLength(2);
+    expect(badgeTexts(wrapper, "workflow-stack-badge")).toEqual([]);
+    wrapper.unmount();
+  });
+
+  /*
+   * The Trash is never collapsed, so nothing there hides anything and no tile
+   * may claim to. The run index is LIVE-only, which made that true by accident
+   * — until one machine has a print live that another has trashed, when the
+   * shared filename gives the trashed row a live membership with `lead: true`
+   * and the badge comes back on a grid where every row is drawn.
+   */
+  it("marks no stack in the Trash, where nothing is ever collapsed", async () => {
+    const live = [
+      runPrint("object.glb", 6, "final_glb", 2),
+      runPrint("matted.png", 5, "matted_image", 1),
+      runPrint("source.png", 4, "generated_image", 0),
+    ];
+    const { wrapper, gallery } = await mountGrid(live);
+    // The same names, trashed on another machine.
+    gallery.trashBuckets.local = {
+      items: live,
+      loading: false,
+      error: null,
+      loaded: true,
+    } as never;
+    gallery.scope = "trash";
+    await nextTick();
+    await flushPromises();
+
+    expect(gallery.trashFiltered).toHaveLength(3);
     expect(badgeTexts(wrapper, "workflow-stack-badge")).toEqual([]);
     wrapper.unmount();
   });

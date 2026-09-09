@@ -1876,12 +1876,14 @@ const tileModels = computed<TileModel[]>(() => {
       mesh,
       kindBadge: mediaKindBadge(item, { clip, audio, mesh }),
       upscaled: isUpscaledImage(item),
-      // ONLY the lead carries the count, because the badge is a STACK marker —
-      // it says this tile stands for prints that are not drawn. A member is
-      // rendered only where its lead was filtered out (`collapseToLeads`), and
-      // there it hides nothing: under `Pictures` all three of a run's pictures
-      // stood, each wearing a "4" pointing at the others.
-      workflowCount: workflowMember?.lead ? workflowMember.memberCount : 0,
+      // The badge is a STACK marker — it says this tile stands for prints that
+      // are NOT drawn — so it belongs only where the collapse actually ran and
+      // only on the tile it ran for. A member is rendered only where its lead
+      // was filtered out, and there it hides nothing; and the Trash is never
+      // collapsed at all, so nothing there hides anything either. The run
+      // index is live-only, which made the Trash safe by accident until one
+      // machine has a print live that another has trashed.
+      workflowCount: !trash && workflowMember?.lead ? workflowMember.memberCount : 0,
       // Inside a run, the badge names the STEP: three near-identical PNGs are
       // otherwise indistinguishable from each other.
       workflowRole: openRun ? (roleLabel(workflowMember?.role ?? "") ?? "") : "",
