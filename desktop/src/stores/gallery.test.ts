@@ -2396,9 +2396,41 @@ describe("a 3-D run is one gallery item", () => {
     gallery.trashBuckets.local = loadedBucket([
       runImage("object.glb", 4, "final_glb", 2),
       runImage("source.png", 2, "generated_image", 0),
-    ]) as never;
+    ]);
     gallery.scope = "trash";
     expect(gallery.basePrints.map((p) => p.item.filename)).toEqual(["object.glb", "source.png"]);
+  });
+
+  /*
+   * `filterChipTags` reads `basePrints`, so guarding that from the collapse
+   * also made the Trash's chips agree with the Trash's grid — a tag borne only
+   * by a run's step now counts there, where the chip used to say a number the
+   * grid could not show. Pinning it so the agreement is not accidental.
+   */
+  it("counts Trash tag chips over what the Trash actually shows", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    // Both copies carry the tag: `organizationOf` resolves a trashed row
+    // through the LIVE index when the filename collides, so tagging only the
+    // trashed copies leaves the chip falling back to the inventory count and
+    // the assertion below passes for the wrong reason.
+    const tagged = (image: GalleryImage) => ({ ...image, tags: ["keep"] }) as GalleryImage;
+    gallery.buckets.local = loadedBucket([
+      tagged(runImage("object.glb", 4, "final_glb", 2)),
+      tagged(runImage("source.png", 2, "generated_image", 0)),
+    ]);
+    gallery.trashBuckets.local = loadedBucket([
+      tagged(runImage("object.glb", 4, "final_glb", 2)),
+      tagged(runImage("source.png", 2, "generated_image", 0)),
+    ]);
+    // The chip row draws its NAMES from the host's tag inventory; the count
+    // beside each is what `filterChipTags` computes over the scope's prints.
+    gallery.tagsByHost.local = { items: [{ name: "keep", count: 99 }], loaded: true };
+    gallery.scope = "trash";
+    expect(gallery.trashFiltered).toHaveLength(2);
+    expect(gallery.filterChipTags.find((t) => t.name.toLowerCase() === "keep")?.count).toBe(
+      gallery.trashFiltered.length,
+    );
   });
 
   it("indexes every member back to its run and its part in it", () => {
