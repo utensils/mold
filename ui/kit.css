@@ -134,6 +134,122 @@
     color: var(--mold-text-dim);
   }
 
+  /* ── The composer ───────────────────────────────────────────────────────
+   *
+   * The bottom-edge bar every making-view shares: a prompt, chips that pick
+   * the recipe, and one accent Generate. New image and the 3-D Studio are the
+   * same anatomy (docs/design/README.md §3), so the vocabulary lives here
+   * rather than being re-declared per view — and it HAS to, for a mechanical
+   * reason as well as a tidiness one: slot content is compiled in the PARENT,
+   * so a chip a view passes into the composer never inherits the composer's
+   * own scoped CSS. Every chip owner used to carry its own copy of the block
+   * below, three of them at the last count.
+   *
+   * Every token read here is in `ui/tokens.css`, never `ui/mold-desktop.css`,
+   * so web and the phone can adopt this without a fallback on every line.
+   */
+  .ms-composer {
+    display: flex;
+    flex-direction: column;
+    border-top: var(--mold-bw) solid var(--mold-border);
+    padding: 12px 14px 14px;
+    background: var(--mold-bg);
+  }
+  .ms-composer__card {
+    display: flex;
+    flex-direction: column;
+    border: var(--mold-bw) solid var(--mold-border);
+    border-radius: var(--mold-radius-2);
+    background: var(--mold-bg-deep);
+    transition: border-color var(--mold-dur-quick) var(--mold-ease-out);
+  }
+  .ms-composer__card:focus-within {
+    border-color: var(--mold-border-focus);
+  }
+  .ms-composer__prompt-row {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    padding: 12px 14px 6px;
+  }
+  .ms-composer__input {
+    flex: 1;
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+    border: 0;
+    background: transparent;
+    color: var(--mold-text);
+    font-family: var(--mold-font-sans);
+    font-size: var(--mold-fs-base);
+    line-height: var(--mold-lh-body);
+    resize: none;
+    outline: none;
+    min-height: 24px;
+    max-height: 160px;
+    overflow-x: hidden;
+  }
+  .ms-composer__input::placeholder {
+    color: var(--mold-text-dim);
+  }
+  .ms-composer__controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 10px 10px 12px;
+  }
+  .ms-composer__spacer {
+    flex: 1;
+    min-width: 16px;
+  }
+  /* One word, accent fill, never wrapped — the mock's primary action. */
+  .ms-composer__generate {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    flex-shrink: 0;
+    height: var(--mold-ctl-lg, 32px);
+    padding: 0 16px;
+    border: 0;
+    border-radius: var(--mold-radius-2);
+    background: var(--mold-blue);
+    color: var(--mold-on-accent);
+    font-size: var(--mold-fs-sm);
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: filter var(--mold-dur-quick) var(--mold-ease-out);
+  }
+  .ms-composer__generate:hover:not(:disabled) {
+    filter: brightness(1.05);
+  }
+  .ms-composer__generate:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+  .ms-composer__generate:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+  .ms-composer__key {
+    font-family: var(--mold-font-mono);
+    font-size: var(--mold-fs-micro);
+    opacity: 0.7;
+  }
+
+  /* The CHIP vocabulary deliberately does NOT live here. `ui/components/
+   * Chip.vue` already owns `.ms-chip` for the 24px filter/tag chip, and the
+   * composer's is a different 28px control — one global name for two controls
+   * is the `.ms-seg` collision `inspectorStyles.test.ts` exists to prevent.
+   * Each composer-chip owner keeps its own copy (it has to anyway: slot
+   * content is compiled in the parent and never inherits the composer's
+   * scoped CSS). Renaming the composer's to `.ms-composer-chip` and lifting
+   * it here would be the tidier end state, and is a refactor of New image's
+   * hot path rather than of this file.
+   */
+
   /* Upscaled marker on a print — the tile grid and the Lightbox draw the same
    * badge, so it lives here rather than in each of them. */
   .ms-lib-upscaled {
