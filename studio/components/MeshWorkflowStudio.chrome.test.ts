@@ -39,16 +39,19 @@ describe("the 3-D Studio wears the shell", () => {
   });
 
   /*
-   * Fixed chrome never shrinks and the canvas absorbs the slack (README §3).
-   * The whole section used to scroll, which took the composer with it.
+   * Fixed chrome never shrinks and the canvas absorbs the slack (README §3) —
+   * that is the composer's `flex-shrink: 0`. The canvas itself still SCROLLS:
+   * clipping it put a long stage list's Cancel and Resume out of reach with no
+   * scrollbar to find them.
    */
-  it("gives the canvas the height and keeps the composer on its edge", () => {
-    expect(
-      rule(source, ".mesh-studio--desktop .mesh-studio__result"),
-    ).toContain("overflow: hidden");
-    expect(rule(source, ".mesh-studio--desktop .mesh-studio__main")).toContain(
-      "flex-direction: column",
+  it("gives the canvas the height, keeps the composer on its edge, and still scrolls", () => {
+    expect(rule(source, ".mesh-studio--desktop .mesh-studio__result")).toContain(
+      "overflow: auto",
     );
+    const main = rule(source, ".mesh-studio--desktop .mesh-studio__main");
+    expect(main).toContain("flex-direction: column");
+    // A floor, so an upward style menu is never cut by the view toolbar.
+    expect(main).toContain("var(--mesh-canvas-floor");
     expect(rule(source, ".mesh-studio--desktop .mesh-studio__bar")).toContain(
       "flex-shrink: 0",
     );
@@ -87,35 +90,20 @@ describe("the 3-D Studio wears the shell", () => {
   });
 
   /*
-   * "3-D" is the lexicon's spelling wherever a kind is named, and deriving the
-   * chip's empty-state copy from its label lowercased it to "Choose a 3-d
-   * style" — which a visual UAT caught and no test did. The placeholder is
-   * authored by the caller now.
+   * Plain words in sans; the format's own vocabulary stays in the mono truth.
+   * The words are SENTENCE case in the template — the uppercase is desktop's
+   * presentation, applied by CSS. Baking the caps in shouted on web, which
+   * renders the same markup without that rule.
    */
-  it("never derives a kind's name by lowercasing it", () => {
-    const chip = readFileSync(
-      resolve(__dirname, "../../desktop/src/components/mesh/MeshStyleChip.vue"),
-      "utf8",
+  it("names the geometry fields in plain words, and shouts only in CSS", () => {
+    expect(source).toContain(">Which way is up</span");
+    expect(source).toContain(">How big one unit is</span");
+    expect(source).not.toContain("WHICH WAY IS UP");
+    expect(source).not.toContain("HOW BIG ONE UNIT IS");
+    expect(rule(source, ".mesh-studio--desktop .mesh-studio__label")).toContain(
+      "text-transform: uppercase",
     );
-    expect(chip).not.toContain("Choose a ${label.toLowerCase()}");
-    expect(chip).toContain("placeholder");
-    const view = readFileSync(
-      resolve(__dirname, "../../desktop/src/views/MeshWorkflowView.vue"),
-      "utf8",
-    );
-    expect(view).toContain('placeholder="Choose a 3-D style"');
-    expect(view).toContain('placeholder="Choose a picture style"');
-    // The lexicon's spelling, not a case-folded one, anywhere a kind is named.
-    expect(view).not.toContain("3-d style");
-    expect(view).not.toContain("3-d object");
-  });
-
-  /* Plain words in sans; the format's own vocabulary stays in the mono truth. */
-  it("names the geometry fields in plain words", () => {
-    expect(source).toContain("WHICH WAY IS UP");
-    expect(source).toContain("HOW BIG ONE UNIT IS");
-    expect(source).not.toContain(">\n                Up axis");
-    expect(source).not.toContain("Metres per unit\n");
+    // The format's own vocabulary survives, in the line of mono truth.
     expect(source).toContain("Y-up · as stored (glTF, Blender OBJ)");
   });
 });

@@ -443,3 +443,158 @@ describe("a returning view does not overwrite what you were writing", () => {
     second.unmount();
   });
 });
+
+describe("the composer is the one place a 3-D object is authored", () => {
+  const target = { baseUrl: "http://local:7680", apiKey: null };
+
+  const paintingModel = {
+    name: "hunyuan3d-2.1:fp16",
+    family: "hunyuan3d",
+    downloaded: true,
+    runtime_available: true,
+    default_steps: 30,
+    default_guidance: 5,
+    default_width: 0,
+    default_height: 0,
+    generation_profile: {
+      default_recipe_id: "shape",
+      recipes: [
+        {
+          id: "shape",
+          capabilities: {
+            canvasless: true,
+            mesh: { workflow_modes: ["text_to_mesh", "mesh_texture"] },
+          },
+        },
+      ],
+    },
+  } as never;
+
+  async function desktopStudio(props: Record<string, unknown> = {}) {
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: { target, desktop: true, ...props },
+    });
+    await flushPromises();
+    return wrapper;
+  }
+
+  /*
+   * The claim of the whole rework: the description, both style chips and
+   * Generate sit on the composer, not at the foot of the settings rail. The
+   * chrome test pins the SOURCE; this pins what actually renders.
+   */
+  it("renders the description, both style slots and Generate on the composer", async () => {
+    const wrapper = await desktopStudio();
+    const wrapper2 = mount(MeshWorkflowStudio, {
+      props: { target, desktop: true },
+      slots: {
+        "mesh-picker": "<i data-test='slot-mesh'/>",
+        "image-picker": "<i data-test='slot-image'/>",
+      },
+    });
+    await flushPromises();
+    const composer = wrapper2.get("[data-test='mesh-composer']");
+    expect(composer.find("textarea").exists()).toBe(true);
+    expect(composer.find("[data-test='slot-mesh']").exists()).toBe(true);
+    expect(composer.find("[data-test='slot-image']").exists()).toBe(true);
+    expect(composer.find("[data-test='mesh-generate']").exists()).toBe(true);
+    // ...and NOT in the rail it came from.
+    const rail = wrapper2.get("form.mesh-studio__composer");
+    expect(rail.find("textarea").exists()).toBe(false);
+    expect(rail.find("[data-test='mesh-generate']").exists()).toBe(false);
+    wrapper2.unmount();
+    wrapper.unmount();
+  });
+
+  /*
+   * `studio/` cannot read the shell's platform table, and desktop ships Linux
+   * and Windows builds where New image's composer says `Ctrl↩`. A hard-coded
+   * `⌘↩` would have the two composers disagree two clicks apart.
+   */
+  it("says the chord the shell tells it, and nothing when there is none", async () => {
+    const withKey = await desktopStudio({ generateShortcut: "Ctrl↩" });
+    expect(withKey.get("[data-test='mesh-generate']").text()).toContain(
+      "Ctrl↩",
+    );
+    withKey.unmount();
+
+    const without = await desktopStudio();
+    expect(
+      without.get("[data-test='mesh-generate']").find("kbd").exists(),
+    ).toBe(false);
+    without.unmount();
+  });
+
+  /* A supplied mesh needs no description, so the prompt row is absent. */
+  it("shows the description only for the workflow that reads one", async () => {
+    const wrapper = await desktopStudio();
+    expect(
+      wrapper.get("[data-test='mesh-composer']").find("textarea").exists(),
+    ).toBe(true);
+    wrapper.unmount();
+  });
+
+  /* Generate refuses until the workflow can actually run. */
+  it("keeps Generate disabled until the workflow is complete", async () => {
+    const wrapper = await desktopStudio();
+    const button = wrapper.get("[data-test='mesh-generate']");
+    expect(button.attributes("disabled")).toBeDefined();
+    await wrapper.get("[data-test='mesh-composer'] textarea").setValue("a fox");
+    await flushPromises();
+    expect(button.attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  /* The empty canvas is the kit's block, in the app's own voice. */
+  it("uses the shared empty state rather than a bare heading", async () => {
+    const wrapper = await desktopStudio();
+    const empty = wrapper.get("[data-test='mesh-empty-canvas']");
+    expect(empty.text()).toContain("Your 3-D object appears here");
+    expect(empty.text()).toContain("press Generate");
+    wrapper.unmount();
+  });
+
+  /*
+   * Web is a different layout and the rework must not have moved anything
+   * there: its description, pickers and Generate stay in the rail.
+   */
+  it("leaves the web layout authoring in the rail", async () => {
+    const wrapper = mount(MeshWorkflowStudio, { props: { target } });
+    await flushPromises();
+    expect(wrapper.find("[data-test='mesh-composer']").exists()).toBe(false);
+    const rail = wrapper.get("form.mesh-studio__composer");
+    expect(rail.find("textarea").exists()).toBe(true);
+    expect(rail.find("button[type='submit']").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  /*
+   * Web's controls lost their accessible name when the wrapping `<label>`
+   * became a `<span>` — the desktop branches kept theirs, so the omission was
+   * invisible on the surface being worked on.
+   */
+  it("names every web control for assistive tech", async () => {
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: { target, availableModels: [paintingModel] },
+    });
+    await flushPromises();
+    for (const label of ["Texture size"]) {
+      const named = wrapper
+        .findAll("select")
+        .some((s) => s.attributes("aria-label") === label);
+      expect(named, label).toBe(true);
+    }
+    wrapper.unmount();
+  });
+
+  /* The caps are desktop's presentation, not the words themselves. */
+  it("does not shout on web", async () => {
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: { target, availableModels: [paintingModel] },
+    });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("TEXTURE SIZE");
+    expect(wrapper.text()).toContain("Texture size");
+    wrapper.unmount();
+  });
+});

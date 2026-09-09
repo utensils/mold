@@ -145,8 +145,9 @@
    * own scoped CSS. Every chip owner used to carry its own copy of the block
    * below, three of them at the last count.
    *
-   * Every token read here is in `ui/tokens.css`, never `ui/mold-desktop.css`,
-   * so web and the phone can adopt this without a fallback on every line.
+   * Every token read here is in `ui/tokens.css` EXCEPT `--mold-ctl-lg`, which
+   * `ui/mold-desktop.css` owns — web and the phone import this file but not
+   * that one, so its fallback below is load-bearing, not decoration.
    */
   .ms-composer {
     display: flex;

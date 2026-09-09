@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
 import { storeToRefs } from "pinia";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
@@ -30,6 +37,7 @@ import {
   type WorkflowGenerateRequest,
   type WorkflowModel,
 } from "../lib/meshWorkflowAuthoring";
+import { autoGrowRows } from "../lib/autogrow";
 import { isMeshFamily } from "../lib/legacyRecipeRules";
 import { useMeshWorkflowDraftStore } from "../stores/meshWorkflowDraft";
 import MeshViewer from "./MeshViewer.vue";
@@ -51,6 +59,15 @@ const props = defineProps<{
    * component is handed the id rather than reading the router itself.
    */
   openWorkflow?: string | null;
+  /**
+   * The platform's spelling of the Generate chord, e.g. `⌘↩` or `Ctrl↩`.
+   *
+   * Passed in rather than hard-coded: `studio/` cannot read the shell's
+   * platform table, and desktop ships Linux and Windows builds where New
+   * image's composer says `Ctrl↩`. Absent renders no keycap, which is right
+   * for web — it binds no keyboard Generate on any surface.
+   */
+  generateShortcut?: string | null;
   resolveTarget?: (
     requirements: MeshWorkflowRequirements,
   ) => Promise<MeshWorkflowRoute>;
@@ -185,7 +202,22 @@ const settled = computed(() =>
     : true,
 );
 
-/** ⌘↩ from inside the description, the way every composer behaves. */
+const composerPrompt = ref<HTMLTextAreaElement | null>(null);
+
+/*
+ * The description grows with what is typed, capped, exactly as New image's
+ * does. Without it a `rows="1"` field scrolled inside one line — worse than
+ * the `rows="5"` box in the rail it replaced.
+ */
+function growComposer(): void {
+  if (composerPrompt.value) autoGrowRows(composerPrompt.value);
+}
+watch(prompt, () => void nextTick(growComposer));
+onMounted(() => void nextTick(growComposer));
+
+/** The primary-modifier Return from inside the description, the way every
+ *  composer behaves. Both modifiers are accepted because this layer cannot
+ *  read the shell's platform table; the visible keycap is the caller's. */
 function onComposerKeydown(event: KeyboardEvent): void {
   if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
   event.preventDefault();
@@ -869,7 +901,7 @@ onBeforeUnmount(() => {
             </label>
             <div class="mesh-studio__field">
               <span class="ms-group-label mesh-studio__label"
-                >WHICH WAY IS UP</span
+                >Which way is up</span
               >
               <SegmentedControl
                 v-if="desktop"
@@ -880,7 +912,7 @@ onBeforeUnmount(() => {
                 variant="neutral"
                 compact
               />
-              <select v-else v-model="upAxis">
+              <select v-else v-model="upAxis" aria-label="Which way is up">
                 <option value="y">Y up</option>
                 <option value="z">Z up</option>
               </select>
@@ -888,7 +920,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="mesh-studio__field">
               <span class="ms-group-label mesh-studio__label"
-                >HOW BIG ONE UNIT IS</span
+                >How big one unit is</span
               >
               <input
                 v-model.number="metersPerUnit"
@@ -911,7 +943,7 @@ onBeforeUnmount(() => {
             "
             class="mesh-studio__field"
           >
-            <span class="ms-group-label mesh-studio__label">TEXTURE SIZE</span>
+            <span class="ms-group-label mesh-studio__label">Texture size</span>
             <SegmentedControl
               v-if="desktop"
               v-model="textureResolution"
@@ -921,7 +953,11 @@ onBeforeUnmount(() => {
               variant="neutral"
               compact
             />
-            <select v-else v-model.number="textureResolution">
+            <select
+              v-else
+              v-model.number="textureResolution"
+              aria-label="Texture size"
+            >
               <option :value="1024">1024</option>
               <option :value="2048">2048</option>
               <option :value="4096">4096</option>
@@ -1056,6 +1092,7 @@ onBeforeUnmount(() => {
               <textarea
                 v-model="prompt"
                 data-selectable
+                ref="composerPrompt"
                 rows="1"
                 aria-label="Describe the object"
                 placeholder="Describe the object — “a hand-carved wooden fox, on a plain background”"
@@ -1092,7 +1129,9 @@ onBeforeUnmount(() => {
                 :disabled="!canSubmit"
               >
                 {{ busy ? "Preparing…" : "Generate" }}
-                <kbd class="ms-composer__key">⌘↩</kbd>
+                <kbd v-if="generateShortcut" class="ms-composer__key">{{
+                  generateShortcut
+                }}</kbd>
               </button>
             </div>
           </div>
@@ -1168,9 +1207,18 @@ onBeforeUnmount(() => {
   font-size: var(--mold-fs-xs);
   font-weight: 500;
 }
-.mesh-studio select,
-.mesh-studio textarea,
-.mesh-studio input[type="number"] {
+/*
+ * The rail's own fields. Every selector here EXCLUDES the composer's input:
+ * an SFC's scoped style is unlayered and `ui/kit.css` sits in
+ * `@layer components`, so an unlayered element selector outranks the kit
+ * whatever the specificity (`.claude/rules/desktop.md`, invariant 1). Without
+ * the exclusion the composer's description rendered as a bordered, opaque,
+ * resizable box with a native grip inside the composer card — nothing like
+ * New image's, which is the whole point of having one.
+ */
+.mesh-studio select:not(.ms-composer__input),
+.mesh-studio textarea:not(.ms-composer__input),
+.mesh-studio input[type="number"]:not(.ms-composer__input) {
   width: 100%;
   border: 1px solid var(--mold-border);
   border-radius: var(--mold-radius-1);
@@ -1178,7 +1226,7 @@ onBeforeUnmount(() => {
   color: var(--mold-text);
   padding: 10px;
 }
-.mesh-studio textarea {
+.mesh-studio textarea:not(.ms-composer__input) {
   resize: vertical;
   line-height: 1.45;
 }
@@ -1207,11 +1255,6 @@ onBeforeUnmount(() => {
   padding: 14px;
   color: var(--mold-text);
   cursor: pointer;
-}
-.mesh-studio__row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
 }
 .mesh-studio__primary {
   margin-top: auto;
@@ -1340,7 +1383,6 @@ onBeforeUnmount(() => {
   /* The shell's chrome plane, the same one CreateHeader sits on — the crust
    * is the tile bed and read a shade off beside the New image toolbar. */
   background: var(--mold-chrome);
-  container-type: inline-size;
 }
 
 /* The canvas column: the result takes the height and the composer sits on its
@@ -1350,7 +1392,15 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  min-height: 0;
+  /*
+   * A floor, bound from the shell's one layout authority (the desktop view
+   * passes `--mesh-canvas-floor` from `benchLayout`'s `MIN_CANVAS_HEIGHT`).
+   * The composer's style menus open UPWARD in place, so without a guaranteed
+   * canvas the top of a long style list is silently cut by the view toolbar —
+   * which is the same reason New image binds its canvas floor rather than
+   * hard-coding one beside the layout.
+   */
+  min-height: var(--mesh-canvas-floor, 320px);
   overflow: hidden;
 }
 .mesh-studio--desktop .mesh-studio__bar {
@@ -1409,10 +1459,17 @@ onBeforeUnmount(() => {
   padding: 24px;
   border: 0;
   background: var(--mold-canvas);
-  /* Fixed chrome never shrinks and the canvas absorbs the slack, so nothing
-   * can escape its region (README §3). A scrolling canvas is what let the
-   * whole surface — composer included — scroll away. */
-  overflow: hidden;
+  /*
+   * Fixed chrome never shrinks and the canvas absorbs the slack (README §3) —
+   * that is what the composer's `flex-shrink: 0` above is for, and it is why
+   * the whole surface no longer scrolls away.
+   *
+   * The canvas itself still SCROLLS, though: `hidden` clipped the stage list
+   * at both ends on a short window (it is `justify-content: center`), which
+   * put Cancel and Resume out of reach with no scrollbar to find them. The
+   * viewer sets its own `height: 100%`, so this never adds a bar for a result.
+   */
+  overflow: auto;
 }
 .mesh-studio--desktop .mesh-studio__result :deep(.mesh-viewer) {
   min-height: 0;
@@ -1424,14 +1481,9 @@ onBeforeUnmount(() => {
   padding: 0 8px;
   font-size: var(--mold-fs-xs);
 }
-.mesh-studio--desktop textarea {
+.mesh-studio--desktop textarea:not(.ms-composer__input) {
   padding: 8px;
   font-size: var(--mold-fs-sm);
-}
-.mesh-studio--desktop .mesh-studio__primary {
-  padding: 8px 12px;
-  font-size: var(--mold-fs-sm);
-  font-weight: 600;
 }
 .mesh-studio__owner {
   font: var(--mold-fs-micro) var(--mold-font-mono);
@@ -1478,23 +1530,37 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-/* Inspector field rhythm: the group label, the control, then one line of mono
- * truth beneath it (README §1). */
-.mesh-studio--desktop .mesh-studio__field {
+/*
+ * Field rhythm: the group label, the control, then one line of mono truth
+ * beneath it (README §1).
+ *
+ * These are NOT desktop-only. The markup they replaced was a `<label>`, which
+ * picked up `.mesh-studio label`'s grid, gap, colour and size — so scoping the
+ * replacements to `--desktop` left web with bare `<div>`s and an unstyled
+ * truth line. Only the uppercase is desktop's presentation.
+ */
+.mesh-studio__field {
   display: grid;
-  gap: 8px;
+  gap: 7px;
   min-width: 0;
+  color: var(--mold-text-2);
+  font-size: var(--mold-fs-xs);
+  font-weight: 500;
+}
+.mesh-studio--desktop .mesh-studio__field {
+  gap: 8px;
 }
 .mesh-studio--desktop .mesh-studio__label {
   text-transform: uppercase;
 }
-.mesh-studio--desktop .mesh-studio__truth {
+.mesh-studio__truth {
   margin: 0;
   font-family: var(--mold-font-mono);
   font-size: var(--mold-fs-micro);
+  font-weight: 400;
   color: var(--mold-text-dim);
 }
-.mesh-studio--desktop .mesh-studio__number {
+.mesh-studio input[type="number"].mesh-studio__number {
   height: var(--mold-ctl-md, 26px);
   width: 12ch;
   padding: 0 8px;

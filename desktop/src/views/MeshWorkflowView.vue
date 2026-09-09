@@ -18,11 +18,13 @@ import MeshStyleChip from "../components/mesh/MeshStyleChip.vue";
 import PanelResizeHandle from "../components/shell/PanelResizeHandle.vue";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { dragWidth } from "../lib/panelResize";
+import { MIN_CANVAS_HEIGHT } from "../lib/benchLayout";
 import type { ModelEntry } from "../lib/api/types";
 import HostChip from "../components/create/HostChip.vue";
 import { useHostsStore } from "../stores/hosts";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useUiStore } from "../stores/ui";
+import { shortcutLabel } from "../lib/platform";
 
 const hosts = useHostsStore();
 const prefs = useAppPrefsStore();
@@ -176,7 +178,11 @@ async function resolveTarget(requirements: MeshWorkflowRequirements): Promise<Me
     ref="studio"
     :target="target"
     :open-workflow="openWorkflow"
-    :style="{ '--mesh-inspector-width': inspectorWidth + 'px' }"
+    :generate-shortcut="shortcutLabel('↩')"
+    :style="{
+      '--mesh-inspector-width': inspectorWidth + 'px',
+      '--mesh-canvas-floor': MIN_CANVAS_HEIGHT + 'px',
+    }"
     :available-models="availableModels"
     :resolve-target="resolveTarget"
     :host-label="selectedHost?.label ?? ''"
