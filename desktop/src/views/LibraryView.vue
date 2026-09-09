@@ -1859,6 +1859,7 @@ const tileModels = computed<TileModel[]>(() => {
     const clip = isClipItem(item);
     const mesh = isMeshItem(item);
     const audio = isAudioItem(item);
+    const workflowMember = workflowIndex.get(item.filename);
     models[i] = {
       entry,
       item,
@@ -1875,10 +1876,15 @@ const tileModels = computed<TileModel[]>(() => {
       mesh,
       kindBadge: mediaKindBadge(item, { clip, audio, mesh }),
       upscaled: isUpscaledImage(item),
-      workflowCount: workflowIndex.get(item.filename)?.memberCount ?? 0,
+      // ONLY the lead carries the count, because the badge is a STACK marker —
+      // it says this tile stands for prints that are not drawn. A member is
+      // rendered only where its lead was filtered out (`collapseToLeads`), and
+      // there it hides nothing: under `Pictures` all three of a run's pictures
+      // stood, each wearing a "4" pointing at the others.
+      workflowCount: workflowMember?.lead ? workflowMember.memberCount : 0,
       // Inside a run, the badge names the STEP: three near-identical PNGs are
       // otherwise indistinguishable from each other.
-      workflowRole: openRun ? (roleLabel(workflowIndex.get(item.filename)?.role ?? "") ?? "") : "",
+      workflowRole: openRun ? (roleLabel(workflowMember?.role ?? "") ?? "") : "",
       mediaPath: galleryMediaPath(item.filename, source, true, item.trashed_at != null),
       // The tile is always a still thumbnail now; a local clip's poster comes
       // from the native cache rather than a <video> element per tile.

@@ -269,6 +269,32 @@ describe("a 3-D run's tile badges", () => {
     wrapper.unmount();
   });
 
+  /*
+   * The layers badge is a STACK marker: it says this tile stands for prints
+   * that are not drawn. Under `Pictures` the mesh lead is removed by kind, so
+   * the run's three pictures all render — and each one wore a "4" claiming to
+   * hide three others while nothing at all was hidden. Three adjacent tiles,
+   * each pointing at the other two.
+   */
+  it("marks no stack where the run is scattered rather than collapsed", async () => {
+    const { wrapper, gallery } = await mountGrid([
+      runPrint("object.glb", 4, "final_glb", 2),
+      runPrint("matted.png", 3, "matted_image", 1),
+      runPrint("source.png", 2, "generated_image", 0),
+    ]);
+    // Collapsed: the mesh leads and says how many came with it.
+    expect(badgeTexts(wrapper, "workflow-stack-badge")).toEqual(["3"]);
+
+    gallery.mediaKind = "image";
+    await nextTick();
+    await flushPromises();
+
+    // Scattered: all three pictures stand, and none of them hides anything.
+    expect(wrapper.findAll(".ms-lib-tile")).toHaveLength(2);
+    expect(badgeTexts(wrapper, "workflow-stack-badge")).toEqual([]);
+    wrapper.unmount();
+  });
+
   /* And an ordinary print still wears nothing at all. */
   it("leaves a print no run made unmarked", async () => {
     const { wrapper } = await mountGrid([
