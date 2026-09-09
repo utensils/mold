@@ -57,13 +57,16 @@ const runPrint = (
   ({
     filename,
     timestamp,
-    size_bytes: 1_000 + stage,
+    // Distinct bytes AND seed per print: the merged grid also collapses
+    // cross-host copies by seed + byte size within a time window, so shared
+    // values silently fused two unrelated fixtures into one tile.
+    size_bytes: 1_000 + timestamp,
     favorite: false,
     tags: [],
     metadata: {
       prompt: "a hand-carved wooden fox",
       model: "hunyuan3d-mini-turbo:fp16",
-      seed: 4242,
+      seed: 4_000 + timestamp,
       mesh_workflow: { job_id: job, mode: "text_to_mesh", role, stage_index: stage },
     },
   }) as unknown as GalleryImage;
@@ -226,6 +229,43 @@ describe("a 3-D run's tile badges", () => {
 
     expect(gallery.openWorkflowId).toBeNull();
     expect(wrapper.findAll(".ms-lib-tile")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  /*
+   * The header's Everything count and the grid are the same promise, and the
+   * defect that started this was them disagreeing: "Everything 6" beside three
+   * tiles, because the view re-implemented the filter inline and never ran the
+   * collapse. That fix lives in `scopeCounts` in LibraryView, which no store
+   * test can reach — the pin has to be the rendered number against the
+   * rendered tiles.
+   */
+  it("renders an Everything count that matches the tiles", async () => {
+    const { wrapper } = await mountGrid([
+      runPrint("object.glb", 6, "final_glb", 2),
+      runPrint("matted.png", 5, "matted_image", 1),
+      runPrint("source.png", 4, "generated_image", 0),
+      runPrint("other.glb", 3, "final_glb", 1, "run-2"),
+      runPrint("other-source.png", 2, "generated_image", 0, "run-2"),
+      {
+        filename: "plain.png",
+        timestamp: 1,
+        size_bytes: 10,
+        favorite: false,
+        tags: [],
+        metadata: { prompt: "p", model: "flux-dev:q8", seed: 1 },
+      } as unknown as GalleryImage,
+    ]);
+
+    // Six prints, two runs: two stacked tiles plus the ordinary print.
+    const tiles = wrapper.findAll(".ms-lib-tile");
+    expect(tiles).toHaveLength(3);
+    const everything = wrapper
+      .get('[data-test="library-scope"]')
+      .text()
+      .match(/Everything\s*(\d+)/)?.[1];
+    expect(everything, "the Everything chip carries a count").toBeTruthy();
+    expect(Number(everything)).toBe(tiles.length);
     wrapper.unmount();
   });
 

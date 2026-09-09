@@ -987,7 +987,16 @@ export const useGalleryStore = defineStore("gallery", {
      * opened. Entering a run therefore moves the scope with it, here, once.
      */
     openWorkflowRun(jobId: string | null) {
-      if (jobId) this.scope = "prints";
+      if (jobId) {
+        this.scope = "prints";
+        // Opening a run means "show me this run", so the narrowing that was on
+        // screen goes with it. Kept, the grid showed a subset while the chip
+        // said "3-D object · 1 print" for a run of four: you reach a run by
+        // searching for one of its steps, which is exactly when this bites.
+        this.query = "";
+        this.tagFilter = [];
+        this.mediaKind = "all";
+      }
       this.workflowId = jobId;
     },
     /** The live host behind a bucket key, if any (resolved at call time).

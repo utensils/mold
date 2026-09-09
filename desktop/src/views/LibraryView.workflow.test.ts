@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { meshWorkflowRouteFor } from "@studio/lib/meshWorkflowProvenance";
 import viewSource from "./LibraryView.vue?raw";
+import lightboxSource from "../components/gallery/Lightbox.vue?raw";
+import releaseNote from "../../../changelog.d/library-3d-stacks.md?raw";
 
 /**
  * The Library's two doors onto a 3-D run. `reuseSettings` degrades a workflow
@@ -63,12 +65,25 @@ describe("the Library's 3-D run doors", () => {
    * set whose lead is a 3-D object. `prints` is what the rest of the view
    * already calls a gallery row ("Deleted N prints everywhere").
    */
-  it("calls a run's members by one name", () => {
+  it("calls a run's members by one name, on every surface that names them", () => {
     expect(viewSource).toContain('`3-D object · ${count} ${count === 1 ? "print" : "prints"}`');
     expect(viewSource).toContain("`Show the ${membership.memberCount} prints`");
     expect(viewSource).toContain("`One 3-D run, ${tile.model.workflowCount} prints`");
-    for (const wrong of ["memberCount} assets", "workflowCount} pictures"])
-      expect(viewSource).not.toContain(wrong);
+    // The Lightbox aside and the release note name the same set. A test that
+    // read only this view stayed green while those two said "Show all N of
+    // these" — three surfaces, two names, one of them checked.
+    expect(lightboxSource).toContain("Show the {{ workflowAssetCount }} prints");
+    expect(releaseNote).toContain("**Show the N prints**");
+    // Only the RUN's own wording — "N pictures" is right elsewhere (the Trash
+    // confirm deletes pictures), so a blanket ban would be a false alarm.
+    for (const source of [viewSource, lightboxSource, releaseNote])
+      for (const wrong of [
+        "Show all",
+        "memberCount} assets",
+        "workflowCount} pictures",
+        "workflowAssetCount }} of these",
+      ])
+        expect(source).not.toContain(wrong);
   });
 
   it("offers no door for a print no workflow made", () => {

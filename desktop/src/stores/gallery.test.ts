@@ -2161,8 +2161,13 @@ describe("a 3-D run is one gallery item", () => {
     expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["matted.png"]);
   });
 
-  /* The tidy-up still holds for plain browsing, which is the whole feature. */
-  it("still collapses while nothing is being searched for", () => {
+  /*
+   * A GUARD, not a pin: it asserts the same thing the first test in this block
+   * does, and it passes against every version of the stand-down rule. It earns
+   * its place by failing the OTHER way — delete the collapse and it goes red —
+   * so the rule can never be widened until it hides nothing.
+   */
+  it("still collapses while plainly browsing", () => {
     const gallery = seedRun();
     expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["unrelated.png", "object.glb"]);
   });
@@ -2181,6 +2186,12 @@ describe("a 3-D run is one gallery item", () => {
    * ...and it is the LIBRARY'S size, so opening a scope, typing a word, or
    * drilling into a run must not rewrite it — the same promise the count
    * already keeps when an album is opened.
+   *
+   * The drill-in leg is the load-bearing one: it is what went wrong (the count
+   * followed the grid into the run and read 3). The other three legs pass
+   * against every version of this code and are here to stop the count being
+   * re-coupled to the grid's narrowing later — do not "simplify" them away as
+   * redundant, they are the ratchet.
    */
   it("keeps the library count still while the grid narrows", () => {
     const gallery = seedRun();
@@ -2262,6 +2273,29 @@ describe("a 3-D run is one gallery item", () => {
     gallery.openWorkflowRun("run-1");
     expect(gallery.scope).toBe("prints");
     expect(gallery.openWorkflowId).toBe("run-1");
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual([
+      "object.glb",
+      "delighted.png",
+      "matted.png",
+      "source.png",
+    ]);
+  });
+
+  /*
+   * You reach a run's step by searching for it, so entering the run from there
+   * must not carry the search in: the grid showed one tile while the chip said
+   * "3-D object · 1 print" for a run of four, because the chip counts what is
+   * drawn.
+   */
+  it("drops the narrowing that led you to the run", () => {
+    const gallery = seedRun();
+    gallery.query = "matted";
+    gallery.tagFilter = ["keep"];
+    gallery.mediaKind = "image";
+    gallery.openWorkflowRun("run-1");
+    expect(gallery.query).toBe("");
+    expect(gallery.tagFilter).toEqual([]);
+    expect(gallery.mediaKind).toBe("all");
     expect(gallery.filtered.map((p) => p.item.filename)).toEqual([
       "object.glb",
       "delighted.png",
