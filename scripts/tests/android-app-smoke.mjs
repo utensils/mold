@@ -2,57 +2,34 @@
 // generation is needed. CDP controls the real Tauri WebView, not a browser copy.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import {
+  actUntil,
+  resolveDeadlineMs,
+  until as untilWith,
+} from "../lib/android-smoke-wait.mjs";
 import { runLegacyMediaSmoke } from "./android-legacy-media-smoke.mjs";
 
 const adb = process.env.ADB ?? "adb";
 const serial = process.env.ANDROID_SERIAL ?? "emulator-5554";
 const output =
   process.env.MOLD_ANDROID_EVIDENCE ?? "/tmp/mold-android-app-smoke";
+// `exec-out screencap` and `dumpsys` both outgrow execFileSync's 1 MB default,
+// which aborts the whole script with ENOBUFS while it is capturing the evidence
+// for some OTHER failure — losing the answer and reporting the wrong question.
+const ADB_MAX_BUFFER = 32 * 1024 * 1024;
 const run = (...args) =>
-  execFileSync(adb, ["-s", serial, ...args], { encoding: "utf8" }).trim();
+  execFileSync(adb, ["-s", serial, ...args], {
+    encoding: "utf8",
+    maxBuffer: ADB_MAX_BUFFER,
+  }).trim();
 const shell = (...args) => run("shell", ...args);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
-/**
- * How long a single wait may take.
- *
- * This polls every 200ms and returns the instant its condition holds, so a
- * generous deadline costs a healthy run NOTHING — it only lengthens the time
- * to fail. On a CI runner the emulator renders in software (`lavapipe`) and
- * `adb` intermittently exits 1, which this loop swallows into `lastError` and
- * retries; 30s was not enough window for adb to recover, and the late steps of
- * a long interaction sequence — the last tab of five, the Back that follows
- * it — were the ones that ran out. Override for a slower machine still.
- */
-const UNTIL_TIMEOUT_MS = Number(
-  process.env.MOLD_ANDROID_SMOKE_TIMEOUT_MS ?? 90_000,
-);
-
-async function until(read, label) {
-  const started = Date.now();
-  const deadline = started + UNTIL_TIMEOUT_MS;
-  let lastError;
-  let attempts = 0;
-  while (Date.now() < deadline) {
-    attempts += 1;
-    try {
-      const value = await read();
-      if (value) return value;
-    } catch (error) {
-      lastError = error;
-    }
-    await sleep(200);
-  }
-  // Say what was waited on and for how long: "Timed out: select hosts" alone
-  // could not distinguish a slow emulator from a condition that never holds.
-  throw new Error(
-    `Timed out: ${label} (${Math.round((Date.now() - started) / 1000)}s, ` +
-      `${attempts} attempts)`,
-    { cause: lastError },
-  );
-}
+/** The deadline every wait in this script shares; see the shared module. */
+const timeoutMs = resolveDeadlineMs(process.env.MOLD_ANDROID_SMOKE_TIMEOUT_MS);
+const until = (read, label) => untilWith(read, label, { timeoutMs });
 
 assert(
   shell("getprop", "ro.kernel.qemu") === "1",
@@ -126,11 +103,7 @@ try {
     // Pull the PNG as a file: full-resolution screenshots can exceed the
     // child-process stdout buffer before the app smoke test even starts.
     shell("screencap", "-p", "/sdcard/mold-boot-launcher-anr.png");
-    run(
-      "pull",
-      "/sdcard/mold-boot-launcher-anr.png",
-      output + "/boot-launcher-anr.png",
-    );
+    run("pull", "/sdcard/mold-boot-launcher-anr.png", output + "/boot-launcher-anr.png");
     shell("rm", "-f", "/sdcard/mold-boot-launcher-anr.png");
     shell("am", "force-stop", "com.android.launcher3");
   }
@@ -252,9 +225,16 @@ try {
     originalTab = await evaluate(
       'document.querySelector(".mobile-tab[aria-current=page]").dataset.test',
     );
+    // Tap, then wait for the tap to have landed — re-tapping if it did not.
+    // A synthetic touch is occasionally swallowed by the CI emulator, and the
+    // evidence from every timed-out run shows the app still on the PREVIOUS
+    // tab, rendered and responsive, with no ANR: waiting longer on a screen no
+    // tap reached only makes the same failure slower.
+    const tap = (name, read, label) =>
+      actUntil(() => click(name), read, label, { timeoutMs });
     for (const tab of ["generate", "queue", "gallery", "catalog", "hosts"]) {
-      await click("mobile-tab-" + tab);
-      await until(
+      await tap(
+        "mobile-tab-" + tab,
         () =>
           evaluate(
             "document.querySelector(" +
@@ -264,8 +244,8 @@ try {
         "select " + tab,
       );
     }
-    await click("mobile-open-settings");
-    await until(
+    await tap(
+      "mobile-open-settings",
       () => evaluate('!!document.querySelector(".is-settings-open")'),
       "settings opens",
     );

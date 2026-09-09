@@ -3,47 +3,31 @@
 // generation is needed. CDP controls the real Tauri WebView, not a browser copy.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import {
+  resolveDeadlineMs,
+  until as untilWith,
+} from "./lib/android-smoke-wait.mjs";
 
 const adb = process.env.ADB ?? "adb";
 const serial = process.env.ANDROID_SERIAL ?? "emulator-5554";
 const output =
   process.env.MOLD_ANDROID_EVIDENCE ?? "/tmp/mold-android-identity-picker";
+// A `uiautomator dump` of a full screen and an `exec-out screencap` both
+// outgrow execFileSync's 1 MB default; ENOBUFS there kills the run outright.
+const ADB_MAX_BUFFER = 32 * 1024 * 1024;
 const run = (...args) =>
-  execFileSync(adb, ["-s", serial, ...args], { encoding: "utf8" }).trim();
+  execFileSync(adb, ["-s", serial, ...args], {
+    encoding: "utf8",
+    maxBuffer: ADB_MAX_BUFFER,
+  }).trim();
 const shell = (...args) => run("shell", ...args);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
-/** Same deadline policy as `tests/android-app-smoke.mjs` — see the note there:
- *  this loop returns the instant its condition holds, so a generous window
- *  costs a healthy run nothing and only gives a software-rendered emulator and
- *  a flaky `adb` room to recover. */
-const UNTIL_TIMEOUT_MS = Number(
-  process.env.MOLD_ANDROID_SMOKE_TIMEOUT_MS ?? 90_000,
-);
-
-async function until(read, label) {
-  const started = Date.now();
-  const deadline = started + UNTIL_TIMEOUT_MS;
-  let lastError;
-  let attempts = 0;
-  while (Date.now() < deadline) {
-    attempts += 1;
-    try {
-      const value = await read();
-      if (value) return value;
-    } catch (error) {
-      lastError = error;
-    }
-    await sleep(200);
-  }
-  throw new Error(
-    `Timed out: ${label} (${Math.round((Date.now() - started) / 1000)}s, ` +
-      `${attempts} attempts)`,
-    { cause: lastError },
-  );
-}
+/** The deadline every wait in this script shares; see the shared module. */
+const timeoutMs = resolveDeadlineMs(process.env.MOLD_ANDROID_SMOKE_TIMEOUT_MS);
+const until = (read, label) => untilWith(read, label, { timeoutMs });
 
 assert(
   shell("getprop", "ro.kernel.qemu") === "1",
@@ -234,7 +218,9 @@ try {
     assert(!early, source + " did not open: " + JSON.stringify(early));
     writeFileSync(
       output + "/" + source + ".png",
-      execFileSync(adb, ["-s", serial, "exec-out", "screencap", "-p"]),
+      execFileSync(adb, ["-s", serial, "exec-out", "screencap", "-p"], {
+        maxBuffer: ADB_MAX_BUFFER,
+      }),
     );
     shell("input", "keyevent", "KEYCODE_BACK");
     const result = await until(
