@@ -230,8 +230,28 @@ impl PaintRuntime<'_> {
             "Hunyuan3D Paint requires an accelerator"
         );
         let token = progress.cancellation_token();
+        // xatlas's four phases laid end to end on one bar. Without this the
+        // stage emits `StageStart` and nothing else until it finishes, which
+        // is what `/api/activity` reads as `phase: "loading"` and what left an
+        // hour-long unwrap reporting no progress at all (#1666).
         let unwrapped = report_display_stage(progress, "Unwrapping mesh", || {
-            uv::unwrap(source, token.flag()).context("unwrap the generated mesh")
+            // The callback is also the cancellation poll, so it fires on a
+            // fixed cadence during phases whose percent does not move. Emit
+            // only when the position actually changes: every event downstream
+            // is an SSE frame.
+            let reported = std::sync::atomic::AtomicU32::new(u32::MAX);
+            uv::unwrap_reporting(source, token.flag(), &|phase, percent| {
+                let position = phase.index() * 100 + percent;
+                if reported.swap(position, std::sync::atomic::Ordering::Relaxed) == position {
+                    return;
+                }
+                progress.stage_progress(
+                    "Unwrapping mesh",
+                    position as usize,
+                    (uv::UnwrapPhase::COUNT * 100) as usize,
+                );
+            })
+            .context("unwrap the generated mesh")
         })?;
         let prepared = report_display_stage(progress, "Preparing paint mesh", || {
             prepare_mesh(&unwrapped)

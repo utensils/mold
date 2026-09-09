@@ -748,7 +748,12 @@ fn queue_plan_detail(work: &mold_core::QueueWorkItem) -> String {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_millis() as u64)
             .unwrap_or(0);
-        parts.push(format!("~{}s", finish.saturating_sub(now).div_ceil(1000)));
+        // A lease's estimate is stamped once and never refreshed, so an
+        // overrun job's remainder is negative. `~0s` on a job that has been
+        // running for an hour is worse than saying nothing (#1666).
+        if finish > now {
+            parts.push(format!("~{}s", (finish - now).div_ceil(1000)));
+        }
     }
     parts.push(format!("{} confidence", work.estimate_confidence));
     if let Some(reason) = mold_core::queue_wait::queue_work_item_reason(work) {

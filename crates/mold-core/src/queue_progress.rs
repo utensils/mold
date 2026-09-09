@@ -88,6 +88,25 @@ pub struct QueueJobProgress {
 }
 
 impl QueueJobProgress {
+    /// Is this job EXECUTING, as opposed to loading weights or fetching bytes?
+    ///
+    /// THE predicate `/api/activity` and `/api/queue` both ask, so the two can
+    /// never label one job differently. Three things make a job look busy and
+    /// they are not equal: a denoise step or an in-stage counter is
+    /// unambiguous work; a NAMED stage is work too, because several long
+    /// stages report only `StageStart` — "Unwrapping mesh", "Sampling",
+    /// "Baking PBR textures" — and [`Self::apply`] clears `stage_current` on
+    /// every `StageStart`, so keying on the counter alone reported a mesh that
+    /// had been unwrapping for an hour as still "loading" (#1666). But weight
+    /// loading and downloading NAME their stages too ("Loading UNet (GPU)"),
+    /// and they are exactly what "loading" means, so they are asked first —
+    /// clients also select byte formatting from that label.
+    pub fn is_executing(&self) -> bool {
+        if self.weight_load.is_some() || self.download.is_some() {
+            return false;
+        }
+        self.step.is_some() || self.stage_current.is_some() || self.stage.is_some()
+    }
     /// Fold one progress event into the snapshot.
     ///
     /// Called from the single `progress_tx` fan-out the attached observer

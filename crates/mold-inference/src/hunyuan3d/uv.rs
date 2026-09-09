@@ -11,7 +11,7 @@ unsafe extern "C" {
         vertices: u32,
         indices: *const u32,
         index_count: u32,
-        proceed: extern "C" fn(*const c_void) -> bool,
+        proceed: extern "C" fn(*const c_void, u32, u32) -> bool,
         state: *const c_void,
         out_vertices: *mut u32,
         out_indices: *mut u32,
@@ -35,16 +35,79 @@ impl Drop for Atlas {
     }
 }
 
-extern "C" fn proceed(state: *const c_void) -> bool {
-    // SAFETY: unwrap keeps this AtomicBool borrowed until the blocking native
-    // call joins all workers. Atomic reads are valid from any callback thread.
-    !unsafe { &*state.cast::<AtomicBool>() }.load(Ordering::Acquire)
+/// The four phases xatlas walks, in the order it runs them.
+///
+/// `xatlas.h:241-247`. They are reported so a long unwrap says which one it is
+/// in rather than sitting on a single opaque stage name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnwrapPhase {
+    AddMesh,
+    ComputeCharts,
+    PackCharts,
+    BuildOutputMeshes,
+}
+
+impl UnwrapPhase {
+    /// How many phases precede this one, so a caller can lay the four out on
+    /// one 0..=400 bar.
+    pub const COUNT: u32 = 4;
+
+    fn from_category(category: u32) -> Option<Self> {
+        Some(match category {
+            0 => Self::AddMesh,
+            1 => Self::ComputeCharts,
+            2 => Self::PackCharts,
+            3 => Self::BuildOutputMeshes,
+            // `MOLD_XATLAS_NO_CATEGORY`: a bare cancellation probe.
+            _ => return None,
+        })
+    }
+
+    pub fn index(self) -> u32 {
+        match self {
+            Self::AddMesh => 0,
+            Self::ComputeCharts => 1,
+            Self::PackCharts => 2,
+            Self::BuildOutputMeshes => 3,
+        }
+    }
+}
+
+/// What the native callback is handed. `Sync` because xatlas may call it from
+/// a worker thread.
+struct UnwrapCallback<'a> {
+    cancelled: &'a AtomicBool,
+    report: &'a (dyn Fn(UnwrapPhase, u32) + Sync),
+}
+
+extern "C" fn proceed(state: *const c_void, category: u32, percent: u32) -> bool {
+    // SAFETY: unwrap keeps this borrow alive until the blocking native call
+    // joins all workers. Atomic reads are valid from any callback thread, and
+    // the reporter is `Sync`.
+    let callback = unsafe { &*state.cast::<UnwrapCallback<'_>>() };
+    if let Some(phase) = UnwrapPhase::from_category(category) {
+        (callback.report)(phase, percent);
+    }
+    !callback.cancelled.load(Ordering::Acquire)
 }
 
 /// Unwrap with the exact xatlas-python 0.0.9 defaults used by Tencent. Existing
 /// UVs and normals do not influence charting; all corner attributes are remapped
 /// to duplicated seam vertices. This CPU stage polls cancellation in xatlas.
 pub fn unwrap(source: &Mesh, cancelled: &AtomicBool) -> Result<Mesh> {
+    unwrap_reporting(source, cancelled, &|_, _| {})
+}
+
+/// [`unwrap`], reporting xatlas's own phase and percent as it goes.
+///
+/// Cancellation and progress share one native callback because xatlas has
+/// exactly one — `ProgressFunc` (`xatlas.h:250`) — and it is the only hook
+/// into a stage that is otherwise opaque for its whole duration.
+pub fn unwrap_reporting(
+    source: &Mesh,
+    cancelled: &AtomicBool,
+    report: &(dyn Fn(UnwrapPhase, u32) + Sync),
+) -> Result<Mesh> {
     ensure!(!cancelled.load(Ordering::Acquire), "UV unwrap cancelled");
     source.validate()?;
     ensure!(
@@ -93,6 +156,7 @@ pub fn unwrap(source: &Mesh, cancelled: &AtomicBool) -> Result<Mesh> {
     let vertices = u32::try_from(source.vertices.len())?;
     let indices = u32::try_from(source.faces.len() * 3)?;
     let (mut out_vertices, mut out_indices) = (0, 0);
+    let callback = UnwrapCallback { cancelled, report };
     // SAFETY: arrays of f32/u32 have contiguous layout; input lengths were
     // checked, the immutable input and cancellation flag outlive every worker.
     let handle = unsafe {
@@ -102,7 +166,7 @@ pub fn unwrap(source: &Mesh, cancelled: &AtomicBool) -> Result<Mesh> {
             source.faces.as_ptr().cast(),
             indices,
             proceed,
-            (cancelled as *const AtomicBool).cast(),
+            (&callback as *const UnwrapCallback<'_>).cast(),
             &mut out_vertices,
             &mut out_indices,
         )
@@ -286,5 +350,49 @@ mod tests {
     #[test]
     fn unwrap_honors_cancellation() {
         assert!(unwrap(&tetrahedron(), &AtomicBool::new(true)).is_err());
+    }
+
+    /// xatlas hands the bridge a category and a percent on every callback and
+    /// they used to be dropped on the floor, which is why an unwrap that ran
+    /// for an hour reported nothing at all (#1666).
+    #[test]
+    fn unwrap_reports_xatlas_phases_in_order() {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let output = unwrap_reporting(&tetrahedron(), &AtomicBool::new(false), &|phase, pct| {
+            seen.lock().unwrap().push((phase, pct));
+        })
+        .unwrap();
+        assert!(!output.faces.is_empty());
+
+        let seen = seen.into_inner().unwrap();
+        assert!(!seen.is_empty(), "the unwrap reported no progress at all");
+        assert!(seen.iter().all(|&(_, pct)| pct <= 100));
+        // The phases run in the order `xatlas.h:241-247` declares them, so the
+        // 0..=400 bar the paint stage lays them on never goes backwards.
+        assert!(
+            seen.windows(2)
+                .all(|pair| pair[0].0.index() <= pair[1].0.index()),
+            "phases were reported out of order: {seen:?}"
+        );
+        for expected in [UnwrapPhase::ComputeCharts, UnwrapPhase::PackCharts] {
+            assert!(
+                seen.iter().any(|&(phase, _)| phase == expected),
+                "{expected:?} was never reported"
+            );
+        }
+    }
+
+    /// The progress callback is also the ONLY cancellation hook xatlas has, so
+    /// a cancel raised while native code owns the thread has to travel back
+    /// through it. Flipping the flag from inside the callback tests exactly
+    /// that path without racing a second thread against a fast unwrap.
+    #[test]
+    fn unwrap_stops_when_the_native_callback_observes_a_cancel() {
+        let cancelled = AtomicBool::new(false);
+        let error = unwrap_reporting(&tetrahedron(), &cancelled, &|_, _| {
+            cancelled.store(true, Ordering::Release);
+        })
+        .expect_err("a cancel observed inside xatlas must stop the unwrap");
+        assert!(error.to_string().contains("cancel"), "{error}");
     }
 }

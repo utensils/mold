@@ -58,12 +58,18 @@ mold repository root.
 
 ## xatlas (optional mesh UV unwrapping)
 
-The `mesh-texture` feature builds unmodified xatlas at revision
+The `mesh-texture` feature builds xatlas at revision
 `f700c7790aaa030e794b52ba7791a05c085faf0c`, the version used by the
 Hunyuan3D 2.1 reference's xatlas-python 0.0.9. Copyright (c) 2018–2020
 Jonathan Young, MIT licence. Sources and complete licence are retained in
 `crates/mold-inference/vendor/xatlas/`. The C ABI bridge is mold-owned code.
 No Python runtime is linked or invoked by mold.
+
+`xatlas.h` and `LICENSE` are unmodified. `xatlas.cpp` carries one mold change,
+which makes the chart-merge phase cancellable and alters no output; every hunk
+is marked `MOLD DIVERGENCE` in the source, the complete diff against the pinned
+revision is `crates/mold-inference/vendor/xatlas/mold-cancellable-merge.patch`,
+and the rationale is in that directory's `README.md`.
 
 ## OpenCV Navier–Stokes texture fill
 

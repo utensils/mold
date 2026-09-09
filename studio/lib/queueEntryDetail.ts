@@ -424,7 +424,13 @@ export function queueEntryDetailModel(
           mono: true,
         }
       : null,
-    item?.estimated_finish_unix_ms != null
+    // An estimate that has already passed is not "0s away", it is unknown.
+    // `estimated_finish_unix_ms` is stamped once when the lease is granted and
+    // never refreshed, from an EWMA with no bucket for UV unwrap, decimation
+    // or paint — so an overrun mesh job showed "Finishes in 0s" for the rest
+    // of its run (#1666). Say nothing rather than something false.
+    item?.estimated_finish_unix_ms != null &&
+    item.estimated_finish_unix_ms > nowMs
       ? {
           label: "Finishes in",
           value: relative(item.estimated_finish_unix_ms - nowMs),

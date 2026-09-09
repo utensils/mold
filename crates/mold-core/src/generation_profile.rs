@@ -308,6 +308,15 @@ pub struct MeshCapabilitiesProfile {
     pub threshold: FloatControl,
     pub target_faces_min: u32,
     pub target_faces_max: u32,
+    /// Triangle budget a TEXTURED run decimates to when the request names no
+    /// `target_faces`, mirroring Tencent's own paint pipeline. Geometry-only
+    /// runs have no default and keep the raw surface, which is why this is
+    /// one advertised number rather than a `target_faces_default`.
+    ///
+    /// `None` means an older server, never "no budget" — a client shows the
+    /// control unprefilled there, exactly as it did before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_faces_texture_default: Option<u32>,
     /// The PBR texture stage. `Hidden` in every build that ships without the
     /// paint bundle, with the reason a client shows instead of the control.
     pub texture: FeatureControlProfile,
@@ -2269,6 +2278,7 @@ fn mesh_capabilities_profile(model: &str) -> MeshCapabilitiesProfile {
         },
         target_faces_min: validation::MESH_MIN_TARGET_FACES,
         target_faces_max: validation::MESH_MAX_TARGET_FACES,
+        target_faces_texture_default: Some(validation::MESH_TEXTURE_DEFAULT_TARGET_FACES),
         texture: FeatureControlProfile {
             mode: if paint_available {
                 ControlMode::Adjustable

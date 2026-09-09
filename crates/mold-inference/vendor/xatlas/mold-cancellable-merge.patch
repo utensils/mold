@@ -1,0 +1,119 @@
+--- a/crates/mold-inference/vendor/xatlas/xatlas.cpp	2026-09-09 10:53:20.256653907 -0700
++++ b/crates/mold-inference/vendor/xatlas/xatlas.cpp	2026-09-09 10:53:20.259205502 -0700
+@@ -3080,6 +3080,20 @@
+ 		update();
+ 	}
+ 
++	// MOLD DIVERGENCE (see vendor/xatlas/README.md): re-run the callback at the
++	// percent already reported, so a phase that computes for minutes without
++	// advancing `m_value` can still observe a cancel. `update()` cannot serve
++	// this: it fires only when the whole percent changes, so during such a
++	// phase `cancel` is never even written, and polling it reads a flag nobody
++	// sets. Reports no new progress and changes no output.
++	void poll()
++	{
++		if (!m_func)
++			return;
++		if (!m_func(m_category, m_percent, m_userData))
++			cancel = true;
++	}
++
+ 	std::atomic<bool> cancel;
+ 
+ private:
+@@ -5332,7 +5346,8 @@
+ 	ConstArrayView<uint32_t> chartFaces(uint32_t chartIndex) const { return m_charts[chartIndex]->faces; }
+ 	const Basis &chartBasis(uint32_t chartIndex) const { return m_charts[chartIndex]->basis; }
+ 
+-	void compute()
++	// MOLD DIVERGENCE: takes the Progress so mergeCharts can be cancelled.
++	void compute(Progress *progress)
+ 	{
+ 		const uint32_t faceCount = m_data.mesh->faceCount();
+ 		m_facesLeft = 0;
+@@ -5366,7 +5381,7 @@
+ 			// When charts cannot grow more: fill holes, merge charts, relocate seeds and start new iteration.
+ 			fillHoles(m_data.options.maxCost * 0.5f);
+ #if XA_MERGE_CHARTS
+-			mergeCharts();
++			mergeCharts(progress);
+ #endif
+ 			if (++iteration == m_data.options.maxIterations)
+ 				break;
+@@ -5514,14 +5529,34 @@
+ 	}
+ 
+ #if XA_MERGE_CHARTS
+-	void mergeCharts()
++	// MOLD DIVERGENCE (see vendor/xatlas/README.md): polls `progress` so this
++	// phase can be cancelled. It is the one part of chart computation that
++	// runs unbounded — a full rescan of every chart pair per successful merge,
++	// each pair re-parameterized and grid-intersected — and it advances no
++	// counter, so upstream neither reports nor interrupts it. On a
++	// non-manifold shape that is minutes to hours with the callback never
++	// invoked. Scheduling only: when nothing cancels, every merge decision and
++	// therefore every output UV is unchanged.
++	void mergeCharts(Progress *progress)
+ 	{
+ 		XA_PROFILE_START(clusteredChartsMerge)
+ 		const uint32_t chartCount = m_charts.size();
+ 		// Merge charts progressively until there's none left to merge.
+ 		for (;;) {
+ 			bool merged = false;
++			if (progress) {
++				progress->poll();
++				if (progress->cancel)
++					break;
++			}
+ 			for (int c = chartCount - 1; c >= 0; c--) {
++				// Bounded latency inside one rescan, which is itself O(charts)
++				// pairs. Every 1024 keeps the callback off the hot path.
++				if (progress && (c & 1023) == 0) {
++					progress->poll();
++					if (progress->cancel)
++						goto removeDeleted;
++				}
+ 				Chart *chart = m_charts[c];
+ 				if (chart == nullptr)
+ 					continue;
+@@ -5599,7 +5634,11 @@
+ 			if (!merged)
+ 				break;
+ 		}
+-		// Remove deleted charts.
++	removeDeleted:
++		// Remove deleted charts. Reached on cancellation too: a partially
++		// merged m_charts holds nullptrs, and every reader assumes it does
++		// not.
++		;
+ 		for (int c = 0; c < int32_t(m_charts.size()); /*do not increment if removed*/) {
+ 			if (m_charts[c] == nullptr) {
+ 				m_charts.removeAt(c);
+@@ -6170,7 +6209,8 @@
+ 		XA_PROFILE_END(buildAtlasInit)
+ 	}
+ 
+-	void compute()
++	// MOLD DIVERGENCE: `progress` reaches ClusteredCharts::mergeCharts.
++	void compute(Progress *progress)
+ 	{
+ 		if (m_data.options.useInputMeshUvs) {
+ 			XA_PROFILE_START(originalUvCharts)
+@@ -6181,7 +6221,7 @@
+ 		m_planarCharts.compute();
+ 		XA_PROFILE_END(planarCharts)
+ 		XA_PROFILE_START(clusteredCharts)
+-		m_clusteredCharts.compute();
++		m_clusteredCharts.compute(progress);
+ 		XA_PROFILE_END(clusteredCharts)
+ 	}
+ 
+@@ -7542,7 +7582,7 @@
+ #else
+ 		XA_PROFILE_START(buildAtlas)
+ 		atlas.reset(mesh, options);
+-		atlas.compute();
++		atlas.compute(progress);
+ 		XA_PROFILE_END(buildAtlas)
+ 		// Update progress.
+ 		progress->increment(faceCount());

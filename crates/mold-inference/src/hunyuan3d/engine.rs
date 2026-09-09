@@ -786,7 +786,11 @@ impl Hunyuan3dEngine {
         let grid = self.decode_occupancy(loaded, &latents, octree)?;
 
         // ── Surface, normals, GLB, poster (CPU) ─────────────────────────
-        let mesh = self.extract_surface(&grid, threshold, options.target_faces)?;
+        let mesh = self.extract_surface(
+            &grid,
+            threshold,
+            mold_core::validation::resolve_mesh_target_faces(&options),
+        )?;
         drop(grid);
         #[cfg(feature = "mesh-texture")]
         if options.texture == Some(true) {
@@ -1010,7 +1014,11 @@ impl Hunyuan3dEngine {
             octree,
         )?;
         let threshold = options.threshold.unwrap_or(0.5);
-        let mesh = self.extract_surface(&grid, threshold, options.target_faces)?;
+        let mesh = self.extract_surface(
+            &grid,
+            threshold,
+            mold_core::validation::resolve_mesh_target_faces(options),
+        )?;
         let (bounds_min, bounds_max) = mesh.bounds();
         let glb = write_glb(&mesh, &GlbMaterial::default(), None)?;
         let poster = super::poster::render_poster(&mesh, POSTER_SIZE)?;
@@ -1180,6 +1188,13 @@ impl Hunyuan3dEngine {
             coordinates.up_axis,
             coordinates.meters_per_unit,
         )?;
+        // Upstream's `use_remesh` applies to exactly this shape: the mesh the
+        // paint pipeline is handed. A caller who uploads a dense scan would
+        // otherwise unwrap it whole, which is the same stall a generated
+        // shape used to hit (#1666).
+        if let Some(target) = mold_core::validation::resolve_mesh_target_faces(options) {
+            mesh = self.simplify_surface(mesh, target)?;
+        }
 
         // A texture-only request must not carry shape residency, even if this
         // engine instance previously served image-to-mesh work.
@@ -1403,17 +1418,45 @@ impl Hunyuan3dEngine {
             );
         }
         super::mesh::compute_smooth_normals(&mut mesh);
-        if let Some(target) = target_faces {
-            mesh = super::mesh::simplify(&mesh, target as usize)?;
-            // Decimation invalidates the old normals.
-            super::mesh::compute_smooth_normals(&mut mesh);
-        }
         self.base.progress.stage_complete(
             ProgressPhase::VisualDecode,
             "Extracting surface",
             phase_started.elapsed(),
         );
+        if let Some(target) = target_faces {
+            mesh = self.simplify_surface(mesh, target)?;
+        }
         Ok(mesh)
+    }
+
+    /// Decimate to `target_faces` as its own reported, cancellable stage.
+    ///
+    /// It used to run silently inside "Extracting surface", which left the
+    /// row showing a frozen "Extracting surface N of N" and ignored a cancel
+    /// for the whole collapse loop. Both callers go through here so the
+    /// generated and the supplied mesh reach the paint stage the same way.
+    fn simplify_surface(&self, mesh: Mesh, target_faces: u32) -> Result<Mesh> {
+        if mesh.faces.len() <= target_faces as usize {
+            return Ok(mesh);
+        }
+        self.base.progress.stage_start("Simplifying mesh");
+        let started = std::time::Instant::now();
+        let progress = &self.base.progress;
+        let mut out = super::mesh::simplify_with_progress(
+            &mesh,
+            target_faces as usize,
+            &mut |current, total| {
+                progress.checkpoint()?;
+                progress.stage_progress("Simplifying mesh", current as usize, total as usize);
+                Ok(())
+            },
+        )?;
+        // Decimation invalidates the old normals.
+        super::mesh::compute_smooth_normals(&mut out);
+        self.base
+            .progress
+            .stage_done("Simplifying mesh", started.elapsed());
+        Ok(out)
     }
 }
 

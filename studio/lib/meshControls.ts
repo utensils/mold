@@ -106,6 +106,23 @@ export function meshRequestFromForm(
   return Object.keys(request).length > 0 ? request : undefined;
 }
 
+/**
+ * The face count a textured run will actually decimate to when the field is
+ * left blank — the server's advertised budget, shown as a placeholder.
+ *
+ * Not a prefilled value: absent still means "let the host decide", which is
+ * what keeps an explicit number an explicit choice. `null` on a geometry-only
+ * run (no budget, the raw surface is the point) and on an older host that
+ * advertises no default.
+ */
+export function meshTargetFacesPlaceholder(
+  form: MeshFormState,
+  caps: MeshCapabilitiesProfile | null | undefined,
+): number | null {
+  if (form.texture !== true) return null;
+  return explicit(caps?.target_faces_texture_default);
+}
+
 /** Restore a form from a print's recorded `metadata.mesh`. */
 export function meshFormFromMetadata(
   mesh: MeshRequestOptions | null | undefined,

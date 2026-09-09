@@ -104,8 +104,11 @@ from the profile (`/api/models`) rather than from this page. `--octree` is
 the detail knob and its cost is cubic. `--mesh-threshold` moves the extracted
 surface: lower recovers thin features and adds noise; it is the same `[0, 1]`
 occupancy scale ComfyUI's `VoxelToMesh` thresholds, so a value tuned there
-carries over. `--target-faces` decimates after extraction and is absent
-until asked for. `mold library export`, the `export_mesh` MCP tool, and the
+carries over. `--target-faces` decimates after extraction. A geometry-only
+export keeps the raw surface when it is absent; a TEXTURED render decimates
+to the profile's `capabilities.mesh.target_faces_texture_default` instead,
+mirroring Tencent's own paint pipeline, because UV unwrapping is superlinear
+in triangle count. `mold library export`, the `export_mesh` MCP tool, and the
 gallery export menu all transcode the same stored `.glb`.
 
 ## Sources

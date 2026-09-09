@@ -222,7 +222,10 @@ describe("lexicon — the inspector", () => {
     expect(inspectorSource).toContain('label="Surface detail"');
     expect(inspectorSource).toContain('label="How tight to the photo"');
     expect(inspectorSource).toContain("Simplify to");
-    expect(inspectorSource).toContain('placeholder="keep every detail"');
+    // The placeholder is now the host's advertised budget on a textured run,
+    // so the plain-words phrasing lives in the fallback rather than the
+    // attribute (#1666).
+    expect(inspectorSource).toContain('"keep every detail"');
     for (const old of ["Octree detail", "Iso threshold", "Target faces", "keep raw surface"]) {
       expect(inspectorSource, old).not.toContain(old);
     }

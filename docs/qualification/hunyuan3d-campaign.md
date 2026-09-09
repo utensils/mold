@@ -90,6 +90,50 @@ loader without replacing network or rendering computations.
   after teardown crashes; the complete reference repeat uses the native exporter.
   This is an export-environment deviation, not a change to model mathematics.
 
+## CPU unwrap build parity and the paint face budget (#1666)
+
+- The vendored xatlas had been compiled without `NDEBUG`, so `XA_DEBUG` resolved
+  to 1 and all 155 `XA_DEBUG_ASSERT` sites were live. The pinned oracle,
+  `xatlas-python` 0.0.9, builds through CMake with `CXX_STANDARD 17` and
+  `BUILD_TYPE=Release`, i.e. `-O3 -DNDEBUG`, so the assert build was a
+  divergence from the pinned revision rather than a safety margin. `build.rs`
+  now matches the oracle and additionally sets `XA_MULTITHREADED=0`.
+- Measured with `crates/mold-inference/examples/unwrap_mesh.rs` on four retained
+  Hunyuan3D GLBs, `plato`, 128 cores. `sha` is over the returned vertices, faces
+  and UVs.
+
+| Mesh (tris) | Build | Wall | User + sys | sha |
+| --- | --- | --- | --- | --- |
+| 226,896 | baseline | 59.9 s | 80.4 + 103.5 s | `7e25b56f5f6c4782` |
+| 226,896 | `+NDEBUG` | 49.9 s | 66.8 + 86.4 s | `7e25b56f5f6c4782` |
+| 226,896 | shipped | 50.6 s | 50.3 + 0.1 s | `7e25b56f5f6c4782` |
+| 264,074 | baseline | 86.6 s | 115.1 + 148.9 s | `1f71623c103c4acc` |
+| 264,074 | shipped | 71.5 s | 71.1 + 0.1 s | `1f71623c103c4acc` |
+| 351,390 | baseline | 169.7 s | 226.7 + 291.9 s | `7104d7196c3fcfe5` |
+| 351,390 | shipped | 139.5 s | 138.7 + 0.2 s | `7104d7196c3fcfe5` |
+
+- Output is byte-identical across the baseline, `+NDEBUG`, `+C++17`,
+  `+XA_MULTITHREADED=0` and the vendored cancellation patch. The build change is
+  a parity RESTORATION and the threading change is scheduling only.
+- Tencent never unwraps an undecimated mesh:
+  `hy3dpaint/textureGenPipeline.py:93` defaults `use_remesh=True` and
+  `hy3dpaint/utils/simplify_mesh_utils.py:23` remeshes to 40,000 triangles
+  before `mesh_uv_wrap`. At that budget the same three meshes take 5.4 s, 6.2 s
+  and 16.5 s including decimation (0.7-1.3 s), against 50.6 s, 71.5 s and
+  139.5 s undecimated.
+- `segment::ClusteredCharts::mergeCharts` is the one vendored divergence. It
+  neither advances a counter nor polls cancellation, and xatlas writes
+  `Progress::cancel` only from `update()`, which fires only on a whole-percent
+  change — so a cancel during that phase could never be observed. Verified end
+  to end against a scratch server: the issue's own `text_to_mesh` workflow
+  reported `Unwrapping mesh 113/400` with `phase: running`, and a cancel cleared
+  the row in under 3 s with the log recording the unwrap aborting 2.4 s after
+  the request.
+- A fourth mesh (455,398 triangles, 106,245 valence-3 and 55,285 valence-4 edges
+  — 28% non-manifold against ~2% for the others) is not fixed by the budget:
+  decimated to 5,000 faces it still exceeds 15 minutes, because `mergeCharts` is
+  superlinear in chart count rather than face count. Tracked as #1669.
+
 ## Static GLB ingestion and oracle export corrections
 
 - GLB geometry ingestion now flattens every triangle primitive in the selected
