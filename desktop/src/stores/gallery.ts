@@ -61,6 +61,7 @@ import {
 } from "@studio/lib/galleryMutationOutbox";
 import {
   indexMeshWorkflowGroups,
+  showsInGrid,
   type GroupableRow,
   type MeshWorkflowGroupMembership,
 } from "@studio/lib/meshWorkflowGroup";
@@ -657,11 +658,11 @@ export const useGalleryStore = defineStore("gallery", {
       const membership = this.meshWorkflowIndex;
       const open = this.workflowId;
       return (entry) => {
-        const member = membership.get(entry.item.filename);
         // Drilled in, the grid is that run and nothing else — the album rule.
-        if (open !== null) return member?.jobId === open;
+        if (open !== null)
+          return membership.get(entry.item.filename)?.jobId === open;
         // Otherwise every ordinary print stands, and a run shows its mesh.
-        return member?.lead !== false;
+        return showsInGrid(entry.item.filename, membership);
       };
     },
     /**
