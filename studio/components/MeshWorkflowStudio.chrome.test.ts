@@ -45,9 +45,9 @@ describe("the 3-D Studio wears the shell", () => {
    * scrollbar to find them.
    */
   it("gives the canvas the height, keeps the composer on its edge, and still scrolls", () => {
-    expect(rule(source, ".mesh-studio--desktop .mesh-studio__result")).toContain(
-      "overflow: auto",
-    );
+    expect(
+      rule(source, ".mesh-studio--desktop .mesh-studio__result"),
+    ).toContain("overflow: auto");
     const main = rule(source, ".mesh-studio--desktop .mesh-studio__main");
     expect(main).toContain("flex-direction: column");
     // A floor, so an upward style menu is never cut by the view toolbar.
