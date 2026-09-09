@@ -683,7 +683,7 @@ function showWorkflowAssets(entry: MergedPrint) {
   const membership = gallery.meshWorkflowIndex.get(entry.item.filename);
   if (!membership) return;
   lightboxOpen.value = false;
-  gallery.workflowId = membership.jobId;
+  gallery.openWorkflowRun(membership.jobId);
 }
 
 function reuseSettings(entry: MergedPrint) {
@@ -1193,11 +1193,14 @@ function meshWorkflowEntries(entry: MergedPrint): MenuEntry[] {
   const route = meshWorkflowRouteFor(entry.item.metadata, workflowHostOf(entry));
   const entries: MenuEntry[] = [{ separator: true }];
   if (membership.memberCount > 1) {
-    const open = gallery.workflowId === membership.jobId;
+    // The OPEN run, not the written id: outside Everything the id is inert,
+    // and reading it raw made the menu offer "Back to everything" on a grid
+    // that was never in a run.
+    const open = gallery.openWorkflowId === membership.jobId;
     entries.push({
       label: open ? "Back to everything" : `Show the ${membership.memberCount} prints`,
       action: () => {
-        gallery.workflowId = open ? null : membership.jobId;
+        gallery.openWorkflowRun(open ? null : membership.jobId);
       },
     });
   }
@@ -2407,7 +2410,7 @@ watch(
       if (c !== undefined) gallery.collectionSlug = asString(c);
       // A drilled-into 3-D run is addressable, so a reload keeps it and a link
       // can express it — the same contract the open album has.
-      if (run !== undefined) gallery.workflowId = asString(run);
+      if (run !== undefined) gallery.openWorkflowRun(asString(run) || null);
       if (tag !== undefined) {
         gallery.tagFilter = (asString(tag) ?? "")
           .split(",")

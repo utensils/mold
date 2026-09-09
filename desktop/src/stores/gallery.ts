@@ -671,20 +671,31 @@ export const useGalleryStore = defineStore("gallery", {
       return this.scope === "prints" ? this.workflowId : null;
     },
     /**
-     * Whether the person is looking for SPECIFIC prints rather than browsing.
+     * Whether the person has NAMED a set of prints rather than browsing one.
      *
-     * A favourite and a tag are marks they applied by hand, and a search is a
-     * name they typed: each names prints, not a shelf to tidy. The collapse
-     * stands down for all three, because outside the Everything grid there is
-     * no stack to open a hidden member from — a favourited step simply
-     * vanished, and the Favourites count went on counting it.
+     * A favourite, a tag and an album are marks they applied by hand, and a
+     * search is a name they typed. Each names prints, not a shelf to tidy, so
+     * the collapse stands down: outside the Everything grid there is no stack
+     * to open a hidden member from, and the drill-in is inert there, so a
+     * collapsed member is simply unreachable — a favourited step vanished
+     * while the Favourites count went on counting it, and a step filed into an
+     * album vanished while the album's card went on counting it.
      *
-     * The kind chips are deliberately NOT in this list. They are browse
-     * facets, and scattering a run back across `Pictures` is the very thing
-     * the collapse exists to prevent.
+     * It is a RULE, not a list of the three cases that were reported: anything
+     * that narrows to prints the person picked out belongs here. Albums were
+     * the omission that reproduced the bug this was written to kill.
+     *
+     * The kind chips are the one deliberate exclusion. They are browse facets,
+     * and scattering a run back across `Pictures` is the very thing the
+     * collapse exists to prevent.
      */
     isSearchingForPrints(): boolean {
-      return this.favoritesOnly || this.tagFilter.length > 0 || this.query.trim().length > 0;
+      return (
+        this.favoritesOnly ||
+        this.openCollectionSlug !== null ||
+        this.tagFilter.length > 0 ||
+        this.query.trim().length > 0
+      );
     },
     /**
      * One tile per run, always — no scope, no search, no drill-in.
@@ -977,6 +988,20 @@ export const useGalleryStore = defineStore("gallery", {
     },
   },
   actions: {
+    /**
+     * Open a 3-D run in the grid, or leave it.
+     *
+     * `openWorkflowId` launders the id to null in every scope but Everything,
+     * so setting `workflowId` alone is a no-op wherever the person actually
+     * sees a stack badge — in Favourites, in an open album, in the Trash the
+     * menu offered "Show the N prints" and clicking it did nothing, while the
+     * written id made a later return to Everything land inside a run nobody
+     * opened. Entering a run therefore moves the scope with it, here, once.
+     */
+    openWorkflowRun(jobId: string | null) {
+      if (jobId) this.scope = "prints";
+      this.workflowId = jobId;
+    },
     /** The live host behind a bucket key, if any (resolved at call time).
      *  The "local" key only counts as host-backed while the local server is
      *  READY — an errored local host can still expose a stale baseUrl, and

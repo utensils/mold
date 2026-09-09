@@ -2201,6 +2201,103 @@ describe("a 3-D run is one gallery item", () => {
     }
   });
 
+  /*
+   * Filing a print into an album is exactly as hand-applied as favouriting it,
+   * and an open album is exactly as stack-less as the Favourites scope — there
+   * is no tile there to open the run from, and the drill-in is inert outside
+   * Everything. Leaving albums out of the rule reproduced the bug it was
+   * written to kill.
+   */
+  it("shows a step filed into an album when that album is open", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 3),
+      { ...runImage("source.png", 1, "generated_image", 0), collections: ["c1"] } as never,
+      // An ordinary print in the SAME album, so an empty grid can never be
+      // read as "the fixture's collections field was ignored".
+      organized("plain.png", 0, { collections: ["c1"] }),
+    ]);
+    gallery.collectionsByHost["local"] = loadedCollections([collection("c1", "Keepers", 2)]);
+    gallery.scope = "collections";
+    gallery.collectionSlug = "keepers";
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["source.png", "plain.png"]);
+  });
+
+  /* And the shelf card's count is the same number the album will render. */
+  it("counts an album by what opening it shows", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      { ...runImage("object.glb", 4, "final_glb", 3), collections: ["c1"] } as never,
+      { ...runImage("source.png", 1, "generated_image", 0), collections: ["c1"] } as never,
+    ]);
+    gallery.collectionsByHost["local"] = loadedCollections([collection("c1", "Keepers", 2)]);
+    gallery.scope = "collections";
+    gallery.collectionSlug = "keepers";
+    // Both prints are filed, so the card must say 2 and the album show 2 —
+    // asserting only that they AGREE would pass at 0 and 0.
+    expect(gallery.collectionCounts("keepers")).toBe(2);
+    expect(gallery.filtered).toHaveLength(2);
+  });
+
+  /*
+   * The stack badge, its menu entry and the Lightbox door all draw wherever a
+   * lead tile does — including Favourites, an open album and the Trash. Setting
+   * only the id there is a no-op (`openWorkflowId` launders it away), so the
+   * entry did nothing, and the written id made a later return to Everything
+   * land inside a run nobody opened.
+   */
+  it("moves to Everything when a run is opened from another scope", () => {
+    const gallery = seedRun();
+    gallery.scope = "favorites";
+    gallery.openWorkflowRun("run-1");
+    expect(gallery.scope).toBe("prints");
+    expect(gallery.openWorkflowId).toBe("run-1");
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual([
+      "object.glb",
+      "delighted.png",
+      "matted.png",
+      "source.png",
+    ]);
+  });
+
+  it("leaves the scope alone when a run is closed", () => {
+    const gallery = seedRun();
+    gallery.openWorkflowRun("run-1");
+    gallery.scope = "trash";
+    gallery.openWorkflowRun(null);
+    expect(gallery.scope).toBe("trash");
+    expect(gallery.workflowId).toBeNull();
+  });
+
+  /*
+   * Every scope's header count is a promise about that scope's own grid. The
+   * numbers deliberately differ between scopes — Everything counts one tile
+   * per run while Favourites counts favourited prints — but neither may
+   * disagree with what it is standing over.
+   */
+  it("agrees with its own grid in every scope", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 2),
+      { ...runImage("matted.png", 3, "matted_image", 1), favorite: true } as never,
+      { ...runImage("source.png", 2, "generated_image", 0), favorite: true } as never,
+      organized("plain.png", 1, {}),
+    ]);
+    // Everything: the run is one tile, plus the ordinary print.
+    expect(gallery.basePrintCount).toBe(2);
+    expect(gallery.filtered).toHaveLength(2);
+    // Favourites: both marked steps, and the count says so too.
+    gallery.scope = "favorites";
+    const favorites = gallery.merged.filter(
+      (e) => gallery.visibleInDefaultLibrary(e) && gallery.organizationOf(e).favorite,
+    ).length;
+    expect(favorites).toBe(2);
+    expect(gallery.filtered).toHaveLength(favorites);
+  });
+
   it("indexes every member back to its run and its part in it", () => {
     const gallery = seedRun();
     const index = gallery.meshWorkflowIndex;
