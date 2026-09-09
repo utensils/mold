@@ -670,12 +670,43 @@ export const useGalleryStore = defineStore("gallery", {
     openWorkflowId(): string | null {
       return this.scope === "prints" ? this.workflowId : null;
     },
+    /**
+     * Whether the person is looking for SPECIFIC prints rather than browsing.
+     *
+     * A favourite and a tag are marks they applied by hand, and a search is a
+     * name they typed: each names prints, not a shelf to tidy. The collapse
+     * stands down for all three, because outside the Everything grid there is
+     * no stack to open a hidden member from — a favourited step simply
+     * vanished, and the Favourites count went on counting it.
+     *
+     * The kind chips are deliberately NOT in this list. They are browse
+     * facets, and scattering a run back across `Pictures` is the very thing
+     * the collapse exists to prevent.
+     */
+    isSearchingForPrints(): boolean {
+      return this.favoritesOnly || this.tagFilter.length > 0 || this.query.trim().length > 0;
+    },
+    /**
+     * One tile per run, always — no scope, no search, no drill-in.
+     *
+     * This is the LIBRARY'S OWN SIZE, which is why it is separate from the
+     * grid's predicate below: the sidebar count and the shell subtitle must
+     * not move when a scope opens or a word is typed, exactly as opening an
+     * album leaves them alone.
+     */
+    collapsesToOneTile(): (entry: MergedPrint) => boolean {
+      const membership = this.meshWorkflowIndex;
+      return (entry) => showsInGrid(entry.item.filename, membership);
+    },
     visibleAfterWorkflowCollapse(): (entry: MergedPrint) => boolean {
       const membership = this.meshWorkflowIndex;
       const open = this.openWorkflowId;
+      const searching = this.isSearchingForPrints;
       return (entry) => {
         // Drilled in, the grid is that run and nothing else — the album rule.
         if (open !== null) return membership.get(entry.item.filename)?.jobId === open;
+        // Asked for by name or by mark, every matching print stands.
+        if (searching) return true;
         // Otherwise every ordinary print stands, and a run shows its mesh.
         return showsInGrid(entry.item.filename, membership);
       };
@@ -705,9 +736,7 @@ export const useGalleryStore = defineStore("gallery", {
     /** The live grid minus hidden albums — the library's own size, whatever
      *  scope is open. The shell's picture count reads this. */
     defaultLibraryPrints(): MergedPrint[] {
-      return this.merged
-        .filter(this.visibleInDefaultLibrary)
-        .filter(this.visibleAfterWorkflowCollapse);
+      return this.merged.filter(this.visibleInDefaultLibrary).filter(this.collapsesToOneTile);
     },
     /**
      * The set the filter chips describe: the SCOPE'S OWN prints (the Trash

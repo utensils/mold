@@ -236,22 +236,15 @@ const entryTrashCapable = (entry: MergedPrint) => {
 };
 
 // ── Header labels ────────────────────────────────────────────────────────────
-const scopeCounts = computed(() => {
-  const hidden = new Set(
-    gallery.mergedCollections
-      .filter((collection) => collection.hidden)
-      .map((collection) => collection.slug),
-  );
-  const prints = gallery.merged.filter(
-    (entry) => !gallery.organizationOf(entry).collections.some((slug) => hidden.has(slug)),
-  ).length;
-  return {
-    prints,
-    favorites: favoritesCount.value,
-    collections: gallery.mergedCollections.length,
-    trash: gallery.trashCount,
-  };
-});
+const scopeCounts = computed(() => ({
+  // The store's own count, which is what the shell's subtitle and the grid
+  // both read: a second inline filter here said "Everything 6" beside three
+  // tiles, because it never applied the 3-D run collapse.
+  prints: gallery.basePrintCount,
+  favorites: favoritesCount.value,
+  collections: gallery.mergedCollections.length,
+  trash: gallery.trashCount,
+}));
 const trashBytes = computed(() =>
   gallery.trashMerged.reduce((sum, e) => sum + (e.item.size_bytes ?? 0), 0),
 );

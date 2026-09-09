@@ -2064,6 +2064,7 @@ describe("a 3-D run is one gallery item", () => {
       timestamp,
       metadata: {
         prompt: "",
+        model: "hunyuan3d-mini-turbo",
         mesh_workflow: {
           job_id: job,
           mode: "text_to_mesh",
@@ -2117,6 +2118,87 @@ describe("a 3-D run is one gallery item", () => {
     ]);
     // A print no workflow made is not part of anyone's run.
     expect(gallery.filtered.map((p) => p.item.filename)).not.toContain("unrelated.png");
+  });
+
+  /*
+   * A mark the user applied by hand is a request for that exact print. The
+   * collapse is a BROWSE tidy-up, so it must stand down wherever the person
+   * has narrowed to specific prints — there is no stack to open in the
+   * Favourites scope, so a collapsed favourite is simply gone.
+   */
+  it("shows a favourited step in Favourites, where no stack could open it", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 3),
+      { ...runImage("source.png", 1, "generated_image", 0), favorite: true } as never,
+      organized("unrelated.png", 5, { favorite: true }),
+    ]);
+    gallery.scope = "favorites";
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["unrelated.png", "source.png"]);
+  });
+
+  it("shows a tagged step when its tag is the filter", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 3),
+      { ...runImage("matted.png", 2, "matted_image", 1), tags: ["keep"] } as never,
+    ]);
+    gallery.tagFilter = ["keep"];
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["matted.png"]);
+  });
+
+  it("finds a step by name when it is searched for", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 3),
+      runImage("matted.png", 2, "matted_image", 1),
+      runImage("source.png", 1, "generated_image", 0),
+    ]);
+    gallery.query = "matted";
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["matted.png"]);
+  });
+
+  /* The tidy-up still holds for plain browsing, which is the whole feature. */
+  it("still collapses while nothing is being searched for", () => {
+    const gallery = seedRun();
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["unrelated.png", "object.glb"]);
+  });
+
+  /* The header count and the grid agree while browsing, which is where the
+   * two used to disagree: "Everything 6" beside three tiles. */
+  it("counts what the grid shows while browsing", () => {
+    const gallery = seedRun();
+    expect(gallery.basePrintCount).toBe(gallery.filtered.length);
+  });
+
+  /*
+   * ...and it is the LIBRARY'S size, so opening a scope, typing a word, or
+   * drilling into a run must not rewrite it — the same promise the count
+   * already keeps when an album is opened.
+   */
+  it("keeps the library count still while the grid narrows", () => {
+    const gallery = seedRun();
+    const atRest = gallery.basePrintCount;
+    expect(atRest).toBe(2);
+    for (const narrow of [
+      () => (gallery.scope = "favorites"),
+      () => (gallery.query = "matted"),
+      () => (gallery.tagFilter = ["keep"]),
+      () => {
+        gallery.scope = "prints";
+        gallery.workflowId = "run-1";
+      },
+    ]) {
+      gallery.scope = "prints";
+      gallery.query = "";
+      gallery.tagFilter = [];
+      gallery.workflowId = null;
+      narrow();
+      expect(gallery.basePrintCount).toBe(atRest);
+    }
   });
 
   it("indexes every member back to its run and its part in it", () => {
