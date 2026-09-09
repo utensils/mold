@@ -581,6 +581,10 @@ fn extract_request_fields(
         // survives a restart on the request rather than through the encrypted
         // media set, and a replayed job re-renders the same geometry.
         mesh,
+        // Server-minted provenance, retained like the batch ids beside it: a
+        // replayed stage must still publish into the workflow that owns it,
+        // or a restart would orphan the run's members from its mesh.
+        mesh_workflow,
         video_only,
         prompt,
         negative_prompt,
@@ -763,6 +767,7 @@ fn extract_request_fields(
 
     let sanitized = mold_core::GenerateRequest {
         offload,
+        mesh_workflow,
         prompt,
         negative_prompt,
         model,

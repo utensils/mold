@@ -1575,6 +1575,7 @@ mod tests {
 
     fn request() -> GenerateRequest {
         GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,

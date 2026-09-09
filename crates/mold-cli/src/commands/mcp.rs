@@ -2846,6 +2846,8 @@ fn build_generate_request(
     }
 
     Ok(GenerateRequest {
+        // The CLI authors one-shots; 3-D workflows are a Studio surface.
+        mesh_workflow: None,
         offload: None,
         mesh: None,
         video_only: None,
@@ -6292,6 +6294,7 @@ mod tests {
     async fn async_job_registry_tracks_completed_image() {
         let jobs = AsyncJobRegistry::default();
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -6424,6 +6427,7 @@ mod tests {
         GalleryImage {
             filename: filename.into(),
             metadata: mold_core::OutputMetadata {
+                mesh_workflow: None,
                 video_only: None,
                 attention_path: None,
                 int8_arm: None,

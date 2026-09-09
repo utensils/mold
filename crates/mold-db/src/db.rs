@@ -960,6 +960,9 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Generat
         fps: row.get::<_, Option<i64>>(21)?.map(|n| n as u32),
         chain_job_id: None,
         chain: None,
+        // A row reconstructed from the legacy columns knows nothing about a
+        // 3-D workflow; the field only ever arrives with the saved JSON.
+        mesh_workflow: None,
         version: row.get(22)?,
         id_image_name: None,
         id_image_sha256: None,
@@ -1088,6 +1091,7 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            mesh_workflow: None,
             video_only: None,
             attention_path: None,
             int8_arm: None,

@@ -470,6 +470,8 @@ fn build_stage_generate_request(
         offload: chain.offload,
         mesh: None,
         video_only: None,
+        // A chain stage is not a 3-D workflow stage.
+        mesh_workflow: None,
         collection: None,
         tags: None,
         title: None,

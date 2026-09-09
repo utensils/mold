@@ -1080,6 +1080,7 @@ mod tests {
 
     fn output_metadata(prompt: &str) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            mesh_workflow: None,
             video_only: None,
             attention_path: None,
             int8_arm: None,
@@ -17446,6 +17447,7 @@ mod tests {
         let db_path = dir.path().join("mold.db");
         let db = MetadataDb::open(&db_path).unwrap();
         let metadata = mold_core::OutputMetadata {
+            mesh_workflow: None,
             video_only: None,
             attention_path: None,
             int8_arm: None,
@@ -18382,6 +18384,7 @@ mod tests {
 
         let db = MetadataDb::open(&dir.path().join("mold.db")).unwrap();
         let metadata = mold_core::OutputMetadata {
+            mesh_workflow: None,
             video_only: None,
             attention_path: None,
             int8_arm: None,

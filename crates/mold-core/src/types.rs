@@ -2014,6 +2014,11 @@ pub struct GenerateRequest {
     /// Total number of siblings in the prepared batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_count: Option<u32>,
+    /// Which durable 3-D workflow this request is a stage of. Server-minted by
+    /// the workflow runner; a public request carrying it is refused, since a
+    /// client that could stamp it would forge a print into someone's workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_workflow: Option<crate::mesh_workflow::MeshWorkflowProvenance>,
     /// LoRA adapter to apply during generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraWeight>,
@@ -3312,6 +3317,14 @@ pub struct OutputMetadata {
     /// settings authoring surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain: Option<crate::chain::ChainOutputMetadata>,
+    /// The durable 3-D workflow that produced this print, and the role it
+    /// plays in it (additive). Every stage of a workflow publishes an ordinary
+    /// print, so this is what lets a client route a queue row back to the 3-D
+    /// Studio, reopen a finished print as its workflow, and collapse a run's
+    /// several outputs into one gallery item led by the mesh. Absent means the
+    /// print was not made by a workflow — or the host predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_workflow: Option<crate::mesh_workflow::MeshWorkflowProvenance>,
     pub version: String,
 }
 
@@ -3397,6 +3410,7 @@ impl OutputMetadata {
             batch_id: req.batch_id.clone(),
             batch_index: req.batch_index,
             batch_count: req.batch_count,
+            mesh_workflow: req.mesh_workflow.clone(),
             output_mode: Some(GenerationOutputMode::OneShot),
             // Stamped by the worker immediately before the save; the request
             // does not know which queue job is carrying it.
@@ -7004,6 +7018,7 @@ mod tests {
     #[test]
     fn generate_request_serde_roundtrip() {
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -7258,6 +7273,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_roundtrip() {
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -7340,6 +7356,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_omitted_when_none() {
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -7625,6 +7642,7 @@ mod tests {
     /// A plain text-to-image request every metadata test can start from.
     fn text_to_image_request() -> GenerateRequest {
         GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -7958,6 +7976,7 @@ mod tests {
     #[test]
     fn output_metadata_records_source_image_provenance() {
         let mut req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -8207,6 +8226,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_negative_prompt_when_provided() {
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -8286,6 +8306,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_strength_and_scheduler_when_applicable() {
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -8368,6 +8389,7 @@ mod tests {
     #[test]
     fn output_metadata_preserves_recreate_knobs() {
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -9168,6 +9190,7 @@ mod tests {
         // Minimal PNG-like bytes for testing
         let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -9253,6 +9276,7 @@ mod tests {
         let image_a = vec![0x89, 0x50, 0x4E, 0x47];
         let image_b = vec![0xFF, 0xD8, 0xFF, 0xE0];
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -9351,6 +9375,7 @@ mod tests {
     #[test]
     fn generate_request_source_image_omitted_in_json_when_none() {
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -9434,6 +9459,7 @@ mod tests {
     fn generate_request_control_image_base64_roundtrip() {
         let control_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -9538,6 +9564,7 @@ mod tests {
         let mask_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let source_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,

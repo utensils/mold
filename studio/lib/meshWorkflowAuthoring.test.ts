@@ -4,6 +4,7 @@ import {
   buildMeshRoundtripWorkflow,
   buildMeshTextureWorkflow,
   buildTextToMeshWorkflow,
+  isTextImageWorkflowModel,
   meshWorkflowModes,
   type WorkflowModel,
 } from "./meshWorkflowAuthoring";
@@ -32,6 +33,45 @@ function model(
     },
   };
 }
+
+describe("the picture-style candidates", () => {
+  /*
+   * `modality` is a CATALOG field: `model_manager` fills it only from a
+   * `cv:`/`hf:` sidecar, so every manifest checkpoint answers `undefined` and
+   * `modality !== "video"` waved LTX-2, Wan and MiniMax H3 straight into the
+   * Picture style list. The one partition authority is `outputKindForModel`,
+   * which the New image section strip and the Styles kind filter already read.
+   */
+  it("refuses a manifest video style that never reported a modality", () => {
+    for (const family of ["ltx-2", "ltx-video", "wan", "minimax-h3"]) {
+      const clip = model(`${family}-checkpoint`, family);
+      expect(clip.modality).toBeUndefined();
+      expect(isTextImageWorkflowModel(clip), family).toBe(false);
+    }
+  });
+
+  it("still offers ordinary still-picture styles", () => {
+    for (const family of ["flux", "z-image", "sdxl", "qwen-image"])
+      expect(isTextImageWorkflowModel(model(`${family}-checkpoint`, family)), family).toBe(true);
+  });
+
+  it("refuses the mesh family, an undownloaded style and an unrunnable one", () => {
+    expect(isTextImageWorkflowModel(model("h3", "hunyuan3d", ["text_to_mesh"]))).toBe(false);
+    expect(isTextImageWorkflowModel({ ...model("flux", "flux"), downloaded: false })).toBe(false);
+    expect(
+      isTextImageWorkflowModel({ ...model("flux", "flux"), runtime_available: false }),
+    ).toBe(false);
+  });
+
+  it("refuses a canvasless recipe and one that ignores the prompt", () => {
+    const canvasless = model("odd", "flux");
+    canvasless.generation_profile!.recipes[0]!.capabilities.canvasless = true;
+    expect(isTextImageWorkflowModel(canvasless)).toBe(false);
+    const ignored = model("mute", "flux");
+    ignored.generation_profile!.recipes[0]!.capabilities.prompt = { mode: "ignored" };
+    expect(isTextImageWorkflowModel(ignored)).toBe(false);
+  });
+});
 
 describe("mesh workflow authoring", () => {
   it("reads workflow availability from the selected recipe contract", () => {

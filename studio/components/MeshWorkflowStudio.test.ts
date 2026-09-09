@@ -1,5 +1,25 @@
 import { flushPromises, mount } from "@vue/test-utils";
+import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { setMeshWorkflowDraftStorage } from "../stores/meshWorkflowDraft";
+
+/*
+ * The 3-D Studio draft is a module-scoped store, so a case that leaves a
+ * selected workflow behind would have the NEXT mount restore it and fetch its
+ * result — which is exactly how the polling budget below saw four fetches
+ * instead of two. Every case starts on a fresh Pinia and a storage stub;
+ * happy-dom keeps one localStorage per file, so the stub is what stops the
+ * cases hydrating each other's prompts.
+ */
+beforeEach(() => {
+  setActivePinia(createPinia());
+  setMeshWorkflowDraftStorage({
+    getItem: () => null,
+    setItem: () => {},
+    removeItem: () => {},
+  });
+});
 
 const createMeshWorkflow = vi.hoisted(() =>
   vi.fn(async () => ({ job_id: "workflow-1" })),
@@ -195,6 +215,37 @@ it("retains unchanged result media across progress polls and stops polling on un
     revokeUrl.mockRestore();
     vi.useRealTimers();
   }
+});
+
+/*
+ * The reported bug, at the level a person hits it: type a description, go to
+ * the Queue, come back. The router lazy-loads this view and nothing keeps it
+ * alive, so every draft ref used to unmount with it.
+ */
+it("keeps the description and the chosen styles across leaving the view and returning", async () => {
+  const first = mount(MeshWorkflowStudio, {
+    props: { target: { baseUrl: "http://local:7680", apiKey: null } },
+  });
+  await flushPromises();
+  await first.get("textarea").setValue("a hand-carved wooden fox");
+  const style = first.get<HTMLSelectElement>(
+    "[data-test='mesh-workflow-model']",
+  ).element.value;
+  expect(style).not.toBe("");
+  first.unmount();
+
+  const second = mount(MeshWorkflowStudio, {
+    props: { target: { baseUrl: "http://local:7680", apiKey: null } },
+  });
+  await flushPromises();
+  expect(second.get<HTMLTextAreaElement>("textarea").element.value).toBe(
+    "a hand-carved wooden fox",
+  );
+  expect(
+    second.get<HTMLSelectElement>("[data-test='mesh-workflow-model']").element
+      .value,
+  ).toBe(style);
+  second.unmount();
 });
 
 it("restores a selected workflow's settings without overwriting edits on progress polls", async () => {

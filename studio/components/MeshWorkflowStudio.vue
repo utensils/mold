@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { storeToRefs } from "pinia";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import type {
@@ -28,6 +29,8 @@ import {
   type WorkflowGenerateRequest,
   type WorkflowModel,
 } from "../lib/meshWorkflowAuthoring";
+import { isMeshFamily } from "../lib/legacyRecipeRules";
+import { useMeshWorkflowDraftStore } from "../stores/meshWorkflowDraft";
 import MeshViewer from "./MeshViewer.vue";
 import {
   prepareReferenceUploads,
@@ -52,20 +55,29 @@ const ownedTarget = ref<ApiTarget>({ ...props.target });
 const ownerLabel = ref(props.hostLabel ?? "");
 const jobs = ref<MeshWorkflowJobSummary[]>([]);
 const detail = ref<MeshWorkflowJobDetail<WorkflowGenerateRequest> | null>(null);
-const selectedId = ref("");
-const mode = ref<"text_to_mesh" | "mesh_roundtrip" | "mesh_texture">(
-  "text_to_mesh",
-);
-const imageModelName = ref("");
-const meshModelName = ref("");
-const prompt = ref("");
-const texture = ref(true);
-const textureResolution = ref(2048);
-const delight = ref(false);
-const meshFile = ref<File | null>(null);
-const appearanceFile = ref<File | null>(null);
-const upAxis = ref<"y" | "z">("y");
-const metersPerUnit = ref(1);
+
+/*
+ * The draft lives in a store, not in this component: the router lazy-loads
+ * this view and nothing keeps it alive, so every one of these used to be a
+ * local `ref` that unmounted with the view — a trip to the Queue and back
+ * landed on an empty form. `jobs`, `detail`, the epochs and the result URLs
+ * stay local because they belong to this mount and are re-fetched on the next.
+ */
+const draft = useMeshWorkflowDraftStore();
+const {
+  mode,
+  imageModelName,
+  meshModelName,
+  prompt,
+  texture,
+  textureResolution,
+  delight,
+  meshFile,
+  appearanceFile,
+  upAxis,
+  metersPerUnit,
+  selectedId,
+} = storeToRefs(draft);
 const busy = ref(false);
 const loading = ref(true);
 const error = ref("");
@@ -82,7 +94,7 @@ const meshModels = computed(() =>
     (model) =>
       model.downloaded &&
       model.runtime_available !== false &&
-      model.family === "hunyuan3d" &&
+      isMeshFamily(model.family) &&
       meshWorkflowModes(model).some((value) =>
         ["text_to_mesh", "mesh_roundtrip", "mesh_texture"].includes(value),
       ),
@@ -551,6 +563,27 @@ watch(
   [() => props.target.baseUrl, () => props.target.apiKey],
   () => void bootstrap(),
 );
+
+/*
+ * Persist the scalars the moment they settle rather than on unmount: the
+ * webview can be closed or reloaded without an unmount hook ever running, and
+ * a draft that only survives a graceful exit is not a draft.
+ */
+watch(
+  [
+    mode,
+    meshModelName,
+    imageModelName,
+    prompt,
+    texture,
+    textureResolution,
+    delight,
+    upAxis,
+    metersPerUnit,
+  ],
+  () => draft.persist(),
+);
+
 onMounted(() => void bootstrap());
 onBeforeUnmount(() => {
   ++contextEpoch;

@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context};
 use mold_core::mesh_workflow::{
     CreateMeshWorkflowRequest, MeshWorkflowArtifact, MeshWorkflowJobState, MeshWorkflowManifest,
-    MeshWorkflowStageKind, MeshWorkflowStageState,
+    MeshWorkflowProvenance, MeshWorkflowStageKind, MeshWorkflowStageState,
 };
 use mold_core::{
     GenerationBatchAdmissionRequest, GenerationBatchChildState, MeshMattingMode, OutputFormat,
@@ -158,15 +158,27 @@ async fn drive_job(
         }
         let stages = mesh_workflow_jobs::stages_for_job(db, &job.id)?;
         let request: CreateMeshWorkflowRequest = serde_json::from_str(&current.request_json)?;
+        let request_mode = request.mode_str();
         match next_action(&request, &stages)? {
             NextAction::SubmitImage { attempt_epoch } => {
-                let request = crate::mesh_workflow_media::hydrate_for_admission(
+                let image = crate::mesh_workflow_media::hydrate_for_admission(
                     workflows_root,
                     &current.work_dir,
                     "image",
                 )?;
-                let batch_id =
-                    admit_child(state, &current.id, "image", attempt_epoch, request).await?;
+                let batch_id = admit_child(
+                    state,
+                    "image",
+                    MeshWorkflowProvenance {
+                        job_id: current.id.clone(),
+                        mode: request_mode.to_string(),
+                        role: "generated_image".into(),
+                        stage_index: stage_index_for(&stages, MeshWorkflowStageKind::Image)?,
+                    },
+                    attempt_epoch,
+                    image,
+                )
+                .await?;
                 if !attach_batch(
                     db,
                     &current.id,
@@ -238,8 +250,19 @@ async fn drive_job(
                         "output_format": "png"
                     }))?;
                 child.source_image = Some(source);
-                let batch_id =
-                    admit_child(state, &current.id, "matting", attempt_epoch, child).await?;
+                let batch_id = admit_child(
+                    state,
+                    "matting",
+                    MeshWorkflowProvenance {
+                        job_id: current.id.clone(),
+                        mode: request_mode.to_string(),
+                        role: "matted_image".into(),
+                        stage_index: stage_index_for(&stages, MeshWorkflowStageKind::Matting)?,
+                    },
+                    attempt_epoch,
+                    child,
+                )
+                .await?;
                 if !attach_batch(
                     db,
                     &current.id,
@@ -313,8 +336,19 @@ async fn drive_job(
                         "output_format": "png"
                     }))?;
                 child.source_image = Some(source);
-                let batch_id =
-                    admit_child(state, &current.id, "delight", attempt_epoch, child).await?;
+                let batch_id = admit_child(
+                    state,
+                    "delight",
+                    MeshWorkflowProvenance {
+                        job_id: current.id.clone(),
+                        mode: request_mode.to_string(),
+                        role: "delighted_image".into(),
+                        stage_index: stage_index_for(&stages, MeshWorkflowStageKind::Delight)?,
+                    },
+                    attempt_epoch,
+                    child,
+                )
+                .await?;
                 if !attach_batch(
                     db,
                     &current.id,
@@ -408,8 +442,23 @@ async fn drive_job(
                     child.source_image =
                         Some(std::fs::read(current.work_dir.join(&image.relative_path))?);
                 }
-                let batch_id =
-                    admit_child(state, &current.id, "mesh", attempt_epoch, child).await?;
+                // The same stage the wait arm retains `final_glb` under: Shape
+                // when the run builds geometry, Paint when it only textures.
+                let mesh_stage_index = stage_index_for(&stages, MeshWorkflowStageKind::Shape)
+                    .or_else(|_| stage_index_for(&stages, MeshWorkflowStageKind::Paint))?;
+                let batch_id = admit_child(
+                    state,
+                    "mesh",
+                    MeshWorkflowProvenance {
+                        job_id: current.id.clone(),
+                        mode: request_mode.to_string(),
+                        role: "final_glb".into(),
+                        stage_index: mesh_stage_index,
+                    },
+                    attempt_epoch,
+                    child,
+                )
+                .await?;
                 let kinds = mesh_execution_kinds(&stages);
                 if !attach_batch(db, &current.id, &stages, &kinds, &batch_id)? {
                     crate::routes::cancel_generation_batch_children(state, &batch_id)
@@ -621,13 +670,37 @@ fn mesh_artifact(stages: &[MeshWorkflowStageRow]) -> anyhow::Result<&MeshWorkflo
         .context("completed mesh workflow has no retained GLB artifact")
 }
 
+/// Admit one stage of a workflow as an ordinary durable generation.
+///
+/// The stage is stamped with its workflow's provenance HERE, at the one place
+/// that knows both. Every stage publishes a real gallery print, so without the
+/// stamp the print and the queue row are indistinguishable from a hand-authored
+/// render: a queue row could only route back to New image, and a text-to-3-D run
+/// scattered its source picture, its matted and delighted copies and its mesh
+/// across My images as four unrelated tiles. It rides the request, so the live
+/// queue entry (whose `metadata` IS the request) and the published print carry
+/// the same answer, and the durable sanitizer retains it across a restart.
+/// The advertised index of `kind` in this job's stage graph.
+fn stage_index_for(
+    stages: &[MeshWorkflowStageRow],
+    kind: MeshWorkflowStageKind,
+) -> anyhow::Result<u32> {
+    stages
+        .iter()
+        .find(|stage| stage.kind == kind)
+        .map(|stage| stage.stage_index)
+        .with_context(|| format!("mesh workflow has no {kind:?} stage"))
+}
+
 async fn admit_child(
     state: &AppState,
-    workflow_id: &str,
     stage: &str,
+    provenance: MeshWorkflowProvenance,
     attempt_epoch: i64,
-    request: mold_core::GenerateRequest,
+    mut request: mold_core::GenerateRequest,
 ) -> anyhow::Result<String> {
+    let workflow_id = provenance.job_id.clone();
+    request.mesh_workflow = Some(provenance);
     let admission = state
         .queue_journal
         .queue_media_admission()
@@ -640,7 +713,7 @@ async fn admit_child(
                 instance_id: state.instance_id.to_string(),
             }),
             GenerationBatchAdmissionRequest {
-                client_batch_id: deterministic_batch_id(workflow_id, stage, attempt_epoch),
+                client_batch_id: deterministic_batch_id(&workflow_id, stage, attempt_epoch),
                 requests: vec![request],
             },
             None,

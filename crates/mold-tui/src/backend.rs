@@ -1606,6 +1606,8 @@ pub(crate) fn build_request(
 
     Ok(GenerateRequest {
         offload: None,
+        // The TUI authors one-shots; 3-D workflows are a Studio surface.
+        mesh_workflow: None,
         // Absent-until-touched, like every optional block: an untouched form
         // ships no `mesh` at all (the recipe's defaults apply), and the
         // capability sync already cleared the block on any recipe whose

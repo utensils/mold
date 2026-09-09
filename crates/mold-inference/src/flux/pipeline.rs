@@ -3716,6 +3716,7 @@ mod tests {
         plural: Option<Vec<LoraWeight>>,
     ) -> GenerateRequest {
         GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,

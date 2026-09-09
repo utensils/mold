@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { storeToRefs } from "pinia";
 import MeshWorkflowStudio from "@studio/components/MeshWorkflowStudio.vue";
+import { useMeshWorkflowDraftStore } from "@studio/stores/meshWorkflowDraft";
 import { meshWorkflowModes, type WorkflowModel } from "@studio/lib/meshWorkflowAuthoring";
 import {
   supportsMeshWorkflow,
@@ -39,8 +41,14 @@ function pickerModels(filtered: WorkflowModel[]): ModelEntry[] {
   return [...rows.values()];
 }
 const inventory = useHostModelsStore();
-const routing = ref<string | null>(null);
-const browseHostId = ref("");
+/*
+ * The machine pin and the machine being browsed belong to the draft, not to
+ * this mount: leaving for the Queue and coming back used to drop the workflow
+ * back onto whichever host answered first. `HostChip` writes `routing`, and
+ * the watcher below still follows it to the browsing host.
+ */
+const draft = useMeshWorkflowDraftStore();
+const { routing, browseHostId } = storeToRefs(draft);
 const selectedHost = computed(
   () => hosts.all.find((host) => host.id === browseHostId.value) ?? null,
 );
@@ -58,6 +66,7 @@ watch(
 );
 watch(routing, (value) => {
   if (value && value !== "capable") browseHostId.value = value;
+  draft.persist();
 });
 // Connections become ready after the view mounts on a cold launch. Refresh
 // only when that authority set changes, never on queue/GPU telemetry ticks.

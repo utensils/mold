@@ -365,6 +365,7 @@ mod tests {
     fn test_encode_png_with_metadata_chunks() {
         let tensor = solid_red_tensor(4, 4);
         let metadata = OutputMetadata {
+            mesh_workflow: None,
             video_only: None,
             attention_path: None,
             int8_arm: None,
@@ -481,6 +482,7 @@ mod tests {
     #[test]
     fn test_build_output_metadata_respects_opt_out() {
         let req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,
@@ -560,6 +562,7 @@ mod tests {
     #[test]
     fn test_update_output_metadata_size_overrides_dimensions() {
         let mut metadata = Some(OutputMetadata {
+            mesh_workflow: None,
             video_only: None,
             attention_path: None,
             int8_arm: None,
@@ -648,6 +651,7 @@ mod tests {
 
     fn test_metadata() -> OutputMetadata {
         OutputMetadata {
+            mesh_workflow: None,
             video_only: None,
             attention_path: None,
             int8_arm: None,
@@ -829,6 +833,7 @@ mod tests {
     fn test_encode_jpeg_metadata_roundtrip() {
         let tensor = solid_red_tensor(8, 8);
         let metadata = OutputMetadata {
+            mesh_workflow: None,
             video_only: None,
             attention_path: None,
             int8_arm: None,

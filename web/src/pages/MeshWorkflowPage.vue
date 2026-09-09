@@ -97,7 +97,7 @@ function hostStatus(): string {
       <CreateModelPicker
         :models="pickerModels(models)"
         :model="selected"
-        browse-to="/models?kind=mesh"
+        browse-to="/models?type=mesh"
         @select="(model) => select(model.name)"
       />
     </template>
@@ -105,7 +105,7 @@ function hostStatus(): string {
       <CreateModelPicker
         :models="pickerModels(models)"
         :model="selected"
-        browse-to="/models?kind=image"
+        browse-to="/models?type=image"
         @select="(model) => select(model.name)"
       />
     </template>
