@@ -1,3 +1,6 @@
+// The network guard is shared with `studio/vitest.config.ts` so the two
+// runners that collect `studio/**` cannot disagree about it.
+import "@studio/test-setup";
 import { beforeEach } from "vitest";
 
 /*

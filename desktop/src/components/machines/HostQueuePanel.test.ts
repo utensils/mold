@@ -113,7 +113,11 @@ async function mountPanel(
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.unstubAllGlobals();
+  // No `unstubAllGlobals()` here. Setup-file hooks run FIRST, so unstubbing in
+  // this file's own `beforeEach` restored the real global `fetch` and undid the
+  // suite-wide network guard for every test below. `mountPanel` installs this
+  // file's own `fetch` anyway, and the guard reinstalls itself each test, so
+  // there is nothing left for it to clean up.
 });
 
 describe("HostQueuePanel", () => {

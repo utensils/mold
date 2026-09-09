@@ -594,8 +594,13 @@ class FakeIntersectionObserver {
 function mountMobileApp(pinia: Pinia = createPinia()): VueWrapper {
   return mount(MobileApp, {
     attachTo: document.body,
-    // DevelopCanvas paints on a real 2D context happy-dom doesn't provide.
-    global: { plugins: [pinia], stubs: { DevelopCanvas: true } },
+    // DevelopCanvas paints on a real 2D context happy-dom doesn't provide,
+    // and MeshViewer uploads to a WebGL one it does not provide either — it
+    // fetches the glTF itself, fails, and the figure's own @fail recovery then
+    // clears the result, so whether the mesh arm was still on screen came down
+    // to how long a DNS miss took. Its rendering has its own tests; here the
+    // question is only which arm a finished 3-D print takes.
+    global: { plugins: [pinia], stubs: { DevelopCanvas: true, MeshViewer: true } },
   });
 }
 
