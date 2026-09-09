@@ -201,18 +201,41 @@ function workflowModeLabel(mode: string): string {
 }
 
 /**
- * What a past run is waiting on, said the way the queue says it — running
- * shows its stage, everything else says its state plainly.
+ * The queue's own words for a settled run.
+ *
+ * Raw wire states — `completed`, `cancelled` — are what the lexicon table
+ * forbids ("Being made / Waiting / Finished", never "active, queued, done").
+ * These are the same words `lib/queueRows.ts` puts on a print's row, so a
+ * finished workflow and a finished print read alike. A state this build has
+ * never heard of still reads as itself rather than as nothing.
+ */
+const WORKFLOW_STATE_LABEL: Record<string, string> = {
+  queued: "Waiting",
+  running: "Being made",
+  paused: "Paused",
+  completed: "Finished",
+  failed: "Failed",
+  cancelled: "Stopped",
+};
+
+/**
+ * What a past run is doing, said the way the queue says it — running shows the
+ * stage it is on and how far through, everything else its state and when.
+ *
+ * `current_stage` is 0-based on the wire (verified against a real host: a
+ * completed three-stage run reports `current_stage: 2`), so the `+ 1` is what
+ * makes it read 3/3 rather than 2/3.
  */
 function workflowStatusLine(job: MeshWorkflowJobSummary): string {
   const when = timeAgo(job.updated_at_ms || job.created_at_ms);
   if (job.state === "running" || job.state === "queued") {
     const stage = job.current_stage_kind
       ? stageLabel(job.current_stage_kind)
-      : "Preparing";
+      : "Getting ready";
     return `${stage} · ${job.current_stage + 1}/${job.stage_count} · ${when}`;
   }
-  return `${job.state} · ${when}`;
+  const state = WORKFLOW_STATE_LABEL[job.state] ?? job.state;
+  return `${state} · ${when}`;
 }
 
 /** Start over without leaving the machine or the styles this session is using. */

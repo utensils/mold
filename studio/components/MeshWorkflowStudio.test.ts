@@ -666,8 +666,86 @@ describe("saving and reusing a 3-D workflow", () => {
 
     const second = wrapper.get("[data-test='mesh-recent-workflow-2']");
     expect(second.text()).toContain("Add texture");
-    expect(second.text()).toContain("completed");
+    // The queue's own word, never the raw wire state (lexicon §2).
+    expect(second.text()).toContain("Finished");
+    expect(second.text()).not.toContain("completed");
     expect(second.text()).toContain("2h ago");
+    wrapper.unmount();
+  });
+
+  /*
+   * The lexicon table forbids the raw wire words ("Being made / Waiting /
+   * Finished", never "active, queued, done"), and these are the same words
+   * `lib/queueRows.ts` puts on a print's row — so a finished workflow and a
+   * finished print read alike.
+   */
+  it("says a settled run's state in the queue's own words", async () => {
+    const { listMeshWorkflows } = await import("../api/meshWorkflows");
+    const now = Date.now();
+    const row = (id: string, state: string) => ({
+      contract_version: 1,
+      id,
+      state,
+      mode: "text_to_mesh",
+      stage_count: 3,
+      current_stage: 2,
+      created_at_ms: now,
+      updated_at_ms: now,
+    });
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [row("a", "completed"), row("b", "failed"), row("c", "cancelled")],
+    } as never);
+
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    expect(wrapper.get("[data-test='mesh-recent-a']").text()).toContain(
+      "Finished",
+    );
+    expect(wrapper.get("[data-test='mesh-recent-b']").text()).toContain(
+      "Failed",
+    );
+    expect(wrapper.get("[data-test='mesh-recent-c']").text()).toContain(
+      "Stopped",
+    );
+    for (const raw of ["completed", "cancelled"])
+      expect(wrapper.text(), raw).not.toContain(raw);
+    wrapper.unmount();
+  });
+
+  /* A state this build has never heard of still reads as itself. */
+  it("shows an unknown state rather than nothing", async () => {
+    const { listMeshWorkflows } = await import("../api/meshWorkflows");
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [
+        {
+          contract_version: 1,
+          id: "z",
+          state: "reticulating",
+          mode: "text_to_mesh",
+          stage_count: 3,
+          current_stage: 0,
+          created_at_ms: Date.now(),
+          updated_at_ms: Date.now(),
+        },
+      ],
+    } as never);
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    expect(wrapper.get("[data-test='mesh-recent-z']").text()).toContain(
+      "reticulating",
+    );
     wrapper.unmount();
   });
 
