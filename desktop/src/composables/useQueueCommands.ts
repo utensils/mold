@@ -2,6 +2,7 @@ import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { useRouter } from "vue-router";
 import { apiFetchTo } from "@studio/api/client";
 import type { FleetActiveWork } from "@studio/api/activity";
+import { meshWorkflowRouteFor } from "@studio/lib/meshWorkflowProvenance";
 import { useOpenLiveWork } from "./useOpenLiveWork";
 import { useQueueActivity, type QueueRow } from "./useQueueActivity";
 import { jobCanBeRemoved, useGenerationStore, type Job } from "../stores/generation";
@@ -442,6 +443,13 @@ export function useQueueCommands(): QueueCommands {
   }
 
   function openPrint(job: Job) {
+    // Work a 3-D workflow made belongs to the 3-D Studio; New image cannot
+    // resume a durable workflow, only re-render one of its stages.
+    const workflow = meshWorkflowRouteFor(job.request ?? job.result?.metadata);
+    if (workflow) {
+      void router.push(workflow);
+      return;
+    }
     generation.select(job.clientId);
     if (job.request) composer.set({ request: job.request });
     if (job.status === "complete") {

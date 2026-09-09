@@ -1,6 +1,10 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// The page reads `?workflow=` so a queue row can route back to a workflow;
+// these cases mount it outside a router.
+vi.mock("vue-router", () => ({ useRoute: () => ({ query: {} }) }));
+
 vi.mock("@studio/components/MeshWorkflowStudio.vue", () => ({
   default: {
     props: ["target"],

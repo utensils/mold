@@ -22,9 +22,7 @@ import { computed, ref, shallowRef } from "vue";
  *   Within a session they survive navigation, which is the reported bug.
  */
 export type MeshWorkflowMode =
-  | "text_to_mesh"
-  | "mesh_roundtrip"
-  | "mesh_texture";
+  "text_to_mesh" | "mesh_roundtrip" | "mesh_texture";
 
 export type MeshUpAxis = "y" | "z";
 
@@ -138,92 +136,95 @@ function load(): PersistedV1 {
   return record;
 }
 
-export const useMeshWorkflowDraftStore = defineStore("meshWorkflowDraft", () => {
-  const initial = load();
+export const useMeshWorkflowDraftStore = defineStore(
+  "meshWorkflowDraft",
+  () => {
+    const initial = load();
 
-  const mode = ref<MeshWorkflowMode>(initial.mode);
-  const meshModelName = ref(initial.meshModelName);
-  const imageModelName = ref(initial.imageModelName);
-  const prompt = ref(initial.prompt);
-  const texture = ref(initial.texture);
-  const textureResolution = ref(initial.textureResolution);
-  const delight = ref(initial.delight);
-  const upAxis = ref<MeshUpAxis>(initial.upAxis);
-  const metersPerUnit = ref(initial.metersPerUnit);
-  const routing = ref<string | null>(initial.routing);
-  const browseHostId = ref(initial.browseHostId);
+    const mode = ref<MeshWorkflowMode>(initial.mode);
+    const meshModelName = ref(initial.meshModelName);
+    const imageModelName = ref(initial.imageModelName);
+    const prompt = ref(initial.prompt);
+    const texture = ref(initial.texture);
+    const textureResolution = ref(initial.textureResolution);
+    const delight = ref(initial.delight);
+    const upAxis = ref<MeshUpAxis>(initial.upAxis);
+    const metersPerUnit = ref(initial.metersPerUnit);
+    const routing = ref<string | null>(initial.routing);
+    const browseHostId = ref(initial.browseHostId);
 
-  /*
-   * `shallowRef`, not `ref`: a `File` is host-object state with no useful
-   * reactive interior, and Vue's proxy over one breaks the identity the
-   * upload path compares against.
-   */
-  const meshFile = shallowRef<File | null>(null);
-  const appearanceFile = shallowRef<File | null>(null);
+    /*
+     * `shallowRef`, not `ref`: a `File` is host-object state with no useful
+     * reactive interior, and Vue's proxy over one breaks the identity the
+     * upload path compares against.
+     */
+    const meshFile = shallowRef<File | null>(null);
+    const appearanceFile = shallowRef<File | null>(null);
 
-  /**
-   * The workflow whose result is on the canvas. Session-scoped: a restart
-   * opens on a new workflow rather than re-fetching a job that may have been
-   * deleted, and the Recent workflows list is the way back to it.
-   */
-  const selectedId = ref("");
+    /**
+     * The workflow whose result is on the canvas. Session-scoped: a restart
+     * opens on a new workflow rather than re-fetching a job that may have been
+     * deleted, and the Recent workflows list is the way back to it.
+     */
+    const selectedId = ref("");
 
-  function persist(): void {
-    const record: PersistedV1 = {
-      version: 1,
-      mode: mode.value,
-      meshModelName: meshModelName.value,
-      imageModelName: imageModelName.value,
-      prompt: prompt.value,
-      texture: texture.value,
-      textureResolution: textureResolution.value,
-      delight: delight.value,
-      upAxis: upAxis.value,
-      metersPerUnit: metersPerUnit.value,
-      routing: routing.value,
-      browseHostId: browseHostId.value,
-    };
-    try {
-      storage()?.setItem(MESH_WORKFLOW_DRAFT_KEY, JSON.stringify(record));
-    } catch {
-      // Storage refused (quota, private mode): the session still remembers.
+    function persist(): void {
+      const record: PersistedV1 = {
+        version: 1,
+        mode: mode.value,
+        meshModelName: meshModelName.value,
+        imageModelName: imageModelName.value,
+        prompt: prompt.value,
+        texture: texture.value,
+        textureResolution: textureResolution.value,
+        delight: delight.value,
+        upAxis: upAxis.value,
+        metersPerUnit: metersPerUnit.value,
+        routing: routing.value,
+        browseHostId: browseHostId.value,
+      };
+      try {
+        storage()?.setItem(MESH_WORKFLOW_DRAFT_KEY, JSON.stringify(record));
+      } catch {
+        // Storage refused (quota, private mode): the session still remembers.
+      }
     }
-  }
 
-  /** Whether anything the person typed or attached would be lost. */
-  const dirty = computed(
-    () =>
-      prompt.value.trim().length > 0 ||
-      meshFile.value !== null ||
-      appearanceFile.value !== null,
-  );
+    /** Whether anything the person typed or attached would be lost. */
+    const dirty = computed(
+      () =>
+        prompt.value.trim().length > 0 ||
+        meshFile.value !== null ||
+        appearanceFile.value !== null,
+    );
 
-  /** Start over, keeping the machine and the styles this session is using. */
-  function clear(): void {
-    prompt.value = "";
-    meshFile.value = null;
-    appearanceFile.value = null;
-    selectedId.value = "";
-    persist();
-  }
+    /** Start over, keeping the machine and the styles this session is using. */
+    function clear(): void {
+      prompt.value = "";
+      meshFile.value = null;
+      appearanceFile.value = null;
+      selectedId.value = "";
+      persist();
+    }
 
-  return {
-    mode,
-    meshModelName,
-    imageModelName,
-    prompt,
-    texture,
-    textureResolution,
-    delight,
-    upAxis,
-    metersPerUnit,
-    routing,
-    browseHostId,
-    meshFile,
-    appearanceFile,
-    selectedId,
-    dirty,
-    clear,
-    persist,
-  };
-});
+    return {
+      mode,
+      meshModelName,
+      imageModelName,
+      prompt,
+      texture,
+      textureResolution,
+      delight,
+      upAxis,
+      metersPerUnit,
+      routing,
+      browseHostId,
+      meshFile,
+      appearanceFile,
+      selectedId,
+      dirty,
+      clear,
+      persist,
+    };
+  },
+);

@@ -2,13 +2,25 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// The view reads `?workflow=` — the queue row's route back here — so these
+// cases mount it against a stub route they can rewrite.
+const routeQuery = vi.hoisted(() => ({ value: {} as Record<string, string> }));
+vi.mock("vue-router", () => ({ useRoute: () => ({ query: routeQuery.value }) }));
+
+const generate = vi.hoisted(() => vi.fn());
 vi.mock("@studio/components/MeshWorkflowStudio.vue", () => ({
   default: {
-    props: ["target", "resolveTarget", "availableModels", "desktop", "hostLabel"],
+    props: ["target", "resolveTarget", "availableModels", "desktop", "hostLabel", "openWorkflow"],
+    // Returning an object (not a render function) keeps the template below.
+    setup: (_props: unknown, { expose }: { expose: (value: unknown) => void }) => {
+      expose({ generate });
+      return {};
+    },
     template: `
       <div data-test="mesh-studio">
         <span data-test="target-url">{{ target.baseUrl }}</span>
         <span data-test="target-key">{{ target.apiKey }}</span>
+        <span data-test="open-workflow">{{ openWorkflow }}</span>
         <slot name="machine" />
       </div>
     `,
@@ -25,6 +37,7 @@ import { useHostModelsStore } from "../stores/hostModels";
 import MeshWorkflowView from "./MeshWorkflowView.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useHostsStore } from "../stores/hosts";
+import { useUiStore } from "../stores/ui";
 
 function mountView() {
   const pinia = createPinia();
@@ -51,7 +64,10 @@ function mountView() {
 }
 
 describe("MeshWorkflowView host routing", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    routeQuery.value = {};
+  });
 
   it("routes the complete studio to the selected authenticated machine", async () => {
     const wrapper = mountView();
@@ -174,6 +190,59 @@ describe("MeshWorkflowView host routing", () => {
     wrapper.findComponent(HostChip).vm.$emit("update:modelValue", "renderbox-7680");
     await flushPromises();
     await expect(resolve(request)).rejects.toThrow("Render box cannot run all");
+    wrapper.unmount();
+  });
+});
+
+describe("MeshWorkflowView shell integration", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    routeQuery.value = {};
+  });
+
+  /*
+   * The queue row's route back here. A 3-D Studio stage is admitted as an
+   * ordinary generation, so clicking it used to land on New image — which
+   * cannot resume a durable workflow at all.
+   */
+  it("opens on the workflow a deep link names", async () => {
+    routeQuery.value = { workflow: "workflow-7" };
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.get("[data-test='open-workflow']").text()).toBe("workflow-7");
+    wrapper.unmount();
+  });
+
+  /*
+   * Before this, ⌘↩ raised the Generate intent AND pushed `/create`: pressing
+   * it here left the view and rendered a picture, while the status bar
+   * advertised the hint as though it worked.
+   */
+  it("generates here when the shell raises ⌘↩, and consumes the intent once", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    const ui = useUiStore();
+
+    ui.generate();
+    await flushPromises();
+    expect(generate).toHaveBeenCalledTimes(1);
+
+    ui.generate();
+    await flushPromises();
+    expect(generate).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("does not generate for an intent another view already consumed", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const ui = useUiStore();
+    ui.generate();
+    expect(ui.consumeIntent("generate")).toBe(true);
+
+    const wrapper = mountView();
+    await flushPromises();
+    expect(generate).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 });

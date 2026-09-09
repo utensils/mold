@@ -2,6 +2,7 @@ import { useRouter } from "vue-router";
 import type { FleetActiveWork } from "@studio/api/activity";
 import { findQueueEntryById } from "@studio/api/queuePlan";
 import { selectedQueueGeneration } from "@studio/api/generationSelection";
+import { meshWorkflowRouteFor } from "@studio/lib/meshWorkflowProvenance";
 import type { OutputMetadata } from "../types";
 import type { HostRouting } from "./useHostRouting";
 import { setGenerationHandoff } from "./useGenerationHandoff";
@@ -48,6 +49,15 @@ export function useOpenLiveWork(routing: HostRouting) {
             "error",
             "This host cannot restore settings for that generation.",
           );
+          return;
+        }
+        // A 3-D Studio stage is admitted as an ordinary generation, so it
+        // arrives here looking like any other print. Create cannot resume a
+        // durable workflow — its stages, Cancel, Resume and history live only
+        // under /api/mesh-workflows.
+        const workflow = meshWorkflowRouteFor(selection.metadata);
+        if (workflow) {
+          await router.push(workflow);
           return;
         }
         setGenerationHandoff({

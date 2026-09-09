@@ -8,11 +8,17 @@ import {
 } from "@studio/lib/meshWorkflowRouting";
 import type { WorkflowModel } from "@studio/lib/meshWorkflowAuthoring";
 import MeshWorkflowHostPicker from "@studio/components/MeshWorkflowHostPicker.vue";
+import { useRoute } from "vue-router";
+import { meshWorkflowIdFromQuery } from "@studio/lib/meshWorkflowProvenance";
 import { useHostRouting } from "../composables/useHostRouting";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import { ORIGIN_HOST_ID } from "../lib/hostRegistry";
 
 const routing = useHostRouting();
+const route = useRoute();
+// The queue row's route back here; routing is the shell's job, so the shared
+// studio is handed the id rather than reading the router itself.
+const openWorkflow = computed(() => meshWorkflowIdFromQuery(route.query));
 const selectedHostId = ref("");
 const selectedHost = computed(
   () =>
@@ -89,6 +95,7 @@ function hostStatus(): string {
   <MeshWorkflowStudio
     v-if="target"
     :target="target"
+    :open-workflow="openWorkflow"
     :available-models="routing.targetModels.value"
     :resolve-target="resolveTarget"
     :host-label="selectedHost?.label ?? ''"

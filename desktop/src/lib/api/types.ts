@@ -3,6 +3,7 @@
  * Source of truth: /api/openapi.json — a drift snapshot test guards these
  * once the OpenAPI harness lands (see desktop/docs/architecture.md §5).
  */
+import type { MeshWorkflowProvenance } from "@studio/lib/meshWorkflowProvenance";
 
 import type { ChainOutputMetadata, ChainRequestWire } from "@studio/lib/api/chainTypes";
 import type { HostMemorySnapshot } from "@studio/lib/hostMemory";
@@ -561,7 +562,13 @@ export interface GenerationMemoryEstimate {
  * JSON (no `data:` prefix), so `source_image` / `mask_image` / `control_image`
  * are typed as `string` here, not bytes.
  */
+/** Re-exported so a wire type and the policy that reads it cannot drift. */
+export type { MeshWorkflowProvenance } from "@studio/lib/meshWorkflowProvenance";
+
 export interface GenerateRequest {
+  /** Server-minted: which durable 3-D workflow this request is a stage of. A
+   * client never sends it — the generate doors refuse one that does. */
+  mesh_workflow?: MeshWorkflowProvenance | null;
   prompt: string;
   prompt_transform?: PromptTransformProvenance | null;
   negative_prompt?: string | null;
@@ -820,6 +827,11 @@ export interface OutputMetadata {
    * chain jobs with a server-side record — ephemeral chain outputs and
    * pre-#564 rows carry nothing (additive; newer servers only). */
   chain_job_id?: string | null;
+  /** The durable 3-D workflow that produced this print, and the role it plays
+   * in it. Additive: absent on every print made outside the 3-D Studio and on
+   * every host that predates the field — which reads as an ordinary print,
+   * never as a refusal. */
+  mesh_workflow?: MeshWorkflowProvenance | null;
   /** The queue id of the generation that produced this print. The server's own
    * replay idempotence key, and the exact answer to "is this print mine?" —
    * absent on hosts that predate it. */

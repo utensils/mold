@@ -44,6 +44,12 @@ const props = defineProps<{
   hostLabel?: string;
   desktop?: boolean;
   availableModels?: WorkflowModel[];
+  /**
+   * A workflow to open on, from the shell's own `?workflow=` deep link — the
+   * queue row's route back here. Routing belongs to the shells, so this
+   * component is handed the id rather than reading the router itself.
+   */
+  openWorkflow?: string | null;
   resolveTarget?: (
     requirements: MeshWorkflowRequirements,
   ) => Promise<MeshWorkflowRoute>;
@@ -252,7 +258,9 @@ async function bootstrap(): Promise<void> {
   ++selectionEpoch;
   clearPoll();
   revokeResult();
-  selectedId.value = "";
+  // A deep link names the workflow to open on; without one this is a fresh
+  // visit, and the draft's own selection does not survive a host change.
+  selectedId.value = props.openWorkflow?.trim() ?? "";
   detail.value = null;
   ownedTarget.value = { ...props.target };
   ownerLabel.value = props.hostLabel ?? "";
@@ -268,6 +276,17 @@ async function bootstrap(): Promise<void> {
     hostModels.value = availableModels;
     jobs.value = listing.jobs;
     chooseModels();
+    // `selectedId` was set before the fetch, so its watcher has already run
+    // against an empty job list. Restore the deep-linked workflow's draft now
+    // that the listing can name it, and say so plainly when it is gone.
+    if (selectedId.value) {
+      if (listing.jobs.some((job) => job.id === selectedId.value))
+        await refreshSelected(true);
+      else {
+        selectedId.value = "";
+        error.value = "That 3-D workflow is no longer on this machine.";
+      }
+    }
   } catch (cause) {
     if (epoch === contextEpoch)
       error.value = cause instanceof Error ? cause.message : String(cause);
@@ -563,6 +582,16 @@ watch(
   [() => props.target.baseUrl, () => props.target.apiKey],
   () => void bootstrap(),
 );
+watch(
+  () => props.openWorkflow,
+  (value) => {
+    const id = value?.trim() ?? "";
+    if (id && id !== selectedId.value) selectedId.value = id;
+  },
+);
+
+/** The shell's ⌘↩ — the same Generate the composer's button runs. */
+defineExpose({ generate: () => void submit() });
 
 /*
  * Persist the scalars the moment they settle rather than on unmount: the

@@ -52,14 +52,24 @@ describe("the picture-style candidates", () => {
 
   it("still offers ordinary still-picture styles", () => {
     for (const family of ["flux", "z-image", "sdxl", "qwen-image"])
-      expect(isTextImageWorkflowModel(model(`${family}-checkpoint`, family)), family).toBe(true);
+      expect(
+        isTextImageWorkflowModel(model(`${family}-checkpoint`, family)),
+        family,
+      ).toBe(true);
   });
 
   it("refuses the mesh family, an undownloaded style and an unrunnable one", () => {
-    expect(isTextImageWorkflowModel(model("h3", "hunyuan3d", ["text_to_mesh"]))).toBe(false);
-    expect(isTextImageWorkflowModel({ ...model("flux", "flux"), downloaded: false })).toBe(false);
     expect(
-      isTextImageWorkflowModel({ ...model("flux", "flux"), runtime_available: false }),
+      isTextImageWorkflowModel(model("h3", "hunyuan3d", ["text_to_mesh"])),
+    ).toBe(false);
+    expect(
+      isTextImageWorkflowModel({ ...model("flux", "flux"), downloaded: false }),
+    ).toBe(false);
+    expect(
+      isTextImageWorkflowModel({
+        ...model("flux", "flux"),
+        runtime_available: false,
+      }),
     ).toBe(false);
   });
 
@@ -68,7 +78,9 @@ describe("the picture-style candidates", () => {
     canvasless.generation_profile!.recipes[0]!.capabilities.canvasless = true;
     expect(isTextImageWorkflowModel(canvasless)).toBe(false);
     const ignored = model("mute", "flux");
-    ignored.generation_profile!.recipes[0]!.capabilities.prompt = { mode: "ignored" };
+    ignored.generation_profile!.recipes[0]!.capabilities.prompt = {
+      mode: "ignored",
+    };
     expect(isTextImageWorkflowModel(ignored)).toBe(false);
   });
 });

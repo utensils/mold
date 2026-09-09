@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
+import { useRoute } from "vue-router";
 import MeshWorkflowStudio from "@studio/components/MeshWorkflowStudio.vue";
 import { useMeshWorkflowDraftStore } from "@studio/stores/meshWorkflowDraft";
+import { meshWorkflowIdFromQuery } from "@studio/lib/meshWorkflowProvenance";
 import { meshWorkflowModes, type WorkflowModel } from "@studio/lib/meshWorkflowAuthoring";
 import {
   supportsMeshWorkflow,
@@ -17,9 +19,29 @@ import type { ModelEntry } from "../lib/api/types";
 import HostChip from "../components/create/HostChip.vue";
 import { useHostsStore } from "../stores/hosts";
 import { useHostModelsStore } from "../stores/hostModels";
+import { useUiStore } from "../stores/ui";
 
 const hosts = useHostsStore();
 const prefs = useAppPrefsStore();
+const route = useRoute();
+const ui = useUiStore();
+const studio = ref<{ generate: () => void } | null>(null);
+// The queue row's route back here (`?workflow=`), read by the shell because
+// routing is the shell's job — the shared studio is handed the id.
+const openWorkflow = computed(() => meshWorkflowIdFromQuery(route.query));
+
+/*
+ * ⌘↩ used to raise the Generate intent AND push `/create`, so pressing it
+ * here left the view and rendered a picture — while the status bar advertised
+ * the hint. The shell now stays put on this route and this view consumes the
+ * intent, exactly as New image does.
+ */
+watch(
+  () => ui.generateTick,
+  () => {
+    if (ui.consumeIntent("generate")) studio.value?.generate();
+  },
+);
 const draftWidth = ref<number | null>(null);
 const inspectorWidth = computed(() => draftWidth.value ?? prefs.generateParamsWidth);
 function resizeInspector(dx: number) {
@@ -125,7 +147,9 @@ async function resolveTarget(requirements: MeshWorkflowRequirements): Promise<Me
 <template>
   <MeshWorkflowStudio
     v-if="target"
+    ref="studio"
     :target="target"
+    :open-workflow="openWorkflow"
     :style="{ '--mesh-inspector-width': inspectorWidth + 'px' }"
     :available-models="availableModels"
     :resolve-target="resolveTarget"

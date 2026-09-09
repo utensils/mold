@@ -11,7 +11,8 @@ import { defineComponent } from "vue";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 
-vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+const push = vi.hoisted(() => vi.fn());
+vi.mock("vue-router", () => ({ useRouter: () => ({ push }) }));
 vi.mock("../lib/api/client", () => ({
   apiJson: vi.fn(() => Promise.resolve([])),
   apiJsonTo: vi.fn(() => Promise.resolve({})),
@@ -553,5 +554,54 @@ describe("useQueueCommands — the pause scopes stay apart", () => {
 
     api.contextMenu(event, queuedRow());
     expect(labels(menu.entries)).not.toContain("Pause");
+  });
+});
+
+describe("useQueueCommands — a 3-D workflow's row opens its own studio", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    __resetQueueCommandState();
+    vi.clearAllMocks();
+    readyLocalHost();
+  });
+
+  const print = (metadata: Record<string, unknown>) =>
+    ({
+      kind: "print",
+      print: {
+        clientId: "job-1",
+        status: "complete",
+        request: metadata,
+        result: { filename: "print.glb" },
+      },
+    }) as never;
+
+  /*
+   * A 3-D Studio stage is admitted as an ordinary generation, so its row was
+   * indistinguishable from a hand-authored print and landed on New image —
+   * which cannot resume a durable workflow at all. Its stages, Cancel, Resume
+   * and history live only under /api/mesh-workflows.
+   */
+  it("routes a workflow's own row to the 3-D Studio, on that workflow", () => {
+    commands().open(
+      print({
+        mesh_workflow: {
+          job_id: "workflow-1",
+          mode: "text_to_mesh",
+          role: "final_glb",
+          stage_index: 4,
+        },
+      }),
+    );
+    expect(push).toHaveBeenCalledWith({
+      path: "/create/3d",
+      query: { workflow: "workflow-1" },
+    });
+  });
+
+  /* Absence is an ordinary print or an older host, never a refusal. */
+  it("leaves every other print on New image", () => {
+    commands().open(print({ prompt: "a brass teapot" }));
+    expect(push).toHaveBeenCalledWith("/create");
   });
 });
