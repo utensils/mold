@@ -96,9 +96,15 @@ watch(
  * not exist. A link that does not say (an older one) leaves the pin alone.
  */
 watch(
-  () => meshWorkflowHostFromQuery(route.query),
-  (hostId) => {
-    if (!hostId || !hosts.all.some((host) => host.id === hostId)) return;
+  [() => meshWorkflowHostFromQuery(route.query), () => hosts.all.map((h) => h.id).join("|")],
+  ([hostId]) => {
+    if (!hostId || browseHostId.value === hostId) return;
+    // The machine may not be known yet: `extras` fills in asynchronously and
+    // the file's own comment below says connections become ready AFTER this
+    // view mounts on a cold launch. The query never changes, so a query-only
+    // watcher would drop the pin here and never look again — which is why the
+    // host list is a source too.
+    if (!hosts.all.some((host) => host.id === hostId)) return;
     browseHostId.value = hostId;
     routing.value = hostId;
     draft.persist();

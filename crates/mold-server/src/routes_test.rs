@@ -784,6 +784,111 @@ mod tests {
         );
     }
 
+    /*
+     * `mesh_workflow` is provenance the SERVER mints in the workflow runner.
+     * A client able to supply it could route another person's queue row into
+     * the 3-D Studio and file a stranger's print inside their run's stack in
+     * the Library, so every public door that takes a `GenerateRequest` and
+     * publishes has to refuse it BY NAME rather than silently stripping it.
+     *
+     * The unit test on `client_minted_mesh_workflow_refusal` proves the
+     * predicate; this proves each door actually asks it.
+     */
+    #[tokio::test]
+    async fn every_public_generate_door_refuses_client_minted_workflow_provenance() {
+        let forged = serde_json::json!({
+            "prompt": "forged",
+            "model": "flux-dev:q8",
+            "width": 512,
+            "height": 512,
+            "steps": 1,
+            "guidance": 1.0,
+            "seed": 1,
+            "batch_size": 1,
+            "output_format": "png",
+            "mesh_workflow": {
+                "job_id": "someone-elses-run",
+                "mode": "text_to_mesh",
+                "role": "final_glb",
+                "stage_index": 0
+            }
+        });
+
+        for (path, body) in [
+            ("/api/generate", forged.clone()),
+            ("/api/generate/stream", forged.clone()),
+        ] {
+            let app = app_empty();
+            let response = app
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{path} accepted client-minted mesh_workflow"
+            );
+            let refused = json_body(response).await;
+            assert_eq!(refused["code"], "VALIDATION_ERROR", "{path}");
+            assert!(
+                refused["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("server-minted provenance"),
+                "{path} refused without saying why: {refused}"
+            );
+        }
+
+        /*
+         * The batch door needs a host that can actually admit: its
+         * `DurableAdmissionReadiness` gate answers 503 first, and rightly so —
+         * a host that can replay nothing refuses everything before it looks at
+         * the request. So this half runs against a durable state.
+         */
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [forged],
+                }),
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let refused = json_body(response).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "/api/generation-batches accepted client-minted mesh_workflow: {refused}"
+        );
+        assert_eq!(refused["code"], "VALIDATION_ERROR");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("server-minted provenance"),
+            "{refused}"
+        );
+        // Refused BEFORE anything was queued — not stripped and admitted.
+        assert!(
+            journal.list_all().is_empty(),
+            "a forged request left a durable row behind"
+        );
+    }
+
     fn seed_chain_job(
         db: &mold_db::MetadataDb,
         mold_home: &std::path::Path,

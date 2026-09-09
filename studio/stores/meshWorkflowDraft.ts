@@ -21,7 +21,15 @@ import { computed, ref, shallowRef } from "vue";
  *   the next launch cannot read; the wells simply come back empty and say so.
  *   Within a session they survive navigation, which is the reported bug.
  */
-export type MeshWorkflowMode =
+/**
+ * The three workflows a person can AUTHOR here.
+ *
+ * Deliberately narrower than `meshWorkflowAuthoring`'s `MeshWorkflowMode`,
+ * which is the recipe's advertised set and includes `image_to_mesh` and
+ * `multiview_to_mesh`. Two exported types under `@studio` sharing one name
+ * was an import waiting to go to the wrong one, so this has its own.
+ */
+export type AuthoredMeshWorkflowMode =
   "text_to_mesh" | "mesh_roundtrip" | "mesh_texture";
 
 export type MeshUpAxis = "y" | "z";
@@ -53,7 +61,7 @@ function storage(): MeshWorkflowDraftStorage | null {
   }
 }
 
-const MODES: readonly MeshWorkflowMode[] = [
+const MODES: readonly AuthoredMeshWorkflowMode[] = [
   "text_to_mesh",
   "mesh_roundtrip",
   "mesh_texture",
@@ -63,7 +71,7 @@ const TEXTURE_RESOLUTIONS: readonly number[] = [1024, 2048, 4096];
 
 interface PersistedV1 {
   version: 1;
-  mode: MeshWorkflowMode;
+  mode: AuthoredMeshWorkflowMode;
   meshModelName: string;
   imageModelName: string;
   prompt: string;
@@ -107,8 +115,8 @@ function load(): PersistedV1 {
     const parsed = JSON.parse(raw) as Partial<PersistedV1> | null;
     if (!parsed || typeof parsed !== "object" || parsed.version !== 1)
       return record;
-    if (MODES.includes(parsed.mode as MeshWorkflowMode))
-      record.mode = parsed.mode as MeshWorkflowMode;
+    if (MODES.includes(parsed.mode as AuthoredMeshWorkflowMode))
+      record.mode = parsed.mode as AuthoredMeshWorkflowMode;
     if (typeof parsed.meshModelName === "string")
       record.meshModelName = parsed.meshModelName;
     if (typeof parsed.imageModelName === "string")
@@ -141,7 +149,7 @@ export const useMeshWorkflowDraftStore = defineStore(
   () => {
     const initial = load();
 
-    const mode = ref<MeshWorkflowMode>(initial.mode);
+    const mode = ref<AuthoredMeshWorkflowMode>(initial.mode);
     const meshModelName = ref(initial.meshModelName);
     const imageModelName = ref(initial.imageModelName);
     const prompt = ref(initial.prompt);
@@ -154,19 +162,46 @@ export const useMeshWorkflowDraftStore = defineStore(
     const browseHostId = ref(initial.browseHostId);
 
     /*
-     * `shallowRef`, not `ref`: a `File` is host-object state with no useful
-     * reactive interior, and Vue's proxy over one breaks the identity the
-     * upload path compares against.
+     * `shallowRef`, not `ref`: a `File` has no useful reactive interior, so
+     * deep reactivity would only cost traversal on every write. (Vue would in
+     * fact leave it unproxied — `reactive()` classifies a `File` as
+     * `TargetType.INVALID` — so this is about intent, not a proxy bug.)
      */
     const meshFile = shallowRef<File | null>(null);
     const appearanceFile = shallowRef<File | null>(null);
 
     /**
-     * The workflow whose result is on the canvas. Session-scoped: a restart
-     * opens on a new workflow rather than re-fetching a job that may have been
-     * deleted, and the Recent workflows list is the way back to it.
+     * The workflow whose result is on the canvas, and the machine it belongs
+     * to.
+     *
+     * The machine is RECORDED, not inferred. A durable workflow lives on one
+     * host, and this view remounts on every route change — so comparing the
+     * incoming target against the component's own `ownedTarget` cannot answer
+     * "did the machine change while I was away": that ref is re-seeded from
+     * the props on each fresh mount and so always looks like the same machine.
+     * Keeping the owner beside the id is what lets a returning view tell a
+     * workflow of its own from one belonging to a machine it no longer talks
+     * to — otherwise a `hal9000` job id is retained against `plato` and the
+     * canvas clears with "no longer on this machine", which is both wrong and
+     * unexplained.
+     *
+     * Both are session-scoped: a restart opens on a new workflow rather than
+     * re-fetching a job that may since have been deleted, and Recent is the
+     * way back to it.
      */
     const selectedId = ref("");
+    const selectedHost = ref("");
+
+    /** Open `id`, remembering which machine it came from. */
+    function selectWorkflow(id: string, host: string): void {
+      selectedId.value = id;
+      selectedHost.value = id ? host : "";
+    }
+
+    /** Whether the open workflow belongs to `host`. False when none is open. */
+    function selectionBelongsTo(host: string): boolean {
+      return Boolean(selectedId.value) && selectedHost.value === host;
+    }
 
     function persist(): void {
       const record: PersistedV1 = {
@@ -203,7 +238,7 @@ export const useMeshWorkflowDraftStore = defineStore(
       prompt.value = "";
       meshFile.value = null;
       appearanceFile.value = null;
-      selectedId.value = "";
+      selectWorkflow("", "");
       persist();
     }
 
@@ -222,6 +257,9 @@ export const useMeshWorkflowDraftStore = defineStore(
       meshFile,
       appearanceFile,
       selectedId,
+      selectedHost,
+      selectWorkflow,
+      selectionBelongsTo,
       dirty,
       clear,
       persist,

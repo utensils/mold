@@ -553,6 +553,7 @@ use crate::queue::clean_error_message;
         mold_core::RetainedSourceMediaInventory,
         mold_core::mesh_workflow::CreateMeshWorkflowRequest,
         mold_core::mesh_workflow::CreateMeshWorkflowResponse,
+        mold_core::mesh_workflow::MeshWorkflowProvenance,
         mold_core::mesh_workflow::MeshWorkflowJobState,
         mold_core::mesh_workflow::MeshWorkflowStageKind,
         mold_core::mesh_workflow::MeshWorkflowStageState,

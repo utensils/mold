@@ -300,8 +300,11 @@ shared segmented control on the toolbar; only workflows supported by the
 connected machines appear.
 
 **The description and Generate live on the composer**, with the ⌘↩ keycap, as
-they do on New image — and ⌘↩ generates here rather than leaving for New image.
-**3-D style** and **Picture style** are composer chips beside them. Reuse
+they do on New image. **3-D style** and **Picture style** are composer chips
+beside them. On the desktop shell ⌘↩ generates HERE rather than leaving for New
+image — every raiser of that intent (the native menu and the ⌘K palette alike)
+stays on this route and lets the view consume it. The web SPA has no keyboard
+Generate on any surface, so the keycap is the desktop composer's. Reuse
 Generate's model picker with filtered candidates, including its search, family
 groups, availability, and friendly labels; do not build a second selector, and
 narrow the candidates through `outputKindForModel` rather than a second

@@ -7,7 +7,13 @@ const searchCatalogMock = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ entries: [], page: 1, page_size: 12, total: 0 }),
 );
 const startCatalogDownloadMock = vi.hoisted(() => vi.fn().mockResolvedValue("job-1"));
-vi.mock("vue-router", () => ({ useRouter: () => ({ push: routerPush }) }));
+// The palette keeps Generate on the 3-D Studio's route instead of pushing
+// /create, so it reads the current route as well as the router.
+const routePath = vi.hoisted(() => ({ value: "/create" }));
+vi.mock("vue-router", () => ({
+  useRouter: () => ({ push: routerPush }),
+  useRoute: () => ({ path: routePath.value }),
+}));
 vi.mock("../../lib/api/history", () => ({ fetchHistory: vi.fn().mockResolvedValue([]) }));
 vi.mock("../../lib/api/models", () => ({ loadModel: vi.fn(), unloadModel: vi.fn() }));
 vi.mock("../../lib/api/catalog", () => ({
@@ -812,6 +818,45 @@ describe("CommandPalette a11y semantics", () => {
     expect(wrapper.get("[role='combobox']").attributes("aria-activedescendant")).toBe(
       "cmd-palette-option-0",
     );
+    wrapper.unmount();
+  });
+});
+
+describe("CommandPalette — Generate respects the route it is on", () => {
+  beforeEach(() => {
+    routePath.value = "/create";
+    routerPush.mockClear();
+  });
+
+  async function runGenerate() {
+    const wrapper = await openPalette();
+    const option = wrapper
+      .findAll("[role='option']")
+      .find((o) => o.text().includes("Generate from these words"));
+    expect(option).toBeTruthy();
+    const before = useUiStore().generateTick;
+    await option!.trigger("click");
+    expect(useUiStore().generateTick).toBe(before + 1);
+    return wrapper;
+  }
+
+  /*
+   * The native menu's Generate was fixed to stay on /create/3d, but the
+   * palette raises the SAME intent and still pushed /create — so ⌘K then
+   * "Generate from these words" left the 3-D Studio and rendered a picture
+   * in New image. One of the two raisers had been fixed.
+   */
+  it("stays on the 3-D Studio rather than rendering a picture in New image", async () => {
+    routePath.value = "/create/3d";
+    const wrapper = await runGenerate();
+    expect(routerPush).not.toHaveBeenCalledWith("/create");
+    wrapper.unmount();
+  });
+
+  it("still routes to New image from anywhere else", async () => {
+    routePath.value = "/library";
+    const wrapper = await runGenerate();
+    expect(routerPush).toHaveBeenCalledWith("/create");
     wrapper.unmount();
   });
 });

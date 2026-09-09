@@ -158,8 +158,15 @@ the model controls, and the length slider. A sequence is now something you scrip
   `/api/generation-batches`: a client able to mint it could route another
   person's queue row into the 3-D Studio and file a stranger's print inside
   their run. `studio/lib/meshWorkflowProvenance.ts` is the one client reading —
-  `role: "final_glb"` is the run's LEAD, and ABSENCE is an ordinary print or an
-  older host, never a refusal.
+  `role: "final_glb"` names the run's LEAD, and ABSENCE is an ordinary print or
+  an older host, never a refusal.
+
+  What reads it TODAY is the routing: a workflow's queue row opens
+  `/create/3d?workflow=<id>&host=<hostId>` rather than New image, which cannot
+  resume a durable workflow at all. The host rides the link because a workflow
+  lives on ONE machine. Collapsing a run's several prints into one gallery item
+  led by the mesh is what the `final_glb` lead EXISTS for and is not yet
+  wired — the Library still draws every stage's print as its own tile.
 
 - **Background matting is profile-driven and its transformed inputs are durable private media.** `capabilities.mesh.matting` is the one Auto/On/Off contract every authoring surface reads. Auto preserves useful alpha and otherwise runs the pinned pure-Rust U²-Net stage before shape weights load; On always recomputes and Off preserves the historical pixels. Processed PNGs never enter the public response or GLB: a durable job seals them under its purpose-keyed `generation_queue_derived_media` obligation before gallery publication, hands every authored and derived set to the same archive identity, and exposes the processed roles for authenticated download while refusing them for request reuse so matting cannot be applied twice. Cancellation, held-row retention, startup reconciliation, gallery deletion, and queue settlement cover all attached sets.
 

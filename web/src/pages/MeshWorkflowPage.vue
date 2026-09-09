@@ -23,21 +23,6 @@ const route = useRoute();
 // studio is handed the id rather than reading the router itself.
 const openWorkflow = computed(() => meshWorkflowIdFromQuery(route.query));
 
-/*
- * A durable workflow lives on ONE machine, so the link that opens it names
- * that machine too — otherwise a queue row from another host asks whichever
- * machine this page happens to be browsing and is told it does not exist.
- * A link that does not say (an older one) leaves the selection alone.
- */
-watch(
-  () => meshWorkflowHostFromQuery(route.query),
-  (hostId) => {
-    if (!hostId || !routing.hosts.value.some((host) => host.id === hostId))
-      return;
-    selectHost(hostId);
-  },
-  { immediate: true },
-);
 const selectedHostId = ref("");
 const selectedHost = computed(
   () =>
@@ -72,6 +57,32 @@ function selectHost(id: string): void {
     selectedHostId.value = id;
   routing.setTarget(id);
 }
+
+/*
+ * A durable workflow lives on ONE machine, so the link that opens it names
+ * that machine too — otherwise a queue row from another host asks whichever
+ * machine this page happens to be browsing and is told it does not exist.
+ * A link that does not say (an older one) leaves the selection alone.
+ *
+ * This has to sit BELOW `selectHost` and the refs it writes: an `immediate`
+ * watcher runs its callback synchronously inside `watch()`, so declared above
+ * them it threw `Cannot access 'selectedHostId' before initialization` — out
+ * of setup in dev, and swallowed in production, which silently restored the
+ * very bug it was added to fix.
+ *
+ * It also watches the host LIST: on a cold load the registry may not name the
+ * machine yet, and the query never changes, so a query-only watcher would drop
+ * the pin and never look again.
+ */
+watch(
+  [() => meshWorkflowHostFromQuery(route.query), () => routing.hosts.value],
+  ([hostId]) => {
+    if (!hostId || selectedHostId.value === hostId) return;
+    if (!routing.hosts.value.some((host) => host.id === hostId)) return;
+    selectedHostId.value = hostId;
+  },
+  { immediate: true },
+);
 
 function pickerModels(filtered: WorkflowModel[]) {
   const names = new Set(filtered.map((model) => model.name));

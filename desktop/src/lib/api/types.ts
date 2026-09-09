@@ -555,6 +555,9 @@ export interface GenerationMemoryEstimate {
   fits_device_capacity?: boolean | null;
 }
 
+/** Re-exported so a wire type and the policy that reads it cannot drift. */
+export type { MeshWorkflowProvenance } from "@studio/lib/meshWorkflowProvenance";
+
 /**
  * Subset of mold-core GenerateRequest the desktop sends.
  *
@@ -562,9 +565,6 @@ export interface GenerationMemoryEstimate {
  * JSON (no `data:` prefix), so `source_image` / `mask_image` / `control_image`
  * are typed as `string` here, not bytes.
  */
-/** Re-exported so a wire type and the policy that reads it cannot drift. */
-export type { MeshWorkflowProvenance } from "@studio/lib/meshWorkflowProvenance";
-
 export interface GenerateRequest {
   /** Server-minted: which durable 3-D workflow this request is a stage of. A
    * client never sends it — the generate doors refuse one that does. */

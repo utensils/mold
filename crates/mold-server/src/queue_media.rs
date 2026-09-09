@@ -1519,6 +1519,12 @@ mod tests {
                 { "frame": 0, "image": "a2V5ZnJhbWU=", "name": "keyframe-secret.png" }
             ],
             "hdr_exr_dir": "/private/exr-output",
+            "mesh_workflow": {
+                "job_id": "run-1",
+                "mode": "text_to_mesh",
+                "role": "final_glb",
+                "stage_index": 3
+            },
             "lora": { "path": "/private/singular-lora.safetensors", "scale": 0.5 },
             "loras": [
                 { "path": "/private/stack-a.safetensors", "scale": 0.7 },
