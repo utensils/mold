@@ -2,7 +2,10 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { setMeshWorkflowDraftStorage } from "../stores/meshWorkflowDraft";
+import {
+  setMeshWorkflowDraftStorage,
+  useMeshWorkflowDraftStore,
+} from "../stores/meshWorkflowDraft";
 
 /*
  * The 3-D Studio draft is a module-scoped store, so a case that leaves a
@@ -803,6 +806,164 @@ describe("saving and reusing a 3-D workflow", () => {
       wrapper.get<HTMLSelectElement>("[data-test='mesh-workflow-model']")
         .element.value,
     ).toBe(style);
+    wrapper.unmount();
+  });
+});
+
+describe("Recent keeps its promise", () => {
+  const target = { baseUrl: "http://local:7680", apiKey: null };
+  const now = Date.now();
+  const job = (id: string, over: Record<string, unknown> = {}) => ({
+    contract_version: 1,
+    id,
+    state: "completed",
+    mode: "text_to_mesh",
+    stage_count: 3,
+    current_stage: 2,
+    created_at_ms: now,
+    updated_at_ms: now,
+    ...over,
+  });
+
+  /*
+   * The single commonest click: the row that is ALREADY selected — after a
+   * submit, after a deep link from the Queue, or after an earlier click. It
+   * renders highlighted, so it reads as the live row. Assigning `selectedId`
+   * to its existing value fires no watcher, so "Use these settings again" did
+   * nothing at all: no restore, no message, no press feedback.
+   */
+  it("restores even when the clicked row is the one already open", async () => {
+    const { listMeshWorkflows, getMeshWorkflow } =
+      await import("../api/meshWorkflows");
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [job("run-1")],
+    } as never);
+    vi.mocked(getMeshWorkflow).mockResolvedValue({
+      id: "run-1",
+      state: "completed",
+      mode: "text_to_mesh",
+      stages: [],
+      request: {
+        mode: "text_to_mesh",
+        image_request: {
+          model: "z-image-turbo:q8",
+          prompt: "the original run",
+        },
+        mesh_request: {
+          model: "hunyuan3d-mini-turbo:fp16",
+          mesh: { texture: false },
+        },
+      },
+    } as never);
+
+    // Arrive with it already open, the way a queue row does.
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: { target, desktop: true, openWorkflow: "run-1" },
+    });
+    await flushPromises();
+    await wrapper
+      .get("[data-test='mesh-composer'] textarea")
+      .setValue("edited away");
+
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    await wrapper.get("[data-test='mesh-recent-run-1']").trigger("click");
+    await flushPromises();
+
+    expect(
+      wrapper.get<HTMLTextAreaElement>("[data-test='mesh-composer'] textarea")
+        .element.value,
+    ).toBe("the original run");
+    wrapper.unmount();
+  });
+
+  /*
+   * A row's sentence comes from the LISTING, not from `detail`, so polling
+   * only the open workflow left a running row reading "1/3 · just now" for the
+   * whole run — and still saying it after the mesh was on the canvas.
+   */
+  it("refreshes the listing while a workflow runs, not just its detail", async () => {
+    vi.useFakeTimers();
+    const { listMeshWorkflows, getMeshWorkflow } =
+      await import("../api/meshWorkflows");
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [job("run-1", { state: "running", current_stage: 0 })],
+    } as never);
+    vi.mocked(getMeshWorkflow).mockResolvedValue({
+      id: "run-1",
+      state: "running",
+      mode: "text_to_mesh",
+      stages: [],
+    } as never);
+
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: { target, desktop: true, openWorkflow: "run-1" },
+    });
+    await flushPromises();
+    const before = vi.mocked(listMeshWorkflows).mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(800);
+    await flushPromises();
+    expect(vi.mocked(listMeshWorkflows).mock.calls.length).toBeGreaterThan(
+      before,
+    );
+
+    wrapper.unmount();
+    vi.useRealTimers();
+  });
+
+  /*
+   * A `File` cannot be restored from a past request, so clearing the wells
+   * destroyed the person's own attachment and put nothing in its place.
+   */
+  it("keeps an attached file when a past run is opened", async () => {
+    const { listMeshWorkflows, getMeshWorkflow } =
+      await import("../api/meshWorkflows");
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [job("run-1")],
+    } as never);
+    vi.mocked(getMeshWorkflow).mockResolvedValue({
+      id: "run-1",
+      state: "completed",
+      mode: "text_to_mesh",
+      stages: [],
+      request: {
+        mode: "text_to_mesh",
+        image_request: { model: "z-image-turbo:q8", prompt: "restored" },
+        mesh_request: {
+          model: "hunyuan3d-mini-turbo:fp16",
+          mesh: { texture: false },
+        },
+      },
+    } as never);
+
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: { target, desktop: true },
+    });
+    await flushPromises();
+    const draft = useMeshWorkflowDraftStore();
+    draft.meshFile = new File(["glb"], "mine.glb");
+
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    await wrapper.get("[data-test='mesh-recent-run-1']").trigger("click");
+    await flushPromises();
+    expect(draft.meshFile?.name).toBe("mine.glb");
+    wrapper.unmount();
+  });
+
+  /* A 300px rail is not a place for two hundred bordered cards. */
+  it("bounds how many past runs it lists", async () => {
+    const { listMeshWorkflows } = await import("../api/meshWorkflows");
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: Array.from({ length: 200 }, (_, i) => job(`run-${i}`)),
+    } as never);
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: { target, desktop: true },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mesh-tab-recent']").trigger("click");
+    const rows = wrapper.findAll("[data-test^='mesh-recent-run-']");
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBeLessThanOrEqual(24);
     wrapper.unmount();
   });
 });

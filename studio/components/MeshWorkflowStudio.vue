@@ -185,10 +185,27 @@ const canSubmit = computed(() => {
  */
 type InspectorTab = "settings" | "recent";
 const inspectorTab = ref<InspectorTab>("settings");
+/** The newest runs, bounded — the listing arrives newest first. */
+const recentWorkflows = computed(() =>
+  jobs.value.slice(0, RECENT_WORKFLOWS_CAP),
+);
 const inspectorTabs = computed(() => [
   { id: "settings" as const, label: "Settings", count: 0 },
-  { id: "recent" as const, label: "Recent", count: jobs.value.length },
+  {
+    id: "recent" as const,
+    label: "Recent",
+    count: recentWorkflows.value.length,
+  },
 ]);
+
+/**
+ * How many past runs Recent shows.
+ *
+ * The listing is unbounded on the wire (`ORDER BY created_at_ms DESC`, no
+ * LIMIT), and New image's Recent caps for the same reason: a 300px rail is not
+ * a place for two hundred bordered cards.
+ */
+const RECENT_WORKFLOWS_CAP = 24;
 
 const WORKFLOW_MODE_LABEL: Record<string, string> = {
   text_to_mesh: "From words",
@@ -238,8 +255,26 @@ function workflowStatusLine(job: MeshWorkflowJobSummary): string {
   return `${state} · ${when}`;
 }
 
+/**
+ * Open a past run from Recent, and actually bring its recipe back.
+ *
+ * This restores EXPLICITLY rather than leaning on `watch(selectedId)`: after a
+ * submit, after a deep link from the Queue, or after any earlier click, the
+ * clicked row IS already `selectedId` — and Vue does not fire a watcher for an
+ * unchanged value, so the row that reads as live was exactly the one where
+ * "Use these settings again" did nothing at all.
+ */
+function openRecentWorkflow(job: MeshWorkflowJobSummary): void {
+  const already = selectedId.value === job.id;
+  draft.selectWorkflow(job.id, targetIdentity(ownedTarget.value));
+  if (already) void refreshSelected(true);
+}
+
 /** Start over without leaving the machine or the styles this session is using. */
 function startNewWorkflow(): void {
+  // A stale refusal ("no longer on this machine") must not outlive the run it
+  // was about.
+  error.value = "";
   draft.clear();
 }
 
@@ -324,7 +359,19 @@ function schedulePoll(): void {
     !["queued", "running"].includes(detail.value.state)
   )
     return;
-  pollTimer = setTimeout(() => void refreshSelected(), 750);
+  pollTimer = setTimeout(() => {
+    void refreshSelected();
+    /*
+     * The LISTING has to move too, not just the open workflow's detail. Recent
+     * rows read their state and stage from the summary, so without this a
+     * running row said "Getting ready · 1/6 · just now" for the whole run and
+     * kept saying it after the finished mesh was on the canvas beside it. It
+     * is also how a workflow started elsewhere — another window, the CLI —
+     * ever appears. Failures are swallowed: a listing that misses one tick is
+     * not worth an error banner over the canvas.
+     */
+    void refreshJobs().catch(() => undefined);
+  }, 750);
 }
 
 async function refreshJobs(): Promise<void> {
@@ -362,9 +409,16 @@ async function refreshSelected(restoreDraft = false): Promise<void> {
 function restoreWorkflowDraft(
   request: CreateMeshWorkflowRequest<WorkflowGenerateRequest>,
 ): void {
-  // History is a different request; never carry another workflow's attachments.
-  meshFile.value = null;
-  appearanceFile.value = null;
+  /*
+   * The attachments are KEPT.
+   *
+   * They were nulled here on the reasoning that history is a different
+   * request — but a `File` cannot be restored from a past workflow at all, so
+   * clearing them destroyed the person's own attachment and put nothing in its
+   * place: attach a 40 MB mesh in Rebuild, click a Recent row to see what you
+   * ran yesterday, and the well empties with no undo and no message. What is
+   * in the wells is what the wells show, and it is theirs.
+   */
   mode.value = request.mode;
   const mesh =
     request.mode === "text_to_mesh"
@@ -382,6 +436,26 @@ function restoreWorkflowDraft(
     imageModelName.value = request.image_request.model;
   }
 }
+
+/**
+ * What a restored run could not bring back.
+ *
+ * A supplied-mesh workflow's inputs are FILES, and a browser cannot re-open
+ * one from a past request — so Rebuild and Add texture restore their settings
+ * and no source. Saying so is the difference between a door that half works
+ * and a Generate button that is disabled for no visible reason.
+ */
+const restoredNeedsSource = computed(() => {
+  if (!selectedId.value || mode.value === "text_to_mesh") return "";
+  if (
+    mode.value === "mesh_texture" &&
+    (!meshFile.value || !appearanceFile.value)
+  )
+    return "Choose the mesh and the picture again — a workflow's files cannot be restored.";
+  if (mode.value === "mesh_roundtrip" && !meshFile.value)
+    return "Choose the mesh again — a workflow's files cannot be restored.";
+  return "";
+});
 
 function chooseModels(): void {
   if (!meshModels.value.some((model) => model.name === meshModelName.value)) {
@@ -418,6 +492,14 @@ async function bootstrap(): Promise<void> {
   if (deepLink) draft.selectWorkflow(deepLink, machine);
   else if (!draft.selectionBelongsTo(machine)) draft.selectWorkflow("", "");
   detail.value = null;
+  /*
+   * The previous machine's runs are not this machine's. The `loading` gate
+   * already hides the panel while the new listing is in flight, so this is not
+   * fixing a reachable click — it keeps the STATE honest rather than relying
+   * on a render gate to cover for it, which is what would break the day the
+   * panel learns to render during a refresh.
+   */
+  jobs.value = [];
   ownedTarget.value = { ...props.target };
   ownerLabel.value = props.hostLabel ?? "";
   const target = ownedTarget.value;
@@ -833,9 +915,15 @@ onBeforeUnmount(() => {
         </button>
         <select
           v-else
-          v-model="selectedId"
+          :value="selectedId"
           :disabled="busy"
           aria-label="Previous 3-D workflow"
+          @change="
+            draft.selectWorkflow(
+              ($event.target as HTMLSelectElement).value,
+              targetIdentity(ownedTarget),
+            )
+          "
         >
           <option value="">New workflow</option>
           <option v-for="job in jobs" :key="job.id" :value="job.id">
@@ -893,14 +981,14 @@ onBeforeUnmount(() => {
               list, and one click brings their settings back.
             </p>
             <button
-              v-for="job in jobs"
+              v-for="job in recentWorkflows"
               :key="job.id"
               type="button"
               class="mesh-studio__recent-row"
               :data-test="`mesh-recent-${job.id}`"
               :data-on="selectedId === job.id ? 'true' : undefined"
               :disabled="busy"
-              @click="draft.selectWorkflow(job.id, targetIdentity(ownedTarget))"
+              @click="openRecentWorkflow(job)"
             >
               <span class="mesh-studio__recent-title">{{
                 workflowModeLabel(job.mode)
@@ -1008,6 +1096,13 @@ onBeforeUnmount(() => {
             </template>
 
             <template v-else>
+              <p
+                v-if="restoredNeedsSource"
+                class="mesh-studio__availability"
+                data-test="mesh-restore-needs-source"
+              >
+                {{ restoredNeedsSource }}
+              </p>
               <label class="mesh-studio__file">
                 Source mesh (GLB or OBJ)
                 <input
@@ -1684,21 +1779,18 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   margin: -16px -16px 4px;
-  padding: 0 14px;
+  /* The strip is the tabs' own track: 8px, not the 14px a title needed. */
+  padding: 0 8px;
+  gap: 2px;
   border-bottom: var(--mold-bw) solid var(--mold-border);
   background: var(--mold-bg-deep);
   color: var(--mold-text);
   font-size: var(--mold-fs-xs);
-  font-weight: 600;
+  font-weight: 400;
 }
 
 /* The inspector's tab strip — the same 26px control ladder InspectorPanel's
  * tabs sit on, inside the one-toolbar-tall header. */
-.mesh-studio--desktop .mesh-studio__inspector-heading {
-  gap: 2px;
-  padding: 0 8px;
-  font-weight: 400;
-}
 .mesh-studio--desktop .mesh-studio__tab {
   display: inline-flex;
   align-items: center;
