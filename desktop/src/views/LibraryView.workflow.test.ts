@@ -5,6 +5,7 @@ import { meshWorkflowRouteFor } from "@studio/lib/meshWorkflowProvenance";
 import viewSource from "./LibraryView.vue?raw";
 import lightboxSource from "../components/gallery/Lightbox.vue?raw";
 import releaseNote from "../../../changelog.d/library-3d-stacks.md?raw";
+import desktopRules from "../../../.claude/rules/desktop.md?raw";
 
 /**
  * The Library's two doors onto a 3-D run. `reuseSettings` degrades a workflow
@@ -61,9 +62,12 @@ describe("the Library's 3-D run doors", () => {
   /*
    * One set, one word. The drill-in chip said "3 prints", the context menu
    * said "3 assets" and the tile's assistive label said "3 pictures" — three
-   * names for the same three things, one of which ("pictures") is wrong for a
-   * set whose lead is a 3-D object. `prints` is what the rest of the view
-   * already calls a gallery row ("Deleted N prints everywhere").
+   * names for the same three things. "pictures" is the one that wins, and not
+   * by taste: `docs/design/README.md` §2 lists "Prints" in the column of words
+   * to REPLACE, and the Library's own chrome already says it — decisively
+   * `CollectionCard.vue`, the album card counting the same kind of set with
+   * the identical construct, plus TrashBanner and LibraryHeader. Unifying on
+   * "prints" instead put a second name beside the one the grid already used.
    */
   it("calls a run's members by one name, on every surface that names them", () => {
     expect(viewSource).toContain('`3-D object · ${count} ${count === 1 ? "picture" : "pictures"}`');
@@ -74,6 +78,11 @@ describe("the Library's 3-D run doors", () => {
     // these" — three surfaces, two names, one of them checked.
     expect(lightboxSource).toContain("Show the {{ workflowAssetCount }} pictures");
     expect(releaseNote).toContain("**Show the N pictures**");
+    // The agent rules are the FOURTH surface naming this set. A test that read
+    // only the three shipped ones would let the rule file drift into the word
+    // the design lexicon bans, which is where the next reader starts.
+    expect(desktopRules).toContain("the number of pictures the run made");
+    expect(desktopRules).not.toContain("the number of prints the run made");
     // Only the RUN's own wording — "N pictures" is right elsewhere (the Trash
     // confirm deletes pictures), so a blanket ban would be a false alarm.
     for (const source of [viewSource, lightboxSource, releaseNote])

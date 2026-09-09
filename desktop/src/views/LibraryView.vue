@@ -3017,6 +3017,14 @@ onUnmounted(() => {
       @remove-tags="(names) => applyTags(selectedEntries, { add: [], remove: names })"
     />
 
+    <!--
+      `workflow-assets` is 0 in the Trash because the Trash offers no run
+      doors: `tileMenu` returns Restore, Copy and Delete forever and nothing
+      else. The run index is LIVE-only, so a name trashed here that another
+      machine still holds live would otherwise be told it had pictures to show
+      — and showing them leaves the Trash outright, since `openWorkflowRun`
+      moves the scope to Everything. Zero closes both doors at once.
+    -->
     <Lightbox
       v-if="lightboxOpen && selectedEntry"
       :item="selectedEntry.item"
@@ -3026,7 +3034,7 @@ onUnmounted(() => {
       :audio="isAudio(selectedEntry.item)"
       :mesh="isMesh(selectedEntry.item)"
       :workflow-assets="
-        gallery.meshWorkflowIndex.get(selectedEntry.item.filename)?.memberCount ?? 0
+        inTrash ? 0 : (gallery.meshWorkflowIndex.get(selectedEntry.item.filename)?.memberCount ?? 0)
       "
       :mesh-export-formats="meshExportFormats"
       :mesh-export-geometry="meshExportGeometry"

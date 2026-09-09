@@ -67,6 +67,10 @@ const runPrint = (
       prompt: "a hand-carved wooden fox",
       model: "hunyuan3d-mini-turbo:fp16",
       seed: 4_000 + timestamp,
+      // The Lightbox renders these facts unguarded; a fixture without them
+      // crashes the render before any assertion about the run is reached.
+      steps: 5,
+      guidance: 5,
       mesh_workflow: { job_id: job, mode: "text_to_mesh", role, stage_index: stage },
     },
   }) as unknown as GalleryImage;
@@ -309,18 +313,39 @@ describe("a 3-D run's tile badges", () => {
     ];
     const { wrapper, gallery } = await mountGrid(live);
     // The same names, trashed on another machine.
-    gallery.trashBuckets.local = {
-      items: live,
-      loading: false,
-      error: null,
-      loaded: true,
-    } as never;
+    gallery.trashBuckets.local = { items: live, loading: false, error: null, loaded: true };
     gallery.scope = "trash";
     await nextTick();
     await flushPromises();
 
     expect(gallery.trashFiltered).toHaveLength(3);
     expect(badgeTexts(wrapper, "workflow-stack-badge")).toEqual([]);
+    wrapper.unmount();
+  });
+
+  /*
+   * The Trash offers no run doors at all: `tileMenu` returns Restore, Copy and
+   * Delete forever and nothing else. But the Lightbox reads the LIVE run
+   * index, so a print trashed here whose name is still live on another machine
+   * was told it had pictures to show — and "Show the 3 pictures" leaves the
+   * Trash outright, because `openWorkflowRun` moves the scope to Everything.
+   */
+  it("offers no run doors in the Trash, even for a name still live elsewhere", async () => {
+    const live = [
+      runPrint("object.glb", 6, "final_glb", 2),
+      runPrint("matted.png", 5, "matted_image", 1),
+      runPrint("source.png", 4, "generated_image", 0),
+    ];
+    const { wrapper, gallery } = await mountGrid(live);
+    // The same names, trashed here while another machine still holds them live.
+    gallery.trashBuckets.local = { items: live, loading: false, error: null, loaded: true };
+    gallery.scope = "trash";
+    await nextTick();
+    await flushPromises();
+
+    await wrapper.get('[data-filename="object.glb"]').trigger("dblclick");
+    await flushPromises();
+    expect(wrapper.getComponent({ name: "Lightbox" }).props("workflowAssets")).toBe(0);
     wrapper.unmount();
   });
 

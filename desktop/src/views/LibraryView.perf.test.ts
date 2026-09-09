@@ -300,14 +300,19 @@ describe("Library grid at 2 000 prints", () => {
     await nextTick();
 
     /*
-     * Warm EXPLICITLY. Re-seeding the collections invalidates the organization
-     * index, and this used to depend on the component's own render effect
-     * happening to rebuild it before the counters were read — if that
-     * incidental render ever stopped, the first read would do the 2 000-call
-     * rebuild itself and this would go red for a reason that is not its
-     * invariant. Read once to warm, reset, then measure the second read.
+     * Warm the DEPENDENCIES, not the getter. Re-seeding the collections
+     * invalidates the organization index, and this used to depend on the
+     * component's own render effect happening to rebuild it before the
+     * counters were read. Warming by reading `collectionCounts` itself fixed
+     * that flakiness but traded away the coverage: it is a computed returning
+     * a CLOSURE, so the warm read cached its body and the reset wiped what the
+     * body did — leaving only `Map.get` calls on the measured side, and a
+     * gallery scan in the body (the exact regression named below) invisible.
+     * Touching what the body depends on keeps both: no incidental rebuild, and
+     * the FIRST read of `collectionCounts` still lands on the measured side.
      */
-    const warm = ALBUM_IDS.map((_, i) => gallery.collectionCounts(`album-${i + 1}`));
+    expect(gallery.organizationIndex).toBeTruthy();
+    expect(gallery.meshWorkflowIndex).toBeTruthy();
     counters.reset();
     const counts = ALBUM_IDS.map((_, i) => gallery.collectionCounts(`album-${i + 1}`));
 
@@ -317,7 +322,6 @@ describe("Library grid at 2 000 prints", () => {
      * identity here. A merely non-zero count would not notice the counting
      * itself breaking.
      */
-    expect(counts).toEqual(warm);
     expect(counts.reduce((a, b) => a + b, 0)).toBe(PRINTS / 4);
     expectOpsUnder("unionOrganization while counting albums", counters.unionOrganization, 0);
     expectOpsUnder(
