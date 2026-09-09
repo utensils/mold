@@ -488,39 +488,30 @@ export const useGalleryStore = defineStore("gallery", {
       return index;
     },
     /**
-     * Every print filename → the 3-D workflow run it belongs to, computed
-     * ONCE per data change beside `organizationIndex` and for the same
-     * reason: a per-tile scan of the gallery is exactly what the Library's
-     * operation budgets refuse.
+     * Every LIVE print's filename → the 3-D run it belongs to, computed ONCE
+     * per data change beside `organizationIndex` and for the same reason: a
+     * per-tile scan of the gallery is exactly what the Library's operation
+     * budgets refuse.
      *
      * This is a SECOND, orthogonal grouping to the cross-host merge above.
-     * That one asks "are these the same bytes on two machines"; a run's
-     * source picture and its mesh share no seed, size or model and can never
-     * collapse through it. This asks "were these made by one run", so a
-     * text-to-3-D run stops leaving four unrelated tiles.
+     * That one asks "are these the same bytes on two machines"; a run's source
+     * picture and its mesh share no seed, size or model and can never collapse
+     * through it. This asks "were these made by one run", so a text-to-3-D run
+     * stops leaving four unrelated tiles.
+     *
+     * TRASH IS DELIBERATELY NOT COLLAPSED, and this index is live-only for
+     * that reason: every trashed print carries its own purge countdown and its
+     * own Restore / Delete forever, and hiding one behind a lead would let
+     * retention purge something the person was never shown. Live-only also
+     * keeps `defaultLibraryPrints` scope-INDEPENDENT, which is what its own
+     * comment promises.
+     *
+     * The rows are one per LOGICAL print — `merged` already collapsed the
+     * cross-host copies — so a gallery mirrored across machines does not
+     * inflate a run's member count.
      */
     meshWorkflowIndex(): Map<string, MeshWorkflowGroupMembership> {
-      return this.scope === "trash" ? this.trashMeshWorkflowIndex : this.liveMeshWorkflowIndex;
-    },
-    /**
-     * Each scope's runs are indexed among ITS OWN prints.
-     *
-     * One index across both was wrong in two ways that only show up once
-     * something is trashed. A run's LEAD could be a print the scope does not
-     * draw — trash the mesh and its source picture is still "not the lead", so
-     * it is hidden from the live grid while the lead sits in the trash and the
-     * whole run disappears from My images. And the COUNT named members the
-     * drill-in would never reveal: four assets promised, two shown.
-     *
-     * A cross-host mirror of one print is one logical row here (`merged`
-     * already collapsed the copies), so a run mirrored to two machines is not
-     * double-counted.
-     */
-    liveMeshWorkflowIndex(): Map<string, MeshWorkflowGroupMembership> {
       return indexMeshWorkflowGroups(workflowRows(this.merged)).membership;
-    },
-    trashMeshWorkflowIndex(): Map<string, MeshWorkflowGroupMembership> {
-      return indexMeshWorkflowGroups(workflowRows(this.trashMerged)).membership;
     },
     /** Logical prints in the trash across every host. */
     trashCount(): number {
@@ -827,7 +818,15 @@ export const useGalleryStore = defineStore("gallery", {
      * deliberately irrelevant because it records when prints were filed.
      */
     filtered(): MergedPrint[] {
-      let entries = this.narrowByKindAndQuery(this.hostFiltered);
+      /*
+       * The collapse runs HERE because this is what the GRID renders.
+       * Applying it to `basePrints` alone moved the sidebar count and the
+       * filter chips while leaving four tiles on screen — a feature that was a
+       * no-op where it mattered and a disagreement everywhere else.
+       */
+      let entries = this.narrowByKindAndQuery(this.hostFiltered).filter(
+        this.visibleAfterWorkflowCollapse,
+      );
       const slug = this.openCollectionSlug;
       if (this.hidesHiddenAlbums) entries = entries.filter(this.visibleInDefaultLibrary);
       entries = entries.filter(this.matchesOrganizationFilters);

@@ -2093,6 +2093,13 @@ describe("a 3-D run is one gallery item", () => {
    */
   it("shows the mesh and hides the steps, leaving other prints alone", () => {
     const gallery = seedRun();
+    /*
+     * `filtered` is what the GRID renders. Asserting only on `basePrints` —
+     * which feeds the sidebar count and the filter chips — is how this shipped
+     * as a no-op on screen with a green suite AND a count that disagreed with
+     * the four tiles still showing.
+     */
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["unrelated.png", "object.glb"]);
     expect(gallery.basePrints.map((p) => p.item.filename)).toEqual(["unrelated.png", "object.glb"]);
     // The header count agrees with what is on screen.
     expect(gallery.defaultLibraryPrints).toHaveLength(2);
@@ -2102,14 +2109,14 @@ describe("a 3-D run is one gallery item", () => {
   it("reveals exactly that run's assets when it is opened", () => {
     const gallery = seedRun();
     gallery.workflowId = "run-1";
-    expect(gallery.basePrints.map((p) => p.item.filename)).toEqual([
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual([
       "object.glb",
       "delighted.png",
       "matted.png",
       "source.png",
     ]);
     // A print no workflow made is not part of anyone's run.
-    expect(gallery.basePrints.map((p) => p.item.filename)).not.toContain("unrelated.png");
+    expect(gallery.filtered.map((p) => p.item.filename)).not.toContain("unrelated.png");
   });
 
   it("indexes every member back to its run and its part in it", () => {
