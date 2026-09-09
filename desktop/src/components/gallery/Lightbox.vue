@@ -94,6 +94,9 @@ const props = withDefaults(
     /** Origin host's friendly name for the metadata block. */
     hostLabel?: string | null;
     canReveal?: boolean;
+    /** How many prints the 3-D run behind this one produced, or 0 / absent
+     *  for an ordinary print. The owner holds the run's membership. */
+    workflowAssets?: number;
     /** Title / ♥ / tags / collections union for this print; null hides the
      *  editing rows (the title line still shows the display title). */
     organization?: LightboxOrganization | null;
@@ -141,6 +144,22 @@ const props = withDefaults(
     tagSuggestions: () => [],
   },
 );
+/**
+ * The 3-D run this print belongs to, if any. Read off the print's own
+ * metadata: absence is an ordinary print, or a host that predates the field.
+ */
+/** How many prints the run produced. The owner knows; 0 hides the doors. */
+const workflowAssetCount = computed(() => props.workflowAssets ?? 0);
+/**
+ * Whether this print belongs to a 3-D run the owner is showing.
+ *
+ * The OWNER decides: it holds the run's membership for the scope on screen.
+ * Re-deriving it from the metadata here was a second authority that could
+ * disagree — a print carrying a valid block but absent from the current
+ * scope's index showed the doors with a count of zero.
+ */
+const meshWorkflow = computed(() => workflowAssetCount.value > 0);
+
 const emit = defineEmits<{
   close: [];
   prev: [];
@@ -150,6 +169,10 @@ const emit = defineEmits<{
   /** One-shot reuse. The OWNER runs it: retained private source media is
    *  attached there, and doing it here would drop it. */
   reuse: [];
+  /** Open the 3-D run that made this print, with its inputs restored. */
+  reopenWorkflow: [];
+  /** Show the rest of what that run made, in the grid. */
+  showWorkflowAssets: [];
   /** Title edited in the aside (`null` clears it). */
   rename: [title: string | null];
   favorite: [value: boolean];
@@ -1016,6 +1039,31 @@ async function performVideoExport(options: VideoExportOptions) {
               @click="openMeshAnimationExport"
             >
               Export turntable…
+            </button>
+          </div>
+          <!--
+            A print a 3-D run made has two doors nothing else has: the run
+            itself, with every input restored, and the rest of what it made.
+            "Use these settings" degrades it to a one-shot on the mesh style,
+            which is not what the person authored.
+          -->
+          <div v-if="meshWorkflow" class="flex flex-wrap gap-2">
+            <button
+              type="button"
+              data-test="reopen-as-workflow"
+              class="ms-toolbar-button flex-1 justify-center"
+              @click="emit('reopenWorkflow')"
+            >
+              Open the 3-D run
+            </button>
+            <button
+              v-if="workflowAssetCount > 1"
+              type="button"
+              data-test="show-workflow-assets"
+              class="ms-toolbar-button flex-1 justify-center"
+              @click="emit('showWorkflowAssets')"
+            >
+              Show the {{ workflowAssetCount }} pictures
             </button>
           </div>
           <div v-if="(item.assets?.length ?? 0) > 0" class="flex flex-wrap gap-2">

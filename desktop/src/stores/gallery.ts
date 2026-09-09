@@ -59,6 +59,12 @@ import {
   removeGalleryMutation,
   updateGalleryMutationFailure,
 } from "@studio/lib/galleryMutationOutbox";
+import {
+  indexMeshWorkflowGroups,
+  collapseToLeads as collapseRunSteps,
+  type GroupableRow,
+  type MeshWorkflowGroupMembership,
+} from "@studio/lib/meshWorkflowGroup";
 import { createUuid } from "@studio/lib/id";
 
 export type {
@@ -366,6 +372,11 @@ export const useGalleryStore = defineStore("gallery", {
     tagFilter: [] as string[],
     /** Collections drill-in: the open collection's slug, or null (the shelf). */
     collectionSlug: null as string | null,
+    /**
+     * The 3-D run drilled into, or null. Opening one is the only thing that
+     * reveals its steps — the album drill-in's rule.
+     */
+    workflowId: null as string | null,
     /** Per-host trashed prints (`GET /api/gallery?view=trash`). Same keys
      *  as `buckets`; fetched on demand by the Trash scope. */
     trashBuckets: {} as Record<string, GalleryBucket>,
@@ -474,6 +485,32 @@ export const useGalleryStore = defineStore("gallery", {
       add(this.merged);
       add(this.trashMerged);
       return index;
+    },
+    /**
+     * Every LIVE print's filename → the 3-D run it belongs to, computed ONCE
+     * per data change beside `organizationIndex` and for the same reason: a
+     * per-tile scan of the gallery is exactly what the Library's operation
+     * budgets refuse.
+     *
+     * This is a SECOND, orthogonal grouping to the cross-host merge above.
+     * That one asks "are these the same bytes on two machines"; a run's source
+     * picture and its mesh share no seed, size or model and can never collapse
+     * through it. This asks "were these made by one run", so a text-to-3-D run
+     * stops leaving four unrelated tiles.
+     *
+     * TRASH IS DELIBERATELY NOT COLLAPSED, and this index is live-only for
+     * that reason: every trashed print carries its own purge countdown and its
+     * own Restore / Delete forever, and hiding one behind a lead would let
+     * retention purge something the person was never shown. Live-only also
+     * keeps `defaultLibraryPrints` scope-INDEPENDENT, which is what its own
+     * comment promises.
+     *
+     * The rows are one per LOGICAL print — `merged` already collapsed the
+     * cross-host copies — so a gallery mirrored across machines does not
+     * inflate a run's member count.
+     */
+    meshWorkflowIndex(): Map<string, MeshWorkflowGroupMembership> {
+      return indexMeshWorkflowGroups(workflowRows(this.merged)).membership;
     },
     /** Logical prints in the trash across every host. */
     trashCount(): number {
@@ -610,6 +647,54 @@ export const useGalleryStore = defineStore("gallery", {
       return this.scope === "collections" ? this.collectionSlug : null;
     },
     /**
+     * Which prints survive the 3-D collapse.
+     *
+     * A durable workflow publishes an ordinary print per stage, so one
+     * text-to-3-D run left FOUR tiles — the source picture, its matted and
+     * delighted copies, and the mesh — indistinguishable from four things a
+     * person made. Only the run's mesh is drawn; opening it reveals the rest.
+     *
+     * The membership map is built once per data change, so this is a single
+     * `Map.get` per print and never a scan. It runs in `basePrints`, ahead of
+     * the chips and the tiles, so a slider drag re-runs no filter at all.
+     */
+    /**
+     * The run drilled into, or null in every scope that cannot show one.
+     *
+     * A stale id left behind by a scope switch is NOT an open run — the same
+     * laundering `openCollectionSlug` does. Without it, drilling into a run and
+     * switching to Favourites left the grid filtered to members that are not
+     * favourited: an empty library with no tile to right-click, no chip and no
+     * way back short of a restart.
+     */
+    openWorkflowId(): string | null {
+      return this.scope === "prints" ? this.workflowId : null;
+    },
+    /**
+     * Hide a run's steps behind the tile that leads them — but ONLY where that
+     * tile is actually on screen.
+     *
+     * This is the whole rule, and it is a rule about REACHABILITY rather than
+     * a list of the filters that should switch it off. A step is hidden
+     * because you can open the lead to get it back; if the lead is not in the
+     * set being drawn, hiding the step does not tidy anything, it deletes it
+     * from view with no door.
+     *
+     * Every reported bug here was the same rule missing: a favourited step
+     * vanished from Favourites, a step filed into an album vanished from that
+     * album, and the `Pictures` chip — which excludes the mesh lead by kind —
+     * made a whole run contribute zero tiles. Enumerating "favourites, tags,
+     * query" instead kept reproducing it one filter at a time, and gave the
+     * same facet opposite answers depending on an unrelated control (`Pictures`
+     * hid the steps until you typed a character).
+     *
+     * Runs it over the ALREADY-NARROWED set, so it must be applied last.
+     */
+    collapseToLeads(): (entries: MergedPrint[]) => MergedPrint[] {
+      const membership = this.meshWorkflowIndex;
+      return (entries) => collapseRunSteps(entries, (entry) => entry.item.filename, membership);
+    },
+    /**
      * Hidden albums are hidden until one is OPEN — in Everything, Favourites,
      * the Albums shelf and the Trash alike. Only the drill-in reveals them,
      * which is the whole point of hiding an album.
@@ -634,7 +719,7 @@ export const useGalleryStore = defineStore("gallery", {
     /** The live grid minus hidden albums — the library's own size, whatever
      *  scope is open. The shell's picture count reads this. */
     defaultLibraryPrints(): MergedPrint[] {
-      return this.merged.filter(this.visibleInDefaultLibrary);
+      return this.collapseToLeads(this.merged.filter(this.visibleInDefaultLibrary));
     },
     /**
      * The set the filter chips describe: the SCOPE'S OWN prints (the Trash
@@ -643,8 +728,14 @@ export const useGalleryStore = defineStore("gallery", {
      * prints the user cannot see.
      */
     basePrints(): MergedPrint[] {
-      const scoped = this.scope === "trash" ? this.trashMerged : this.merged;
-      return this.hidesHiddenAlbums ? scoped.filter(this.visibleInDefaultLibrary) : scoped;
+      const inTrash = this.scope === "trash";
+      const scoped = inTrash ? this.trashMerged : this.merged;
+      const albums = this.hidesHiddenAlbums ? scoped.filter(this.visibleInDefaultLibrary) : scoped;
+      // THE TRASH IS NEVER COLLAPSED, and this says so rather than relying on
+      // the index being live-only to make it true by accident. That accident
+      // holds only until one host has a print live that another has trashed,
+      // where the shared filename would put a trashed row in the live index.
+      return inTrash ? albums : this.collapseToLeads(albums);
     },
     /** Header count before host, kind, search, and organization narrowing —
      *  scope-independent, so switching to the Trash never rewrites it. */
@@ -667,12 +758,20 @@ export const useGalleryStore = defineStore("gallery", {
     /** Logical prints per collection slug, over the merged live grid — the
      *  count a shelf card shows (a mirrored print counts once). */
     collectionCounts(): (slug: string) => number {
-      const counts = new Map<string, number>();
+      const bySlug = new Map<string, MergedPrint[]>();
       for (const entry of this.merged) {
         for (const slug of this.organizationOf(entry).collections) {
-          counts.set(slug, (counts.get(slug) ?? 0) + 1);
+          const held = bySlug.get(slug);
+          if (held) held.push(entry);
+          else bySlug.set(slug, [entry]);
         }
       }
+      // A card's number is a promise about what opening it shows, so it counts
+      // the album's prints under the SAME rule the album's grid draws: a run
+      // whose lead is filed here too is one tile, and a step filed on its own
+      // is its own tile because nothing here would open it.
+      const counts = new Map<string, number>();
+      for (const [slug, entries] of bySlug) counts.set(slug, this.collapseToLeads(entries).length);
       return (slug) => counts.get(slug) ?? 0;
     },
     /** Kind + text narrowing shared by the live grid and the trash. */
@@ -755,13 +854,29 @@ export const useGalleryStore = defineStore("gallery", {
      * deliberately irrelevant because it records when prints were filed.
      */
     filtered(): MergedPrint[] {
+      /*
+       * The collapse runs HERE because this is what the GRID renders, and it
+       * runs LAST because it asks whether each run's lead survived everything
+       * else — a step may only be hidden behind a tile that is on screen.
+       * Applying it to `basePrints` alone moved the sidebar count and the
+       * filter chips while leaving four tiles on screen — a feature that was a
+       * no-op where it mattered and a disagreement everywhere else.
+       */
       let entries = this.narrowByKindAndQuery(this.hostFiltered);
       const slug = this.openCollectionSlug;
       if (this.hidesHiddenAlbums) entries = entries.filter(this.visibleInDefaultLibrary);
       entries = entries.filter(this.matchesOrganizationFilters);
-      if (!slug) return entries;
-      const organizationOf = this.organizationOf;
-      return entries.filter((entry) => organizationOf(entry).collections.includes(slug));
+      if (slug) {
+        const organizationOf = this.organizationOf;
+        entries = entries.filter((entry) => organizationOf(entry).collections.includes(slug));
+      }
+      // Drilled in, the grid is that run and nothing else — the album rule.
+      const open = this.openWorkflowId;
+      if (open !== null) {
+        const membership = this.meshWorkflowIndex;
+        return entries.filter((entry) => membership.get(entry.item.filename)?.jobId === open);
+      }
+      return this.collapseToLeads(entries);
     },
     /**
      * The Favourites scope and the tag chips, as ONE predicate — the live grid
@@ -866,6 +981,29 @@ export const useGalleryStore = defineStore("gallery", {
     },
   },
   actions: {
+    /**
+     * Open a 3-D run in the grid, or leave it.
+     *
+     * `openWorkflowId` launders the id to null in every scope but Everything,
+     * so setting `workflowId` alone is a no-op wherever the person actually
+     * sees a stack badge — in Favourites, in an open album, in the Trash the
+     * menu offered "Show the N pictures" and clicking it did nothing, while the
+     * written id made a later return to Everything land inside a run nobody
+     * opened. Entering a run therefore moves the scope with it, here, once.
+     */
+    openWorkflowRun(jobId: string | null) {
+      if (jobId) {
+        this.scope = "prints";
+        // Opening a run means "show me this run", so the narrowing that was on
+        // screen goes with it. Kept, the grid showed a subset while the chip
+        // said "3-D object · 1 print" for a run of four: you reach a run by
+        // searching for one of its steps, which is exactly when this bites.
+        this.query = "";
+        this.tagFilter = [];
+        this.mediaKind = "all";
+      }
+      this.workflowId = jobId;
+    },
     /** The live host behind a bucket key, if any (resolved at call time).
      *  The "local" key only counts as host-backed while the local server is
      *  READY — an errored local host can still expose a stale baseUrl, and
@@ -2175,6 +2313,18 @@ export function indexBucketRows(items: readonly GalleryImage[]): BucketIndex {
     else byIdentity.set(identity, [row]);
   });
   return { byFilename, byIdentity };
+}
+
+/**
+ * The rows a scope contributes to the 3-D run index: one per LOGICAL print,
+ * not one per cross-host copy — the copies of one print are the same print, so
+ * counting them would inflate a run's member count on a mirrored gallery.
+ */
+function workflowRows(prints: MergedPrint[]): GroupableRow[] {
+  return prints.map((print) => ({
+    key: print.item.filename,
+    metadata: print.item.metadata,
+  }));
 }
 
 function indexBuckets(buckets: Record<string, GalleryBucket>): Map<string, BucketIndex> {

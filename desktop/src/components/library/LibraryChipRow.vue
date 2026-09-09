@@ -36,8 +36,10 @@ const props = withDefaults(
     hostFilter: string;
     /** Open collection (drill-in) shown as a removable chip. */
     collectionName?: string | null;
+    /** The 3-D run drilled into, named for its chip. Null when none is open. */
+    runName?: string | null;
   }>(),
-  { collectionName: null },
+  { collectionName: null, runName: null },
 );
 
 const emit = defineEmits<{
@@ -45,6 +47,7 @@ const emit = defineEmits<{
   "update:hostFilter": [key: string];
   clearFilters: [];
   exitCollection: [];
+  exitRun: [];
 }>();
 
 const activeKeys = computed(() => new Set(props.activeTags.map(tagKey)));
@@ -68,7 +71,11 @@ const moreMatches = computed(() => {
 });
 
 const anyFilter = computed(
-  () => props.activeTags.length > 0 || props.hostFilter !== "all" || !!props.collectionName,
+  () =>
+    props.activeTags.length > 0 ||
+    props.hostFilter !== "all" ||
+    !!props.collectionName ||
+    !!props.runName,
 );
 
 function closeMore() {
@@ -85,6 +92,26 @@ defineExpose({ closeMore, isOpen: () => moreOpen.value });
     role="group"
     aria-label="My images filters"
   >
+    <!--
+      A drilled-into 3-D run needs a way out that is always on screen. The
+      tile menu's own entry early-returns in the Trash and in select mode, so
+      it was possible to be inside a run with nothing to click.
+    -->
+    <template v-if="runName">
+      <button
+        type="button"
+        class="ms-lib-chip ms-lib-chip--on"
+        data-test="run-chip"
+        :title="`Leave ${runName}`"
+        @click="emit('exitRun')"
+      >
+        <Icon name="layers" :size="12" />
+        <span class="max-w-48 truncate">{{ runName }}</span>
+        <span aria-hidden="true">×</span>
+      </button>
+      <span class="ms-lib-vr" aria-hidden="true" />
+    </template>
+
     <template v-if="collectionName">
       <button
         type="button"

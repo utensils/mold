@@ -161,12 +161,32 @@ the model controls, and the length slider. A sequence is now something you scrip
   `role: "final_glb"` names the run's LEAD, and ABSENCE is an ordinary print or
   an older host, never a refusal.
 
-  What reads it TODAY is the routing: a workflow's queue row opens
+  Two things read it. ROUTING: a workflow's queue row opens
   `/create/3d?workflow=<id>&host=<hostId>` rather than New image, which cannot
-  resume a durable workflow at all. The host rides the link because a workflow
-  lives on ONE machine. Collapsing a run's several prints into one gallery item
-  led by the mesh is what the `final_glb` lead EXISTS for and is not yet
-  wired — the Library still draws every stage's print as its own tile.
+  resume a durable workflow at all — the host rides the link because a workflow
+  lives on ONE machine, and the host is taken from the COPY that carries the
+  provenance, never the merged print's `sourceKey` (an auto-saved remote output
+  lands in this Mac's gallery and would name the wrong machine). And the
+  desktop LIBRARY: `studio/lib/meshWorkflowGroup.ts` indexes a run once per data
+  change beside `organizationIndex`, and `collapseToLeads` hides its steps
+  behind the tile led by its `final_glb`. That rule is about REACHABILITY, not
+  about which filters are active: **a step may be hidden only where the lead
+  that would open it is in the same list**, so it runs LAST in `filtered`, over
+  the set the grid is about to draw. Enumerating the filters that should switch
+  it off instead (favourites, then tags, then the query, then albums) kept
+  reproducing one bug per filter, and could not have reached the `Pictures`
+  chip, which excludes the mesh BY KIND and so left a whole run with no tile at
+  all. Consequently a marked or searched-for step always stands, `Pictures`
+  shows a run's pictures, `3-D` keeps it one stacked tile, and plain browsing
+  collapses. `collectionCounts` takes the same rule, because a shelf card's
+  number is a promise about what opening it shows. Entering a run goes through
+  the store's `openWorkflowRun`, which moves the scope to Everything and drops
+  the narrowing that led you there — `openWorkflowId` launders the id away in
+  every other scope, so an id written alone is a menu entry that does nothing.
+  TRASH IS NOT COLLAPSED and the index is live-only: every trashed print
+  carries its own purge countdown and its own Restore, and hiding one behind a
+  lead would let retention purge something nobody was shown. Web and the phone
+  still list every stage separately.
 
 - **Background matting is profile-driven and its transformed inputs are durable private media.** `capabilities.mesh.matting` is the one Auto/On/Off contract every authoring surface reads. Auto preserves useful alpha and otherwise runs the pinned pure-Rust U²-Net stage before shape weights load; On always recomputes and Off preserves the historical pixels. Processed PNGs never enter the public response or GLB: a durable job seals them under its purpose-keyed `generation_queue_derived_media` obligation before gallery publication, hands every authored and derived set to the same archive identity, and exposes the processed roles for authenticated download while refusing them for request reuse so matting cannot be applied twice. Cancellation, held-row retention, startup reconciliation, gallery deletion, and queue settlement cover all attached sets.
 

@@ -13,11 +13,13 @@ import { defineComponent, nextTick } from "vue";
 
 const counters = vi.hoisted(() => ({
   unionOrganization: 0,
+  meshWorkflowIndex: 0,
   /** What the native listing answers; seeded per test before mount. */
   localImages: [] as unknown[],
   mediaMounts: new Map<string, number>(),
   reset() {
     counters.unionOrganization = 0;
+    counters.meshWorkflowIndex = 0;
     counters.mediaMounts.clear();
   },
 }));
@@ -29,6 +31,21 @@ vi.mock("@studio/lib/libraryOrganization", async (importOriginal) => {
     unionOrganization: (...args: Parameters<typeof actual.unionOrganization>) => {
       counters.unionOrganization += 1;
       return actual.unionOrganization(...args);
+    },
+  };
+});
+/*
+ * The 3-D run index is the second thing that must run once per data change,
+ * not once per tile. The existing guards count `unionOrganization` only and
+ * would pass with an O(n·m) path in here.
+ */
+vi.mock("@studio/lib/meshWorkflowGroup", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@studio/lib/meshWorkflowGroup")>();
+  return {
+    ...actual,
+    indexMeshWorkflowGroups: (...args: Parameters<typeof actual.indexMeshWorkflowGroups>) => {
+      counters.meshWorkflowIndex += 1;
+      return actual.indexMeshWorkflowGroups(...args);
     },
   };
 });
@@ -61,6 +78,8 @@ import { clearSessionScrollForTests } from "@studio/lib/libraryOrganization";
 installMemoryLocalStorage();
 
 const PRINTS = 2_000;
+/** Three albums, so `collectionCounts` has more than one list to collapse. */
+const ALBUM_IDS = ["alb-1", "alb-2", "alb-3"];
 const VIEWPORT_WIDTH = 1200;
 const VIEWPORT_HEIGHT = 800;
 /** Rows of 220 px tiles at 1200 px hold ~5–7 prints; 800 px shows ~4 rows,
@@ -74,6 +93,11 @@ function print(index: number): GalleryImage {
     size_bytes: 100_000 + index,
     favorite: index % 5 === 0,
     tags: index % 3 === 0 ? ["portrait"] : [],
+    // Album membership for the one test that seeds the albums after mount.
+    // Everywhere else these ids resolve to nothing (the collections bucket is
+    // empty), so this is inert for every other assertion in the file — it does
+    // NOT give them album coverage, and did not change any existing budget.
+    collections: index % 4 === 0 ? [ALBUM_IDS[index % ALBUM_IDS.length]!] : [],
     metadata: {
       prompt: `print ${index}`,
       model: "flux-dev:q8",
@@ -162,6 +186,10 @@ async function mountGrid() {
   for (let i = 0; i < PRINTS; i++) items.push(print(i));
   counters.localImages = items;
   gallery.buckets.local = { items, loading: false, error: null, loaded: true };
+  // No collections are seeded here on purpose: the view fetches them on open
+  // and, with no reachable target, `fetchCollections` assigns `items: []` —
+  // a seed placed before mount is wiped. The one test that needs albums seeds
+  // them AFTER mount and says so.
   gallery.collectionsByHost["local"] = { items: [], loaded: true } as never;
 
   const wrapper = mount(LibraryView, {
@@ -196,6 +224,13 @@ describe("Library grid at 2 000 prints", () => {
     // Mount sees two data changes — the seeded bucket, then the listing the
     // view fetches on open — so two index passes are legitimate.
     expectOpsUnder("unionOrganization during mount", counters.unionOrganization, 2 * PRINTS);
+    /*
+     * The run index runs at mount — asserting it is BUILT is what stops the
+     * zero-budget guards below being vacuous: a mock that never intercepted
+     * would report zero everywhere and pass for the wrong reason.
+     */
+    expect(counters.meshWorkflowIndex).toBeGreaterThan(0);
+    expectOpsUnder("mesh workflow index passes at mount", counters.meshWorkflowIndex, 2);
     wrapper.unmount();
   });
 
@@ -224,6 +259,93 @@ describe("Library grid at 2 000 prints", () => {
       wrapper.findAll("[data-test='media-kind-badge']").length,
       tiles.length,
     );
+    // The 3-D run index is cached on the same data, so narrowing must not
+    // rebuild it either.
+    expectOpsUnder(
+      "mesh workflow index passes across a scope switch",
+      counters.meshWorkflowIndex,
+      0,
+    );
+    // ...and at most one stack badge per rendered tile.
+    expectOpsUnder(
+      "stack badges in the DOM",
+      wrapper.findAll("[data-test='workflow-stack-badge']").length,
+      tiles.length,
+    );
+    wrapper.unmount();
+  });
+
+  /*
+   * An album's card count is a per-album collapse, so it is the one place a
+   * future refactor is likely to reach for `organizationOf` inside the loop
+   * and turn a cached lookup into a gallery scan per card. The invariant is
+   * that reading every album's count after mount costs NOTHING beyond what is
+   * already cached.
+   */
+  it("counts every album off the cached indexes", async () => {
+    const { wrapper, gallery } = await mountGrid();
+    // The view fetches collections on open and the harness answers []; seed
+    // after that so the albums survive to be counted.
+    gallery.collectionsByHost["local"] = {
+      items: ALBUM_IDS.map((id, i) => ({
+        id,
+        name: `Album ${i + 1}`,
+        slug: `album-${i + 1}`,
+        count: 0,
+        created_at: 0,
+        updated_at: 0,
+      })),
+      loaded: true,
+    } as never;
+    await nextTick();
+
+    /*
+     * Warm the DEPENDENCIES, not the getter. Re-seeding the collections
+     * invalidates the organization index, and this used to depend on the
+     * component's own render effect happening to rebuild it before the
+     * counters were read. Warming by reading `collectionCounts` itself fixed
+     * that flakiness but traded away the coverage: it is a computed returning
+     * a CLOSURE, so the warm read cached its body and the reset wiped what the
+     * body did — leaving only `Map.get` calls on the measured side, and a
+     * gallery scan in the body (the exact regression named below) invisible.
+     * Touching what the body depends on keeps both: no incidental rebuild, and
+     * the FIRST read of `collectionCounts` still lands on the measured side.
+     */
+    expect(gallery.organizationIndex).toBeTruthy();
+    expect(gallery.meshWorkflowIndex).toBeTruthy();
+    counters.reset();
+    const counts = ALBUM_IDS.map((_, i) => gallery.collectionCounts(`album-${i + 1}`));
+
+    /*
+     * An EXACT total, not merely "more than zero": every fourth print is
+     * filed, and none of them belongs to a 3-D run, so the collapse is the
+     * identity here. A merely non-zero count would not notice the counting
+     * itself breaking.
+     */
+    expect(counts.reduce((a, b) => a + b, 0)).toBe(PRINTS / 4);
+    expectOpsUnder("unionOrganization while counting albums", counters.unionOrganization, 0);
+    expectOpsUnder(
+      "mesh workflow index passes while counting albums",
+      counters.meshWorkflowIndex,
+      0,
+    );
+    wrapper.unmount();
+  });
+
+  /*
+   * Drilling into a run narrows the SAME cached index. Rebuilding it here
+   * would put a gallery-wide pass behind a click.
+   */
+  it("opens a 3-D run without rebuilding the run index", async () => {
+    const { wrapper, gallery } = await mountGrid();
+    counters.reset();
+
+    gallery.workflowId = "run-that-does-not-exist";
+    await nextTick();
+    await flushPromises();
+
+    expectOpsUnder("mesh workflow index passes across a drill-in", counters.meshWorkflowIndex, 0);
+    expectOpsUnder("unionOrganization across a drill-in", counters.unionOrganization, 0);
     wrapper.unmount();
   });
 

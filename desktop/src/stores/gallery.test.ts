@@ -2049,3 +2049,444 @@ describe("organization server events", () => {
     expect(gallery.tagsByHost["hal9000-7680"]).toBeUndefined();
   });
 });
+
+describe("a 3-D run is one gallery item", () => {
+  /** What one text-to-3-D run with matting and lighting removal publishes. */
+  const runImage = (
+    filename: string,
+    timestamp: number,
+    role: string,
+    stage: number,
+    job = "run-1",
+  ) =>
+    ({
+      filename,
+      timestamp,
+      metadata: {
+        prompt: "",
+        model: "hunyuan3d-mini-turbo",
+        mesh_workflow: {
+          job_id: job,
+          mode: "text_to_mesh",
+          role,
+          stage_index: stage,
+        },
+      },
+    }) as never as GalleryImage;
+
+  function seedRun() {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 3),
+      runImage("delighted.png", 3, "delighted_image", 2),
+      runImage("matted.png", 2, "matted_image", 1),
+      runImage("source.png", 1, "generated_image", 0),
+      img("unrelated.png", 5),
+    ]);
+    return gallery;
+  }
+
+  /*
+   * The reported problem: a run left four tiles in My images, sorted by time
+   * and indistinguishable from four things a person made. The mesh is the
+   * result; the rest are how it was reached.
+   */
+  it("shows the mesh and hides the steps, leaving other prints alone", () => {
+    const gallery = seedRun();
+    /*
+     * `filtered` is what the GRID renders. Asserting only on `basePrints` —
+     * which feeds the sidebar count and the filter chips — is how this shipped
+     * as a no-op on screen with a green suite AND a count that disagreed with
+     * the four tiles still showing.
+     */
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["unrelated.png", "object.glb"]);
+    expect(gallery.basePrints.map((p) => p.item.filename)).toEqual(["unrelated.png", "object.glb"]);
+    // The header count agrees with what is on screen.
+    expect(gallery.defaultLibraryPrints).toHaveLength(2);
+  });
+
+  /* Opening a run is the only thing that reveals its steps — the album rule. */
+  it("reveals exactly that run's assets when it is opened", () => {
+    const gallery = seedRun();
+    gallery.workflowId = "run-1";
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual([
+      "object.glb",
+      "delighted.png",
+      "matted.png",
+      "source.png",
+    ]);
+    // A print no workflow made is not part of anyone's run.
+    expect(gallery.filtered.map((p) => p.item.filename)).not.toContain("unrelated.png");
+  });
+
+  /*
+   * A mark the user applied by hand is a request for that exact print. The
+   * collapse is a BROWSE tidy-up, so it must stand down wherever the person
+   * has narrowed to specific prints — there is no stack to open in the
+   * Favourites scope, so a collapsed favourite is simply gone.
+   */
+  it("shows a favourited step in Favourites, where no stack could open it", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 3),
+      { ...runImage("source.png", 1, "generated_image", 0), favorite: true } as never,
+      organized("unrelated.png", 5, { favorite: true }),
+    ]);
+    gallery.scope = "favorites";
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["unrelated.png", "source.png"]);
+  });
+
+  it("shows a tagged step when its tag is the filter", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 3),
+      { ...runImage("matted.png", 2, "matted_image", 1), tags: ["keep"] } as never,
+    ]);
+    gallery.tagFilter = ["keep"];
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["matted.png"]);
+  });
+
+  it("finds a step by name when it is searched for", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 3),
+      runImage("matted.png", 2, "matted_image", 1),
+      runImage("source.png", 1, "generated_image", 0),
+    ]);
+    gallery.query = "matted";
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["matted.png"]);
+  });
+
+  /*
+   * A GUARD, not a pin: it asserts the same thing the first test in this block
+   * does, and it passes against every version of the stand-down rule. It earns
+   * its place by failing the OTHER way — delete the collapse and it goes red —
+   * so the rule can never be widened until it hides nothing.
+   */
+  it("still collapses while plainly browsing", () => {
+    const gallery = seedRun();
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["unrelated.png", "object.glb"]);
+  });
+
+  /* The header count and the grid agree while browsing, which is where the
+   * two used to disagree: "Everything 6" beside three tiles. */
+  it("counts what the grid shows while browsing", () => {
+    const gallery = seedRun();
+    // The absolute number first: comparing the two computeds ALONE passes when
+    // both are wrong the same way — with no collapse at all this read 5 and 5.
+    expect(gallery.filtered).toHaveLength(2);
+    expect(gallery.basePrintCount).toBe(2);
+  });
+
+  /*
+   * ...and it is the LIBRARY'S size, so opening a scope, typing a word, or
+   * drilling into a run must not rewrite it — the same promise the count
+   * already keeps when an album is opened.
+   *
+   * The drill-in leg is the load-bearing one: it is what went wrong (the count
+   * followed the grid into the run and read 3). The other three legs pass
+   * against every version of this code and are here to stop the count being
+   * re-coupled to the grid's narrowing later — do not "simplify" them away as
+   * redundant, they are the ratchet.
+   */
+  it("keeps the library count still while the grid narrows", () => {
+    const gallery = seedRun();
+    const atRest = gallery.basePrintCount;
+    expect(atRest).toBe(2);
+    for (const narrow of [
+      () => (gallery.scope = "favorites"),
+      () => (gallery.query = "matted"),
+      () => (gallery.tagFilter = ["keep"]),
+      () => {
+        gallery.scope = "prints";
+        gallery.workflowId = "run-1";
+      },
+    ]) {
+      gallery.scope = "prints";
+      gallery.query = "";
+      gallery.tagFilter = [];
+      gallery.workflowId = null;
+      narrow();
+      expect(gallery.basePrintCount).toBe(atRest);
+    }
+  });
+
+  /*
+   * Filing a print into an album is exactly as hand-applied as favouriting it,
+   * and an open album is exactly as stack-less as the Favourites scope — there
+   * is no tile there to open the run from, and the drill-in is inert outside
+   * Everything. Leaving albums out of the rule reproduced the bug it was
+   * written to kill.
+   */
+  it("shows a step filed into an album when that album is open", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 3),
+      { ...runImage("source.png", 1, "generated_image", 0), collections: ["c1"] } as never,
+      // An ordinary print in the SAME album, so an empty grid can never be
+      // read as "the fixture's collections field was ignored".
+      organized("plain.png", 0, { collections: ["c1"] }),
+    ]);
+    gallery.collectionsByHost["local"] = loadedCollections([collection("c1", "Keepers", 2)]);
+    gallery.scope = "collections";
+    gallery.collectionSlug = "keepers";
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["source.png", "plain.png"]);
+  });
+
+  /*
+   * The shelf card is a promise about what opening it shows, under the same
+   * rule: file the run's LEAD alongside a step and the album is one stacked
+   * tile, because the lead is right there to open.
+   */
+  it("counts an album by what opening it shows", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      { ...runImage("object.glb", 4, "final_glb", 3), collections: ["c1"] } as never,
+      { ...runImage("source.png", 1, "generated_image", 0), collections: ["c1"] } as never,
+      organized("plain.png", 0, { collections: ["c1"] }),
+    ]);
+    gallery.collectionsByHost["local"] = loadedCollections([collection("c1", "Keepers", 3)]);
+    gallery.scope = "collections";
+    gallery.collectionSlug = "keepers";
+    // Three prints filed, drawn as two tiles: the run's stack, and the plain
+    // print. Both numbers are asserted, so this cannot pass at 0 and 0.
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["object.glb", "plain.png"]);
+    expect(gallery.collectionCounts("keepers")).toBe(2);
+  });
+
+  /*
+   * The stack badge, its menu entry and the Lightbox door all draw wherever a
+   * lead tile does — including Favourites, an open album and the Trash. Setting
+   * only the id there is a no-op (`openWorkflowId` launders it away), so the
+   * entry did nothing, and the written id made a later return to Everything
+   * land inside a run nobody opened.
+   */
+  it("moves to Everything when a run is opened from another scope", () => {
+    const gallery = seedRun();
+    gallery.scope = "favorites";
+    gallery.openWorkflowRun("run-1");
+    expect(gallery.scope).toBe("prints");
+    expect(gallery.openWorkflowId).toBe("run-1");
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual([
+      "object.glb",
+      "delighted.png",
+      "matted.png",
+      "source.png",
+    ]);
+  });
+
+  /*
+   * You reach a run's step by searching for it, so entering the run from there
+   * must not carry the search in: the grid showed one tile while the chip said
+   * "3-D object · 1 print" for a run of four, because the chip counts what is
+   * drawn.
+   */
+  it("drops the narrowing that led you to the run", () => {
+    const gallery = seedRun();
+    gallery.query = "matted";
+    gallery.tagFilter = ["keep"];
+    gallery.mediaKind = "image";
+    gallery.openWorkflowRun("run-1");
+    expect(gallery.query).toBe("");
+    expect(gallery.tagFilter).toEqual([]);
+    expect(gallery.mediaKind).toBe("all");
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual([
+      "object.glb",
+      "delighted.png",
+      "matted.png",
+      "source.png",
+    ]);
+  });
+
+  it("leaves the scope alone when a run is closed", () => {
+    const gallery = seedRun();
+    gallery.openWorkflowRun("run-1");
+    gallery.scope = "trash";
+    gallery.openWorkflowRun(null);
+    expect(gallery.scope).toBe("trash");
+    expect(gallery.workflowId).toBeNull();
+  });
+
+  /*
+   * Every scope's header count is a promise about that scope's own grid. The
+   * numbers deliberately differ between scopes — Everything counts one tile
+   * per run while Favourites counts favourited prints — but neither may
+   * disagree with what it is standing over.
+   */
+  it("agrees with its own grid in every scope", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 2),
+      { ...runImage("matted.png", 3, "matted_image", 1), favorite: true } as never,
+      { ...runImage("source.png", 2, "generated_image", 0), favorite: true } as never,
+      organized("plain.png", 1, {}),
+    ]);
+    // Everything: the run is one tile, plus the ordinary print.
+    expect(gallery.basePrintCount).toBe(2);
+    expect(gallery.filtered).toHaveLength(2);
+    // Favourites: both marked steps, and the count says so too.
+    gallery.scope = "favorites";
+    const favorites = gallery.merged.filter(
+      (e) => gallery.visibleInDefaultLibrary(e) && gallery.organizationOf(e).favorite,
+    ).length;
+    expect(favorites).toBe(2);
+    expect(gallery.filtered).toHaveLength(favorites);
+  });
+
+  /*
+   * The `Pictures` chip excludes the mesh by KIND, so the tile that would hide
+   * the run's pictures is not drawn there. Hiding them anyway made a whole run
+   * contribute nothing at all — worse than scattering, because there was no
+   * stack badge and no menu entry left to reach them from. Worse still, typing
+   * any character revealed them again: the same facet, opposite answers,
+   * decided by an unrelated control.
+   */
+  it("shows a run's pictures under Pictures, where the mesh cannot lead", () => {
+    const gallery = seedRun();
+    gallery.mediaKind = "image";
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual([
+      "unrelated.png",
+      "delighted.png",
+      "matted.png",
+      "source.png",
+    ]);
+  });
+
+  /* Under 3-D the mesh IS on screen, so it leads and the steps stay behind it. */
+  it("keeps the run one tile under 3-D, where the mesh leads", () => {
+    const gallery = seedRun();
+    gallery.mediaKind = "mesh";
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["object.glb"]);
+  });
+
+  /* A kind chip must not change its own answer because a word was typed. */
+  it("answers the same for a kind chip with and without a query", () => {
+    const gallery = seedRun();
+    gallery.mediaKind = "image";
+    const withoutQuery = gallery.filtered.map((p) => p.item.filename);
+    gallery.query = "png";
+    const withQuery = gallery.filtered.map((p) => p.item.filename);
+    expect(withQuery).toEqual(withoutQuery);
+  });
+
+  /*
+   * A trashed print carries its own purge countdown and its own Restore, so
+   * hiding one behind a lead would let retention purge something nobody was
+   * shown. The live-only index makes that true by accident today; it stops
+   * being an accident the moment one machine has a print live that another
+   * has trashed, because the shared filename puts the trashed row in the live
+   * index.
+   */
+  it("never collapses the Trash, even when the live index knows the name", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    // Live: the whole run, so every filename is in the index.
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 2),
+      runImage("source.png", 2, "generated_image", 0),
+    ]);
+    // Trashed on another machine: the same two names.
+    gallery.trashBuckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 2),
+      runImage("source.png", 2, "generated_image", 0),
+    ]);
+    gallery.scope = "trash";
+    expect(gallery.basePrints.map((p) => p.item.filename)).toEqual(["object.glb", "source.png"]);
+  });
+
+  /*
+   * `filterChipTags` reads `basePrints`, so guarding that from the collapse
+   * also made the Trash's chips agree with the Trash's grid — a tag borne only
+   * by a run's step now counts there, where the chip used to say a number the
+   * grid could not show. Pinning it so the agreement is not accidental.
+   */
+  it("counts Trash tag chips over what the Trash actually shows", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    // Both copies carry the tag: `organizationOf` resolves a trashed row
+    // through the LIVE index when the filename collides, so tagging only the
+    // trashed copies leaves the chip falling back to the inventory count and
+    // the assertion below passes for the wrong reason.
+    const tagged = (image: GalleryImage) => ({ ...image, tags: ["keep"] }) as GalleryImage;
+    gallery.buckets.local = loadedBucket([
+      tagged(runImage("object.glb", 4, "final_glb", 2)),
+      tagged(runImage("source.png", 2, "generated_image", 0)),
+    ]);
+    gallery.trashBuckets.local = loadedBucket([
+      tagged(runImage("object.glb", 4, "final_glb", 2)),
+      tagged(runImage("source.png", 2, "generated_image", 0)),
+    ]);
+    // The chip row draws its NAMES from the host's tag inventory; the count
+    // beside each is what `filterChipTags` computes over the scope's prints.
+    gallery.tagsByHost.local = { items: [{ name: "keep", count: 99 }], loaded: true };
+    gallery.scope = "trash";
+    expect(gallery.trashFiltered).toHaveLength(2);
+    expect(gallery.filterChipTags.find((t) => t.name.toLowerCase() === "keep")?.count).toBe(
+      gallery.trashFiltered.length,
+    );
+  });
+
+  it("indexes every member back to its run and its part in it", () => {
+    const gallery = seedRun();
+    const index = gallery.meshWorkflowIndex;
+    expect(index.get("object.glb")).toMatchObject({
+      jobId: "run-1",
+      role: "final_glb",
+      lead: true,
+      memberCount: 4,
+    });
+    expect(index.get("source.png")).toMatchObject({ lead: false, stageIndex: 0 });
+    expect(index.has("unrelated.png")).toBe(false);
+  });
+
+  /*
+   * The index spanned live AND trashed prints, so a run's lead could be a
+   * print that is not in the scope being drawn. Trash the mesh and its source
+   * picture is still "not the lead" — so it is hidden from the live grid while
+   * the lead sits in the trash, and the whole run vanishes from My images.
+   */
+  it("keeps a run visible in the live grid when its mesh is trashed", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("source.png", 1, "generated_image", 0),
+      img("unrelated.png", 5),
+    ]);
+    gallery.trashBuckets.local = loadedBucket([runImage("object.glb", 4, "final_glb", 3)]);
+    expect(gallery.basePrints.map((p) => p.item.filename)).toEqual(["unrelated.png", "source.png"]);
+  });
+
+  /*
+   * The count names what opening the run will show. Counting across scopes
+   * promised four assets and revealed two.
+   */
+  it("counts only the members in the scope being drawn", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 3),
+      runImage("source.png", 1, "generated_image", 0),
+    ]);
+    gallery.trashBuckets.local = loadedBucket([
+      runImage("matted.png", 2, "matted_image", 1),
+      runImage("delighted.png", 3, "delighted_image", 2),
+    ]);
+    expect(gallery.meshWorkflowIndex.get("object.glb")?.memberCount).toBe(2);
+  });
+
+  /* Absence is an ordinary print or an older host, never a refusal. */
+  it("changes nothing for a gallery no workflow touched", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([img("a.png", 2), img("b.png", 1)]);
+    expect(gallery.basePrints.map((p) => p.item.filename)).toEqual(["a.png", "b.png"]);
+    expect(gallery.meshWorkflowIndex.size).toBe(0);
+  });
+});
