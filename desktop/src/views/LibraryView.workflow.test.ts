@@ -66,21 +66,24 @@ describe("the Library's 3-D run doors", () => {
    * already calls a gallery row ("Deleted N prints everywhere").
    */
   it("calls a run's members by one name, on every surface that names them", () => {
-    expect(viewSource).toContain('`3-D object · ${count} ${count === 1 ? "print" : "prints"}`');
-    expect(viewSource).toContain("`Show the ${membership.memberCount} prints`");
-    expect(viewSource).toContain("`One 3-D run, ${tile.model.workflowCount} prints`");
+    expect(viewSource).toContain('`3-D object · ${count} ${count === 1 ? "picture" : "pictures"}`');
+    expect(viewSource).toContain("`Show the ${membership.memberCount} pictures`");
+    expect(viewSource).toContain("`One 3-D run, ${tile.model.workflowCount} pictures`");
     // The Lightbox aside and the release note name the same set. A test that
     // read only this view stayed green while those two said "Show all N of
     // these" — three surfaces, two names, one of them checked.
-    expect(lightboxSource).toContain("Show the {{ workflowAssetCount }} prints");
-    expect(releaseNote).toContain("**Show the N prints**");
+    expect(lightboxSource).toContain("Show the {{ workflowAssetCount }} pictures");
+    expect(releaseNote).toContain("**Show the N pictures**");
     // Only the RUN's own wording — "N pictures" is right elsewhere (the Trash
     // confirm deletes pictures), so a blanket ban would be a false alarm.
     for (const source of [viewSource, lightboxSource, releaseNote])
       for (const wrong of [
         "Show all",
         "memberCount} assets",
-        "workflowCount} pictures",
+        "memberCount} prints",
+        // `docs/design/README.md` §2 lists "Prints" as a word to replace, and
+        // the album card counting the same kind of set says "pictures".
+        "workflowCount} prints",
         "workflowAssetCount }} of these",
       ])
         expect(source).not.toContain(wrong);

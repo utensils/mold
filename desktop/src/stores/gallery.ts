@@ -987,7 +987,7 @@ export const useGalleryStore = defineStore("gallery", {
      * `openWorkflowId` launders the id to null in every scope but Everything,
      * so setting `workflowId` alone is a no-op wherever the person actually
      * sees a stack badge — in Favourites, in an open album, in the Trash the
-     * menu offered "Show the N prints" and clicking it did nothing, while the
+     * menu offered "Show the N pictures" and clicking it did nothing, while the
      * written id made a later return to Everything land inside a run nobody
      * opened. Entering a run therefore moves the scope with it, here, once.
      */

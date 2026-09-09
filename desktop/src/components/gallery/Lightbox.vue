@@ -1063,7 +1063,7 @@ async function performVideoExport(options: VideoExportOptions) {
               class="ms-toolbar-button flex-1 justify-center"
               @click="emit('showWorkflowAssets')"
             >
-              Show the {{ workflowAssetCount }} prints
+              Show the {{ workflowAssetCount }} pictures
             </button>
           </div>
           <div v-if="(item.assets?.length ?? 0) > 0" class="flex flex-wrap gap-2">

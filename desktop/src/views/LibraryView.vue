@@ -195,7 +195,7 @@ const drillInName = computed(() =>
 const openRunName = computed(() => {
   if (!gallery.openWorkflowId) return null;
   const count = gallery.filtered.length;
-  return `3-D object · ${count} ${count === 1 ? "print" : "prints"}`;
+  return `3-D object · ${count} ${count === 1 ? "picture" : "pictures"}`;
 });
 
 /** The shelf (cards) shows only in Collections with no collection open. */
@@ -1198,7 +1198,7 @@ function meshWorkflowEntries(entry: MergedPrint): MenuEntry[] {
     // that was never in a run.
     const open = gallery.openWorkflowId === membership.jobId;
     entries.push({
-      label: open ? "Back to everything" : `Show the ${membership.memberCount} prints`,
+      label: open ? "Back to everything" : `Show the ${membership.memberCount} pictures`,
       action: () => {
         gallery.openWorkflowRun(open ? null : membership.jobId);
       },
@@ -2913,7 +2913,7 @@ onUnmounted(() => {
                   v-if="!tile.model.workflowRole && tile.model.workflowCount > 1"
                   data-test="workflow-stack-badge"
                   class="ms-lib-kind ms-lib-stack"
-                  :aria-label="`One 3-D run, ${tile.model.workflowCount} prints`"
+                  :aria-label="`One 3-D run, ${tile.model.workflowCount} pictures`"
                 >
                   <Icon name="layers" :size="10" aria-hidden="true" />
                   {{ tile.model.workflowCount }}
