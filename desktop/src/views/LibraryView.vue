@@ -37,6 +37,7 @@ import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";
+import { meshWorkflowRouteFor } from "@studio/lib/meshWorkflowProvenance";
 import {
   fetchGalleryMediaBytes,
   galleryMediaPath,
@@ -660,6 +661,22 @@ async function transitionUpscale(action: "pause" | "resume" | "cancel") {
 // restores exactly like any other print — this is the ONLY path that attaches
 // retained source-media authority (`composer.set` invalidates it).
 
+/** Open the 3-D run that made this print, with its inputs restored. */
+function reopenAsWorkflow(entry: MergedPrint) {
+  const route = meshWorkflowRouteFor(entry.item.metadata);
+  if (!route) return;
+  lightboxOpen.value = false;
+  void router.push(route);
+}
+
+/** Show the rest of what that run made, in the grid. */
+function showWorkflowAssets(entry: MergedPrint) {
+  const membership = gallery.meshWorkflowIndex.get(entry.item.filename);
+  if (!membership) return;
+  lightboxOpen.value = false;
+  gallery.workflowId = membership.jobId;
+}
+
 function reuseSettings(entry: MergedPrint) {
   // Full metadata → full-fidelity restore (negative prompt, LoRAs,
   // scheduler, video params, …) via `applyPrefillToForm`.
@@ -1138,6 +1155,33 @@ function collectionSubmenu(entry: MergedPrint): MenuEntry[] {
   return items;
 }
 
+/**
+ * The two doors a 3-D run's print opens: the run itself, and the rest of what
+ * it made. Absent for every ordinary print and on a host that predates the
+ * provenance field, so nothing is offered that cannot be delivered.
+ */
+function meshWorkflowEntries(entry: MergedPrint): MenuEntry[] {
+  const membership = gallery.meshWorkflowIndex.get(entry.item.filename);
+  if (!membership) return [];
+  const route = meshWorkflowRouteFor(entry.item.metadata);
+  const entries: MenuEntry[] = [{ separator: true }];
+  if (membership.memberCount > 1) {
+    const open = gallery.workflowId === membership.jobId;
+    entries.push({
+      label: open ? "Back to everything" : `Show the ${membership.memberCount} assets`,
+      action: () => {
+        gallery.workflowId = open ? null : membership.jobId;
+      },
+    });
+  }
+  if (route)
+    entries.push({
+      label: "Reopen as a workflow",
+      action: () => void router.push(route),
+    });
+  return entries.length > 1 ? entries : [];
+}
+
 function tileMenu(entry: MergedPrint): MenuEntry[] {
   const item = entry.item;
   const m = item.metadata;
@@ -1226,6 +1270,10 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
   }
   return [
     { label: "Use these settings", action: () => reuseSettings(entry) },
+    // A print a 3-D workflow made has a second, truer door: the run that made
+    // it, with every input restored. "Use these settings" degrades it to a
+    // one-shot on the mesh style, which is not what the person authored.
+    ...meshWorkflowEntries(entry),
     ...(organize
       ? [
           { separator: true } as MenuEntry,
@@ -1723,6 +1771,9 @@ interface TileModel {
   /** The mock's word badge: "clip 5s" / "3-D" / "audio", "" for a still. */
   kindBadge: string;
   upscaled: boolean;
+  /** How many prints the 3-D run behind this tile produced, or 0 for an
+   *  ordinary print. Drawn as the stack marker beside the kind badge. */
+  workflowCount: number;
   /** Media bytes are addressed differently for a host bucket and this Mac. */
   mediaPath: string;
   localVideo: boolean;
@@ -1754,6 +1805,9 @@ const tileModels = computed<TileModel[]>(() => {
   const list = entries.value;
   const organizationOf = gallery.organizationOf;
   const organizeCapable = gallery.organizeCapable;
+  // The store built this once for this data change; the loop does one
+  // `Map.get` per tile rather than a scan.
+  const workflowIndex = gallery.meshWorkflowIndex;
   const trash = inTrash.value;
   const models: TileModel[] = new Array(list.length);
   for (let i = 0; i < list.length; i++) {
@@ -1783,6 +1837,7 @@ const tileModels = computed<TileModel[]>(() => {
       mesh,
       kindBadge: mediaKindBadge(item, { clip, audio, mesh }),
       upscaled: isUpscaledImage(item),
+      workflowCount: workflowIndex.get(item.filename)?.memberCount ?? 0,
       mediaPath: galleryMediaPath(item.filename, source, true, item.trashed_at != null),
       // The tile is always a still thumbnail now; a local clip's poster comes
       // from the native cache rather than a <video> element per tile.
@@ -2763,6 +2818,17 @@ onUnmounted(() => {
                 >
                   {{ tile.model.kindBadge }}
                 </span>
+                <!-- One 3-D run publishes a print per stage. The mesh is the
+                     tile; this says how many pictures came with it, and the
+                     tile's own click opens them. -->
+                <span
+                  v-if="tile.model.workflowCount > 1"
+                  data-test="workflow-stack-badge"
+                  class="ms-lib-kind ms-lib-stack"
+                  :aria-label="`${tile.model.workflowCount} assets from one 3-D run`"
+                >
+                  ⧉ {{ tile.model.workflowCount }}
+                </span>
                 <span
                   v-if="showBadges"
                   data-test="host-badge"
@@ -2870,6 +2936,9 @@ onUnmounted(() => {
       :video="isVideo(selectedEntry.item)"
       :audio="isAudio(selectedEntry.item)"
       :mesh="isMesh(selectedEntry.item)"
+      :workflow-assets="
+        gallery.meshWorkflowIndex.get(selectedEntry.item.filename)?.memberCount ?? 0
+      "
       :mesh-export-formats="meshExportFormats"
       :mesh-export-geometry="meshExportGeometry"
       :source="gallery.mediaSourceOf(selectedEntry.sourceKey)"
@@ -2891,6 +2960,8 @@ onUnmounted(() => {
       @delete="removeSelected"
       @use-source="useSelectedAsSource"
       @reuse="reuseSettings(selectedEntry!)"
+      @reopen-workflow="reopenAsWorkflow(selectedEntry!)"
+      @show-workflow-assets="showWorkflowAssets(selectedEntry!)"
       @rename="(title) => renamePrint(selectedEntry!, title)"
       @favorite="(value) => setFavorite([selectedEntry!], value)"
       @tags="(change) => applyTags([selectedEntry!], change)"
@@ -3033,6 +3104,11 @@ onUnmounted(() => {
   background: var(--mold-bg-crust);
   padding: 2px 6px;
   white-space: nowrap;
+}
+/* The stack marker sits beside the kind badge and reads as one more fact
+ * about the tile, not a second control. */
+.ms-lib-stack {
+  font-variant-numeric: tabular-nums;
 }
 
 /* ★ overlay: a drop shadow keeps the glyph legible on any print. */

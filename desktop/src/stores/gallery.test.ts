@@ -2049,3 +2049,88 @@ describe("organization server events", () => {
     expect(gallery.tagsByHost["hal9000-7680"]).toBeUndefined();
   });
 });
+
+describe("a 3-D run is one gallery item", () => {
+  /** What one text-to-3-D run with matting and lighting removal publishes. */
+  const runImage = (
+    filename: string,
+    timestamp: number,
+    role: string,
+    stage: number,
+    job = "run-1",
+  ) =>
+    ({
+      filename,
+      timestamp,
+      metadata: {
+        prompt: "",
+        mesh_workflow: {
+          job_id: job,
+          mode: "text_to_mesh",
+          role,
+          stage_index: stage,
+        },
+      },
+    }) as never as GalleryImage;
+
+  function seedRun() {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 3),
+      runImage("delighted.png", 3, "delighted_image", 2),
+      runImage("matted.png", 2, "matted_image", 1),
+      runImage("source.png", 1, "generated_image", 0),
+      img("unrelated.png", 5),
+    ]);
+    return gallery;
+  }
+
+  /*
+   * The reported problem: a run left four tiles in My images, sorted by time
+   * and indistinguishable from four things a person made. The mesh is the
+   * result; the rest are how it was reached.
+   */
+  it("shows the mesh and hides the steps, leaving other prints alone", () => {
+    const gallery = seedRun();
+    expect(gallery.basePrints.map((p) => p.item.filename)).toEqual(["unrelated.png", "object.glb"]);
+    // The header count agrees with what is on screen.
+    expect(gallery.defaultLibraryPrints).toHaveLength(2);
+  });
+
+  /* Opening a run is the only thing that reveals its steps — the album rule. */
+  it("reveals exactly that run's assets when it is opened", () => {
+    const gallery = seedRun();
+    gallery.workflowId = "run-1";
+    expect(gallery.basePrints.map((p) => p.item.filename)).toEqual([
+      "object.glb",
+      "delighted.png",
+      "matted.png",
+      "source.png",
+    ]);
+    // A print no workflow made is not part of anyone's run.
+    expect(gallery.basePrints.map((p) => p.item.filename)).not.toContain("unrelated.png");
+  });
+
+  it("indexes every member back to its run and its part in it", () => {
+    const gallery = seedRun();
+    const index = gallery.meshWorkflowIndex;
+    expect(index.get("object.glb")).toMatchObject({
+      jobId: "run-1",
+      role: "final_glb",
+      lead: true,
+      memberCount: 4,
+    });
+    expect(index.get("source.png")).toMatchObject({ lead: false, stageIndex: 0 });
+    expect(index.has("unrelated.png")).toBe(false);
+  });
+
+  /* Absence is an ordinary print or an older host, never a refusal. */
+  it("changes nothing for a gallery no workflow touched", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([img("a.png", 2), img("b.png", 1)]);
+    expect(gallery.basePrints.map((p) => p.item.filename)).toEqual(["a.png", "b.png"]);
+    expect(gallery.meshWorkflowIndex.size).toBe(0);
+  });
+});

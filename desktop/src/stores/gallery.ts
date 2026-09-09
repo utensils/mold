@@ -59,6 +59,11 @@ import {
   removeGalleryMutation,
   updateGalleryMutationFailure,
 } from "@studio/lib/galleryMutationOutbox";
+import {
+  indexMeshWorkflowGroups,
+  type GroupableRow,
+  type MeshWorkflowGroupMembership,
+} from "@studio/lib/meshWorkflowGroup";
 import { createUuid } from "@studio/lib/id";
 
 export type {
@@ -366,6 +371,12 @@ export const useGalleryStore = defineStore("gallery", {
     tagFilter: [] as string[],
     /** Collections drill-in: the open collection's slug, or null (the shelf). */
     collectionSlug: null as string | null,
+    /**
+     * The 3-D run currently opened, or null. A workflow's steps are collapsed
+     * under its mesh in every scope; opening one is the only thing that
+     * reveals them — the same rule the album drill-in follows.
+     */
+    workflowId: null as string | null,
     /** Per-host trashed prints (`GET /api/gallery?view=trash`). Same keys
      *  as `buckets`; fetched on demand by the Trash scope. */
     trashBuckets: {} as Record<string, GalleryBucket>,
@@ -474,6 +485,27 @@ export const useGalleryStore = defineStore("gallery", {
       add(this.merged);
       add(this.trashMerged);
       return index;
+    },
+    /**
+     * Every print filename → the 3-D workflow run it belongs to, computed
+     * ONCE per data change beside `organizationIndex` and for the same
+     * reason: a per-tile scan of the gallery is exactly what the Library's
+     * operation budgets refuse.
+     *
+     * This is a SECOND, orthogonal grouping to the cross-host merge above.
+     * That one asks "are these the same bytes on two machines"; a run's
+     * source picture and its mesh share no seed, size or model and can never
+     * collapse through it. This asks "were these made by one run", so a
+     * text-to-3-D run stops leaving four unrelated tiles.
+     */
+    meshWorkflowIndex(): Map<string, MeshWorkflowGroupMembership> {
+      const rows: GroupableRow[] = [];
+      for (const print of [...this.merged, ...this.trashMerged]) {
+        const copies = print.copies ?? [{ sourceKey: print.sourceKey, item: print.item }];
+        for (const copy of copies)
+          rows.push({ key: copy.item.filename, metadata: copy.item.metadata });
+      }
+      return indexMeshWorkflowGroups(rows).membership;
     },
     /** Logical prints in the trash across every host. */
     trashCount(): number {
@@ -610,6 +642,29 @@ export const useGalleryStore = defineStore("gallery", {
       return this.scope === "collections" ? this.collectionSlug : null;
     },
     /**
+     * Which prints survive the 3-D collapse.
+     *
+     * A durable workflow publishes an ordinary print per stage, so one
+     * text-to-3-D run left FOUR tiles — the source picture, its matted and
+     * delighted copies, and the mesh — indistinguishable from four things a
+     * person made. Only the run's mesh is drawn; opening it reveals the rest.
+     *
+     * The membership map is built once per data change, so this is a single
+     * `Map.get` per print and never a scan. It runs in `basePrints`, ahead of
+     * the chips and the tiles, so a slider drag re-runs no filter at all.
+     */
+    visibleAfterWorkflowCollapse(): (entry: MergedPrint) => boolean {
+      const membership = this.meshWorkflowIndex;
+      const open = this.workflowId;
+      return (entry) => {
+        const member = membership.get(entry.item.filename);
+        // Drilled in, the grid is that run and nothing else — the album rule.
+        if (open !== null) return member?.jobId === open;
+        // Otherwise every ordinary print stands, and a run shows its mesh.
+        return member?.lead !== false;
+      };
+    },
+    /**
      * Hidden albums are hidden until one is OPEN — in Everything, Favourites,
      * the Albums shelf and the Trash alike. Only the drill-in reveals them,
      * which is the whole point of hiding an album.
@@ -634,7 +689,9 @@ export const useGalleryStore = defineStore("gallery", {
     /** The live grid minus hidden albums — the library's own size, whatever
      *  scope is open. The shell's picture count reads this. */
     defaultLibraryPrints(): MergedPrint[] {
-      return this.merged.filter(this.visibleInDefaultLibrary);
+      return this.merged
+        .filter(this.visibleInDefaultLibrary)
+        .filter(this.visibleAfterWorkflowCollapse);
     },
     /**
      * The set the filter chips describe: the SCOPE'S OWN prints (the Trash
@@ -644,7 +701,8 @@ export const useGalleryStore = defineStore("gallery", {
      */
     basePrints(): MergedPrint[] {
       const scoped = this.scope === "trash" ? this.trashMerged : this.merged;
-      return this.hidesHiddenAlbums ? scoped.filter(this.visibleInDefaultLibrary) : scoped;
+      const albums = this.hidesHiddenAlbums ? scoped.filter(this.visibleInDefaultLibrary) : scoped;
+      return albums.filter(this.visibleAfterWorkflowCollapse);
     },
     /** Header count before host, kind, search, and organization narrowing —
      *  scope-independent, so switching to the Trash never rewrites it. */

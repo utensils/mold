@@ -96,6 +96,7 @@ function mountMesh(
   meshExportFormats: string[],
   meshExportGeometry: MeshExportGeometryCapabilities | null = null,
   item: GalleryImage = meshItem,
+  extra: Record<string, unknown> = {},
 ) {
   return mount(Lightbox, {
     props: {
@@ -107,6 +108,7 @@ function mountMesh(
       target,
       meshExportFormats,
       meshExportGeometry,
+      ...extra,
     },
     global: { stubs: { AuthedMedia: { template: "<div />" } } },
   });
@@ -432,5 +434,58 @@ describe("Lightbox — mesh poster", () => {
     await flushPromises();
 
     expect(wrapper.findComponent(MeshViewer).exists()).toBe(false);
+  });
+});
+
+describe("a print a 3-D run made", () => {
+  const runMesh = {
+    ...meshItem,
+    metadata: {
+      ...meshItem.metadata,
+      mesh_workflow: {
+        job_id: "run-1",
+        mode: "text_to_mesh",
+        role: "final_glb",
+        stage_index: 3,
+      },
+    },
+  } as never;
+
+  /*
+   * "Use these settings" degrades a workflow print to a one-shot on the mesh
+   * style, which is not what the person authored. The run itself is the truer
+   * door, and it only exists for a print a run actually made.
+   */
+  it("offers the run that made it, and the rest of what that run made", async () => {
+    const wrapper = mountMesh(["glb"], null, runMesh, { workflowAssets: 4 });
+    await flushPromises();
+    expect(wrapper.get("[data-test='reopen-as-workflow']").text()).toContain(
+      "Reopen as a workflow",
+    );
+    expect(wrapper.get("[data-test='show-workflow-assets']").text()).toContain("Show the 4 assets");
+
+    await wrapper.get("[data-test='reopen-as-workflow']").trigger("click");
+    expect(wrapper.emitted("reopenWorkflow")).toHaveLength(1);
+    await wrapper.get("[data-test='show-workflow-assets']").trigger("click");
+    expect(wrapper.emitted("showWorkflowAssets")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  /* A run that produced one print has nothing to show beside it. */
+  it("hides the assets door for a run with a single print", async () => {
+    const wrapper = mountMesh(["glb"], null, runMesh, { workflowAssets: 1 });
+    await flushPromises();
+    expect(wrapper.find("[data-test='reopen-as-workflow']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='show-workflow-assets']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  /* Absence is an ordinary print or an older host — never a refusal. */
+  it("offers neither door for a print no workflow made", async () => {
+    const wrapper = mountMesh(["glb"], null, meshItem);
+    await flushPromises();
+    expect(wrapper.find("[data-test='reopen-as-workflow']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='show-workflow-assets']").exists()).toBe(false);
+    wrapper.unmount();
   });
 });
