@@ -30,16 +30,6 @@ export interface GroupableRow {
   metadata: MeshWorkflowProvenanceCarrier | null | undefined;
 }
 
-export interface MeshWorkflowGroup {
-  jobId: string;
-  /** The run's mode, from whichever member reported one. */
-  mode: string;
-  /** The key of the print a collapsed view shows — the mesh. */
-  leadKey: string;
-  /** Every member's key, the lead FIRST, then the rest by stage order. */
-  memberKeys: string[];
-}
-
 /** What a single row needs to know about the run it belongs to. */
 export interface MeshWorkflowGroupMembership {
   jobId: string;
@@ -64,22 +54,17 @@ export interface MeshWorkflowGroupMembership {
  * than silently scattering back into several or vanishing entirely.
  */
 export function indexMeshWorkflowGroups(rows: readonly GroupableRow[]): {
-  groups: Map<string, MeshWorkflowGroup>;
   membership: Map<string, MeshWorkflowGroupMembership>;
 } {
   const staged = new Map<
     string,
-    { mode: string; members: { key: string; role: string; stage: number }[] }
+    { members: { key: string; role: string; stage: number }[] }
   >();
 
   for (const row of rows) {
     const provenance = meshWorkflowProvenanceOf(row.metadata);
     if (!provenance) continue;
-    const run = staged.get(provenance.job_id) ?? {
-      mode: provenance.mode,
-      members: [],
-    };
-    if (!run.mode && provenance.mode) run.mode = provenance.mode;
+    const run = staged.get(provenance.job_id) ?? { members: [] };
     run.members.push({
       key: row.key,
       role: provenance.role,
@@ -88,7 +73,6 @@ export function indexMeshWorkflowGroups(rows: readonly GroupableRow[]): {
     staged.set(provenance.job_id, run);
   }
 
-  const groups = new Map<string, MeshWorkflowGroup>();
   const membership = new Map<string, MeshWorkflowGroupMembership>();
 
   for (const [jobId, run] of staged) {
@@ -99,16 +83,6 @@ export function indexMeshWorkflowGroups(rows: readonly GroupableRow[]): {
       run.members.reduce((latest, member) =>
         member.stage >= latest.stage ? member : latest,
       );
-    const rest = run.members
-      .filter((member) => member.key !== lead.key)
-      .sort((a, b) => a.stage - b.stage);
-
-    groups.set(jobId, {
-      jobId,
-      mode: run.mode,
-      leadKey: lead.key,
-      memberKeys: [lead.key, ...rest.map((member) => member.key)],
-    });
     for (const member of run.members) {
       membership.set(member.key, {
         jobId,
@@ -120,7 +94,7 @@ export function indexMeshWorkflowGroups(rows: readonly GroupableRow[]): {
     }
   }
 
-  return { groups, membership };
+  return { membership };
 }
 
 /** The plain word for a member's part in its run. */

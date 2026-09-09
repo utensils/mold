@@ -22,9 +22,18 @@ describe("the Library's 3-D run doors", () => {
    * is easy to reintroduce at every new call site.
    */
   it("carries the owning machine from every reopen door", () => {
-    const calls = viewSource.match(/meshWorkflowRouteFor\([^)]*\)/gs) ?? [];
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-    for (const call of calls) expect(call, call).toContain("entry.sourceKey");
+    const good = viewSource.match(
+      /meshWorkflowRouteFor\(\s*entry\.item\.metadata,\s*workflowHostOf\(entry\)\s*\)/g,
+    );
+    expect(good?.length ?? 0).toBeGreaterThanOrEqual(2);
+    // Every call site, no exceptions: a helper test would pass while a caller
+    // forgot, which is exactly how this shipped wrong twice.
+    const all = viewSource.split("meshWorkflowRouteFor(").length - 1;
+    expect(all).toBe(good?.length ?? 0);
+    // Never the representative copy's bucket — an auto-saved remote output
+    // lands in this Mac's gallery, so `sourceKey` can say "local" for a run
+    // this Mac never performed.
+    expect(viewSource).not.toContain("metadata, entry.sourceKey)");
   });
 
   /* The route the doors build, given a print a run made. */

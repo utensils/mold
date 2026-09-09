@@ -36,15 +36,13 @@ describe("collapsing a 3-D run into one gallery item", () => {
    * the result; the rest are how it was reached.
    */
   it("shows the mesh and hides the steps that made it", () => {
-    const { groups, membership } = indexMeshWorkflowGroups(run);
-    expect(groups.get("run-1")?.leadKey).toBe("object.glb");
-    expect(groups.get("run-1")?.memberKeys).toEqual([
-      "object.glb",
-      "source.png",
-      "matted.png",
-      "delighted.png",
-    ]);
-    expect(membership.get("object.glb")?.memberCount).toBe(4);
+    const { membership } = indexMeshWorkflowGroups(run);
+    expect(membership.get("object.glb")).toMatchObject({
+      jobId: "run-1",
+      role: "final_glb",
+      lead: true,
+      memberCount: 4,
+    });
     expect(showsInGrid("object.glb", membership)).toBe(true);
     for (const hidden of ["source.png", "matted.png", "delighted.png"])
       expect(showsInGrid(hidden, membership), hidden).toBe(false);
@@ -71,21 +69,20 @@ describe("collapsing a 3-D run into one gallery item", () => {
    */
   it("keeps a run with no mesh yet as a single tile led by its latest step", () => {
     const partial = run.slice(0, 3);
-    const { groups, membership } = indexMeshWorkflowGroups(partial);
-    expect(groups.get("run-1")?.leadKey).toBe("delighted.png");
+    const { membership } = indexMeshWorkflowGroups(partial);
+    expect(membership.get("delighted.png")?.lead).toBe(true);
     expect(
       partial.filter((row) => showsInGrid(row.key, membership)),
     ).toHaveLength(1);
   });
 
   it("keeps separate runs separate", () => {
-    const { groups, membership } = indexMeshWorkflowGroups([
+    const { membership } = indexMeshWorkflowGroups([
       ...run,
       member("other.glb", "final_glb", 3, "run-2"),
       member("other.png", "generated_image", 0, "run-2"),
     ]);
-    expect(groups.size).toBe(2);
-    expect(groups.get("run-2")?.leadKey).toBe("other.glb");
+    expect(membership.get("other.glb")?.lead).toBe(true);
     expect(membership.get("other.png")?.jobId).toBe("run-2");
     expect(membership.get("object.glb")?.memberCount).toBe(4);
     expect(membership.get("other.glb")?.memberCount).toBe(2);

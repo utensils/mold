@@ -373,9 +373,8 @@ export const useGalleryStore = defineStore("gallery", {
     /** Collections drill-in: the open collection's slug, or null (the shelf). */
     collectionSlug: null as string | null,
     /**
-     * The 3-D run currently opened, or null. A workflow's steps are collapsed
-     * under its mesh in every scope; opening one is the only thing that
-     * reveals them — the same rule the album drill-in follows.
+     * The 3-D run drilled into, or null. Opening one is the only thing that
+     * reveals its steps — the album drill-in's rule.
      */
     workflowId: null as string | null,
     /** Per-host trashed prints (`GET /api/gallery?view=trash`). Same keys
@@ -659,9 +658,21 @@ export const useGalleryStore = defineStore("gallery", {
      * `Map.get` per print and never a scan. It runs in `basePrints`, ahead of
      * the chips and the tiles, so a slider drag re-runs no filter at all.
      */
+    /**
+     * The run drilled into, or null in every scope that cannot show one.
+     *
+     * A stale id left behind by a scope switch is NOT an open run — the same
+     * laundering `openCollectionSlug` does. Without it, drilling into a run and
+     * switching to Favourites left the grid filtered to members that are not
+     * favourited: an empty library with no tile to right-click, no chip and no
+     * way back short of a restart.
+     */
+    openWorkflowId(): string | null {
+      return this.scope === "prints" ? this.workflowId : null;
+    },
     visibleAfterWorkflowCollapse(): (entry: MergedPrint) => boolean {
       const membership = this.meshWorkflowIndex;
-      const open = this.workflowId;
+      const open = this.openWorkflowId;
       return (entry) => {
         // Drilled in, the grid is that run and nothing else — the album rule.
         if (open !== null) return membership.get(entry.item.filename)?.jobId === open;

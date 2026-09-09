@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { meshWorkflowProvenanceOf } from "@studio/lib/meshWorkflowProvenance";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 import Icon from "@ui/components/Icon.vue";
 import VideoExportDialog from "@ui/components/VideoExportDialog.vue";
@@ -149,9 +148,17 @@ const props = withDefaults(
  * The 3-D run this print belongs to, if any. Read off the print's own
  * metadata: absence is an ordinary print, or a host that predates the field.
  */
-const meshWorkflow = computed(() => meshWorkflowProvenanceOf(props.item.metadata));
-/** How many prints the run produced. The owner knows; 0 hides the door. */
+/** How many prints the run produced. The owner knows; 0 hides the doors. */
 const workflowAssetCount = computed(() => props.workflowAssets ?? 0);
+/**
+ * Whether this print belongs to a 3-D run the owner is showing.
+ *
+ * The OWNER decides: it holds the run's membership for the scope on screen.
+ * Re-deriving it from the metadata here was a second authority that could
+ * disagree — a print carrying a valid block but absent from the current
+ * scope's index showed the doors with a count of zero.
+ */
+const meshWorkflow = computed(() => workflowAssetCount.value > 0);
 
 const emit = defineEmits<{
   close: [];
@@ -1047,7 +1054,7 @@ async function performVideoExport(options: VideoExportOptions) {
               class="ms-toolbar-button flex-1 justify-center"
               @click="emit('reopenWorkflow')"
             >
-              Reopen as a workflow
+              Open the 3-D run
             </button>
             <button
               v-if="workflowAssetCount > 1"
@@ -1056,7 +1063,7 @@ async function performVideoExport(options: VideoExportOptions) {
               class="ms-toolbar-button flex-1 justify-center"
               @click="emit('showWorkflowAssets')"
             >
-              Show the {{ workflowAssetCount }} assets
+              Show all {{ workflowAssetCount }} of these
             </button>
           </div>
           <div v-if="(item.assets?.length ?? 0) > 0" class="flex flex-wrap gap-2">

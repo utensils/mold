@@ -459,10 +459,10 @@ describe("a print a 3-D run made", () => {
   it("offers the run that made it, and the rest of what that run made", async () => {
     const wrapper = mountMesh(["glb"], null, runMesh, { workflowAssets: 4 });
     await flushPromises();
-    expect(wrapper.get("[data-test='reopen-as-workflow']").text()).toContain(
-      "Reopen as a workflow",
+    expect(wrapper.get("[data-test='reopen-as-workflow']").text()).toContain("Open the 3-D run");
+    expect(wrapper.get("[data-test='show-workflow-assets']").text()).toContain(
+      "Show all 4 of these",
     );
-    expect(wrapper.get("[data-test='show-workflow-assets']").text()).toContain("Show the 4 assets");
 
     await wrapper.get("[data-test='reopen-as-workflow']").trigger("click");
     expect(wrapper.emitted("reopenWorkflow")).toHaveLength(1);
