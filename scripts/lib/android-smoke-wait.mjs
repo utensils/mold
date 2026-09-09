@@ -65,6 +65,11 @@ export async function until(read, label, options = {}) {
     } catch (error) {
       lastReadError = error;
     }
+    // After the read, which reads naturally but is NOT what makes a retry
+    // safe: `actUntil` re-reads immediately before it dispatches, and that
+    // guard is what prevents an over-dispatch. Moving this ahead of the read
+    // is therefore harmless, and no test pins the order — deliberately, so
+    // nobody strengthens a property the code does not rely on.
     if (options.onRetry) {
       try {
         await options.onRetry(attempts);
@@ -74,9 +79,15 @@ export async function until(read, label, options = {}) {
     }
     await pause(options.pollIntervalMs ?? POLL_INTERVAL_MS);
   }
+  // Name the action's failure in the MESSAGE, not just on the object: a run
+  // whose every dispatch threw looks identical in the log to one whose reads
+  // simply never came true, and those want different fixes.
+  const acted = lastActError
+    ? `; last dispatch failed: ${lastActError.message}`
+    : "";
   const failure = new Error(
     `Timed out: ${label} (${Math.round((now() - started) / 1000)}s, ` +
-      `${attempts} attempts)`,
+      `${attempts} attempts)${acted}`,
     { cause: lastReadError },
   );
   if (lastActError) failure.actError = lastActError;
@@ -98,11 +109,17 @@ export async function until(read, label, options = {}) {
  */
 export async function actUntil(act, read, label, options = {}) {
   const every = options.redispatchEvery ?? REDISPATCH_EVERY_ATTEMPTS;
-  await act();
+  // The OPENING dispatch happens inside the loop, not ahead of it, so it is
+  // exactly as retryable as every later one. Dispatched outside, a transient
+  // failure in the very first attempt killed the whole run: a CI emulator
+  // answered `Input.dispatchTouchEvent` past the 10s CDP timeout and the
+  // suite died with a bare `CDP timeout`, naming no step. The action is the
+  // thing that goes wrong here — there is no reason its first try is special.
+  let dispatched = false;
   return until(read, label, {
     ...options,
     onRetry: async (attempts) => {
-      if (attempts % every !== 0) return;
+      if (dispatched && attempts % every !== 0) return;
       // Re-READ, immediately before re-dispatching. The poll that scheduled
       // this retry is already one interval old, and for an action that is not
       // idempotent that gap is the whole risk: a second Android Back arriving
@@ -111,8 +128,9 @@ export async function actUntil(act, read, label, options = {}) {
       // `consumed != "true"` and calls `delegate()` — which finishes the
       // activity. The smoke test would then PASS its Back assertion (the tab
       // bar is back) and fail three steps later for no visible reason.
-      if (await read()) return;
+      if (dispatched && (await read())) return;
       await act();
+      dispatched = true;
     },
   });
 }

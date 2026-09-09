@@ -134,9 +134,11 @@ describe("actUntil", () => {
    * The property that makes it safe to retry an action that is NOT idempotent
    * (the hardware Back key): nothing is dispatched once the condition holds.
    *
-   * Counting the ACTS is what pins it. An earlier version of this test only
-   * recorded the ORDER of reads and acts, which survived moving the retry
-   * ahead of the read — the precise mutation it existed to catch.
+   * Counting the ACTS is what pins it. An earlier version recorded only the
+   * ORDER of reads and acts and survived moving the retry ahead of the read —
+   * the precise mutation it existed to catch. That order is no longer the
+   * protection anyway: the re-read guard below is, and it is what the next
+   * test pins.
    */
   test("never dispatches again once the condition holds", async () => {
     const clock = fakeClock();
@@ -197,6 +199,47 @@ describe("actUntil", () => {
       counts.push(taps);
     }
     expect(counts[1]).toBeLessThan(counts[0]);
+  });
+
+  /*
+   * The opening dispatch is as retryable as the rest. A CI emulator answered
+   * `Input.dispatchTouchEvent` past the 10s CDP timeout and the run died with
+   * a bare "CDP timeout" naming no step, because that first dispatch happened
+   * outside the loop.
+   */
+  test("recovers when the very first dispatch throws", async () => {
+    const clock = fakeClock();
+    let attemptsToAct = 0;
+    let landed = false;
+    await actUntil(
+      () => {
+        attemptsToAct += 1;
+        if (attemptsToAct === 1)
+          throw new Error("CDP timeout: Input.dispatchTouchEvent");
+        landed = true;
+      },
+      () => landed,
+      "select hosts",
+      { ...clock, timeoutMs: 30_000, redispatchEvery: 5 },
+    );
+    expect(attemptsToAct).toBe(2);
+    expect(landed).toBe(true);
+  });
+
+  test("names the failed dispatch in the timeout message", async () => {
+    const clock = fakeClock();
+    await expect(
+      actUntil(
+        () => {
+          throw new Error("CDP timeout: Input.dispatchTouchEvent");
+        },
+        () => false,
+        "select hosts",
+        { ...clock, timeoutMs: 1_000, redispatchEvery: 5 },
+      ),
+    ).rejects.toThrow(
+      /last dispatch failed: CDP timeout: Input\.dispatchTouchEvent/,
+    );
   });
 
   test("still fails when the action never takes effect", async () => {
