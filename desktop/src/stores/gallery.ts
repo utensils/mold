@@ -500,13 +500,27 @@ export const useGalleryStore = defineStore("gallery", {
      * text-to-3-D run stops leaving four unrelated tiles.
      */
     meshWorkflowIndex(): Map<string, MeshWorkflowGroupMembership> {
-      const rows: GroupableRow[] = [];
-      for (const print of [...this.merged, ...this.trashMerged]) {
-        const copies = print.copies ?? [{ sourceKey: print.sourceKey, item: print.item }];
-        for (const copy of copies)
-          rows.push({ key: copy.item.filename, metadata: copy.item.metadata });
-      }
-      return indexMeshWorkflowGroups(rows).membership;
+      return this.scope === "trash" ? this.trashMeshWorkflowIndex : this.liveMeshWorkflowIndex;
+    },
+    /**
+     * Each scope's runs are indexed among ITS OWN prints.
+     *
+     * One index across both was wrong in two ways that only show up once
+     * something is trashed. A run's LEAD could be a print the scope does not
+     * draw — trash the mesh and its source picture is still "not the lead", so
+     * it is hidden from the live grid while the lead sits in the trash and the
+     * whole run disappears from My images. And the COUNT named members the
+     * drill-in would never reveal: four assets promised, two shown.
+     *
+     * A cross-host mirror of one print is one logical row here (`merged`
+     * already collapsed the copies), so a run mirrored to two machines is not
+     * double-counted.
+     */
+    liveMeshWorkflowIndex(): Map<string, MeshWorkflowGroupMembership> {
+      return indexMeshWorkflowGroups(workflowRows(this.merged)).membership;
+    },
+    trashMeshWorkflowIndex(): Map<string, MeshWorkflowGroupMembership> {
+      return indexMeshWorkflowGroups(workflowRows(this.trashMerged)).membership;
     },
     /** Logical prints in the trash across every host. */
     trashCount(): number {
@@ -659,8 +673,7 @@ export const useGalleryStore = defineStore("gallery", {
       const open = this.workflowId;
       return (entry) => {
         // Drilled in, the grid is that run and nothing else — the album rule.
-        if (open !== null)
-          return membership.get(entry.item.filename)?.jobId === open;
+        if (open !== null) return membership.get(entry.item.filename)?.jobId === open;
         // Otherwise every ordinary print stands, and a run shows its mesh.
         return showsInGrid(entry.item.filename, membership);
       };
@@ -2234,6 +2247,18 @@ export function indexBucketRows(items: readonly GalleryImage[]): BucketIndex {
     else byIdentity.set(identity, [row]);
   });
   return { byFilename, byIdentity };
+}
+
+/**
+ * The rows a scope contributes to the 3-D run index: one per LOGICAL print,
+ * not one per cross-host copy — the copies of one print are the same print, so
+ * counting them would inflate a run's member count on a mirrored gallery.
+ */
+function workflowRows(prints: MergedPrint[]): GroupableRow[] {
+  return prints.map((print) => ({
+    key: print.item.filename,
+    metadata: print.item.metadata,
+  }));
 }
 
 function indexBuckets(buckets: Record<string, GalleryBucket>): Map<string, BucketIndex> {

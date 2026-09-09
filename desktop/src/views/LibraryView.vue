@@ -663,7 +663,11 @@ async function transitionUpscale(action: "pause" | "resume" | "cancel") {
 
 /** Open the 3-D run that made this print, with its inputs restored. */
 function reopenAsWorkflow(entry: MergedPrint) {
-  const route = meshWorkflowRouteFor(entry.item.metadata);
+  // The machine rides the link: a durable workflow lives on ONE host, and a
+  // link that only names the id asks whichever machine the studio was last
+  // browsing and is told the workflow does not exist. A gallery source key IS
+  // the host id.
+  const route = meshWorkflowRouteFor(entry.item.metadata, entry.sourceKey);
   if (!route) return;
   lightboxOpen.value = false;
   void router.push(route);
@@ -1163,7 +1167,11 @@ function collectionSubmenu(entry: MergedPrint): MenuEntry[] {
 function meshWorkflowEntries(entry: MergedPrint): MenuEntry[] {
   const membership = gallery.meshWorkflowIndex.get(entry.item.filename);
   if (!membership) return [];
-  const route = meshWorkflowRouteFor(entry.item.metadata);
+  // The machine rides the link: a durable workflow lives on ONE host, and a
+  // link that only names the id asks whichever machine the studio was last
+  // browsing and is told the workflow does not exist. A gallery source key IS
+  // the host id.
+  const route = meshWorkflowRouteFor(entry.item.metadata, entry.sourceKey);
   const entries: MenuEntry[] = [{ separator: true }];
   if (membership.memberCount > 1) {
     const open = gallery.workflowId === membership.jobId;

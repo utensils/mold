@@ -2125,6 +2125,41 @@ describe("a 3-D run is one gallery item", () => {
     expect(index.has("unrelated.png")).toBe(false);
   });
 
+  /*
+   * The index spanned live AND trashed prints, so a run's lead could be a
+   * print that is not in the scope being drawn. Trash the mesh and its source
+   * picture is still "not the lead" — so it is hidden from the live grid while
+   * the lead sits in the trash, and the whole run vanishes from My images.
+   */
+  it("keeps a run visible in the live grid when its mesh is trashed", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("source.png", 1, "generated_image", 0),
+      img("unrelated.png", 5),
+    ]);
+    gallery.trashBuckets.local = loadedBucket([runImage("object.glb", 4, "final_glb", 3)]);
+    expect(gallery.basePrints.map((p) => p.item.filename)).toEqual(["unrelated.png", "source.png"]);
+  });
+
+  /*
+   * The count names what opening the run will show. Counting across scopes
+   * promised four assets and revealed two.
+   */
+  it("counts only the members in the scope being drawn", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([
+      runImage("object.glb", 4, "final_glb", 3),
+      runImage("source.png", 1, "generated_image", 0),
+    ]);
+    gallery.trashBuckets.local = loadedBucket([
+      runImage("matted.png", 2, "matted_image", 1),
+      runImage("delighted.png", 3, "delighted_image", 2),
+    ]);
+    expect(gallery.meshWorkflowIndex.get("object.glb")?.memberCount).toBe(2);
+  });
+
   /* Absence is an ordinary print or an older host, never a refusal. */
   it("changes nothing for a gallery no workflow touched", () => {
     connectLocal();
