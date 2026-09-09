@@ -132,35 +132,53 @@ describe("actUntil", () => {
 
   /*
    * The property that makes it safe to retry an action that is NOT idempotent
-   * (the hardware Back key): a re-dispatch only ever follows a poll that has
-   * just read the condition as false, and nothing is dispatched once it holds.
-   * A blind timer would press Back again after the panel had already closed,
-   * popping the navigation underneath it.
+   * (the hardware Back key): nothing is dispatched once the condition holds.
+   *
+   * Counting the ACTS is what pins it. An earlier version of this test only
+   * recorded the ORDER of reads and acts, which survived moving the retry
+   * ahead of the read — the precise mutation it existed to catch.
    */
   test("never dispatches again once the condition holds", async () => {
     const clock = fakeClock();
-    const order = [];
-    let landed = false;
+    let acts = 0;
+    let reads = 0;
     await actUntil(
       () => {
-        order.push("act");
-        // The action lands on the second dispatch.
-        if (order.filter((o) => o === "act").length >= 2) landed = true;
+        acts += 1;
       },
-      () => {
-        order.push("read");
-        return landed;
-      },
+      () => ++reads >= 5,
       "native Back dismisses settings",
       { ...clock, timeoutMs: 30_000, redispatchEvery: 5 },
     );
-    // Every dispatch after the first is immediately preceded by a false read,
-    // and none follows the read that returned true.
-    expect(order[0]).toBe("act");
-    expect(order.at(-1)).toBe("read");
-    for (let i = 1; i < order.length; i++)
-      if (order[i] === "act") expect(order[i - 1]).toBe("read");
-    expect(order.filter((o) => o === "act")).toHaveLength(2);
+    // The opening dispatch and nothing else: the fifth read succeeds, and no
+    // retry may be scheduled off a read that came back true.
+    expect(acts).toBe(1);
+  });
+
+  /*
+   * ...and it re-READS immediately before re-dispatching. The poll that
+   * scheduled a retry is already one interval old, and an Android Back that
+   * arrives after the panel has closed finds nothing to consume and exits the
+   * app — passing the assertion, failing three steps later for no reason.
+   */
+  test("does not dispatch when the condition settled since the last poll", async () => {
+    const clock = fakeClock();
+    let acts = 0;
+    let settled = false;
+    await actUntil(
+      () => {
+        acts += 1;
+      },
+      () => {
+        const answer = settled;
+        // Settles in the gap AFTER the poll that will schedule the retry.
+        if (acts === 1 && !settled) settled = true;
+        return answer;
+      },
+      "native Back dismisses settings",
+      { ...clock, timeoutMs: 30_000, redispatchEvery: 1 },
+    );
+    expect(acts).toBe(1);
   });
 
   test("a slower cadence dispatches less often over the same wait", async () => {

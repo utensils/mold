@@ -50,7 +50,12 @@ export async function until(read, label, options = {}) {
   const pause = options.sleep ?? sleep;
   const started = now();
   const deadline = started + timeoutMs;
-  let lastError;
+  // Kept apart on purpose: a re-dispatch that throws must not clobber the
+  // reason the wait was actually failing. Re-tapping a button that has since
+  // been `v-if`'d away throws every single time, and folding both into one
+  // slot left every genuine timeout blaming the retry.
+  let lastReadError;
+  let lastActError;
   let attempts = 0;
   while (now() < deadline) {
     attempts += 1;
@@ -58,22 +63,24 @@ export async function until(read, label, options = {}) {
       const value = await read();
       if (value) return value;
     } catch (error) {
-      lastError = error;
+      lastReadError = error;
     }
     if (options.onRetry) {
       try {
         await options.onRetry(attempts);
       } catch (error) {
-        lastError = error;
+        lastActError = error;
       }
     }
     await pause(options.pollIntervalMs ?? POLL_INTERVAL_MS);
   }
-  throw new Error(
+  const failure = new Error(
     `Timed out: ${label} (${Math.round((now() - started) / 1000)}s, ` +
       `${attempts} attempts)`,
-    { cause: lastError },
+    { cause: lastReadError },
   );
+  if (lastActError) failure.actError = lastActError;
+  throw failure;
 }
 
 /**
@@ -95,7 +102,17 @@ export async function actUntil(act, read, label, options = {}) {
   return until(read, label, {
     ...options,
     onRetry: async (attempts) => {
-      if (attempts % every === 0) await act();
+      if (attempts % every !== 0) return;
+      // Re-READ, immediately before re-dispatching. The poll that scheduled
+      // this retry is already one interval old, and for an action that is not
+      // idempotent that gap is the whole risk: a second Android Back arriving
+      // after the panel closed finds nothing to consume, so `useMobileBack`
+      // returns without `preventDefault`, the native plugin sees
+      // `consumed != "true"` and calls `delegate()` — which finishes the
+      // activity. The smoke test would then PASS its Back assertion (the tab
+      // bar is back) and fail three steps later for no visible reason.
+      if (await read()) return;
+      await act();
     },
   });
 }

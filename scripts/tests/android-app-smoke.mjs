@@ -254,30 +254,50 @@ try {
     );
     await recordNavigation("before native Back");
     /*
-     * The hardware Back key gets dropped exactly as a synthetic touch does:
+     * The hardware Back key goes missing the way a synthetic touch does:
      * `navigation.json` from the API 36 failure shows `settingsOpen: true` and
      * `historyLength: 2` unchanged across all 148 polls — the identical state
      * the API 35 run recorded a moment before it PASSED, so the app was fine
-     * and the key never arrived.
+     * and the press had no effect.
      *
-     * Back is the one action here that is not idempotent — a second press with
-     * the panel already dismissed would pop the tab navigation instead — so it
-     * re-presses on a much slower cadence than a tab tap, and only ever right
-     * after a poll has just read the panel as still open.
+     * WHY it had none is not settled, and the retry does not depend on which
+     * it is. `AndroidOverlayBack.kt` gives the renderer 1s to answer, and its
+     * injected script is guarded by `Date.now() < deadline`, so a press whose
+     * JS is delayed past that window does nothing at all — no close, no exit —
+     * while this script is evaluating over CDP every 200ms. That is at least
+     * as likely as the emulator losing the key, and it is a real product
+     * question rather than a test one — filed as #1665.
+     *
+     * Back is the one action here that is not idempotent, and over-pressing it
+     * does not fail an assertion — it ENDS THE APP. A second press arriving
+     * after the panel has closed finds nothing to consume, so `useMobileBack`
+     * returns without `preventDefault`, the native plugin reads
+     * `consumed != "true"` and calls `delegate()`, and the activity finishes.
+     * So it re-presses on a much slower cadence than a tab tap, and `actUntil`
+     * re-reads immediately beforehand.
+     *
+     * The condition is therefore the WHOLE post-state, not just "a tab is
+     * selected". Waiting only for the tab bar would be satisfied by an app
+     * that had been Back'd clean out of settings AND one press further, and
+     * the run would go green here and fail three steps later with a timeout
+     * naming the wrong thing.
      */
     await actUntil(
       () => shell("input", "keyevent", "4"),
       () =>
-        evaluate('!!document.querySelector(".mobile-tab[aria-current=page]")'),
-      "native Back dismisses settings",
+        evaluate(
+          '(() => { const tab = document.querySelector(".mobile-tab[aria-current=page]");' +
+            ' return !document.querySelector(".is-settings-open") && !!tab &&' +
+            ' tab.dataset.test === "mobile-tab-hosts"; })()',
+        ),
+      "native Back dismisses settings, and lands on Machines",
       { timeoutMs, redispatchEvery: BACK_REDISPATCH_EVERY_ATTEMPTS },
     );
-    assert(
-      await evaluate(
-        'document.querySelector(".mobile-tab[aria-current=page]").dataset.test === "mobile-tab-hosts"',
-      ),
-      "Back changed the underlying destination",
-    );
+    // The depth is deliberately NOT in the condition above: no artifact
+    // records what it is after a healthy Back, and gating CI on a guessed
+    // value would fail a run that was fine. Record it instead — the next green
+    // run tells us, and then it can be asserted.
+    await recordNavigation("after native Back");
     const metrics = () =>
       evaluate(
         '({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, font: parseFloat(getComputedStyle(document.querySelector(".mobile-wordmark")).fontSize) })',
