@@ -222,6 +222,12 @@ try {
         maxBuffer: ADB_MAX_BUFFER,
       }),
     );
+    // Deliberately NOT wrapped in `actUntil` like the CI smoke test's Back is.
+    // The hazard is the same — a dropped press waits out the whole deadline —
+    // but this script is manual-only (no workflow runs it; it needs a device
+    // and the isolated redesign UAT package), so the change could not be
+    // verified before shipping. It gains the shared deadline and the richer
+    // timeout message either way.
     shell("input", "keyevent", "KEYCODE_BACK");
     const result = await until(
       () => evaluate("window.__pickerUat"),

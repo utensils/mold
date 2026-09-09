@@ -27,7 +27,7 @@ on:
         "scripts/tests/android-app-smoke.mjs",
         "scripts/tests/android-legacy-downloads.sh",
         "scripts/tests/android-legacy-media-smoke.mjs",
-        "scripts/lib/android-smoke-wait.mjs",
+        "scripts/lib/android-smoke-*.mjs",
         "flake.nix",
         ".github/workflows/android.yml",
       ]
@@ -56,7 +56,7 @@ on:
         "scripts/tests/android-app-smoke.mjs",
         "scripts/tests/android-legacy-downloads.sh",
         "scripts/tests/android-legacy-media-smoke.mjs",
-        "scripts/lib/android-smoke-wait.mjs",
+        "scripts/lib/android-smoke-*.mjs",
         "flake.nix",
         ".github/workflows/android.yml",
       ]
@@ -116,7 +116,7 @@ jobs:
               - 'scripts/tests/android-app-smoke.mjs'
               - 'scripts/tests/android-legacy-downloads.sh'
               - 'scripts/tests/android-legacy-media-smoke.mjs'
-              - 'scripts/lib/android-smoke-wait.mjs'
+              - 'scripts/lib/android-smoke-*.mjs'
               - 'flake.nix'
               - '.github/workflows/android.yml'
 
