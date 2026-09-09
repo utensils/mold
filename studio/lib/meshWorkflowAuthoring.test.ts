@@ -50,6 +50,37 @@ describe("the picture-style candidates", () => {
     }
   });
 
+  /*
+   * UAT found this: the partition sorts by OUTPUT KIND, so the prompt
+   * expander and the upscalers — neither a clip nor a mesh — landed in
+   * "still" and were offered as things to draw a picture with. Every other
+   * picker already excluded them, through two blocklists that had drifted.
+   */
+  it("refuses the support artifacts that are not styles at all", () => {
+    for (const [name, family] of [
+      ["qwen3-expand:q8", "qwen3-expand"],
+      ["real-esrgan-x4plus:fp16", "real-esrgan"],
+      ["upscaler:fp16", "upscaler"],
+      ["controlnet-depth:fp16", "controlnet"],
+      ["some-companion:fp16", "companion"],
+    ] as const)
+      expect(isTextImageWorkflowModel(model(name, family)), name).toBe(false);
+  });
+
+  /* A catalog install can land one under a family this build never heard of. */
+  it("refuses a support artifact whose family it does not recognise", () => {
+    for (const name of [
+      "my-vae-fix",
+      "some-text-encoder",
+      "RealESRGAN x4",
+      "prompt-expand-helper",
+    ])
+      expect(
+        isTextImageWorkflowModel(model(name, "brand-new-family")),
+        name,
+      ).toBe(false);
+  });
+
   it("still offers ordinary still-picture styles", () => {
     for (const family of ["flux", "z-image", "sdxl", "qwen-image"])
       expect(

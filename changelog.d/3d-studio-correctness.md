@@ -15,6 +15,8 @@
   picture in New image while the status bar advertised the shortcut as though
   it worked.
 - **Picture style offers only picture styles.** The text-to-3-D image stage
-  listed LTX-2, Wan and MiniMax H3 among its still-picture candidates; it now
-  reads the same style partition the New image section strip and the Styles
-  kind filter use.
+  listed LTX-2, Wan and MiniMax H3 among its still-picture candidates, and also
+  the prompt-expansion LLM and the upscalers — none of which can draw a
+  picture. It now reads the same style partition the New image section strip
+  and the Styles kind filter use, plus one shared answer to "is this a style at
+  all" that the desktop and web pickers had been answering separately.

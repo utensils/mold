@@ -1,12 +1,18 @@
 import { defineStore } from "pinia";
 import { apiJson } from "../lib/api/client";
+import { isGenerationModel as isGenerationModelShared } from "@studio/lib/generationModels";
 import type { ModelEntry } from "../lib/api/types";
 
-/** Families that never appear in the generation model picker. */
-const NON_GENERATION_FAMILIES = new Set(["real-esrgan", "upscaler", "qwen3-expand", "controlnet"]);
-
+/**
+ * Whether a row is a style a person can pick.
+ *
+ * The list lives in `@studio/lib/generationModels` — this surface and web each
+ * had their own and they had already drifted (this one knew `real-esrgan`,
+ * web knew `companion` and `control-net`), which is how the 3-D Studio came to
+ * offer the prompt expander as a picture style.
+ */
 export function isGenerationModel(m: ModelEntry): boolean {
-  return !NON_GENERATION_FAMILIES.has(m.family);
+  return isGenerationModelShared(m);
 }
 
 export const useModelStore = defineStore("models", {
