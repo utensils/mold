@@ -2224,21 +2224,26 @@ describe("a 3-D run is one gallery item", () => {
     expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["source.png", "plain.png"]);
   });
 
-  /* And the shelf card's count is the same number the album will render. */
+  /*
+   * The shelf card is a promise about what opening it shows, under the same
+   * rule: file the run's LEAD alongside a step and the album is one stacked
+   * tile, because the lead is right there to open.
+   */
   it("counts an album by what opening it shows", () => {
     connectLocal();
     const gallery = useGalleryStore();
     gallery.buckets.local = loadedBucket([
       { ...runImage("object.glb", 4, "final_glb", 3), collections: ["c1"] } as never,
       { ...runImage("source.png", 1, "generated_image", 0), collections: ["c1"] } as never,
+      organized("plain.png", 0, { collections: ["c1"] }),
     ]);
-    gallery.collectionsByHost["local"] = loadedCollections([collection("c1", "Keepers", 2)]);
+    gallery.collectionsByHost["local"] = loadedCollections([collection("c1", "Keepers", 3)]);
     gallery.scope = "collections";
     gallery.collectionSlug = "keepers";
-    // Both prints are filed, so the card must say 2 and the album show 2 —
-    // asserting only that they AGREE would pass at 0 and 0.
+    // Three prints filed, drawn as two tiles: the run's stack, and the plain
+    // print. Both numbers are asserted, so this cannot pass at 0 and 0.
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["object.glb", "plain.png"]);
     expect(gallery.collectionCounts("keepers")).toBe(2);
-    expect(gallery.filtered).toHaveLength(2);
   });
 
   /*
@@ -2296,6 +2301,42 @@ describe("a 3-D run is one gallery item", () => {
     ).length;
     expect(favorites).toBe(2);
     expect(gallery.filtered).toHaveLength(favorites);
+  });
+
+  /*
+   * The `Pictures` chip excludes the mesh by KIND, so the tile that would hide
+   * the run's pictures is not drawn there. Hiding them anyway made a whole run
+   * contribute nothing at all — worse than scattering, because there was no
+   * stack badge and no menu entry left to reach them from. Worse still, typing
+   * any character revealed them again: the same facet, opposite answers,
+   * decided by an unrelated control.
+   */
+  it("shows a run's pictures under Pictures, where the mesh cannot lead", () => {
+    const gallery = seedRun();
+    gallery.mediaKind = "image";
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual([
+      "unrelated.png",
+      "delighted.png",
+      "matted.png",
+      "source.png",
+    ]);
+  });
+
+  /* Under 3-D the mesh IS on screen, so it leads and the steps stay behind it. */
+  it("keeps the run one tile under 3-D, where the mesh leads", () => {
+    const gallery = seedRun();
+    gallery.mediaKind = "mesh";
+    expect(gallery.filtered.map((p) => p.item.filename)).toEqual(["object.glb"]);
+  });
+
+  /* A kind chip must not change its own answer because a word was typed. */
+  it("answers the same for a kind chip with and without a query", () => {
+    const gallery = seedRun();
+    gallery.mediaKind = "image";
+    const withoutQuery = gallery.filtered.map((p) => p.item.filename);
+    gallery.query = "png";
+    const withQuery = gallery.filtered.map((p) => p.item.filename);
+    expect(withQuery).toEqual(withoutQuery);
   });
 
   it("indexes every member back to its run and its part in it", () => {

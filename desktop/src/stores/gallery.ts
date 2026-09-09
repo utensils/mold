@@ -61,7 +61,7 @@ import {
 } from "@studio/lib/galleryMutationOutbox";
 import {
   indexMeshWorkflowGroups,
-  showsInGrid,
+  collapseToLeads as collapseRunSteps,
   type GroupableRow,
   type MeshWorkflowGroupMembership,
 } from "@studio/lib/meshWorkflowGroup";
@@ -671,56 +671,28 @@ export const useGalleryStore = defineStore("gallery", {
       return this.scope === "prints" ? this.workflowId : null;
     },
     /**
-     * Whether the person has NAMED a set of prints rather than browsing one.
+     * Hide a run's steps behind the tile that leads them — but ONLY where that
+     * tile is actually on screen.
      *
-     * A favourite, a tag and an album are marks they applied by hand, and a
-     * search is a name they typed. Each names prints, not a shelf to tidy, so
-     * the collapse stands down: outside the Everything grid there is no stack
-     * to open a hidden member from, and the drill-in is inert there, so a
-     * collapsed member is simply unreachable — a favourited step vanished
-     * while the Favourites count went on counting it, and a step filed into an
-     * album vanished while the album's card went on counting it.
+     * This is the whole rule, and it is a rule about REACHABILITY rather than
+     * a list of the filters that should switch it off. A step is hidden
+     * because you can open the lead to get it back; if the lead is not in the
+     * set being drawn, hiding the step does not tidy anything, it deletes it
+     * from view with no door.
      *
-     * It is a RULE, not a list of the three cases that were reported: anything
-     * that narrows to prints the person picked out belongs here. Albums were
-     * the omission that reproduced the bug this was written to kill.
+     * Every reported bug here was the same rule missing: a favourited step
+     * vanished from Favourites, a step filed into an album vanished from that
+     * album, and the `Pictures` chip — which excludes the mesh lead by kind —
+     * made a whole run contribute zero tiles. Enumerating "favourites, tags,
+     * query" instead kept reproducing it one filter at a time, and gave the
+     * same facet opposite answers depending on an unrelated control (`Pictures`
+     * hid the steps until you typed a character).
      *
-     * The kind chips are the one deliberate exclusion. They are browse facets,
-     * and scattering a run back across `Pictures` is the very thing the
-     * collapse exists to prevent.
+     * Runs it over the ALREADY-NARROWED set, so it must be applied last.
      */
-    isSearchingForPrints(): boolean {
-      return (
-        this.favoritesOnly ||
-        this.openCollectionSlug !== null ||
-        this.tagFilter.length > 0 ||
-        this.query.trim().length > 0
-      );
-    },
-    /**
-     * One tile per run, always — no scope, no search, no drill-in.
-     *
-     * This is the LIBRARY'S OWN SIZE, which is why it is separate from the
-     * grid's predicate below: the sidebar count and the shell subtitle must
-     * not move when a scope opens or a word is typed, exactly as opening an
-     * album leaves them alone.
-     */
-    collapsesToOneTile(): (entry: MergedPrint) => boolean {
+    collapseToLeads(): (entries: MergedPrint[]) => MergedPrint[] {
       const membership = this.meshWorkflowIndex;
-      return (entry) => showsInGrid(entry.item.filename, membership);
-    },
-    visibleAfterWorkflowCollapse(): (entry: MergedPrint) => boolean {
-      const membership = this.meshWorkflowIndex;
-      const open = this.openWorkflowId;
-      const searching = this.isSearchingForPrints;
-      return (entry) => {
-        // Drilled in, the grid is that run and nothing else — the album rule.
-        if (open !== null) return membership.get(entry.item.filename)?.jobId === open;
-        // Asked for by name or by mark, every matching print stands.
-        if (searching) return true;
-        // Otherwise every ordinary print stands, and a run shows its mesh.
-        return showsInGrid(entry.item.filename, membership);
-      };
+      return (entries) => collapseRunSteps(entries, (entry) => entry.item.filename, membership);
     },
     /**
      * Hidden albums are hidden until one is OPEN — in Everything, Favourites,
@@ -747,7 +719,7 @@ export const useGalleryStore = defineStore("gallery", {
     /** The live grid minus hidden albums — the library's own size, whatever
      *  scope is open. The shell's picture count reads this. */
     defaultLibraryPrints(): MergedPrint[] {
-      return this.merged.filter(this.visibleInDefaultLibrary).filter(this.collapsesToOneTile);
+      return this.collapseToLeads(this.merged.filter(this.visibleInDefaultLibrary));
     },
     /**
      * The set the filter chips describe: the SCOPE'S OWN prints (the Trash
@@ -758,7 +730,7 @@ export const useGalleryStore = defineStore("gallery", {
     basePrints(): MergedPrint[] {
       const scoped = this.scope === "trash" ? this.trashMerged : this.merged;
       const albums = this.hidesHiddenAlbums ? scoped.filter(this.visibleInDefaultLibrary) : scoped;
-      return albums.filter(this.visibleAfterWorkflowCollapse);
+      return this.collapseToLeads(albums);
     },
     /** Header count before host, kind, search, and organization narrowing —
      *  scope-independent, so switching to the Trash never rewrites it. */
@@ -781,12 +753,20 @@ export const useGalleryStore = defineStore("gallery", {
     /** Logical prints per collection slug, over the merged live grid — the
      *  count a shelf card shows (a mirrored print counts once). */
     collectionCounts(): (slug: string) => number {
-      const counts = new Map<string, number>();
+      const bySlug = new Map<string, MergedPrint[]>();
       for (const entry of this.merged) {
         for (const slug of this.organizationOf(entry).collections) {
-          counts.set(slug, (counts.get(slug) ?? 0) + 1);
+          const held = bySlug.get(slug);
+          if (held) held.push(entry);
+          else bySlug.set(slug, [entry]);
         }
       }
+      // A card's number is a promise about what opening it shows, so it counts
+      // the album's prints under the SAME rule the album's grid draws: a run
+      // whose lead is filed here too is one tile, and a step filed on its own
+      // is its own tile because nothing here would open it.
+      const counts = new Map<string, number>();
+      for (const [slug, entries] of bySlug) counts.set(slug, this.collapseToLeads(entries).length);
       return (slug) => counts.get(slug) ?? 0;
     },
     /** Kind + text narrowing shared by the live grid and the trash. */
@@ -870,20 +850,28 @@ export const useGalleryStore = defineStore("gallery", {
      */
     filtered(): MergedPrint[] {
       /*
-       * The collapse runs HERE because this is what the GRID renders.
+       * The collapse runs HERE because this is what the GRID renders, and it
+       * runs LAST because it asks whether each run's lead survived everything
+       * else — a step may only be hidden behind a tile that is on screen.
        * Applying it to `basePrints` alone moved the sidebar count and the
        * filter chips while leaving four tiles on screen — a feature that was a
        * no-op where it mattered and a disagreement everywhere else.
        */
-      let entries = this.narrowByKindAndQuery(this.hostFiltered).filter(
-        this.visibleAfterWorkflowCollapse,
-      );
+      let entries = this.narrowByKindAndQuery(this.hostFiltered);
       const slug = this.openCollectionSlug;
       if (this.hidesHiddenAlbums) entries = entries.filter(this.visibleInDefaultLibrary);
       entries = entries.filter(this.matchesOrganizationFilters);
-      if (!slug) return entries;
-      const organizationOf = this.organizationOf;
-      return entries.filter((entry) => organizationOf(entry).collections.includes(slug));
+      if (slug) {
+        const organizationOf = this.organizationOf;
+        entries = entries.filter((entry) => organizationOf(entry).collections.includes(slug));
+      }
+      // Drilled in, the grid is that run and nothing else — the album rule.
+      const open = this.openWorkflowId;
+      if (open !== null) {
+        const membership = this.meshWorkflowIndex;
+        return entries.filter((entry) => membership.get(entry.item.filename)?.jobId === open);
+      }
+      return this.collapseToLeads(entries);
     },
     /**
      * The Favourites scope and the tag chips, as ONE predicate — the live grid

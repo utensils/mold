@@ -201,6 +201,34 @@ describe("a 3-D run's tile badges", () => {
     wrapper.unmount();
   });
 
+  /*
+   * The chip row counts an open run as a filter, so **Clear filters** appears
+   * while one is open. It cleared tags, the host chip and an open album and
+   * left the run alone: with no tag filter and every host shown, the button
+   * appeared and clicking it changed nothing — a control that lies, which is
+   * the exact failure the tag chips in the Trash were fixed for.
+   */
+  it("leaves the run when the chip row's Clear filters is used", async () => {
+    const { wrapper, gallery } = await mountGrid([
+      runPrint("object.glb", 4, "final_glb", 2),
+      runPrint("matted.png", 3, "matted_image", 1),
+      runPrint("source.png", 2, "generated_image", 0),
+    ]);
+    gallery.openWorkflowRun("run-1");
+    await nextTick();
+    await flushPromises();
+    expect(gallery.openWorkflowId).toBe("run-1");
+
+    const clear = wrapper.findAll("button").find((b) => b.text().trim() === "Clear filters");
+    expect(clear, "Clear filters is offered while a run is open").toBeTruthy();
+    await clear!.trigger("click");
+    await nextTick();
+
+    expect(gallery.openWorkflowId).toBeNull();
+    expect(wrapper.findAll(".ms-lib-tile")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
   /* And an ordinary print still wears nothing at all. */
   it("leaves a print no run made unmarked", async () => {
     const { wrapper } = await mountGrid([

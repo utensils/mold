@@ -113,15 +113,32 @@ export function meshWorkflowRoleLabel(role: string): string {
 }
 
 /**
- * Whether a row should be drawn in the grid at all.
+ * Hide a run's steps behind the tile that leads them — but ONLY where that
+ * tile is in the same list.
  *
- * Only the run's lead is; the rest are reachable by opening it. They remain
- * real prints — reusable, exportable, deletable — and a row that belongs to no
- * run is always shown.
+ * This is a rule about REACHABILITY, not a list of the filters that should
+ * switch it off. A step is hidden because you can open the lead to get it
+ * back; if the lead is not in the set being drawn, hiding the step does not
+ * tidy anything, it removes it from view with no door.
+ *
+ * So it runs over the ALREADY-NARROWED list, last. Give it everything the
+ * grid is about to draw and it answers what the grid should draw. A row that
+ * belongs to no run always stands, and so does every run's own lead; the rows
+ * it removes remain real prints — reusable, exportable, deletable.
  */
-export function showsInGrid(
-  key: string,
+export function collapseToLeads<T>(
+  entries: readonly T[],
+  keyOf: (entry: T) => string,
   membership: ReadonlyMap<string, MeshWorkflowGroupMembership>,
-): boolean {
-  return membership.get(key)?.lead !== false;
+): T[] {
+  const leadOnScreen = new Set<string>();
+  for (const entry of entries) {
+    const member = membership.get(keyOf(entry));
+    if (member?.lead) leadOnScreen.add(member.jobId);
+  }
+  return entries.filter((entry) => {
+    const member = membership.get(keyOf(entry));
+    if (!member || member.lead) return true;
+    return !leadOnScreen.has(member.jobId);
+  });
 }

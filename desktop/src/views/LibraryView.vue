@@ -1474,6 +1474,11 @@ function clearFilters() {
   gallery.tagFilter = [];
   gallery.filter = "all";
   if (inCollections.value) exitCollection();
+  // The chip row counts an open run as a filter, so it offers Clear filters
+  // while one is open. Leaving the run out made that button do nothing with no
+  // tag and every host shown — a control that lies, which is what the Trash's
+  // tag chips were fixed for.
+  gallery.openWorkflowRun(null);
 }
 
 // ── Bulk select mode ───────────────────────────────────────────────────────

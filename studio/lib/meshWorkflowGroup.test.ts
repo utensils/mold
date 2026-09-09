@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   indexMeshWorkflowGroups,
   meshWorkflowRoleLabel,
-  showsInGrid,
+  collapseToLeads,
   type GroupableRow,
 } from "./meshWorkflowGroup";
 
@@ -19,6 +19,16 @@ function member(key: string, role: string, stage: number, job = "run-1") {
       },
     },
   } satisfies GroupableRow;
+}
+
+/** The keys the grid would draw, given everything it was about to draw. */
+function keysDrawn(
+  rows: readonly GroupableRow[],
+  membership: ReturnType<typeof indexMeshWorkflowGroups>["membership"],
+): string[] {
+  return collapseToLeads(rows, (row) => row.key, membership).map(
+    (row) => row.key,
+  );
 }
 
 /** What one text-to-3-D run with matting and delight actually publishes. */
@@ -43,9 +53,7 @@ describe("collapsing a 3-D run into one gallery item", () => {
       lead: true,
       memberCount: 4,
     });
-    expect(showsInGrid("object.glb", membership)).toBe(true);
-    for (const hidden of ["source.png", "matted.png", "delighted.png"])
-      expect(showsInGrid(hidden, membership), hidden).toBe(false);
+    expect(keysDrawn(run, membership)).toEqual(["object.glb"]);
   });
 
   /* Absence is an ordinary print or an older host — never a refusal. */
@@ -57,8 +65,12 @@ describe("collapsing a 3-D run into one gallery item", () => {
       ...run,
     ];
     const { membership } = indexMeshWorkflowGroups(rows);
-    for (const key of ["a.png", "b.png", "c.png"])
-      expect(showsInGrid(key, membership), key).toBe(true);
+    expect(keysDrawn(rows, membership)).toEqual([
+      "a.png",
+      "b.png",
+      "c.png",
+      "object.glb",
+    ]);
     expect(membership.has("a.png")).toBe(false);
   });
 
@@ -71,9 +83,7 @@ describe("collapsing a 3-D run into one gallery item", () => {
     const partial = run.slice(0, 3);
     const { membership } = indexMeshWorkflowGroups(partial);
     expect(membership.get("delighted.png")?.lead).toBe(true);
-    expect(
-      partial.filter((row) => showsInGrid(row.key, membership)),
-    ).toHaveLength(1);
+    expect(keysDrawn(partial, membership)).toEqual(["delighted.png"]);
   });
 
   it("keeps separate runs separate", () => {
@@ -115,5 +125,47 @@ describe("collapsing a 3-D run into one gallery item", () => {
       "Retopologised glb",
     );
     expect(meshWorkflowRoleLabel("")).toBe("Step");
+  });
+});
+
+/*
+ * The rule is about REACHABILITY, and it is what every Library filter relies
+ * on: a step is hidden because the lead is right there to open. Hand it a list
+ * the lead did not survive and it must hand the step back, or the step is gone
+ * from the screen with nothing left to open it.
+ */
+describe("collapseToLeads", () => {
+  const { membership } = indexMeshWorkflowGroups(run);
+
+  it("hides the steps when the lead is in the list", () => {
+    expect(keysDrawn(run, membership)).toEqual(["object.glb"]);
+  });
+
+  it("hands a step back when the lead is not in the list", () => {
+    const withoutMesh = run.filter((row) => row.key !== "object.glb");
+    expect(keysDrawn(withoutMesh, membership)).toEqual([
+      "source.png",
+      "matted.png",
+      "delighted.png",
+    ]);
+  });
+
+  it("hides only the runs whose own lead is present", () => {
+    const other = [
+      member("other-source.png", "generated_image", 0, "run-2"),
+      member("other.glb", "final_glb", 1, "run-2"),
+    ];
+    const index = indexMeshWorkflowGroups([...run, ...other]).membership;
+    // run-1 keeps its mesh, run-2's is filtered out by whatever ran before.
+    const drawn = keysDrawn([...run, other[0]!], index);
+    expect(drawn).toEqual(["object.glb", "other-source.png"]);
+  });
+
+  it("never touches a print no run made", () => {
+    const plain: GroupableRow[] = [{ key: "plain.png", metadata: null }];
+    expect(keysDrawn([...plain, ...run], membership)).toEqual([
+      "plain.png",
+      "object.glb",
+    ]);
   });
 });
