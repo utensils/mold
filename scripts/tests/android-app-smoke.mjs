@@ -15,10 +15,28 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
+/**
+ * How long a single wait may take.
+ *
+ * This polls every 200ms and returns the instant its condition holds, so a
+ * generous deadline costs a healthy run NOTHING — it only lengthens the time
+ * to fail. On a CI runner the emulator renders in software (`lavapipe`) and
+ * `adb` intermittently exits 1, which this loop swallows into `lastError` and
+ * retries; 30s was not enough window for adb to recover, and the late steps of
+ * a long interaction sequence — the last tab of five, the Back that follows
+ * it — were the ones that ran out. Override for a slower machine still.
+ */
+const UNTIL_TIMEOUT_MS = Number(
+  process.env.MOLD_ANDROID_SMOKE_TIMEOUT_MS ?? 90_000,
+);
+
 async function until(read, label) {
-  const deadline = Date.now() + 30_000;
+  const started = Date.now();
+  const deadline = started + UNTIL_TIMEOUT_MS;
   let lastError;
+  let attempts = 0;
   while (Date.now() < deadline) {
+    attempts += 1;
     try {
       const value = await read();
       if (value) return value;
@@ -27,7 +45,13 @@ async function until(read, label) {
     }
     await sleep(200);
   }
-  throw new Error("Timed out: " + label, { cause: lastError });
+  // Say what was waited on and for how long: "Timed out: select hosts" alone
+  // could not distinguish a slow emulator from a condition that never holds.
+  throw new Error(
+    `Timed out: ${label} (${Math.round((Date.now() - started) / 1000)}s, ` +
+      `${attempts} attempts)`,
+    { cause: lastError },
+  );
 }
 
 assert(
@@ -102,7 +126,11 @@ try {
     // Pull the PNG as a file: full-resolution screenshots can exceed the
     // child-process stdout buffer before the app smoke test even starts.
     shell("screencap", "-p", "/sdcard/mold-boot-launcher-anr.png");
-    run("pull", "/sdcard/mold-boot-launcher-anr.png", output + "/boot-launcher-anr.png");
+    run(
+      "pull",
+      "/sdcard/mold-boot-launcher-anr.png",
+      output + "/boot-launcher-anr.png",
+    );
     shell("rm", "-f", "/sdcard/mold-boot-launcher-anr.png");
     shell("am", "force-stop", "com.android.launcher3");
   }

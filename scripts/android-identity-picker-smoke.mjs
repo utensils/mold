@@ -15,10 +15,21 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
+/** Same deadline policy as `tests/android-app-smoke.mjs` — see the note there:
+ *  this loop returns the instant its condition holds, so a generous window
+ *  costs a healthy run nothing and only gives a software-rendered emulator and
+ *  a flaky `adb` room to recover. */
+const UNTIL_TIMEOUT_MS = Number(
+  process.env.MOLD_ANDROID_SMOKE_TIMEOUT_MS ?? 90_000,
+);
+
 async function until(read, label) {
-  const deadline = Date.now() + 30_000;
+  const started = Date.now();
+  const deadline = started + UNTIL_TIMEOUT_MS;
   let lastError;
+  let attempts = 0;
   while (Date.now() < deadline) {
+    attempts += 1;
     try {
       const value = await read();
       if (value) return value;
@@ -27,7 +38,11 @@ async function until(read, label) {
     }
     await sleep(200);
   }
-  throw new Error("Timed out: " + label, { cause: lastError });
+  throw new Error(
+    `Timed out: ${label} (${Math.round((Date.now() - started) / 1000)}s, ` +
+      `${attempts} attempts)`,
+    { cause: lastError },
+  );
 }
 
 assert(
