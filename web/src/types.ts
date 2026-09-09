@@ -1,3 +1,4 @@
+import type { MeshWorkflowProvenance } from "@studio/lib/meshWorkflowProvenance";
 import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
 import type { OutputFormat as WireOutputFormat } from "@studio/lib/generated/generationProfileV1";
 import type {
@@ -81,7 +82,14 @@ export type Scheduler =
   | { "uni-pc": unknown }
   | { "edm-dpm-pp-2m": unknown };
 
+/** Re-exported so a wire type and the policy that reads it cannot drift. */
+export type { MeshWorkflowProvenance } from "@studio/lib/meshWorkflowProvenance";
+
 export interface OutputMetadata {
+  /** The durable 3-D workflow that produced this print, and the role it plays
+   * in it. Additive: absent on every print made outside the 3-D Studio and on
+   * every host that predates the field, which reads as an ordinary print. */
+  mesh_workflow?: MeshWorkflowProvenance | null;
   /** User-authored print title as it was at creation (D5). Embedded so
    * mirrors carry it; the gallery row's editable title wins for display. */
   title?: string | null;

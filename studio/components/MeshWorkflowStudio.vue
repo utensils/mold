@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { storeToRefs } from "pinia";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import type {
@@ -28,6 +29,8 @@ import {
   type WorkflowGenerateRequest,
   type WorkflowModel,
 } from "../lib/meshWorkflowAuthoring";
+import { isMeshFamily } from "../lib/legacyRecipeRules";
+import { useMeshWorkflowDraftStore } from "../stores/meshWorkflowDraft";
 import MeshViewer from "./MeshViewer.vue";
 import {
   prepareReferenceUploads,
@@ -41,6 +44,12 @@ const props = defineProps<{
   hostLabel?: string;
   desktop?: boolean;
   availableModels?: WorkflowModel[];
+  /**
+   * A workflow to open on, from the shell's own `?workflow=` deep link — the
+   * queue row's route back here. Routing belongs to the shells, so this
+   * component is handed the id rather than reading the router itself.
+   */
+  openWorkflow?: string | null;
   resolveTarget?: (
     requirements: MeshWorkflowRequirements,
   ) => Promise<MeshWorkflowRoute>;
@@ -52,20 +61,29 @@ const ownedTarget = ref<ApiTarget>({ ...props.target });
 const ownerLabel = ref(props.hostLabel ?? "");
 const jobs = ref<MeshWorkflowJobSummary[]>([]);
 const detail = ref<MeshWorkflowJobDetail<WorkflowGenerateRequest> | null>(null);
-const selectedId = ref("");
-const mode = ref<"text_to_mesh" | "mesh_roundtrip" | "mesh_texture">(
-  "text_to_mesh",
-);
-const imageModelName = ref("");
-const meshModelName = ref("");
-const prompt = ref("");
-const texture = ref(true);
-const textureResolution = ref(2048);
-const delight = ref(false);
-const meshFile = ref<File | null>(null);
-const appearanceFile = ref<File | null>(null);
-const upAxis = ref<"y" | "z">("y");
-const metersPerUnit = ref(1);
+
+/*
+ * The draft lives in a store, not in this component: the router lazy-loads
+ * this view and nothing keeps it alive, so every one of these used to be a
+ * local `ref` that unmounted with the view — a trip to the Queue and back
+ * landed on an empty form. `jobs`, `detail`, the epochs and the result URLs
+ * stay local because they belong to this mount and are re-fetched on the next.
+ */
+const draft = useMeshWorkflowDraftStore();
+const {
+  mode,
+  imageModelName,
+  meshModelName,
+  prompt,
+  texture,
+  textureResolution,
+  delight,
+  meshFile,
+  appearanceFile,
+  upAxis,
+  metersPerUnit,
+  selectedId,
+} = storeToRefs(draft);
 const busy = ref(false);
 const loading = ref(true);
 const error = ref("");
@@ -82,7 +100,7 @@ const meshModels = computed(() =>
     (model) =>
       model.downloaded &&
       model.runtime_available !== false &&
-      model.family === "hunyuan3d" &&
+      isMeshFamily(model.family) &&
       meshWorkflowModes(model).some((value) =>
         ["text_to_mesh", "mesh_roundtrip", "mesh_texture"].includes(value),
       ),
@@ -235,12 +253,27 @@ function chooseModels(): void {
     imageModelName.value = imageModels.value[0]?.name ?? "";
 }
 
+/** A machine's identity for the purpose of owning a workflow. */
+function targetIdentity(target: ApiTarget): string {
+  return `${target.baseUrl}\u0000${target.apiKey ?? ""}`;
+}
+
 async function bootstrap(): Promise<void> {
   const epoch = ++contextEpoch;
   ++selectionEpoch;
   clearPoll();
   revokeResult();
-  selectedId.value = "";
+  /*
+   * A deep link names the workflow to open on. Without one, the selection is
+   * kept whenever this is the SAME machine — `bootstrap` also runs on every
+   * mount, so clearing unconditionally meant a trip to the Queue and back
+   * emptied the canvas even though the draft beneath it survived. A host
+   * change does clear it: the workflow belongs to the machine that ran it.
+   */
+  const deepLink = props.openWorkflow?.trim() ?? "";
+  const machine = targetIdentity(props.target);
+  if (deepLink) draft.selectWorkflow(deepLink, machine);
+  else if (!draft.selectionBelongsTo(machine)) draft.selectWorkflow("", "");
   detail.value = null;
   ownedTarget.value = { ...props.target };
   ownerLabel.value = props.hostLabel ?? "";
@@ -256,6 +289,26 @@ async function bootstrap(): Promise<void> {
     hostModels.value = availableModels;
     jobs.value = listing.jobs;
     chooseModels();
+    // `selectedId` was set before the fetch, so its watcher has already run
+    // against an empty job list. Restore the deep-linked workflow's draft now
+    // that the listing can name it, and say so plainly when it is gone.
+    if (selectedId.value) {
+      if (listing.jobs.some((job) => job.id === selectedId.value)) {
+        /*
+         * Restore the DRAFT only for a deep link. A returning view is showing
+         * a workflow the person already has, and their unsent description and
+         * attachments are the newer thing: `restoreWorkflowDraft` overwrites
+         * the prompt, both styles, every stage setting and BOTH file wells, so
+         * doing it on every entry reverted the draft to the finished
+         * workflow's — the exact loss this PR exists to end, for the normal
+         * case of having run something once.
+         */
+        await refreshSelected(Boolean(deepLink));
+      } else {
+        draft.selectWorkflow("", "");
+        error.value = "That 3-D workflow is no longer on this machine.";
+      }
+    }
   } catch (cause) {
     if (epoch === contextEpoch)
       error.value = cause instanceof Error ? cause.message : String(cause);
@@ -293,7 +346,7 @@ async function submit(): Promise<void> {
   error.value = "";
   let uploadLease: ReferenceUploadLease<WorkflowGenerateRequest> | null = null;
   const epoch = contextEpoch;
-  const draft = {
+  const submitted = {
     mode: mode.value,
     prompt: prompt.value,
     texture: texture.value,
@@ -310,20 +363,20 @@ async function submit(): Promise<void> {
   try {
     const route = props.resolveTarget
       ? await props.resolveTarget({
-          mode: draft.mode,
+          mode: submitted.mode,
           meshModel: meshModel.name,
-          ...(draft.mode === "text_to_mesh"
-            ? { imageModel: draft.selectedImageModel!.name }
+          ...(submitted.mode === "text_to_mesh"
+            ? { imageModel: submitted.selectedImageModel!.name }
             : {}),
           texture:
-            draft.mode === "mesh_texture" ||
-            (draft.mode === "text_to_mesh" &&
-              draft.textureAvailable &&
-              draft.texture),
+            submitted.mode === "mesh_texture" ||
+            (submitted.mode === "text_to_mesh" &&
+              submitted.textureAvailable &&
+              submitted.texture),
           delight:
-            draft.mode !== "mesh_roundtrip" &&
-            draft.delightAvailable &&
-            draft.delight,
+            submitted.mode !== "mesh_roundtrip" &&
+            submitted.delightAvailable &&
+            submitted.delight,
         })
       : { target: { ...props.target }, label: props.hostLabel ?? "" };
     if (epoch !== contextEpoch) return;
@@ -338,17 +391,17 @@ async function submit(): Promise<void> {
     if (epoch !== contextEpoch) return;
     const submissionUploads = capabilities.reference_uploads ?? null;
     let request =
-      draft.mode === "text_to_mesh"
+      submitted.mode === "text_to_mesh"
         ? buildTextToMeshWorkflow({
-            prompt: draft.prompt,
-            imageModel: draft.selectedImageModel!,
+            prompt: submitted.prompt,
+            imageModel: submitted.selectedImageModel!,
             meshModel,
-            texture: draft.texture,
-            textureResolution: draft.textureResolution,
-            delight: draft.delightAvailable && draft.delight,
+            texture: submitted.texture,
+            textureResolution: submitted.textureResolution,
+            delight: submitted.delightAvailable && submitted.delight,
           })
         : await (async () => {
-            const mesh = draft.meshFile!;
+            const mesh = submitted.meshFile!;
             const useUpload =
               submissionUploads?.available === true &&
               Boolean(submissionTarget.apiKey?.trim());
@@ -365,18 +418,20 @@ async function submit(): Promise<void> {
               meshByteLength: mesh.size,
               ...(meshPayload ? { meshSha256: meshPayload.sha256 } : {}),
               meshFormat,
-              upAxis: draft.upAxis,
-              metersPerUnit: draft.metersPerUnit,
+              upAxis: submitted.upAxis,
+              metersPerUnit: submitted.metersPerUnit,
             };
-            if (draft.mode === "mesh_roundtrip") {
+            if (submitted.mode === "mesh_roundtrip") {
               return buildMeshRoundtripWorkflow(shared);
             }
-            const appearancePayload = await filePayload(draft.appearanceFile!);
+            const appearancePayload = await filePayload(
+              submitted.appearanceFile!,
+            );
             return buildMeshTextureWorkflow({
               ...shared,
               appearanceBase64: appearancePayload.base64,
-              textureResolution: draft.textureResolution,
-              delight: draft.delightAvailable && draft.delight,
+              textureResolution: submitted.textureResolution,
+              delight: submitted.delightAvailable && submitted.delight,
             });
           })();
     const meshRequest =
@@ -402,7 +457,7 @@ async function submit(): Promise<void> {
         capabilities: submissionUploads,
         request: meshRequest,
         ...(directMeshUpload
-          ? { uploadBodies: new Map([[1, draft.meshFile!]]) }
+          ? { uploadBodies: new Map([[1, submitted.meshFile!]]) }
           : {}),
       });
       if (request.mode === "mesh_texture") {
@@ -424,7 +479,9 @@ async function submit(): Promise<void> {
     detail.value = null;
     ownedTarget.value = submissionTarget;
     ownerLabel.value = route.label;
-    selectedId.value = created.job_id;
+    // The run belongs to the machine that accepted it — which under Auto or
+    // Most capable is not necessarily the one being browsed.
+    draft.selectWorkflow(created.job_id, targetIdentity(submissionTarget));
     await refreshJobs();
   } catch (cause) {
     await uploadLease?.cancel().catch(() => undefined);
@@ -466,7 +523,7 @@ async function remove(): Promise<void> {
   error.value = "";
   try {
     await deleteMeshWorkflow(ownedTarget.value, selectedId.value);
-    selectedId.value = "";
+    draft.selectWorkflow("", "");
     detail.value = null;
     revokeResult();
     await refreshJobs();
@@ -551,6 +608,38 @@ watch(
   [() => props.target.baseUrl, () => props.target.apiKey],
   () => void bootstrap(),
 );
+watch(
+  () => props.openWorkflow,
+  (value) => {
+    const id = value?.trim() ?? "";
+    if (id && id !== selectedId.value)
+      draft.selectWorkflow(id, targetIdentity(ownedTarget.value));
+  },
+);
+
+/** The shell's ⌘↩ — the same Generate the composer's button runs. */
+defineExpose({ generate: () => void submit() });
+
+/*
+ * Persist the scalars the moment they settle rather than on unmount: the
+ * webview can be closed or reloaded without an unmount hook ever running, and
+ * a draft that only survives a graceful exit is not a draft.
+ */
+watch(
+  [
+    mode,
+    meshModelName,
+    imageModelName,
+    prompt,
+    texture,
+    textureResolution,
+    delight,
+    upAxis,
+    metersPerUnit,
+  ],
+  () => draft.persist(),
+);
+
 onMounted(() => void bootstrap());
 onBeforeUnmount(() => {
   ++contextEpoch;

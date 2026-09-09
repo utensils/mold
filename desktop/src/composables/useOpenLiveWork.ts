@@ -2,6 +2,7 @@ import { useRouter } from "vue-router";
 import type { FleetActiveWork } from "@studio/api/activity";
 import { findQueueEntryById } from "@studio/api/queuePlan";
 import { selectedQueueGeneration } from "@studio/api/generationSelection";
+import { meshWorkflowRouteFor } from "@studio/lib/meshWorkflowProvenance";
 import type { OutputMetadata } from "../lib/api/types";
 import { useComposerStore } from "../stores/composer";
 import { useHostsStore } from "../stores/hosts";
@@ -36,6 +37,15 @@ export function useOpenLiveWork() {
         const selection = selectedQueueGeneration<OutputMetadata>(entry ? [entry] : [], row.id);
         if (!selection) {
           toasts.push("This host cannot restore settings for that generation", "error");
+          return;
+        }
+        // A 3-D Studio stage is admitted as an ordinary generation, so it
+        // arrives here looking like any other print. New image cannot resume
+        // it: the stages, Cancel, Resume and history live only under
+        // /api/mesh-workflows. Route to the surface that owns the work.
+        const workflow = meshWorkflowRouteFor(selection.metadata, row.hostId);
+        if (workflow) {
+          await router.push(workflow);
           return;
         }
         composer.set({

@@ -199,7 +199,7 @@ a literal.
 | ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Tokens: six complete theme maps + the theme-invariant set; a fenced legacy bridge keeps the `--desk/--bath/…` names alive for web and the phone | `ui/tokens.css` (single source, consumed by `web/` and `desktop/`)                                                          |
 | Shell metrics, control heights, semantic surfaces, `--mold-state-*`                                                                             | `ui/mold-desktop.css`                                                                                                       |
-| Theme contract (`ThemeId`, `THEME_FAMILY_META`, `toneChoice`, `migrateLegacyTheme`, `applyTheme`)                                                      | `ui/theme.ts`, re-exported by `desktop/src/lib/theme.ts` and consumed by `web/src/lib/theme.ts`                             |
+| Theme contract (`ThemeId`, `THEME_FAMILY_META`, `toneChoice`, `migrateLegacyTheme`, `applyTheme`)                                               | `ui/theme.ts`, re-exported by `desktop/src/lib/theme.ts` and consumed by `web/src/lib/theme.ts`                             |
 | Desktop Tailwind layer (`bg-panel`, `text-fg-dim`, `rounded-control`, `text-micro`…)                                                            | `desktop/src/styles/tokens.css` + `base.css`; `tokens.legacy.test.ts` refuses the retired vocabulary                        |
 | Shared kit: shimmer, pulse, `.ms-toolbar-button`, `.ms-group-label`, `.ms-card-edge`, `.ms-lib-upscaled`                                        | `ui/kit.css`                                                                                                                |
 | Shared primitives (`SegmentedControl` `inline`, `SliderRow` `low`/`high`, `ModalPanel` header + `#description`, `DrawerPanel`)                  | `ui/components/` (Vue, token-var styled)                                                                                    |
@@ -291,19 +291,41 @@ image and says so.
 
 ## 3-D Studio workflows
 
-The 3-D Studio uses the desktop shell's 40px view toolbar, a full-height result
-canvas, and the standard inspector on the right (300px by default, resizable
+The 3-D Studio is New image's anatomy, not a variation on it: the desktop
+shell's 40px view toolbar, a full-height result canvas, a composer on the bottom
+edge, and the standard inspector on the right (300px by default, resizable
 280–480px with Generate's shared handle, width setting, keyboard controls, and
-double-click reset). **From words**, **Rebuild**,
-and **Add texture** are the shared segmented control; only workflows supported
-by the connected machines appear. Workflow inputs belong together in the
-inspector, including the description or source files, with **Generate** at its
-foot. Use **3-D style** and **Picture style** for the two style pickers. Reuse
+double-click reset). **From words**, **Rebuild**, and **Add texture** are the
+shared segmented control on the toolbar; only workflows supported by the
+connected machines appear.
+
+**The description and Generate live on the composer**, with the ⌘↩ keycap, as
+they do on New image. **3-D style** and **Picture style** are composer chips
+beside them. On the desktop shell ⌘↩ generates HERE rather than leaving for New
+image — every raiser of that intent (the native menu and the ⌘K palette alike)
+stays on this route and lets the view consume it. The web SPA has no keyboard
+Generate on any surface, so the keycap is the desktop composer's. Reuse
 Generate's model picker with filtered candidates, including its search, family
-groups, availability, and friendly labels; do not build a second selector.
-Use the shared switches and inspector typography for stage settings. The
-result and its stage progress occupy the canvas, without a separate landing-page
-heading or oversized cards.
+groups, availability, and friendly labels; do not build a second selector, and
+narrow the candidates through `outputKindForModel` rather than a second
+predicate. The inspector holds the stage settings — texture and its size,
+lighting removal, and for a supplied mesh its file wells and orientation — using
+the shared switches, group labels and inspector typography. The result and its
+stage progress occupy the canvas, without a separate landing-page heading or
+oversized cards.
+
+(This supersedes the original "workflow inputs belong together in the inspector,
+with Generate at its foot". Putting the prompt where every other making-view
+puts it is what makes the surface read as part of the app, and it gives ⌘↩ an
+obvious home.)
+
+**The draft belongs to a store, never to the view.** The router lazy-loads this
+surface and nothing keeps it alive, so a component-local ref loses the
+description, both styles, the attachments, the stage settings and the machine
+pin on any trip to the Queue. `studio/stores/meshWorkflowDraft.ts` holds them,
+exactly as `generateForm` does for New image. An attached file is deliberately
+session-scoped: a browser cannot re-open a file handle from a previous session,
+so the well comes back empty rather than promising bytes it cannot read.
 
 The existing **Where it runs** chip is the last toolbar control. **Auto** chooses
 the least-busy eligible machine; **Most capable** chooses its strongest eligible

@@ -1764,6 +1764,8 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         .clone()
         .or_else(|| config.default_negative_prompt.clone());
     let req = mold_core::GenerateRequest {
+        // The CLI authors one-shots; 3-D workflows are a Studio surface.
+        mesh_workflow: None,
         offload: None,
         mesh: None,
         video_only: None,

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, toRef, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
+import { MESH_WORKFLOW_ROUTE } from "@studio/lib/meshWorkflowProvenance";
 import Icon from "@ui/components/Icon.vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 import { useUiStore } from "../../stores/ui";
@@ -55,6 +56,7 @@ const ui = useUiStore();
 // Escape first and stopped it before the palette's own input ever saw it.
 useOverlayStack(toRef(ui, "paletteOpen"), "command-palette");
 const router = useRouter();
+const route = useRoute();
 const gallery = useGalleryStore();
 const models = useModelStore();
 const hostModels = useHostModelsStore();
@@ -341,8 +343,11 @@ const staticCommands = computed<Command[]>(() => {
       keywords: ["make", "render", "submit", "run"],
       key: shortcutLabel("↩"),
       run: () => {
+        // The 3-D Studio consumes this intent too, so on that route Generate
+        // stays put. Routing to New image there rendered a picture and left
+        // the view — the same fault the native menu had.
         ui.generate();
-        go("/create");
+        if (route.path !== MESH_WORKFLOW_ROUTE) go("/create");
       },
     },
     {

@@ -4901,6 +4901,7 @@ mod tests {
     /// hand to `OutputMetadata::from_generate_request` in tests.
     fn fake_request(model: &str) -> GenerateRequest {
         GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,

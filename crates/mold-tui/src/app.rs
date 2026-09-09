@@ -9761,6 +9761,7 @@ impl App {
                         let meta = mold_core::OutputMetadata {
                             video_only: None,
                             attention_path: None,
+                            mesh_workflow: None,
                             int8_arm: None,
                             collection: submitted_params.collection.clone(),
                             tags: (!submitted_filing.is_empty()).then_some(submitted_filing),
@@ -10356,6 +10357,7 @@ impl App {
                     let meta = mold_core::OutputMetadata {
                         video_only: None,
                         attention_path: None,
+                        mesh_workflow: None,
                         int8_arm: None,
                         // An upscale of a filed print stays filed: the copy
                         // is the same picture, and losing its title and tags
@@ -11760,6 +11762,7 @@ mod tests {
         let entry = GalleryEntry {
             path: std::path::PathBuf::from("/home/user/.mold/output/mold-flux-1234.png"),
             metadata: mold_core::OutputMetadata {
+                mesh_workflow: None,
                 video_only: None,
                 attention_path: None,
                 int8_arm: None,
@@ -11850,6 +11853,7 @@ mod tests {
         let entry = GalleryEntry {
             path: std::path::PathBuf::new(),
             metadata: mold_core::OutputMetadata {
+                mesh_workflow: None,
                 video_only: None,
                 attention_path: None,
                 int8_arm: None,
@@ -12001,6 +12005,7 @@ mod tests {
 
     fn make_test_metadata() -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            mesh_workflow: None,
             video_only: None,
             attention_path: None,
             int8_arm: None,

@@ -1,5 +1,25 @@
 import { flushPromises, mount } from "@vue/test-utils";
+import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { setMeshWorkflowDraftStorage } from "../stores/meshWorkflowDraft";
+
+/*
+ * The 3-D Studio draft is a module-scoped store, so a case that leaves a
+ * selected workflow behind would have the NEXT mount restore it and fetch its
+ * result — which is exactly how the polling budget below saw four fetches
+ * instead of two. Every case starts on a fresh Pinia and a storage stub;
+ * happy-dom keeps one localStorage per file, so the stub is what stops the
+ * cases hydrating each other's prompts.
+ */
+beforeEach(() => {
+  setActivePinia(createPinia());
+  setMeshWorkflowDraftStorage({
+    getItem: () => null,
+    setItem: () => {},
+    removeItem: () => {},
+  });
+});
 
 const createMeshWorkflow = vi.hoisted(() =>
   vi.fn(async () => ({ job_id: "workflow-1" })),
@@ -197,6 +217,37 @@ it("retains unchanged result media across progress polls and stops polling on un
   }
 });
 
+/*
+ * The reported bug, at the level a person hits it: type a description, go to
+ * the Queue, come back. The router lazy-loads this view and nothing keeps it
+ * alive, so every draft ref used to unmount with it.
+ */
+it("keeps the description and the chosen styles across leaving the view and returning", async () => {
+  const first = mount(MeshWorkflowStudio, {
+    props: { target: { baseUrl: "http://local:7680", apiKey: null } },
+  });
+  await flushPromises();
+  await first.get("textarea").setValue("a hand-carved wooden fox");
+  const style = first.get<HTMLSelectElement>(
+    "[data-test='mesh-workflow-model']",
+  ).element.value;
+  expect(style).not.toBe("");
+  first.unmount();
+
+  const second = mount(MeshWorkflowStudio, {
+    props: { target: { baseUrl: "http://local:7680", apiKey: null } },
+  });
+  await flushPromises();
+  expect(second.get<HTMLTextAreaElement>("textarea").element.value).toBe(
+    "a hand-carved wooden fox",
+  );
+  expect(
+    second.get<HTMLSelectElement>("[data-test='mesh-workflow-model']").element
+      .value,
+  ).toBe(style);
+  second.unmount();
+});
+
 it("restores a selected workflow's settings without overwriting edits on progress polls", async () => {
   const { getMeshWorkflow } = await import("../api/meshWorkflows");
   vi.useFakeTimers();
@@ -274,3 +325,121 @@ it.each([
     }
   },
 );
+
+describe("a returning view does not overwrite what you were writing", () => {
+  const job = (id: string) => ({
+    contract_version: 1,
+    id,
+    state: "completed",
+    mode: "text_to_mesh",
+    stage_count: 3,
+    current_stage: 2,
+    created_at_ms: Date.now(),
+    updated_at_ms: Date.now(),
+  });
+
+  async function withOneFinishedRun() {
+    const { listMeshWorkflows, getMeshWorkflow } =
+      await import("../api/meshWorkflows");
+    vi.mocked(listMeshWorkflows).mockResolvedValue({
+      jobs: [job("run-1")],
+    } as never);
+    vi.mocked(getMeshWorkflow).mockResolvedValue({
+      id: "run-1",
+      state: "completed",
+      mode: "text_to_mesh",
+      stages: [],
+      request: {
+        mode: "text_to_mesh",
+        image_request: {
+          model: "z-image-turbo:q8",
+          prompt: "the finished run",
+        },
+        mesh_request: {
+          model: "hunyuan3d-mini-turbo:fp16",
+          mesh: { texture: false },
+        },
+      },
+    } as never);
+  }
+
+  /*
+   * `bootstrap` retains the selection, and it used to restore the DRAFT from
+   * it on every entry. So after your first run — the normal state — leaving
+   * for the Queue and coming back reverted your unsent description to the
+   * finished workflow's and dropped both attachments, then persisted the
+   * clobbered values. That is the reported bug, reintroduced for the common
+   * case. The draft is only restored for a DEEP LINK, which is a request to
+   * open someone's specific workflow.
+   */
+  it("keeps a new description over a finished run's, across a remount", async () => {
+    await withOneFinishedRun();
+    const target = { baseUrl: "http://local:7680", apiKey: null };
+
+    // Arrive on the workflow the way a queue row does, then type over it.
+    const first = mount(MeshWorkflowStudio, {
+      props: { target, desktop: true, openWorkflow: "run-1" },
+    });
+    await flushPromises();
+    await first.get("textarea").setValue("a completely different object");
+    first.unmount();
+
+    const second = mount(MeshWorkflowStudio, {
+      props: { target, desktop: true },
+    });
+    await flushPromises();
+    expect(second.get<HTMLTextAreaElement>("textarea").element.value).toBe(
+      "a completely different object",
+    );
+    second.unmount();
+  });
+
+  /* A deep link IS a request to open that workflow, so it does restore. */
+  it("restores the workflow's own settings when a link names it", async () => {
+    await withOneFinishedRun();
+    const wrapper = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://local:7680", apiKey: null },
+        desktop: true,
+        openWorkflow: "run-1",
+      },
+    });
+    await flushPromises();
+    expect(wrapper.get<HTMLTextAreaElement>("textarea").element.value).toBe(
+      "the finished run",
+    );
+    wrapper.unmount();
+  });
+
+  /*
+   * The machine is RECORDED, not inferred: `ownedTarget` is re-seeded from
+   * the props on every fresh mount, so comparing against it always said "same
+   * machine" and a hal9000 job id was retained against plato — clearing the
+   * canvas with "no longer on this machine", which is wrong and unexplained.
+   */
+  it("drops a selection belonging to a machine it no longer talks to", async () => {
+    await withOneFinishedRun();
+    const first = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://hal9000:7680", apiKey: "hk" },
+        desktop: true,
+        openWorkflow: "run-1",
+      },
+    });
+    await flushPromises();
+    first.unmount();
+
+    // A FRESH mount against a different machine — the case the old test missed.
+    const { listMeshWorkflows } = await import("../api/meshWorkflows");
+    vi.mocked(listMeshWorkflows).mockResolvedValue({ jobs: [] } as never);
+    const second = mount(MeshWorkflowStudio, {
+      props: {
+        target: { baseUrl: "http://plato:7680", apiKey: "pk" },
+        desktop: true,
+      },
+    });
+    await flushPromises();
+    expect(second.text()).not.toContain("no longer on this machine");
+    second.unmount();
+  });
+});

@@ -1313,6 +1313,8 @@ pub async fn run(
                     })?;
                     let control = ic_lora_control.clone().unwrap_or_else(|| "hdr".to_string());
                     let mut probe_req = GenerateRequest {
+                        // The CLI authors one-shots; 3-D workflows are a Studio surface.
+                        mesh_workflow: None,
                         offload: offload.then_some(true),
                         mesh: None,
                         video_only: None,
@@ -1500,6 +1502,8 @@ pub async fn run(
     }
 
     let mut req = GenerateRequest {
+        // The CLI authors one-shots; 3-D workflows are a Studio surface.
+        mesh_workflow: None,
         offload: offload.then_some(true),
         mesh: mesh_options,
         collection: resolved_filing.collection,

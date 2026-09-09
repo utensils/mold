@@ -593,6 +593,8 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         offload: None,
         mesh: None,
         video_only: None,
+        // The bot authors one-shots; 3-D workflows are a Studio surface.
+        mesh_workflow: None,
         collection: None,
         tags: None,
         title: None,

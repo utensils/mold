@@ -8,11 +8,21 @@ import {
 } from "@studio/lib/meshWorkflowRouting";
 import type { WorkflowModel } from "@studio/lib/meshWorkflowAuthoring";
 import MeshWorkflowHostPicker from "@studio/components/MeshWorkflowHostPicker.vue";
+import { useRoute } from "vue-router";
+import {
+  meshWorkflowHostFromQuery,
+  meshWorkflowIdFromQuery,
+} from "@studio/lib/meshWorkflowProvenance";
 import { useHostRouting } from "../composables/useHostRouting";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import { ORIGIN_HOST_ID } from "../lib/hostRegistry";
 
 const routing = useHostRouting();
+const route = useRoute();
+// The queue row's route back here; routing is the shell's job, so the shared
+// studio is handed the id rather than reading the router itself.
+const openWorkflow = computed(() => meshWorkflowIdFromQuery(route.query));
+
 const selectedHostId = ref("");
 const selectedHost = computed(
   () =>
@@ -47,6 +57,32 @@ function selectHost(id: string): void {
     selectedHostId.value = id;
   routing.setTarget(id);
 }
+
+/*
+ * A durable workflow lives on ONE machine, so the link that opens it names
+ * that machine too — otherwise a queue row from another host asks whichever
+ * machine this page happens to be browsing and is told it does not exist.
+ * A link that does not say (an older one) leaves the selection alone.
+ *
+ * This has to sit BELOW `selectHost` and the refs it writes: an `immediate`
+ * watcher runs its callback synchronously inside `watch()`, so declared above
+ * them it threw `Cannot access 'selectedHostId' before initialization` — out
+ * of setup in dev, and swallowed in production, which silently restored the
+ * very bug it was added to fix.
+ *
+ * It also watches the host LIST: on a cold load the registry may not name the
+ * machine yet, and the query never changes, so a query-only watcher would drop
+ * the pin and never look again.
+ */
+watch(
+  [() => meshWorkflowHostFromQuery(route.query), () => routing.hosts.value],
+  ([hostId]) => {
+    if (!hostId || selectedHostId.value === hostId) return;
+    if (!routing.hosts.value.some((host) => host.id === hostId)) return;
+    selectedHostId.value = hostId;
+  },
+  { immediate: true },
+);
 
 function pickerModels(filtered: WorkflowModel[]) {
   const names = new Set(filtered.map((model) => model.name));
@@ -89,6 +125,7 @@ function hostStatus(): string {
   <MeshWorkflowStudio
     v-if="target"
     :target="target"
+    :open-workflow="openWorkflow"
     :available-models="routing.targetModels.value"
     :resolve-target="resolveTarget"
     :host-label="selectedHost?.label ?? ''"
@@ -97,7 +134,7 @@ function hostStatus(): string {
       <CreateModelPicker
         :models="pickerModels(models)"
         :model="selected"
-        browse-to="/models?kind=mesh"
+        browse-to="/models?type=mesh"
         @select="(model) => select(model.name)"
       />
     </template>
@@ -105,7 +142,7 @@ function hostStatus(): string {
       <CreateModelPicker
         :models="pickerModels(models)"
         :model="selected"
-        browse-to="/models?kind=image"
+        browse-to="/models?type=image"
         @select="(model) => select(model.name)"
       />
     </template>

@@ -8784,6 +8784,7 @@ mod tests {
 
     fn req(model: &str, format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
         GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,

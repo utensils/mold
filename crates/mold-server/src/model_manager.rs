@@ -5279,6 +5279,7 @@ mod tests {
     #[test]
     fn activation_hint_from_request_classifies_correctly() {
         let mut req = GenerateRequest {
+            mesh_workflow: None,
             offload: None,
             mesh: None,
             video_only: None,

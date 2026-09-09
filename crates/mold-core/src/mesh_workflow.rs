@@ -156,6 +156,75 @@ impl std::str::FromStr for MeshWorkflowJobState {
     }
 }
 
+/// Which durable 3-D workflow produced a piece of work, and the part it plays
+/// in it.
+///
+/// Every stage of a workflow is admitted as an ORDINARY generation, so without
+/// this the queue row and the finished print are indistinguishable from a
+/// hand-authored render: a queue row could only route back to New image, and a
+/// text-to-3-D run left its source picture, its matted and delighted copies and
+/// its mesh in the gallery as four unrelated prints. It rides
+/// [`crate::GenerateRequest`] and is copied onto [`crate::OutputMetadata`], so
+/// the live queue entry (whose `metadata` IS the request) and the published
+/// print carry the same answer.
+///
+/// Server-minted in the workflow runner and REFUSED on a public request — a
+/// client that could stamp it would forge a print into someone's workflow.
+/// Additive: absent on every print made outside the 3-D Studio, on every print
+/// made before this field, and on every older host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MeshWorkflowProvenance {
+    /// The durable job under `/api/mesh-workflows`.
+    pub job_id: String,
+    /// The authored workflow shape: `text_to_mesh`, `mesh_roundtrip`, or
+    /// `mesh_texture`. A value this build does not know is still displayable.
+    pub mode: String,
+    /// The artifact role this output fills, the same vocabulary
+    /// [`MeshWorkflowArtifact::role`] uses: `generated_image`, `matted_image`,
+    /// `delighted_image`, `final_glb`. `final_glb` is the run's LEAD — the one
+    /// a client shows when it collapses the run into a single print.
+    pub role: String,
+    /// Zero-based stage that produced it, so a client can order the members
+    /// without knowing the stage graph.
+    pub stage_index: u32,
+}
+
+/// The role whose print represents the whole run.
+pub const MESH_WORKFLOW_LEAD_ROLE: &str = "final_glb";
+
+impl CreateMeshWorkflowRequest {
+    /// The workflow's wire tag — the same word `mode` carries on the request.
+    pub fn mode_str(&self) -> &'static str {
+        match self {
+            Self::TextToMesh { .. } => "text_to_mesh",
+            Self::MeshTexture { .. } => "mesh_texture",
+            Self::MeshRoundtrip { .. } => "mesh_roundtrip",
+        }
+    }
+}
+
+/// Refuse a client-supplied [`MeshWorkflowProvenance`] on a public request.
+///
+/// The field is provenance the SERVER mints in the workflow runner. A request
+/// that arrived over the public generate doors carrying one would be claiming
+/// membership of a durable workflow it is not a stage of — which would route
+/// another person's queue row into the 3-D Studio, and file a stranger's print
+/// inside their run's stack in the Library. Refused by name rather than
+/// silently stripped, so a client that sends it learns why.
+pub fn client_minted_mesh_workflow_refusal(req: &GenerateRequest) -> Option<&'static str> {
+    req.mesh_workflow.is_some().then_some(
+        "mesh_workflow is server-minted provenance and cannot be supplied by a client; \
+         create a 3-D workflow with POST /api/mesh-workflows instead",
+    )
+}
+
+impl MeshWorkflowProvenance {
+    /// Whether this output is the one a collapsed view shows.
+    pub fn is_lead(&self) -> bool {
+        self.role == MESH_WORKFLOW_LEAD_ROLE
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MeshWorkflowStageKind {
@@ -907,5 +976,75 @@ mod tests {
             manifest.to_toml(),
             Err(MoldError::Validation(message)) if message.contains("portable relative path")
         ));
+    }
+
+    /*
+     * The field is the one thread tying a queue row and a finished print back
+     * to the workflow that made them, so a client able to mint it could route
+     * another person's row into the 3-D Studio and file a stranger's print
+     * inside their run. It is refused by name rather than silently stripped.
+     */
+    #[test]
+    fn a_client_cannot_mint_workflow_provenance() {
+        let mut request = crate::test_support::minimal_generate_request("flux-dev:q8");
+        assert!(client_minted_mesh_workflow_refusal(&request).is_none());
+        request.mesh_workflow = Some(MeshWorkflowProvenance {
+            job_id: "someone-elses-workflow".into(),
+            mode: "text_to_mesh".into(),
+            role: MESH_WORKFLOW_LEAD_ROLE.into(),
+            stage_index: 4,
+        });
+        let refusal = client_minted_mesh_workflow_refusal(&request)
+            .expect("a supplied mesh_workflow is refused");
+        assert!(refusal.contains("server-minted"));
+        assert!(refusal.contains("/api/mesh-workflows"));
+    }
+
+    #[test]
+    fn only_the_mesh_is_the_lead_of_its_run() {
+        let member = |role: &str| MeshWorkflowProvenance {
+            job_id: "workflow-1".into(),
+            mode: "text_to_mesh".into(),
+            role: role.into(),
+            stage_index: 0,
+        };
+        assert!(member(MESH_WORKFLOW_LEAD_ROLE).is_lead());
+        for role in ["generated_image", "matted_image", "delighted_image"] {
+            assert!(!member(role).is_lead(), "{role} is not the run's lead");
+        }
+    }
+
+    /* The wire tag is the same word the create request carries. */
+    #[test]
+    fn the_mode_tag_matches_the_request_it_came_from() {
+        let request = |json: serde_json::Value| {
+            serde_json::from_value::<CreateMeshWorkflowRequest>(json).expect("mode parses")
+        };
+        for (json, expected) in [
+            (
+                serde_json::json!({
+                    "mode": "text_to_mesh",
+                    "image_request": crate::test_support::minimal_generate_request("flux-dev:q8"),
+                    "mesh_request": crate::test_support::minimal_generate_request("flux-dev:q8"),
+                }),
+                "text_to_mesh",
+            ),
+            (
+                serde_json::json!({
+                    "mode": "mesh_texture",
+                    "texture_request": crate::test_support::minimal_generate_request("flux-dev:q8"),
+                }),
+                "mesh_texture",
+            ),
+            (
+                serde_json::json!({
+                    "mode": "mesh_roundtrip",
+                    "roundtrip_request": crate::test_support::minimal_generate_request("flux-dev:q8"),
+                }),
+                "mesh_roundtrip",
+            ),
+        ] {
+            assert_eq!(request(json).mode_str(), expected);
+        }
     }
 }

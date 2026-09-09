@@ -857,6 +857,8 @@ impl ChainRequest {
             offload: self.offload,
             mesh: None,
             video_only: None,
+            // A sequence is not a 3-D workflow stage.
+            mesh_workflow: None,
             // A sequence has exactly one gallery print — the stitched output.
             // Its title and filing come from the chain request and ride the
             // same `OutputMetadata` plumbing as a one-shot's, which is why

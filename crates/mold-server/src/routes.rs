@@ -553,6 +553,7 @@ use crate::queue::clean_error_message;
         mold_core::RetainedSourceMediaInventory,
         mold_core::mesh_workflow::CreateMeshWorkflowRequest,
         mold_core::mesh_workflow::CreateMeshWorkflowResponse,
+        mold_core::mesh_workflow::MeshWorkflowProvenance,
         mold_core::mesh_workflow::MeshWorkflowJobState,
         mold_core::mesh_workflow::MeshWorkflowStageKind,
         mold_core::mesh_workflow::MeshWorkflowStageState,
@@ -2933,6 +2934,12 @@ async fn admit_generation_batch(
         return Err(unready.api_error());
     }
     body.client_batch_id = canonical_client_batch_id(&body.client_batch_id)?;
+    for request in &body.requests {
+        if let Some(reason) = mold_core::mesh_workflow::client_minted_mesh_workflow_refusal(request)
+        {
+            return Err(ApiError::validation(reason));
+        }
+    }
     if body.requests.is_empty() || body.requests.len() > MAX_HETEROGENEOUS_BATCH_OUTPUTS {
         return Err(ApiError::validation(format!(
             "requests must contain 1..={MAX_HETEROGENEOUS_BATCH_OUTPUTS} children"
@@ -3366,6 +3373,9 @@ async fn generate(
     headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
+    if let Some(reason) = mold_core::mesh_workflow::client_minted_mesh_workflow_refusal(&req) {
+        return Err(ApiError::validation(reason));
+    }
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     crate::gallery_source_media::hydrate_reuse_session(
         &state,
@@ -4550,6 +4560,9 @@ async fn generate_stream(
     headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
+    if let Some(reason) = mold_core::mesh_workflow::client_minted_mesh_workflow_refusal(&req) {
+        return Err(ApiError::validation(reason));
+    }
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     crate::gallery_source_media::hydrate_reuse_session(
         &state,

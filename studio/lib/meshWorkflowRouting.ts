@@ -1,4 +1,5 @@
 import type { ApiTarget } from "../api/client";
+import { isMeshFamily } from "./legacyRecipeRules";
 import {
   isTextImageWorkflowModel,
   meshWorkflowModes,
@@ -27,7 +28,7 @@ export function supportsMeshWorkflow(
   if (
     !mesh?.downloaded ||
     mesh.runtime_available === false ||
-    mesh.family !== "hunyuan3d"
+    !isMeshFamily(mesh.family)
   )
     return false;
   const modes = meshWorkflowModes(mesh);

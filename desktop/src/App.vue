@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, watch } from "vue";
+import { MESH_WORKFLOW_ROUTE } from "@studio/lib/meshWorkflowProvenance";
 import { useRouter } from "vue-router";
 import TitleBar from "./components/shell/TitleBar.vue";
 import Sidebar from "./components/shell/Sidebar.vue";
@@ -281,8 +282,14 @@ async function listenForMenu() {
         return void router.push("/create");
       // New image consumes these intents, so every raiser has to route there:
       // an intent left pending would fire on the next visit instead.
+      //
+      // Generate is the exception: the 3-D Studio consumes it too, so on that
+      // route ⌘↩ stays put. It used to raise the intent and push `/create`,
+      // which left the view and rendered a picture — while the status bar
+      // advertised the hint as if it worked.
       case "generate":
         ui.generate();
+        if (router.currentRoute.value.path === MESH_WORKFLOW_ROUTE) return;
         return void router.push("/create");
       case "expand-prompt":
         ui.expandPrompt();

@@ -1,5 +1,7 @@
 import type { CreateMeshWorkflowRequest } from "../api/meshWorkflows";
 import type { GenerationReference } from "./generationReferences";
+import { isGenerationModel } from "./generationModels";
+import { outputKindForModel } from "./outputKind";
 
 export type MeshWorkflowMode =
   | "image_to_mesh"
@@ -77,13 +79,33 @@ export function meshWorkflowModes(model: WorkflowModel): MeshWorkflowMode[] {
   );
 }
 
+/**
+ * Which styles may drive the text-to-3-D image stage.
+ *
+ * The kind test is `outputKindForModel` — the ONE partition the New image
+ * section strip and the Styles kind filter already read — so this list can
+ * never disagree with the rest of the app about what a picture style is. It
+ * used to ask `family !== "hunyuan3d" && modality !== "video"`, and `modality`
+ * is a CATALOG field that `model_manager` fills only from a `cv:`/`hf:`
+ * sidecar: every manifest checkpoint answers `undefined`, so `undefined !==
+ * "video"` waved LTX-2, Wan and MiniMax H3 into the Picture style menu.
+ *
+ * The partition alone is not enough: it sorts by OUTPUT KIND, so the prompt
+ * expander and the upscalers — neither of which is a clip or a mesh — landed
+ * in "still" and were offered as things to draw a picture with. UAT caught
+ * that; `isGenerationModel` is the shared answer to "is this a style at all".
+ *
+ * The recipe tests stay on top of the partition and are this stage's own: it
+ * hands the stage a prompt and takes a picture back, so a canvasless recipe
+ * and one whose prompt is `ignored` are refused even though both are stills.
+ */
 export function isTextImageWorkflowModel(model: WorkflowModel): boolean {
   const recipe = defaultRecipe(model);
   return (
     model.downloaded &&
     model.runtime_available !== false &&
-    model.family !== "hunyuan3d" &&
-    model.modality !== "video" &&
+    isGenerationModel(model) &&
+    outputKindForModel(model) === "still" &&
     recipe?.capabilities.canvasless !== true &&
     recipe?.capabilities.prompt?.mode !== "ignored"
   );

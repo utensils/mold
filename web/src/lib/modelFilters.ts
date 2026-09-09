@@ -1,4 +1,5 @@
 import { familyLabel } from "@studio/lib/modelFamily";
+import { isGenerationModel } from "@studio/lib/generationModels";
 
 import type { ModelInfoExtended } from "../types";
 
@@ -22,25 +23,6 @@ export interface ModelFamilyGroup {
   label: string;
   models: ModelInfoExtended[];
 }
-
-const NON_GENERATION_FAMILIES = new Set([
-  "upscaler",
-  "qwen3-expand",
-  "companion",
-  "controlnet",
-  "control-net",
-]);
-
-const SUPPORT_NAME_PATTERNS = [
-  /\bupscal(e|er|ing)\b/i,
-  /\breal[-_ ]?esrgan\b/i,
-  /\bcontrol[-_ ]?net\b/i,
-  /\b(qwen3|prompt)[-_ ]?expand/i,
-  /\bclip[-_ ]?[lg]?\b/i,
-  /\btext[-_ ]?encoder\b/i,
-  /\btokenizer\b/i,
-  /\bvae\b/i,
-];
 
 const FAMILY_ORDER = [
   "flux",
@@ -74,14 +56,16 @@ const VARIANT_RANKS: Record<string, number> = {
   q4: 6,
 };
 
+/**
+ * Whether a row is a style a person can pick.
+ *
+ * The list lives in `@studio/lib/generationModels` — this surface and desktop
+ * each had their own and they had already drifted (this one knew `companion`
+ * and `control-net`, desktop knew `real-esrgan`), which is how the 3-D Studio
+ * came to offer the prompt expander as a picture style.
+ */
 export function isStandaloneGenerationModel(model: ModelInfoExtended): boolean {
-  const family = model.family.toLowerCase();
-  if (NON_GENERATION_FAMILIES.has(family)) return false;
-
-  const searchable = [model.name, model.description, model.hf_repo]
-    .join(" ")
-    .toLowerCase();
-  return !SUPPORT_NAME_PATTERNS.some((pattern) => pattern.test(searchable));
+  return isGenerationModel(model);
 }
 
 export function modelQuantization(model: ModelInfoExtended): string {
