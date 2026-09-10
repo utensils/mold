@@ -2057,6 +2057,29 @@ async function onUpscale(item: GalleryImage) {
     }
   }
 }
+
+// Create's recent-print viewer hands an existing video to the Library because
+// this page owns the durable Framewise workflow. Wait for the gallery and host
+// capabilities to settle, consume the one-shot intent, then open the same
+// dialog as the Library tile and lightbox actions.
+watch(
+  [loading, selected, () => route.query.upscale],
+  ([isLoading, item, intent]) => {
+    if (isLoading || !item || intent !== "framewise") return;
+    const query = { ...route.query };
+    delete query.upscale;
+    void router.replace({ query });
+    if (!canUpscaleItem(item)) {
+      toast(
+        "error",
+        "Framewise upscale is unavailable on this print's machine.",
+      );
+      return;
+    }
+    void onUpscale(item);
+  },
+  { flush: "post" },
+);
 function upscaleTarget(item: GalleryImage) {
   const host = hostForEntry(item);
   if (!host) throw missingHostError(item);

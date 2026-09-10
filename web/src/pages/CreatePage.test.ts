@@ -52,6 +52,7 @@ const routerReplaceMock = vi.hoisted(() =>
     return Promise.resolve();
   }),
 );
+const routerPushMock = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 vi.mock("vue-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("vue-router")>()),
   useRoute: () =>
@@ -59,7 +60,7 @@ vi.mock("vue-router", async (importOriginal) => ({
       {},
       { get: (_t, key) => (key === "query" ? routeQuery.value : undefined) },
     ),
-  useRouter: () => ({ replace: routerReplaceMock, push: vi.fn() }),
+  useRouter: () => ({ replace: routerReplaceMock, push: routerPushMock }),
 }));
 
 vi.mock("@microsoft/fetch-event-source", () => ({
@@ -324,6 +325,8 @@ describe("CreatePage layout and behavior", () => {
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
+    routerPushMock.mockReset();
+    routerPushMock.mockResolvedValue(undefined);
     promptHistoryApiMock.mockReset();
     promptHistoryApiMock.mockResolvedValue({ entries: [] });
     placementPreviewMock.mockReset();
@@ -841,6 +844,39 @@ describe("CreatePage layout and behavior", () => {
     await nextTick();
     expect((details.element as HTMLDetailsElement).open).toBe(false);
     globalThis.fetch = originalFetch;
+  });
+
+  it("hands a recent video to the Library's durable Framewise upscale flow", async () => {
+    galleryListing.value = [
+      { ...entry, filename: "recent-clip.mp4", format: "mp4" },
+    ];
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.RecentGrid = defineComponent({
+      props: ["entries"],
+      template:
+        '<button data-test="open-recent-video" @click="$emit(\'open\', entries[0])">open</button>',
+    });
+    stubs.Lightbox = defineComponent({
+      props: ["item"],
+      template:
+        '<button v-if="item" data-test="video-upscale" @click="$emit(\'upscale\', item)">upscale</button>',
+    });
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+
+    await wrapper.get('[data-test="open-recent-video"]').trigger("click");
+    await wrapper.get('[data-test="video-upscale"]').trigger("click");
+    await flushPromises();
+
+    expect(routerPushMock).toHaveBeenCalledWith({
+      name: "library",
+      query: {
+        print: "recent-clip.mp4",
+        printHost: ORIGIN_HOST_ID,
+        upscale: "framewise",
+      },
+    });
+    expect(useGenerateForm().state.value.sourceVideo).toBeNull();
   });
 
   it("offers the gallery actions when a Recent tile is right-clicked", async () => {
