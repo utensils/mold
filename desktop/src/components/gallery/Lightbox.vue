@@ -508,7 +508,7 @@ async function runMeshExport(format: string, geometry: MeshGeometryOptions | nul
     const saved = await saveGalleryMedia(
       props.target,
       props.item.filename,
-      meshExportFilename(suggestedSaveName({ ...props.item, title: currentTitle.value }), format),
+      meshExportFilename(props.item.filename, format),
       meshExportRequest(format, geometry),
       fromTrash.value,
     );
@@ -584,10 +584,7 @@ async function performVideoExport(options: VideoExportOptions) {
     const saved = await saveGalleryMedia(
       props.target,
       props.item.filename,
-      videoExportFilename(
-        suggestedSaveName({ ...props.item, title: currentTitle.value }),
-        options.format,
-      ),
+      videoExportFilename(props.item.filename, options.format),
       options,
     );
     exportOpen.value = false;

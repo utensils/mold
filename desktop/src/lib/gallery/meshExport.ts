@@ -32,7 +32,7 @@ export function meshAnimationExportFormats(
 }
 
 /**
- * The saved name for a transcode: the print's own suggested save name with
+ * The saved name for a transcode: the print's original gallery filename with
  * its container swapped. The gallery filename never changes — this only names
  * the copy that lands in Downloads.
  */
