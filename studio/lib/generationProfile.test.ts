@@ -440,9 +440,24 @@ describe("controlNote", () => {
     expect(controlNote({ mode: "fixed", note: "   " })).toBeNull();
   });
 
-  it("stays silent for adjustable, hidden, and absent controls", () => {
-    expect(controlNote({ mode: "adjustable", note: "unreachable" })).toBeNull();
-    expect(controlNote({ mode: "hidden", note: "unreachable" })).toBeNull();
+  it("returns the server's own sentence for a bounded adjustable control", () => {
+    // H3's undistilled step floor is a reviewed schedule, not a pin: the
+    // control moves, but not below 21, and a user who cannot see why reads
+    // the refusal as a bug. The server authors that sentence beside the
+    // bound; the client renders it wherever it renders a fixed one.
+    const note =
+      "Floor is the undistilled tier's smallest reviewed schedule: 21 " +
+      "terminal-inclusive sampler grid points (ComfyUI's default; the " +
+      "released default is 50). Fewer flash once per latent frame — pick a " +
+      "Turbo tag for a 4- or 8-step render.";
+    expect(controlNote({ mode: "adjustable", note })).toBe(note);
+  });
+
+  it("stays silent for a control the server said nothing about", () => {
+    expect(controlNote({ mode: "adjustable" })).toBeNull();
+    expect(controlNote({ mode: "adjustable", note: null })).toBeNull();
+    expect(controlNote({ mode: "adjustable", note: "   " })).toBeNull();
+    expect(controlNote({ mode: "hidden" })).toBeNull();
     expect(controlNote(null)).toBeNull();
     expect(controlNote(undefined)).toBeNull();
   });

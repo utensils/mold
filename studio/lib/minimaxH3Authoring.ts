@@ -66,11 +66,12 @@ export const MINIMAX_H3_MIN_FRAMES = 107;
 export const MINIMAX_H3_MAX_FRAMES = 345;
 export const MINIMAX_H3_FRAME_STEP = 17;
 export const MINIMAX_H3_FRAME_OFFSET = 5;
-// Mirrors `mold_core::minimax_h3::COMPACT_MIN_STEPS` /
-// `COMPACT_MAX_STEPS` — the base compact tag's step range. A reviewed Turbo
-// tier keeps its distilled adapter's exact count instead
-// (`MINIMAX_H3_REVIEWED_COMPACT_STEPS`).
-export const MINIMAX_H3_COMPACT_MIN_STEPS = 2;
+// Mirrors `mold_core::minimax_h3::COMPACT_BASE_MIN_STEPS` /
+// `COMPACT_MAX_STEPS` — the undistilled base tag's step range, whose floor is
+// the smallest reviewed schedule (ComfyUI's 21-point default), not the
+// sampler's arithmetic minimum. A reviewed Turbo tier keeps its distilled
+// adapter's exact count instead (`MINIMAX_H3_REVIEWED_COMPACT_STEPS`).
+export const MINIMAX_H3_COMPACT_BASE_MIN_STEPS = 21;
 export const MINIMAX_H3_COMPACT_MAX_STEPS = 50;
 export const MINIMAX_H3_MAX_REFERENCES = 12;
 export const MINIMAX_H3_MAX_REFERENCE_IMAGES = 9;
@@ -449,7 +450,7 @@ export function minimaxH3AuthoringCapabilities(
     maxFrames: MINIMAX_H3_MAX_FRAMES,
     frameStep: MINIMAX_H3_FRAME_STEP,
     frameOffset: MINIMAX_H3_FRAME_OFFSET,
-    minSteps: turboSteps ?? MINIMAX_H3_COMPACT_MIN_STEPS,
+    minSteps: turboSteps ?? MINIMAX_H3_COMPACT_BASE_MIN_STEPS,
     maxSteps: turboSteps ?? MINIMAX_H3_COMPACT_MAX_STEPS,
     synchronizedAudio: true,
     audioDisableSupported: false,

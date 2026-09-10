@@ -418,7 +418,7 @@ describe("MiniMax H3 Studio authority", () => {
       name: "minimax-h3-fl2va:comfy-pruned-int8",
       family: "minimax-h3",
     })!;
-    expect(base.minSteps).toBe(2);
+    expect(base.minSteps).toBe(21);
     expect(base.maxSteps).toBe(50);
     expect(base.minFrames).toBe(107);
     expect(base.maxFrames).toBe(345);

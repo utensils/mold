@@ -406,6 +406,36 @@ pub fn turbo_tier_for_model(model: &str) -> Option<&'static TurboManifestTier> {
         .find(|tier| tier.model == canonical)
 }
 
+/// The fewest sampler grid points an UNDISTILLED H3 tag may be asked for.
+///
+/// This is a REVIEWED SCHEDULE, not an arithmetic bound —
+/// [`COMPACT_MIN_STEPS`] is the arithmetic one and admits far less than
+/// anyone rendered. The 2026-08-28 Ref2VA UAT
+/// (`docs/qualification/minimax-h3.md`, rows `a′`/`a″` vs `a‴`) took one
+/// request through both: at 4 grid points — three forwards, sigmas
+/// 1.0 → 0.96 → 0.86 → 0 — the decoded print flashes once per latent frame
+/// and ghosts the reference, and at ComfyUI's 21-point default (row `a‴`,
+/// the quality control) it is clean. 21 is therefore the smallest schedule
+/// the base checkpoint has ever been reviewed at; a 4- or 8-step render is
+/// what a Turbo tag's distilled adapter is for.
+pub const COMPACT_BASE_MIN_STEPS: u32 = COMFY_DEFAULT_STEPS;
+
+/// The fewest sampler grid points one model identity may be asked for.
+///
+/// One authority for both tiers, because the answer is a property of the
+/// weights: a Turbo tag's distilled schedule has exactly its own number of
+/// grid points, and everything else — the undistilled compact tags, the
+/// official BF16 references, an alias — takes the smallest reviewed
+/// schedule ([`COMPACT_BASE_MIN_STEPS`]). Admission, both generation-profile
+/// builders, and the private runtime envelope all read this rather than
+/// restating a floor each.
+pub fn steps_floor_for_model(model: &str) -> u32 {
+    match turbo_tier_for_model(model) {
+        Some(tier) => tier.steps,
+        None => COMPACT_BASE_MIN_STEPS,
+    }
+}
+
 pub const DEFAULT_WIDTH: u32 = 1344;
 pub const DEFAULT_HEIGHT: u32 = 768;
 /// The spatial stride one packed video row covers.
@@ -696,12 +726,21 @@ pub const MAX_FRAMES: u32 = 345;
 pub const REVIEWED_COMPACT_FRAMES: u32 = 124;
 /// [`REVIEWED_COMPACT_FRAMES`] under the name that describes what it is.
 pub const DEFAULT_COMPACT_FRAMES: u32 = REVIEWED_COMPACT_FRAMES;
-/// The fewest steps a compact request may ask for.
+/// The SAMPLER's arithmetic floor — never an admission floor.
 ///
 /// The sampler builds a sigma GRID whose terminal point is zero, so two points
 /// is one denoise evaluation and one point is not a schedule at all
 /// (`H3DualSchedule::new` refuses `grid_points < 2`). A floor of 1 would be
 /// refused by arithmetic rather than by contract.
+///
+/// It is deliberately NOT what a request is admitted against: a schedule the
+/// arithmetic can build is not a schedule anyone reviewed, and admitting 2
+/// grid points on the undistilled checkpoint rendered a print that flashes
+/// once per latent frame. [`steps_floor_for_model`] is the admission
+/// authority — [`COMPACT_BASE_MIN_STEPS`] for an undistilled tag and the
+/// tier's own count for a Turbo one. This constant survives to say what the
+/// sampler itself can build; nothing but its own documentation and its tests
+/// reads it, and `H3DualSchedule::new` spells the same 2 as its own literal.
 pub const COMPACT_MIN_STEPS: u32 = 2;
 /// The most steps a compact request may ask for.
 ///
@@ -2608,10 +2647,20 @@ fn validate_request_contract_with_authorities(
             "MiniMax H3 uses its dedicated synchronized video/audio flow schedules; generic scheduler overrides are unsupported",
         ));
     }
-    if req.steps < 2 {
+    // The floor is the identity's own smallest REVIEWED schedule, never the
+    // sampler's arithmetic minimum: a Turbo tag's distilled count, and
+    // otherwise ComfyUI's 21-point default, below which the undistilled
+    // checkpoint's print flashes once per latent frame. For a Turbo tag this
+    // only moves a refusal the runtime's own equality check already issues to
+    // the door, before the ~37 GB artifact pass is paid.
+    let steps_floor = steps_floor_for_model(&req.model);
+    if req.steps < steps_floor {
         return Err(violation(
             "MINIMAX_H3_GRID_POINTS",
-            "MiniMax H3 steps count terminal-inclusive sigma grid points and must be at least 2",
+            format!(
+                "MiniMax H3 steps count terminal-inclusive sigma grid points; {} requires at least {steps_floor}, the smallest reviewed schedule for this tag, and received {}",
+                req.model, req.steps
+            ),
         ));
     }
     if req
@@ -4831,6 +4880,7 @@ mod tests {
     /// keep their exact distilled counts, which is a property of the adapter.
     #[test]
     fn the_compact_steps_range_is_derived_and_contains_every_reviewed_count() {
+        // The SAMPLER's arithmetic floor, which is not the admission floor.
         assert_eq!(COMPACT_MIN_STEPS, 2);
         assert_eq!(COMPACT_MAX_STEPS, DEFAULT_STEPS);
         assert_eq!(COMPACT_MAX_STEPS, 50);
@@ -4842,6 +4892,153 @@ mod tests {
                 tier.model,
                 tier.steps
             );
+        }
+
+        // The ADMISSION floor for an undistilled tag sits inside that
+        // arithmetic range and above every distilled tier's own schedule.
+        const {
+            assert!(COMPACT_MIN_STEPS <= COMPACT_BASE_MIN_STEPS);
+            assert!(COMPACT_BASE_MIN_STEPS < COMPACT_MAX_STEPS);
+            assert!(COMPACT_BASE_MIN_STEPS > COMPACT_MIN_STEPS);
+        }
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            assert!(
+                tier.steps < COMPACT_BASE_MIN_STEPS,
+                "{} steps {}: a distilled schedule is shorter than the base floor",
+                tier.model,
+                tier.steps
+            );
+        }
+    }
+
+    /// The base tag's floor is the smallest schedule anyone rendered and
+    /// looked at: ComfyUI's own 21-point default
+    /// (`docs/qualification/minimax-h3.md` row a‴), against rows a′/a″ at 4
+    /// grid points, whose print flashes once per latent frame.
+    #[test]
+    fn the_base_steps_floor_is_the_smallest_reviewed_schedule() {
+        assert_eq!(COMPACT_BASE_MIN_STEPS, COMFY_DEFAULT_STEPS);
+        assert_eq!(COMPACT_BASE_MIN_STEPS, 21);
+    }
+
+    /// One authority answers both tiers: a Turbo tag's floor is its own
+    /// distilled schedule length, and everything else takes the reviewed
+    /// schedule.
+    #[test]
+    fn steps_floor_is_the_tier_count_for_turbo_and_the_reviewed_schedule_for_base() {
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            assert_eq!(
+                steps_floor_for_model(tier.model),
+                tier.steps,
+                "{}",
+                tier.model
+            );
+        }
+        for model in [
+            FL2VA_COMFY,
+            REF2VA_COMFY,
+            FL2VA_OFFICIAL,
+            REF2VA_OFFICIAL,
+            "minimax-h3",
+        ] {
+            assert_eq!(
+                steps_floor_for_model(model),
+                COMPACT_BASE_MIN_STEPS,
+                "{model}"
+            );
+        }
+    }
+
+    /// A base tag below the reviewed schedule is refused at the door, with
+    /// the model, the floor, and what it asked for in the sentence.
+    #[test]
+    fn base_tag_requests_below_the_reviewed_schedule_fail_admission() {
+        for model in [FL2VA_COMFY, REF2VA_COMFY] {
+            for steps in [2, 4, 20] {
+                let mut req = request();
+                req.model = model.into();
+                req.steps = steps;
+                if model == REF2VA_COMFY {
+                    req.references = Some(vec![image_reference("first.png", 1)]);
+                }
+                let error = validate_request_contract(
+                    &req,
+                    if model == REF2VA_COMFY {
+                        Task::Ref2va
+                    } else {
+                        Task::Fl2va
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(error.code, "MINIMAX_H3_GRID_POINTS", "{model} {steps}");
+                assert!(
+                    error.message.contains("at least 21"),
+                    "{model} {steps}: {}",
+                    error.message
+                );
+                assert!(
+                    error.message.contains(model),
+                    "{model} {steps}: {}",
+                    error.message
+                );
+            }
+            for steps in [COMPACT_BASE_MIN_STEPS, COMPACT_MAX_STEPS] {
+                let mut req = request();
+                req.model = model.into();
+                req.steps = steps;
+                if model == REF2VA_COMFY {
+                    req.references = Some(vec![image_reference("first.png", 1)]);
+                }
+                let outcome = validate_request_contract(
+                    &req,
+                    if model == REF2VA_COMFY {
+                        Task::Ref2va
+                    } else {
+                        Task::Fl2va
+                    },
+                );
+                // The shared fixture is not contract-valid for every tier, so
+                // the positive half asserts only that the STEP gate let the
+                // request through; another refusal is that tier's own business.
+                if let Err(error) = &outcome {
+                    assert_ne!(error.code, "MINIMAX_H3_GRID_POINTS", "{model} {steps}");
+                }
+            }
+        }
+    }
+
+    /// For a Turbo tag the floor IS the tier's count, so a shorter schedule
+    /// is refused at the door instead of by the runtime's equality check —
+    /// the same request, refused before the load rather than after it.
+    #[test]
+    fn turbo_requests_below_their_tier_count_fail_admission_at_the_door() {
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            let task = task_for_model(tier.model).expect("a reviewed tier names its task");
+            let mut req = request();
+            req.model = tier.model.into();
+            req.steps = tier.steps - 1;
+            if task == Task::Ref2va {
+                req.references = Some(vec![image_reference("first.png", 1)]);
+            }
+            let error = validate_request_contract(&req, task).unwrap_err();
+            assert_eq!(error.code, "MINIMAX_H3_GRID_POINTS", "{}", tier.model);
+            assert!(
+                error.message.contains(&format!("at least {}", tier.steps)),
+                "{}: {}",
+                tier.model,
+                error.message
+            );
+
+            // Its own count still passes this gate.
+            let mut exact = request();
+            exact.model = tier.model.into();
+            exact.steps = tier.steps;
+            if task == Task::Ref2va {
+                exact.references = Some(vec![image_reference("first.png", 1)]);
+            }
+            if let Err(error) = validate_request_contract(&exact, task) {
+                assert_ne!(error.code, "MINIMAX_H3_GRID_POINTS", "{}", tier.model);
+            }
         }
     }
 

@@ -612,7 +612,8 @@ which canvases the compact FL2VA runtime admits: both axes a multiple of 32,
 each at least 256 px, at most `COMPACT_MAX_PIXELS` = 1,032,192 pixels in total,
 and aspect inside the family's 1:4..4:1 bounds. The clip length is the family
 grid (107 to 345 frames on `17n+5` at 24 fps) and the base tag's step count is
-a 2..=50 range. Everything derives from those: the generation profile's range
+a 21..=50 range (ComfyUI's 21-point default is the smallest reviewed
+schedule). Everything derives from those: the generation profile's range
 and ceilings, the private bridge's advertised bounds, source fitting, and
 `private_server.rs`'s own `validate_shape`.
 

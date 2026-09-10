@@ -1662,6 +1662,15 @@ mod tests {
         is_inference_cancelled, InferenceCancellationToken, InferenceCancelled, ProgressReporter,
     };
 
+    /// Denoise forwards the fixture request performs.
+    ///
+    /// A schedule of N terminal-inclusive grid points is N-1 denoise
+    /// intervals, and the fixture asks for the base tag's reviewed floor —
+    /// the smallest count `validate_request_contract` admits on an
+    /// undistilled tag, which is what `prepare_request` runs. Derived rather
+    /// than written out so raising the floor cannot leave a stale literal.
+    const FIXTURE_DENOISE_FORWARDS: usize = contract::COMPACT_BASE_MIN_STEPS as usize - 1;
+
     fn request() -> GenerateRequest {
         GenerateRequest {
             mesh_workflow: None,
@@ -1677,7 +1686,10 @@ mod tests {
             model: contract::FL2VA_COMFY.into(),
             width: 32,
             height: 32,
-            steps: 4,
+            // The reviewed schedule floor: `prepare_request` runs the family
+            // contract, which since the base-tag step floor refuses anything
+            // below `COMPACT_BASE_MIN_STEPS` on an undistilled tag.
+            steps: contract::COMPACT_BASE_MIN_STEPS,
             guidance: 0.0,
             seed: Some(7),
             batch_size: 1,
@@ -2190,11 +2202,14 @@ mod tests {
             &mut NoopH3PipelineObserver,
         )
         .unwrap();
-        assert_eq!(backend.forwards, 3);
+        assert_eq!(backend.forwards, FIXTURE_DENOISE_FORWARDS);
         assert!(backend.decoded_video && backend.decoded_audio);
         assert!(backend.text_was_dropped());
         assert_eq!(*backend.condition_values.lock().unwrap(), [0.25, -0.5]);
-        assert_eq!(backend.observed_condition_rows.len(), 3);
+        assert_eq!(
+            backend.observed_condition_rows.len(),
+            FIXTURE_DENOISE_FORWARDS
+        );
         assert!(backend
             .observed_condition_rows
             .windows(2)
@@ -2223,8 +2238,14 @@ mod tests {
             .all(|draw| draw.seed == 7 && !draw.fresh_generator));
         assert_eq!(staged.provenance.noise_domain_version, NOISE_DOMAIN_VERSION);
         assert_eq!(staged.provenance.endpoint_anchors.len(), 2);
-        assert_eq!(staged.provenance.requested_grid_points, 4);
-        assert_eq!(staged.provenance.transformer_evaluations, 3);
+        assert_eq!(
+            staged.provenance.requested_grid_points,
+            contract::COMPACT_BASE_MIN_STEPS as usize
+        );
+        assert_eq!(
+            staged.provenance.transformer_evaluations,
+            FIXTURE_DENOISE_FORWARDS
+        );
         assert_eq!(staged.provenance.sampler, "official-euler");
         assert!(!staged.video_only_mp4.is_empty());
         assert!(!staged.thumbnail_png.is_empty());
@@ -2316,7 +2337,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(backend.forwards, 3);
+        assert_eq!(backend.forwards, FIXTURE_DENOISE_FORWARDS);
         assert_eq!(staged.provenance.sampler, "comfy-res-multistep");
     }
 
@@ -2371,7 +2392,7 @@ mod tests {
         let cancel_at = H3PipelineEvent {
             phase: H3PipelinePhase::Denoise,
             completed: 1,
-            total: 3,
+            total: FIXTURE_DENOISE_FORWARDS,
         };
         let mut observer = RecordingObserver {
             cancel_at: Some(cancel_at),
@@ -2531,8 +2552,10 @@ mod tests {
             .copied()
             .collect::<Vec<_>>();
         assert_eq!(denoise.first().unwrap().completed, 0);
-        assert_eq!(denoise.last().unwrap().completed, 3);
-        assert!(denoise.iter().all(|event| event.total == 3));
+        assert_eq!(denoise.last().unwrap().completed, FIXTURE_DENOISE_FORWARDS);
+        assert!(denoise
+            .iter()
+            .all(|event| event.total == FIXTURE_DENOISE_FORWARDS));
         let mut totals = std::collections::HashMap::new();
         for event in observer.events {
             assert_eq!(

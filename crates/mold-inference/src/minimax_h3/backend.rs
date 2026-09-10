@@ -36,7 +36,6 @@ use super::pipeline::{
     H3Fl2VaBackend, H3PipelineBackendIdentity, H3PipelineBackendKind, H3PipelineCheckpoint,
     H3PipelineEvent, H3PipelinePhase, H3PreparedEndpoint, H3TextConditioning, H3VideoEncodeSink,
 };
-use super::sampler::H3SamplerKind;
 use super::{
     FrozenH3ConditionerPlacement, H3ConditionerExecution, H3ConditionerLease,
     H3ConditionerLifecycle,
@@ -711,20 +710,6 @@ where
         self.execution_lease.device()
     }
 
-    fn sampler_kind(&self) -> H3SamplerKind {
-        match self.plan.layout() {
-            Layout::OfficialBf16 => H3SamplerKind::OfficialEuler,
-            Layout::ComfyPrunedInt8ConvrotNvfp4Awq => H3SamplerKind::ComfyResMultistep,
-            // No backend for this layout can be constructed: the components
-            // check below refuses it, and `base_compact_model` already
-            // refused it at admission. Naming a sampler here would be a
-            // guess about a checkpoint mold cannot read.
-            Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => unreachable!(
-                "MiniMax H3 pruned NVFP4 has no runtime; validate_components refuses it first"
-            ),
-        }
-    }
-
     fn encode_text(
         &mut self,
         prompt: &str,
@@ -1244,6 +1229,32 @@ mod tests {
     use mold_candle::minimax_h3::{H3RawTokenizer, PresentationError};
 
     use super::*;
+
+    /// A pipeline face in this module must take its integrator from the
+    /// frozen quantization authority, never from a layout literal (#1432).
+    /// `H3CandleBackend` is never constructed on any shipping route — its
+    /// only caller, `try_activate_h3_candle_backend`, unconditionally
+    /// refuses before construction — so the frozen plan carries no
+    /// quantization authority for this backend to delegate to, and this
+    /// module's `H3Fl2VaBackend::sampler_kind` must stay the trait default
+    /// (`OfficialEuler`) rather than a layout-keyed map. Such a map would
+    /// have answered `ComfyResMultistep` for every reviewed Turbo tier,
+    /// which is `ComfyEuler`.
+    #[test]
+    fn no_pipeline_face_in_backend_rs_names_an_integrator_literal() {
+        let source = include_str!("backend.rs");
+        let marker = "#[cfg(test)]\nmod tests {";
+        let end = source.find(marker).expect("test module marker");
+        let body = &source[..end];
+        assert!(
+            !body.contains("H3SamplerKind::"),
+            "no layout-keyed sampler literal outside the test module"
+        );
+        assert!(
+            !body.contains("fn sampler_kind"),
+            "no sampler_kind override outside the test module"
+        );
+    }
 
     const EXECUTION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 

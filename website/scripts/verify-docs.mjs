@@ -207,7 +207,7 @@ const requiredH3DownloadFacts = [
   // shape the memory bounds were MEASURED at. Pinned because the interesting
   // way this doc goes wrong is restating either as a fixed contract.
   '107 to 345 frames on the `17n+5` grid at 24 fps',
-  '2 to 50 terminal-inclusive sampler grid points',
+  '21 to 50 terminal-inclusive sampler grid points',
   // Metal stopped being an unimplemented backend in #1164 and, since #1323, is
   // admitted by the frozen contract and shipped in the macOS artifacts -- but
   // only a reduced-size render is retained. Pin the default-resolution

@@ -214,7 +214,7 @@ function roleValue(value: unknown): value is MiniMaxH3ComponentRole {
  * For a Turbo tier this is still exact — the count is the distilled adapter's
  * own schedule length, so the advertised envelope must agree. For the base
  * identity it is the default within
- * `MINIMAX_H3_COMPACT_MIN_STEPS..=MINIMAX_H3_COMPACT_MAX_STEPS`, not a pin. */
+ * `MINIMAX_H3_COMPACT_BASE_MIN_STEPS..=MINIMAX_H3_COMPACT_MAX_STEPS`, not a pin. */
 export const MINIMAX_H3_REVIEWED_COMPACT_STEPS: Readonly<
   Record<string, number>
 > = {

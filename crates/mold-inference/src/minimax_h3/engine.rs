@@ -1400,7 +1400,7 @@ mod tests {
             "model": contract::FL2VA_COMFY,
             "width": 32,
             "height": 32,
-            "steps": 4,
+            "steps": contract::COMPACT_BASE_MIN_STEPS,
             "guidance": 0.0,
             "seed": 7,
             "batch_size": 1,
@@ -2664,20 +2664,25 @@ mod tests {
             output.reference_fingerprint,
             Some(ref2va_reference_fingerprint(&request).unwrap())
         );
-        assert_eq!(
-            *trace.lock().unwrap(),
-            vec![
-                "decode-reference",
-                "preprocess-reference",
-                "encode-text",
-                "encode-visual",
+        // One denoise trace entry per interval: a schedule of N
+        // terminal-inclusive grid points has N-1 of them, and the fixture
+        // asks for the base tag's reviewed floor because that is the
+        // smallest count the family contract admits on an undistilled tag.
+        let mut expected = vec![
+            "decode-reference",
+            "preprocess-reference",
+            "encode-text",
+            "encode-visual",
+        ];
+        expected.extend(
+            std::iter::repeat_n(
                 "streamed-denoise",
-                "streamed-denoise",
-                "streamed-denoise",
-                "decode-video",
-                "decode-audio",
-            ]
+                contract::COMPACT_BASE_MIN_STEPS as usize - 1,
+            )
+            .collect::<Vec<_>>(),
         );
+        expected.extend(["decode-video", "decode-audio"]);
+        assert_eq!(*trace.lock().unwrap(), expected);
     }
 
     /// Ref2VA components whose reference decode and preprocessing are the

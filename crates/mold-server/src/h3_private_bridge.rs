@@ -1016,14 +1016,27 @@ fn reviewed_h3_private_generation_profile_for(
     recipe.resolution.aspect_groups = reviewed_groups;
     // A Turbo tier's step count is its distilled adapter's own schedule
     // length and stays fixed; the base tier takes the compact range, unless a
-    // stored record is the authority (above), which pins one count.
-    let fixed_steps =
-        private_record_runtime || mold_core::minimax_h3::turbo_tier_for_model(model).is_some();
+    // stored record is the authority (above), which pins one count. The
+    // range's FLOOR is the identity's own smallest reviewed schedule, read
+    // from the same authority admission enforces — never the sampler's
+    // arithmetic minimum, which admits a print that flashes once per latent
+    // frame. `recipe.steps.note` is inherited from `resolve_generation_profile`
+    // for the base range and for a Turbo tier; the ONE row this function pins
+    // that core does not — a stored record on an undistilled tag — authors
+    // its own sentence beside the pin, because the inherited floor note would
+    // tell a user to pick a step count on a control that has no range.
+    let turbo_tier = mold_core::minimax_h3::turbo_tier_for_model(model);
+    let fixed_steps = private_record_runtime || turbo_tier.is_some();
+    if private_record_runtime && turbo_tier.is_none() {
+        recipe.steps.note = Some(format!(
+            "Fixed by this build's stored qualification record: {steps} terminal-inclusive sampler grid points."
+        ));
+    }
     recipe.steps.default = steps;
     recipe.steps.min = if fixed_steps {
         steps
     } else {
-        mold_core::minimax_h3::COMPACT_MIN_STEPS
+        mold_core::minimax_h3::steps_floor_for_model(model)
     };
     recipe.steps.max = if fixed_steps {
         steps
@@ -2466,7 +2479,10 @@ mod presentation_tests {
                 temporal.frames.mode,
                 mold_core::generation_profile::ControlMode::Adjustable
             );
-            assert_eq!(recipe.steps.min, mold_core::minimax_h3::COMPACT_MIN_STEPS);
+            assert_eq!(
+                recipe.steps.min,
+                mold_core::minimax_h3::COMPACT_BASE_MIN_STEPS
+            );
             assert_eq!(recipe.steps.max, mold_core::minimax_h3::COMPACT_MAX_STEPS);
             assert_eq!(
                 recipe.steps.mode,
@@ -2484,6 +2500,99 @@ mod presentation_tests {
                 )
             );
             assert!(recipe.steps.recommended.len() >= 2);
+        }
+    }
+
+    /// The private row advertises the SAME step floor every other H3 door
+    /// enforces, and it inherits the sentence explaining it rather than
+    /// authoring a second one.
+    ///
+    /// The bridge overwrites `steps.min`/`max`/`recommended`/`mode` and
+    /// deliberately never touches `steps.note`, so the base row carries
+    /// whatever `resolve_generation_profile` authored. If that ever stops
+    /// being true a user reads a floor here with no reason beside it.
+    #[test]
+    fn the_base_row_advertises_the_reviewed_schedule_floor_and_its_note() {
+        let (profile, _, _) = super::reviewed_h3_private_generation_profile()
+            .expect("the reviewed H3 profile must resolve");
+        let recipe = profile.default_recipe().expect("one reviewed recipe");
+        if super::private_h3_record_runtime() {
+            // A stored record pins one step count by equality (the pin itself
+            // is asserted by `the_advertised_profile_matches_this_build_s_runtime_authority`);
+            // its sentence must be the record's, never the base floor's, which
+            // would tell a user to choose on a control that has no range.
+            let note = recipe.steps.note.as_deref().expect("a pinned row says why");
+            assert!(note.contains("stored qualification record"), "{note}");
+            assert!(!note.contains("Floor"), "{note}");
+            assert_eq!(
+                recipe.steps.mode,
+                mold_core::generation_profile::ControlMode::Fixed
+            );
+            return;
+        }
+        assert_eq!(
+            recipe.steps.min,
+            mold_core::minimax_h3::COMPACT_BASE_MIN_STEPS
+        );
+        assert_eq!(recipe.steps.min, 21);
+        assert_eq!(recipe.steps.max, mold_core::minimax_h3::COMPACT_MAX_STEPS);
+        assert_eq!(
+            recipe.steps.mode,
+            mold_core::generation_profile::ControlMode::Adjustable
+        );
+
+        // The note is the CORE profile's, byte for byte.
+        let core = mold_core::resolve_generation_profile(mold_core::GenerationProfileInput {
+            model: mold_core::minimax_h3::FL2VA_COMFY,
+            family: mold_core::minimax_h3::FAMILY,
+            sub_family: None,
+            default_width: mold_core::minimax_h3::DEFAULT_WIDTH,
+            default_height: mold_core::minimax_h3::DEFAULT_HEIGHT,
+            default_steps: mold_core::minimax_h3::COMFY_DEFAULT_STEPS,
+            default_guidance: 0.0,
+            default_frames: Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES),
+            default_fps: Some(mold_core::minimax_h3::FIXED_FPS),
+            default_negative_prompt: None,
+            source_image: Some(mold_core::SourceImageCapability::Required),
+            supports_sequence: false,
+            supports_extend: false,
+            supports_audio: mold_core::catalog::declared_audio_capability(
+                mold_core::minimax_h3::FAMILY,
+                mold_core::minimax_h3::FL2VA_COMFY,
+            ) == Some(true),
+        });
+        let expected = core
+            .default_recipe()
+            .expect("one core recipe")
+            .steps
+            .note
+            .clone();
+        assert!(expected.is_some(), "the base tag must explain its floor");
+        assert_eq!(recipe.steps.note, expected);
+
+        // A Turbo row still pins its own count and keeps the Turbo sentence.
+        for tier in mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS {
+            let Some((turbo, _, _)) =
+                super::reviewed_h3_private_generation_profile_for(tier.model, tier.steps)
+            else {
+                continue;
+            };
+            let turbo_recipe = turbo.default_recipe().expect("one reviewed recipe");
+            assert_eq!(turbo_recipe.steps.min, tier.steps, "{}", tier.model);
+            assert_eq!(turbo_recipe.steps.max, tier.steps, "{}", tier.model);
+            assert_eq!(
+                turbo_recipe.steps.mode,
+                mold_core::generation_profile::ControlMode::Fixed,
+                "{}",
+                tier.model
+            );
+            let note = turbo_recipe
+                .steps
+                .note
+                .as_deref()
+                .expect("a Turbo tier explains itself");
+            assert!(note.starts_with("Fixed by the "), "{}: {note}", tier.model);
+            assert_ne!(Some(note), expected.as_deref(), "{}", tier.model);
         }
     }
 
@@ -2596,7 +2705,10 @@ mod presentation_tests {
                 recipe.steps.mode,
                 mold_core::generation_profile::ControlMode::Adjustable
             );
-            assert_eq!(recipe.steps.min, mold_core::minimax_h3::COMPACT_MIN_STEPS);
+            assert_eq!(
+                recipe.steps.min,
+                mold_core::minimax_h3::COMPACT_BASE_MIN_STEPS
+            );
             assert_eq!(recipe.steps.max, mold_core::minimax_h3::COMPACT_MAX_STEPS);
         }
     }
@@ -2975,7 +3087,10 @@ mod tests {
             );
         } else {
             // The per-request-minted runtime advertises the compact ranges.
-            assert_eq!(recipe.steps.min, mold_core::minimax_h3::COMPACT_MIN_STEPS);
+            assert_eq!(
+                recipe.steps.min,
+                mold_core::minimax_h3::COMPACT_BASE_MIN_STEPS
+            );
             assert_eq!(recipe.steps.max, mold_core::minimax_h3::COMPACT_MAX_STEPS);
             assert_eq!(
                 recipe.steps.mode,
