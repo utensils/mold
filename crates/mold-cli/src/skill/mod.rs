@@ -1536,12 +1536,19 @@ mod tests {
     /// `mold run --script`, `mold chain validate` and eight of ten
     /// `library` verbs went untaught while every fence still parsed.
     const UNDOCUMENTED_BY_DESIGN: &[(&str, &str)] = &[
-        // Interactive surfaces an agent cannot drive from a shell. `tui` and
-        // `discord` need no entry: they are hidden commands, so they are not
-        // in the walk at all.
+        // Interactive or long-running surfaces an agent cannot drive from a
+        // shell. `tui` and `discord` are feature-gated, so they enter the
+        // walk only in a build that carries them — CI's feature-union build
+        // does, a default `cargo test` does not.
         (
             "library grid",
             "opens the interactive terminal Library grid",
+        ),
+        ("tui", "the interactive terminal app (feature `tui`)"),
+        ("discord", "runs the Discord bot (feature `discord`)"),
+        (
+            "server discover",
+            "LAN discovery (feature `mdns`); the machines guide documents it",
         ),
         // Machine setup a person does once, not work an agent performs.
         ("completions", "shell setup performed by the user"),
@@ -1662,12 +1669,20 @@ mod tests {
         );
     }
 
+    /// Exemptions for commands that exist only behind a cargo feature. They
+    /// are allowed to be absent from a default-feature walk; a build that
+    /// carries the feature still checks them like any other.
+    const FEATURE_GATED_EXEMPTIONS: &[&str] = &["tui", "discord", "server discover"];
+
     /// Every exemption names a command that exists, so a renamed or retired
     /// command cannot leave a stale excuse behind.
     #[test]
     fn every_coverage_exemption_names_a_real_command() {
         let paths = invocable_command_paths();
         for (name, reason) in UNDOCUMENTED_BY_DESIGN {
+            if FEATURE_GATED_EXEMPTIONS.contains(name) && !paths.iter().any(|path| path == name) {
+                continue;
+            }
             assert!(
                 paths
                     .iter()
