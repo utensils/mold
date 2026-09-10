@@ -404,6 +404,41 @@ describe("LibraryPage", () => {
     );
   });
 
+  it("opens the durable Framewise flow handed off by Create's recent viewer", async () => {
+    listGalleryMock.mockResolvedValue([
+      { ...cat, filename: "recent-clip.mp4", format: "mp4" },
+    ]);
+    hostCapabilitiesMock.mockResolvedValue({
+      gallery: { can_delete: true },
+      video_upscale: { available: true },
+    });
+    routeState.query = {
+      print: "recent-clip.mp4",
+      printHost: "origin",
+      upscale: "framewise",
+    };
+    await mounted();
+
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector("[data-test='upscale-dialog']"),
+      ).not.toBeNull(),
+    );
+    (
+      document.querySelector("[data-test='start-upscale']") as HTMLButtonElement
+    ).click();
+    await flushPromises();
+
+    expect(createFramewiseUpscaleMock).toHaveBeenCalledWith(
+      { baseUrl: window.location.origin, apiKey: null },
+      "recent-clip.mp4",
+      "real-esrgan-x4plus:fp16",
+    );
+    expect(replaceMock).toHaveBeenCalledWith({
+      query: { print: "recent-clip.mp4", printHost: "origin" },
+    });
+  });
+
   it("appends Library source images to Ref2VA's dedicated ordered references", async () => {
     const form = useGenerateForm();
     form.state.value.model = "minimax-h3-ref2va:comfy-pruned-int8";

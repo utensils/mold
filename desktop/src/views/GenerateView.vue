@@ -232,6 +232,7 @@ import {
   fullSizeMediaUrl,
   galleryMediaPath,
   localMediaPath,
+  isVideoItem,
   mediaMimeType,
   mediaPath,
   nativeBytes,
@@ -240,8 +241,20 @@ import {
 import { applyGalleryEntryAsSource, canUseGalleryEntryAsSource } from "../lib/gallery/useAsSource";
 import { readGalleryMediaBase64 } from "../lib/gallery/sourceMedia";
 import { useReuseStillPrint } from "../composables/useReuseStillPrint";
-import { upscaleLibraryImage } from "@studio/api/videoUpscale";
-import { defaultUpscaler } from "@studio/lib/upscale";
+import {
+  createFramewiseUpscale,
+  findRecoverableFramewiseUpscale,
+  getFramewiseUpscale,
+  transitionFramewiseUpscale,
+  upscaleLibraryImage,
+  type VideoUpscaleJob,
+} from "@studio/api/videoUpscale";
+import {
+  defaultUpscaler,
+  framewiseProgress,
+  framewiseStatus,
+  shouldPollFramewiseJob,
+} from "@studio/lib/upscale";
 import UpscaleDialog from "@ui/components/UpscaleDialog.vue";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
 import { blobToBase64 } from "../lib/image";
@@ -1948,46 +1961,152 @@ async function repeatPrint(candidate: Job, count: number) {
 }
 
 // ── Make bigger (the caption's upscale door) ────────────────────────────────
-// One print, one machine: the canvas result has exactly one origin, so this
-// carries neither the Library's authority picker nor its framewise video
-// recovery. A host that can upscale a gallery file in place does; anything
-// older streams the bytes back and saves the result beside them.
+// The file's media kind selects the workflow, independently of the live form.
+// Durable clips carry a filename, not video_frames (the raw-frame fallback).
 const upscaleEntry = ref<MergedPrint | null>(null);
 const upscaleModel = ref("");
 const upscaleBusy = ref(false);
 const upscaleError = ref("");
+const upscaleJob = ref<VideoUpscaleJob | null>(null);
+const upscaleTarget = ref<ApiTarget | null>(null);
+const upscaleKind = computed(() =>
+  upscaleEntry.value && isVideoItem(upscaleEntry.value.item) ? "video" : "image",
+);
+let upscaleEpoch = 0;
+let upscalePoll: ReturnType<typeof setTimeout> | null = null;
+
+function stopCanvasUpscalePoll() {
+  if (upscalePoll) clearTimeout(upscalePoll);
+  upscalePoll = null;
+}
+
+function canvasUpscaleTarget(j: Job): ApiTarget | null {
+  const current = hostGallery.targetOfOrNull(j.hostId ?? "local");
+  const frozen = generation.targetForJob(j.clientId);
+  // A saved host entry may have been edited since this print was made.
+  // Never apply the replacement host's capabilities to the original file.
+  if (
+    frozen &&
+    (!current || frozen.baseUrl !== current.baseUrl || frozen.apiKey !== current.apiKey)
+  )
+    return null;
+  return frozen ?? current;
+}
 
 function canUpscaleCanvasResult(j: Job): boolean {
+  const entry = canvasPrintEntry(j);
   return (
     j.status === "complete" &&
     !j.result?.video_frames &&
     !isAudioResult(j) &&
     !isMeshResult(j) &&
-    !!canvasPrintEntry(j)
+    !!entry &&
+    !!canvasUpscaleTarget(j) &&
+    (!isVideoItem(entry.item) ||
+      (!!j.result?.filename &&
+        hosts.capabilities[entry.sourceKey]?.video_upscale?.available === true))
   );
 }
 
-function openCanvasUpscale(j: Job) {
-  const entry = canvasPrintEntry(j);
-  if (!entry) return;
+async function openCanvasUpscale(j: Job) {
+  if (!canUpscaleCanvasResult(j)) return;
+  closeCanvasUpscale();
+  const entry = canvasPrintEntry(j)!;
   upscaleEntry.value = entry;
-  upscaleError.value = "";
+  upscaleTarget.value = { ...canvasUpscaleTarget(j)! };
   upscaleModel.value = defaultUpscaler(models.upscalers);
+  if (!isVideoItem(entry.item)) return;
+  const epoch = upscaleEpoch;
+  upscaleBusy.value = true;
+  try {
+    const recovered = await findRecoverableFramewiseUpscale(
+      upscaleTarget.value!,
+      entry.item.filename,
+    );
+    if (epoch !== upscaleEpoch) return;
+    upscaleJob.value = recovered;
+    if (recovered) upscaleModel.value = recovered.model;
+    void pollCanvasUpscale();
+  } catch (error) {
+    if (epoch === upscaleEpoch)
+      upscaleError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (epoch === upscaleEpoch) upscaleBusy.value = false;
+  }
 }
 
 function closeCanvasUpscale() {
+  upscaleEpoch += 1;
+  stopCanvasUpscalePoll();
   upscaleEntry.value = null;
+  upscaleTarget.value = null;
+  upscaleJob.value = null;
   upscaleBusy.value = false;
   upscaleError.value = "";
+}
+onBeforeUnmount(closeCanvasUpscale);
+
+async function pollCanvasUpscale() {
+  const entry = upscaleEntry.value;
+  const job = upscaleJob.value;
+  const target = upscaleTarget.value;
+  if (!entry || !target || !job || !shouldPollFramewiseJob(job)) return;
+  const epoch = upscaleEpoch;
+  try {
+    const next = await getFramewiseUpscale(target, job.id);
+    if (epoch !== upscaleEpoch) return;
+    upscaleJob.value = next;
+    if (next.state === "completed") {
+      toasts.push(`Framewise upscale complete — ${next.output_filename}`);
+      void hostGallery.refreshHost(entry.sourceKey);
+    }
+    if (shouldPollFramewiseJob(next)) upscalePoll = setTimeout(() => void pollCanvasUpscale(), 750);
+  } catch (error) {
+    if (epoch === upscaleEpoch)
+      upscaleError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function transitionCanvasUpscale(action: "pause" | "resume" | "cancel") {
+  const entry = upscaleEntry.value;
+  const job = upscaleJob.value;
+  const target = upscaleTarget.value;
+  if (!entry || !target || !job || upscaleBusy.value) return;
+  stopCanvasUpscalePoll();
+  const epoch = ++upscaleEpoch;
+  upscaleBusy.value = true;
+  upscaleError.value = "";
+  try {
+    const next = await transitionFramewiseUpscale(target, job.id, action);
+    if (epoch !== upscaleEpoch) return;
+    upscaleJob.value = next;
+    void pollCanvasUpscale();
+  } catch (error) {
+    if (epoch === upscaleEpoch)
+      upscaleError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (epoch === upscaleEpoch) upscaleBusy.value = false;
+  }
 }
 
 async function startCanvasUpscale() {
   const entry = upscaleEntry.value;
-  const target = entry ? hostGallery.targetOf(entry.sourceKey) : null;
-  if (!entry || !target || upscaleBusy.value) return;
+  const target = upscaleTarget.value;
+  if (!entry || !target || upscaleBusy.value || upscaleJob.value) return;
+  const epoch = ++upscaleEpoch;
   upscaleBusy.value = true;
   upscaleError.value = "";
   try {
+    if (isVideoItem(entry.item)) {
+      if (hosts.capabilities[entry.sourceKey]?.video_upscale?.available !== true) {
+        throw new Error("This print's machine does not support Framewise upscale.");
+      }
+      const created = await createFramewiseUpscale(target, entry.item.filename, upscaleModel.value);
+      if (epoch !== upscaleEpoch) return;
+      upscaleJob.value = created;
+      void pollCanvasUpscale();
+      return;
+    }
     if (hosts.capabilities[entry.sourceKey]?.video_upscale?.gallery_image === true) {
       const result = await upscaleLibraryImage(target, entry.item.filename, upscaleModel.value);
       toasts.push(`Made bigger — ${result.filename}`);
@@ -2002,11 +2121,12 @@ async function startCanvasUpscale() {
       toasts.push(`Made bigger — saved as ${saved}`);
     }
     void hostGallery.refreshHost(entry.sourceKey);
-    closeCanvasUpscale();
+    if (epoch === upscaleEpoch) closeCanvasUpscale();
   } catch (error) {
-    upscaleError.value = error instanceof Error ? error.message : String(error);
+    if (epoch === upscaleEpoch)
+      upscaleError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    upscaleBusy.value = false;
+    if (epoch === upscaleEpoch) upscaleBusy.value = false;
   }
 }
 
@@ -4686,11 +4806,17 @@ onBeforeUnmount(() => {
     <UpscaleDialog
       v-model="upscaleModel"
       :open="!!upscaleEntry"
-      kind="image"
+      :kind="upscaleKind"
       :source-name="upscaleEntry?.item.filename ?? ''"
       :models="models.upscalers"
       :busy="upscaleBusy"
       :error="upscaleError || null"
+      :job-state="upscaleJob?.state ?? null"
+      :status="upscaleJob ? framewiseStatus(upscaleJob) : null"
+      :progress="upscaleJob ? framewiseProgress(upscaleJob) : null"
+      @pause="transitionCanvasUpscale('pause')"
+      @resume="transitionCanvasUpscale('resume')"
+      @cancel="transitionCanvasUpscale('cancel')"
       @confirm="startCanvasUpscale"
       @close="closeCanvasUpscale"
     />

@@ -7,6 +7,7 @@ import {
   ref,
   watch,
 } from "vue";
+import { useRouter } from "vue-router";
 import { requestChoice, toast, undoableAction } from "../lib/toasts";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import ResultCanvas from "../components/create/ResultCanvas.vue";
@@ -296,6 +297,7 @@ function loadMuted(): boolean {
 }
 
 const form = useGenerateForm();
+const router = useRouter();
 const { status } = useStatusPoll();
 const routing = useHostRouting();
 const licenseAcceptance = useLicenseAcceptance();
@@ -4313,6 +4315,19 @@ async function onLightboxUseSource(item: GalleryImage) {
 }
 
 async function onLightboxUpscale(item: GalleryImage) {
+  if (mediaKind(item.format, item.filename) === "video") {
+    closeDrawer();
+    await router.push({
+      name: "library",
+      query: {
+        print: item.filename,
+        printHost:
+          (item as GalleryImage & { hostId?: string }).hostId ?? ORIGIN_HOST_ID,
+        upscale: "framewise",
+      },
+    });
+    return;
+  }
   if (!(await attachLightboxSource(item))) return;
   form.state.value.upscaleModel ||= defaultUpscaler(models.value);
   closeDrawer();
