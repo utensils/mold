@@ -25376,7 +25376,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "d2eb3b13f2b386cbca96900040d9639119299aea3a2379795c90438c4f1017c8",
+        "profile_hash": "e163794620e6bace740cbe0dd7396686146edb27bdda420ab437570195ee1115",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -25483,15 +25483,15 @@
             },
             "steps": {
               "default": 21,
-              "min": 2,
+              "min": 21,
               "max": 50,
               "step": 1,
               "recommended": [
-                11,
                 21,
                 32
               ],
-              "mode": "adjustable"
+              "mode": "adjustable",
+              "note": "Floor is the undistilled tier's smallest reviewed schedule: 21 terminal-inclusive sampler grid points (ComfyUI's default; the released default is 50). Fewer flash once per latent frame — pick a Turbo tag for a 4- or 8-step render."
             },
             "guidance": {
               "default": 0.0,
@@ -26129,7 +26129,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "d405cfffb7d1e68fb5e95df4c12034b8ab324cbda44116a140d8e51c9b4050f9",
+        "profile_hash": "a3c888a5261321d0d939a657af6a8b269f849da70f5990b64545f47b7afa3f43",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -26229,7 +26229,7 @@
             },
             "steps": {
               "default": 50,
-              "min": 2,
+              "min": 21,
               "max": 100,
               "step": 1,
               "recommended": [
@@ -26237,7 +26237,8 @@
                 50,
                 75
               ],
-              "mode": "adjustable"
+              "mode": "adjustable",
+              "note": "Floor is the undistilled tier's smallest reviewed schedule: 21 terminal-inclusive sampler grid points (ComfyUI's default; the released default is 50). Fewer flash once per latent frame — pick a Turbo tag for a 4- or 8-step render."
             },
             "guidance": {
               "default": 0.0,
@@ -26369,7 +26370,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-ref2va",
-        "profile_hash": "811ee62c726358184f5f21b3e742f2424e13b5f75cc852248a578bfa53008a1c",
+        "profile_hash": "ec901ef5d0cc36f87e744d9fc4d8fe370b36251f73632410de1f20095a17ec2e",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -26476,15 +26477,15 @@
             },
             "steps": {
               "default": 21,
-              "min": 2,
+              "min": 21,
               "max": 50,
               "step": 1,
               "recommended": [
-                11,
                 21,
                 32
               ],
-              "mode": "adjustable"
+              "mode": "adjustable",
+              "note": "Floor is the undistilled tier's smallest reviewed schedule: 21 terminal-inclusive sampler grid points (ComfyUI's default; the released default is 50). Fewer flash once per latent frame — pick a Turbo tag for a 4- or 8-step render."
             },
             "guidance": {
               "default": 0.0,
@@ -26863,7 +26864,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-ref2va",
-        "profile_hash": "962481b9980ee0fb0325098fd1eb08da61ab30e0c651c1cf86377f2b025509c7",
+        "profile_hash": "cb892cc3de0257c757ea0586ed7e14c55c30af538a378f79201c994e27147e76",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -26963,7 +26964,7 @@
             },
             "steps": {
               "default": 50,
-              "min": 2,
+              "min": 21,
               "max": 100,
               "step": 1,
               "recommended": [
@@ -26971,7 +26972,8 @@
                 50,
                 75
               ],
-              "mode": "adjustable"
+              "mode": "adjustable",
+              "note": "Floor is the undistilled tier's smallest reviewed schedule: 21 terminal-inclusive sampler grid points (ComfyUI's default; the released default is 50). Fewer flash once per latent frame — pick a Turbo tag for a 4- or 8-step render."
             },
             "guidance": {
               "default": 0.0,

@@ -1588,7 +1588,10 @@ mod tests {
             model: contract::REF2VA_COMFY.into(),
             width: 32,
             height: 32,
-            steps: 4,
+            // The reviewed schedule floor: `prepare_request` runs the family
+            // contract, which since the base-tag step floor refuses anything
+            // below `COMPACT_BASE_MIN_STEPS` on an undistilled tag.
+            steps: contract::COMPACT_BASE_MIN_STEPS,
             guidance: 0.0,
             seed: Some(7),
             batch_size: 1,

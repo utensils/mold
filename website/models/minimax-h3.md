@@ -7,6 +7,19 @@ twelve compact Comfy tags, plus two official BF16 qualification references. The
 files are downloaded directly from their pinned Hugging Face repositories;
 Mold does not bundle or mirror the weights.
 
+## Prompting
+
+The released checkpoints train on a structured Context-IR, not a single
+caption: ordered `integrated_multimodal_description`, `overall_soundscape`,
+and `non_diegetic_music` fields, `[Shot n]` cuts, and `<d>[English]
+…</d>` dialogue tags. A bare one-line prompt under-fills that wiring and
+renders worse than the model deserves. `mold expand`, `mold remix`,
+`mold run --expand`, and every app's Expand render the same guide into the
+expander. See [MiniMax H3 prompting](/guide/prompting#minimax-h3-prompting)
+for the field syntax and
+[MiniMax H3 Ref2VA](/guide/prompting#minimax-h3-ref2va) for the
+reference-conditioned variant.
+
 ## Generated Examples
 
 Every clip contains synchronized audio generated with the video. Press play to
@@ -349,8 +362,9 @@ The current compact implementation supports this request profile:
   least 256 px, at most 1,032,192 pixels in total (the area of `1344x768`),
   aspect between 1:4 and 4:1) batch size 1
 - 107 to 345 frames on the `17n+5` grid at 24 fps (124 is the default)
-- 2 to 50 terminal-inclusive sampler grid points for the base model (21 is the
-  default); a reviewed Turbo tag instead requires exactly its tier's own count
+- 21 to 50 terminal-inclusive sampler grid points for the base model (21 is
+  the default and the floor: below it the print flashes once per latent
+  frame); a reviewed Turbo tag instead requires exactly its tier's own count
   (9 for `-turbo-8step`, `-turbo-8step-768p`, and `-turbo-8step-r21`, 5 for
   `-turbo-4step-768p`, `-turbo-4step-768p-v1.1`, and `-turbo-4step-768p-r21`),
   because that count is the distilled adapter's own schedule length
@@ -476,7 +490,7 @@ it does not require private authorization or qualification-record files.
 `minimax-h3-ref2va:comfy-pruned-int8` conditions on an **ordered set of
 references** instead of a boundary frame. Everything about the generated side
 is FL2VA's (the same canvas rule, the same `17n+5` frame grid at 24 fps, the
-same 2-50 sampler grid points, MP4 with synchronized audio) and the
+same 21-50 sampler grid points, MP4 with synchronized audio) and the
 conditioning side is the set:
 
 - 1 to 12 references in total, at most 9 images, 3 videos, and 3 audio files

@@ -217,6 +217,56 @@ describe("ControlsAside", () => {
     expect(wrapper.text()).not.toContain("Distilled recipe fixes CFG");
   });
 
+  it("renders the host's own note for a bounded but adjustable step control", () => {
+    // The base H3 tag's floor is a reviewed schedule rather than a pin, so
+    // the control still moves. The sentence has to render anyway — a bound
+    // the user can see and cannot account for reads as a bug.
+    const name = "minimax-h3-fl2va:comfy-pruned-int8";
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({
+          model: name,
+          modelFamily: "minimax-h3",
+          steps: 21,
+          guidance: 0,
+        }),
+        family: "minimax-h3",
+        advCount: 0,
+        model: noteModel(
+          name,
+          "minimax-h3",
+          {
+            default: 21,
+            min: 21,
+            max: 50,
+            step: 1,
+            mode: "adjustable",
+            note: H3_BASE_STEPS_NOTE,
+          },
+          {
+            default: 0,
+            min: 0,
+            max: 0,
+            step: 0.1,
+            mode: "fixed",
+            note: H3_GUIDANCE_NOTE,
+          },
+        ),
+      },
+    });
+
+    expect(wrapper.get("[data-test='fixed-steps-hint']").text()).toBe(
+      H3_BASE_STEPS_NOTE,
+    );
+    // And the control it explains is still usable.
+    const steps = wrapper
+      .findAllComponents(SliderRow)
+      .find((row) => row.props("label") === "Detail")!;
+    expect(steps.props("disabled")).toBe(false);
+    expect(steps.props("min")).toBe(21);
+    expect(steps.props("max")).toBe(50);
+  });
+
   it("renders no note for an adjustable control, and none for a silent fixed one", () => {
     const adjustable = mount(ControlsAside, {
       props: {
@@ -1037,6 +1087,8 @@ const H3_GUIDANCE_NOTE =
   "MiniMax H3 does not use classifier-free guidance; guidance is fixed at 0.";
 const H3_TURBO_STEPS_NOTE =
   "Fixed by the 8-step Turbo tier: 9 terminal-inclusive sampler grid points (8 denoise intervals).";
+const H3_BASE_STEPS_NOTE =
+  "Floor is the undistilled tier's smallest reviewed schedule: 21 terminal-inclusive sampler grid points (ComfyUI's default; the released default is 50). Fewer flash once per latent frame \u2014 pick a Turbo tag for a 4- or 8-step render.";
 
 /** A minimal advertised v1 profile whose two numeric controls carry exactly
  * the mode and note under test. Recipe defaults mirror the controls because

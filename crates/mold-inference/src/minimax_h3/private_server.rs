@@ -333,9 +333,10 @@ impl H3PrivateRuntimeEnvelopeRecord {
         // A Turbo tier's count is EXACT: it is the distilled adapter's own
         // schedule length, a property of the weights rather than a
         // qualification pin, so 21 steps on an 8-step adapter is a different
-        // model. The base tier takes a range — the sampler needs at least two
-        // grid points and nothing above the released default was ever a
-        // reviewed configuration.
+        // model. The base tier takes a range whose ends are both reviewed
+        // configurations — ComfyUI's 21-point default at the bottom, below
+        // which the undistilled print flashes once per latent frame, and the
+        // released default at the top, above which nothing was measured.
         match turbo_steps {
             Some(reviewed_steps) => {
                 if self.max_steps != reviewed_steps {
@@ -346,12 +347,12 @@ impl H3PrivateRuntimeEnvelopeRecord {
                 }
             }
             None => {
-                if !(contract::COMPACT_MIN_STEPS..=contract::COMPACT_MAX_STEPS)
+                if !(contract::COMPACT_BASE_MIN_STEPS..=contract::COMPACT_MAX_STEPS)
                     .contains(&self.max_steps)
                 {
                     bail!(
                         "private H3 runtime qualification envelope allows {}..={} steps, not {}",
-                        contract::COMPACT_MIN_STEPS,
+                        contract::COMPACT_BASE_MIN_STEPS,
                         contract::COMPACT_MAX_STEPS,
                         self.max_steps
                     )
@@ -7598,17 +7599,23 @@ mod tests {
         }
 
         // The base tier's step axis is a range; a Turbo tier's is exact.
+        // `COMFY_DEFAULT_STEPS` is the same number as the floor, reached
+        // through the other authority, so it is not listed twice.
         for steps in [
-            contract::COMPACT_MIN_STEPS,
-            10,
-            contract::COMFY_DEFAULT_STEPS,
+            contract::COMPACT_BASE_MIN_STEPS,
+            30,
             contract::COMPACT_MAX_STEPS,
         ] {
             reviewed_envelope(steps)
                 .validate()
                 .unwrap_or_else(|error| panic!("{steps} steps: {error}"));
         }
-        for steps in [0, 1, contract::COMPACT_MAX_STEPS + 1] {
+        for steps in [
+            0,
+            1,
+            contract::COMPACT_BASE_MIN_STEPS - 1,
+            contract::COMPACT_MAX_STEPS + 1,
+        ] {
             assert!(
                 reviewed_envelope(steps).validate().is_err(),
                 "out-of-range step count {steps} was admitted"
@@ -8383,31 +8390,66 @@ mod tests {
     /// step RANGE. The 21-step pin was the qualifying campaign's own count
     /// read as a contract; a step is time rather than memory, so nothing in
     /// the bounds moves with it and there was never anything to qualify.
+    ///
+    /// The range's FLOOR is a different question, and it is a reviewed
+    /// schedule: 5, 9 and 20 used to sit inside it and no longer do, because
+    /// a base render below 21 grid points flashes once per latent frame.
+    /// Their distilled counterparts still validate under their own adapter
+    /// authority, which is what `a_turbo_prepared_request_validates_only_
+    /// under_its_own_step_authority` covers.
     #[test]
     fn the_envelope_step_axis_is_a_range_without_a_turbo_adapter() {
+        // `COMFY_DEFAULT_STEPS` is the floor itself under its other name, so
+        // 21 is listed once.
         for steps in [
-            contract::COMPACT_MIN_STEPS,
-            5,
-            9,
-            20,
-            contract::COMFY_DEFAULT_STEPS,
+            contract::COMPACT_BASE_MIN_STEPS,
             22,
+            30,
             contract::COMPACT_MAX_STEPS,
         ] {
             reviewed_envelope(steps)
                 .validate()
                 .unwrap_or_else(|error| panic!("{steps}: {error}"));
         }
-        for steps in [0u32, 1, contract::COMPACT_MAX_STEPS + 1, 4_096] {
+        for steps in [0u32, 1, 5, 9, 20, contract::COMPACT_MAX_STEPS + 1, 4_096] {
             let error = reviewed_envelope(steps).validate().unwrap_err().to_string();
             assert!(
                 error.contains(&format!(
                     "allows {}..={} steps",
-                    contract::COMPACT_MIN_STEPS,
+                    contract::COMPACT_BASE_MIN_STEPS,
                     contract::COMPACT_MAX_STEPS
                 )),
                 "{steps}: {error}"
             );
+        }
+    }
+
+    /// The undistilled envelope's floor is the smallest REVIEWED schedule,
+    /// not the sampler's arithmetic minimum.
+    ///
+    /// `docs/qualification/minimax-h3.md` rows `a′`/`a″` rendered the same
+    /// request at 4 grid points and the print flashes once per latent frame;
+    /// row `a‴` at ComfyUI's 21-point default is the clean control. So the
+    /// private envelope refuses everything below it by name, with the same
+    /// sentence the generation profile advertises a floor for.
+    #[test]
+    fn the_envelope_refuses_base_step_counts_below_the_reviewed_schedule() {
+        for steps in [2u32, 4, 20] {
+            let error = reviewed_envelope(steps).validate().unwrap_err().to_string();
+            assert!(
+                error.contains(&format!(
+                    "allows {}..={} steps",
+                    contract::COMPACT_BASE_MIN_STEPS,
+                    contract::COMPACT_MAX_STEPS
+                )),
+                "{steps}: {error}"
+            );
+            assert!(error.contains("allows 21..=50 steps"), "{steps}: {error}");
+        }
+        for steps in [21u32, 30, 50] {
+            reviewed_envelope(steps)
+                .validate()
+                .unwrap_or_else(|error| panic!("{steps}: {error}"));
         }
     }
 
@@ -8559,20 +8601,29 @@ mod tests {
                 .validate_prepared_with_adapter(&request, Some(&adapter))
                 .unwrap();
 
-            // The base tier's step axis is a range that CONTAINS every
-            // reviewed Turbo count, so the step number is no longer what
-            // separates the tiers — passing `None` here validates. What still
-            // separates them is adapter IDENTITY: `validate_for_task_with_
-            // adapter` checks the tier's reviewed task, `resolve_turbo_
-            // authority_for_request` selects by model name, and
-            // `media_model_matches_h3_authority` pairs the request with the
-            // frozen adapter. Each caller must still name which authority it
-            // holds.
-            assert!((contract::COMPACT_MIN_STEPS..=contract::COMPACT_MAX_STEPS)
-                .contains(&reviewed_steps));
-            envelope
+            // Every reviewed Turbo count sits BELOW the base tier's reviewed
+            // floor, so a distilled schedule is now reachable only through
+            // its own adapter authority: the same envelope under `None` is
+            // refused. That does not make the step number what separates the
+            // tiers — adapter IDENTITY still does, and each caller must name
+            // which authority it holds (`validate_for_task_with_adapter`
+            // checks the tier's reviewed task, `resolve_turbo_authority_for_
+            // request` selects by model name, and `media_model_matches_h3_
+            // authority` pairs the request with the frozen adapter). It means
+            // an unadapted request can no longer borrow a distilled count.
+            assert!(reviewed_steps < contract::COMPACT_BASE_MIN_STEPS);
+            let error = envelope
                 .validate_prepared_with_adapter(&request, None)
-                .unwrap_or_else(|error| panic!("{reviewed_steps}: {error}"));
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!(
+                    "allows {}..={} steps",
+                    contract::COMPACT_BASE_MIN_STEPS,
+                    contract::COMPACT_MAX_STEPS
+                )),
+                "{reviewed_steps}: {error}"
+            );
 
             // And the baseline request is still refused under the Turbo
             // authority, so the tier's count is a pin rather than a widening.
@@ -8598,7 +8649,7 @@ mod tests {
     ///
     /// `validate_prepared_with_adapter` compares `grid_points` to `max_steps`
     /// by EQUALITY, so minting the default 21 while the generation profile
-    /// advertises a 2..=50 range let a 30-step base request clear API
+    /// advertised a 2..=50 range let a 30-step base request clear API
     /// validation and then fail at runtime preparation — the exact
     /// advertise-one-thing-enforce-another split the range was meant to
     /// remove. A Turbo adapter still overrides the request, because its count
@@ -8649,7 +8700,7 @@ mod tests {
         };
 
         for steps in [
-            contract::COMPACT_MIN_STEPS,
+            contract::COMPACT_BASE_MIN_STEPS,
             contract::COMFY_DEFAULT_STEPS,
             30,
             contract::COMPACT_MAX_STEPS,
@@ -8684,13 +8735,21 @@ mod tests {
             assert!(error.contains("grid_points"), "{steps}: {error}");
         }
 
-        // Outside the base range nothing mints at all.
-        for steps in [0, 1, contract::COMPACT_MAX_STEPS + 1, 4_096] {
+        // Outside the base range nothing mints at all — including a
+        // distilled tier's own count, which is reachable only through the
+        // adapter authority that names the tier.
+        for steps in [
+            0,
+            1,
+            contract::COMPACT_BASE_MIN_STEPS - 1,
+            contract::COMPACT_MAX_STEPS + 1,
+            4_096,
+        ] {
             let error = mint(steps).unwrap_err().to_string();
             assert!(
                 error.contains(&format!(
                     "allows {}..={} steps",
-                    contract::COMPACT_MIN_STEPS,
+                    contract::COMPACT_BASE_MIN_STEPS,
                     contract::COMPACT_MAX_STEPS
                 )),
                 "{steps}: {error}"

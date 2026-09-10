@@ -29,13 +29,13 @@ off_bucket?: OffBucketPolicy | null, aspect_groups: Array<ProfileAspectGroup>, }
 
 export type IntegerControl = { default: number, min: number, max: number, step: number, recommended?: Array<number>, mode: ControlMode,
 /**
- * See [`IntegerControl`]'s note on fixed-control copy.
+ * See [`IntegerControl`]'s note on fixed-or-bounded-control copy.
  */
 note?: string | null, };
 
 export type FloatControl = { default: number, min: number, max: number, step: number, mode: ControlMode,
 /**
- * See [`IntegerControl`]'s note on fixed-control copy.
+ * See [`IntegerControl`]'s note on fixed-or-bounded-control copy.
  */
 note?: string | null, };
 

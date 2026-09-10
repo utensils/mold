@@ -149,18 +149,24 @@ export function advertisedGenerationRecipe(
 }
 
 /**
- * The server's own sentence explaining why a control cannot be changed.
+ * The server's own sentence explaining why a control is fixed or bounded.
  *
- * The generation profile authors this beside the decision that fixes the
- * control, so no surface composes copy for a value it did not choose. An
- * adjustable control, an older server that never sends the field, and a fixed
- * control the profile had nothing to say about all answer `null` — render
- * nothing rather than inventing a sentence.
+ * The generation profile authors this beside the decision that pins the
+ * control or narrows its range, so no surface composes copy for a value it
+ * did not choose. A pinned control is the obvious case; an ADJUSTABLE one
+ * whose range is narrower than the family's needs the sentence just as much
+ * — H3's undistilled step floor is a reviewed schedule, and a user who
+ * cannot see why 20 is refused reads it as a bug. So the mode is not asked
+ * at all: whatever the server chose to explain is rendered.
+ *
+ * An older server that never sends the field, and any control the profile
+ * had nothing to say about, answer `null` — render nothing rather than
+ * inventing a sentence.
  */
 export function controlNote(
   control: { mode?: string | null; note?: string | null } | null | undefined,
 ): string | null {
-  if (!control || control.mode !== "fixed") return null;
+  if (!control) return null;
   const note = control.note;
   return typeof note === "string" && note.trim() ? note : null;
 }

@@ -141,13 +141,17 @@ pub struct ResolutionProfile {
     pub aspect_groups: Vec<AspectGroup>,
 }
 
-/// The one human sentence explaining why a control cannot be changed.
+/// The one human sentence explaining why a control is fixed or bounded.
 ///
-/// Authored at the single place the fixedness is decided, so no client ever
-/// composes copy for a value it did not choose. Absent for every adjustable
-/// control and for a fixed control with nothing worth saying — a client that
-/// finds no note renders nothing rather than inventing a sentence, which is
-/// exactly what an older server's response deserializes to.
+/// Authored at the single place the fixedness or the bound is decided, so no
+/// client ever composes copy for a value it did not choose. A pinned control
+/// is the obvious case, but an ADJUSTABLE control whose range is narrower
+/// than the family's needs the sentence just as much — H3's undistilled step
+/// floor is a reviewed schedule, and a user who cannot see why 20 is refused
+/// reads it as a bug. Absent for a control with nothing worth saying — a
+/// client that finds no note renders nothing rather than inventing a
+/// sentence, which is exactly what an older server's response deserializes
+/// to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct IntegerControl {
     pub default: u32,
@@ -157,7 +161,7 @@ pub struct IntegerControl {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recommended: Vec<u32>,
     pub mode: ControlMode,
-    /// See [`IntegerControl`]'s note on fixed-control copy.
+    /// See [`IntegerControl`]'s note on fixed-or-bounded-control copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -169,7 +173,7 @@ pub struct FloatControl {
     pub max: f64,
     pub step: f64,
     pub mode: ControlMode,
-    /// See [`IntegerControl`]'s note on fixed-control copy.
+    /// See [`IntegerControl`]'s note on fixed-or-bounded-control copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -1777,6 +1781,23 @@ fn fixed_turbo_steps_note(tier: &crate::minimax_h3::TurboManifestTier) -> String
     )
 }
 
+/// The sentence explaining an UNDISTILLED H3 tag's step FLOOR.
+///
+/// The control is adjustable, so nothing here is about a pin: it is about a
+/// bound the user can see and cannot otherwise account for. The floor is the
+/// smallest schedule the checkpoint was ever reviewed at, and below it the
+/// print flashes once per latent frame — a failure that looks like a bug in
+/// mold rather than a step count the user chose, which is exactly why the
+/// number needs a sentence. The 4- and 8-step renders someone came here
+/// looking for exist, on the Turbo tags, so the note says where.
+fn base_compact_steps_note() -> String {
+    format!(
+        "Floor is the undistilled tier's smallest reviewed schedule: {} terminal-inclusive sampler grid points (ComfyUI's default; the released default is {}). Fewer flash once per latent frame — pick a Turbo tag for a 4- or 8-step render.",
+        crate::minimax_h3::COMPACT_BASE_MIN_STEPS,
+        crate::minimax_h3::DEFAULT_STEPS,
+    )
+}
+
 /// The sentence explaining a DMD-distilled Wan tier's fixed step count.
 ///
 /// The ladder is not a budget the user spends: the student was trained to
@@ -2158,7 +2179,11 @@ fn recipe(
     };
     let steps_min = match (wan_dmd_steps, h3_compact_turbo_steps, family) {
         (Some(steps), _, _) | (None, Some(steps), _) => steps,
-        (None, None, "minimax-h3") => crate::minimax_h3::COMPACT_MIN_STEPS,
+        // The undistilled floor is the identity's own smallest REVIEWED
+        // schedule, not the sampler's arithmetic minimum — the same authority
+        // admission reads, so the control advertises exactly what the door
+        // enforces.
+        (None, None, "minimax-h3") => crate::minimax_h3::steps_floor_for_model(input.model),
         _ => 1,
     };
     let steps_max = match (wan_dmd_steps, h3_compact_turbo_steps, h3_compact) {
@@ -2212,9 +2237,14 @@ fn recipe(
                 steps_ladder(steps_min, default_steps, steps_max)
             },
             mode: steps_mode,
+            // Order is load-bearing: a Turbo tag is an H3 identity too, and
+            // its pinned schedule is the more specific answer. The base arm
+            // explains a FLOOR on an adjustable control, which is the case
+            // the note contract was widened for.
             note: wan_dmd_ladder
                 .map(fixed_dmd_steps_note)
-                .or_else(|| h3_compact_turbo.map(fixed_turbo_steps_note)),
+                .or_else(|| h3_compact_turbo.map(fixed_turbo_steps_note))
+                .or_else(|| (family == "minimax-h3").then(base_compact_steps_note)),
         },
         guidance: FloatControl {
             default: effective_guidance,
@@ -4462,7 +4492,7 @@ mod tests {
                 assert_eq!(recipe.steps.mode, ControlMode::Adjustable, "{model}");
                 assert_eq!(
                     recipe.steps.min,
-                    crate::minimax_h3::COMPACT_MIN_STEPS,
+                    crate::minimax_h3::COMPACT_BASE_MIN_STEPS,
                     "{model}"
                 );
                 assert_eq!(
@@ -4480,7 +4510,7 @@ mod tests {
                 assert_eq!(
                     recipe.steps.recommended,
                     steps_ladder(
-                        crate::minimax_h3::COMPACT_MIN_STEPS,
+                        crate::minimax_h3::COMPACT_BASE_MIN_STEPS,
                         steps,
                         crate::minimax_h3::COMPACT_MAX_STEPS
                     ),
@@ -4600,12 +4630,28 @@ mod tests {
                 "{model}: the official ladder keeps every reviewed aspect"
             );
             assert_eq!(recipe.steps.mode, ControlMode::Adjustable, "{model}");
-            assert_eq!(recipe.steps.min, 2, "{model}");
+            // The step FLOOR is a property of the undistilled checkpoint, not
+            // of the compact packaging, so the official references take it
+            // too; only the ceiling is the family's own wider one.
+            assert_eq!(
+                recipe.steps.min,
+                crate::minimax_h3::COMPACT_BASE_MIN_STEPS,
+                "{model}"
+            );
             assert_eq!(recipe.steps.max, 100, "{model}");
             assert_eq!(
                 recipe.steps.recommended,
-                steps_ladder(2, crate::minimax_h3::DEFAULT_STEPS, 100),
+                steps_ladder(
+                    crate::minimax_h3::COMPACT_BASE_MIN_STEPS,
+                    crate::minimax_h3::DEFAULT_STEPS,
+                    100
+                ),
                 "{model}: an adjustable H3 tier offers the ladder"
+            );
+            assert_eq!(
+                recipe.steps.note.as_deref(),
+                Some(base_compact_steps_note().as_str()),
+                "{model}"
             );
 
             let temporal = recipe.temporal.as_ref().unwrap();
@@ -4623,6 +4669,9 @@ mod tests {
         let mut h3_input = input("minimax-h3-fl2va:official-bf16", "minimax-h3");
         h3_input.default_width = 768;
         h3_input.default_height = 768;
+        // The fixture's generic 20 sits below the family's reviewed step
+        // floor, and this test is about frames and guidance.
+        h3_input.default_steps = crate::minimax_h3::DEFAULT_STEPS;
         h3_input.default_frames = Some(crate::minimax_h3::MIN_FRAMES);
         h3_input.default_fps = Some(crate::minimax_h3::FIXED_FPS);
         let h3 = resolve_generation_profile(h3_input);
@@ -4669,18 +4718,80 @@ mod tests {
         }
     }
 
-    /// The base compact tag takes a step RANGE, so there is nothing to
-    /// explain and no note is authored — a client renders nothing rather
-    /// than inventing copy.
+    /// The base compact tag takes a step RANGE, but a BOUNDED one: its floor
+    /// is the smallest schedule the undistilled checkpoint was reviewed at,
+    /// and a bound the user can see but not explain is exactly what a note is
+    /// for. So an adjustable control carries one here.
     #[test]
-    fn h3_base_steps_are_adjustable_and_carry_no_note() {
-        let profile =
-            resolve_generation_profile(input(crate::minimax_h3::FL2VA_COMFY, "minimax-h3"));
-        let steps = &profile.default_recipe().unwrap().steps;
-        assert_eq!(steps.mode, ControlMode::Adjustable);
-        assert_eq!(steps.min, crate::minimax_h3::COMPACT_MIN_STEPS);
-        assert_eq!(steps.max, crate::minimax_h3::COMPACT_MAX_STEPS);
-        assert_eq!(steps.note, None);
+    fn h3_base_steps_are_bounded_by_the_reviewed_schedule_and_say_why() {
+        for model in [
+            crate::minimax_h3::FL2VA_COMFY,
+            crate::minimax_h3::REF2VA_COMFY,
+        ] {
+            let profile = resolve_generation_profile(input(model, "minimax-h3"));
+            let steps = &profile.default_recipe().unwrap().steps;
+            assert_eq!(steps.mode, ControlMode::Adjustable, "{model}");
+            assert_eq!(
+                steps.min,
+                crate::minimax_h3::COMPACT_BASE_MIN_STEPS,
+                "{model}"
+            );
+            assert_eq!(steps.min, 21, "{model}");
+            assert_eq!(steps.max, crate::minimax_h3::COMPACT_MAX_STEPS, "{model}");
+            assert_eq!(steps.max, 50, "{model}");
+            assert_eq!(steps.default, 21, "{model}");
+            assert_eq!(steps.recommended, vec![21, 32], "{model}");
+            assert_eq!(
+                steps.recommended,
+                steps_ladder(steps.min, steps.default, steps.max),
+                "{model}"
+            );
+            assert_eq!(
+                steps.note.as_deref(),
+                Some(base_compact_steps_note().as_str()),
+                "{model}"
+            );
+        }
+    }
+
+    /// The advertised floor is the ENFORCED floor: a client that ignores the
+    /// control's minimum is refused by the same profile it read it from.
+    #[test]
+    fn a_base_tag_request_below_the_floor_is_refused_by_the_profile() {
+        let mut h3_input = input(crate::minimax_h3::FL2VA_COMFY, "minimax-h3");
+        h3_input.default_width = crate::minimax_h3::DEFAULT_WIDTH;
+        h3_input.default_height = crate::minimax_h3::DEFAULT_HEIGHT;
+        h3_input.default_frames = Some(crate::minimax_h3::DEFAULT_COMPACT_FRAMES);
+        h3_input.default_fps = Some(crate::minimax_h3::FIXED_FPS);
+        let profile = resolve_generation_profile(h3_input);
+        let mut request = request_for(
+            &profile,
+            crate::minimax_h3::DEFAULT_WIDTH,
+            crate::minimax_h3::DEFAULT_HEIGHT,
+        );
+
+        request.steps = crate::minimax_h3::COMPACT_BASE_MIN_STEPS - 1;
+        let error = validate_request_against_generation_profile(&profile, &request).unwrap_err();
+        assert!(error.contains("steps"), "{error}");
+
+        request.steps = crate::minimax_h3::COMPACT_BASE_MIN_STEPS;
+        validate_request_against_generation_profile(&profile, &request).unwrap();
+    }
+
+    /// A Turbo tier's sentence is the tier's own, and the base floor's note
+    /// never displaces it — the base arm is asked only after the Turbo one.
+    #[test]
+    fn turbo_steps_notes_are_untouched_by_the_base_floor() {
+        for tier in crate::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS {
+            let profile = resolve_generation_profile(input(tier.model, "minimax-h3"));
+            let steps = &profile.default_recipe().unwrap().steps;
+            assert_eq!(steps.mode, ControlMode::Fixed, "{}", tier.model);
+            assert_eq!(steps.min, tier.steps, "{}", tier.model);
+            assert_eq!(steps.max, tier.steps, "{}", tier.model);
+            let note = steps.note.as_deref().expect("a Turbo tier explains itself");
+            assert!(note.starts_with("Fixed by the "), "{}: {note}", tier.model);
+            assert_ne!(note, base_compact_steps_note(), "{}", tier.model);
+        }
     }
 
     /// A Turbo tier's step count is terminal-inclusive: the published N-step
