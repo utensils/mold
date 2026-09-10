@@ -171,9 +171,11 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"  # laptop
 ```
 
 `--offload` also applies to remote renders and durable sequences on GPU hosts.
-Add `--no-save` to keep one render out of the Library; the host still publishes
-the print and moves it straight to trash, so `mold trash restore` gets it back
-until retention sweeps it.
+Add `--no-save` to keep one render out of a server's Library; the host still
+publishes the print and moves it straight to trash, so `mold trash restore`
+gets it back until retention sweeps it. It applies to renders a server
+performs — a local render has no Library, and refuses the flag rather than
+ignoring it.
 
 A sequence of several clips is scripted, not composed in an app:
 

@@ -9,7 +9,7 @@ pub async fn run(action: JobsAction, _config: &Config) -> Result<()> {
     let client = MoldClient::from_env();
     match action {
         JobsAction::List { json } => jobs_list(&client, json).await,
-        JobsAction::Show { id, json } => jobs_show(&client, &id, json).await,
+        JobsAction::Show { id, json, script } => jobs_show(&client, &id, json, script).await,
         JobsAction::Resume { id } => jobs_resume(&client, &id).await,
         JobsAction::Retake {
             id,
@@ -89,14 +89,28 @@ async fn jobs_list(client: &MoldClient, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn jobs_show(client: &MoldClient, id: &str, json: bool) -> Result<()> {
+async fn jobs_show(client: &MoldClient, id: &str, json: bool, script: bool) -> Result<()> {
     let detail = client.get_chain_job(id).await?;
+    if script {
+        // The document `mold jobs amend --script` reads, so the pair is a
+        // round trip: `--json` prints a ChainJobDetail, which amend cannot
+        // take and which telling a user to edit would never have worked.
+        print!("{}", render_job_script(&detail)?);
+        return Ok(());
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&detail)?);
         return Ok(());
     }
     print_detail(&detail);
     Ok(())
+}
+
+/// The job's EFFECTIVE script (its original request with every retake and
+/// amendment applied) as `mold.chain.v1` TOML.
+fn render_job_script(detail: &ChainJobDetail) -> Result<String> {
+    mold_core::chain_toml::write_script(&detail.script)
+        .map_err(|error| anyhow::anyhow!("could not render the job's script: {error}"))
 }
 
 async fn jobs_resume(client: &MoldClient, id: &str) -> Result<()> {
@@ -541,6 +555,41 @@ mod tests {
         let edited = script(vec![stage(r"a cat\na dog", 97)]);
         let req = amend_request_from_script(&edited, &args());
         assert_eq!(req.stages[0].prompt, "a cat\na dog");
+    }
+
+    /// `mold jobs show --script` writes the job's effective script as
+    /// `mold.chain.v1` TOML, which is what `mold jobs amend --script` reads.
+    ///
+    /// `--json` prints `ChainJobDetail`, a different document — telling a
+    /// user to edit that and hand it back would never have worked.
+    #[tokio::test]
+    async fn show_script_round_trips_into_the_amend_input() {
+        colored::control::set_override(false);
+        let server = amend_host(false).await;
+        let client = MoldClient::new(&server.uri());
+        let detail = client.get_chain_job("job-7").await.unwrap();
+        let rendered = render_job_script(&detail).unwrap();
+
+        let parsed = mold_core::chain_toml::read_script_resolving_paths(
+            &rendered,
+            std::path::Path::new("."),
+        )
+        .expect("show --script output must parse as a chain script");
+        assert_eq!(
+            parsed
+                .stages
+                .iter()
+                .map(|stage| (stage.prompt.as_str(), stage.frames))
+                .collect::<Vec<_>>(),
+            vec![("a cat walks in", 97), ("the cat sits down", 49)]
+        );
+        assert_eq!(parsed.chain.model, "ltx-2-19b-distilled:fp8");
+        assert_eq!(parsed.chain.fps, 24);
+
+        // And the amend it feeds carries exactly those stages.
+        let req = amend_request_from_script(&parsed, &args());
+        assert_eq!(req.stages.len(), 2);
+        refuse_unamendable_edits(&detail.script, &parsed).unwrap();
     }
 
     fn script_toml() -> &'static str {

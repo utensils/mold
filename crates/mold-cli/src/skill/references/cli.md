@@ -154,6 +154,7 @@ not appear in `mold jobs list`.
 ```bash
 mold jobs list
 mold jobs show job-abc123 --json
+mold jobs show job-abc123 --script
 mold jobs resume job-abc123
 mold jobs retake job-abc123 --stage 2 --mode splice --prompt "it lands on the rug"
 mold jobs cancel job-abc123
@@ -161,13 +162,15 @@ mold jobs gc
 ```
 
 `mold jobs retake` re-renders ONE stage. To change the shape of the sequence,
-export its effective script from `mold jobs show --json`, edit it, and hand the
-whole list back — amend replaces every stage, and the host keeps the cached
+export its effective script with `mold jobs show <ID> --script` (`--json`
+prints a different document, the job detail), edit it, and hand the whole list
+back — amend replaces every stage, and the host keeps the cached
 clips of the leading stages that did not change. The model, size and container
 are not amendable; those need a new sequence. `--dry-run` prints what would be
 sent without touching the job.
 
 ```bash
+mold jobs show job-abc123 --script > edited.toml
 mold jobs amend job-abc123 --script edited.toml --dry-run
 mold jobs amend job-abc123 --script edited.toml --fps 30 --no-audio
 mold jobs delete job-abc123 --yes

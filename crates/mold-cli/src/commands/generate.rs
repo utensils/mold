@@ -156,6 +156,7 @@ where
 /// mirrors what the HTTP server does with its catalog family hint.
 #[cfg(any(feature = "cuda", feature = "metal", test))]
 fn validate_local_request(req: &GenerateRequest, config: &Config) -> Result<()> {
+    refuse_no_save_on_a_local_render(req.save_to_gallery == Some(false))?;
     require_local_request_model_activation(req, config)?;
     mold_core::validate_generate_request_with_family(
         req,
@@ -165,6 +166,26 @@ fn validate_local_request(req: &GenerateRequest, config: &Config) -> Result<()> 
     if let Some(profile) = local_generation_profile(config, &req.model) {
         mold_core::validate_request_against_generation_profile(&profile, req)
             .map_err(anyhow::Error::msg)?;
+    }
+    Ok(())
+}
+
+/// `--no-save` names a HOST's Library, so a local render refuses it.
+///
+/// The flag does not discard anything: the host publishes the print and moves
+/// it straight to trash, which is what keeps it recoverable. A local render
+/// writes a file and a local metadata row and has no trash to move it into,
+/// so the flag cannot be honoured — and silently ignoring it would save a
+/// print the user asked to keep out of the Library. Both local doors read the
+/// same request field, so this is asked once on each: before a forced-local
+/// render begins, and inside the validation the local-fallback path runs.
+fn refuse_no_save_on_a_local_render(no_save: bool) -> Result<()> {
+    if no_save {
+        anyhow::bail!(
+            "--no-save keeps a print out of a HOST's Library by publishing it and moving it \
+             straight to trash; a local render (--local, or the fallback when no server is \
+             reachable) has no Library and no trash, so drop the flag or run against a server"
+        );
     }
     Ok(())
 }
@@ -1113,6 +1134,9 @@ pub async fn run(
         .pipeline
         .is_some_and(mold_core::Ltx2PipelineMode::is_audio_only);
     if local {
+        // Before any download or weight load: the flag cannot be honoured
+        // here, and the answer does not depend on the model.
+        refuse_no_save_on_a_local_render(filing.no_save)?;
         // Ask the activation question before the profile lookup. A model this
         // build cannot execute has no runtime recipe *because* it is refused,
         // so looking the recipe up first reports the symptom ("no generation
@@ -6669,6 +6693,44 @@ mod tests {
         .unwrap();
 
         assert!(mold_core::validate_generate_request(&request).is_err());
+        validate_local_request(&request, &config).unwrap();
+    }
+
+    /// `--no-save` is about a HOST's Library, so a local render refuses it by
+    /// name rather than rendering and quietly saving the print anyway.
+    ///
+    /// The flag means "publish, then trash": the print stays recoverable on
+    /// the machine that owns the gallery. A local render writes a file and a
+    /// local metadata row, with no trash to move anything into, so honouring
+    /// the flag is impossible and ignoring it is a lie about where the print
+    /// went. Both local doors read the same request field, so the refusal is
+    /// pinned where the local-fallback path validates.
+    #[test]
+    fn a_local_render_refuses_no_save_rather_than_saving_anyway() {
+        let config = Config::default();
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a red apple",
+            "model": "flux-dev:q4",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 0.0,
+            "batch_size": 1
+        }))
+        .unwrap();
+        assert_eq!(request.save_to_gallery, None);
+        validate_local_request(&request, &config).unwrap();
+
+        request.save_to_gallery = Some(false);
+        let error = validate_local_request(&request, &config)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--no-save"), "{error}");
+        assert!(error.contains("--local"), "{error}");
+
+        // The refusal is about the opt-out only. `true` is never sent by this
+        // CLI, and a request that carries it is asking for the default.
+        request.save_to_gallery = Some(true);
         validate_local_request(&request, &config).unwrap();
     }
 

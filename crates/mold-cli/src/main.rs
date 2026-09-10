@@ -18,6 +18,10 @@ use mold_core::{OutputFormat, Scheduler};
 
 /// Value parser for OutputFormat with tab-completion candidates.
 fn output_format_parser(formats: &'static [&'static str]) -> clap::builder::ValueParser {
+    // The value is matched case-insensitively at the ARG (`ignore_case`),
+    // because that is where `PossibleValuesParser` reads the setting from —
+    // and the wire types' own `FromStr` lowercases before matching, so an
+    // exact list would refuse a spelling every other door accepts.
     let parser = clap::builder::TypedValueParser::map(
         clap::builder::PossibleValuesParser::new(formats),
         |s: String| s.parse::<OutputFormat>().unwrap(),
@@ -749,10 +753,23 @@ pub enum JobsAction {
         #[arg(long)]
         json: bool,
     },
+    /// Show one sequence job, or print the script that made it
+    #[command(after_long_help = "\
+Examples:
+  mold jobs show job-abc123
+  mold jobs show job-abc123 --json
+  mold jobs show job-abc123 --script > edited.toml")]
     Show {
+        /// Sequence job id as shown by `mold jobs list`
+        #[arg(value_name = "JOB-ID")]
         id: String,
-        #[arg(long)]
+        /// Print the raw `ChainJobDetail` document as JSON
+        #[arg(long, conflicts_with = "script")]
         json: bool,
+        /// Print the job's EFFECTIVE `mold.chain.v1` script as TOML — the
+        /// document `mold jobs amend --script` reads back
+        #[arg(long, conflicts_with = "json")]
+        script: bool,
     },
     Resume {
         id: String,
@@ -771,13 +788,14 @@ pub enum JobsAction {
     /// Replace a sequence's stages from an edited script
     ///
     /// Amend takes the WHOLE stage list, so it is script-shaped: export the
-    /// job's effective script with `mold jobs show <ID> --json`, edit it,
+    /// job's effective script with `mold jobs show <ID> --script`, edit it,
     /// and hand it back. Leading stages whose clips are unchanged keep their
     /// cached artifacts and rendering requeues from the first edit. The
     /// model, size and container are NOT amendable — those need a new
     /// sequence.
     #[command(after_long_help = "\
 Examples:
+  mold jobs show job-abc123 --script > edited.toml
   mold jobs amend job-abc123 --script edited.toml
   mold jobs amend job-abc123 --script edited.toml --dry-run
   mold jobs amend job-abc123 --script edited.toml --fps 30 --no-audio")]
@@ -1127,7 +1145,7 @@ pub enum LibraryAction {
         collection: Option<String>,
         #[arg(long)]
         favorite: bool,
-        #[arg(long, value_parser = output_format_parser(&[
+        #[arg(long, ignore_case = true, value_parser = output_format_parser(&[
             "png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav", "glb",
         ]))]
         format: Option<OutputFormat>,
@@ -1205,7 +1223,7 @@ Examples:
         member: Option<String>,
         /// Where to write the downloaded member. Defaults to its display
         /// name in the current directory; `-` writes to stdout.
-        #[arg(long, short = 'o', value_name = "PATH", requires = "member")]
+        #[arg(long, short = 'o', value_name = "PATH", requires = "member", value_hint = ValueHint::FilePath)]
         output: Option<String>,
         /// Print the raw inventory document as JSON
         #[arg(long, conflicts_with = "member")]
@@ -1244,14 +1262,16 @@ Examples:
     Export {
         #[arg(value_name = "FILENAME")]
         filename: String,
-        /// Container: glb, obj, zip, stl, or ply. glb downloads the stored file
-        /// unchanged; zip packages OBJ + MTL + PBR maps; the rest transcode.
-        #[arg(long, value_name = "FORMAT", value_parser = mesh_export_format_parser())]
+        /// Container: glb, obj, zip, stl, ply, or a gif/apng/webp turntable.
+        /// glb downloads the stored file unchanged; zip packages OBJ + MTL +
+        /// PBR maps; obj, stl and ply transcode the geometry; gif, apng and
+        /// webp RENDER the mesh spinning through a full turn.
+        #[arg(long, value_name = "FORMAT", ignore_case = true, value_parser = mesh_export_format_parser())]
         format: mold_core::MeshExportFormat,
         /// Where to write the converted file. Defaults to the print's stem
         /// with the new extension in the current directory; `-` writes to
         /// stdout.
-        #[arg(long, short = 'o', value_name = "PATH")]
+        #[arg(long, short = 'o', value_name = "PATH", value_hint = ValueHint::FilePath)]
         output: Option<String>,
         #[command(flatten)]
         turntable: TurntableArgs,
@@ -1370,7 +1390,7 @@ Examples:
         /// 3-D). `obj` is deliberately absent: mold never STORES an OBJ,
         /// because one carries neither materials nor textures on its own —
         /// it exists only as a gallery export transcode.
-        #[arg(long, help_heading = "Output",
+        #[arg(long, help_heading = "Output", ignore_case = true,
               value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav", "glb"]))]
         format: Option<OutputFormat>,
 
@@ -1399,10 +1419,13 @@ Examples:
         #[arg(long, help_heading = "Output")]
         no_auto_tag: bool,
 
-        /// Keep this render out of the Library. The host still publishes the
-        /// print and then moves it straight to trash, so nothing is lost:
-        /// it stays recoverable with `mold trash restore` until the host's
-        /// retention sweep purges it.
+        /// Keep this render out of a server's Library. The host still
+        /// publishes the print and then moves it straight to trash, so
+        /// nothing is lost: it stays recoverable with `mold trash restore`
+        /// until the host's retention sweep purges it. It applies only to a
+        /// render a server performs — a local render (`--local`, or the
+        /// fallback when no server is reachable) has no Library and refuses
+        /// the flag rather than ignoring it.
         #[arg(long, help_heading = "Output")]
         no_save: bool,
 
@@ -3629,7 +3652,8 @@ async fn run() -> anyhow::Result<()> {
 /// (which is why `--control-model`, a model name, is not a path flag), and
 /// one missing from here completes nothing at all. Walking
 /// `ValueHint::FilePath` / `DirPath` is what keeps the two in step as flags
-/// are added — the list had fallen fourteen flags behind by hand.
+/// are added — the hand-kept list had fallen thirteen file-path flags behind,
+/// and had `--output-dir` missing from the directory side.
 fn path_completion_tokens() -> (Vec<String>, Vec<String>) {
     fn walk(command: &clap::Command, files: &mut Vec<String>, dirs: &mut Vec<String>) {
         for arg in command.get_arguments() {
@@ -3825,6 +3849,30 @@ mod tests {
             .expect("clap thread panicked")
     }
 
+    /// A container name is matched the way the wire type parses it, which is
+    /// case-insensitively — `MeshExportFormat::from_str` lowercases first, so
+    /// `--format GLB` worked until the parser became a possible-value list.
+    #[test]
+    fn format_flags_still_accept_the_case_the_wire_type_accepts() {
+        match parse(&["library", "export", "chair.glb", "--format", "GLB"]).command {
+            Commands::Library {
+                action: LibraryAction::Export { format, .. },
+            } => assert_eq!(format, mold_core::MeshExportFormat::Glb),
+            _ => panic!("expected Library export"),
+        }
+        match parse(&["library", "export", "chair.glb", "--format", "Stl"]).command {
+            Commands::Library {
+                action: LibraryAction::Export { format, .. },
+            } => assert_eq!(format, mold_core::MeshExportFormat::Stl),
+            _ => panic!("expected Library export"),
+        }
+        match parse(&["run", "m", "p", "--format", "PNG"]).command {
+            Commands::Run { format, .. } => assert_eq!(format, Some(OutputFormat::Png)),
+            _ => panic!("expected Run"),
+        }
+        assert!(try_parse(&["library", "export", "chair.glb", "--format", "tiff"]).is_err());
+    }
+
     /// Ask the real completion engine what each flag offers, the way a
     /// shell does.
     ///
@@ -3890,11 +3938,12 @@ mod tests {
     /// The zsh wrapper's two `_files` case lists ARE the set of path args in
     /// the clap tree — not a copy of it that has to be remembered.
     ///
-    /// The hand-kept list had fallen fourteen flags behind (`--video`,
-    /// `--audio-file`, `--extend`, `--first-frame`, …) and carried
-    /// `--control-model`, which takes a MODEL NAME: a flag in this list
-    /// short-circuits to `_files` before the dynamic engine is asked, so
-    /// listing one there silently disables its candidates.
+    /// The hand-kept list had fallen thirteen file-path flags behind
+    /// (`--video`, `--audio-file`, `--extend`, `--first-frame`, …), missed
+    /// `--output-dir` on the directory side, and carried `--control-model`,
+    /// which takes a MODEL NAME: a flag in this list short-circuits to
+    /// `_files` before the dynamic engine is asked, so listing one there
+    /// silently disables its candidates.
     #[test]
     fn the_zsh_files_list_matches_every_file_path_arg() {
         let (files, dirs) = on_large_stack(path_completion_tokens);
@@ -5240,6 +5289,26 @@ mod tests {
                 _ => panic!("expected Trash empty --yes"),
             }
         }
+    }
+
+    /// `mold jobs show --script` is the other half of amend: it prints the
+    /// job's effective script as chain TOML, which is what `--script` reads.
+    #[test]
+    fn jobs_show_prints_the_effective_script_as_toml() {
+        match parse(&["jobs", "show", "job-abc123", "--script"]).command {
+            Commands::Jobs {
+                action: JobsAction::Show { id, json, script },
+            } => {
+                assert_eq!(id, "job-abc123");
+                assert!(!json);
+                assert!(script);
+            }
+            _ => panic!("expected Jobs show --script"),
+        }
+        assert!(
+            try_parse(&["jobs", "show", "job-abc123", "--json", "--script"]).is_err(),
+            "the two documents are different shapes; asking for both is a mistake"
+        );
     }
 
     /// Amend is script-shaped because the wire request carries the whole

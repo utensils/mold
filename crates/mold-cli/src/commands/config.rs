@@ -539,9 +539,27 @@ pub fn complete_config_key() -> Vec<CompletionCandidate> {
 /// exists whether or not anything has been written under it. A machine with
 /// no `mold.db` yet completes nothing rather than failing.
 pub fn complete_profile_name() -> Vec<CompletionCandidate> {
-    crate::metadata_db::handle()
-        .map(profile_candidates)
-        .unwrap_or_default()
+    profile_candidates_from_disk()
+}
+
+/// Read the profiles out of this machine's `mold.db`, WITHOUT creating it.
+///
+/// A completer runs on a keystroke. `mold_db::global_db()` opens the default
+/// database, which creates the file, its WAL siblings and the schema as a
+/// side effect — pressing Tab on a machine that has never run mold must not
+/// do that, so the file's existence is the gate and its absence completes
+/// nothing.
+fn profile_candidates_from_disk() -> Vec<CompletionCandidate> {
+    let Some(path) = mold_db::default_db_path() else {
+        return Vec::new();
+    };
+    if !path.exists() {
+        return Vec::new();
+    }
+    let Ok(db) = mold_db::MetadataDb::open(&path) else {
+        return Vec::new();
+    };
+    profile_candidates(&db)
 }
 
 fn profile_candidates(db: &mold_db::MetadataDb) -> Vec<CompletionCandidate> {
@@ -1081,6 +1099,37 @@ mod tests {
     }
 
     // ── Completion tests ────────────────────────────────
+
+    /// Completing `--profile` must never CREATE this machine's `mold.db`.
+    ///
+    /// A completer runs on a keystroke, in a shell, on a machine that may
+    /// never have run mold: opening the database there writes a file (and its
+    /// WAL siblings) and applies migrations as a side effect of pressing Tab.
+    /// The file's existence is checked first, and its absence completes
+    /// nothing.
+    #[test]
+    fn profile_completion_never_creates_the_database() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let db_path = home.path().join("mold.db");
+        let prior = std::env::var("MOLD_DB_PATH").ok();
+        // SAFETY: serialized by ENV_LOCK, and restored below.
+        unsafe { std::env::set_var("MOLD_DB_PATH", &db_path) };
+
+        assert!(profile_candidates_from_disk().is_empty());
+        assert!(
+            !db_path.exists(),
+            "completing a profile must not create {}",
+            db_path.display()
+        );
+
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("MOLD_DB_PATH", value),
+                None => std::env::remove_var("MOLD_DB_PATH"),
+            }
+        }
+    }
 
     /// `--profile` completes the profiles that exist in this machine's
     /// `mold.db`, and `default` is always one of them even before anything

@@ -13,14 +13,16 @@
   override the script's chain block, `--dry-run` shows what would be sent, and
   a change to the model, size or container is refused by name. The command
   reports how many leading stages kept their rendered clips.
-- **`mold run --no-save` keeps one render out of the Library.** The host still
-  publishes the print and moves it straight to trash, so `mold trash restore`
-  recovers it until retention sweeps it.
+- **`mold run --no-save` keeps one render out of a server's Library.** The host
+  still publishes the print and moves it straight to trash, so `mold trash
+restore` recovers it until retention sweeps it. A local render has no Library
+  and no trash, so it refuses the flag by name instead of ignoring it.
 - **Shell completion stopped drifting.** The zsh wrapper's file-path flag list
   is now generated from the clap tree instead of a hand-kept list that had
-  fallen thirteen flags behind (`--video`, `--audio-file`, `--extend`,
-  `--first-frame`, …) while wrongly claiming `--control-model`, which now
-  completes ControlNet adapter names. `mold library export --format` offers its
+  fallen thirteen file-path flags behind (`--video`, `--audio-file`,
+  `--extend`, `--first-frame`, …), missed `--output-dir` among the
+  directories, and wrongly claimed `--control-model`, which now completes
+  ControlNet adapter names. `mold library export --format` offers its
   containers, `--profile` offers the profiles in `mold.db`, and
   `mold skill show` offers the bundle's files.
 - **The agent skill and the docs are checked for omissions, not just errors.**
