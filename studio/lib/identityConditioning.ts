@@ -12,7 +12,7 @@
  * Nothing here is a NEW rule. The admission contract is:
  *   - identity is accepted only on an identity-qualified checkpoint, which
  *     the server advertises per model (never inferred from a name here);
- *   - it may not combine with a LoRA or an img2img source image;
+ *   - it rides WITH a LoRA and an img2img source image;
  *   - a weight/start-step/name without an image is invalid;
  *   - the image must be PNG or JPEG, at most 16 MiB encoded, 8192 px per
  *     axis, and 32 MP decoded — all checked from the header alone.

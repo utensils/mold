@@ -1492,6 +1492,10 @@ impl SD15Engine {
         let reference = self.reference.resolve(
             req,
             self.base.model_name(),
+            // The denoise loop concatenates `[uncond, cond]` into ONE forward
+            // when guidance is active, so the projection has to carry both
+            // rows — see `IpAdapterContext::new`.
+            cfg_active(req.guidance),
             &device,
             dtype,
             &mold_candle::stable_diffusion::sd15_unet(),
@@ -1733,6 +1737,9 @@ impl SD15Engine {
         let reference = self.reference.resolve(
             req,
             self.base.model_name(),
+            // One doubled `[uncond, cond]` forward under guidance, so the
+            // projection carries both rows — see `IpAdapterContext::new`.
+            cfg_active(req.guidance),
             &loaded.device,
             loaded.dtype,
             &mold_candle::stable_diffusion::sd15_unet(),

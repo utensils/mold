@@ -464,7 +464,7 @@ export interface GenerateRequestWire {
   /** Face-identity (PuLID) reference, base64 PNG/JPEG with no data-URI
    * prefix (#1224). Never fitted or cropped against the canvas — it is a
    * face reference, not a composition input. Admission accepts it only on an
-   * identity-qualified checkpoint, and never beside a LoRA or `source_image`;
+   * identity-qualified checkpoint, and it rides beside a LoRA and `source_image`;
    * every rule lives in `@studio/lib/identityConditioning`. */
   id_image?: string | null;
   /** Ordered multi-photo identity form, mutually exclusive with id_image. */

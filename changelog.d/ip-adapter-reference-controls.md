@@ -1,13 +1,13 @@
-- **A reference picture can now ride WITH a source image, a mask, ControlNet
-  and a LoRA.** IP-Adapter on SD1.5 and SDXL is the first recipe whose
-  references add to the conditioning instead of replacing it, so Create draws
-  both wells live at once and parks neither — every earlier reference family
-  (Qwen Image Edit, FLUX.2 [dev] and [klein]) still behaves exactly as it did.
-  A drop with no well under the cursor lands on the Source well, the request
-  carries `source_image` and `edit_images` together, and the batch is no
-  longer coerced to one print, because an image prompt broadcasts across every
-  row.
-- **New Reference strength slider** beside the reference strip, with the
-  bounds the host itself advertises. It appears only where the recipe declares
-  an adapter — an older host or a checkpoint without one shows nothing — and
-  stays off the wire until you move it, so a default render is unchanged.
+- **Create draws both image wells at once for an SD 1.5 or SDXL reference.**
+  IP-Adapter is the first recipe whose references ADD to the conditioning
+  instead of replacing it, so neither well parks and the request carries the
+  source image and the reference together — every earlier reference family
+  (Qwen Image Edit, FLUX.2 [dev] and [klein]) behaves exactly as it did. A drop
+  with no well under the cursor lands on the Source well, and the batch is no
+  longer coerced to one print
+  ([#1573](https://github.com/utensils/mold/issues/1573)).
+- **Reference strength control on web, desktop and phone.** It renders only
+  where the recipe declares an adapter and takes its bounds from the host, so
+  an older machine or a checkpoint without one shows nothing, and it stays off
+  the wire until you move it — a default render is unchanged
+  ([#1573](https://github.com/utensils/mold/issues/1573)).

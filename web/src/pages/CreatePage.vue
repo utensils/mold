@@ -2377,7 +2377,7 @@ function validateSubmit(): boolean {
     showAdvanced.value = true;
     return false;
   }
-  // Identity is refused as a COMBINATION (a LoRA, a source image, a knob with
+  // Identity is refused for its OWN controls (a strength or start step out of range, a knob with
   // no photo, an unqualified checkpoint), so the block has to happen here as
   // well as inline: `toRequest` silently drops the whole partition, which
   // would otherwise render a stranger's face without a word.

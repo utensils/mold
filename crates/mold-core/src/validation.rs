@@ -7687,7 +7687,17 @@ mod tests {
     /// client renders instead of the control cannot drift apart.
     #[test]
     fn a_family_without_references_refuses_edit_images_by_name() {
-        for model in ["sdxl-base:q4", "wan22-t2v-a14b:q8", "z-image-turbo:q8"] {
+        // Every name here must RESOLVE. `sdxl-base:q4` used to sit in this
+        // list and does not exist — the manifest has only `sdxl-base:fp16` —
+        // so `model_family` answered `None`, the profile fell to the `Hidden`
+        // arm, and the test asserted SDXL refuses references long after SDXL
+        // started accepting them. A nonexistent model is a Hidden recipe by
+        // accident, which makes it useless evidence about a real one.
+        for model in ["wan22-t2v-a14b:q8", "z-image-turbo:q8"] {
+            assert!(
+                crate::manifest::find_manifest(model).is_some(),
+                "{model} must be a real manifest for this test to mean anything"
+            );
             let mut req = valid_req();
             req.model = model.to_string();
             req.edit_images = Some(vec![png_bytes()]);
@@ -7707,6 +7717,34 @@ mod tests {
                 Some(error.as_str()),
                 "{model}"
             );
+        }
+    }
+
+    /// SD1.5 and SDXL ACCEPT `edit_images` — the positive half, which was
+    /// missing entirely while a live test asserted the opposite.
+    #[test]
+    fn the_sd_families_accept_edit_images_beside_a_source_image() {
+        for model in ["sd15:fp16", "sdxl-base:fp16"] {
+            let family = model_family(model).unwrap_or_else(|| panic!("{model} resolves"));
+            let profile = crate::generation_profile::reference_images_for_recipe(family, model);
+            assert_eq!(
+                profile.source_relation,
+                crate::generation_profile::ReferenceSourceRelation::Combines,
+                "{model}"
+            );
+
+            let mut req = valid_req();
+            req.model = model.to_string();
+            req.edit_images = Some(vec![png_bytes()]);
+            validate_generate_request(&req)
+                .unwrap_or_else(|error| panic!("{model} must accept a reference: {error}"));
+
+            // And beside a source image, which is the whole point of Combines.
+            req.source_image = Some(png_bytes());
+            req.strength = 0.6;
+            validate_generate_request(&req).unwrap_or_else(|error| {
+                panic!("{model} must accept a reference beside a source: {error}")
+            });
         }
     }
 

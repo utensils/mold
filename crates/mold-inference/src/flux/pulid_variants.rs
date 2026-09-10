@@ -188,6 +188,16 @@ fn denoise_with_true_cfg(
     denoise_inner(transformer, inputs, pulid, true_cfg, 0)
 }
 
+fn denoise_with_true_cfg_at_offset(
+    transformer: &FluxTransformer,
+    inputs: &Inputs,
+    pulid: Option<PulidRuntime<'_>>,
+    true_cfg: Option<&TrueCfgBranch<'_>>,
+    step_offset: usize,
+) -> Vec<f32> {
+    denoise_inner(transformer, inputs, pulid, true_cfg, step_offset)
+}
+
 fn denoise_inner(
     transformer: &FluxTransformer,
     inputs: &Inputs,
@@ -451,6 +461,80 @@ fn id_start_step_is_measured_against_the_untruncated_schedule() {
         assert_eq!(
             baseline, gated,
             "{name}: a start past the end of the truncated schedule must render bit-identically"
+        );
+    }
+}
+
+/// `cfg_start_step` counts against the untruncated schedule too.
+///
+/// The negative branch has its own gate — `absolute_step >= branch.start_step`
+/// — and it reads the same index `hook_for_step` does. img2img plus true CFG
+/// was unreachable before the identity/img2img pairing was qualified, so
+/// nothing covered it: reverting either of the two true-CFG sites in
+/// `transformer.rs` to the loop's local index left the whole suite green.
+#[test]
+fn cfg_start_step_is_measured_against_the_untruncated_schedule() {
+    let cfg = tiny_flux_config();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gguf = dir.path().join("tiny-flux.gguf");
+    let inputs = inputs();
+    let adapter = adapter();
+    let live = context(1.0, 0);
+    let uncond = context(1.0, 0);
+    let negative = negative_inputs();
+
+    const OFFSET: usize = 10;
+
+    for (name, transformer) in variants(&cfg, &gguf) {
+        let unbranched = denoise_at_offset(
+            &transformer,
+            &inputs,
+            Some(PulidRuntime::new(&adapter, &live)),
+            OFFSET,
+        );
+
+        // Absolute 10 is the first window: the branch runs throughout.
+        let from_the_first = TrueCfgBranch {
+            scale: 2.0,
+            start_step: OFFSET,
+            txt: &negative.txt,
+            txt_ids: &negative.txt_ids,
+            vec_: &negative.vec_,
+            pulid: Some(PulidRuntime::new(&adapter, &uncond)),
+        };
+        assert_ne!(
+            unbranched,
+            denoise_with_true_cfg_at_offset(
+                &transformer,
+                &inputs,
+                Some(PulidRuntime::new(&adapter, &live)),
+                Some(&from_the_first),
+                OFFSET,
+            ),
+            "{name}: cfg_start_step == step_offset must engage the first window; \
+             reading the loop's local index instead would gate it off entirely"
+        );
+
+        // Absolute 14 is past the end of the four windows: never engaged, so
+        // bit-identical to no branch at all.
+        let never_starts = TrueCfgBranch {
+            scale: 2.0,
+            start_step: OFFSET + 4,
+            txt: &negative.txt,
+            txt_ids: &negative.txt_ids,
+            vec_: &negative.vec_,
+            pulid: Some(PulidRuntime::new(&adapter, &uncond)),
+        };
+        assert_eq!(
+            unbranched,
+            denoise_with_true_cfg_at_offset(
+                &transformer,
+                &inputs,
+                Some(PulidRuntime::new(&adapter, &live)),
+                Some(&never_starts),
+                OFFSET,
+            ),
+            "{name}: a branch starting past the truncated schedule must not run"
         );
     }
 }

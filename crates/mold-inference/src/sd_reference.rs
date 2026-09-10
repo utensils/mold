@@ -214,6 +214,7 @@ impl SdReferenceState {
         &mut self,
         req: &GenerateRequest,
         model: &str,
+        use_cfg: bool,
         device: &Device,
         dtype: DType,
         config: &UNet2DConditionModelConfig,
@@ -240,8 +241,9 @@ impl SdReferenceState {
 
         let embeds = self.encode(&images[0], device, dtype, progress)?;
         let adapter = self.ensure_adapter(device, dtype, config)?;
-        let context = IpAdapterContext::new(&adapter, &embeds, asked.weight, device, dtype)
-            .context("projecting the reference image into this UNet's token space")?;
+        let context =
+            IpAdapterContext::new(&adapter, &embeds, use_cfg, asked.weight, device, dtype)
+                .context("projecting the reference image into this UNet's token space")?;
         Ok(Some(ResolvedReference { adapter, context }))
     }
 
@@ -917,6 +919,7 @@ pub(crate) mod tests {
             .resolve(
                 &request(None),
                 "sd15:fp16",
+                false,
                 &device,
                 DType::F32,
                 &config,
@@ -940,6 +943,7 @@ pub(crate) mod tests {
             .resolve(
                 &request(Some(vec![vec![0x89, 0x50, 0x4e, 0x47]])),
                 "sd15:fp16",
+                false,
                 &device,
                 DType::F32,
                 &config,

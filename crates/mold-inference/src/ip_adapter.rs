@@ -48,8 +48,9 @@ use crate::sd_attn_layout::{plan_attn_layers, AttnLayerSite};
 
 /// Leading module name the checkpoint stores the per-layer projections under.
 ///
-/// `ip_adapter.<i>.to_k_ip.weight`, where `<i>` counts `attn2` modules ONLY —
-/// see [`AttnLayerSite::ip_index`], which is where that differs from PuLID.
+/// `ip_adapter.<i>.to_k_ip.weight`, where `<i>` is the module's position in
+/// `unet.attn_processors` — `attn1` and `attn2` interleaved, the SAME space
+/// PuLID uses. See [`AttnLayerSite::ip_index`].
 pub const ADAPTER_PREFIX: &str = "ip_adapter";
 
 /// Leading module name for the image projection.
@@ -309,8 +310,8 @@ impl IpAdapter {
     /// SD1.5-shaped plan against the SDXL file would find its planned indices
     /// present — they are a prefix — load 16 of the file's 70 modules, and
     /// render an image conditioned on a fraction of the reference. Here the
-    /// index space is dense from zero, so the surplus check is simply "is
-    /// there an `ip_adapter.<n>` above the plan".
+    /// index space is dense in ODD numbers, so the surplus check probes the
+    /// next positions the plan would have used rather than a bare count.
     pub fn from_var_builder(
         vb: VarBuilder,
         config: &UNet2DConditionModelConfig,
@@ -438,15 +439,45 @@ impl IpAdapterContext {
     /// (`visual_projection(post_layernorm(hidden[:, 0]))`), not hidden states.
     /// The Plus adapters take hidden states instead, which is a different
     /// projection module and a later change.
+    ///
+    /// `use_cfg` says whether the render drives ONE doubled `[uncond, cond]`
+    /// forward, and it is required rather than inferred because getting it
+    /// wrong fails silently. Upstream runs the two branches as separate passes
+    /// and gives the negative one the projection of a ZEROED embedding —
+    /// `stable-diffusion.cpp` `stable-diffusion.cpp:2221-2222`
+    /// (`zeros_like(embed)` through the same `image_proj`) and diffusers'
+    /// `pipeline_stable_diffusion.py:534,576`
+    /// (`torch.zeros_like(image_embeds)`, then
+    /// `cat([negative, positive], dim=0)`). That is NOT the same as no tokens
+    /// and NOT the same as the conditional ones: `image_proj` carries a bias
+    /// and a `LayerNorm`, so `proj(0)` is a specific learned null token set.
+    ///
+    /// Handing both rows the conditional tokens is the failure this argument
+    /// exists to prevent. Both CFG rows start from the SAME latent, so at the
+    /// first cross-attention the query is identical and the image delta is
+    /// identical too — and `eps_u + g * (eps_c - eps_u)` then cancels it down
+    /// to 1x where upstream carries `g * cond - (g - 1) * null`. The picture
+    /// still changes, so nothing looks broken; it is simply several times
+    /// weaker than the same weight upstream. `SdxlPulidContext::new` records
+    /// the same trap for the identity adapter.
     pub fn new(
         adapter: &IpAdapter,
         image_embeds: &Tensor,
+        use_cfg: bool,
         scale: f32,
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
         let embeds = image_embeds.to_device(device)?.to_dtype(dtype)?;
-        let tokens = adapter.image_proj().forward(&embeds)?;
+        let cond = adapter.image_proj().forward(&embeds)?;
+        let tokens = if use_cfg {
+            let uncond = adapter.image_proj().forward(&embeds.zeros_like()?)?;
+            // `[uncond, cond]`, the order the denoise loops concatenate their
+            // latents and their text embeddings in.
+            Tensor::cat(&[&uncond, &cond], 0)?
+        } else {
+            cond
+        };
         Ok(Self { tokens, scale })
     }
 
@@ -516,25 +547,31 @@ pub struct IpAdapterHook<'a> {
 }
 
 impl IpAdapterHook<'_> {
-    /// Broadcast the reference tokens across a CFG batch.
+    /// Match the reference tokens to the rows of this forward.
     ///
-    /// mold runs `[uncond, cond]` as ONE forward, so a `[1, tokens, dim]`
-    /// context has to cover both rows. Upstream runs the two branches
-    /// separately and hands each the same tokens, so broadcasting reproduces
-    /// it exactly — the image prompt applies to both branches, unlike PuLID's
-    /// true CFG where the negative branch takes a DIFFERENT embedding.
-    fn broadcast(&self, batch: usize) -> candle_core::Result<Tensor> {
+    /// The context is built at the denoise batch already — two rows under
+    /// classifier-free guidance, one without — so the common case is an exact
+    /// match. A one-row context is repeated only for a forward that carries
+    /// several images WITHOUT guidance; it is never widened onto a CFG batch,
+    /// because `[uncond, cond]` needs two DIFFERENT token sets and quietly
+    /// giving both rows the conditional one is the cancellation
+    /// `IpAdapterContext::new` documents.
+    fn rows_for(&self, batch: usize) -> candle_core::Result<Tensor> {
         let tokens = self.context.tokens();
         let have = tokens.dim(0)?;
         if have == batch {
             return Ok(tokens.clone());
         }
-        if have == 1 {
+        if have == 1 && batch % 2 == 1 {
             return tokens
                 .broadcast_as((batch, tokens.dim(1)?, tokens.dim(2)?))?
                 .contiguous();
         }
-        candle_core::bail!("IP-Adapter tokens carry {have} rows but the forward runs {batch}")
+        candle_core::bail!(
+            "IP-Adapter tokens carry {have} rows but the forward runs {batch}; a \
+             classifier-free batch needs the unconditional projection built beside the \
+             conditional one"
+        )
     }
 }
 
@@ -563,7 +600,7 @@ impl CrossAttentionHook for IpAdapterHook<'_> {
             );
         }
         let batch = query.dim(0)?;
-        let tokens = self.broadcast(batch)?;
+        let tokens = self.rows_for(batch)?;
         Ok(Some(layer.inject(
             &tokens,
             query,
@@ -589,6 +626,7 @@ pub fn planned_module_names(config: &UNet2DConditionModelConfig) -> BTreeMap<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::IndexOp;
     use candle_nn::VarMap;
 
     fn sd15_config() -> UNet2DConditionModelConfig {
@@ -869,12 +907,64 @@ mod tests {
         );
     }
 
-    /// A `[1, ...]` context covers a `[uncond, cond]` forward.
+    /// The negative branch gets the NULL tokens, not the conditional ones.
     ///
-    /// mold runs CFG as one doubled batch where upstream runs two passes, and
-    /// upstream hands the SAME tokens to both — so broadcasting reproduces it.
+    /// This is the whole CFG claim, and the previous version of this test
+    /// asserted only that the output kept its shape — which passes whether the
+    /// unconditional row carries the null projection, the conditional one, or
+    /// noise. It therefore documented the bug rather than catching it.
+    ///
+    /// `image_proj` carries a bias and a `LayerNorm`, so `proj(0)` is a
+    /// specific learned token set, distinct from both `proj(embed)` and zero.
     #[test]
-    fn the_tokens_broadcast_across_a_cfg_batch() {
+    fn a_cfg_context_carries_the_null_projection_on_the_negative_row() {
+        let (_map, adapter) = synthetic(&sd15_config(), 4, CLIP_EMBED_DIM);
+        let device = Device::Cpu;
+        let embeds = Tensor::randn(0f32, 1.0, (1, CLIP_EMBED_DIM), &device).unwrap();
+
+        let cfg = IpAdapterContext::new(&adapter, &embeds, true, 1.0, &device, DType::F32).unwrap();
+        let plain =
+            IpAdapterContext::new(&adapter, &embeds, false, 1.0, &device, DType::F32).unwrap();
+
+        // Two rows under guidance, one without.
+        assert_eq!(cfg.tokens().dim(0).unwrap(), 2);
+        assert_eq!(plain.tokens().dim(0).unwrap(), 1);
+
+        let row = |t: &Tensor, i: usize| {
+            t.i(i)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        };
+        let uncond = row(cfg.tokens(), 0);
+        let cond = row(cfg.tokens(), 1);
+
+        // The conditional row is the ordinary projection.
+        assert_eq!(cond, row(plain.tokens(), 0));
+        // The negative row is NOT it — the failure that cancels the adapter
+        // down to 1x inside `eps_u + g * (eps_c - eps_u)`.
+        assert_ne!(uncond, cond);
+        // ...and is not simply zero either: it is `LayerNorm(bias)`.
+        assert!(uncond.iter().any(|v| *v != 0.0));
+        // It is the projection of a zeroed embedding, which is what both
+        // oracles hand the negative branch.
+        let zeroed = IpAdapterContext::new(
+            &adapter,
+            &embeds.zeros_like().unwrap(),
+            false,
+            1.0,
+            &device,
+            DType::F32,
+        )
+        .unwrap();
+        assert_eq!(uncond, row(zeroed.tokens(), 0));
+    }
+
+    /// A one-row context is never widened onto a guided batch.
+    #[test]
+    fn a_conditional_only_context_is_refused_on_a_cfg_forward() {
         let (_map, adapter) = synthetic(&sd15_config(), 4, CLIP_EMBED_DIM);
         let device = Device::Cpu;
         let tokens = Tensor::randn(0f32, 1.0, (1, 4, 768), &device).unwrap();
@@ -883,14 +973,21 @@ mod tests {
             .hook_for_step(0)
             .expect("a live scale yields a hook");
 
-        let hidden = adapter.layer(0).unwrap().site().hidden_size;
-        let query = Tensor::randn(0f32, 1.0, (2, 6, hidden), &device).unwrap();
-        let attended = Tensor::randn(0f32, 1.0, (2, 6, hidden), &device).unwrap();
-        let out = hook
-            .cross_attention(0, &query, &attended, adapter.layer(0).unwrap().site().heads)
+        let site = adapter.layer(0).unwrap().site();
+        let query = Tensor::randn(0f32, 1.0, (2, 6, site.hidden_size), &device).unwrap();
+        let attended = query.clone();
+        assert!(
+            hook.cross_attention(0, &query, &attended, site.heads)
+                .is_err(),
+            "a two-row forward needs a two-row context"
+        );
+
+        // The matching case still works.
+        let one = Tensor::randn(0f32, 1.0, (1, 6, site.hidden_size), &device).unwrap();
+        assert!(hook
+            .cross_attention(0, &one, &one, site.heads)
             .unwrap()
-            .expect("the hook replaces the attention output");
-        assert_eq!(out.dims(), attended.dims());
+            .is_some());
     }
 
     /// The gate the whole bit-identity claim rests on.
@@ -931,83 +1028,103 @@ mod tests {
             .is_err());
     }
 
-    /// The published checkpoints' own inventory, read from the real files.
+    /// The published checkpoints' own inventory — indices and widths.
     ///
-    /// This is the test that would have caught the index-space mistake, and
-    /// the reason it exists: the synthetic fixtures above are generated FROM
-    /// `plan_attn_layers`, so they agree with whatever it says. Only the
-    /// shipped bytes are independent of mold's own arithmetic.
+    /// This is the test that catches an index-space mistake, and the reason it
+    /// exists: every other fixture describing the `attn2` layout is generated
+    /// FROM `plan_attn_layers`, so it agrees with whatever that function says.
+    /// Pinning the per-layer index against one of those was green while the
+    /// derivation was wrong, and only a real render caught it.
     ///
-    /// Weight-gated because the files are 44 MB and 700 MB. Point
-    /// `MOLD_TEST_IP_ADAPTER_DIR` at a mold models root that has the bundles
-    /// installed (`mold pull ip-adapter-sd15 ip-adapter-sdxl`) to run it —
-    /// `shared/ip-adapter/` beneath it is what is read.
+    /// `published_inventory.json` is captured from the shipped safetensors
+    /// headers instead, so it runs on any machine with no weights installed —
+    /// a weight-gated version of this test reported `ok` having done nothing,
+    /// because nothing in the repo ever set the variable that enabled it.
     #[test]
     fn the_published_adapters_inventory_matches_the_plan() {
-        let Ok(root) = std::env::var("MOLD_TEST_IP_ADAPTER_DIR") else {
-            eprintln!("skipping: set MOLD_TEST_IP_ADAPTER_DIR to a models root with the bundles");
-            return;
-        };
-        let root = std::path::Path::new(&root).join("shared/ip-adapter");
-        for (relative, config, expected_tokens) in [
-            ("models/ip-adapter_sd15.safetensors", sd15_config(), 4usize),
-            (
-                "sdxl_models/ip-adapter_sdxl_vit-h.safetensors",
-                sdxl_config(),
-                4,
-            ),
-        ] {
-            let path = root.join(relative);
-            if !path.exists() {
-                eprintln!("skipping {relative}: not installed");
-                continue;
-            }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata/ip_adapter/published_inventory.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+        let doc: serde_json::Value = serde_json::from_str(&text).expect("the inventory is JSON");
 
-            // The shape the loader will derive, against the real header.
-            let shape = IpAdapterShape::from_safetensors(&path, config.cross_attention_dim)
-                .unwrap_or_else(|error| panic!("{relative}: {error}"));
-            assert_eq!(shape.tokens, expected_tokens, "{relative}");
-            assert_eq!(shape.clip_dim, CLIP_EMBED_DIM, "{relative}");
+        for (key, config, expected_tokens) in
+            [("sd15", sd15_config(), 4usize), ("sdxl", sdxl_config(), 4)]
+        {
+            let entry = &doc["adapters"][key];
+            let context_dim = config.cross_attention_dim;
 
-            // Every planned module must be present AT THE PLANNED INDEX and
-            // AT THE PLANNED WIDTH. The width is the half that matters: a
-            // wrong index space still finds a tensor for roughly half the
-            // modules, and only the shape disagrees.
-            let bytes = std::fs::read(&path).expect("read adapter");
-            let (_, metadata) =
-                safetensors::SafeTensors::read_metadata(&bytes).expect("parse adapter header");
-            let tensors = metadata.tensors();
+            // The shape the loader derives, against the published projection.
+            let proj = entry["image_proj_weight_shape"]
+                .as_array()
+                .expect("proj shape");
+            let out_dim = proj[0].as_u64().unwrap() as usize;
+            let clip_dim = proj[1].as_u64().unwrap() as usize;
+            let shape = IpAdapterShape::from_proj_dims(out_dim, clip_dim, context_dim)
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            assert_eq!(shape.tokens, expected_tokens, "{key}");
+            assert_eq!(shape.clip_dim, CLIP_EMBED_DIM, "{key}");
+
+            let published: std::collections::BTreeMap<usize, Vec<usize>> = entry["to_k_ip"]
+                .as_object()
+                .expect("to_k_ip map")
+                .iter()
+                .map(|(index, shape)| {
+                    (
+                        index.parse().expect("numeric index"),
+                        shape
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|d| d.as_u64().unwrap() as usize)
+                            .collect(),
+                    )
+                })
+                .collect();
 
             let sites = plan_attn_layers(&config);
+            assert_eq!(
+                sites.len(),
+                entry["modules"].as_u64().unwrap() as usize,
+                "{key}: module count"
+            );
+
+            // Every planned module must be present AT THE PLANNED INDEX and AT
+            // THE PLANNED WIDTH. The width is the half that matters: a wrong
+            // index space still finds a tensor for roughly half the modules,
+            // and only the shape disagrees.
             for site in &sites {
-                for name in ["to_k_ip", "to_v_ip"] {
-                    let key = format!("{ADAPTER_PREFIX}.{}.{name}.weight", site.ip_index());
-                    let info = tensors
-                        .get(&key)
-                        .unwrap_or_else(|| panic!("{relative}: {key} is absent"));
-                    assert_eq!(
-                        info.shape,
-                        vec![site.hidden_size, config.cross_attention_dim],
-                        "{relative}: {key}"
-                    );
-                }
+                let shape = published
+                    .get(&site.ip_index())
+                    .unwrap_or_else(|| panic!("{key}: ip_adapter.{} is absent", site.ip_index()));
+                assert_eq!(
+                    shape,
+                    &vec![site.hidden_size, context_dim],
+                    "{key}: ip_adapter.{}",
+                    site.ip_index()
+                );
             }
 
             // And nothing beyond the plan, so a cross-family pairing cannot
             // pass by being a prefix.
-            let present: std::collections::BTreeSet<usize> = tensors
-                .keys()
-                .filter_map(|key| key.strip_prefix(&format!("{ADAPTER_PREFIX}.")))
-                .filter_map(|rest| rest.split('.').next())
-                .filter_map(|index| index.parse().ok())
-                .collect();
             let planned: std::collections::BTreeSet<usize> =
                 sites.iter().map(AttnLayerSite::ip_index).collect();
-            assert_eq!(
-                present, planned,
-                "{relative}: index sets must agree exactly"
-            );
+            let present: std::collections::BTreeSet<usize> = published.keys().copied().collect();
+            assert_eq!(present, planned, "{key}: index sets must agree exactly");
         }
+
+        // SD1.5's indices really are a prefix of SDXL's, which is what makes
+        // the loader's scan past its own plan load-bearing rather than
+        // defensive.
+        let sd15: std::collections::BTreeSet<usize> = plan_attn_layers(&sd15_config())
+            .iter()
+            .map(AttnLayerSite::ip_index)
+            .collect();
+        let sdxl: std::collections::BTreeSet<usize> = plan_attn_layers(&sdxl_config())
+            .iter()
+            .map(AttnLayerSite::ip_index)
+            .collect();
+        assert!(sd15.is_subset(&sdxl));
     }
 
     /// The names the loader looks for are the names the file has: odd indices

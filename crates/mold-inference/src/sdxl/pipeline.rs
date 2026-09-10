@@ -1776,6 +1776,10 @@ impl SDXLEngine {
         let reference = self.reference.resolve(
             req,
             self.base.model_name(),
+            // The denoise loop concatenates `[uncond, cond]` into ONE forward
+            // when guidance is active, so the projection has to carry both
+            // rows — see `IpAdapterContext::new`.
+            cfg_active(req.guidance),
             &device,
             dtype,
             &super::pulid::sdxl_unet_layout(),
@@ -2031,6 +2035,9 @@ impl SDXLEngine {
         let reference = self.reference.resolve(
             req,
             self.base.model_name(),
+            // One doubled `[uncond, cond]` forward under guidance, so the
+            // projection carries both rows — see `IpAdapterContext::new`.
+            cfg_active(req.guidance),
             &loaded.device,
             loaded.dtype,
             &super::pulid::sdxl_unet_layout(),

@@ -1853,7 +1853,7 @@ pub struct GenerateRequest {
     pub source_fit: Option<serde_json::Value>,
     /// Face-identity reference image for identity conditioning (raw PNG/JPEG
     /// bytes, base64-encoded in JSON). Accepted family-wide on FLUX.1 and SDXL
-    /// except for SDXL Turbo, and never alongside a LoRA or an img2img
+    /// except for SDXL Turbo. It rides alongside a LoRA and an img2img
     /// `source_image`. The payload is bounds-checked
     /// from its header alone before any decode
     /// (`identity::validate_id_image_bytes`).

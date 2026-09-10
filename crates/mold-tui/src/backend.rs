@@ -1551,11 +1551,27 @@ pub(crate) fn build_request(
             0.75,
             None,
         )
-    } else if !reference_bytes.is_empty() {
-        // References attached: `Replaces` and `Exclusive` both refuse the
-        // img2img fields alongside them, so the request carries the group
-        // alone.
+    } else if !reference_bytes.is_empty()
+        && reference_images.source_relation
+            != mold_core::generation_profile::ReferenceSourceRelation::Combines
+    {
+        // References attached to a `Replaces` or `Exclusive` recipe: both
+        // refuse the img2img fields alongside them, so the request carries the
+        // group alone.
         (Some(reference_bytes), None, params.strength, None)
+    } else if !reference_bytes.is_empty() {
+        // `Combines` — SD1.5/SDXL image prompting. The reference is a second
+        // key/value stream on every cross-attention output, not a replacement
+        // for the denoise input, so the source image, its strength and its
+        // mask all ride WITH it. Dropping them here would silently discard
+        // conditioning the Source row is still live for, which is what the
+        // relation exists to prevent.
+        (
+            Some(reference_bytes),
+            source_image,
+            params.strength,
+            mask_image,
+        )
     } else {
         (None, source_image, params.strength, mask_image)
     };
@@ -1649,6 +1665,9 @@ pub(crate) fn build_request(
         scheduler: params.scheduler,
         cfg_plus: None,
         edit_images,
+        // The TUI has no strength row for it yet, so the server's advertised
+        // default applies. Absent is the right wire shape for that — a field
+        // the form cannot set must not pin a value the recipe might retune.
         reference_weight: None,
         references: (!named_views.is_empty()).then_some(named_views),
         source_image: if params.named_view_paths.is_empty() {

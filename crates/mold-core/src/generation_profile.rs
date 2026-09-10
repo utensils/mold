@@ -957,6 +957,27 @@ pub fn validate_edit_images_against(
     subject: &str,
     request: &crate::GenerateRequest,
 ) -> Result<(), String> {
+    // The weight belongs to the adapter, so a recipe with no adapter refuses it
+    // rather than accepting and ignoring it — the accept-and-ignore failure the
+    // whole capability contract exists to prevent.
+    //
+    // It runs BEFORE the `Hidden` early return below, and that ordering is the
+    // point: `Hidden` is 117 of the 176 shipped recipes, so checking it after
+    // would mean a `reference_weight` of 99 — or NaN — was silently accepted on
+    // every family that has no reference protocol at all, then carried into
+    // provenance for Reuse to replay. It is also checked whether or not
+    // references are attached, because naming a strength for nothing is the
+    // same mistake either way.
+    match (&profile.weight, request.reference_weight) {
+        (Some(_), Some(weight)) => crate::validation::validate_reference_weight(weight)?,
+        (None, Some(_)) => {
+            return Err(format!(
+                "{subject} has no reference adapter, so reference_weight does not apply"
+            ));
+        }
+        _ => {}
+    }
+
     let images = request.edit_images.as_deref();
     if matches!(profile.mode, ControlMode::Hidden) {
         if images.is_some() {
@@ -1009,20 +1030,6 @@ pub fn validate_edit_images_against(
         {
             return Err("edit_images must contain only PNG or JPEG images".to_string());
         }
-    }
-    // The weight belongs to the adapter, so a recipe with no adapter refuses
-    // it rather than accepting and ignoring it — the accept-and-ignore failure
-    // the whole capability contract exists to prevent. It is checked whether
-    // or not references are attached, because naming a strength for nothing is
-    // the same mistake either way.
-    match (&profile.weight, request.reference_weight) {
-        (Some(_), Some(weight)) => crate::validation::validate_reference_weight(weight)?,
-        (None, Some(_)) => {
-            return Err(format!(
-                "{subject} has no reference adapter, so reference_weight does not apply"
-            ));
-        }
-        _ => {}
     }
     // `Replaces` never reads `source_image`, so the img2img fields are refused
     // whether or not references are attached. `Exclusive` renders from ONE of
@@ -2809,6 +2816,39 @@ mod tests {
         edit.source_image = None;
         edit.batch_size = 4;
         assert!(validate_edit_images_against(&qwen, "Qwen Image Edit", &edit).is_err());
+    }
+
+    /// A recipe with no reference protocol at all still refuses the strength.
+    ///
+    /// `Hidden` is 117 of the 176 shipped recipes, and the weight check used
+    /// to sit AFTER that early return — so `reference_weight: 99.0` on
+    /// `flux-dev:q4` was accepted, ignored, and then written into provenance
+    /// for Reuse to replay.
+    #[test]
+    fn a_hidden_recipe_refuses_a_reference_weight_rather_than_ignoring_it() {
+        for (family, model) in [
+            ("flux", "flux-dev:q4"),
+            ("wan", "wan22-t2v-a14b:q8"),
+            ("hunyuan3d", "hunyuan3d-2:q8"),
+        ] {
+            let profile = reference_images_for_recipe(family, model);
+            assert_eq!(profile.mode, ControlMode::Hidden, "{model}");
+
+            let mut req = crate::test_support::minimal_generate_request(model);
+            // No references at all: the strength alone is the whole mistake.
+            for bad in [99.0, f64::NAN, -1.0, 1.0] {
+                req.reference_weight = Some(bad);
+                let error = validate_edit_images_against(&profile, "This model", &req)
+                    .expect_err("{model} has no adapter to weight");
+                assert!(error.contains("reference_weight"), "{model}: {error}");
+            }
+
+            // Absent stays fine — this is a refusal of a named value, not a
+            // new requirement.
+            req.reference_weight = None;
+            validate_edit_images_against(&profile, "This model", &req)
+                .unwrap_or_else(|error| panic!("{model} without the field: {error}"));
+        }
     }
 
     /// The strength belongs to the adapter: a recipe without one refuses the

@@ -6084,7 +6084,86 @@ pub fn auxiliary_manifests_for_request_with_family(
             manifests.push(family.manifest());
         }
     }
+    // The image-prompt bundle follows the same rule, through its own one
+    // authority. Without this the local path advertises `Combines` on SD1.5
+    // and SDXL and then cannot provision it: the render loads the checkpoint
+    // and both text encoders before discovering the adapter is absent.
+    if crate::validation::request_conditions_on_reference(request) {
+        if let Some(family) =
+            family.and_then(crate::ip_adapter_assets::ImagePromptFamily::from_generation_family)
+        {
+            manifests.push(family.manifest());
+        }
+    }
     manifests
+}
+
+#[cfg(test)]
+mod ip_adapter_auxiliary_tests {
+    use super::*;
+
+    fn request(model: &str, weight: Option<f64>, with_reference: bool) -> crate::GenerateRequest {
+        let mut req = crate::test_support::minimal_generate_request(model);
+        if with_reference {
+            req.edit_images = Some(vec![vec![0x89, 0x50, 0x4E, 0x47]]);
+        }
+        req.reference_weight = weight;
+        req
+    }
+
+    /// A local SD render with a reference plans its bundle, so `mold run`
+    /// pulls it BEFORE the checkpoint loads rather than failing an encode
+    /// late. The advertised capability and the acquirable asset have to be the
+    /// same answer.
+    #[test]
+    fn an_sd_reference_request_plans_its_own_bundle() {
+        for (model, family, expected) in [
+            ("sd15:fp16", "sd15", IP_ADAPTER_SD15_MANIFEST),
+            ("sdxl-base:fp16", "sdxl", IP_ADAPTER_SDXL_MANIFEST),
+        ] {
+            let planned = auxiliary_manifests_for_request_with_family(
+                &request(model, None, true),
+                Some(family),
+            );
+            assert!(planned.contains(&expected), "{model}: {planned:?}");
+        }
+    }
+
+    /// Weight zero conditions on nothing, so it plans nothing — the same
+    /// falsification rule `id_weight` has, and the reason the predicate is the
+    /// effective weight rather than the presence of `edit_images`.
+    #[test]
+    fn a_zero_weighted_reference_plans_no_bundle() {
+        let planned = auxiliary_manifests_for_request_with_family(
+            &request("sdxl-base:fp16", Some(0.0), true),
+            Some("sdxl"),
+        );
+        assert!(planned.is_empty(), "{planned:?}");
+    }
+
+    /// A family whose references are native to the checkpoint has no adapter
+    /// to pull, and a request with no reference at all plans nothing.
+    #[test]
+    fn other_families_and_bare_requests_plan_no_bundle() {
+        for (model, family) in [
+            ("flux2-klein:bf16", "flux2"),
+            ("qwen-image-edit-2511:q4", "qwen-image-edit"),
+        ] {
+            let planned = auxiliary_manifests_for_request_with_family(
+                &request(model, None, true),
+                Some(family),
+            );
+            assert!(
+                !planned.iter().any(|name| name.starts_with("ip-adapter")),
+                "{model}: {planned:?}"
+            );
+        }
+        let planned = auxiliary_manifests_for_request_with_family(
+            &request("sdxl-base:fp16", None, false),
+            Some("sdxl"),
+        );
+        assert!(planned.is_empty(), "{planned:?}");
+    }
 }
 
 /// Manifest name for the PuLID v1.1 (SDXL) asset bundle.

@@ -839,16 +839,22 @@ pub(crate) const IP_ADAPTER_VISION_TOWER_PARAMETERS: u64 = 632_076_800;
 /// phase runs, and a term that assumed the two peaks were mutually exclusive
 /// would admit a render with nowhere to put the tower.
 ///
-/// The figure is `IP_ADAPTER_VISION_TOWER_PARAMETERS` at the checkpoint's own
-/// f32 width — 2,528,307,200 bytes — plus ~72 MB for the forward's working set
-/// (a `[1, 257, 1280]` hidden stream, a `[1, 16, 257, 257]` score matrix, a
-/// `[1, 257, 5120]` MLP intermediate, and the staging the `VarBuilder` copies
-/// through). f32 is the conservative end of a range this estimate cannot
-/// narrow: the tower's dtype belongs to its caller, and a tower built at
-/// f16 costs half this. Under-charging a transient that peaks before the
-/// denoise arena exists is an OOM at the least recoverable moment, so the wide
-/// end is deliberate.
-pub(crate) const IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES: u64 = 2_600_000_000;
+/// The figure is `IP_ADAPTER_VISION_TOWER_PARAMETERS` at **f16** —
+/// 1,264,153,600 bytes — plus ~136 MB for the forward's working set (a
+/// `[1, 257, 1280]` hidden stream, a `[1, 16, 257, 257]` score matrix, a
+/// `[1, 257, 5120]` MLP intermediate) and the staging the `VarBuilder` copies
+/// through as it widens the file.
+///
+/// f16 is not a guess about the caller: it is what the caller does. The tower
+/// takes the ENGINE's dtype (`sd_reference::SdReferenceState::encode` hands
+/// `resolve`'s `dtype` straight to `OpenClipVisionTower`), and both SD engines
+/// resolve that to `DType::F16` on every GPU (`sd15/pipeline.rs`,
+/// `sdxl/pipeline.rs`) — this is a VRAM term, so the CPU f32 case is not the
+/// one being charged. An earlier version charged the checkpoint's own f32
+/// width, which is the width on DISK; that over-charged every reference render
+/// by ~1.24 GB and would have parked renders a 12 GB card can run, which is
+/// the mistake the identity terms' history records twice.
+pub(crate) const IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES: u64 = 1_400_000_000;
 
 /// Whether this request will actually condition on a reference picture.
 ///
@@ -3822,8 +3828,19 @@ mod fail_closed_tests {
             "the parameter count must land a header away from the published f32 file"
         );
 
-        assert!(IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES > f32_bytes);
-        let working_set = IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES - f32_bytes;
+        // The CHARGE is against the width the tower is actually built at,
+        // which is the engine's f16 — not the file's f32.
+        let f16_bytes = parameters * 2;
+        assert!(
+            IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES > f16_bytes,
+            "the charge must cover the weights themselves"
+        );
+        assert!(
+            IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES < f32_bytes,
+            "charging the file's f32 width over-charges every reference render \
+             by more than a gigabyte"
+        );
+        let working_set = IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES - f16_bytes;
         // One 224x224 forward at batch 1: the hidden stream, the score matrix,
         // and the MLP intermediate, at f32.
         let forward = (PATCHES * HIDDEN + 16 * PATCHES * PATCHES + PATCHES * INTERMEDIATE) * 4;

@@ -91,7 +91,12 @@ pushed screen opened from the header.
   one and the other parks with an inline note while keeping its media;
   Develop stays enabled, attaching to the parked well makes it active again
   (last write wins), and the request carries `source_image` + `strength`
-  (+ mask) OR `edit_images`, never both. iPhone and Android have no OS drag,
+  (+ mask) OR `edit_images`, never both. A `combines` recipe — SD 1.5 and SDXL
+  image prompting — also renders both wells, but NEITHER parks: the reference
+  is an image prompt injected beside the text rather than a replacement for the
+  denoise input, so the request carries `source_image` + `strength` (+ mask)
+  AND `edit_images` together, with a **Reference strength** control gated on
+  the recipe advertising one. iPhone and Android have no OS drag,
   so the picker sheet is the only acquisition path and the desktop
   drop-routing bridge does not apply here.
   prompt **style** presets compose at submit without rewriting the prompt text.
@@ -137,10 +142,11 @@ pushed screen opened from the header.
   **Identity start step** live in the More settings sheet, count toward its badge,
   clear on its Reset (which keeps the attached face), and stay absent from the
   request until touched so the server's defaults remain authoritative. Every
-  refusal — a photo with a LoRA or a source image, a knob with no photo, an
+  refusal — a knob with no photo, a strength or start step out of range, an
   oversized or unsupported file, a photo over the 45 MiB combined request-media
   budget — renders inline beside the control and blocks Develop, never as a
-  toast. Prepared Batch N siblings inherit the whole partition — and because
+  toast. A photo alongside a LoRA or a source image is no longer one of them:
+  all three ride together. Prepared Batch N siblings inherit the whole partition — and because
   the reviewed card owns its own Develop, an identity refusal travels with the
   reviewed work as a named stale reason rather than relying on the composer's
   blocker. A changed photo stales reviewed prompt work through the shared
