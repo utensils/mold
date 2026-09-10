@@ -84,6 +84,11 @@ mold run juggernaut-xl:fp16 \
   --id-image portrait.png --id-weight 0.8 \
   --negative-prompt "cartoon, waxy skin, distorted face, text, watermark" --seed 83121
 
+# Image prompting: the reference supplies the look, the prompt steers
+mold pull ip-adapter-sdxl
+mold run sdxl-base:fp16 "A sailboat on a calm lake at sunrise" --reference streetscape.png --reference-weight 0.7
+mold run juggernaut-xl:fp16 "a studio portrait on grey seamless" --reference palette.png --reference-weight 0.6 --id-image portrait.png
+
 # LoRA, img2img, and inpainting
 mold run sdxl-base:fp16 "a lighthouse in a storm" --lora style.safetensors --lora-scale 0.8
 mold run sdxl-base:fp16 "anime style" --image photo.png --strength 0.7

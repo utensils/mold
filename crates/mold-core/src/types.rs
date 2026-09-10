@@ -6197,6 +6197,38 @@ mod tests {
         );
     }
 
+    /// `ALL` is what the CLI offers and accepts, so a variant missing from
+    /// it would be a container `--format` could never name. The exhaustive
+    /// match makes adding one a compile error here.
+    #[test]
+    fn every_mesh_export_format_is_listed_in_all() {
+        for format in MeshExportFormat::ALL {
+            match format {
+                MeshExportFormat::Glb
+                | MeshExportFormat::Obj
+                | MeshExportFormat::Zip
+                | MeshExportFormat::Stl
+                | MeshExportFormat::Ply
+                | MeshExportFormat::Gif
+                | MeshExportFormat::Apng
+                | MeshExportFormat::Webp => {}
+            }
+            assert_eq!(
+                format.as_str().parse::<MeshExportFormat>().unwrap(),
+                format,
+                "{} must parse back to itself",
+                format.as_str()
+            );
+        }
+        let mut names: Vec<&str> = MeshExportFormat::ALL
+            .iter()
+            .map(|format| format.as_str())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), MeshExportFormat::ALL.len());
+    }
+
     /// The export enum is a delivery contract, and `glb`/`obj` keep the exact
     /// wire spellings the old `Vec<OutputFormat>` field used.
     #[test]
@@ -11979,6 +12011,20 @@ pub enum MeshExportFormat {
 }
 
 impl MeshExportFormat {
+    /// Every container, in wire order. The CLI's `--format` value parser is
+    /// built from this so the shell can offer the list and a container the
+    /// endpoint would refuse can never parse.
+    pub const ALL: [Self; 8] = [
+        Self::Glb,
+        Self::Obj,
+        Self::Zip,
+        Self::Stl,
+        Self::Ply,
+        Self::Gif,
+        Self::Apng,
+        Self::Webp,
+    ];
+
     /// The format's own name: what the wire, the CLI `--format` flag and the
     /// export-options list call it.
     pub fn as_str(self) -> &'static str {

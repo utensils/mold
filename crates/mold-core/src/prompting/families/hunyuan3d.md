@@ -85,6 +85,14 @@ mold run hunyuan3d-turbo --image lamp.png --mesh-threshold 0.4 -o lamp.glb
 # Named views keep semantic slots; any non-empty subset is accepted
 mold run hunyuan3d-2mv-turbo --front front.png --left left.png --back back.png -o object.glb
 
+# Decimate to a face budget; matting and delight prepare the source image
+mold run hunyuan3d-2.1 --image chair.png --target-faces 40000 --matting auto -o chair.glb
+mold run hunyuan3d-2.1 --image chair.png --matting on --delight -o chair.glb
+
+# Paint PBR textures as well as geometry (the host must advertise them)
+mold run hunyuan3d-2.1 --image chair.png --texture -o chair.glb
+mold run hunyuan3d-2.1 --image chair.png --texture --texture-resolution 2048 -o chair.glb
+
 # Export a saved mesh from the gallery as STL, OBJ+PBR ZIP, or PLY
 mold library export chair.glb --format stl -o chair.stl
 
@@ -96,7 +104,16 @@ mold library export chair.glb --format gif
 mold library export chair.glb --format gif --playback bounce --repeat once --frames 24
 ```
 
-`--octree`, `--mesh-threshold`, and `--target-faces` are the three mesh
+`--texture` asks for PBR maps beside the geometry and needs the paint bundle;
+without it the request is refused rather than answered with a bare white
+mesh. `--texture-resolution` sets the atlas edge (1024, 2048 or 4096) and only
+means anything with `--texture`. `--matting` decides background removal before
+shape conditioning — `auto` preserves useful alpha and removes opaque
+backgrounds, `on` recomputes every cutout, `off` keeps the pixels — and
+`--delight` runs the fixed lighting and highlight removal stage after matting
+and before shape or paint, only where the profile advertises it.
+
+`--octree`, `--mesh-threshold`, and `--target-faces` are the three geometry
 controls, and the model's generation profile is the authority on their
 values: its `capabilities.mesh` block advertises the octree allowlist and
 default, the threshold range and default, and the face bounds, so read them

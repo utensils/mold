@@ -66,11 +66,21 @@ mold run hunyuan3d --image chair.png \
   -o chair.glb
 ```
 
-| Flag               | Default   | What it does                                               |
-| ------------------ | --------- | ---------------------------------------------------------- |
-| `--octree`         | 256       | Query-grid resolution. The detail knob; **cost is cubic**. |
-| `--mesh-threshold` | 0.6       | Iso-level. Lower recovers thin features and adds noise.    |
-| `--target-faces`   | see below | Decimate to approximately this triangle count.             |
+| Flag                            | Default   | What it does                                                                                         |
+| ------------------------------- | --------- | ---------------------------------------------------------------------------------------------------- |
+| `--octree`                      | 256       | Query-grid resolution. The detail knob; **cost is cubic**.                                           |
+| `--mesh-threshold`              | 0.6       | Iso-level. Lower recovers thin features and adds noise.                                              |
+| `--target-faces`                | see below | Decimate to approximately this triangle count.                                                       |
+| `--texture`                     | off       | Paint PBR textures as well as geometry. Needs the paint bundle, or the run is refused.               |
+| `--texture-resolution`          | recipe    | Atlas edge: 1024, 2048 or 4096. Requires `--texture`.                                                |
+| `--matting`                     | `auto`    | Background removal before shape: `auto` keeps useful alpha, `on` recomputes, `off` keeps the pixels. |
+| `--delight`                     | off       | Remove baked lighting and highlights after matting, before shape or paint.                           |
+| `--front/--left/--back/--right` | —         | Named views for a 2mv reconstruction; any non-empty subset is accepted.                              |
+
+```bash
+mold run hunyuan3d-2.1 --image chair.png --texture --texture-resolution 2048 --matting on --delight -o chair.glb
+mold run hunyuan3d-2mv-turbo --front front.png --left left.png --right right.png -o object.glb
+```
 
 `--target-faces` behaves differently depending on whether you asked for a
 texture. A geometry-only export keeps the full-density surface, which is what

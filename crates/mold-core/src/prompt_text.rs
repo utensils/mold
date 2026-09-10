@@ -136,6 +136,21 @@ pub(crate) fn protect_remix_request_for_wire(request: &crate::RemixRequest) -> c
     wire
 }
 
+/// The amend body carries the FULL stage list, so every stage prompt needs
+/// the same protection [`protect_chain_request_for_wire`] gives a creation.
+pub(crate) fn protect_amend_request_for_wire(
+    request: &crate::chain_job::AmendRequest,
+) -> crate::chain_job::AmendRequest {
+    let mut wire = request.clone();
+    for stage in &mut wire.stages {
+        protect_prompt_for_wire(&mut stage.prompt);
+        if let Some(prompt) = stage.negative_prompt.as_mut() {
+            protect_prompt_for_wire(prompt);
+        }
+    }
+    wire
+}
+
 pub(crate) fn protect_retake_request_for_wire(
     request: &crate::chain_job::RetakeRequest,
 ) -> crate::chain_job::RetakeRequest {

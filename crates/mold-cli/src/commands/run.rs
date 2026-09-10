@@ -26,6 +26,19 @@ pub fn complete_model_name() -> Vec<CompletionCandidate> {
         .collect()
 }
 
+/// Provide ControlNet adapter completions for `--control-model`.
+///
+/// The value is a MODEL NAME, so it completes from the manifest the way
+/// `--upscale` does, filtered to the one family the flag accepts — offering
+/// every model here would suggest checkpoints ControlNet cannot use.
+pub fn complete_control_model() -> Vec<CompletionCandidate> {
+    mold_core::manifest::known_manifests()
+        .iter()
+        .filter(|manifest| manifest.family == "controlnet")
+        .map(|manifest| CompletionCandidate::new(&manifest.name))
+        .collect()
+}
+
 /// Resolve positional args into (model, prompt).
 ///
 /// Rules:

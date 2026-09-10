@@ -96,7 +96,8 @@ and `ffprobe` on `PATH` before the server advertises that feature.
 - **3D:** single-image and named multiview-to-mesh with Hunyuan3D 2.0 and 2.1,
   automatic background removal, optional highlight and lighting removal, and
   Hunyuan3D Paint PBR materials in CUDA builds. Shape transformers can be
-  locally derived as qualified FP8/GGUF tiers. Results are published to the Library as
+  locally derived as qualified FP8/GGUF tiers with `mold quantize`, which
+  registers the derived tier on the host that made it. Results are published to the Library as
   binary glTF with a rendered poster tile, exportable as OBJ, an OBJ+PBR ZIP, STL, or PLY, or
   shared as a turntable GIF, APNG, or WebP. The web and desktop **3-D Studio**
   also runs durable text-to-3D, supplied-mesh texturing, and Hunyuan3D 2.1
@@ -170,11 +171,26 @@ MOLD_HOST=http://gpu-server:7680 mold run "a cat"  # laptop
 ```
 
 `--offload` also applies to remote renders and durable sequences on GPU hosts.
+Add `--no-save` to keep one render out of a server's Library; the host still
+publishes the print and moves it straight to trash, so `mold trash restore`
+gets it back until retention sweeps it. It applies to renders a server
+performs — a local render has no Library, and refuses the flag rather than
+ignoring it.
+
+A sequence of several clips is scripted, not composed in an app:
+
+```bash
+mold chain validate shot.toml
+mold run --script shot.toml --output walk.mp4
+mold jobs list
+```
 
 See the [remote workflow](https://utensils.io/mold/guide/remote-workflows) and
 [RunPod](https://utensils.io/mold/deployment/runpod-cli) guides. Use
 `mold queue` to manage remote work and `mold library` to browse and organize
-the host's prints. To install Mold's Agent Skill for supported coding agents,
+the host's prints, including `mold library source-media` to recover the
+conditioning image a print was made from and `mold trash delete` to remove one
+permanently. To install Mold's Agent Skill for supported coding agents,
 run:
 
 ```bash

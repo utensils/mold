@@ -70,6 +70,21 @@ async fn run_remote(action: LibraryAction, client: &MoldClient) -> Result<()> {
         }
         LibraryAction::Tag { action } => library_tag(client, action).await,
         LibraryAction::Collection { action } => library_collection(client, action).await,
+        LibraryAction::SourceMedia {
+            filename,
+            member,
+            output,
+            json,
+        } => {
+            library_source_media(
+                client,
+                &filename,
+                member.as_deref(),
+                output.as_deref(),
+                json,
+            )
+            .await
+        }
         LibraryAction::Trash { filenames } => library_trash(client, &filenames).await,
         LibraryAction::Export {
             filename,
@@ -432,6 +447,172 @@ async fn collection_membership(
         selected.name
     );
     Ok(())
+}
+
+/// `mold library source-media <FILENAME> [--member ID] [--output PATH|-]` —
+/// what the serving host kept of one print's conditioning media, and the
+/// bytes of one retained member.
+///
+/// The host is the only authority on what it retained, so this asks it and
+/// reports the `availability` it answers with rather than guessing from the
+/// print's metadata. There is deliberately no local fallback: the media
+/// belongs to the machine that rendered the print.
+async fn library_source_media(
+    client: &MoldClient,
+    filename: &str,
+    member: Option<&str>,
+    output: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    if member.is_none() && output.is_some() {
+        bail!("--output writes one retained file; name it with --member (run without either to list what the host kept)");
+    }
+    let inventory = client
+        .gallery_source_media(filename)
+        .await
+        .with_context(|| {
+            format!(
+                "could not ask {} what it retained for {filename}",
+                client.host()
+            )
+        })?;
+    let Some(member_id) = member else {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&inventory)?);
+        } else {
+            print!(
+                "{}",
+                render_source_media(client.host(), filename, &inventory)
+            );
+        }
+        return Ok(());
+    };
+    // Refuse locally with the state's own sentence rather than letting the
+    // download route answer 404 for a print whose media the host has already
+    // said it does not have.
+    if inventory.availability != mold_core::RetainedSourceMediaAvailability::Available {
+        bail!(
+            "{}",
+            source_media_state_sentence(client.host(), filename, inventory.availability)
+        );
+    }
+    let selected = inventory
+        .members
+        .iter()
+        .find(|entry| entry.member_id == member_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} retained no member '{member_id}' for {filename}; run `mold library source-media {filename}` for the ids it kept",
+                client.host()
+            )
+        })?;
+    let bytes = client
+        .download_gallery_source_media_member(filename, member_id)
+        .await
+        .with_context(|| {
+            format!(
+                "could not download {} for {filename}",
+                selected.display_name
+            )
+        })?;
+    let destination = output.unwrap_or(selected.display_name.as_str());
+    if destination == "-" {
+        io::stdout()
+            .write_all(&bytes)
+            .context("could not write the retained file to stdout")?;
+        io::stdout().flush().ok();
+        return Ok(());
+    }
+    std::fs::write(destination, &bytes)
+        .with_context(|| format!("could not write {destination}"))?;
+    println!(
+        "{} {destination} ({} bytes)",
+        "downloaded".green(),
+        bytes.len()
+    );
+    Ok(())
+}
+
+/// The one sentence each `availability` state gets.
+///
+/// `unavailable_legacy` after a CLEAN resolve is not damage: the print either
+/// predates retained source media, or everything it recorded is provenance
+/// text (a filename, a LoRA path) that was never downloadable by design.
+/// Only `unavailable_missing_or_corrupt` reports damage.
+fn source_media_state_sentence(
+    host: &str,
+    filename: &str,
+    availability: mold_core::RetainedSourceMediaAvailability,
+) -> String {
+    use mold_core::RetainedSourceMediaAvailability as State;
+    match availability {
+        State::Available => format!("{host} retained source media for {filename}"),
+        State::UnavailableLegacy => format!(
+            "{host} kept no downloadable source media for {filename}: the print predates retained source media, or its conditioning was recorded only as text. Nothing here is lost or broken."
+        ),
+        State::UnavailableMissingOrCorrupt => format!(
+            "{host} retained source media for {filename} but can no longer read it; the stored files are missing or damaged."
+        ),
+        State::UnavailableAuth => format!(
+            "{host} will not say what it retained for {filename} without its API key; set MOLD_API_KEY and ask again."
+        ),
+    }
+}
+
+/// The human-readable inventory. Pure so every state's wording is testable.
+fn render_source_media(
+    host: &str,
+    filename: &str,
+    inventory: &mold_core::RetainedSourceMediaInventory,
+) -> String {
+    use mold_core::RetainedSourceMediaAvailability as State;
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if inventory.availability != State::Available {
+        let _ = writeln!(
+            out,
+            "{}",
+            source_media_state_sentence(host, filename, inventory.availability)
+        );
+        return out;
+    }
+    let count = inventory.members.len();
+    let _ = writeln!(
+        out,
+        "{host} retained {count} file{} for {filename}",
+        if count == 1 { "" } else { "s" }
+    );
+    let id_width = inventory
+        .members
+        .iter()
+        .map(|entry| entry.member_id.chars().count())
+        .max()
+        .unwrap_or(8)
+        .clamp(8, 64);
+    let _ = writeln!(
+        out,
+        "{:<id_width$} {:<28} {:<28} {:>9}",
+        "MEMBER".bold(),
+        "ROLE".bold(),
+        "NAME".bold(),
+        "SIZE".bold()
+    );
+    let _ = writeln!(out, "{}", "─".repeat(id_width + 68).dimmed());
+    for entry in &inventory.members {
+        let _ = writeln!(
+            out,
+            "{:<id_width$} {:<28} {:<28} {:>9}",
+            entry.member_id,
+            truncate(&entry.role, 28),
+            truncate(&entry.display_name, 28),
+            mold_core::format::human_bytes_compact(entry.size_bytes)
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\nDownload one with `mold library source-media {filename} --member <MEMBER>`."
+    );
+    out
 }
 
 async fn library_trash(client: &MoldClient, filenames: &[String]) -> Result<()> {
@@ -1202,6 +1383,183 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    fn inventory(
+        availability: mold_core::RetainedSourceMediaAvailability,
+        members: Vec<mold_core::RetainedSourceMediaMember>,
+    ) -> mold_core::RetainedSourceMediaInventory {
+        mold_core::RetainedSourceMediaInventory {
+            availability,
+            members,
+        }
+    }
+
+    fn member(id: &str, role: &str, name: &str, size: u64) -> mold_core::RetainedSourceMediaMember {
+        mold_core::RetainedSourceMediaMember {
+            member_id: id.to_string(),
+            role: role.to_string(),
+            display_name: name.to_string(),
+            size_bytes: size,
+        }
+    }
+
+    /// One sentence per state, and the host is always the subject: it is the
+    /// only authority on what it kept.
+    ///
+    /// `unavailable_legacy` after a clean resolve means the print predates
+    /// retention or recorded its conditioning only as text — it NEVER means
+    /// damage, and saying so is the whole point of separating it from
+    /// `unavailable_missing_or_corrupt`.
+    #[test]
+    fn every_availability_state_gets_its_own_sentence() {
+        use mold_core::RetainedSourceMediaAvailability as State;
+        colored::control::set_override(false);
+        let host = "http://gpu:7680";
+
+        let available = render_source_media(
+            host,
+            "cat.png",
+            &inventory(
+                State::Available,
+                vec![
+                    member("abc123", "source_image", "chair.png", 2_048),
+                    member("def456", "mask_image", "mask.png", 1_024),
+                ],
+            ),
+        );
+        assert!(available.contains("retained 2 files"), "{available}");
+        assert!(available.contains("abc123"), "{available}");
+        assert!(available.contains("source_image"), "{available}");
+        assert!(available.contains("chair.png"), "{available}");
+        assert!(available.contains("--member"), "{available}");
+
+        let legacy = render_source_media(
+            host,
+            "cat.png",
+            &inventory(State::UnavailableLegacy, vec![]),
+        );
+        assert!(legacy.contains("predates"), "{legacy}");
+        assert!(!legacy.to_lowercase().contains("corrupt"), "{legacy}");
+        assert!(
+            !legacy.to_lowercase().contains("damage"),
+            "damage claim: {legacy}"
+        );
+
+        let corrupt = render_source_media(
+            host,
+            "cat.png",
+            &inventory(State::UnavailableMissingOrCorrupt, vec![]),
+        );
+        assert!(corrupt.contains("can no longer read"), "{corrupt}");
+
+        let auth = render_source_media(host, "cat.png", &inventory(State::UnavailableAuth, vec![]));
+        assert!(auth.contains("MOLD_API_KEY"), "{auth}");
+    }
+
+    async fn source_media_host(body: serde_json::Value) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/cat.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/source-media/cat.png/abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"source-bytes".to_vec()))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// `--member` writes the retained bytes where `--output` says, and to
+    /// stdout for `-`; with no `--output` it takes the member's own name.
+    #[tokio::test]
+    async fn source_media_downloads_one_member_to_a_file_and_to_stdout() {
+        colored::control::set_override(false);
+        let server = source_media_host(serde_json::json!({
+            "availability": "available",
+            "members": [{
+                "member_id": "abc123",
+                "role": "source_image",
+                "display_name": "chair.png",
+                "size_bytes": 12
+            }]
+        }))
+        .await;
+        let client = MoldClient::new(&server.uri());
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("recovered.png");
+
+        library_source_media(
+            &client,
+            "cat.png",
+            Some("abc123"),
+            Some(target.to_str().unwrap()),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"source-bytes");
+
+        library_source_media(&client, "cat.png", Some("abc123"), Some("-"), false)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// A member id the host never listed is refused locally, and so is a
+    /// download from a print whose media the host says it does not have —
+    /// both name the state rather than handing back an empty file.
+    #[tokio::test]
+    async fn source_media_refuses_an_unknown_member_and_an_unavailable_print() {
+        colored::control::set_override(false);
+        let server = source_media_host(serde_json::json!({
+            "availability": "available",
+            "members": [{
+                "member_id": "abc123",
+                "role": "source_image",
+                "display_name": "chair.png",
+                "size_bytes": 12
+            }]
+        }))
+        .await;
+        let client = MoldClient::new(&server.uri());
+        let error = library_source_media(&client, "cat.png", Some("nope"), None, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("nope"), "{error}");
+        assert!(
+            error.contains("mold library source-media cat.png"),
+            "{error}"
+        );
+
+        let legacy = source_media_host(serde_json::json!({
+            "availability": "unavailable_legacy",
+            "members": []
+        }))
+        .await;
+        let client = MoldClient::new(&legacy.uri());
+        let error = library_source_media(&client, "cat.png", Some("abc123"), None, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("predates"), "{error}");
+    }
+
+    /// `--output` with nothing to write is a usage mistake worth naming: a
+    /// listing has no bytes.
+    #[tokio::test]
+    async fn source_media_refuses_an_output_without_a_member() {
+        let unreachable = MoldClient::new("http://127.0.0.1:1");
+        let error = library_source_media(&unreachable, "cat.png", None, Some("out.png"), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--member"), "{error}");
     }
 
     #[test]

@@ -18,6 +18,10 @@ use mold_core::{OutputFormat, Scheduler};
 
 /// Value parser for OutputFormat with tab-completion candidates.
 fn output_format_parser(formats: &'static [&'static str]) -> clap::builder::ValueParser {
+    // The value is matched case-insensitively at the ARG (`ignore_case`),
+    // because that is where `PossibleValuesParser` reads the setting from —
+    // and the wire types' own `FromStr` lowercases before matching, so an
+    // exact list would refuse a spelling every other door accepts.
     let parser = clap::builder::TypedValueParser::map(
         clap::builder::PossibleValuesParser::new(formats),
         |s: String| s.parse::<OutputFormat>().unwrap(),
@@ -25,11 +29,24 @@ fn output_format_parser(formats: &'static [&'static str]) -> clap::builder::Valu
     clap::builder::ValueParser::new(parser)
 }
 
-/// Value parser for `mold library export --format`. Delegates to the wire
-/// type's own `FromStr` so the CLI can never accept a container the export
-/// endpoint would refuse.
-fn mesh_export_format_parser(raw: &str) -> Result<mold_core::MeshExportFormat, String> {
-    raw.parse()
+/// Value parser for `mold library export --format`. Built from the wire
+/// type's own variant list, so the CLI can never accept a container the
+/// export endpoint would refuse — and so the shell can offer them, which a
+/// bare `FromStr` parser cannot: the completion engine reads a parser's
+/// possible values and a function parser has none.
+fn mesh_export_format_parser() -> clap::builder::ValueParser {
+    let names: Vec<&'static str> = mold_core::MeshExportFormat::ALL
+        .iter()
+        .map(|format| format.as_str())
+        .collect();
+    let parser = clap::builder::TypedValueParser::map(
+        clap::builder::PossibleValuesParser::new(names),
+        |raw: String| {
+            raw.parse::<mold_core::MeshExportFormat>()
+                .expect("possible values are the enum's own names")
+        },
+    );
+    clap::builder::ValueParser::new(parser)
 }
 
 /// Value parser for `--title`: applies the shared print-title contract
@@ -736,10 +753,23 @@ pub enum JobsAction {
         #[arg(long)]
         json: bool,
     },
+    /// Show one sequence job, or print the script that made it
+    #[command(after_long_help = "\
+Examples:
+  mold jobs show job-abc123
+  mold jobs show job-abc123 --json
+  mold jobs show job-abc123 --script > edited.toml")]
     Show {
+        /// Sequence job id as shown by `mold jobs list`
+        #[arg(value_name = "JOB-ID")]
         id: String,
-        #[arg(long)]
+        /// Print the raw `ChainJobDetail` document as JSON
+        #[arg(long, conflicts_with = "script")]
         json: bool,
+        /// Print the job's EFFECTIVE `mold.chain.v1` script as TOML — the
+        /// document `mold jobs amend --script` reads back
+        #[arg(long, conflicts_with = "json")]
+        script: bool,
     },
     Resume {
         id: String,
@@ -754,6 +784,52 @@ pub enum JobsAction {
         seed_offset: Option<u64>,
         #[arg(long)]
         prompt: Option<String>,
+    },
+    /// Replace a sequence's stages from an edited script
+    ///
+    /// Amend takes the WHOLE stage list, so it is script-shaped: export the
+    /// job's effective script with `mold jobs show <ID> --script`, edit it,
+    /// and hand it back. Leading stages whose clips are unchanged keep their
+    /// cached artifacts and rendering requeues from the first edit. The
+    /// model, size and container are NOT amendable — those need a new
+    /// sequence.
+    #[command(after_long_help = "\
+Examples:
+  mold jobs show job-abc123 --script > edited.toml
+  mold jobs amend job-abc123 --script edited.toml
+  mold jobs amend job-abc123 --script edited.toml --dry-run
+  mold jobs amend job-abc123 --script edited.toml --fps 30 --no-audio")]
+    Amend {
+        /// Sequence job id as shown by `mold jobs list`
+        #[arg(value_name = "JOB-ID")]
+        id: String,
+        /// Edited `mold.chain.v1` TOML script carrying the full stage list
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+        script: std::path::PathBuf,
+        /// Frames per second for the stitched sequence
+        #[arg(long, value_name = "N")]
+        fps: Option<u32>,
+        /// Base seed the stage seeds derive from
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
+        #[arg(long, value_name = "N")]
+        steps: Option<u32>,
+        #[arg(long, value_name = "F")]
+        guidance: Option<f64>,
+        #[arg(long, value_name = "F")]
+        strength: Option<f64>,
+        /// Pixel frames of motion carried across a smooth boundary
+        #[arg(long, value_name = "N")]
+        motion_tail: Option<u32>,
+        /// Force synchronized audio
+        #[arg(long, conflicts_with = "no_audio")]
+        audio: bool,
+        /// Render silent
+        #[arg(long, conflicts_with = "audio")]
+        no_audio: bool,
+        /// Print what would be sent without amending anything
+        #[arg(long)]
+        dry_run: bool,
     },
     Cancel {
         id: String,
@@ -924,6 +1000,25 @@ pub enum TrashAction {
         #[arg(required = true, value_name = "FILENAME")]
         filenames: Vec<String>,
     },
+    /// Permanently delete the named prints, bypassing the trash
+    ///
+    /// Works on trashed and live prints alike, and nothing is recoverable
+    /// afterwards — the print, its thumbnail, its sidecar and its retained
+    /// source media all go. Use `mold library trash` to move a live print
+    /// into the recoverable trash instead.
+    #[command(after_long_help = "\
+Examples:
+  mold trash delete mold-flux-dev-q4-1700000000000.png
+  mold trash delete a.png b.mp4 --yes")]
+    Delete {
+        /// Gallery filenames as shown by `mold trash list` or
+        /// `mold library list`
+        #[arg(required = true, value_name = "FILENAME")]
+        filenames: Vec<String>,
+        /// Skip the confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Permanently delete every trashed print on the server
     Empty {
         /// Skip the confirmation prompt
@@ -1050,7 +1145,7 @@ pub enum LibraryAction {
         collection: Option<String>,
         #[arg(long)]
         favorite: bool,
-        #[arg(long, value_parser = output_format_parser(&[
+        #[arg(long, ignore_case = true, value_parser = output_format_parser(&[
             "png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav", "glb",
         ]))]
         format: Option<OutputFormat>,
@@ -1106,6 +1201,34 @@ pub enum LibraryAction {
         #[command(subcommand)]
         action: LibraryCollectionAction,
     },
+    /// List, and download, the conditioning media a host kept for one print
+    ///
+    /// The source image, mask, reference set, audio or clip a print was made
+    /// from, as the SERVING HOST retained them. The host is the only
+    /// authority on what it kept, so this asks it and reports its answer:
+    /// nothing retained is a plain fact about the print, not damage.
+    #[command(after_long_help = "\
+Examples:
+  mold library source-media mold-flux-dev-q4-1700000000000.png
+  mold library source-media cat.png --json
+  mold library source-media cat.png --member 6f1c... -o recovered.png
+  mold library source-media cat.png --member 6f1c... --output - | viu -")]
+    SourceMedia {
+        /// Gallery filename as shown by `mold library list`
+        #[arg(value_name = "FILENAME")]
+        filename: String,
+        /// Download this member instead of listing. The id comes from the
+        /// listing and is opaque — never a path on the host.
+        #[arg(long, value_name = "ID")]
+        member: Option<String>,
+        /// Where to write the downloaded member. Defaults to its display
+        /// name in the current directory; `-` writes to stdout.
+        #[arg(long, short = 'o', value_name = "PATH", requires = "member", value_hint = ValueHint::FilePath)]
+        output: Option<String>,
+        /// Print the raw inventory document as JSON
+        #[arg(long, conflicts_with = "member")]
+        json: bool,
+    },
     /// Move live prints into the recoverable gallery trash
     Trash {
         #[arg(required = true, value_name = "FILENAME")]
@@ -1139,14 +1262,16 @@ Examples:
     Export {
         #[arg(value_name = "FILENAME")]
         filename: String,
-        /// Container: glb, obj, zip, stl, or ply. glb downloads the stored file
-        /// unchanged; zip packages OBJ + MTL + PBR maps; the rest transcode.
-        #[arg(long, value_name = "FORMAT", value_parser = mesh_export_format_parser)]
+        /// Container: glb, obj, zip, stl, ply, or a gif/apng/webp turntable.
+        /// glb downloads the stored file unchanged; zip packages OBJ + MTL +
+        /// PBR maps; obj, stl and ply transcode the geometry; gif, apng and
+        /// webp RENDER the mesh spinning through a full turn.
+        #[arg(long, value_name = "FORMAT", ignore_case = true, value_parser = mesh_export_format_parser())]
         format: mold_core::MeshExportFormat,
         /// Where to write the converted file. Defaults to the print's stem
         /// with the new extension in the current directory; `-` writes to
         /// stdout.
-        #[arg(long, short = 'o', value_name = "PATH")]
+        #[arg(long, short = 'o', value_name = "PATH", value_hint = ValueHint::FilePath)]
         output: Option<String>,
         #[command(flatten)]
         turntable: TurntableArgs,
@@ -1265,7 +1390,7 @@ Examples:
         /// 3-D). `obj` is deliberately absent: mold never STORES an OBJ,
         /// because one carries neither materials nor textures on its own —
         /// it exists only as a gallery export transcode.
-        #[arg(long, help_heading = "Output",
+        #[arg(long, help_heading = "Output", ignore_case = true,
               value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav", "glb"]))]
         format: Option<OutputFormat>,
 
@@ -1293,6 +1418,16 @@ Examples:
         /// `generate.auto_tag_title` says.
         #[arg(long, help_heading = "Output")]
         no_auto_tag: bool,
+
+        /// Keep this render out of a server's Library. The host still
+        /// publishes the print and then moves it straight to trash, so
+        /// nothing is lost: it stays recoverable with `mold trash restore`
+        /// until the host's retention sweep purges it. It applies only to a
+        /// render a server performs — a local render (`--local`, or the
+        /// fallback when no server is reachable) has no Library and refuses
+        /// the flag rather than ignoring it.
+        #[arg(long, help_heading = "Output")]
+        no_save: bool,
 
         /// Display generated image(s) inline in the terminal after generation
         #[arg(long, env = "MOLD_PREVIEW", help_heading = "Output")]
@@ -1577,7 +1712,7 @@ Examples:
         /// Path to a `mold.chain.v1` TOML script. When set, every other
         /// generation flag is ignored except `--output`, `--local`, `--host`,
         /// and `--dry-run`.
-        #[arg(long, value_name = "PATH", help_heading = "Server")]
+        #[arg(long, value_name = "PATH", help_heading = "Server", value_hint = ValueHint::FilePath)]
         script: Option<std::path::PathBuf>,
 
         /// Parse and normalise the script without submitting. Prints the
@@ -1759,7 +1894,8 @@ Examples:
         control: Option<String>,
 
         /// ControlNet model name (e.g. controlnet-canny-sd15)
-        #[arg(long, requires = "control", help_heading = "ControlNet")]
+        #[arg(long, requires = "control", help_heading = "ControlNet",
+              add = ArgValueCandidates::new(commands::run::complete_control_model))]
         control_model: Option<String>,
 
         /// ControlNet conditioning scale (0.0 = no effect, 1.0 = full, up to 2.0)
@@ -2150,7 +2286,8 @@ Examples:
     Config {
         /// Operate on the named profile (v6 settings scoping). Overrides
         /// the `MOLD_PROFILE` env var for the duration of this command.
-        #[arg(long, global = true, value_name = "NAME")]
+        #[arg(long, global = true, value_name = "NAME",
+              add = ArgValueCandidates::new(commands::config::complete_profile_name))]
         profile: Option<String>,
         #[command(subcommand)]
         action: ConfigAction,
@@ -2759,6 +2896,7 @@ async fn run() -> anyhow::Result<()> {
             tags,
             collection,
             no_auto_tag,
+            no_save,
             preview,
             local,
             prompt,
@@ -2957,6 +3095,7 @@ async fn run() -> anyhow::Result<()> {
                     tags,
                     collection,
                     no_auto_tag,
+                    no_save,
                 },
                 preview,
                 local,
@@ -3504,31 +3643,74 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Generate shell completion script.
+/// The flags zsh should complete with its own `_files`, derived from the
+/// clap tree rather than a hand-kept list.
 ///
-/// For zsh: custom script that separates flags from positional candidates so
-/// `mold run <TAB>` shows only model names, while `mold run --<TAB>` shows flags.
-/// For other shells: delegates to clap_complete's dynamic registration.
-fn generate_completions(shell: &str) -> anyhow::Result<()> {
-    if shell == "zsh" {
-        let bin = std::env::args()
-            .next()
-            .unwrap_or_else(|| "mold".to_string());
-        print!(
-            r##"#compdef mold
+/// The zsh wrapper short-circuits to `_files` before it asks the dynamic
+/// engine anything, so this must contain EXACTLY the args that take a path
+/// and nothing else: a flag listed here can never offer dynamic candidates
+/// (which is why `--control-model`, a model name, is not a path flag), and
+/// one missing from here completes nothing at all. Walking
+/// `ValueHint::FilePath` / `DirPath` is what keeps the two in step as flags
+/// are added — the hand-kept list had fallen thirteen file-path flags behind,
+/// and had `--output-dir` missing from the directory side.
+fn path_completion_tokens() -> (Vec<String>, Vec<String>) {
+    fn walk(command: &clap::Command, files: &mut Vec<String>, dirs: &mut Vec<String>) {
+        for arg in command.get_arguments() {
+            let bucket = match arg.get_value_hint() {
+                ValueHint::FilePath | ValueHint::AnyPath => &mut *files,
+                ValueHint::DirPath => &mut *dirs,
+                _ => continue,
+            };
+            if let Some(long) = arg.get_long() {
+                bucket.push(format!("--{long}"));
+            }
+            if let Some(short) = arg.get_short() {
+                bucket.push(format!("-{short}"));
+            }
+        }
+        for sub in command.get_subcommands() {
+            walk(sub, files, dirs);
+        }
+    }
+    let command = <Cli as CommandFactory>::command();
+    let (mut files, mut dirs) = (Vec::new(), Vec::new());
+    walk(&command, &mut files, &mut dirs);
+    for list in [&mut files, &mut dirs] {
+        list.sort();
+        list.dedup();
+    }
+    // One token, one answer: `-o` is a FILE on `mold run` and a DIRECTORY on
+    // `mold runpod run`, and the wrapper matches on the previous word alone,
+    // so it cannot tell them apart. zsh's `_files` offers directories as well
+    // as files, so keeping the ambiguous token on the file side completes
+    // both; listing it twice would silently give the first `case` branch and
+    // leave a second, unreachable one behind.
+    dirs.retain(|token| !files.contains(token));
+    (files, dirs)
+}
+
+/// The zsh completion wrapper. A hand-written `compdef` because the dynamic
+/// engine's own zsh output does not separate flags from positional
+/// candidates, so `mold run <TAB>` would offer flags instead of model names.
+fn zsh_completion_script(bin: &str) -> String {
+    let (files, dirs) = path_completion_tokens();
+    format!(
+        r##"#compdef mold
 function _clap_dynamic_completer_mold() {{
     local _CLAP_COMPLETE_INDEX=$(expr $CURRENT - 1)
     local _CLAP_IFS=$'\n'
 
     # File-path flags: fall back to zsh native _files for tilde expansion,
-    # directory traversal, and proper path completion.
+    # directory traversal, and proper path completion. This list is generated
+    # from every ValueHint::FilePath / DirPath arg in the clap tree.
     local prev_word="${{words[$(( CURRENT - 1 ))]}}"
     case "$prev_word" in
-        --lora|--image|-i|--mask|--control|--output|-o)
+        {files})
             _files
             return
             ;;
-        --control-model|--models-dir)
+        {dirs})
             _files -/
             return
             ;;
@@ -3572,8 +3754,23 @@ function _clap_dynamic_completer_mold() {{
 
 compdef _clap_dynamic_completer_mold mold
 "##,
-            bin = bin,
-        );
+        files = files.join("|"),
+        dirs = dirs.join("|"),
+        bin = bin,
+    )
+}
+
+/// Generate shell completion script.
+///
+/// For zsh: custom script that separates flags from positional candidates so
+/// `mold run <TAB>` shows only model names, while `mold run --<TAB>` shows flags.
+/// For other shells: delegates to clap_complete's dynamic registration.
+fn generate_completions(shell: &str) -> anyhow::Result<()> {
+    if shell == "zsh" {
+        let bin = std::env::args()
+            .next()
+            .unwrap_or_else(|| "mold".to_string());
+        print!("{}", zsh_completion_script(&bin));
         return Ok(());
     }
 
@@ -3639,6 +3836,174 @@ mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
     use clap::Parser;
+
+    /// Run a closure over the clap tree on a thread sized like the real
+    /// `main`; building or rendering it does not fit the default 2 MiB
+    /// test-thread stack in a debug build.
+    fn on_large_stack<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(work)
+            .expect("spawn clap thread")
+            .join()
+            .expect("clap thread panicked")
+    }
+
+    /// A container name is matched the way the wire type parses it, which is
+    /// case-insensitively — `MeshExportFormat::from_str` lowercases first, so
+    /// `--format GLB` worked until the parser became a possible-value list.
+    #[test]
+    fn format_flags_still_accept_the_case_the_wire_type_accepts() {
+        match parse(&["library", "export", "chair.glb", "--format", "GLB"]).command {
+            Commands::Library {
+                action: LibraryAction::Export { format, .. },
+            } => assert_eq!(format, mold_core::MeshExportFormat::Glb),
+            _ => panic!("expected Library export"),
+        }
+        match parse(&["library", "export", "chair.glb", "--format", "Stl"]).command {
+            Commands::Library {
+                action: LibraryAction::Export { format, .. },
+            } => assert_eq!(format, mold_core::MeshExportFormat::Stl),
+            _ => panic!("expected Library export"),
+        }
+        match parse(&["run", "m", "p", "--format", "PNG"]).command {
+            Commands::Run { format, .. } => assert_eq!(format, Some(OutputFormat::Png)),
+            _ => panic!("expected Run"),
+        }
+        assert!(try_parse(&["library", "export", "chair.glb", "--format", "tiff"]).is_err());
+    }
+
+    /// Ask the real completion engine what each flag offers, the way a
+    /// shell does.
+    ///
+    /// The engine reads a value parser's possible values, so a flag parsed by
+    /// a bare `fn(&str)` completes NOTHING — which is what
+    /// `library export --format` did, the one list long enough to need it.
+    /// `--control-model` and `mold skill show <FILE>` are names, not paths,
+    /// so they carry candidate functions instead.
+    #[test]
+    fn every_named_value_flag_offers_its_candidates() {
+        fn candidates(argv: &[&str]) -> Vec<String> {
+            let owned: Vec<std::ffi::OsString> = std::iter::once("mold".into())
+                .chain(argv.iter().map(std::ffi::OsString::from))
+                .collect();
+            let index = owned.len() - 1;
+            on_large_stack(move || {
+                let mut command = <Cli as CommandFactory>::command();
+                clap_complete::engine::complete(&mut command, owned, index, None)
+                    .expect("completion engine")
+                    .into_iter()
+                    .map(|candidate| candidate.get_value().to_string_lossy().to_string())
+                    .collect()
+            })
+        }
+
+        for argv in [
+            &["run", "--format", ""][..],
+            &["library", "list", "--format", ""][..],
+        ] {
+            let found = candidates(argv);
+            assert!(found.contains(&"png".to_string()), "{argv:?}: {found:?}");
+            assert!(found.contains(&"mp4".to_string()), "{argv:?}: {found:?}");
+            assert!(
+                !found.contains(&"tiff".to_string()),
+                "{argv:?} offers only what it accepts: {found:?}"
+            );
+        }
+
+        let export = candidates(&["library", "export", "chair.glb", "--format", ""]);
+        for container in mold_core::MeshExportFormat::ALL {
+            assert!(
+                export.contains(&container.as_str().to_string()),
+                "{} missing: {export:?}",
+                container.as_str()
+            );
+        }
+
+        let control = candidates(&["run", "--control-model", ""]);
+        assert!(
+            control.iter().all(|name| name.starts_with("controlnet-")),
+            "--control-model offers ControlNet adapters only: {control:?}"
+        );
+        assert!(!control.is_empty(), "no ControlNet adapters offered");
+
+        let files = candidates(&["skill", "show", "agents", ""]);
+        assert!(files.contains(&"SKILL.md".to_string()), "{files:?}");
+        assert!(
+            files.iter().any(|name| name.starts_with("references/")),
+            "{files:?}"
+        );
+    }
+
+    /// The zsh wrapper's two `_files` case lists ARE the set of path args in
+    /// the clap tree — not a copy of it that has to be remembered.
+    ///
+    /// The hand-kept list had fallen thirteen file-path flags behind
+    /// (`--video`, `--audio-file`, `--extend`, `--first-frame`, …), missed
+    /// `--output-dir` on the directory side, and carried `--control-model`,
+    /// which takes a MODEL NAME: a flag in this list short-circuits to
+    /// `_files` before the dynamic engine is asked, so listing one there
+    /// silently disables its candidates.
+    #[test]
+    fn the_zsh_files_list_matches_every_file_path_arg() {
+        let (files, dirs) = on_large_stack(path_completion_tokens);
+        let script = on_large_stack(|| zsh_completion_script("mold"));
+
+        let case_pattern = |after: &str| -> Vec<String> {
+            let head = script
+                .split(after)
+                .next()
+                .expect("script text")
+                .rsplit_once("        ")
+                .expect("case line")
+                .1
+                .trim()
+                .trim_end_matches(')')
+                .to_string();
+            let mut tokens: Vec<String> = head.split('|').map(|token| token.to_string()).collect();
+            tokens.sort();
+            tokens
+        };
+        assert_eq!(case_pattern("\n            _files\n"), files);
+        assert_eq!(case_pattern("\n            _files -/\n"), dirs);
+
+        // The set itself, so an arg losing its hint is a failure too.
+        for expected in [
+            "--image",
+            "-i",
+            "--mask",
+            "--control",
+            "--lora",
+            "--output",
+            "-o",
+            "--video",
+            "--audio-file",
+            "--extend",
+            "--script",
+            "--id-image",
+        ] {
+            assert!(
+                files.contains(&expected.to_string()),
+                "{expected} takes a path but zsh would not complete one: {files:?}"
+            );
+        }
+        assert!(dirs.contains(&"--models-dir".to_string()), "{dirs:?}");
+        // A token in both lists would leave an unreachable `case` branch:
+        // zsh takes the first match, and `-o` names a file on `mold run` and
+        // a directory on `mold runpod run`.
+        for token in &dirs {
+            assert!(
+                !files.contains(token),
+                "{token} is in both completion lists"
+            );
+        }
+        assert!(files.contains(&"-o".to_string()) && !dirs.contains(&"-o".to_string()));
+        assert!(
+            !files.contains(&"--control-model".to_string())
+                && !dirs.contains(&"--control-model".to_string()),
+            "--control-model completes model names, not paths"
+        );
+    }
 
     /// Parse CLI args from a vector (simulates command-line invocation).
     fn parse(args: &[&str]) -> Cli {
@@ -4135,6 +4500,33 @@ mod tests {
         }
     }
 
+    /// `--no-save` opts one render out of the Library. The print is still
+    /// published and then trashed, so it is recoverable until retention
+    /// sweeps it — the help says so, because "--no-save" reads like
+    /// "discarded".
+    #[test]
+    fn run_no_save_flag() {
+        match parse(&["run", "model", "test"]).command {
+            Commands::Run { no_save, .. } => assert!(!no_save),
+            _ => panic!("expected Run"),
+        }
+        match parse(&["run", "model", "test", "--no-save"]).command {
+            Commands::Run { no_save, .. } => assert!(no_save),
+            _ => panic!("expected Run --no-save"),
+        }
+        let help = on_large_stack(|| {
+            <Cli as clap::CommandFactory>::command()
+                .find_subcommand_mut("run")
+                .expect("run subcommand")
+                .render_long_help()
+                .to_string()
+        });
+        assert!(
+            help.contains("recoverable until") || help.contains("trash"),
+            "the help must say the print is recoverable: {help}"
+        );
+    }
+
     #[test]
     fn run_no_metadata_flag() {
         let cli = parse(&["run", "model", "test", "--no-metadata"]);
@@ -4527,6 +4919,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn library_source_media_parses_the_listing_and_the_download() {
+        match parse(&["library", "source-media", "cat.png"]).command {
+            Commands::Library {
+                action:
+                    LibraryAction::SourceMedia {
+                        filename,
+                        member,
+                        output,
+                        json,
+                    },
+            } => {
+                assert_eq!(filename, "cat.png");
+                assert!(member.is_none());
+                assert!(output.is_none());
+                assert!(!json);
+            }
+            _ => panic!("expected Library source-media"),
+        }
+        match parse(&[
+            "library",
+            "source-media",
+            "cat.png",
+            "--member",
+            "abc123",
+            "-o",
+            "-",
+        ])
+        .command
+        {
+            Commands::Library {
+                action:
+                    LibraryAction::SourceMedia {
+                        member,
+                        output,
+                        json,
+                        ..
+                    },
+            } => {
+                assert_eq!(member.as_deref(), Some("abc123"));
+                assert_eq!(output.as_deref(), Some("-"));
+                assert!(!json);
+            }
+            _ => panic!("expected Library source-media --member"),
+        }
+        assert!(
+            try_parse(&[
+                "library",
+                "source-media",
+                "cat.png",
+                "--json",
+                "--member",
+                "a"
+            ])
+            .is_err(),
+            "--json describes the inventory, not a downloaded file"
+        );
+        assert!(
+            try_parse(&["library", "source-media", "cat.png", "-o", "out.png"]).is_err(),
+            "a listing has no bytes to write"
+        );
+        assert!(try_parse(&["library", "source-media"]).is_err());
+    }
+
     /// `--format` is parsed by the WIRE type, so the CLI can never accept a
     /// container the export endpoint would refuse.
     #[test]
@@ -4833,6 +5289,132 @@ mod tests {
                 _ => panic!("expected Trash empty --yes"),
             }
         }
+    }
+
+    /// `mold jobs show --script` is the other half of amend: it prints the
+    /// job's effective script as chain TOML, which is what `--script` reads.
+    #[test]
+    fn jobs_show_prints_the_effective_script_as_toml() {
+        match parse(&["jobs", "show", "job-abc123", "--script"]).command {
+            Commands::Jobs {
+                action: JobsAction::Show { id, json, script },
+            } => {
+                assert_eq!(id, "job-abc123");
+                assert!(!json);
+                assert!(script);
+            }
+            _ => panic!("expected Jobs show --script"),
+        }
+        assert!(
+            try_parse(&["jobs", "show", "job-abc123", "--json", "--script"]).is_err(),
+            "the two documents are different shapes; asking for both is a mistake"
+        );
+    }
+
+    /// Amend is script-shaped because the wire request carries the whole
+    /// stage list; the flags only overlay chain-level fields.
+    #[test]
+    fn jobs_amend_parses_the_script_and_its_overlays() {
+        match parse(&[
+            "jobs",
+            "amend",
+            "job-abc123",
+            "--script",
+            "edited.toml",
+            "--fps",
+            "30",
+            "--seed",
+            "99",
+            "--steps",
+            "12",
+            "--guidance",
+            "3.5",
+            "--strength",
+            "0.5",
+            "--motion-tail",
+            "0",
+            "--no-audio",
+            "--dry-run",
+        ])
+        .command
+        {
+            Commands::Jobs {
+                action:
+                    JobsAction::Amend {
+                        id,
+                        script,
+                        fps,
+                        seed,
+                        steps,
+                        guidance,
+                        strength,
+                        motion_tail,
+                        audio,
+                        no_audio,
+                        dry_run,
+                    },
+            } => {
+                assert_eq!(id, "job-abc123");
+                assert_eq!(script, std::path::PathBuf::from("edited.toml"));
+                assert_eq!(fps, Some(30));
+                assert_eq!(seed, Some(99));
+                assert_eq!(steps, Some(12));
+                assert_eq!(guidance, Some(3.5));
+                assert_eq!(strength, Some(0.5));
+                assert_eq!(motion_tail, Some(0));
+                assert!(!audio);
+                assert!(no_audio);
+                assert!(dry_run);
+            }
+            _ => panic!("expected Jobs amend"),
+        }
+        assert!(
+            try_parse(&["jobs", "amend", "job-abc123"]).is_err(),
+            "amend needs the edited script"
+        );
+        assert!(
+            try_parse(&[
+                "jobs",
+                "amend",
+                "job-abc123",
+                "--script",
+                "s.toml",
+                "--audio",
+                "--no-audio"
+            ])
+            .is_err(),
+            "audio and no-audio are exclusive"
+        );
+    }
+
+    #[test]
+    fn trash_delete_takes_filenames_and_confirms_unless_yes() {
+        let cli = parse(&["trash", "delete", "a.png", "b.mp4"]);
+        match cli.command {
+            Commands::Trash {
+                action: TrashAction::Delete { filenames, yes },
+            } => {
+                assert_eq!(filenames, vec!["a.png", "b.mp4"]);
+                assert!(!yes, "a permanent delete confirms by default");
+            }
+            _ => panic!("expected Trash delete"),
+        }
+        for args in [
+            ["trash", "delete", "a.png", "--yes"],
+            ["trash", "delete", "a.png", "-y"],
+        ] {
+            let cli = parse(&args);
+            match cli.command {
+                Commands::Trash {
+                    action: TrashAction::Delete { yes, .. },
+                } => assert!(yes),
+                _ => panic!("expected Trash delete --yes"),
+            }
+        }
+        assert!(
+            try_parse(&["trash", "delete"]).is_err(),
+            "delete without filenames must be a usage error"
+        );
     }
 
     #[test]

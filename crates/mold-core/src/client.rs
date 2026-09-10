@@ -1,7 +1,7 @@
 use crate::chain::{ChainProgressEvent, ChainRequest};
 use crate::chain_job::{
-    ChainJobDetail, ChainJobListing, ChainJobSummary, CreateChainJobResponse, GcOutcome,
-    RetakeRequest,
+    AmendRequest, AmendResponse, ChainJobDetail, ChainJobListing, ChainJobSummary,
+    CreateChainJobResponse, GcOutcome, RetakeRequest,
 };
 use crate::error::MoldError;
 use crate::queue_progress::QueueJobProgress;
@@ -1061,6 +1061,30 @@ impl MoldClient {
             .await?)
     }
 
+    /// Replace a chain job's stage list and its chain-level overlays
+    /// (`POST /api/chain-jobs/:id/amend`, 202).
+    ///
+    /// `req.stages` is the FULL edited list in canonical order — there is no
+    /// per-stage index on the wire — and the answer says how many leading
+    /// stages kept their cached artifacts, which is where rendering resumes.
+    pub async fn amend_chain_job(&self, id: &str, req: &AmendRequest) -> Result<AmendResponse> {
+        let wire_req = crate::prompt_text::protect_amend_request_for_wire(req);
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/chain-jobs/{}/amend",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .json(&wire_req)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<AmendResponse>()
+            .await?)
+    }
+
     pub async fn cancel_chain_job(&self, id: &str) -> Result<ChainJobSummary> {
         let resp = self
             .client
@@ -2094,6 +2118,29 @@ impl MoldClient {
         let resp = self
             .client
             .post(format!("{}/api/gallery/trash", self.base_url))
+            .json(&TrashFilenamesRequest {
+                filenames: filenames.to_vec(),
+            })
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// Permanently delete the named prints in one call
+    /// (`POST /api/gallery/trash/delete-forever`).
+    ///
+    /// This is the BULK route, and it works on live and already-trashed
+    /// prints alike. The single-file [`Self::delete_gallery_image_forever`]
+    /// is a different route (`DELETE /api/gallery/image/:name?permanent=true`)
+    /// and is not a substitute.
+    pub async fn delete_gallery_files_forever(&self, filenames: &[String]) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/gallery/trash/delete-forever",
+                self.base_url
+            ))
             .json(&TrashFilenamesRequest {
                 filenames: filenames.to_vec(),
             })
@@ -5297,6 +5344,166 @@ mod tests {
             msg.contains("GALLERY_RESTORE_CONFLICT"),
             "body missing: {msg}"
         );
+    }
+
+    /// `mold trash delete <FILENAME>...` posts the named list to the bulk
+    /// permanent route — not the single-file `?permanent=true` delete, which
+    /// is a different route with different semantics.
+    #[tokio::test]
+    async fn delete_gallery_files_forever_posts_the_filename_list() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/trash/delete-forever"))
+            .and(body_json(
+                serde_json::json!({ "filenames": ["a.png", "b.png"] }),
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        client
+            .delete_gallery_files_forever(&["a.png".to_string(), "b.png".to_string()])
+            .await
+            .unwrap();
+    }
+
+    /// Every refusal the route can answer with reaches the caller carrying
+    /// its status and the server's own sentence, because a permanent delete
+    /// that silently did nothing is the worst possible outcome.
+    #[tokio::test]
+    async fn delete_gallery_files_forever_surfaces_every_refusal() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (status, code) in [
+            (404, "GALLERY_ITEM_NOT_FOUND"),
+            (409, "GALLERY_DELETE_CONFLICT"),
+            (422, "GALLERY_FILENAME_INVALID"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/gallery/trash/delete-forever"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(serde_json::json!({
+                        "error": "refused",
+                        "code": code
+                    })),
+                )
+                .mount(&server)
+                .await;
+            let client = MoldClient::new(&server.uri());
+            let err = client
+                .delete_gallery_files_forever(&["cat.png".to_string()])
+                .await
+                .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains(&status.to_string()), "status missing: {msg}");
+            assert!(msg.contains(code), "body missing: {msg}");
+        }
+    }
+
+    fn amend_stage(prompt: &str, frames: u32) -> crate::chain::ChainStage {
+        crate::chain::ChainStage {
+            prompt: prompt.to_string(),
+            frames,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: crate::chain::TransitionMode::default(),
+            fade_frames: None,
+            model: None,
+            loras: Vec::new(),
+            references: Vec::new(),
+        }
+    }
+
+    fn amend_response_body() -> serde_json::Value {
+        serde_json::json!({
+            "id": "job-7",
+            "state": "queued",
+            "model": "ltx-2-19b-distilled:fp8",
+            "stage_count": 2,
+            "current_stage": 0,
+            "created_at_unix_ms": 1_700_000_000_000_u64,
+            "updated_at_unix_ms": 1_700_000_000_000_u64,
+            "error": null,
+            "ephemeral": false,
+            "preserved_stages": 1
+        })
+    }
+
+    /// Amend carries the FULL stage list in canonical order and reads back
+    /// how many leading stages the host kept.
+    #[tokio::test]
+    async fn amend_chain_job_posts_the_full_stage_list_and_reports_preserved_stages() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chain-jobs/job-7/amend"))
+            .and(body_partial_json(serde_json::json!({
+                "stages": [
+                    { "prompt": "first", "frames": 97 },
+                    { "prompt": "second", "frames": 49 }
+                ],
+                "fps": 24,
+                "seed": "11"
+            })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(amend_response_body()))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let req = crate::chain_job::AmendRequest {
+            stages: vec![amend_stage("first", 97), amend_stage("second", 49)],
+            motion_tail_frames: None,
+            fps: Some(24),
+            seed: Some(11),
+            steps: None,
+            guidance: None,
+            strength: None,
+            enable_audio: None,
+        };
+        let response = client.amend_chain_job("job-7", &req).await.unwrap();
+        assert_eq!(response.preserved_stages, 1);
+        assert_eq!(response.summary.id, "job-7");
+    }
+
+    /// A stage prompt carrying a backslash survives the wire the way every
+    /// other prompt-bearing request's does: the client doubles it so the
+    /// server's normalizing deserializer hands the job back what was typed.
+    #[tokio::test]
+    async fn amend_chain_job_protects_stage_prompt_backslashes() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chain-jobs/job-7/amend"))
+            .and(body_partial_json(serde_json::json!({
+                "stages": [{ "prompt": r"a back\\slash" }]
+            })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(amend_response_body()))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let req = crate::chain_job::AmendRequest {
+            stages: vec![amend_stage(r"a back\slash", 97)],
+            motion_tail_frames: None,
+            fps: None,
+            seed: None,
+            steps: None,
+            guidance: None,
+            strength: None,
+            enable_audio: None,
+        };
+        client.amend_chain_job("job-7", &req).await.unwrap();
     }
 
     #[tokio::test]
