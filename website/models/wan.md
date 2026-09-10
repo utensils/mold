@@ -448,6 +448,16 @@ what the checkpoint accepts:
 Installed `cv:`/`hf:` wan checkpoints classify from their own tensor shapes —
 the same read the engine performs — never from their names.
 
+That same contract decides the prompt. On an `optional` or `required` tier a
+render that carries a source image may be left **unprompted** — the attached
+frame already decides the shot, so a prompt refines it rather than authoring
+it — and `mold run wan22-ti2v-5b --image still.png` is a complete command.
+Expect near-static micro-motion when you leave it out. Every `unsupported`
+tier attaches nothing, so its prompt stays required. The recipe advertises the
+answer as `capabilities.prompt.mode` in `/api/models`; no client carries a
+model list. The same rule covers [LTX-2](/models/ltx2) and
+[MiniMax H3](/models/minimax-h3).
+
 ## First/last-frame interpolation
 
 `--image` + `--last-image` (wire: a two-entry `keyframes` list anchoring

@@ -35,6 +35,12 @@ Match the described duration to the requested four to fifteen seconds.
 non-verbal sounds, never repeating dialogue or music. `non_diegetic_music`
 covers instrumentation, tempo, and dynamics; `N/A` when no score is wanted.
 
+The prompt is optional once the request carries conditioning — a first or last
+frame for FL2VA, a reference set for Ref2VA. What you attached already decides
+what the shot shows, so a prompt refines that render rather than authoring it,
+and an unprompted clip tends toward near-static micro-motion. With nothing
+attached the prompt is the whole render and stays required.
+
 ## Examples
 
 Input: a baker opens the shutters before sunrise and says one line
@@ -61,6 +67,8 @@ identities, or Ref2VA for reference-conditioned identities.
 ```bash
 # Feed a written Context-IR prompt from a file
 mold run minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p "$(cat h3-prompt.txt)" --first-frame presenter.png --duration 5 --seed 83009
+# Unprompted: the attached first frame is the whole conditioning
+mold run minimax-h3-fl2va:comfy-pruned-int8 --first-frame presenter.png
 ```
 
 ## Sources

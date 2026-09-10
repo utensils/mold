@@ -603,6 +603,7 @@ mod tests {
 
     fn meta(prompt: &str, model: &str) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            family: None,
             mesh_workflow: None,
             video_only: None,
             attention_path: None,

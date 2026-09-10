@@ -32,8 +32,12 @@ describe("legacyPromptRequirementForFamily", () => {
     expect(legacyPromptRequirementForFamily(undefined)).toBe("required");
   });
 
-  it("never answers ignored — no pre-profile family lacked a text encoder", () => {
-    expect(legacyPromptRequirementForFamily("hunyuan3d")).toBe("required");
+  // Hunyuan3D has no text encoder on ANY host version, so a print restored
+  // for an uninstalled 3-D model — where no recipe answers — must not be
+  // held behind a prompt nothing reads.
+  it("ignores the prompt for a mesh family even without a recipe", () => {
+    expect(legacyPromptRequirementForFamily("hunyuan3d")).toBe("ignored");
+    expect(legacyPromptRequirementForFamily("  HunYuan3D ")).toBe("ignored");
   });
 });
 

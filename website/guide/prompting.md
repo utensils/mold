@@ -64,19 +64,19 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `ltx-video-0.9.8-2b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
 | `ltx-video-0.9.8-13b-dev` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
 | `ltx-video-0.9.8-13b-distilled` | `ltx-video` | `shared.md`, `families/ltx-video.md` | 150 | 523 |
-| `ltx-2-19b-dev` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 478 |
-| `ltx-2-19b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 478 |
-| `ltx-2.3-22b-dev` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 478 |
-| `ltx-2.3-22b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 478 |
-| `ltx-2.5-22b-dev` | `ltx2` | `shared.md`, `families/ltx2.md`, `models/ltx-2.5.md` | 200 | 559 |
-| `ltx-2.5-22b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md`, `models/ltx-2.5.md` | 200 | 559 |
-| `wan21-t2v-1.3b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 592 |
-| `wan21-t2v-14b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 592 |
-| `wan22-ti2v-5b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md`, `models/wan22-ti2v-5b.md` | 80 | 684 |
-| `wan22-t2v-a14b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 592 |
-| `wan22-i2v-a14b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md` | 80 | 587 |
-| `minimax-h3-fl2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/base-modes.md` | 250 | 583 |
-| `minimax-h3-ref2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/ref2va.md` | 300 | 567 |
+| `ltx-2-19b-dev` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 520 |
+| `ltx-2-19b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 520 |
+| `ltx-2.3-22b-dev` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 520 |
+| `ltx-2.3-22b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md` | 200 | 520 |
+| `ltx-2.5-22b-dev` | `ltx2` | `shared.md`, `families/ltx2.md`, `models/ltx-2.5.md` | 200 | 601 |
+| `ltx-2.5-22b-distilled` | `ltx2` | `shared.md`, `families/ltx2.md`, `models/ltx-2.5.md` | 200 | 601 |
+| `wan21-t2v-1.3b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 574 |
+| `wan21-t2v-14b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 574 |
+| `wan22-ti2v-5b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md`, `models/wan22-ti2v-5b.md` | 80 | 681 |
+| `wan22-t2v-a14b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 574 |
+| `wan22-i2v-a14b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md` | 80 | 584 |
+| `minimax-h3-fl2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/base-modes.md` | 250 | 644 |
+| `minimax-h3-ref2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/ref2va.md` | 300 | 628 |
 | `real-esrgan-x4plus` | `upscaler` | `shared.md`, `families/upscaler.md` | 20 | 229 |
 | `real-esrgan-x4plus-anime` | `upscaler` | `shared.md`, `families/upscaler.md` | 20 | 229 |
 | `real-esrgan-anime-v3` | `upscaler` | `shared.md`, `families/upscaler.md` | 20 | 229 |
@@ -1200,9 +1200,13 @@ Frames sit on the `8k+1` grid at 24 fps, so 121 frames is about five seconds.
 Both axes must be multiples of 32, and of 64 for lip dub. Size the action to
 that duration, keep one continuous take per clip, and keep lip sync inside a
 single clip. With a source image attached, describe only what changes from it;
-restating the frame inaccurately makes the model cut. Distilled LTX-2.5 fixes
-guidance at 1.0. Audio renders by default on MP4 output, one-shots and
-sequences alike, so write the soundscape unless the request says silent.
+restating the frame inaccurately makes the model cut. The prompt is optional
+once anything is attached — a still, keyframes, a clip to continue — because
+what you attached already decides the render; that rule is shared with Wan and
+MiniMax H3, and an unprompted clip tends toward near-static micro-motion.
+Distilled LTX-2.5 fixes guidance at 1.0. Audio renders by default on MP4
+output, one-shots and sequences alike, so write the soundscape unless the
+request says silent.
 
 #### Examples
 
@@ -1320,11 +1324,12 @@ pushes forward.
 
 Wan generates silent video. Never request dialogue or sound, or claim
 synchronized audio. Wan S2V is a separate speech-to-video model. Wan 2.2 A14B
-drives two experts from this one prompt, so keep it internally consistent. Read
-one task leaf: text-to-video for T2V identities, image-conditioned for I2V and
-TI2V identities or any source frame.
+drives two experts from this one prompt, so keep it internally consistent.
 
 #### CLI
+
+Read one task leaf: text-to-video for T2V identities, image-conditioned for I2V
+and TI2V identities or any source frame.
 
 ```bash
 # Wan 2.1 text-to-video (frames are 4k+1: 49, 81, 121, ...; MP4 default)
@@ -1358,6 +1363,8 @@ mold run wan22-t2v-a14b:q5 "a lighthouse at dusk, volumetric fog" --frames 1 -o 
 mold run wan22-t2v-a14b:q8 "storm waves" --sample-shift 12
 mold run wan22-t2v-a14b:q5 "storm waves" --sample-solver euler
 mold run wan22-t2v-a14b:q5 "storm waves" --distill-strength high=1.8,low=1.0 --steps 6
+# Unprompted image-to-video: the attached frame is the whole conditioning
+mold run wan22-ti2v-5b --image still.png
 # First/last-frame interpolation (A14B I2V or TI2V-5B; endpoints only)
 mold run wan22-i2v-a14b:q5 "the sapling grows into an oak" --image sapling.png --last-image oak.png
 # Send an explicit empty negative prompt, disabling the tuned model default
@@ -1414,6 +1421,12 @@ Match the described duration to the requested four to fifteen seconds.
 non-verbal sounds, never repeating dialogue or music. `non_diegetic_music`
 covers instrumentation, tempo, and dynamics; `N/A` when no score is wanted.
 
+The prompt is optional once the request carries conditioning — a first or last
+frame for FL2VA, a reference set for Ref2VA. What you attached already decides
+what the shot shows, so a prompt refines that render rather than authoring it,
+and an unprompted clip tends toward near-static micro-motion. With nothing
+attached the prompt is the whole render and stays required.
+
 #### Examples
 
 Input: a baker opens the shutters before sunrise and says one line
@@ -1440,6 +1453,8 @@ identities, or Ref2VA for reference-conditioned identities.
 ```bash
 # Feed a written Context-IR prompt from a file
 mold run minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p "$(cat h3-prompt.txt)" --first-frame presenter.png --duration 5 --seed 83009
+# Unprompted: the attached first frame is the whole conditioning
+mold run minimax-h3-fl2va:comfy-pruned-int8 --first-frame presenter.png
 ```
 
 #### Sources
@@ -1658,6 +1673,9 @@ Name what must stay stable. For a first and last frame pair, describe a
 physically continuous path between them and the change that happens: walking
 into, appearing, turning into, camera left, camera right. Check the model row
 for its supported source roles.
+
+The prompt is optional here: the attached frame decides the shot. Unprompted,
+expect near-static micro-motion.
 
 #### Examples
 

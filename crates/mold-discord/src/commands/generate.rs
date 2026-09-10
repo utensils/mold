@@ -964,16 +964,61 @@ fn build_keyframes(images: Vec<Vec<u8>>, frames: u32) -> Vec<KeyframeCondition> 
         .collect()
 }
 
-/// Whether `/generate` must reject the interaction up front for a missing prompt.
+/// Whether `/generate` must reject the interaction up front for a missing
+/// prompt.
 ///
-/// The slash command runs this before deferring, so the model family isn't
-/// resolved yet — only the attachment is known. A source image is enough to
-/// let the run through unprompted (LTX-2 image-to-video conditions on the
-/// frame); the server's family-aware validator is the backstop that still
-/// rejects an empty prompt for image families.
-fn prompt_missing_before_defer(prompt: Option<&str>, has_visual_conditioning: bool) -> bool {
-    !has_visual_conditioning && prompt.is_none_or(|p| p.trim().is_empty())
+/// The rule is not decided here. `mold_core`'s
+/// [`prompt_required_with_conditioning`] is the ONE authority behind
+/// admission, every recipe's advertised `prompt` block, and this gate, so the
+/// bot cannot drift from the server it talks to. It was hand-rolled as "any
+/// conditioning is enough", which let a FLUX img2img run with a blank prompt
+/// burn the interaction and fail server-side, and which would have kept Wan
+/// and MiniMax H3 refused after the rule changed under it.
+///
+/// The family comes from the model option (or the default model) and is known
+/// without deferring; `None` — an unrecognised model — keeps the prompt
+/// required, which is the safe answer.
+///
+/// [`prompt_required_with_conditioning`]: mold_core::prompt_required_with_conditioning
+fn prompt_missing_before_defer(
+    family: Option<&str>,
+    prompt: Option<&str>,
+    has_visual_conditioning: bool,
+) -> bool {
+    mold_core::prompt_required_with_conditioning(family, has_visual_conditioning)
+        && prompt.is_none_or(|p| p.trim().is_empty())
 }
+
+/// Discord's projection into `mold_core`'s shared conditioning parts.
+///
+/// The slash command resolves the prompt before it builds the request, so it
+/// cannot call `has_visual_conditioning`. It rebuilt the list by hand from
+/// three attachment options and omitted `reference_*` — the only well Ref2VA
+/// has, since the exclusivity check above refuses everything else beside
+/// them — so every unprompted Ref2VA run was refused before deferring.
+fn conditioning_before_defer(
+    has_source_image: bool,
+    has_source_video: bool,
+    keyframes: usize,
+    references: usize,
+    pipeline: Option<Ltx2PipelineMode>,
+) -> bool {
+    mold_core::validation::PromptConditioningParts {
+        source_image: has_source_image,
+        keyframes: keyframes > 0,
+        source_video: has_source_video,
+        extend: false,
+        references: references > 0,
+        audio_only: pipeline.is_some_and(Ltx2PipelineMode::is_audio_only),
+    }
+    .is_conditioned()
+}
+
+/// The refusal for a blank prompt the request has nothing to stand in for.
+/// It names every well that would have made the prompt optional.
+const PROMPT_NEEDED_WITHOUT_CONDITIONING: &str =
+    "Prompt cannot be empty. (It's optional only with visual conditioning: a source image, \
+     retake video, keyframes, or ordered references.)";
 
 /// The up-front refusal for a mesh model with nothing to condition on.
 const MESH_NEEDS_SOURCE_IMAGE: &str = "This model renders a 3-D mesh from a picture: attach a \
@@ -1177,16 +1222,19 @@ pub async fn generate(
     }
     // Validate prompt before deferring (avoids wasting the interaction)
     if prompt_missing_before_defer(
+        family,
         prompt.as_deref(),
-        source_image.is_some() || source_video.is_some() || !keyframe_attachments.is_empty(),
+        conditioning_before_defer(
+            source_image.is_some(),
+            source_video.is_some(),
+            keyframe_attachments.len(),
+            reference_attachments.len(),
+            pipeline_for_request(family, specialized, pipeline),
+        ),
     ) {
         ctx.send(
             poise::CreateReply::default()
-                .content(
-                    "Prompt cannot be empty. \
-                     (It's optional only with visual conditioning: a source image, retake video, \
-                     or keyframes.)",
-                )
+                .content(PROMPT_NEEDED_WITHOUT_CONDITIONING)
                 .ephemeral(true),
         )
         .await?;
@@ -1633,16 +1681,97 @@ mod tests {
         assert_eq!(raster.output_format, Some(OutputFormat::Png));
     }
 
-    /// The pre-defer prompt gate is "visual conditioning present": a mesh
-    /// run always carries a source image, so it is admitted without a
-    /// prompt, while a bare empty prompt is still refused before deferring.
+    /// The pre-defer prompt gate for a family whose prompt is optional once
+    /// conditioned: a mesh run always carries a source image and never reads
+    /// a prompt at all, while a bare empty prompt is still refused before
+    /// deferring.
     #[test]
     fn an_empty_prompt_passes_the_pre_defer_gate_only_with_visual_conditioning() {
-        assert!(!prompt_missing_before_defer(None, true));
-        assert!(!prompt_missing_before_defer(Some("   "), true));
-        assert!(prompt_missing_before_defer(None, false));
-        assert!(prompt_missing_before_defer(Some("   "), false));
-        assert!(!prompt_missing_before_defer(Some("a chair"), false));
+        let video = Some("ltx2");
+        assert!(!prompt_missing_before_defer(video, None, true));
+        assert!(!prompt_missing_before_defer(video, Some("   "), true));
+        assert!(prompt_missing_before_defer(video, None, false));
+        assert!(prompt_missing_before_defer(video, Some("   "), false));
+        assert!(!prompt_missing_before_defer(video, Some("a chair"), false));
+
+        // A mesh family has no text encoder, so it is admitted unprompted
+        // whether or not anything is attached.
+        let mesh = Some(mold_core::manifest::HUNYUAN3D_FAMILY);
+        assert!(!prompt_missing_before_defer(mesh, None, true));
+        assert!(!prompt_missing_before_defer(mesh, None, false));
+    }
+
+    /// Ref2VA can carry NOTHING but references — the exclusivity check above
+    /// refuses a source, retake, keyframe, audio, or pipeline input beside
+    /// them — so a gate that did not count them refused every unprompted
+    /// Ref2VA run before the interaction was even deferred.
+    #[test]
+    fn references_count_toward_the_pre_defer_conditioning() {
+        assert!(conditioning_before_defer(false, false, 0, 1, None));
+        assert!(!conditioning_before_defer(false, false, 0, 0, None));
+        assert!(conditioning_before_defer(true, false, 0, 0, None));
+        assert!(conditioning_before_defer(false, true, 0, 0, None));
+        assert!(conditioning_before_defer(false, false, 2, 0, None));
+
+        // An audio-only render reads no pixels, so nothing attached to it
+        // conditions the render.
+        assert!(!conditioning_before_defer(
+            true,
+            false,
+            0,
+            0,
+            Some(Ltx2PipelineMode::T2a)
+        ));
+
+        // The gate then reads the core authority with that answer.
+        assert!(!prompt_missing_before_defer(
+            Some(mold_core::minimax_h3::FAMILY),
+            None,
+            conditioning_before_defer(false, false, 0, 1, None)
+        ));
+    }
+
+    /// The refusal names every well that would make the prompt optional. It
+    /// listed only three, so a user holding a Ref2VA reference was told to
+    /// write a prompt they did not need.
+    #[test]
+    fn the_prompt_refusal_names_the_reference_well() {
+        assert!(PROMPT_NEEDED_WITHOUT_CONDITIONING.contains("references"));
+        assert!(PROMPT_NEEDED_WITHOUT_CONDITIONING.contains("source image"));
+        assert!(PROMPT_NEEDED_WITHOUT_CONDITIONING.contains("keyframes"));
+    }
+
+    /// The pre-defer gate is the CORE authority rather than a hand-rolled
+    /// copy of it. Hand-rolling is what let a FLUX img2img run with a blank
+    /// prompt defer and then fail server-side, and what would have kept Wan
+    /// and MiniMax H3 refused up front after the rule changed under them.
+    #[test]
+    fn the_pre_defer_gate_matches_the_core_prompt_authority() {
+        for family in [
+            Some("flux"),
+            Some("sdxl"),
+            Some("ltx2"),
+            Some("ltx-video"),
+            Some("wan"),
+            Some(mold_core::minimax_h3::FAMILY),
+            Some(mold_core::manifest::HUNYUAN3D_FAMILY),
+            None,
+        ] {
+            for conditioned in [true, false] {
+                let required = mold_core::prompt_required_with_conditioning(family, conditioned);
+                for blank in [None, Some(""), Some("   ")] {
+                    assert_eq!(
+                        prompt_missing_before_defer(family, blank, conditioned),
+                        required,
+                        "{family:?} conditioned={conditioned} blank={blank:?}"
+                    );
+                }
+                assert!(
+                    !prompt_missing_before_defer(family, Some("a chair"), conditioned),
+                    "{family:?}: a prompt that was written is never missing"
+                );
+            }
+        }
     }
 
     /// `/generate model:hunyuan3d` with no `source_image` is refused for the
@@ -3045,16 +3174,18 @@ mod tests {
     fn prompt_rejected_up_front_only_without_a_source_image() {
         // No attachment: an absent or blank prompt is rejected before the
         // interaction is deferred.
-        assert!(prompt_missing_before_defer(None, false));
-        assert!(prompt_missing_before_defer(Some("   "), false));
-        assert!(!prompt_missing_before_defer(Some("a cat"), false));
+        let video = Some("ltx2");
+        assert!(prompt_missing_before_defer(video, None, false));
+        assert!(prompt_missing_before_defer(video, Some("   "), false));
+        assert!(!prompt_missing_before_defer(video, Some("a cat"), false));
 
-        // With a source image the run may be unprompted — LTX-2 image-to-video
-        // conditions on the frame. Non-video families are still rejected, by
-        // the server's family-aware validator.
-        assert!(!prompt_missing_before_defer(None, true));
-        assert!(!prompt_missing_before_defer(Some("  "), true));
-        assert!(!prompt_missing_before_defer(Some("a cat"), true));
+        // With a source image a video family's run may be unprompted — the
+        // attached frame conditions it. An image family is refused HERE now
+        // rather than after the interaction is deferred.
+        assert!(!prompt_missing_before_defer(video, None, true));
+        assert!(!prompt_missing_before_defer(video, Some("  "), true));
+        assert!(!prompt_missing_before_defer(video, Some("a cat"), true));
+        assert!(prompt_missing_before_defer(Some("flux"), None, true));
     }
 
     #[test]

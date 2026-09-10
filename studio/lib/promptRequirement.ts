@@ -8,22 +8,22 @@
  * for a CONDITIONED request, because that is the only case that can differ;
  * this module resolves it against the request being built.
  *
- * Why a prompt can be optional at all: an empty prompt is a well-defined
- * trained context for LTX-2, not a degenerate one — the Gemma tokenizer pads
- * to a fixed 1024 tokens and the embeddings connector replaces every padded
- * position with learned register embeddings, so the transformer always sees
- * a full context. What makes a promptless render meaningful is the *visual*
- * conditioning — a source image, keyframes, a source video, or a
- * continuation — which is why `optional` resolves back to `required` until
- * the request carries one. `ignored` is different in kind: the family has no
- * text encoder anywhere (Hunyuan3D), so the prompt is saved as a note and
- * conditioning does not enter into it.
+ * Why a prompt can be optional at all: for the families that advertise it,
+ * an empty prompt is a well-defined trained context rather than a degenerate
+ * one — each family's text encoder has its own reason (LTX-2's Gemma pads to
+ * a fixed 1024 positions and the connector fills them with learned register
+ * embeddings; Wan's umT5 encodes the empty string on its unconditional
+ * branch). What makes a promptless render meaningful is the *visual*
+ * conditioning — a source image, keyframes, boundary frames, an ordered
+ * reference, a source video, or a continuation — which is why `optional`
+ * resolves back to `required` until the request carries one. `ignored` is
+ * different in kind: the family has no text encoder anywhere (Hunyuan3D), so
+ * the prompt is saved as a note and conditioning does not enter into it.
  *
- * Two things the surfaces must stay honest about:
- *  - It buys **zero** VRAM. The Gemma context is a fixed `[1, 1024, 4096]`
- *    tensor whose size is independent of the prompt's token count.
- *  - Expect near-static output (a blink, micro-motion). The right answer is
- *    guidance, never a synthesized placeholder prompt.
+ * What the surfaces must stay honest about: expect near-static output (a
+ * blink, micro-motion). The right answer is guidance, never a synthesized
+ * placeholder prompt. The copy names no memory saving — that was an LTX-2
+ * fact about a fixed-size Gemma context and it does not generalize.
  *
  * A host that predates the field gets the rule every client applied before
  * it existed (`legacyRecipeRules.ts`), so behaviour there is unchanged.
@@ -87,13 +87,103 @@ export type PromptConditioningInput = {
   /** Exact request identity remains available when family metadata is not. */
   model?: string | null;
   sourceImage?: unknown;
+  /**
+   * Web's single well as well as an ordered reference strip: on a
+   * `single`-layout web recipe `imageAttachments[0]` IS the source image
+   * (`web/src/composables/useGenerateForm.ts`), so dropping it to match the
+   * server's field list would un-condition every web img2img render. It also
+   * counts references on a reference-only recipe, which is inert: those
+   * families advertise `required` whatever they carry.
+   */
   imageAttachments?: readonly unknown[] | null;
   keyframes?: readonly unknown[] | null;
   sourceVideo?: unknown;
   sourceVideoPath?: string | null;
   extendVideo?: unknown;
   extendVideoPath?: string | null;
+  /**
+   * MiniMax H3 Ref2VA's ordered references — the ONLY place a Ref2VA
+   * request carries its frames. (An LTX-2 end frame is deliberately NOT an
+   * input: it ships as a keyframe only beside a first frame, which already
+   * counts, and alone it ships nothing — so it must not read as conditioning.)
+   */
+  references?: readonly unknown[] | null;
+  /** MiniMax H3 first/last-frame authoring, which lives outside
+   * `sourceImage` and `keyframes` on every surface. */
+  h3FirstFrame?: unknown;
+  h3LastFrame?: unknown;
 };
+
+/**
+ * A surface form as this module reads it. Desktop's and iPhone's
+ * `GenerateForm` and web's form state both satisfy it structurally; the
+ * fields the shared input does not name by the same name are projected by
+ * {@link promptConditioningInputFor}.
+ */
+export type PromptConditioningSource = Omit<
+  PromptConditioningInput,
+  "h3FirstFrame" | "h3LastFrame"
+> & {
+  /** Desktop / web / iPhone MiniMax H3 authoring state. */
+  h3Authoring?: {
+    firstFrame?: unknown;
+    lastFrame?: unknown;
+    references?: readonly unknown[] | null;
+  } | null;
+  /** A surface that names its reference strip differently. */
+  referenceImages?: readonly unknown[] | null;
+  /** Accepted so a form can be handed over whole; deliberately not read (see
+   * `references` above). */
+  endFrame?: unknown;
+};
+
+/**
+ * Web initialises `h3Authoring` with an EMPTY reference list, and `[] ?? x`
+ * is `[]`, so a plain nullish chain would hide every later strip. The first
+ * list that actually holds something is the one the request will carry.
+ */
+function firstNonEmpty(
+  ...lists: (readonly unknown[] | null | undefined)[]
+): readonly unknown[] | null {
+  return lists.find((list) => (list?.length ?? 0) > 0) ?? null;
+}
+
+/**
+ * The ONE projection from a surface's form onto the shared rule's input.
+ *
+ * Desktop, web and iPhone all hold the same conditioning under different
+ * field names (H3 frames sit inside `h3Authoring`, references may be
+ * `references` or `referenceImages`), and a spread only ever carried the
+ * fields that already matched — which is how every H3 frame stayed invisible
+ * to the rule. Reading the form here keeps that map in one place instead of
+ * three.
+ */
+export function promptConditioningInputFor(
+  source: PromptConditioningSource | null | undefined,
+  recipe?: PromptRecipe | null,
+): PromptConditioningInput {
+  if (!source) return recipe ? { recipe } : {};
+  return {
+    recipe: recipe ?? source.recipe ?? null,
+    family: source.family ?? null,
+    modelFamily: source.modelFamily ?? null,
+    model: source.model ?? null,
+    sourceImage: source.sourceImage ?? null,
+    imageAttachments: source.imageAttachments ?? null,
+    keyframes: source.keyframes ?? null,
+    sourceVideo: source.sourceVideo ?? null,
+    sourceVideoPath: source.sourceVideoPath ?? null,
+    extendVideo: source.extendVideo ?? null,
+    extendVideoPath: source.extendVideoPath ?? null,
+    references: firstNonEmpty(
+      source.h3Authoring?.references,
+      source.references,
+      source.referenceImages,
+    ),
+    h3FirstFrame: source.h3Authoring?.firstFrame ?? null,
+    h3LastFrame: source.h3Authoring?.lastFrame ?? null,
+  };
+}
 
 function conditioningFamily(
   input: PromptConditioningInput | null | undefined,
@@ -102,7 +192,7 @@ function conditioningFamily(
   return input.family ?? input.modelFamily ?? null;
 }
 
-/** Whether the request carries anything for the model to animate. */
+/** Whether the request carries anything for the model to render from. */
 export function hasVisualConditioning(
   input: PromptConditioningInput | null | undefined,
 ): boolean {
@@ -114,7 +204,10 @@ export function hasVisualConditioning(
     input.sourceVideo ||
     input.sourceVideoPath?.trim() ||
     input.extendVideo ||
-    input.extendVideoPath?.trim(),
+    input.extendVideoPath?.trim() ||
+    (input.references?.length ?? 0) > 0 ||
+    input.h3FirstFrame ||
+    input.h3LastFrame,
   );
 }
 
@@ -153,18 +246,24 @@ export function promptRequired(
 /**
  * Prompt-bed placeholder once the prompt is optional. Deliberately does not
  * suggest leaving it blank is free or equivalent — the guidance line owns the
- * expectation-setting; this only says the field can be skipped.
+ * expectation-setting; this only says the field can be skipped, naming the
+ * attachment rather than any one family's conditioning channel.
  */
 export const OPTIONAL_PROMPT_PLACEHOLDER =
-  "Describe the motion — optional with a source…";
+  "Describe the motion — optional with what you attached…";
 
 /**
  * The one shared explanation of what a blank prompt does. Web, desktop, and
  * iPhone all render this string so the three surfaces cannot set different
  * expectations.
+ *
+ * It names the conditioning generically because the rule now covers a source
+ * image, a source video, a continuation, boundary frames and an ordered
+ * reference across three families, and it claims no memory saving: that was
+ * an LTX-2 fact about a fixed-size Gemma context.
  */
 export const OPTIONAL_PROMPT_GUIDANCE =
-  "With a source the prompt is optional — leave it blank and the model animates what it sees, which usually means near-static motion. It does not reduce memory use.";
+  "The prompt is optional with what you attached — leave it blank and the model works from the attached image or frames, which usually means near-static motion.";
 
 /**
  * Placeholder for a recipe that IGNORES the prompt: there is no text encoder
@@ -212,10 +311,18 @@ export function promptPlaceholder(
   input: PromptConditioningInput | null | undefined,
   requiredPlaceholder: string,
 ): string {
-  if (isMinimaxH3Identity(conditioningFamily(input), input?.model)) {
+  const requirement = promptRequirementFor(input);
+  // MiniMax H3's own wording is what a request that still NEEDS a prompt is
+  // told. Once its conditioning makes the prompt optional the shared optional
+  // wording wins, or a conditioned H3 render would never learn it can skip
+  // the field.
+  if (
+    requirement === "required" &&
+    isMinimaxH3Identity(conditioningFamily(input), input?.model)
+  ) {
     return MINIMAX_H3_PROMPT_PLACEHOLDER;
   }
-  switch (promptRequirementFor(input)) {
+  switch (requirement) {
     case "required":
       return requiredPlaceholder;
     case "optional":

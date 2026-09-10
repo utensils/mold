@@ -92,6 +92,7 @@ impl VideoMetadata {
     /// carries the same composite `mold:parameters` block still images do.
     fn to_output_metadata(&self) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            family: mold_core::validation::resolved_family_for(&self.model).map(str::to_owned),
             video_only: None,
             attention_path: None,
             mesh_workflow: None,

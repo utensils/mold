@@ -2083,7 +2083,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `5cfc784cbe98216e829b314a584b60c3db6f2a249290e766b8130c0453afa57a` · default recipe `default`
+Schema 1 · hash `d2eb3b13f2b386cbca96900040d9639119299aea3a2379795c90438c4f1017c8` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8`, `minimax-h3-fl2va:comfy-pruned-nvfp4`.
 
@@ -2107,7 +2107,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `fc538fd3df1692610710c4806d98edf1a09c99864c9293b9ddfe8b02922bc5ed` · default recipe `default`
+Schema 1 · hash `ed62c7cb4525ab8aa35e23840fce6cdd1c4f4b6267b65b3e8d42d367b11f5584` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-r21`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p-v1.1`.
 
@@ -2131,7 +2131,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `fb929a00a95bf8538d7c9ab4cd21c34753e8a55f8b7dd7484a256514a8564815` · default recipe `default`
+Schema 1 · hash `c47b4d7d8d293c191b2090a804b926fe940bdbc6210f95a0ef9ee44c1a5d9a0b` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-768p`, `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step-r21`.
 
@@ -2155,7 +2155,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-fl2va:official-bf16`
 
-Schema 1 · hash `a6fa0b29198eb7f6bf6061e66368b16fa207675be38b1dea6c8cd42f17b95bec` · default recipe `default`
+Schema 1 · hash `d405cfffb7d1e68fb5e95df4c12034b8ab324cbda44116a140d8e51c9b4050f9` · default recipe `default`
 
 Models: `minimax-h3-fl2va:official-bf16`.
 
@@ -2179,7 +2179,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-ref2va`
 
-Schema 1 · hash `f37599d397955aac4fbc8d6faa60bbbf472e0f2f9d9c262254c42bd27ce89a86` · default recipe `default`
+Schema 1 · hash `811ee62c726358184f5f21b3e742f2424e13b5f75cc852248a578bfa53008a1c` · default recipe `default`
 
 Models: `minimax-h3-ref2va:comfy-pruned-int8`, `minimax-h3-ref2va:comfy-pruned-nvfp4`.
 
@@ -2203,7 +2203,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-ref2va`
 
-Schema 1 · hash `dbb031382db2621ec64ed5d27523d66a283059e12bb6ce4b788d50bf04423fd3` · default recipe `default`
+Schema 1 · hash `b53f9d167a425c2a2d717e5cfc44f8603245446cef0bce747c41e9d988514773` · default recipe `default`
 
 Models: `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`, `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step-r21`.
 
@@ -2227,7 +2227,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-ref2va:official-bf16`
 
-Schema 1 · hash `24b1287aac1baaaf20b0a6febbe94fb52ca9adeca92cae38d02266649ec00ae7` · default recipe `default`
+Schema 1 · hash `962481b9980ee0fb0325098fd1eb08da61ab30e0c651c1cf86377f2b025509c7` · default recipe `default`
 
 Models: `minimax-h3-ref2va:official-bf16`.
 
@@ -2865,7 +2865,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-i2v-a14b:fp8`
 
-Schema 1 · hash `8963403553a1f3488e8b617f8680447e1f844c6724941ec820dc0e4393ba3c22` · default recipe `default`
+Schema 1 · hash `748d6625d53bbf152112a80e2197485a5b5566634c215bd390f845f2a936c661` · default recipe `default`
 
 Models: `wan22-i2v-a14b:fp8`.
 
@@ -2887,7 +2887,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-i2v-a14b`
 
-Schema 1 · hash `9b700315b373d2b07dea8c829427c3af83c1c709249d7a7394ba9a7855a58de0` · default recipe `default`
+Schema 1 · hash `3dd6fa01fdf3dfef3a21a87db48ea7534e0c6ce307a165b5c9bb4a5a58fc94cb` · default recipe `default`
 
 Models: `wan22-i2v-a14b:q4`, `wan22-i2v-a14b:q5`.
 
@@ -2909,7 +2909,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-i2v-a14b:q8`
 
-Schema 1 · hash `689aa708f8f73bcf3ea88da53bc80834d5629cfb3c4463c68c32f56fcf1f7ddf` · default recipe `default`
+Schema 1 · hash `014125e4f2b5969c3e0ec72170913d2ed41501d31038f23c17d9255561e72dff` · default recipe `default`
 
 Models: `wan22-i2v-a14b:q8`.
 
@@ -3017,7 +3017,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-ti2v-5b`
 
-Schema 1 · hash `d198471419a0b5d42ca152995f6652056650e5d38660ecd09b7af5098e4d7652` · default recipe `default`
+Schema 1 · hash `8b0aab36305f1c9917568cf98f9dfdf106cc1ada190acd9ab887f1bdece01298` · default recipe `default`
 
 Models: `wan22-ti2v-5b:fp16`, `wan22-ti2v-5b:q8`.
 
@@ -3037,7 +3037,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-ti2v-5b:turbo`
 
-Schema 1 · hash `495d0a046707f0164f574f36c9f08bc9c931b3868d055479628fa1a0c3a0f3bc` · default recipe `default`
+Schema 1 · hash `c42016b1ea5136f1067a43d1807e526a8feeb82fbfa1fc5c264e94302993f1ab` · default recipe `default`
 
 Models: `wan22-ti2v-5b:turbo`.
 

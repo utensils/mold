@@ -739,10 +739,22 @@ pub fn materialize_generation_profile_output_default(
 ///
 ///   - `Ignored` for a mesh family: it has no text encoder anywhere in it, so
 ///     a prompt is provenance and nothing else.
-///   - `Optional` for LTX-2 with visual conditioning: an image or clip already
-///     determines the render. Legacy LTX-Video remains required because Mold's
-///     engine cannot accept visual conditioning.
-///   - `Required` everywhere else.
+///   - `Optional` for a video family whose request carries visual
+///     conditioning — LTX-2, Wan and MiniMax H3. **The justification is not
+///     the text encoder, it is the render:** an attached still, a pair of
+///     boundary frames, a reference set or a clip to continue already
+///     determines what the frames show, so a prompt refines that render
+///     rather than authoring it. An unprompted clip tends toward near-static
+///     micro-motion, which is guidance for the user, not a refusal. Legacy
+///     LTX-Video stays required because mold's engine cannot accept visual
+///     conditioning at all.
+///   - `Required` everywhere else, including every text-to-video tier of the
+///     families above: with nothing attached, the prompt IS the render.
+///
+/// The conditioning half is the caller's answer, never a per-tier list here.
+/// Admission passes [`crate::validation::has_visual_conditioning`] for the
+/// request in hand, and the recipe builder passes the tier's own
+/// `source_image` contract, so a t2v tier advertises `Required` for free.
 pub fn prompt_requirement_for_family(
     family: Option<&str>,
     has_visual_conditioning: bool,
@@ -755,7 +767,10 @@ pub fn prompt_requirement_for_family(
         {
             PromptRequirement::Ignored
         }
-        Some("ltx2") if has_visual_conditioning => PromptRequirement::Optional,
+        Some("ltx2" | "wan") if has_visual_conditioning => PromptRequirement::Optional,
+        Some(family) if has_visual_conditioning && crate::minimax_h3::is_family(family) => {
+            PromptRequirement::Optional
+        }
         _ => PromptRequirement::Required,
     }
 }
@@ -3440,6 +3455,13 @@ mod tests {
 
     /// Every raster and video recipe stays exactly as it was: no mesh block,
     /// a required prompt, and strength wherever an existing latent is read.
+    ///
+    /// The tier's own `source_image` contract is carried in from the manifest
+    /// rather than left at the fixture's `None`, because that is what decides
+    /// the advertised prompt mode for a video family: `wan22-t2v-a14b:q4` is
+    /// `Unsupported` and so stays `Required`, while the fixture default reads
+    /// as "generic img2img", which is true of an image family and of nothing
+    /// in the Wan ladder.
     #[test]
     fn only_a_mesh_recipe_carries_mesh_controls() {
         for (model, family) in [
@@ -3447,12 +3469,97 @@ mod tests {
             ("sdxl:fp16", "sdxl"),
             ("wan22-t2v-a14b:q4", "wan"),
         ] {
-            let recipe_set = resolve_generation_profile(input(model, family));
+            let mut profile_input = input(model, family);
+            profile_input.source_image = crate::manifest::find_manifest(model)
+                .and_then(|manifest| manifest.defaults.source_image);
+            let recipe_set = resolve_generation_profile(profile_input);
             let caps = &recipe_set.default_recipe().unwrap().capabilities;
             assert!(caps.mesh.is_none(), "{model} must not advertise mesh");
             assert_eq!(caps.prompt.mode, PromptRequirement::Required, "{model}");
             assert_eq!(caps.supports_strength, family != "wan", "{model}");
         }
+    }
+
+    /// The advertised mode and admission must agree for an audio-only recipe.
+    /// The recipe forces the conditioning argument to `false` because an
+    /// attached still conditions nothing an audio decoder reads; admission
+    /// has to reach the same answer for the same request, or a `t2a` render
+    /// the recipe says needs a prompt is admitted without one.
+    #[test]
+    fn an_audio_only_recipe_and_admission_agree_on_the_prompt() {
+        let mut profile_input = input("ltx-2.3-22b-dev:fp8", "ltx2");
+        profile_input.source_image = Some(SourceImageCapability::Optional);
+        profile_input.default_frames = Some(97);
+        profile_input.default_fps = Some(24);
+        profile_input.supports_audio = true;
+        let profile = resolve_generation_profile(profile_input);
+        let recipe = profile
+            .recipe_for_pipeline(Some(Ltx2PipelineMode::T2a))
+            .expect("the LTX-2 profile carries an audio-only recipe");
+        assert_eq!(recipe.capabilities.prompt.mode, PromptRequirement::Required);
+
+        let mut request = crate::test_support::minimal_generate_request("ltx-2.3-22b-dev:fp8");
+        request.pipeline = Some(Ltx2PipelineMode::T2a);
+        request.source_image = Some(png_bytes());
+        assert!(
+            crate::validation::prompt_required_for(&request, Some("ltx2")),
+            "admission must answer the recipe's own advertised mode"
+        );
+    }
+
+    /// Wan and MiniMax H3 join LTX-2: the prompt is optional exactly where the
+    /// tier can be conditioned at all. The manifest's own `source_image`
+    /// contract is the authority, so every t2v tier — and `wan22-ti2v-5b:dmd`,
+    /// whose DMD ladder takes no source — keeps the prompt required for free,
+    /// with no per-tier list anywhere.
+    #[test]
+    fn wan_and_h3_advertise_an_optional_prompt_only_where_the_tier_takes_a_source() {
+        let mut optional = 0_usize;
+        let mut required = 0_usize;
+        for manifest in crate::manifest::known_manifests() {
+            let family = canonical_family(&manifest.family);
+            if family != "wan" && !crate::minimax_h3::is_family(family) {
+                continue;
+            }
+            let mut profile_input = input(manifest.name.as_str(), manifest.family.as_str());
+            profile_input.source_image = manifest.defaults.source_image;
+            profile_input.default_width = manifest.defaults.width;
+            profile_input.default_height = manifest.defaults.height;
+            profile_input.default_steps = manifest.defaults.steps;
+            profile_input.default_guidance = manifest.defaults.guidance;
+            profile_input.default_frames = manifest.defaults.frames;
+            profile_input.default_fps = manifest.defaults.fps;
+            let recipe_set = resolve_generation_profile(profile_input);
+            let mode = recipe_set
+                .default_recipe()
+                .unwrap()
+                .capabilities
+                .prompt
+                .mode;
+            let conditionable =
+                manifest.defaults.source_image != Some(SourceImageCapability::Unsupported);
+            if conditionable {
+                assert_eq!(
+                    mode,
+                    PromptRequirement::Optional,
+                    "{} takes a source, so a conditioned render needs no prompt",
+                    manifest.name
+                );
+                optional += 1;
+            } else {
+                assert_eq!(
+                    mode,
+                    PromptRequirement::Required,
+                    "{} can never be conditioned, so its prompt is the whole render",
+                    manifest.name
+                );
+                required += 1;
+            }
+        }
+        assert!(
+            optional > 0 && required > 0,
+            "the ladder must exercise both answers: {optional} optional, {required} required"
+        );
     }
 
     /// A `mesh` block on a raster recipe is refused with the same sentence

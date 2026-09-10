@@ -361,6 +361,16 @@ The current compact implementation supports this request profile:
   budgets 2,048 rows, of which the first-frame image's vision pads and label
   take 1,014, and a longer prompt is refused immediately with its exact budget
   named rather than after artifact verification
+- the prompt is **optional** once the request carries conditioning — a first or
+  last frame here, a reference set for Ref2VA. What you attached already
+  decides the shot, so a prompt refines it; expect near-static micro-motion
+  when you leave it out, and with nothing attached the prompt is the whole
+  render and stays required. The same rule covers [LTX-2](/models/ltx2) and
+  [Wan](/models/wan). This is a complete command:
+
+  ```bash
+  mold run minimax-h3-fl2va:comfy-pruned-int8 --first-frame presenter.png
+  ```
 
 A repeated prompt against the same first-frame (or, for Ref2VA, the same
 reference set and frame count) on the same conditioner route and device

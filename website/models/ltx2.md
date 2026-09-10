@@ -493,10 +493,19 @@ Two things worth being blunt about:
   something, say so.
 
 Everything else keeps the prompt required: text-to-video with no conditioning,
-and every image family (FLUX, Flux.2, SD1.5/SDXL/SD3.5, Qwen-Image, Z-Image,
-Wuerstchen) even when you pass `--image`. A blank prompt also disables prompt
-expansion for that run (mold will not let the expander invent the prompt that
-then gets recorded in your metadata) and is not written to prompt history.
+an audio-only `--pipeline t2a` render (it reads no pixels, so an attached still
+conditions nothing), and every image family (FLUX, Flux.2, SD1.5/SDXL/SD3.5,
+Qwen-Image, Z-Image, Wuerstchen) even when you pass `--image`. A blank prompt
+also disables prompt expansion for that run (mold will not let the expander
+invent the prompt that then gets recorded in your metadata) and is not written
+to prompt history.
+
+The rule is not LTX-2's alone. [Wan](/models/wan) and
+[MiniMax H3](/models/minimax-h3) answer the same way on any tier that takes
+conditioning, for the same reason: the attached media already decides the
+render. The justification differs only in the encoder — LTX-2's register
+embeddings make `""` a trained context, while Wan's umT5 still emits its
+end-of-sequence token for an empty string — and the result is identical.
 
 Web, desktop, and iPhone Create all enable **Generate** once a source image is
 attached to a compatible model and say the same thing in the prompt

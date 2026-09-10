@@ -6429,6 +6429,7 @@ mod tests {
         GalleryImage {
             filename: filename.into(),
             metadata: mold_core::OutputMetadata {
+                family: None,
                 mesh_workflow: None,
                 video_only: None,
                 attention_path: None,

@@ -2782,6 +2782,30 @@ describe("generate form serialization helpers", () => {
     ]);
   });
 
+  // The print's own recorded family is the ONLY thing left that can answer
+  // for a model no connected machine has — clearing it left the shared prompt
+  // rule with nothing to read, so a restored 3-D print (a family with no text
+  // encoder at all) sat behind a prompt nobody could satisfy.
+  it("keeps the family a print recorded when its model is not installed", () => {
+    const next = applyMetadataToForm(
+      makeForm(),
+      {
+        prompt: "",
+        model: "hunyuan3d-2.1:fp16",
+        family: "hunyuan3d",
+        seed: 42,
+        steps: 30,
+        guidance: 7.5,
+        width: 768,
+        height: 512,
+        version: "test",
+      },
+      { models: [] },
+    );
+
+    expect(next.modelFamily).toBe("hunyuan3d");
+  });
+
   it("preserves canonical multiline prompts through web Library reuse", () => {
     const next = applyMetadataToForm(
       makeForm(),

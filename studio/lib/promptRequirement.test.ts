@@ -8,6 +8,7 @@ import {
   promptGuidance,
   OPTIONAL_PROMPT_PLACEHOLDER,
   hasVisualConditioning,
+  promptConditioningInputFor,
   promptOptional,
   promptPlaceholder,
   promptRequired,
@@ -71,6 +72,54 @@ describe("hasVisualConditioning", () => {
     );
   });
 
+  // MiniMax H3 Ref2VA carries its frames ONLY in `references`; a Ref2VA
+  // render with a reference and no prompt is exactly the case the server
+  // now admits.
+  it("counts an H3 Ref2VA reference as conditioning", () => {
+    expect(
+      hasVisualConditioning({
+        family: "minimax-h3",
+        references: [{ kind: "image" }],
+      }),
+    ).toBe(true);
+  });
+
+  it("counts an H3 boundary frame as conditioning", () => {
+    expect(
+      hasVisualConditioning({
+        family: "minimax-h3",
+        h3FirstFrame: { data: "b64" },
+      }),
+    ).toBe(true);
+    expect(
+      hasVisualConditioning({
+        family: "minimax-h3",
+        h3LastFrame: { data: "b64" },
+      }),
+    ).toBe(true);
+  });
+
+  // An end frame ships as a keyframe only beside a first frame (which already
+  // counts); alone it ships nothing, so the server never sees conditioning.
+  it("does not count a lone LTX-2 end frame the request will not carry", () => {
+    expect(
+      hasVisualConditioning(
+        promptConditioningInputFor({
+          family: "ltx2",
+          endFrame: { base64: "x" },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  // On web `imageAttachments[0]` IS the source well for a single-well
+  // layout, so dropping it would un-condition every web img2img render.
+  it("counts web's single-well imageAttachments as conditioning", () => {
+    expect(
+      hasVisualConditioning({ modelFamily: "wan", imageAttachments: ["b64"] }),
+    ).toBe(true);
+  });
+
   it("treats empty collections, blank paths, and absence as no conditioning", () => {
     expect(hasVisualConditioning({})).toBe(false);
     expect(
@@ -82,6 +131,9 @@ describe("hasVisualConditioning", () => {
         sourceVideoPath: "",
         extendVideo: null,
         extendVideoPath: "   ",
+        references: [],
+        h3FirstFrame: null,
+        h3LastFrame: null,
       }),
     ).toBe(false);
     expect(hasVisualConditioning(null)).toBe(false);
@@ -124,6 +176,26 @@ describe("promptRequired / promptOptional", () => {
       }),
     ).toBe(true);
     expect(promptRequired({ family: "sdxl", sourceImage: "b64" })).toBe(true);
+  });
+
+  // The reference wells are counted for every family, which is inert where
+  // the recipe advertises Required regardless — Qwen-Image-Edit and FLUX.2
+  // condition through references and still demand a prompt.
+  it("leaves a references-only required family required", () => {
+    expect(
+      promptRequired({
+        family: "qwen-image-edit",
+        references: [{ kind: "image" }],
+        imageAttachments: [{ base64: "x" }],
+      }),
+    ).toBe(true);
+    expect(
+      promptRequired({
+        family: "flux2",
+        recipe: sdxlRecipe(),
+        references: [{ kind: "image" }],
+      }),
+    ).toBe(true);
   });
 
   it("reads web's `modelFamily` as well as desktop's `family`", () => {
@@ -179,10 +251,12 @@ describe("promptRequired / promptOptional", () => {
   it("uses the shared legacy rule when an older recipe omits its prompt block", () => {
     const recipe = hunyuan3dRecipe();
     delete (recipe.capabilities as { prompt?: unknown }).prompt;
+    // A mesh family has no text encoder on ANY host version, so the legacy
+    // rule answers `ignored` rather than demanding a prompt nothing reads.
     expect(promptRequirementFor({ family: "hunyuan3d", recipe })).toBe(
-      "required",
+      "ignored",
     );
-    expect(promptRequired({ family: "hunyuan3d", recipe })).toBe(true);
+    expect(promptRequired({ family: "hunyuan3d", recipe })).toBe(false);
     expect(
       promptRequirementFor({ family: "ltx2", recipe, sourceImage: "image" }),
     ).toBe("optional");
@@ -237,6 +311,26 @@ describe("copy helpers", () => {
     ).toContain("synchronized shot");
   });
 
+  // The H3 placeholder is the wording for a request that still NEEDS a
+  // prompt. Once the conditioning makes it optional the shared optional
+  // wording wins, otherwise a conditioned H3 render would never be told.
+  it("yields the H3 placeholder to the optional placeholder once conditioned", () => {
+    const h3 = {
+      family: "minimax-h3",
+      model: "minimax-h3-fl2va:official-bf16",
+      recipe: ltxRecipe(),
+    };
+    expect(promptPlaceholder(h3, "Describe the print…")).toContain(
+      "synchronized shot",
+    );
+    expect(
+      promptPlaceholder(
+        { ...h3, h3FirstFrame: { data: "b64" } },
+        "Describe the print…",
+      ),
+    ).toBe(OPTIONAL_PROMPT_PLACEHOLDER);
+  });
+
   it("tells the user the prompt is a note when the recipe ignores it", () => {
     expect(
       promptPlaceholder(
@@ -270,12 +364,66 @@ describe("copy helpers", () => {
     expect(IGNORED_PROMPT_GUIDANCE).not.toBe(OPTIONAL_PROMPT_GUIDANCE);
   });
 
-  // Two things the copy must never imply: that a blank prompt saves memory
-  // (the Gemma context is a fixed [1, 1024, 4096] tensor either way), or that
-  // it produces the same motion as a described one.
-  it("sets honest expectations about motion and memory", () => {
+  // The copy must not imply a blank prompt renders the same motion as a
+  // described one, and it must not name a memory saving: that claim was a
+  // Gemma fact (LTX-2's fixed [1, 1024, 4096] context) and the rule now
+  // covers families whose text encoders behave differently. The wording is
+  // family-neutral because the conditioning may be a source image, a pair of
+  // boundary frames, or a reference.
+  it("sets honest, family-neutral expectations about the blank prompt", () => {
     expect(OPTIONAL_PROMPT_GUIDANCE.toLowerCase()).toContain("near-static");
-    expect(OPTIONAL_PROMPT_GUIDANCE.toLowerCase()).toContain("memory");
+    expect(OPTIONAL_PROMPT_GUIDANCE.toLowerCase()).not.toContain("memory");
+    expect(OPTIONAL_PROMPT_GUIDANCE.toLowerCase()).toContain("attach");
+    expect(OPTIONAL_PROMPT_GUIDANCE.toLowerCase()).not.toContain("a source ");
     expect(OPTIONAL_PROMPT_PLACEHOLDER.toLowerCase()).toContain("optional");
+    expect(OPTIONAL_PROMPT_PLACEHOLDER.toLowerCase()).toContain("attach");
+  });
+});
+
+// ONE projection so desktop, web and iPhone cannot each grow their own map
+// of form fields onto the shared rule.
+describe("promptConditioningInputFor", () => {
+  it("takes the first reference strip that actually holds something", () => {
+    const projected = promptConditioningInputFor({
+      family: "minimax-h3",
+      h3Authoring: { references: [] },
+      referenceImages: [{ kind: "image" }],
+    });
+    expect(projected.references).toHaveLength(1);
+  });
+
+  it("projects a form's H3 boundary frames and H3 references", () => {
+    const projected = promptConditioningInputFor({
+      family: "minimax-h3",
+      model: "minimax-h3-fl2va:official-bf16",
+      h3Authoring: {
+        firstFrame: { data: "first" },
+        lastFrame: { data: "last" },
+        references: [{ reference: { kind: "image" } }],
+      },
+    });
+    expect(projected.h3FirstFrame).toEqual({ data: "first" });
+    expect(projected.h3LastFrame).toEqual({ data: "last" });
+    expect(projected.references).toHaveLength(1);
+    expect(hasVisualConditioning(projected)).toBe(true);
+  });
+
+  it("carries the recipe handed alongside and answers with the shared rule", () => {
+    const conditioned = promptConditioningInputFor(
+      { family: "wan", sourceImage: "b64" },
+      ltxRecipe(),
+    );
+    expect(promptRequired(conditioned)).toBe(false);
+    const bare = promptConditioningInputFor({ family: "wan" }, ltxRecipe());
+    expect(promptRequired(bare)).toBe(true);
+  });
+
+  it("reads web's own field names and an absent form", () => {
+    const web = promptConditioningInputFor({
+      modelFamily: "ltx2",
+      imageAttachments: ["b64"],
+    });
+    expect(promptOptional(web)).toBe(true);
+    expect(hasVisualConditioning(promptConditioningInputFor(null))).toBe(false);
   });
 });

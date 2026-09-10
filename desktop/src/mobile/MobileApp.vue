@@ -98,7 +98,11 @@ import {
   removeGalleryMutation,
   updateGalleryMutationFailure,
 } from "@studio/lib/galleryMutationOutbox";
-import { promptPlaceholder, promptRequired } from "@studio/lib/promptRequirement";
+import {
+  promptConditioningInputFor,
+  promptPlaceholder,
+  promptRequired,
+} from "@studio/lib/promptRequirement";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import {
   appendMinimaxH3GalleryImageReference,
@@ -2329,10 +2333,12 @@ const mobileMediaBudgetError = computed(() => mobileMediaBudgetValidationError(f
 // see `ignored`, which is what a checkpoint with no text encoder anywhere
 // (Hunyuan3D) reports, and reading the form alone would leave Develop
 // disabled forever on a model whose prompt the host never encodes.
-const promptConditioning = computed(() => ({
-  ...form,
-  recipe: effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline),
-}));
+const promptConditioning = computed(() =>
+  promptConditioningInputFor(
+    form,
+    effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline),
+  ),
+);
 const promptMissing = computed(
   () => promptRequired(promptConditioning.value) && !form.prompt.trim(),
 );

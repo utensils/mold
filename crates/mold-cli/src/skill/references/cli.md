@@ -21,6 +21,22 @@ Use `mold info <model>` or `/api/models` before selecting dimensions, frame
 counts, steps, guidance, conditioning, or audio. A catalog model can differ
 from a built-in manifest profile.
 
+The prompt is OPTIONAL, not absent, on a video render that already carries
+visual conditioning — a source image, keyframes, a clip to continue, or a
+reference set. LTX-2, Wan and MiniMax H3 all answer this way: what the user
+attached already decides the render, so a prompt refines it. Never invent one
+to satisfy the CLI, and expect near-static micro-motion when there is none. A
+text-to-video tier attaches nothing, so its prompt stays required, and an
+audio-only render (`--pipeline t2a`) reads no pixels so an attached still does
+not make its prompt optional. The recipe's advertised `prompt.mode` in
+`/api/models` is the authority for any model; never a family list.
+
+```bash
+# The attached frame is the whole conditioning
+mold run wan22-ti2v-5b --image still.png
+mold run ltx-2-19b-distilled:fp8 --image chef.png
+```
+
 `mold run --offload` carries the forced-offload preference to the GPU host,
 including durable sequences. Without it, the request inherits the host policy.
 Wan 1.3B and dense Wan 2.1 14B always run without residual caching because

@@ -117,6 +117,10 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         .unwrap_or_else(|| "unknown".to_string());
 
     OutputMetadata {
+        // Best effort like the rest of this synthesis: the model was recovered
+        // from the filename, so an unclassifiable one leaves the field absent
+        // rather than guessed.
+        family: mold_core::validation::resolved_family_for(&model).map(str::to_owned),
         video_only: None,
         attention_path: None,
         int8_arm: None,

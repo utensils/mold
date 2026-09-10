@@ -29,9 +29,13 @@ Frames sit on the `8k+1` grid at 24 fps, so 121 frames is about five seconds.
 Both axes must be multiples of 32, and of 64 for lip dub. Size the action to
 that duration, keep one continuous take per clip, and keep lip sync inside a
 single clip. With a source image attached, describe only what changes from it;
-restating the frame inaccurately makes the model cut. Distilled LTX-2.5 fixes
-guidance at 1.0. Audio renders by default on MP4 output, one-shots and
-sequences alike, so write the soundscape unless the request says silent.
+restating the frame inaccurately makes the model cut. The prompt is optional
+once anything is attached — a still, keyframes, a clip to continue — because
+what you attached already decides the render; that rule is shared with Wan and
+MiniMax H3, and an unprompted clip tends toward near-static micro-motion.
+Distilled LTX-2.5 fixes guidance at 1.0. Audio renders by default on MP4
+output, one-shots and sequences alike, so write the soundscape unless the
+request says silent.
 
 ## Examples
 

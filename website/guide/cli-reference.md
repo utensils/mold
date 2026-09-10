@@ -17,14 +17,21 @@ The first positional argument is treated as the model only when it resolves to a
 known model name. Otherwise it becomes part of the prompt. Prompt text can also
 come from stdin.
 
-`PROMPT` is required, with one exception: an LTX-2 or LTX-Video run that already
-carries visual conditioning (`--image`, `--keyframe`, `--video`, or `--extend`)
-may be left unprompted, so `mold run ltx-2-19b-distilled:fp8 --image still.png
---frames 97` is a complete command. It buys no VRAM and usually renders
-near-static motion; see
-[the LTX-2 page](/models/ltx2#the-prompt-is-optional-for-image-to-video). Every
-other run, including img2img on an image family, still errors with
-`no prompt provided`. An empty prompt also skips prompt expansion for that run.
+`PROMPT` is required, with one exception: a video run that already carries
+visual conditioning (`--image`, `--keyframe`, `--video`, `--extend`, or a
+reference set) may be left unprompted. That covers LTX-2, Wan and MiniMax H3,
+so `mold run ltx-2-19b-distilled:fp8 --image still.png --frames 97` and
+`mold run wan22-ti2v-5b --image still.png` are both complete commands. It buys
+no VRAM and usually renders near-static motion; see
+[the LTX-2 page](/models/ltx2#the-prompt-is-optional-for-image-to-video).
+
+Every other run still errors with `no prompt provided`: img2img on an image
+family, a text-to-video tier that takes no source at all (`wan21-t2v-1.3b`,
+`wan22-t2v-a14b`, `wan22-ti2v-5b:dmd`, legacy `ltx-video`), and an audio-only
+render (`--pipeline t2a`), which reads no pixels so an attached still does not
+condition it. A 3-D model is the separate case: it has no text encoder, so its
+prompt is never required and is saved as a note. An empty prompt also skips
+prompt expansion for that run.
 
 ### Options
 

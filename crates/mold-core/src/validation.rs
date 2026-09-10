@@ -1288,23 +1288,29 @@ fn resolved_family<'a>(model_name: &'a str, family_hint: Option<&'a str>) -> Opt
 /// The generation-profile door has the model but no family hint, and it must
 /// resolve the reference subject the same way family validation does — two
 /// doors, one answer.
-pub(crate) fn resolved_family_for(model_name: &str) -> Option<&str> {
+pub fn resolved_family_for(model_name: &str) -> Option<&str> {
     resolved_family(model_name, None)
 }
 
 /// Whether `req` must carry a non-empty prompt.
 ///
-/// LTX-2's text encoder pads to a fixed-width context, and its Gemma connector
-/// replaces every padded position with learned register embeddings, so `""`
-/// is a trained context rather than a degenerate one. It may accept an empty
-/// prompt when the request carries visual conditioning to continue: a source
-/// image, keyframes, a source video, or an extend. Pure text-to-video and every
+/// A video family may accept an empty prompt when the request carries visual
+/// conditioning to continue: a source image, keyframes, a reference set, a
+/// source video, or an extend. The attached media already determines what the
+/// frames show, so the prompt refines that render rather than authoring it.
+/// LTX-2, Wan and MiniMax H3 all answer this way; pure text-to-video and every
 /// image family keep the prompt required.
 ///
-/// Note this buys no VRAM — the Gemma context is a fixed-size tensor whose
-/// footprint is independent of the token count — and an unprompted clip tends
-/// toward near-static micro-motion. Callers should surface that as guidance
-/// rather than synthesising a placeholder prompt.
+/// An **audio-only** render is the exception on the other side: it reads no
+/// pixels, so an attached still conditions nothing and the prompt stays the
+/// whole render. That is what the recipe already advertises for `t2a`, and
+/// asking it here is what keeps the advertised mode and the enforced one from
+/// diverging.
+///
+/// Note this buys no VRAM — a fixed-width text context costs the same
+/// whatever it holds — and an unprompted clip tends toward near-static
+/// micro-motion. Callers should surface that as guidance rather than
+/// synthesising a placeholder prompt.
 ///
 /// A family with NO text encoder at all — hunyuan3d — never requires one; the
 /// prompt is recorded as provenance and conditions nothing.
@@ -1320,23 +1326,90 @@ pub(crate) fn resolved_family_for(model_name: &str) -> Option<&str> {
 pub fn prompt_required_for(req: &GenerateRequest, family_hint: Option<&str>) -> bool {
     prompt_required_with_conditioning(
         resolved_family(&req.model, family_hint),
-        has_visual_conditioning(req),
+        prompt_conditioning_for(req),
     )
 }
 
 /// Whether a request carries visual conditioning — a source image, keyframes,
-/// a source video (inline or server-local path), or an extend.
+/// a source video (inline or server-local path), an extend, or a reference
+/// set.
+///
+/// `references` belongs here because it is the ONLY well MiniMax H3 Ref2VA
+/// has: that task refuses `source_image` and `keyframes` outright and carries
+/// every conditioning image in `references`, so a predicate reading only the
+/// generic wells saw every Ref2VA render as unconditioned. The field is legal
+/// only for `minimax-h3` and `hunyuan3d`, so nothing else changes answer.
 ///
 /// This is the single definition of "conditioned" for the whole request path.
 /// Beyond the optional-prompt rule it also separates OOM cooldown buckets, and
 /// those must agree: two requests with different conditioning have different
 /// VRAM profiles and must never share a cooldown or a reduced memory grant.
+/// Counting `references` moves that split too, deliberately — a reference set
+/// is encoded and resident, so a Ref2VA render genuinely has a different VRAM
+/// profile from a bare one and must not inherit its cooldown.
 pub fn has_visual_conditioning(req: &GenerateRequest) -> bool {
-    req.source_image.is_some()
-        || req.keyframes.as_ref().is_some_and(|k| !k.is_empty())
-        || req.source_video.is_some()
-        || req.source_video_path.is_some()
-        || req.is_extend()
+    PromptConditioningParts::from_request(req).has_attached_media()
+}
+
+/// The conditioning wells the prompt rule reads, decomposed.
+///
+/// A front-end resolves the prompt BEFORE it assembles the request — the CLI,
+/// the TUI and Discord all do — so it cannot call
+/// [`has_visual_conditioning`]. Each used to rebuild the list by hand from
+/// whatever fields were in scope, and each drifted: the CLI omitted
+/// `references`, so `mold run minimax-h3-ref2va --reference a.png` was
+/// refused locally for a blank prompt the server would have admitted, and
+/// Discord omitted them too even though Ref2VA can carry NOTHING else. This
+/// is the one list, and every surface projects into it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptConditioningParts {
+    pub source_image: bool,
+    pub keyframes: bool,
+    /// Inline bytes or a server-local path; both condition the render.
+    pub source_video: bool,
+    pub extend: bool,
+    /// MiniMax H3 Ref2VA's only well, and Hunyuan3D's named views.
+    pub references: bool,
+    /// An audio-only render reads no pixels, so anything attached to it
+    /// conditions nothing and the prompt stays the whole render.
+    pub audio_only: bool,
+}
+
+impl PromptConditioningParts {
+    pub fn from_request(req: &GenerateRequest) -> Self {
+        Self {
+            source_image: req.source_image.is_some(),
+            keyframes: req.keyframes.as_ref().is_some_and(|k| !k.is_empty()),
+            source_video: req.source_video.is_some() || req.source_video_path.is_some(),
+            extend: req.is_extend(),
+            references: req.references.as_ref().is_some_and(|r| !r.is_empty()),
+            audio_only: req.pipeline.is_some_and(Ltx2PipelineMode::is_audio_only),
+        }
+    }
+
+    /// Whether anything at all is attached. This is the OOM-cooldown
+    /// question, which is deliberately blind to `audio_only`: an audio-only
+    /// render still pays to decode whatever it was handed.
+    pub fn has_attached_media(self) -> bool {
+        self.source_image || self.keyframes || self.source_video || self.extend || self.references
+    }
+
+    /// Whether the attached media actually conditions THIS render, which is
+    /// the question the prompt rule asks.
+    pub fn is_conditioned(self) -> bool {
+        !self.audio_only && self.has_attached_media()
+    }
+}
+
+/// The conditioning answer every prompt door must ask.
+///
+/// [`has_visual_conditioning`] is the raw "is anything attached" question and
+/// also buckets OOM cooldowns. This is that answer narrowed by the one case
+/// where attached media conditions nothing. Asking the raw predicate instead
+/// is what let a conditioned `t2a` request advertise `prompt_mode: Optional`
+/// through [`crate::ExpandContext`] while admission refused the same request.
+pub fn prompt_conditioning_for(req: &GenerateRequest) -> bool {
+    PromptConditioningParts::from_request(req).is_conditioned()
 }
 
 /// Lower-level form of [`prompt_required_for`] for callers that have not yet
@@ -5848,6 +5921,148 @@ mod tests {
         validate_generate_request_with_family(&catalog, Some("ltx2")).unwrap();
     }
 
+    /// A Ref2VA reference set, in the exact wire form admission accepts.
+    fn h3_image_reference() -> crate::GenerationReference {
+        crate::GenerationReference::Image {
+            media: crate::GenerationReferenceAuthority::Inline { data: png_bytes() },
+            provenance: crate::GenerationReferenceProvenance {
+                name: Some("reference.png".to_string()),
+                sha256: None,
+                crop: None,
+            },
+            mime_type: "image/png".to_string(),
+            width: 1920,
+            height: 1080,
+        }
+    }
+
+    /// Baseline Wan clip on the family's `4k+1` grid, with nothing attached.
+    fn wan_video_req(model: &str) -> GenerateRequest {
+        let mut req = valid_req();
+        req.model = model.to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.fps = Some(24);
+        req.frames = Some(81);
+        req
+    }
+
+    /// H3 Ref2VA carries its whole conditioning in `references` and REFUSES
+    /// `source_image`/`keyframes`, so a predicate that reads only the generic
+    /// wells sees every Ref2VA render as unconditioned — and would then hold
+    /// it to a prompt the attached references already answer.
+    #[test]
+    fn h3_ref2va_references_are_visual_conditioning() {
+        let mut req = valid_h3_request(crate::minimax_h3::REF2VA_COMFY);
+        assert!(
+            !super::has_visual_conditioning(&req),
+            "a bare Ref2VA request carries nothing yet"
+        );
+        req.references = Some(vec![h3_image_reference()]);
+        assert!(super::has_visual_conditioning(&req));
+    }
+
+    #[test]
+    fn empty_prompt_allowed_for_h3_ref2va_with_a_reference() {
+        let mut req = valid_h3_request(crate::minimax_h3::REF2VA_COMFY);
+        req.references = Some(vec![h3_image_reference()]);
+        req.prompt = String::new();
+        validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY)).unwrap();
+        assert!(!super::prompt_required_for(
+            &req,
+            Some(crate::minimax_h3::FAMILY)
+        ));
+    }
+
+    #[test]
+    fn empty_prompt_allowed_for_h3_fl2va_with_a_first_frame() {
+        let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        req.source_image = Some(png_bytes());
+        req.prompt = String::new();
+        validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY)).unwrap();
+    }
+
+    /// The `(false, false)` arm is true text-to-video: with no boundary frame
+    /// and no reference the presentation would carry zero tokens, so the
+    /// prompt stays the whole render.
+    #[test]
+    fn empty_prompt_still_rejected_for_h3_text_to_video() {
+        let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        req.prompt = String::new();
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .expect_err("an unconditioned H3 render still needs a prompt");
+        assert!(error.contains("prompt"), "got: {error}");
+    }
+
+    #[test]
+    fn empty_prompt_allowed_for_wan22_ti2v_5b_with_a_source_image() {
+        let mut req = wan_video_req("wan22-ti2v-5b:fp16");
+        req.prompt = String::new();
+        req.source_image = Some(png_bytes());
+        validate_generate_request(&req).unwrap();
+        assert!(!super::prompt_required_for(&req, None));
+    }
+
+    /// A14B I2V declares `source_image: Required`, so every admitted render
+    /// of it is conditioned.
+    #[test]
+    fn empty_prompt_allowed_for_wan22_i2v_a14b() {
+        let mut req = wan_video_req("wan22-i2v-a14b:q5");
+        req.prompt = String::new();
+        req.source_image = Some(png_bytes());
+        validate_generate_request(&req).unwrap();
+    }
+
+    /// Every text-to-video tier keeps the prompt required, including
+    /// `wan22-ti2v-5b:dmd`, whose DMD ladder takes no source at all.
+    /// An audio-only render reads no pixels, so an attached still is not
+    /// conditioning: the recipe has always advertised `Required` for `t2a`,
+    /// while admission consulted only the family and accepted a blank prompt
+    /// on a conditioned one. The two doors now answer alike.
+    #[test]
+    fn empty_prompt_still_rejected_for_conditioned_ltx2_t2a() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-dev:fp8".to_string();
+        req.pipeline = Some(Ltx2PipelineMode::T2a);
+        req.output_format = Some(OutputFormat::Wav);
+        req.width = 0;
+        req.height = 0;
+        req.source_image = Some(png_bytes());
+        req.prompt = String::new();
+        assert!(super::prompt_required_for(&req, None));
+        let error = validate_generate_request(&req)
+            .expect_err("an audio-only render is authored by its prompt");
+        assert!(error.contains("prompt"), "got: {error}");
+
+        // The video pipelines on the same checkpoint are unaffected.
+        req.pipeline = None;
+        req.output_format = Some(OutputFormat::Mp4);
+        req.width = 1024;
+        req.height = 1024;
+        req.fps = Some(24);
+        req.frames = Some(97);
+        validate_generate_request(&req).unwrap();
+    }
+
+    #[test]
+    fn empty_prompt_still_rejected_for_wan_text_to_video() {
+        for model in [
+            "wan21-t2v-1.3b:bf16",
+            "wan22-t2v-a14b:q5",
+            "wan22-ti2v-5b:dmd",
+        ] {
+            let mut req = wan_video_req(model);
+            req.prompt = String::new();
+            assert!(
+                super::prompt_required_for(&req, None),
+                "{model} can never be conditioned, so its prompt is the whole render"
+            );
+            let error = validate_generate_request(&req)
+                .expect_err("an unconditioned Wan render still needs a prompt");
+            assert!(error.contains("prompt"), "{model}: {error}");
+        }
+    }
+
     #[test]
     fn empty_prompt_allowed_for_ltx2_keyframes_video_and_extend() {
         let mut keyframed = ltx2_video_req();
@@ -5967,7 +6182,22 @@ mod tests {
             PromptRequirement::Required,
             "legacy LTX-Video cannot carry the conditioning that makes a prompt optional"
         );
-        for family in ["flux", "sdxl", "wan", "z-image"] {
+        // Wan and MiniMax H3 answer the same way LTX-2 does: the attached
+        // media decides the render, so the prompt refines it rather than
+        // authoring it. Unconditioned, all three stay required.
+        for family in ["wan", "minimax-h3", "minimax_h3", "minimaxh3"] {
+            assert_eq!(
+                prompt_requirement_for_family(Some(family), true),
+                PromptRequirement::Optional,
+                "{family} conditioned"
+            );
+            assert_eq!(
+                prompt_requirement_for_family(Some(family), false),
+                PromptRequirement::Required,
+                "{family} unconditioned"
+            );
+        }
+        for family in ["flux", "sdxl", "z-image"] {
             assert_eq!(
                 prompt_requirement_for_family(Some(family), true),
                 PromptRequirement::Required,
@@ -5992,6 +6222,23 @@ mod tests {
         catalog.model = "hf:Lightricks/LTX-2".to_string();
         assert!(super::prompt_required_for(&catalog, None));
         assert!(!super::prompt_required_for(&catalog, Some("ltx2")));
+
+        // The same walk for the two families that joined the rule.
+        let mut wan = wan_video_req("wan22-ti2v-5b:fp16");
+        assert!(super::prompt_required_for(&wan, None));
+        wan.source_image = Some(png_bytes());
+        assert!(!super::prompt_required_for(&wan, None));
+
+        let mut h3 = valid_h3_request(crate::minimax_h3::REF2VA_COMFY);
+        assert!(super::prompt_required_for(
+            &h3,
+            Some(crate::minimax_h3::FAMILY)
+        ));
+        h3.references = Some(vec![h3_image_reference()]);
+        assert!(!super::prompt_required_for(
+            &h3,
+            Some(crate::minimax_h3::FAMILY)
+        ));
     }
 
     #[test]
