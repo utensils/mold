@@ -77,6 +77,7 @@ mod queue_media_ingress;
 mod queue_media_lifecycle;
 pub mod queue_media_runtime;
 mod queue_retention;
+mod queue_transfer;
 mod routes_mesh_workflows;
 // This dependency-free policy seam lands default-dark. The concrete
 // schema/store adapter activates it atomically with queue-media admission.

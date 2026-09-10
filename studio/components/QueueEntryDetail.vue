@@ -7,6 +7,7 @@
  * only paints it. Actions are emitted rather than performed, because each
  * shell owns its own authenticated target for the exact selected host.
  */
+import { useHeldQueueTransfer } from "../composables/useHeldQueueTransfer";
 import { computed, ref } from "vue";
 import type { QueueEntryDetailModel } from "../lib/queueEntryDetail";
 import { copyTextToClipboard } from "../lib/notificationClipboard";
@@ -14,6 +15,7 @@ import { copyTextToClipboard } from "../lib/notificationClipboard";
 const props = withDefaults(
   defineProps<{
     model: QueueEntryDetailModel;
+    transferHostId?: string | undefined;
     /** Live denoise snapshot for a running row, when the host emits one. */
     /** The host's folded progress snapshot: a denoise image is optional,
      * and a host with previews disabled still reports the step counter. */
@@ -53,6 +55,7 @@ const emit = defineEmits<{
   (e: "retry"): void;
 }>();
 
+const transfer = useHeldQueueTransfer();
 const cancelArmed = ref(false);
 const copied = ref(false);
 
@@ -213,6 +216,17 @@ async function copyDetail(): Promise<void> {
         {{ model.cancel.blockedReason }}
       </p>
       <div class="qed__actions">
+        <button
+          v-if="
+            model.held && transferHostId && transfer?.canSend(transferHostId)
+          "
+          type="button"
+          data-test="queue-detail-transfer"
+          :disabled="retrying || cancelling"
+          @click="transfer.open(transferHostId, model.jobId)"
+        >
+          Send to another machine…
+        </button>
         <button
           type="button"
           data-test="queue-detail-reuse"

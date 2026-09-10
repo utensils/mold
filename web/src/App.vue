@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
+import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
+
 import { computed, onBeforeUnmount, onMounted, provide, ref } from "vue";
 import { useRoute } from "vue-router";
 import ToastShelf from "@ui/components/ToastShelf.vue";
@@ -49,6 +52,27 @@ const reconciler = startGenerateQueueReconciler(stream);
 // One fleet activity loop belongs to the shell. Page and navigation consumers
 // read the same singleton, including while Create is unmounted.
 const routing = useHostRouting();
+
+const queueTransfer = provideHeldQueueTransfer(
+  computed(() =>
+    routing.hosts.value.flatMap((host) =>
+      host.instanceId
+        ? [
+            {
+              id: host.id,
+              label: host.label,
+              instanceId: host.instanceId,
+              target: { baseUrl: host.url, apiKey: host.apiKey ?? null },
+              ready: host.status === "ready" && !host.stale,
+              gpuCount: host.routingLoad?.gpuCount,
+              queueDepth: host.queueDepth,
+            },
+          ]
+        : [],
+    ),
+  ),
+);
+
 const liveActivity = useLiveActivity(routing);
 const activityRows = useActivityRows(stream.jobs, liveActivity.rows);
 const queueSections = useQueueSections(
@@ -175,6 +199,7 @@ const notifications = useNotifications();
 </script>
 
 <template>
+  <HeldQueueTransferDialog :controller="queueTransfer" />
   <div class="app-frame">
     <AppNav />
     <div

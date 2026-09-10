@@ -184,6 +184,7 @@ async function act(action: "cancel" | "retry", id: string) {
             v-if="inspection.model.value"
             compact
             :model="inspection.model.value"
+            :transfer-host-id="inspection.selected.value?.hostId"
             :cancelling="inspection.pendingAction.value === 'cancel'"
             :retrying="inspection.pendingAction.value === 'retry'"
             :error="inspection.error.value"

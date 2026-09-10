@@ -1,3 +1,4 @@
+import { useHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
 import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { useRouter } from "vue-router";
 import { apiFetchTo } from "@studio/api/client";
@@ -85,6 +86,7 @@ export function __resetQueueCommandState(): void {
  */
 export function useQueueCommands(): QueueCommands {
   const router = useRouter();
+  const transfer = useHeldQueueTransfer();
   const composer = useComposerStore();
   const contextMenu = useContextMenuStore();
   const generation = useGenerationStore();
@@ -481,8 +483,21 @@ export function useQueueCommands(): QueueCommands {
   }
 
   function menu(row: QueueRow): MenuEntry[] {
+    const source = serverRef(row);
+    const held =
+      queueEntryOf(row)?.state === "held" || (row.kind === "print" && row.print.holdError !== null);
+    const transferEntries: MenuEntry[] =
+      held && source && transfer?.canSend(source.hostId)
+        ? [
+            {
+              label: "Send to another machine…",
+              action: () => transfer.open(source.hostId, source.id),
+            },
+          ]
+        : [];
     if (row.kind === "shared") {
       return [
+        ...transferEntries,
         ...reorderEntries(row),
         ...pauseEntries(row),
         ...(canResumeChain(row)
@@ -494,6 +509,7 @@ export function useQueueCommands(): QueueCommands {
     const job = row.print;
     const live = job.status !== "complete" && job.status !== "error";
     return [
+      ...transferEntries,
       ...reorderEntries(row),
       ...pauseEntries(row),
       live

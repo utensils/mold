@@ -242,6 +242,7 @@ fn map_machines_key(key: &KeyEvent) -> Action {
         KeyCode::Char('f') => Action::MachinesForget,
         KeyCode::Char('r') => Action::MachinesRefresh,
         KeyCode::Char('x') => Action::MachinesCancelJob,
+        KeyCode::Char('s') => Action::MachinesSendHeldJob,
         KeyCode::Char('l') => Action::MachinesLoadMoreQueue,
         KeyCode::Char('g') => Action::MachinesNextDevice,
         KeyCode::Char('[') => Action::MachinesDevicePrev,

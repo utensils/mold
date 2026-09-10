@@ -185,6 +185,30 @@ describe("mobile automatic generation routing", () => {
     expect(result).toMatchObject({ kind: "route", host: { id: "render" } });
   });
 
+  it("queues a batch on Plato's four lanes without memory or placement probes", async () => {
+    const hal = candidate(host("hal9000"), { backend: "cuda", queueDepth: 0 });
+    const plato = candidate(host("plato"), { backend: "cuda", queueDepth: 2 });
+    const result = await routeAutomaticMobileGeneration({
+      ...options([hal, plato]),
+      candidates: [
+        {
+          ...hal,
+          view: { ...hal.view, routingLoad: { gpuCount: 1, activeJobs: 0, paused: false } },
+        },
+        {
+          ...plato,
+          view: { ...plato.view, routingLoad: { gpuCount: 4, activeJobs: 4, paused: false } },
+        },
+      ],
+      chain: false,
+      copies: 6,
+      routeForHost: canonicalRouteForHost,
+    });
+    expect(result.kind).toBe("route");
+    if (result.kind === "route") expect(result.host.id).toBe("plato");
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
   it("routes Auto from cached v2 telemetry without opening placement probes", async () => {
     const studio = host("studio");
     const render = host("render");

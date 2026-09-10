@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, watch } from "vue";
+import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
+import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
+
+import { computed, onMounted, onUnmounted, watch } from "vue";
 import { MESH_WORKFLOW_ROUTE } from "@studio/lib/meshWorkflowProvenance";
 import { useRouter } from "vue-router";
 import TitleBar from "./components/shell/TitleBar.vue";
@@ -55,6 +58,27 @@ const contextMenu = useContextMenuStore();
 const events = useEventsStore();
 const gallery = useGalleryStore();
 const hostsStore = useHostsStore();
+
+const queueTransfer = provideHeldQueueTransfer(
+  computed(() =>
+    hostsStore.all.flatMap((host) =>
+      host.baseUrl && host.instanceId
+        ? [
+            {
+              id: host.id,
+              label: host.label,
+              instanceId: host.instanceId,
+              target: { baseUrl: host.baseUrl, apiKey: host.apiKey ?? null },
+              ready: host.status === "ready" && !host.stale,
+              gpuCount: host.routingLoad?.gpuCount,
+              queueDepth: host.queueDepth,
+            },
+          ]
+        : [],
+    ),
+  ),
+);
+
 const hostStatus = useHostStatusStore();
 const jobs = useJobsStore();
 const libraryPrefs = useLibraryPrefsStore();
@@ -426,6 +450,7 @@ onUnmounted(() => {
 
 <template>
   <div class="relative flex h-full flex-col overflow-clip bg-bg">
+    <HeldQueueTransferDialog :controller="queueTransfer" />
     <TitleBar />
     <UpdateBanner />
     <div class="flex min-h-0 flex-1 overflow-hidden">

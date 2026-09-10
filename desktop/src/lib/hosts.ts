@@ -117,6 +117,7 @@ export interface RoutableHost {
   status: "connecting" | "ready" | "error";
   /** Live queue depth; null while unknown. */
   queueDepth: number | null;
+  routingLoad?: import("@studio/lib/hostRouting").HostRoutingLoad | null;
   /** Latest projected completion. Unknown sorts behind a known prediction. */
   predictedCompletionMs?: number | null;
 }
@@ -126,8 +127,8 @@ export interface RoutableHost {
  * completion wins before raw queue depth. If either is planless, queue depth
  * remains the deterministic backward-compatible fallback.
  */
-export function pickAutoHost<T extends RoutableHost>(hosts: T[]): T | null {
-  return sharedPickAutoHost(hosts, { isHome: (host) => host.kind === "local" });
+export function pickAutoHost<T extends RoutableHost>(hosts: T[], copies = 1): T | null {
+  return sharedPickAutoHost(hosts, { isHome: (host) => host.kind === "local" }, copies);
 }
 
 /**
@@ -154,6 +155,7 @@ export interface CapableHost {
   status: "connecting" | "ready" | "error";
   /** Live queue depth; null while unknown (counts as busiest). */
   queueDepth: number | null;
+  routingLoad?: import("@studio/lib/hostRouting").HostRoutingLoad | null;
   /** GPU summary from `/api/status`; null when the host reports none. */
   gpu: { backend?: string | null; name?: string | null; vramTotalMb?: number | null } | null;
 }

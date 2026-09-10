@@ -764,6 +764,7 @@ async function retryFromMenu(entry: EnrichedQueueEntry): Promise<void> {
     <QueueEntryDrawer
       v-if="queueDetailModel"
       :model="queueDetailModel"
+      :transfer-host-id="host.id"
       :preview="detailPreview"
       :cancelling="queueDetail ? cancellingIds.includes(queueDetail.id) : false"
       :retrying="queueDetail ? retryingIds.includes(queueDetail.id) : false"

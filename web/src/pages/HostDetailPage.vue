@@ -1368,6 +1368,7 @@ onBeforeUnmount(() => {
       data-test="queue-entry-drawer"
     >
       <QueueEntryDetail
+        :transfer-host-id="hostId"
         :model="inspectedModel"
         :preview="inspectPreview"
         :cancelling="

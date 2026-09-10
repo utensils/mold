@@ -289,6 +289,7 @@ use crate::queue::clean_error_message;
         generate,
         generate_stream,
         admit_generation_batch,
+        admit_generation_transfer,
         get_generation_batch,
         cancel_generation_batch,
         generation_batch_events,
@@ -342,6 +343,8 @@ use crate::queue::clean_error_message;
         patch_device,
         list_queue,
         get_queue_job,
+        export_held_queue_job,
+        complete_held_queue_transfer,
         get_queue_job_preview,
         patch_queue_job,
         cancel_queue_job,
@@ -591,6 +594,10 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/generate/stream", post(generate_stream))
         .route("/api/generation-batches", post(admit_generation_batch))
+        .route(
+            "/api/generation-batches/transfer",
+            post(admit_generation_transfer),
+        )
         .route(
             "/api/generation-batches/by-client/:client_batch_id",
             get(get_generation_batch_by_client),
@@ -887,6 +894,11 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(cancel_queue_job),
         )
         .route("/api/queue/:id/retry", post(retry_queue_job))
+        .route("/api/queue/:id/transfer", post(export_held_queue_job))
+        .route(
+            "/api/queue/:id/transfer/complete",
+            post(complete_held_queue_transfer),
+        )
         .route("/api/queue/:id/pause", post(pause_queue_job))
         .route("/api/queue/:id/resume", post(resume_queue_job))
         .route(
@@ -2905,6 +2917,31 @@ pub(crate) fn generation_batch_status(
 /// Admit distinct prepared prompts as one durable, idempotent parent. Every
 /// child validates before the single DB commit; after admission children run
 /// independently through the ordinary generation queue.
+/// A separate endpoint makes older servers fail closed instead of ignoring a fence.
+#[utoipa::path(post, path = "/api/generation-batches/transfer", tag = "queue",
+    request_body = mold_core::GenerationBatchAdmissionRequest,
+    responses((status = 202, description = "Transfer durably admitted"), (status = 409, description = "Destination identity changed")))]
+async fn admit_generation_transfer(
+    State(state): State<AppState>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
+    headers: HeaderMap,
+    body: Json<mold_core::GenerationBatchAdmissionRequest>,
+) -> Result<(StatusCode, Json<mold_core::GenerationBatchStatus>), ApiError> {
+    if headers
+        .get("x-mold-destination-instance")
+        .and_then(|value| value.to_str().ok())
+        != Some(state.instance_id.as_str())
+    {
+        return Err(ApiError::with_code(
+            "Destination identity changed; nothing admitted",
+            "TRANSFER_DESTINATION_CHANGED",
+            StatusCode::CONFLICT,
+        ));
+    }
+    admit_generation_batch(State(state), authenticated, auth_state, headers, body).await
+}
+
 #[utoipa::path(
     post,
     path = "/api/generation-batches",
@@ -7415,6 +7452,92 @@ async fn cancel_one_queue_job(
     let id = id.to_string();
     spawn_queue_mutation(move || journal.cancel_id(&id)).await?;
     Ok(QueueJobCancelOutcome::Cancelled)
+}
+
+/// Fence transfer operations to one held batch child. Called under the same
+/// durable transition lock as Retry, Cancel and feeder publication.
+async fn validate_held_transfer(
+    state: &AppState,
+    id: &str,
+    authority: &mold_core::GenerationRetryRequest,
+) -> Result<(), ApiError> {
+    let journal = state.queue_journal.clone();
+    let lookup_id = id.to_string();
+    let row = spawn_queue_read(move || journal.row_projection(&lookup_id))
+        .await?
+        .ok_or_else(|| ApiError::queue_job_not_found("Held job no longer exists"))?;
+    if authority.instance_id != *state.instance_id
+        || authority.job_id != id
+        || row.batch_id.as_deref() != Some(&authority.batch_id)
+        || row.client_batch_id.as_deref() != Some(&authority.client_batch_id)
+    {
+        return Err(ApiError::with_code(
+            "The source job's identity changed. Refresh and try again.",
+            "QUEUE_JOB_AUTHORITY_MISMATCH",
+            StatusCode::CONFLICT,
+        ));
+    }
+    if row.state != mold_db::generation_queue::QueueRowState::Held {
+        return Err(ApiError::with_code(
+            "This job is no longer held. Nothing was changed on the source.",
+            "QUEUE_JOB_NOT_HELD",
+            StatusCode::CONFLICT,
+        ));
+    }
+    Ok(())
+}
+
+#[utoipa::path(post, path = "/api/queue/{id}/transfer", tag = "queue",
+    params(("id" = String, Path, description = "Held job id")),
+    request_body = mold_core::GenerationRetryRequest,
+    responses((status = 200, description = "Portable original request and media", body = GenerateRequest),
+              (status = 409, description = "Job is not held or identity changed")))]
+async fn export_held_queue_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(authority): Json<mold_core::GenerationRetryRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    {
+        let _transition = state.queue_journal.lock_durable_transition().await;
+        validate_held_transfer(&state, &id, &authority).await?;
+    }
+    let journal = state.queue_journal.clone();
+    let db = state.metadata_db.clone();
+    let export_id = id.clone();
+    let body = tokio::task::spawn_blocking(move || {
+        crate::queue_transfer::export_request(&journal, &export_id, db.as_ref().as_ref())
+    })
+    .await
+    .map_err(|_| ApiError::internal("Could not read original job"))?
+    .map_err(|error| ApiError::validation(error.to_string()))?;
+    // Media hydration pins original files but must not stall host dispatch.
+    // Recheck after IO so a concurrent Retry/Cancel cannot export a stale row.
+    let _transition = state.queue_journal.lock_durable_transition().await;
+    validate_held_transfer(&state, &id, &authority).await?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    ))
+}
+
+#[utoipa::path(post, path = "/api/queue/{id}/transfer/complete", tag = "queue",
+    params(("id" = String, Path, description = "Held source job id")),
+    request_body = mold_core::GenerationRetryRequest,
+    responses((status = 204, description = "Held source cancelled after destination acceptance"),
+              (status = 409, description = "Source is no longer held")))]
+async fn complete_held_queue_transfer(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(authority): Json<mold_core::GenerationRetryRequest>,
+) -> Result<StatusCode, ApiError> {
+    let _transition = state.queue_journal.lock_durable_transition().await;
+    validate_held_transfer(&state, &id, &authority).await?;
+    // Never stop a job another client has resumed while bytes were travelling.
+    cancel_one_queue_job(&state, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Resume a durable dependency-preparation failure after the dependency or

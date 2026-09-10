@@ -453,6 +453,18 @@ lost, so the error names the job to resume (`POST /api/queue/{job_id}/retry`)
 and the batch to reconcile. SSE delivers the same failure as its terminal
 `error` event, with the same code.
 
+Held jobs can be moved explicitly between machines. `POST /api/queue/{id}/transfer`
+accepts the same instance/job/batch/client-batch authority and returns the original
+request with portable source media (`Cache-Control: no-store`). Submit it as a
+singleton durable generation batch through `POST /api/generation-batches/transfer`
+on the destination with `x-mold-destination-instance` set to its observed identity.
+This dedicated endpoint rejects identity changes before admitting work. Then call
+`POST /api/queue/{id}/transfer/complete` with the original authority only after
+confirming acceptance. Completion refuses a source that has resumed or changed.
+The apps and `mold queue send JOB-ID --to HOST` retain a stable destination
+operation ID so retrying after a lost response does not submit another job.
+Machine-local LoRA paths and independent workflow stages cannot be transferred.
+
 Only when the attached observer disappears after commit does the route return
 HTTP 202 with its `GenerationBatchStatus` instead of an opaque 500; reconcile
 by batch or client operation ID and do not resubmit. SSE emits

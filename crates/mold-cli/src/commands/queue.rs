@@ -38,6 +38,29 @@ pub async fn run(action: QueueAction) -> Result<()> {
             yes,
         } => queue_cancel(&client, &job_ids, all, batch.as_deref(), yes).await,
         QueueAction::Retry { job_ids, held } => queue_retry(&client, &job_ids, held).await,
+        QueueAction::Send {
+            job_id,
+            to,
+            destination_api_key,
+        } => {
+            let destination = match destination_api_key {
+                Some(key) => MoldClient::with_api_key(&to, key),
+                None => MoldClient::new(&to),
+            };
+            let (batch, removed) = client.send_held_queue_job(&job_id, &destination).await?;
+            println!(
+                "Sent {} to {} as {}. {}",
+                job_id,
+                destination.host(),
+                batch.children[0].job_id,
+                if removed {
+                    "Original removed."
+                } else {
+                    "Original could not be removed; check the source before retrying it."
+                }
+            );
+            Ok(())
+        }
         QueueAction::Move { job_id, to } => queue_move(&client, &job_id, to).await,
         QueueAction::Pause { job_id } => queue_pause(&client, job_id.as_deref(), true).await,
         QueueAction::Resume { job_id } => queue_pause(&client, job_id.as_deref(), false).await,

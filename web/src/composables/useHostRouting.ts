@@ -1,3 +1,4 @@
+import { hostRoutingLoad } from "@studio/lib/hostRouting";
 /*
  * Generation host routing state for the Create surface — the browser's answer
  * to the desktop app's hosts store (web has no Pinia; module-singleton
@@ -100,6 +101,7 @@ interface HostTelemetry {
   version: string | null;
   instanceId: string | null;
   queueDepth: number | null;
+  routingLoad?: import("@studio/lib/hostRouting").HostRoutingLoad | null;
   queuePaused: boolean | null;
   gpu: RoutableGpu | null;
   predictedCompletionMs: number | null;
@@ -331,6 +333,7 @@ const hosts = computed<RoutableHost[]>(() =>
       status: live?.status ?? "connecting",
       stale: live?.stale ?? false,
       queueDepth: live?.queueDepth ?? null,
+      routingLoad: live?.routingLoad ?? null,
       gpu: live?.gpu ?? null,
       predictedCompletionMs: live?.predictedCompletionMs ?? null,
     };
@@ -587,6 +590,7 @@ async function pollHost(entry: HostEntry): Promise<void> {
         version: status.value.version ?? null,
         instanceId: nextInstanceId,
         queueDepth: status.value.queue_depth ?? null,
+        routingLoad: hostRoutingLoad(status.value, inventory),
         queuePaused: status.value.queue_paused ?? null,
         gpu: gpuFromStatus(status.value, inventory),
         predictedCompletionMs: mergedQueue?.plan
@@ -835,6 +839,7 @@ async function resolveFeasibleWithPreview(
   requireAuthoritative = false,
   options: PlacementPreviewOptions = {},
   authorityRetry = 0,
+  copies = 1,
 ): Promise<FeasibilityResult> {
   readRegistry();
   readTarget();
@@ -1011,6 +1016,7 @@ async function resolveFeasibleWithPreview(
         requireAuthoritative,
         options,
         1,
+        copies,
       );
     }
     return {
@@ -1052,6 +1058,7 @@ async function resolveFeasibleWithPreview(
       usable,
       selection,
       hostsForModel(model).filter((id) => usableIds.has(id)),
+      copies,
     );
     if (route) {
       const preview =
@@ -1249,6 +1256,8 @@ async function resolveFeasible(
       request as unknown as Record<string, unknown>,
     ),
     options,
+    0,
+    copies,
   );
 }
 
@@ -1273,6 +1282,8 @@ async function resolveFeasibleChain(
       ),
     false,
     options,
+    0,
+    copies,
   );
 }
 

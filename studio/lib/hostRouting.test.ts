@@ -5,6 +5,7 @@ import {
   backendRank,
   chooseRoutedHost,
   hostIdsForModel,
+  hostRoutingLoad,
   inferBackendFromGpuName,
   isAutomaticTarget,
   normalizeTargetHost,
@@ -92,6 +93,57 @@ describe("pickAutoHost", () => {
     // No home rule: input order survives unless a lowest-id rule is asked for.
     expect(pickAutoHost(hosts)?.id).toBe("remote");
     expect(pickAutoHost(hosts, { lowestIdWins: true })?.id).toBe("local");
+  });
+});
+
+describe("parallel Auto routing", () => {
+  const load = (gpuCount: number, activeJobs = 0, paused = false) => ({
+    gpuCount,
+    activeJobs,
+    paused,
+  });
+  it("queues a six-print batch on four busy GPUs instead of an idle single GPU", () => {
+    const hal = routable({
+      id: "hal9000",
+      queueDepth: 0,
+      routingLoad: load(1),
+    });
+    const plato = routable({
+      id: "plato",
+      queueDepth: 2,
+      routingLoad: load(4, 4),
+    });
+    expect(pickAutoHost([hal, plato], {}, 6)?.id).toBe("plato");
+    expect(pickAutoHost([hal, plato], {}, 1)?.id).toBe("hal9000");
+  });
+  it("counts loading lanes and excludes paused or unavailable machines", () => {
+    expect(
+      hostRoutingLoad({
+        gpus: [
+          { state: "loading" },
+          { state: "generating" },
+          { state: "degraded" },
+        ],
+      }),
+    ).toEqual(load(2, 2));
+    expect(
+      pickAutoHost([
+        routable({ id: "paused", routingLoad: load(4, 0, true) }),
+        routable({ id: "disabled", routingLoad: load(0) }),
+        routable({ id: "ready", queueDepth: 10, routingLoad: load(1, 1) }),
+      ])?.id,
+    ).toBe("ready");
+  });
+  it("uses inventory eligibility without excluding busy schedulable devices", () => {
+    expect(
+      hostRoutingLoad({ gpus: [{ state: "idle" }] }, [
+        { schedulable: true, ordinal: 0, activity: "generating" },
+        { schedulable: false, ordinal: 1, activity: "idle" },
+        { schedulable: true, ordinal: null, activity: "idle" },
+      ]),
+    ).toEqual(load(1, 1));
+    expect(hostRoutingLoad({ busy: true })).toEqual(load(1, 1));
+    expect(hostRoutingLoad({ gpus: [] })).toEqual(load(0));
   });
 });
 
@@ -317,4 +369,30 @@ describe("chooseRoutedHost", () => {
       chooseRoutedHost([], AUTO_TARGET_ID, comparePlacementPreviews),
     ).toBeNull();
   });
+});
+
+it("uses one scoring regime for every permutation of a mixed-version fleet", () => {
+  const a = routable({
+    id: "a",
+    queueDepth: 4,
+    predictedCompletionMs: 100,
+    routingLoad: { gpuCount: 4, activeJobs: 0, paused: false },
+  });
+  const b = routable({ id: "b", queueDepth: 0, predictedCompletionMs: 10 });
+  const c = routable({
+    id: "c",
+    queueDepth: 1,
+    predictedCompletionMs: 1,
+    routingLoad: { gpuCount: 1, activeJobs: 0, paused: false },
+  });
+  for (const hosts of [
+    [a, b, c],
+    [a, c, b],
+    [b, a, c],
+    [b, c, a],
+    [c, a, b],
+    [c, b, a],
+  ]) {
+    expect(pickAutoHost(hosts, { lowestIdWins: true }, 6)?.id).toBe("c");
+  }
 });

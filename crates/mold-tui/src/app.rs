@@ -276,6 +276,7 @@ pub enum BackgroundEvent {
         capabilities: Option<Box<mold_core::ServerCapabilities>>,
     },
     /// Per-host queue snapshot for the selected Machines row.
+    HeldQueueTransferFinished(String),
     HostQueueUpdate {
         host_id: String,
         queue: Option<mold_core::QueueListingWire>,
@@ -4173,6 +4174,51 @@ impl App {
 
     /// Handle a raw crossterm event.
     pub fn handle_crossterm_event(&mut self, event: CrosstermEvent) {
+        if self.machines.transfer.is_some() {
+            if let CrosstermEvent::Key(key) = event {
+                use crossterm::event::KeyCode;
+                match key.code {
+                    KeyCode::Esc => {
+                        self.machines.transfer = None;
+                    }
+                    KeyCode::Up | KeyCode::Left => {
+                        let picker = self.machines.transfer.as_mut().unwrap();
+                        picker.selected = picker.selected.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Right => {
+                        let picker = self.machines.transfer.as_mut().unwrap();
+                        picker.selected = (picker.selected + 1).min(picker.destinations.len() - 1);
+                    }
+                    KeyCode::Enter => {
+                        let picker = self.machines.transfer.take().unwrap();
+                        let destination = picker.destinations[picker.selected].clone();
+                        let source_client = crate::hosts::client_for(
+                            &picker.source.url,
+                            crate::hosts::api_key_for(&picker.source.id).as_deref(),
+                        );
+                        let destination_client = crate::hosts::client_for(
+                            &destination.url,
+                            crate::hosts::api_key_for(&destination.id).as_deref(),
+                        );
+                        self.machines.transfer_busy = true;
+                        self.machines.transfer_message =
+                            Some(format!("Sending to {}…", destination.display_name()));
+                        let tx = self.bg_tx.clone();
+                        self.tokio_handle.spawn(async move {
+                            let message = match source_client.send_held_queue_job(&picker.job_id, &destination_client).await {
+                                Ok((_, true)) => format!("Sent to {}. Original removed.", destination.display_name()),
+                                Ok((_, false)) => format!("Sent to {}; original remains. Check source before retrying it.", destination.display_name()),
+                                Err(error) => format!("Could not send: {error}"),
+                            };
+                            let _ = tx.send(BackgroundEvent::HeldQueueTransferFinished(message));
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
         // Handle mouse events
         if let CrosstermEvent::Mouse(mouse) = event {
             self.handle_mouse(mouse);
@@ -6003,6 +6049,12 @@ impl App {
             Action::MachinesRefresh if self.active_view == View::Machines => {
                 self.machines.force_poll();
                 self.tick_host_polling();
+            }
+            Action::MachinesSendHeldJob
+                if self.active_view == View::Machines
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
+            {
+                self.machines.transfer = self.machines.held_transfer_options();
             }
             Action::MachinesCancelJob
                 if self.active_view == View::Machines
@@ -10572,6 +10624,12 @@ impl App {
                 } => {
                     self.machines
                         .apply_capabilities(host_id, capabilities.map(|boxed| *boxed));
+                }
+                BackgroundEvent::HeldQueueTransferFinished(message) => {
+                    self.machines.transfer_busy = false;
+                    self.machines.transfer_message = Some(message);
+                    self.machines.force_poll();
+                    self.tick_host_polling();
                 }
                 BackgroundEvent::HostQueueUpdate { host_id, queue } => {
                     self.machines.apply_queue(host_id, queue);

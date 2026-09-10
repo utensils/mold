@@ -384,9 +384,19 @@ pub(crate) const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// polling accumulate work instead of observing the host.
 const POLL_TIMEOUT: std::time::Duration = POLL_INTERVAL;
 
+pub(crate) struct HeldTransferPicker {
+    pub source: HostEntry,
+    pub job_id: String,
+    pub destinations: Vec<HostEntry>,
+    pub selected: usize,
+}
+
 /// State of the Machines workspace.
 #[derive(Default)]
 pub(crate) struct MachinesState {
+    pub transfer: Option<HeldTransferPicker>,
+    pub transfer_busy: bool,
+    pub transfer_message: Option<String>,
     pub registry: HostRegistry,
     /// Selected row index: 0 = local, 1.. = `registry.hosts` order.
     pub selected: usize,
@@ -510,6 +520,55 @@ impl MachinesState {
         if self.queue_selected + 1 < len {
             self.queue_selected += 1;
         }
+    }
+
+    pub fn held_transfer_options(&self) -> Option<HeldTransferPicker> {
+        if self.transfer_busy {
+            return None;
+        }
+        let (host_id, listing) = self.queue.as_ref()?;
+        let job = listing.entries.get(self.queue_selected)?;
+        if job.state != "held" {
+            return None;
+        }
+        let source = self.registry.get(host_id)?.clone();
+        if self.statuses.get(host_id)?.health != HostHealth::Ready {
+            return None;
+        }
+        let identity = self
+            .statuses
+            .get(host_id)?
+            .status
+            .as_ref()?
+            .instance_id
+            .as_ref()?;
+        let destinations: Vec<_> = self
+            .registry
+            .hosts
+            .iter()
+            .filter(|entry| {
+                entry.connected
+                    && entry.id != *host_id
+                    && self.statuses.get(&entry.id).is_some_and(|state| {
+                        state.health == HostHealth::Ready
+                            && state
+                                .status
+                                .as_ref()
+                                .and_then(|status| status.instance_id.as_ref())
+                                .is_some_and(|id| id != identity)
+                    })
+            })
+            .cloned()
+            .collect();
+        if destinations.is_empty() {
+            return None;
+        }
+        Some(HeldTransferPicker {
+            source,
+            job_id: job.id.clone(),
+            destinations,
+            selected: 0,
+        })
     }
 
     /// The cancellable job under the queue selection. Running rows require
@@ -1513,6 +1572,42 @@ mod tests {
                 .unwrap();
         }
         st
+    }
+
+    #[test]
+    fn held_transfer_requires_another_ready_instance_and_a_held_row() {
+        let mut st = state_with_hosts(2);
+        st.select_next();
+        st.apply_status(
+            "h0".into(),
+            Some(status_with(Some("source"), Some("source-instance"))),
+        );
+        st.apply_queue(
+            "h0".into(),
+            Some(queue_page(vec![queue_job("job", "held")], None)),
+        );
+        assert!(st.held_transfer_options().is_none());
+        st.apply_status(
+            "h1".into(),
+            Some(status_with(
+                Some("destination"),
+                Some("destination-instance"),
+            )),
+        );
+        let picker = st.held_transfer_options().unwrap();
+        assert_eq!(picker.job_id, "job");
+        assert_eq!(picker.destinations[0].id, "h1");
+        st.transfer_busy = true;
+        assert!(st.held_transfer_options().is_none());
+        st.transfer_busy = false;
+        st.queue.as_mut().unwrap().1.entries[0].state = "running".into();
+        assert!(st.held_transfer_options().is_none());
+        st.queue.as_mut().unwrap().1.entries[0].state = "held".into();
+        st.apply_status(
+            "h1".into(),
+            Some(status_with(Some("alias"), Some("source-instance"))),
+        );
+        assert!(st.held_transfer_options().is_none());
     }
 
     #[test]

@@ -56,6 +56,7 @@ export interface RoutableHost {
   stale?: boolean;
   /** Live queue depth; null while unknown (counts as busiest). */
   queueDepth: number | null;
+  routingLoad?: import("@studio/lib/hostRouting").HostRoutingLoad | null;
   /** Predicted end of this host's current plan. Null on legacy hosts. */
   predictedCompletionMs?: number | null;
   gpu: RoutableGpu | null;
@@ -110,8 +111,13 @@ function isOrigin(host: { id: string }): boolean {
  */
 export function pickAutoHost<T extends RoutableHost>(
   hosts: readonly T[],
+  copies = 1,
 ): T | null {
-  return sharedPickAutoHost(hosts, { isHome: isOrigin, lowestIdWins: true });
+  return sharedPickAutoHost(
+    hosts,
+    { isHome: isOrigin, lowestIdWins: true },
+    copies,
+  );
 }
 
 /** Capability ladder: CUDA (2) > Metal (1) > CPU/unknown (0). */
@@ -160,6 +166,7 @@ export function resolveRoute(
   hosts: readonly RoutableHost[],
   selection: string | null | undefined,
   modelHostIds: readonly string[] = [],
+  copies = 1,
 ): HostRoute | null {
   const sel = normalizeTargetId(selection, hosts);
   let chosen: RoutableHost | null;
@@ -174,7 +181,7 @@ export function resolveRoute(
     const withModel = hosts.filter(
       (h) => h.status === "ready" && modelHostIds.includes(h.id),
     );
-    chosen = pickAutoHost(withModel.length > 0 ? withModel : hosts);
+    chosen = pickAutoHost(withModel.length > 0 ? withModel : hosts, copies);
   }
   if (!chosen) return null;
   const target: HostTarget = { baseUrl: chosen.url };

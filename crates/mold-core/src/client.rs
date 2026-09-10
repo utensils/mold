@@ -1368,6 +1368,22 @@ impl MoldClient {
             .await?)
     }
 
+    /// Admit a transfer only on the exact destination observed by the caller.
+    pub async fn admit_generation_transfer(
+        &self,
+        request: &GenerationBatchAdmissionRequest,
+        destination_instance: &str,
+    ) -> Result<GenerationBatchStatus> {
+        let response = self
+            .client
+            .post(format!("{}/api/generation-batches/transfer", self.base_url))
+            .header("x-mold-destination-instance", destination_instance)
+            .json(request)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response).await?.json().await?)
+    }
+
     /// Resolve an ambiguous admission response using the caller-owned
     /// idempotency key. A genuine 404 is represented as `None`.
     pub async fn generation_batch_by_client_id(
@@ -1431,6 +1447,43 @@ impl MoldClient {
             .await?
             .json::<GenerationBatchStatusResponse>()
             .await?)
+    }
+
+    /// Export original settings and media from one held durable child.
+    pub async fn export_held_queue_job(
+        &self,
+        authority: &GenerationRetryRequest,
+    ) -> Result<GenerateRequest> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/queue/{}/transfer",
+                self.base_url,
+                encode_path_segment(&authority.job_id)
+            ))
+            .json(authority)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response).await?.json().await?)
+    }
+
+    /// Remove an original only if it is still the same held durable child.
+    pub async fn complete_held_queue_transfer(
+        &self,
+        authority: &GenerationRetryRequest,
+    ) -> Result<()> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/queue/{}/transfer/complete",
+                self.base_url,
+                encode_path_segment(&authority.job_id)
+            ))
+            .json(authority)
+            .send()
+            .await?;
+        error_for_status_with_body(response).await?;
+        Ok(())
     }
 
     /// Return a retryable held generation child to the durable queue.

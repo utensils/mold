@@ -463,6 +463,27 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
             )));
         }
     }
+    if let Some(picker) = &st.transfer {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Send held job to: {}",
+                picker.destinations[picker.selected].display_name()
+            ),
+            theme.warning(),
+        )));
+        lines.push(Line::from(Span::styled(
+            "←/→ Choose machine · Enter Send · Esc Cancel",
+            theme.dim(),
+        )));
+    } else if st.held_transfer_options().is_some() {
+        lines.push(Line::from(Span::styled(
+            "s Send held job to another machine…",
+            theme.dim(),
+        )));
+    }
+    if let Some(message) = &st.transfer_message {
+        lines.push(Line::from(Span::styled(message.clone(), theme.dim())));
+    }
     match listing {
         Some((_, listing)) if !listing.entries.is_empty() => {
             let now_ms = std::time::SystemTime::now()
