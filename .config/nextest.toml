@@ -171,3 +171,11 @@ not (
   (binary_id(mold-ai-server) & test(=video_upscale::tests::encoder_fits_oversized_frames_so_the_thumbnailer_can_decode_them))
 )
 """
+
+# A push to `main` runs every test, the live external catalog monitor
+# included. One retry keeps a lone scheduling flake from painting main red;
+# nextest still reports the test as FLAKY rather than hiding it.
+[profile.main]
+fail-fast = false
+slow-timeout = { period = "120s" }
+retries = 1

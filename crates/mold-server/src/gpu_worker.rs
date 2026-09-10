@@ -6590,6 +6590,12 @@ mod tests {
     use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
 
+    /// How long a test waits for the worker thread to reach a barrier it has
+    /// already been handed work for. A hang guard, not a latency assertion:
+    /// under nextest every test is its own process and the GPU thread can
+    /// wait seconds for a core, which a one-second deadline read as a bug.
+    const BARRIER_DEADLINE: Duration = Duration::from_secs(30);
+
     #[test]
     fn durable_media_hydrates_only_inside_the_device_owner_after_two_cancel_fences() {
         let source = include_str!("gpu_worker.rs");
@@ -9530,7 +9536,7 @@ mod tests {
             .unwrap();
 
         ran_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(BARRIER_DEADLINE)
             .expect("legacy owner should execute transported work");
         assert!(matches!(
             owner_event_rx.try_recv(),
@@ -9589,7 +9595,7 @@ mod tests {
 
         worker.release_in_flight();
         ran_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(BARRIER_DEADLINE)
             .expect("legacy work should run after the chain releases");
         worker.request_shutdown();
         handle.join().unwrap();
@@ -10177,7 +10183,7 @@ mod tests {
                 Some(crate::scheduler::WorkerEvent::AllocationCommitted { .. })
             ));
             stage_reached
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(BARRIER_DEADLINE)
                 .expect("post-upscale stage must reach deterministic barrier");
 
             worker.request_drain(false);
@@ -10278,7 +10284,7 @@ mod tests {
             Some(crate::scheduler::WorkerEvent::AllocationCommitted { .. })
         ));
         generate_started_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(BARRIER_DEADLINE)
             .expect("generation must start only after model readiness");
 
         worker.request_drain(false);
@@ -10348,7 +10354,7 @@ mod tests {
             Some(crate::scheduler::WorkerEvent::AllocationCommitted { .. })
         ));
         load_started
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(BARRIER_DEADLINE)
             .expect("admin load must reach the model load barrier");
 
         worker.request_drain(false);
@@ -10429,7 +10435,7 @@ mod tests {
                 })
                 .unwrap();
             accepted_rx
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(BARRIER_DEADLINE)
                 .expect("owner must stop at the accepted-before-process barrier");
             assert!(matches!(
                 event_rx.blocking_recv(),
@@ -10459,7 +10465,7 @@ mod tests {
                 })
             ));
             ran_rx
-                .recv_timeout(Duration::from_secs(1))
+                .recv_timeout(BARRIER_DEADLINE)
                 .expect("accepted owner stage must finish while draining");
             assert!(matches!(
                 event_rx.blocking_recv(),
@@ -10518,7 +10524,7 @@ mod tests {
                 retry: None,
             })
             .unwrap();
-        accepted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        accepted_rx.recv_timeout(BARRIER_DEADLINE).unwrap();
         assert!(matches!(
             event_rx.blocking_recv(),
             Some(crate::scheduler::WorkerEvent::Accepted { .. })
