@@ -90,7 +90,7 @@ and `ffprobe` on `PATH` before the server advertises that feature.
   MiniMax H3 forced-local execution accepts one FL2VA request; batches,
   sequences, and Ref2VA reference uploads require the server route.
 - **Images:** text-to-image, image editing, inpainting, ControlNet, LoRA,
-  identity photos, prompt expansion, and upscaling.
+  identity photos, reference-image prompting, prompt expansion, and upscaling.
 - **Video and audio:** text/image-to-video, sequences, clip continuation,
   lip dub, text-to-audio, and MP4 output with generated audio.
 - **3D:** single-image and named multiview-to-mesh with Hunyuan3D 2.0 and 2.1,

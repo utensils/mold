@@ -283,12 +283,13 @@ export function cameraControlValidationError(
 
 /**
  * Whether the form holds an image the request would condition on, in whichever
- * well this layout keeps it. An EXCLUSIVE recipe (Klein) has two wells and
- * either satisfies the contract — the request ships exactly one of them.
+ * well this layout keeps it. A two-well recipe — exclusive (Klein) or additive
+ * (IP-Adapter) — is satisfied by EITHER: the exclusive one ships exactly one
+ * of them, the additive one ships whatever each holds.
  */
 function holdsConditioningImage(mode: SourceImageMode, form: GenerateForm): boolean {
   if (mode === "single") return Boolean(form.sourceImage);
-  if (mode === "single-or-references") {
+  if (mode === "single-or-references" || mode === "single-and-references") {
     return Boolean(form.sourceImage) || form.imageAttachments.length > 0;
   }
   return form.imageAttachments.length > 0;
@@ -354,35 +355,26 @@ export function sourceConditioningValidationError(
  * Why this form's face-identity partition (#1224) would be refused, in the
  * server's own order — or `null` when it is valid, including "not used".
  *
- * Every rule lives in `@studio/lib/identityConditioning`; this only resolves
- * the two inputs that are desktop-shaped. `hasSourceImage` is the source the
- * REQUEST will carry, not the retained UI state: source media is parked
- * across model switches so switching back restores the draft, and a parked
- * image a checkpoint drops in `buildRequest` must not refuse an identity
- * photo it never travels with — the same reading
- * {@link sourceConditioningValidationError} takes.
+ * Every rule lives in `@studio/lib/identityConditioning`; this only adapts the
+ * desktop form to it.
+ *
+ * A LoRA and a source image used to be refused here alongside a photo. Both
+ * pairings are qualified now — the adapter injects between blocks (FLUX) or on
+ * the `attn2` output (SDXL), underneath a merged LoRA, and img2img only ever
+ * needed the denoise loop to gate on its absolute schedule position — so this
+ * no longer resolves either.
  *
  * A checkpoint that cannot take an identity photo reports NOTHING: the whole
  * partition parks, off the wire and out of the inspector, so blocking Generate
  * on it would refuse a print the server would happily render.
  */
 export function identityConditioningValidationError(form: GenerateForm): string | null {
-  const caps = generationCapabilitiesForFamily(
-    form.family,
-    form.model,
-    form.pipeline,
-    form.guidanceCapabilities,
-    form.sourceImageCapability,
-  );
-  const hasSourceImage = caps.supportsImg2img && holdsConditioningImage(caps.sourceImageMode, form);
   return identityValidationError({
     supported: form.identitySupported === true,
     image: form.identityImage,
     weight: form.identityWeight,
     startStep: form.identityStartStep,
     steps: form.steps,
-    hasLora: form.loras.length > 0,
-    hasSourceImage,
   });
 }
 

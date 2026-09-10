@@ -1415,6 +1415,7 @@ mod tests {
             reason: Some(
                 mold_core::generation_profile::REFERENCE_IMAGES_UNSUPPORTED_REASON.to_string(),
             ),
+            weight: None,
         });
         let mut caps = capabilities_for_model("flux2", "flux2-dev:bf16", None, None, None, None);
         apply_recipe_capabilities(&mut caps, Some(&recipe));

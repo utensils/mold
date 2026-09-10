@@ -309,9 +309,14 @@ and repeating checks 3 and 4.
 - `flux-dev:q8` — the second qualified tier. Same code path, same adapter shape;
   it differs only in the transformer's quantization, which the adapter does not
   read.
-- Krea, block offload, LoRA, and img2img alongside an identity. All are refused
-  by the request contract in milestone 1 and belong to a milestone-2
-  qualification pass.
+- Krea alongside an identity. Same code path as `flux-dev`; the adapter reads
+  nothing the fine-tune changes.
+- Block offload alongside an identity was never refused — `flux/offload.rs`
+  drives the same `PulidBlockHook` as every other arm, pinned by
+  `flux/pulid_variants.rs`. This entry used to claim otherwise and was wrong.
+- LoRA and img2img alongside an identity WERE refused by the request contract
+  in milestone 1. Both are qualified now; see the combination renders in the
+  qualification pass that lifted them.
 
 ## Follow-up UAT (q8 / Metal)
 

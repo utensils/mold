@@ -112,15 +112,36 @@ const strength = computed(() => strengthSemantics(props.family));
 const referencesOnly = computed(
   () =>
     (plan.value.kind === "attachments" && plan.value.primary === null) ||
-    plan.value.kind === "single-or-references",
+    plan.value.kind === "single-or-references" ||
+    plan.value.kind === "single-and-references",
 );
 const referenceMax = computed(() => caps.value.referenceImages?.max ?? null);
-/** The exclusive (Klein) references live in their own store, because the
+/**
+ * The adapter's injection strength, straight from the recipe.
+ * `null` — a recipe with no adapter, or an older host that never sent the
+ * field — renders no slider. Never a family or model test.
+ */
+const referenceWeight = computed(
+  () => caps.value.referenceImages?.weight ?? null,
+);
+const effectiveReferenceWeight = computed(
+  () => props.modelValue.referenceWeight ?? referenceWeight.value?.default ?? 1,
+);
+/** Both two-well layouts render the strip beside the Source well. */
+const twoWells = computed(
+  () =>
+    plan.value.kind === "single-or-references" ||
+    plan.value.kind === "single-and-references",
+);
+/** A two-well recipe's references live in their own store, because the
  * source well keeps `imageAttachments[0]`. */
 const referenceImages = computed(() => props.modelValue.referenceImages ?? []);
 /**
- * The parking rule: whichever well holds media is the active one, the other
- * parks with an inline note and KEEPS its media, and Generate stays enabled.
+ * The EXCLUSIVE parking rule: whichever well holds media is the active one,
+ * the other parks with an inline note and KEEPS its media, and Generate stays
+ * enabled. An ADDITIVE (IP-Adapter) plan never asks — nothing parks there,
+ * because the reference is an image prompt injected beside the source rather
+ * than instead of it.
  */
 const exclusive = computed(() =>
   plan.value.kind === "single-or-references"
@@ -152,11 +173,13 @@ const kicker = computed(() =>
         ? "Ordered references"
         : plan.value.kind === "single-or-references"
           ? "Source or references"
-          : plan.value.kind === "attachments"
-            ? referencesOnly.value
-              ? "Reference images"
-              : "Edit images"
-            : "Source image",
+          : plan.value.kind === "single-and-references"
+            ? "Source and references"
+            : plan.value.kind === "attachments"
+              ? referencesOnly.value
+                ? "Reference images"
+                : "Edit images"
+              : "Source image",
 );
 
 const hasSource = computed(() => props.modelValue.imageAttachments.length > 0);
@@ -269,10 +292,11 @@ async function onStripDrop(event: DragEvent) {
   // The ceiling is the RECIPE's, never a client constant, and the strip is
   // APPENDED to — a drop that replaced it lost every earlier picture.
   const max = referenceMax.value ?? undefined;
-  if (plan.value.kind === "single-or-references") {
+  if (twoWells.value) {
     patch({
       referenceImages: [...referenceImages.value, ...images].slice(0, max),
-      // Last write wins on an exclusive recipe: the source parks, kept.
+      // Last write wins on an exclusive recipe: the source parks, kept. On an
+      // additive one this records the write and parks nothing.
       exclusiveWell: "references",
     });
     return;
@@ -527,12 +551,10 @@ function clearControl() {
       </p>
     </template>
 
-    <!-- One source image (+ optional end frame), or — on an EXCLUSIVE recipe
-         (FLUX.2 [klein]) — the same well plus the reference strip below it,
-         mutually exclusive. -->
-    <template
-      v-else-if="plan.kind === 'single' || plan.kind === 'single-or-references'"
-    >
+    <!-- One source image (+ optional end frame), or — on a TWO-WELL recipe —
+         the same well plus the reference strip below it: mutually exclusive
+         on FLUX.2 [klein], live together on an additive IP-Adapter recipe. -->
+    <template v-else-if="plan.kind === 'single' || twoWells">
       <SourceMediaWells
         :plan="plan"
         :parked="exclusive?.parked === 'source'"
@@ -561,10 +583,10 @@ function clearControl() {
         @clear="onWellClear"
       />
 
-      <!-- The exclusive reference strip: the SAME picker the strip-only
-           layouts use, driven by the plan. -->
+      <!-- The second well: the SAME strip and picker the strip-only layouts
+           use, driven by the plan. -->
       <div
-        v-if="plan.kind === 'single-or-references'"
+        v-if="twoWells"
         class="smp__strip"
         data-test="reference-strip"
         data-drop-target="references"
@@ -621,6 +643,25 @@ function clearControl() {
               : `Up to ${referenceMax} ordered references.`
           }}
         </p>
+        <!-- The adapter's injection strength. Rendered only where the recipe
+             advertises a `weight` control, with the server's own bounds, and
+             left ABSENT from the request until touched so a default-valued
+             render is byte-identical to one that never named it. -->
+        <template v-if="referenceWeight && referenceImages.length > 0">
+          <SliderRow
+            label="Reference strength"
+            :model-value="effectiveReferenceWeight"
+            :min="referenceWeight.min"
+            :max="referenceWeight.max"
+            :step="referenceWeight.step"
+            :value-label="effectiveReferenceWeight.toFixed(2)"
+            data-test="reference-weight"
+            @update:model-value="patch({ referenceWeight: $event })"
+          />
+          <p class="smp__hint">
+            How hard the reference picture steers the render beside the prompt.
+          </p>
+        </template>
       </div>
 
       <template v-if="sourceRefinements && hasSource">

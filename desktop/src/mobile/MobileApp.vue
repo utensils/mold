@@ -203,7 +203,12 @@ import { licenseRequirements } from "@studio/lib/licenseAcceptance";
 import { upscaleImage } from "../lib/api/upscale";
 import { openExternal } from "../lib/openExternal";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
-import { conditioningForRequest, sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
+import {
+  conditioningForRequest,
+  referencesLockBatchSize,
+  requestCarriesSource,
+  sourceMediaPlan,
+} from "@studio/lib/sourceMediaPlan";
 import { modelDisplayNameForId } from "../lib/models";
 import { mobileStyleLabel } from "./styleLabel";
 import type {
@@ -1634,7 +1639,8 @@ const showSourceMedia = computed(() => sourcePlan.value.kind !== "none");
 const referencesOnly = computed(
   () =>
     (sourcePlan.value.kind === "attachments" && sourcePlan.value.primary === null) ||
-    sourcePlan.value.kind === "single-or-references",
+    sourcePlan.value.kind === "single-or-references" ||
+    sourcePlan.value.kind === "single-and-references",
 );
 const referenceMax = computed(() => caps.value.referenceImages?.max ?? null);
 /** Which conditioning this form's request will carry — the shared decision
@@ -1655,7 +1661,12 @@ const h3AuthoringError = computed(() =>
   ),
 );
 const effectiveBatchSize = computed(() =>
-  caps.value.forcesBatchSizeOne || requestConditioning.value === "references"
+  caps.value.forcesBatchSizeOne ||
+  referencesLockBatchSize(caps.value.sourceImageMode, {
+    hasSource: Boolean(form.sourceImage),
+    referenceCount: form.imageAttachments.length,
+    lastWrite: form.exclusiveWell ?? null,
+  })
     ? 1
     : Math.max(1, Math.floor(form.batchSize)),
 );
@@ -1936,8 +1947,11 @@ const upscalers = computed(() =>
 const controlModels = computed(() => models.value.filter((model) => model.family === "controlnet"));
 const sourceSectionTitle = computed(() => {
   if (sourcePlan.value.kind === "h3-boundaries") return "Frame endpoints";
-  // Klein offers both wells, so the section is named for what it holds.
+  // Klein offers both wells and ships one of them; an IP-Adapter recipe
+  // offers both and ships both. Either way the section is named for what it
+  // holds, not for a single well.
   if (sourcePlan.value.kind === "single-or-references") return "Source or references";
+  if (sourcePlan.value.kind === "single-and-references") return "Source and references";
   return caps.value.sourceImageMode !== "single"
     ? referencesOnly.value
       ? "References"
@@ -2198,7 +2212,7 @@ watch(
     previousStillSource = next.base64;
     previousStillResolution = next.resolution;
     previousStillAutomaticResolution = next.automaticResolution;
-    if (replaced && requestConditioning.value === "source") {
+    if (replaced && requestCarriesSource(requestConditioning.value)) {
       form.sourceFit = defaultSourceFitPolicy();
     }
   },
@@ -8304,11 +8318,13 @@ async function restoreOrdinaryReusedSource(
       // Preserve the pre-feature local and same-name gallery fallbacks.
     }
   }
-  // An exclusive (Klein) recipe still has a single-source restore path; only a
-  // strip-only layout has nothing to restore into the source well.
+  // A two-well recipe — exclusive (Klein) or additive (IP-Adapter) — still has
+  // a single-source restore path; only a strip-only layout has nothing to
+  // restore into the source well.
   if (
     caps.value.sourceImageMode !== "single" &&
-    caps.value.sourceImageMode !== "single-or-references"
+    caps.value.sourceImageMode !== "single-or-references" &&
+    caps.value.sourceImageMode !== "single-and-references"
   ) {
     return retainedUnavailable ? retainedSourceMediaDisclosure(retainedUnavailable) : null;
   }
@@ -8569,7 +8585,8 @@ async function useSelectedPrintAsSource(
     // recipe (the plan default), not on its reference strip.
     const attachmentMode =
       caps.value.sourceImageMode !== "single" &&
-      caps.value.sourceImageMode !== "single-or-references";
+      caps.value.sourceImageMode !== "single-or-references" &&
+      caps.value.sourceImageMode !== "single-and-references";
     const existingBytes = inlineGenerationMediaBytes(
       form,
       h3Task === "fl2va" ? "h3FirstFrame" : attachmentMode ? null : "sourceImage",

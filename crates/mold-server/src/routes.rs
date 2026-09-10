@@ -4978,9 +4978,9 @@ async fn placement_preview_outcome(
     // Face identity is part of admission for exactly the same reason, and the
     // preview reaches dependency preparation BEFORE the shared request
     // validator runs. Without this, an unqualified checkpoint carrying an
-    // `id_image` — or a build without the `pulid` feature, or a LoRA beside
-    // the photograph — would have its preview plan the PuLID bundle and
-    // answer `planned` for a request generation then refuses.
+    // `id_image` — or a build without the `pulid` feature, or a strength
+    // outside the advertised range — would have its preview plan the PuLID
+    // bundle and answer `planned` for a request generation then refuses.
     if let Err(error) = mold_core::identity::validate_identity_conditioning_with_family(
         &request,
         resolved_family.as_deref(),

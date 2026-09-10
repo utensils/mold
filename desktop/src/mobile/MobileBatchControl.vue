@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, watch } from "vue";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
-import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
+import { referencesLockBatchSize } from "@studio/lib/sourceMediaPlan";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import type { ModelEntry } from "../lib/api/types";
 import type { GenerateForm } from "../lib/generateForm";
@@ -28,11 +28,11 @@ const caps = computed(() =>
 const batchLocked = computed(
   () =>
     caps.value.forcesBatchSizeOne ||
-    conditioningForRequest(caps.value.sourceImageMode, {
+    referencesLockBatchSize(caps.value.sourceImageMode, {
       hasSource: Boolean(props.form.sourceImage),
       referenceCount: props.form.imageAttachments.length,
       lastWrite: props.form.exclusiveWell ?? null,
-    }) === "references",
+    }),
 );
 
 watch(

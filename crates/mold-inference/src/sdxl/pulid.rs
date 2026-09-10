@@ -51,7 +51,6 @@
 //! `MOLD_ATTN` rules that bound every other score matrix in the engine apply
 //! here too.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -59,6 +58,8 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
 use candle_transformers::models::stable_diffusion::attention::CrossAttentionHook;
 use candle_transformers::models::stable_diffusion::unet_2d::UNet2DConditionModelConfig;
+
+pub use crate::sd_attn_layout::{plan_attn_layers, AttnLayerSite};
 
 /// Identity tokens in a PuLID embedding.
 ///
@@ -76,18 +77,10 @@ pub const ADAPTER_PREFIX: &str = "id_adapter_attn_layers";
 
 /// SDXL's UNet cross-attention layout, for the layer table alone.
 ///
-/// Mold owns this rather than reading it off the engine's own
-/// `StableDiffusionConfig` because candle keeps that struct's `unet` field
-/// private and exposes no accessor. The values are the published
-/// `stabilityai/stable-diffusion-xl-base-1.0/unet/config.json` — the same file
-/// candle transcribes in `StableDiffusionConfig::sdxl_` and `sdxl_turbo_`
-/// (whose UNet blocks are identical to each other), and the same file
-/// `testdata/pulid_sdxl/capture_attn_layer_map.py` built the real
-/// `diffusers.UNet2DConditionModel` from.
-///
-/// Only the fields [`plan_attn_layers`] reads are load-bearing — `blocks` and
-/// `layers_per_block`. The rest are filled in for completeness and are never
-/// used to construct anything.
+/// A thin alias for `mold_candle::stable_diffusion::sdxl_unet()`, which mold
+/// already owns because candle keeps `StableDiffusionConfig`'s `unet` field
+/// private and exposes no accessor. Only the fields [`plan_attn_layers`] reads
+/// are load-bearing — `blocks` and `layers_per_block`.
 ///
 /// Two defences make a drift between this and candle's copy fail loudly rather
 /// than render a mis-wired face: the layer table is pinned against the
@@ -96,168 +89,7 @@ pub const ADAPTER_PREFIX: &str = "id_adapter_attn_layers";
 /// run time [`SdxlPulidHook::cross_attention`] refuses an index it was not
 /// planned for and a head count the UNet disagrees with.
 pub fn sdxl_unet_layout() -> UNet2DConditionModelConfig {
-    let block = |out_channels, use_cross_attn, attention_head_dim| {
-        candle_transformers::models::stable_diffusion::unet_2d::BlockConfig {
-            out_channels,
-            use_cross_attn,
-            attention_head_dim,
-        }
-    };
-    UNet2DConditionModelConfig {
-        blocks: vec![
-            block(320, None, 5),
-            block(640, Some(2), 10),
-            block(1280, Some(10), 20),
-        ],
-        center_input_sample: false,
-        cross_attention_dim: 2048,
-        downsample_padding: 1,
-        flip_sin_to_cos: true,
-        freq_shift: 0.,
-        layers_per_block: 2,
-        mid_block_scale_factor: 1.,
-        norm_eps: 1e-5,
-        norm_num_groups: 32,
-        sliced_attention_size: None,
-        use_linear_projection: true,
-    }
-}
-
-/// One hooked cross-attention module: where it sits in the forward pass, and
-/// which checkpoint index carries its weights.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AttnLayerSite {
-    /// Position among `attn2` modules in the order candle's UNet forward
-    /// visits them — `down_blocks -> mid_block -> up_blocks` — which is
-    /// exactly the `index` the [`CrossAttentionHook`] receives.
-    pub hook_index: usize,
-    /// Position in diffusers' `unet.attn_processors`, which interleaves
-    /// `attn1` and `attn2` and walks `down_blocks -> up_blocks -> mid_block`.
-    /// This is the `<i>` in `id_adapter_attn_layers.<i>`.
-    pub processor_index: usize,
-    /// The module's own channel width; `id_to_k` / `id_to_v` are
-    /// `[hidden_size, ID_TOKEN_DIM]`.
-    pub hidden_size: usize,
-    /// Attention heads this module splits `hidden_size` across.
-    pub heads: usize,
-}
-
-impl AttnLayerSite {
-    /// Width of one head. `IDAttnProcessor2_0` derives it the same way
-    /// (`attention_processor.py:338`, `inner_dim // attn.heads`).
-    pub fn dim_head(&self) -> usize {
-        self.hidden_size / self.heads
-    }
-}
-
-/// A contiguous run of `attn2` modules that share a width and a head count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Region {
-    Down(usize),
-    Mid,
-    Up(usize),
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RegionShape {
-    region: Region,
-    /// `attn2` modules this region contributes.
-    count: usize,
-    hidden_size: usize,
-    heads: usize,
-}
-
-/// The `attn2` layout of one UNet, in hook order, with each module's
-/// checkpoint index.
-///
-/// Derived from the UNet config rather than transcribed, so the SD1.5 geometry
-/// (16 modules) and the SDXL geometry (70) come out of the same arithmetic and
-/// a config change cannot leave a hard-coded table behind. The two orders are
-/// built separately and joined on `(region, local index)`:
-///
-/// * diffusers registers `down_blocks`, then `up_blocks`, then `mid_block`,
-///   because that is `UNet2DConditionModel.__init__`'s attribute order and
-///   `attn_processors` walks `named_children` — and within each transformer
-///   block it registers `attn1` before `attn2`.
-/// * candle's `forward` runs `down_blocks`, then `mid_block`, then `up_blocks`
-///   (`unet_2d.rs`'s "3. down / 4. mid / 5. up"), which is the order the hook
-///   cursor counts in.
-pub fn plan_attn_layers(config: &UNet2DConditionModelConfig) -> Vec<AttnLayerSite> {
-    let n_blocks = config.blocks.len();
-    let mut downs = Vec::new();
-    let mut ups = Vec::new();
-    for index in 0..n_blocks {
-        let block = config.blocks[index];
-        if let Some(transformer_layers) = block.use_cross_attn {
-            downs.push(RegionShape {
-                region: Region::Down(index),
-                count: config.layers_per_block * transformer_layers,
-                hidden_size: block.out_channels,
-                heads: block.attention_head_dim,
-            });
-        }
-        // `up_blocks[i]` is built from `blocks[n - 1 - i]` and carries one more
-        // resnet layer than its down-block mirror (`unet_2d.rs`'s
-        // `num_layers: config.layers_per_block + 1`).
-        let mirrored = config.blocks[n_blocks - 1 - index];
-        if let Some(transformer_layers) = mirrored.use_cross_attn {
-            ups.push(RegionShape {
-                region: Region::Up(index),
-                count: (config.layers_per_block + 1) * transformer_layers,
-                hidden_size: mirrored.out_channels,
-                heads: mirrored.attention_head_dim,
-            });
-        }
-    }
-    // The mid block is always cross-attentional and always takes the last
-    // block's width, head count, and transformer depth (`unet_2d.rs`'s
-    // `mid_transformer_layers_per_block`, mirroring diffusers' own
-    // `unet_2d_condition.py:462`).
-    let mid = config.blocks.last().map(|block| RegionShape {
-        region: Region::Mid,
-        count: block.use_cross_attn.unwrap_or(1),
-        hidden_size: block.out_channels,
-        heads: block.attention_head_dim,
-    });
-
-    // Diffusers registration order assigns the checkpoint indices.
-    let mut processor_of: BTreeMap<(Region, usize), usize> = BTreeMap::new();
-    let mut next_processor = 0usize;
-    let diffusers_order = downs
-        .iter()
-        .chain(ups.iter())
-        .chain(mid.iter())
-        .copied()
-        .collect::<Vec<_>>();
-    for shape in &diffusers_order {
-        for local in 0..shape.count {
-            // Every transformer block registers `attn1` then `attn2`.
-            next_processor += 1;
-            processor_of.insert((shape.region, local), next_processor);
-            next_processor += 1;
-        }
-    }
-
-    // Candle's forward order assigns the hook indices.
-    let candle_order = downs
-        .iter()
-        .chain(mid.iter())
-        .chain(ups.iter())
-        .copied()
-        .collect::<Vec<_>>();
-    let mut sites = Vec::with_capacity(next_processor / 2);
-    for shape in &candle_order {
-        for local in 0..shape.count {
-            let processor_index = processor_of[&(shape.region, local)];
-            sites.push(AttnLayerSite {
-                hook_index: sites.len(),
-                processor_index,
-                hidden_size: shape.hidden_size,
-                heads: shape.heads,
-            });
-        }
-    }
-    sites
+    mold_candle::stable_diffusion::sdxl_unet()
 }
 
 /// One module's identity key/value projections.
@@ -886,6 +718,57 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(site.hidden_size, *hidden_size, "{module_name}");
         }
+    }
+
+    /// IP-Adapter and PuLID key their per-layer weights off the SAME index.
+    ///
+    /// Both walk `unet.attn_processors`, which interleaves `attn1` and
+    /// `attn2`, so both name a module by its position in that list — PuLID as
+    /// `id_adapter_attn_layers.<i>` and IP-Adapter as `ip_adapter.<i>`. The
+    /// published SDXL adapter carries `.1` through `.139`, seventy modules at
+    /// odd positions, because the parameterless `attn1` processors consume the
+    /// even ones.
+    ///
+    /// This test exists because the opposite was assumed first, and the
+    /// FIXTURE agreed with it: `attn_layer_map*.json` carries an
+    /// `attn2_ordinal` column, and pinning `ip_index()` against that column
+    /// passed while loading `ip_adapter.2i+1`'s weights into module `i`. Only
+    /// the real checkpoint settles it, so this asserts the shape of the space
+    /// and `the_published_adapters_inventory_matches_the_plan` checks the
+    /// bytes.
+    #[test]
+    fn the_ip_adapter_index_is_the_interleaved_processor_index() {
+        for (config, expected) in [(sd15_config(), 16usize), (sdxl_unet_layout(), 70)] {
+            let sites = plan_attn_layers(&config);
+            assert_eq!(sites.len(), expected);
+            for site in &sites {
+                assert_eq!(site.ip_index(), site.processor_index);
+                // Every cross-attention sits at an odd position: its own
+                // block's `attn1` took the even one before it.
+                assert_eq!(site.ip_index() % 2, 1, "{site:?}");
+            }
+            let indices: std::collections::BTreeSet<usize> =
+                sites.iter().map(AttnLayerSite::ip_index).collect();
+            assert_eq!(
+                indices,
+                (0..expected)
+                    .map(|i| 2 * i + 1)
+                    .collect::<std::collections::BTreeSet<_>>()
+            );
+        }
+
+        // SD1.5's indices are a strict PREFIX of SDXL's, which is why the
+        // loader has to scan past its own plan rather than trusting that every
+        // index it wants is present.
+        let sd15: std::collections::BTreeSet<usize> = plan_attn_layers(&sd15_config())
+            .iter()
+            .map(AttnLayerSite::ip_index)
+            .collect();
+        let sdxl: std::collections::BTreeSet<usize> = plan_attn_layers(&sdxl_unet_layout())
+            .iter()
+            .map(AttnLayerSite::ip_index)
+            .collect();
+        assert!(sd15.is_subset(&sdxl));
     }
 
     /// Records the `(index, heads)` sequence a real UNet forward hands the

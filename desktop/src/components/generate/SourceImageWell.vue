@@ -119,15 +119,33 @@ const namedViewsProfile = computed(() =>
 const referencesOnly = computed(
   () =>
     (plan.value.kind === "attachments" && plan.value.primary === null) ||
-    plan.value.kind === "single-or-references",
+    plan.value.kind === "single-or-references" ||
+    plan.value.kind === "single-and-references",
+);
+/** Whether this layout renders the ordered strip beside (or instead of) the
+ * primary well — the two-well plans and the strip-only ones. */
+const referenceStrip = computed(
+  () =>
+    plan.value.kind === "attachments" ||
+    plan.value.kind === "single-or-references" ||
+    plan.value.kind === "single-and-references",
 );
 /** The advertised strip ceiling; `null` is unbounded (Qwen edit). */
 const referenceMax = computed(() =>
   plan.value.kind === "attachments"
     ? plan.value.max
-    : plan.value.kind === "single-or-references"
+    : plan.value.kind === "single-or-references" || plan.value.kind === "single-and-references"
       ? plan.value.references.max
       : null,
+);
+/**
+ * The adapter's injection strength, straight from the recipe. `null` — a
+ * recipe with no adapter, or an older host that never sent the field — hides
+ * the slider; nothing here matches on a family or a model name.
+ */
+const referenceWeight = computed(() => caps.value.referenceImages?.weight ?? null);
+const effectiveReferenceWeight = computed(
+  () => props.form.referenceWeight ?? referenceWeight.value?.default ?? 1,
 );
 /**
  * The exclusive (Klein) parking rule: whichever well holds media is the
@@ -164,6 +182,7 @@ const primaryWellImage = computed(() =>
 const sourceRefinements = computed(
   () =>
     plan.value.kind === "single" ||
+    plan.value.kind === "single-and-references" ||
     (plan.value.kind === "single-or-references" && sourceActive.value),
 );
 /** Why the attached conditioning would be refused, in the server's own order. */
@@ -566,9 +585,7 @@ function setSourceFitMode(e: Event) {
        exclusive. The wells and the strip are the SAME ones every other
        layout renders; the plan decides which of them appear. -->
   <div
-    v-else-if="
-      plan.kind === 'attachments' || plan.kind === 'single' || plan.kind === 'single-or-references'
-    "
+    v-else-if="plan.kind === 'single' || referenceStrip"
     :data-test="plan.kind === 'attachments' ? undefined : 'source-media-controls'"
   >
     <SourceMediaWells
@@ -614,9 +631,9 @@ function setSourceFitMode(e: Event) {
     <!-- The ordered picture strip. Qwen's Target + References, FLUX.2 [dev]'s
          references, and Klein's second (exclusive) well are all THIS strip. -->
     <div
-      v-if="plan.kind === 'attachments' || plan.kind === 'single-or-references'"
+      v-if="referenceStrip"
       class="mb-2 flex items-center gap-2"
-      :class="{ 'mt-3': plan.kind === 'single-or-references' }"
+      :class="{ 'mt-3': plan.kind !== 'attachments' }"
     >
       <span class="font-mono text-micro text-fg-dim whitespace-nowrap">{{
         referencesOnly ? "References" : "Pictures"
@@ -625,7 +642,7 @@ function setSourceFitMode(e: Event) {
     </div>
 
     <div
-      v-if="plan.kind === 'attachments' || plan.kind === 'single-or-references'"
+      v-if="referenceStrip"
       class="flex gap-2 overflow-x-auto pb-1"
       data-test="attachment-strip"
       data-drop-target="references"
@@ -698,10 +715,7 @@ function setSourceFitMode(e: Event) {
         ＋
       </button>
     </div>
-    <p
-      v-if="plan.kind === 'attachments' || plan.kind === 'single-or-references'"
-      class="mt-1 text-micro text-fg-dim"
-    >
+    <p v-if="referenceStrip" class="mt-1 text-micro text-fg-dim">
       {{
         referencesOnly
           ? referenceMax === null
@@ -719,6 +733,32 @@ function setSourceFitMode(e: Event) {
       {{ exclusive.note }}
     </p>
 
+    <!-- The adapter's injection strength. Gated on the recipe advertising a
+         `weight` control at all — never on a family — and its bounds are the
+         server's, so a retuned range needs no client release. It stays
+         ABSENT from the request until touched, so a default-valued render is
+         byte-identical to one that never named it. -->
+    <div
+      v-if="referenceWeight && form.imageAttachments.length > 0"
+      class="mt-3"
+      data-test="reference-weight"
+    >
+      <SliderRow
+        :model-value="effectiveReferenceWeight"
+        :min="referenceWeight.min"
+        :max="referenceWeight.max"
+        :step="referenceWeight.step"
+        label="Reference strength"
+        :value-label="effectiveReferenceWeight.toFixed(2)"
+        low="Prompt leads"
+        high="Picture leads"
+        @update:model-value="form.referenceWeight = $event"
+      />
+      <p class="mt-1 text-micro text-fg-dim">
+        How hard the reference picture steers the render beside the prompt.
+      </p>
+    </div>
+
     <ImagePickerModal
       v-if="targetLayout"
       :open="targetPickerOpen"
@@ -729,7 +769,7 @@ function setSourceFitMode(e: Event) {
       @close="targetPickerOpen = false"
     />
     <ImagePickerModal
-      v-if="plan.kind === 'attachments' || plan.kind === 'single-or-references'"
+      v-if="referenceStrip"
       :open="editPickerOpen"
       :multiple="true"
       :title="referencesOnly ? 'Add references' : 'Add pictures'"

@@ -67,6 +67,7 @@ impl FluxTransformer {
         txt_ids: &Tensor,
         vec_: &Tensor,
         timesteps: &[f64],
+        step_offset: usize,
         guidance: f64,
         progress: &ProgressReporter,
         inpaint_ctx: Option<&InpaintContext>,
@@ -83,6 +84,12 @@ impl FluxTransformer {
         for (step, window) in timesteps.windows(2).enumerate() {
             progress.checkpoint()?;
             let step_start = Instant::now();
+            // img2img truncates the schedule, so `step` counts the REMAINING
+            // window while `id_start_step` and `cfg_start_step` are measured
+            // against the full schedule the request asked for. `step_offset`
+            // is that truncation, and it is 0 for txt2img — so every gate
+            // below asks the absolute question a request's step actually named.
+            let absolute_step = step_offset + step;
             let (t_curr, t_prev) = match window {
                 [a, b] => (a, b),
                 _ => continue,
@@ -95,7 +102,7 @@ impl FluxTransformer {
             // is therefore structural, not a numerical coincidence, and it
             // holds on the *same* transformer route rather than requiring a
             // separate no-PuLID load.
-            let hook = pulid.and_then(|runtime| runtime.hook_for_step(step));
+            let hook = pulid.and_then(|runtime| runtime.hook_for_step(absolute_step));
             let pred = self.forward_once(
                 &img,
                 img_ids,
@@ -112,11 +119,13 @@ impl FluxTransformer {
             // produced it — the same structural gate `hook_for_step` uses, so
             // a request that never asked for true CFG runs the identical code.
             let pred = match true_cfg {
-                Some(branch) if step >= branch.start_step => {
+                Some(branch) if absolute_step >= branch.start_step => {
                     // `PuLID/flux/sampling.py:145`: the negative branch takes
                     // the UNCONDITIONAL identity, gated by the SAME
                     // `id_start_step` as the conditional one.
-                    let neg_hook = branch.pulid.and_then(|runtime| runtime.hook_for_step(step));
+                    let neg_hook = branch
+                        .pulid
+                        .and_then(|runtime| runtime.hook_for_step(absolute_step));
                     let neg_pred = self.forward_once(
                         &img,
                         img_ids,

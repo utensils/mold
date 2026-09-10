@@ -136,6 +136,7 @@ pub const AUXILIARY_FAMILIES: &[&str] = &[
     "ltx2-control",
     "ltx2-camera-control",
     "pulid",
+    "ip-adapter",
     HUNYUAN3D_PAINT_FAMILY,
 ];
 
@@ -214,6 +215,25 @@ pub enum ModelComponent {
     /// candle-loadable artifact is produced on first use and is deliberately
     /// not a manifest file.
     FaceParser,
+    /// IP-Adapter's image-prompt weights: the small CLIP-embedding projection
+    /// plus the per-layer `to_k_ip`/`to_v_ip` pair grafted onto every `attn2`
+    /// module. A conditioning adapter, never a standalone checkpoint, so it is
+    /// deliberately not a [`ModelComponent::Transformer`] — the same reasoning
+    /// [`ModelComponent::IdentityAdapter`] records.
+    ///
+    /// Kept distinct from `IdentityAdapter` because the two bundles share a
+    /// storage prefix: resolution is strictly by component, so one name for
+    /// both would let a PuLID install answer for an IP-Adapter one.
+    ImagePromptAdapter,
+    /// The OpenCLIP ViT-H/14 vision tower IP-Adapter conditions on.
+    ///
+    /// Unlike [`ModelComponent::IdentityVisionEncoder`], upstream publishes
+    /// this in HF safetensors layout, so it is loaded directly and there is no
+    /// derived artifact.
+    ImagePromptVisionEncoder,
+    /// The vision tower's `config.json`, carried so the loader reads the
+    /// published architecture rather than trusting a transcription of it.
+    ImagePromptVisionConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -320,7 +340,11 @@ impl ModelManifest {
                 && !crate::ltx25_manifest::is_runtime_manifest(&self.name))
             || matches!(
                 self.family.as_str(),
-                "ltx2-control" | "ltx2-camera-control" | PULID_FAMILY | HUNYUAN3D_PAINT_FAMILY
+                "ltx2-control"
+                    | "ltx2-camera-control"
+                    | PULID_FAMILY
+                    | IP_ADAPTER_FAMILY
+                    | HUNYUAN3D_PAINT_FAMILY
             )
     }
 
@@ -1550,6 +1574,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(ltx2_control_manifests());
     manifests.extend(ltx2_camera_control_manifests());
     manifests.extend(pulid_manifests());
+    manifests.extend(ip_adapter_manifests());
     manifests.extend(controlnet_manifests());
     manifests.extend(qwen3_expand_manifests());
     manifests.extend(upscaler_manifests());
@@ -6100,11 +6125,102 @@ pub fn auxiliary_manifests_for_request_with_family(
             manifests.push(family.manifest());
         }
     }
+    // The image-prompt bundle follows the same rule, through its own one
+    // authority. Without this the local path advertises `Combines` on SD1.5
+    // and SDXL and then cannot provision it: the render loads the checkpoint
+    // and both text encoders before discovering the adapter is absent.
+    if crate::validation::request_conditions_on_reference(request) {
+        if let Some(family) =
+            family.and_then(crate::ip_adapter_assets::ImagePromptFamily::from_generation_family)
+        {
+            manifests.push(family.manifest());
+        }
+    }
     manifests
+}
+
+#[cfg(test)]
+mod ip_adapter_auxiliary_tests {
+    use super::*;
+
+    fn request(model: &str, weight: Option<f64>, with_reference: bool) -> crate::GenerateRequest {
+        let mut req = crate::test_support::minimal_generate_request(model);
+        if with_reference {
+            req.edit_images = Some(vec![vec![0x89, 0x50, 0x4E, 0x47]]);
+        }
+        req.reference_weight = weight;
+        req
+    }
+
+    /// A local SD render with a reference plans its bundle, so `mold run`
+    /// pulls it BEFORE the checkpoint loads rather than failing an encode
+    /// late. The advertised capability and the acquirable asset have to be the
+    /// same answer.
+    #[test]
+    fn an_sd_reference_request_plans_its_own_bundle() {
+        for (model, family, expected) in [
+            ("sd15:fp16", "sd15", IP_ADAPTER_SD15_MANIFEST),
+            ("sdxl-base:fp16", "sdxl", IP_ADAPTER_SDXL_MANIFEST),
+        ] {
+            let planned = auxiliary_manifests_for_request_with_family(
+                &request(model, None, true),
+                Some(family),
+            );
+            assert!(planned.contains(&expected), "{model}: {planned:?}");
+        }
+    }
+
+    /// Weight zero conditions on nothing, so it plans nothing — the same
+    /// falsification rule `id_weight` has, and the reason the predicate is the
+    /// effective weight rather than the presence of `edit_images`.
+    #[test]
+    fn a_zero_weighted_reference_plans_no_bundle() {
+        let planned = auxiliary_manifests_for_request_with_family(
+            &request("sdxl-base:fp16", Some(0.0), true),
+            Some("sdxl"),
+        );
+        assert!(planned.is_empty(), "{planned:?}");
+    }
+
+    /// A family whose references are native to the checkpoint has no adapter
+    /// to pull, and a request with no reference at all plans nothing.
+    #[test]
+    fn other_families_and_bare_requests_plan_no_bundle() {
+        for (model, family) in [
+            ("flux2-klein:bf16", "flux2"),
+            ("qwen-image-edit-2511:q4", "qwen-image-edit"),
+        ] {
+            let planned = auxiliary_manifests_for_request_with_family(
+                &request(model, None, true),
+                Some(family),
+            );
+            assert!(
+                !planned.iter().any(|name| name.starts_with("ip-adapter")),
+                "{model}: {planned:?}"
+            );
+        }
+        let planned = auxiliary_manifests_for_request_with_family(
+            &request("sdxl-base:fp16", None, false),
+            Some("sdxl"),
+        );
+        assert!(planned.is_empty(), "{planned:?}");
+    }
 }
 
 /// Manifest name for the PuLID v1.1 (SDXL) asset bundle.
 pub const PULID_SDXL_MANIFEST: &str = "pulid-sdxl";
+
+/// Manifest family every IP-Adapter bundle carries.
+///
+/// One family for both bundles so `storage_path` lands their shared vision
+/// tower at a single `shared/ip-adapter/` path.
+pub const IP_ADAPTER_FAMILY: &str = "ip-adapter";
+
+/// The SD1.5 image-prompt bundle.
+pub const IP_ADAPTER_SD15_MANIFEST: &str = "ip-adapter-sd15";
+
+/// The SDXL image-prompt bundle.
+pub const IP_ADAPTER_SDXL_MANIFEST: &str = "ip-adapter-sdxl";
 
 /// The four extraction artifacts every PuLID bundle shares.
 ///
@@ -6267,6 +6383,107 @@ fn pulid_manifests() -> Vec<ModelManifest> {
                     },
                 ];
                 files.extend(shared_pulid_extraction_files());
+                files
+            },
+            defaults: pulid_bundle_defaults(),
+            hidden: true,
+        },
+    ]
+}
+
+/// The vision tower both IP-Adapter bundles condition on.
+///
+/// `ip-adapter_sdxl_vit-h` is named for THIS tower — it deliberately reuses
+/// `models/image_encoder` rather than the ViT-bigG one beside it, which
+/// belongs to the out-of-scope `ip-adapter_sdxl`. So the two bundles differ in
+/// exactly one file, and because they carry the same family they land these
+/// two at one `shared/ip-adapter/` path: a machine holding one bundle pulls
+/// only the other's adapter. The same arrangement `shared_pulid_extraction_files`
+/// makes for the four artifacts PuLID's two bundles share.
+///
+/// LICENSE: laion's CLIP-ViT-H-14 is MIT and `h94/IP-Adapter` is Apache-2.0,
+/// so neither bundle needs recorded acceptance — unlike PuLID, whose
+/// antelopev2 graphs are research-only.
+fn shared_ip_adapter_vision_files() -> Vec<ModelFile> {
+    vec![
+        ModelFile {
+            hf_repo: "h94/IP-Adapter".to_string(),
+            hf_filename: "models/image_encoder/model.safetensors".to_string(),
+            component: ModelComponent::ImagePromptVisionEncoder,
+            size_bytes: 2_528_373_448,
+            gated: false,
+            sha256: Some("6ca9667da1ca9e0b0f75e46bb030f7e011f44f86cbfb8d5a36590fcd7507b030"),
+        },
+        // Carried so the loader reads the published architecture rather than
+        // trusting a transcription of it. 1280 wide, 32 layers, 16 heads,
+        // patch 14, projection 1024, `hidden_act: "gelu"` — that last one is
+        // the exact erf form, which is neither candle's tanh `Tensor::gelu()`
+        // nor the fork's QuickGelu, and is why the tower is ported locally.
+        ModelFile {
+            hf_repo: "h94/IP-Adapter".to_string(),
+            hf_filename: "models/image_encoder/config.json".to_string(),
+            component: ModelComponent::ImagePromptVisionConfig,
+            size_bytes: 560,
+            gated: false,
+            sha256: Some("625d37b31afbf2f0792a87846b3654ee23f20568409e35b78a1f795b04e1a7a1"),
+        },
+    ]
+}
+
+/// The IP-Adapter auxiliary asset bundles, one per base architecture.
+///
+/// Like the PuLID bundles these are emphatically **not** generation models:
+/// each is an image-prompt adapter plus the shared vision tower a render needs
+/// before it can condition on a reference picture. Hidden, auxiliary, and
+/// files-only.
+///
+/// Scope is the CLASSIC adapters. The Plus files (`ip-adapter-plus_*`) replace
+/// the linear projection with a Resampler emitting 16 tokens instead of 4;
+/// `ip_adapter::IpAdapterShape` already reads the token count off the file, so
+/// adding them later is a manifest entry and a Resampler, not a new contract.
+fn ip_adapter_manifests() -> Vec<ModelManifest> {
+    vec![
+        ModelManifest {
+            name: IP_ADAPTER_SD15_MANIFEST.to_string(),
+            family: IP_ADAPTER_FAMILY.to_string(),
+            description:
+                "IP-Adapter image prompting for SD1.5 — adapter and OpenCLIP ViT-H/14 vision tower"
+                    .to_string(),
+            files: {
+                let mut files = vec![ModelFile {
+                    hf_repo: "h94/IP-Adapter".to_string(),
+                    hf_filename: "models/ip-adapter_sd15.safetensors".to_string(),
+                    component: ModelComponent::ImagePromptAdapter,
+                    size_bytes: 44_642_768,
+                    gated: false,
+                    sha256: Some(
+                        "289b45f16d043d0bf542e45831f971dcdaabe18b656f11e86d9dfba7e9ee3369",
+                    ),
+                }];
+                files.extend(shared_ip_adapter_vision_files());
+                files
+            },
+            defaults: pulid_bundle_defaults(),
+            hidden: true,
+        },
+        ModelManifest {
+            name: IP_ADAPTER_SDXL_MANIFEST.to_string(),
+            family: IP_ADAPTER_FAMILY.to_string(),
+            description:
+                "IP-Adapter image prompting for SDXL — adapter and OpenCLIP ViT-H/14 vision tower"
+                    .to_string(),
+            files: {
+                let mut files = vec![ModelFile {
+                    hf_repo: "h94/IP-Adapter".to_string(),
+                    hf_filename: "sdxl_models/ip-adapter_sdxl_vit-h.safetensors".to_string(),
+                    component: ModelComponent::ImagePromptAdapter,
+                    size_bytes: 698_391_064,
+                    gated: false,
+                    sha256: Some(
+                        "ebf05d918348aec7abb02a5e9ecef77e0aaea6914a5c4ea13f50d45eb1681831",
+                    ),
+                }];
+                files.extend(shared_ip_adapter_vision_files());
                 files
             },
             defaults: pulid_bundle_defaults(),
@@ -9455,7 +9672,12 @@ mod tests {
         // checkpoints, each carrying its DiT, shape VAE and DINO tower.
         // Mesh preprocessing: +3 hidden runnable workers — auto/forced U²-Net
         // matting aliases and the Delight diffusion pipeline.
-        assert_eq!(known_manifests().len(), 208);
+        // IP-Adapter bump (#1573): +2 hidden auxiliary files-only bundles,
+        // `ip-adapter-sd15` and `ip-adapter-sdxl`. Like the PuLID pair they
+        // share their vision tower — the OpenCLIP ViT-H/14 at the SAME
+        // `shared/ip-adapter/` paths — and differ by one file, the adapter.
+        // Neither is a checkpoint or a default-model candidate.
+        assert_eq!(known_manifests().len(), 210);
     }
 
     /// Every reviewed H3 Turbo adapter lands in the one family `loras/`

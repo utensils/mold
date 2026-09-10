@@ -26,6 +26,8 @@ import {
   flux2DevRecipe,
   flux2KleinRecipe,
   qwenImageEditRecipe,
+  sdxlIpAdapterRecipe,
+  sdxlRecipe,
 } from "@studio/lib/generationProfile.testFixtures";
 
 describe("loraHostBinding", () => {
@@ -3563,5 +3565,108 @@ describe("file under", () => {
       [],
     );
     expect(form.fileUnderAutoTag).toBe(true);
+  });
+});
+
+/**
+ * The ADDITIVE reference contract (`combines`, IP-Adapter on SD1.5/SDXL).
+ *
+ * Every other reference family replaces or excludes the source image, so
+ * every earlier test here asserts one well OR the other. This one is the
+ * first that carries both in the same pass, and the strength that scales it.
+ */
+describe("buildRequest — an additive recipe carries both wells at once", () => {
+  function ipAdapterModel(): ModelEntry {
+    return {
+      ...ltx2Model(),
+      name: "sdxl-base:fp16",
+      family: "sdxl",
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 25,
+      default_guidance: 7,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "sdxl",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [sdxlIpAdapterRecipe()],
+      },
+    } as unknown as ModelEntry;
+  }
+
+  function ipAdapterForm(): GenerateForm {
+    const form = newGenerateForm();
+    applyModelDefaults(form, ipAdapterModel());
+    form.prompt = "a lantern on a pier";
+    return form;
+  }
+
+  it("ships source_image, strength, mask AND edit_images together", () => {
+    const form = ipAdapterForm();
+    form.sourceImage = "SOURCE";
+    form.sourceImageName = "pier.png";
+    form.maskImage = "MASK";
+    form.strength = 0.42;
+    form.imageAttachments = ["REF"];
+    // A `lastWrite` marker is meaningless here — nothing parks — so the well
+    // the user happened to touch last must not remove the other from the wire.
+    form.exclusiveWell = "references";
+
+    const req = buildRequest(form);
+    expect(req.source_image).toBe("SOURCE");
+    expect(req.source_image_name).toBe("pier.png");
+    expect(req.strength).toBe(0.42);
+    expect(req.mask_image).toBe("MASK");
+    expect(req.edit_images).toEqual(["REF"]);
+  });
+
+  it("keeps reference_weight absent until the user touches it", () => {
+    const form = ipAdapterForm();
+    form.imageAttachments = ["REF"];
+    expect(form.referenceWeight).toBeNull();
+    expect("reference_weight" in buildRequest(form)).toBe(false);
+
+    form.referenceWeight = 0.6;
+    expect(buildRequest(form).reference_weight).toBe(0.6);
+  });
+
+  it("never sends a strength for a recipe that advertises no adapter", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, {
+      ...ipAdapterModel(),
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "sdxl",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [sdxlRecipe()],
+      },
+    } as unknown as ModelEntry);
+    form.prompt = "a cat";
+    form.imageAttachments = ["REF"];
+    form.referenceWeight = 1.5;
+
+    const req = buildRequest(form);
+    expect("reference_weight" in req).toBe(false);
+    // …and with no advertised reference block the strip stays off the wire.
+    expect("edit_images" in req).toBe(false);
+  });
+
+  it("does not lock the batch, because the reference is an image prompt", () => {
+    const form = ipAdapterForm();
+    form.imageAttachments = ["REF"];
+    form.batchSize = 3;
+    expect(buildRequest(form).batch_size).toBe(3);
+  });
+
+  it("restores the strength a running print was submitted with", () => {
+    const form = ipAdapterForm();
+    applyRequestToForm(
+      form,
+      { ...buildRequest(form), edit_images: ["REF"], reference_weight: 0.75 },
+      [],
+    );
+    expect(form.referenceWeight).toBe(0.75);
   });
 });

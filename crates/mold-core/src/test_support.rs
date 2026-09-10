@@ -37,6 +37,7 @@ pub(crate) fn minimal_generate_request(model: &str) -> crate::types::GenerateReq
         source_image: None,
         source_image_name: None,
         edit_images: None,
+        reference_weight: None,
         references: None,
         strength: 0.75,
         mask_image: None,

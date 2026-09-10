@@ -172,8 +172,6 @@ describe("identityValidationError", () => {
     weight: null,
     startStep: null,
     steps: 20,
-    hasLora: false,
-    hasSourceImage: false,
   };
 
   it("says nothing when identity is not used at all", () => {
@@ -204,8 +202,6 @@ describe("identityValidationError", () => {
       identityValidationError({
         ...base,
         supported: false,
-        hasLora: true,
-        hasSourceImage: true,
         weight: 99,
         startStep: 999,
       }),
@@ -225,16 +221,13 @@ describe("identityValidationError", () => {
     expect(identityValidationError({ ...base, supported: false })).toBeNull();
   });
 
-  it("refuses identity combined with a LoRA", () => {
-    expect(identityValidationError({ ...base, hasLora: true })).toMatch(
-      /LoRA/i,
-    );
-  });
-
-  it("refuses identity combined with a source image", () => {
-    expect(identityValidationError({ ...base, hasSourceImage: true })).toMatch(
-      /source image/i,
-    );
+  it("no longer knows about LoRAs or source images at all", () => {
+    // Both pairings are qualified, and the refusal is not merely relaxed —
+    // the inputs are gone, so no surface can reintroduce one by passing a
+    // flag this module quietly still reads.
+    expect(Object.keys(base)).not.toContain("hasLora");
+    expect(Object.keys(base)).not.toContain("hasSourceImage");
+    expect(identityValidationError(base)).toBeNull();
   });
 
   it("bounds the weight to the server range", () => {

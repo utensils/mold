@@ -2199,7 +2199,10 @@ fn resolved_manifest_paths_exist(
         | ModelComponent::IdentityVisionEncoder
         | ModelComponent::FaceDetector
         | ModelComponent::FaceRecognizer
-        | ModelComponent::FaceParser => false,
+        | ModelComponent::FaceParser
+        | ModelComponent::ImagePromptAdapter
+        | ModelComponent::ImagePromptVisionEncoder
+        | ModelComponent::ImagePromptVisionConfig => false,
         ModelComponent::Decoder => paths.decoder.as_ref().is_some_and(|path| path.exists()),
         ModelComponent::Upscaler => paths.transformer.exists(),
     })

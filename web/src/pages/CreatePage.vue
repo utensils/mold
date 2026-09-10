@@ -1147,7 +1147,8 @@ const requestConditioning = computed(() =>
   conditioningForRequest(capabilities.value.sourceImageMode, {
     hasSource: Boolean(form.state.value.imageAttachments[0]?.base64),
     referenceCount:
-      capabilities.value.sourceImageMode === "single-or-references"
+      capabilities.value.sourceImageMode === "single-or-references" ||
+      capabilities.value.sourceImageMode === "single-and-references"
         ? (form.state.value.referenceImages?.length ?? 0)
         : form.state.value.imageAttachments.length,
     lastWrite: form.state.value.exclusiveWell ?? null,
@@ -1188,8 +1189,6 @@ const identityError = computed(() =>
     weight: form.state.value.identityWeight ?? null,
     startStep: form.state.value.identityStartStep ?? null,
     steps: form.state.value.steps,
-    hasLora: form.state.value.loras.length > 0,
-    hasSourceImage: form.state.value.imageAttachments.length > 0,
   }),
 );
 
@@ -2331,8 +2330,13 @@ function validateSubmit(): boolean {
   // recipe (Klein) the mask PARKS with the well it belongs to the moment the
   // references become active — `toRequest` already drops it there, so blocking
   // would strand Generate behind a control the user cannot even see.
+  // …and an ADDITIVE recipe (IP-Adapter) parks nothing at all: its source
+  // well is live beside the references, so a mask with no source is still the
+  // plain mistake it is on any img2img recipe.
   const maskParked =
-    referencesReplaceSource.value || requestConditioning.value === "references";
+    capabilities.value.sourceImageMode !== "single-and-references" &&
+    (referencesReplaceSource.value ||
+      requestConditioning.value === "references");
   if (
     !maskParked &&
     form.state.value.maskImage &&
@@ -2373,7 +2377,7 @@ function validateSubmit(): boolean {
     showAdvanced.value = true;
     return false;
   }
-  // Identity is refused as a COMBINATION (a LoRA, a source image, a knob with
+  // Identity is refused for its OWN controls (a strength or start step out of range, a knob with
   // no photo, an unqualified checkpoint), so the block has to happen here as
   // well as inline: `toRequest` silently drops the whole partition, which
   // would otherwise render a stranger's face without a word.
@@ -4029,18 +4033,38 @@ function openJob(job: Job) {
   const source = request.source_image
     ? image(request.source_image, request.source_image_name || "Source image")
     : null;
-  if (request.edit_images?.length || source) {
+  // A TWO-WELL layout keeps its references in their own store, because
+  // `imageAttachments[0]` is still the source well. Restoring `edit_images`
+  // into the attachments there would put a reference in the source well —
+  // and on an ADDITIVE recipe, whose request carries both, it would also
+  // overwrite the source image the print was actually made from.
+  const twoWellLayout =
+    capabilities.value.sourceImageMode === "single-or-references" ||
+    capabilities.value.sourceImageMode === "single-and-references";
+  const restoredReferences = (request.edit_images ?? []).map((base64, index) =>
+    image(
+      base64,
+      !twoWellLayout && index === 0 ? "Target image" : `Reference ${index + 1}`,
+    ),
+  );
+  if (restoredReferences.length || source) {
     preserveRestoredSourceCanvas(
-      request.edit_images?.[0] ?? request.source_image ?? "",
+      (twoWellLayout ? request.source_image : null) ??
+        request.edit_images?.[0] ??
+        request.source_image ??
+        "",
     );
   }
-  form.state.value.imageAttachments = request.edit_images?.length
-    ? request.edit_images.map((base64, index) =>
-        image(base64, index === 0 ? "Target image" : `Reference ${index}`),
-      )
-    : source
+  form.state.value.referenceImages = twoWellLayout ? restoredReferences : [];
+  form.state.value.imageAttachments = twoWellLayout
+    ? source
       ? [source]
-      : [];
+      : []
+    : restoredReferences.length
+      ? restoredReferences
+      : source
+        ? [source]
+        : [];
   if (request.source_image) {
     const effectiveSource = request.source_image;
     void sha256HexOfBase64(effectiveSource)
@@ -4085,6 +4109,7 @@ function openJob(job: Job) {
     : null;
   form.state.value.identityWeight = request.id_weight ?? null;
   form.state.value.identityStartStep = request.id_start_step ?? null;
+  form.state.value.referenceWeight = request.reference_weight ?? null;
   form.state.value.maskImage = request.mask_image
     ? image(request.mask_image, "Mask")
     : null;

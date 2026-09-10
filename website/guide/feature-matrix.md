@@ -18,8 +18,8 @@ features today?
 | Family          | img2img | Inpainting | Edit / video references                               |
 | --------------- | ------- | ---------- | ----------------------------------------------------- |
 | FLUX.1          | Yes     | Yes        | No                                                    |
-| SDXL            | Yes     | Yes        | No                                                    |
-| SD 1.5          | Yes     | Yes        | No                                                    |
+| SDXL            | Yes     | Yes        | One IP-Adapter image prompt, alongside img2img        |
+| SD 1.5          | Yes     | Yes        | One IP-Adapter image prompt, alongside img2img        |
 | SD 3.5          | Yes     | Yes        | No                                                    |
 | Z-Image         | Yes     | Yes        | No                                                    |
 | Flux.2 Klein    | Yes     | Yes        | No                                                    |

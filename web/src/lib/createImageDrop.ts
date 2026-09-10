@@ -37,7 +37,8 @@ export function droppedReferenceCount(
   state: GenerateFormState,
   plan: SourceMediaPlan,
 ): number {
-  return plan.kind === "single-or-references"
+  return plan.kind === "single-or-references" ||
+    plan.kind === "single-and-references"
     ? (state.referenceImages?.length ?? 0)
     : state.imageAttachments.length;
 }
@@ -119,7 +120,10 @@ export async function applyCreateDrop(
       return null;
     case "references": {
       const max = context.referenceMax ?? undefined;
-      if (context.plan.kind === "single-or-references") {
+      if (
+        context.plan.kind === "single-or-references" ||
+        context.plan.kind === "single-and-references"
+      ) {
         state.referenceImages = [...(state.referenceImages ?? []), image].slice(
           0,
           max,

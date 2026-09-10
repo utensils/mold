@@ -12,7 +12,7 @@
  * Nothing here is a NEW rule. The admission contract is:
  *   - identity is accepted only on an identity-qualified checkpoint, which
  *     the server advertises per model (never inferred from a name here);
- *   - it may not combine with a LoRA or an img2img source image;
+ *   - it rides WITH a LoRA and an img2img source image;
  *   - a weight/start-step/name without an image is invalid;
  *   - the image must be PNG or JPEG, at most 16 MiB encoded, 8192 px per
  *     axis, and 32 MP decoded — all checked from the header alone.
@@ -119,8 +119,6 @@ export interface IdentityFormInput {
   startStep: number | null;
   /** Denoise steps this print will render. */
   steps: number;
-  hasLora: boolean;
-  hasSourceImage: boolean;
 }
 
 /** Decoded byte length of a base64 payload, without decoding it. */
@@ -326,12 +324,6 @@ export function identityValidationError(
   // different person — but it says what to do rather than reporting an empty
   // payload the user never chose.
   if (!input.image.base64) return IDENTITY_PHOTO_UNAVAILABLE;
-  if (input.hasLora) {
-    return "An identity photo cannot be combined with a LoRA yet. Remove the LoRA or the photo.";
-  }
-  if (input.hasSourceImage) {
-    return "An identity photo cannot be combined with a source image yet. Remove the source image or the photo.";
-  }
   if (input.weight != null) {
     if (
       !Number.isFinite(input.weight) ||

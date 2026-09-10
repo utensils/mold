@@ -29,6 +29,7 @@ pub mod identity;
 mod image;
 pub(crate) mod img2img;
 pub mod img_utils;
+pub mod ip_adapter;
 pub mod latent_preview;
 pub mod loader;
 pub mod ltx2;
@@ -109,6 +110,10 @@ pub mod runtime_env;
 pub mod scheduler;
 pub mod sd15;
 pub mod sd3;
+pub mod sd_attn_layout;
+/// Image-prompt (IP-Adapter) residency and hook composition, shared by the
+/// SD1.5 and SDXL engines. Crate-private: nothing outside an engine builds one.
+mod sd_reference;
 pub mod sdxl;
 pub mod shared_pool;
 pub mod upscaler;

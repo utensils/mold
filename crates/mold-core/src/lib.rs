@@ -30,6 +30,7 @@ pub mod ltx2_duration;
 pub mod ltx2_preprocess;
 pub mod ltx2_weight_index;
 pub use ltx2_control::Ltx2ControlAdapterInfo;
+pub mod ip_adapter_assets;
 pub mod ltx25_manifest;
 pub mod ltx25_probe;
 pub mod manifest;

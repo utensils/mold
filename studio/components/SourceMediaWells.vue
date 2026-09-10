@@ -34,7 +34,9 @@ const props = withDefaults(
     /** Prefix for surface-specific test hooks while keeping one component. */
     testIdPrefix?: string;
     /**
-     * `single-or-references` only: this well's media is PARKED because the
+     * `single-or-references` ONLY — an additive (`single-and-references`)
+     * plan never passes this, because nothing parks there: this well's
+     * media is PARKED because the
      * References strip holds the conditioning that ships. The well stays
      * fully interactive — attaching here makes it the active one again
      * (`resolveExclusiveWells` is last-write-wins) — and its media is kept,
@@ -66,7 +68,8 @@ const emit = defineEmits<{
 const wells = computed(() =>
   props.plan.kind === "single" ||
   props.plan.kind === "h3-boundaries" ||
-  props.plan.kind === "single-or-references"
+  props.plan.kind === "single-or-references" ||
+  props.plan.kind === "single-and-references"
     ? props.plan
     : props.plan.kind === "attachments" && props.plan.primary === "target"
       ? props.plan
@@ -84,7 +87,9 @@ const video = computed(
   () =>
     h3.value ||
     (props.plan.kind === "single" && props.plan.video) ||
-    (props.plan.kind === "single-or-references" && props.plan.single.video),
+    ((props.plan.kind === "single-or-references" ||
+      props.plan.kind === "single-and-references") &&
+      props.plan.single.video),
 );
 const required = computed(() =>
   props.plan.kind === "single"
@@ -93,7 +98,8 @@ const required = computed(() =>
       ? props.plan.requiredEndpoint === "first"
       : props.plan.kind === "attachments"
         ? props.plan.required
-        : props.plan.kind === "single-or-references"
+        : props.plan.kind === "single-or-references" ||
+            props.plan.kind === "single-and-references"
           ? props.plan.single.required
           : false,
 );
@@ -119,7 +125,10 @@ const endIncompatible = computed(
 );
 const showEndWell = computed(() => {
   if (props.plan.kind === "single") return props.plan.endFrame;
-  if (props.plan.kind === "single-or-references")
+  if (
+    props.plan.kind === "single-or-references" ||
+    props.plan.kind === "single-and-references"
+  )
     return props.plan.single.endFrame;
   if (props.plan.kind === "h3-boundaries")
     return props.plan.requiredEndpoint !== "first" || !!props.endFrame;

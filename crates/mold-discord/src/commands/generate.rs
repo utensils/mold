@@ -652,6 +652,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         scheduler: None,
         cfg_plus: None,
         edit_images: None,
+        reference_weight: None,
         references: if is_h3
             && mold_core::minimax_h3::task_for_model(params.model)
                 == Some(mold_core::minimax_h3::Task::Ref2va)

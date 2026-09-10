@@ -51,6 +51,26 @@ export type SourceMediaPlan =
         maxPixelsMulti: number | null;
       };
     }
+  /**
+   * BOTH wells, live AT ONCE (IP-Adapter on SD1.5/SDXL): the reference is an
+   * image PROMPT injected as a second key/value stream on every
+   * cross-attention output, so it rides WITH the source image, its strength,
+   * the repaint mask, ControlNet and a LoRA in one pass.
+   *
+   * The shape is the exclusive plan's, deliberately — the same two wells, the
+   * same strip — and the whole difference is that NOTHING parks: there is no
+   * `resolveExclusiveWells` call for this kind, both wells stay enabled, and
+   * the request carries whatever each one holds.
+   */
+  | {
+      kind: "single-and-references";
+      single: { required: boolean; endFrame: boolean; video: boolean };
+      references: {
+        max: number | null;
+        maxPixelsSingle: number | null;
+        maxPixelsMulti: number | null;
+      };
+    }
   /** MiniMax H3 FL2VA first/last boundaries — the same two wells as
    * `single`+`endFrame`, backed by dedicated H3 authoring state. */
   | { kind: "h3-boundaries"; requiredEndpoint: "first" | null }
@@ -87,8 +107,12 @@ export function sourceMediaPlan(
         primary: references?.primaryIsTarget ? "target" : null,
       };
     case "single-or-references":
+    case "single-and-references":
       return {
-        kind: "single-or-references",
+        kind:
+          caps.sourceImageMode === "single-or-references"
+            ? "single-or-references"
+            : "single-and-references",
         single: {
           required: caps.requiresSourceImage,
           endFrame: caps.supportsEndFrame,
@@ -182,11 +206,20 @@ export function resolveExclusiveWells(
  * other depending on what the user attached, and a builder that emitted both
  * is refused at admission. H3 modes answer `none` — their boundaries and
  * ordered references have their own serializer.
+ *
+ * `"both"` is the ADDITIVE answer, and the reason this returns a union rather
+ * than one well: an IP-Adapter render carries `source_image` (with its
+ * strength and mask) AND `edit_images` in the same request, so a caller that
+ * only ever asked `=== "source"` would drop the reference and one that only
+ * asked `=== "references"` would drop the img2img. Ask through
+ * `requestCarriesSource` / `requestCarriesReferences` rather than comparing.
  */
+export type RequestConditioning = ExclusiveWell | "both" | "none";
+
 export function conditioningForRequest(
   mode: SourceImageMode,
   state: ExclusiveWellsState,
-): ExclusiveWell | "none" {
+): RequestConditioning {
   switch (mode) {
     case "single":
       return state.hasSource ? "source" : "none";
@@ -195,8 +228,51 @@ export function conditioningForRequest(
       return state.referenceCount > 0 ? "references" : "none";
     case "single-or-references":
       return resolveExclusiveWells(state).active ?? "none";
+    case "single-and-references": {
+      // Nothing parks, so the answer is simply what each well is holding.
+      const hasReferences = state.referenceCount > 0;
+      if (state.hasSource && hasReferences) return "both";
+      if (state.hasSource) return "source";
+      return hasReferences ? "references" : "none";
+    }
     case "h3-boundaries":
     case "ordered-references":
       return "none";
   }
+}
+
+/** Whether the request carries `source_image` (and so its strength/mask). */
+export function requestCarriesSource(
+  conditioning: RequestConditioning,
+): boolean {
+  return conditioning === "source" || conditioning === "both";
+}
+
+/** Whether the request carries `edit_images`. */
+export function requestCarriesReferences(
+  conditioning: RequestConditioning,
+): boolean {
+  return conditioning === "references" || conditioning === "both";
+}
+
+/**
+ * Whether attaching references coerces this recipe's batch to a single print.
+ *
+ * Mirrors `generation_profile::validate_edit_images_against`: a recipe whose
+ * references REPLACE or EXCLUDE the source edits ONE picture, and a batch of
+ * edits of one picture is not something the engines express. An ADDITIVE
+ * recipe's reference is an image PROMPT — the same tokens broadcast across
+ * every row — so its batch is ordinary, the server accepts it, and locking it
+ * here would take away a normal SD workflow for no reason.
+ *
+ * It lives beside `conditioningForRequest` because every surface used to ask
+ * `conditioning === "references"` for this, which is the same question only
+ * while every reference family is exclusive.
+ */
+export function referencesLockBatchSize(
+  mode: SourceImageMode,
+  state: ExclusiveWellsState,
+): boolean {
+  if (mode === "single-and-references") return false;
+  return requestCarriesReferences(conditioningForRequest(mode, state));
 }

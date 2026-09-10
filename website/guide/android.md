@@ -59,7 +59,7 @@ remains available. Returning to a qualified model restores the well and photo.
 **Identity strength** and **Identity start step** live in Advanced, count toward
 its badge, and clear with Advanced Reset while the photo remains attached.
 
-Identity requests cannot combine with a LoRA or img2img source. Every refusal
+Identity requests ride alongside a LoRA and an img2img source. Every refusal
 is shown inline and queues nothing. Under **Auto** or **Most capable**, Mold
 considers only machines whose own model row advertises identity support.
 Prepared Batch siblings inherit the same photo and controls.

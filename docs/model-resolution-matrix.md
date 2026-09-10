@@ -2451,7 +2451,7 @@ Provenance: MoldPolicy `Mold source-driven Qwen Image Edit guidance`, qualified:
 
 ### `dreamshaper-v8:fp16`
 
-Schema 1 · hash `49c4ab886b4d689da8f52bce186fb9f5fa598ebf308c329c7ab460afa1b254af` · default recipe `default`
+Schema 1 · hash `5807024a48d7eaa5f2cc7d492069d529102efec9a403075a6710f68c1edabe5f` · default recipe `default`
 
 Models: `dreamshaper-v8:fp16`.
 
@@ -2473,7 +2473,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `realistic-vision-v5:fp16`
 
-Schema 1 · hash `dd0e8d5480386c44c665facfb7e68fbe4446db0056fa03d5445c24ca26d72188` · default recipe `default`
+Schema 1 · hash `abfc6032f8723f6f684bdd3147270535f9ce3a9871ba21d0bd0a64e8a93c01e4` · default recipe `default`
 
 Models: `realistic-vision-v5:fp16`.
 
@@ -2495,7 +2495,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `sd15:fp16`
 
-Schema 1 · hash `60260bcd5d94858127ddbb6bcd683dc9297109f610512cb51f42b8aa3aa52d72` · default recipe `default`
+Schema 1 · hash `f84d8c84eaa9c4327f1076dd504bdcc07e708b9476a3e6bda8aa9513b055ca5b` · default recipe `default`
 
 Models: `sd15:fp16`.
 
@@ -2593,7 +2593,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `cyberrealistic-pony:fp16`
 
-Schema 1 · hash `abc1e98bfd9be04dc860aa8a7dc5399d857afeb2ec539ff6f79dde0960483a68` · default recipe `default`
+Schema 1 · hash `af7f20014a68bd1cea8ba4078ed72f9104c5f63247e3162efd90352f08402e7c` · default recipe `default`
 
 Models: `cyberrealistic-pony:fp16`.
 
@@ -2619,7 +2619,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `dreamshaper-xl:fp16`
 
-Schema 1 · hash `589e0c7b65fee0791cc8cb3778eb8f9b289c08185a2ed31da7f52cfb5f9dd6a1` · default recipe `default`
+Schema 1 · hash `ea918dd6672426793a43b84dbc5df2cb9ca5db4cd05f9205ec97f8be4a053993` · default recipe `default`
 
 Models: `dreamshaper-xl:fp16`.
 
@@ -2645,7 +2645,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `juggernaut-xl:fp16`
 
-Schema 1 · hash `1b83299de31fb1aff4b885638707e4e32011e356565eb125f43c2ea4593995f1` · default recipe `default`
+Schema 1 · hash `2c38f6a3ca50576b3b913f89c0cbffca4ae2e84ab4ad58d2521895b898ef96c7` · default recipe `default`
 
 Models: `juggernaut-xl:fp16`.
 
@@ -2671,7 +2671,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `playground-v2.5:fp16`
 
-Schema 1 · hash `ff9edd136447a6fe3b52c5e64e8e1deabb441c3abfe14903ea775fd2b729422f` · default recipe `default`
+Schema 1 · hash `29499fdf098ebeeccfddedfcd3093fc69777ca2e9ed8bf69f754a82fe50789e9` · default recipe `default`
 
 Models: `playground-v2.5:fp16`.
 
@@ -2697,7 +2697,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `pony-v6:fp16`
 
-Schema 1 · hash `ff6d873eb847e0d611745af823d2317a6112503b5d5d9bbbaae01ade356cfce6` · default recipe `default`
+Schema 1 · hash `2ecd13634ad16216e91e4ed17278f8294a1908d09abce78900b6df6dc7e5fe6c` · default recipe `default`
 
 Models: `pony-v6:fp16`.
 
@@ -2723,7 +2723,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `realvis-xl:fp16`
 
-Schema 1 · hash `482453bf5669384b0b6bc63452a6efe847a5e1fedf5ab679ef97b0ed3e0ebb85` · default recipe `default`
+Schema 1 · hash `4f2b72e818647128159692aae6d9d08c681522a11332b605682dc6b4ea8fc81e` · default recipe `default`
 
 Models: `realvis-xl:fp16`.
 
@@ -2749,7 +2749,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `sdxl-base:fp16`
 
-Schema 1 · hash `f607520f588f893606e90949b34de2675b8b60f5b58bb6cbf6d50579bb6a01c0` · default recipe `default`
+Schema 1 · hash `812f7c97f4911dcb6426fa634bee56b5a3c5f314291c6c0e49c26d2c814415d0` · default recipe `default`
 
 Models: `sdxl-base:fp16`.
 
@@ -2775,7 +2775,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `sdxl-turbo:fp16`
 
-Schema 1 · hash `f90f80a33510af6ebaecf98f8e682daeb7777e4a1928c511208f42859596b806` · default recipe `default`
+Schema 1 · hash `ddcd315e999906f1637125e75e82ce0096a341e25ffe4860678b0cb7427ba73a` · default recipe `default`
 
 Models: `sdxl-turbo:fp16`.
 

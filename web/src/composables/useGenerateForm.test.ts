@@ -16,6 +16,10 @@ import type {
   OutputMetadata,
 } from "../types";
 import { WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT } from "@studio/lib/negativePrompt";
+import {
+  sdxlIpAdapterRecipe,
+  sdxlRecipe,
+} from "@studio/lib/generationProfile.testFixtures";
 
 const STORAGE_KEY = "mold.generate.form";
 
@@ -3193,5 +3197,102 @@ describe("useGenerateForm — identity photo", () => {
     expect(form.state.value.identityWeight).toBeNull();
     expect(form.state.value.identityStartStep).toBeNull();
     expect(form.state.value.identitySupported).toBe(true);
+  });
+});
+
+/**
+ * The ADDITIVE reference contract (`combines`, IP-Adapter on SD1.5/SDXL) —
+ * the first recipe whose reference rides WITH the source image rather than
+ * replacing or excluding it. Every earlier reference test in this file
+ * asserts one well or the other.
+ */
+describe("toRequest — an additive recipe carries both wells at once", () => {
+  function ipAdapterModel(): ModelInfoExtended {
+    return makeModel({
+      name: "sdxl-base:fp16",
+      family: "sdxl",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "sdxl",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [sdxlIpAdapterRecipe()],
+      },
+    } as Partial<ModelInfoExtended>);
+  }
+
+  function ipAdapterForm() {
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lantern on a pier";
+    return form;
+  }
+
+  it("sends source_image, strength, mask AND edit_images in one request", () => {
+    const form = ipAdapterForm();
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "pier.png", base64: "SOURCE" },
+    ];
+    form.state.value.maskImage = {
+      kind: "upload",
+      filename: "m.png",
+      base64: "MASK",
+    };
+    form.state.value.strength = 0.42;
+    form.state.value.referenceImages = [
+      { kind: "upload", filename: "ref.png", base64: "REF" },
+    ];
+    // Nothing parks here, so a `lastWrite` marker must not remove either.
+    form.state.value.exclusiveWell = "references";
+
+    const request = form.toRequest(ipAdapterModel());
+    expect(request.source_image).toBe("SOURCE");
+    expect(request.strength).toBe(0.42);
+    expect(request.mask_image).toBe("MASK");
+    expect(request.edit_images).toEqual(["REF"]);
+  });
+
+  it("keeps reference_weight absent until the user touches it", () => {
+    const form = ipAdapterForm();
+    form.state.value.referenceImages = [
+      { kind: "upload", filename: "ref.png", base64: "REF" },
+    ];
+    expect("reference_weight" in form.toRequest(ipAdapterModel())).toBe(false);
+
+    form.state.value.referenceWeight = 0.6;
+    expect(form.toRequest(ipAdapterModel()).reference_weight).toBe(0.6);
+  });
+
+  it("never sends a strength for a recipe that advertises no adapter", () => {
+    const form = ipAdapterForm();
+    form.state.value.referenceImages = [
+      { kind: "upload", filename: "ref.png", base64: "REF" },
+    ];
+    form.state.value.referenceWeight = 1.5;
+    const plain = makeModel({
+      name: "sdxl-base:fp16",
+      family: "sdxl",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "sdxl",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [sdxlRecipe()],
+      },
+    } as Partial<ModelInfoExtended>);
+
+    const request = form.toRequest(plain);
+    expect("reference_weight" in request).toBe(false);
+    expect("edit_images" in request).toBe(false);
+  });
+
+  it("does not lock the batch, because the reference is an image prompt", () => {
+    const form = ipAdapterForm();
+    form.state.value.referenceImages = [
+      { kind: "upload", filename: "ref.png", base64: "REF" },
+    ];
+    form.state.value.batchSize = 3;
+    expect(form.toRequest(ipAdapterModel()).batch_size).toBe(3);
   });
 });

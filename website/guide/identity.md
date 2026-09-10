@@ -336,14 +336,24 @@ mold info ~/.mold/output/mold-flux-dev-q4-1.png
 A print with no identity records no identity fields at all, so a knob on an
 ordinary render can never read as conditioning that did not happen.
 
+## What it combines with
+
+A LoRA and an img2img source image both ride alongside an identity photograph,
+together or apart, on FLUX.1 and on SDXL. Neither pairing was ever a numerical
+prohibition — the adapter injects between transformer blocks on FLUX and on the
+cross-attention output on SDXL, underneath whatever a LoRA merged into the base
+weights, and an img2img render simply starts further into the schedule.
+
+`--id-start-step` counts against the full `--steps` schedule whether or not a
+source image truncates it, so the same number means the same thing in both
+cases.
+
 ## Limitations
 
 Each of these is refused with a specific message rather than silently rendered,
 on both families:
 
 - **Qualified checkpoints only**: see [Which models](#which-models).
-- **No LoRA** alongside an identity.
-- **No img2img** alongside an identity.
 - Video families, Flux.2, Z-Image, Qwen-Image, SD 1.5/3.5, and Wuerstchen do
   not support identity at all.
 

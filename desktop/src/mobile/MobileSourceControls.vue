@@ -208,16 +208,26 @@ const h3ReferencePickerMaxBytes = computed(() =>
 const referencesOnly = computed(
   () =>
     (plan.value.kind === "attachments" && plan.value.primary === null) ||
-    plan.value.kind === "single-or-references",
+    plan.value.kind === "single-or-references" ||
+    plan.value.kind === "single-and-references",
 );
 const referenceMax = computed(() =>
   plan.value.kind === "attachments"
     ? plan.value.max
-    : plan.value.kind === "single-or-references"
+    : plan.value.kind === "single-or-references" || plan.value.kind === "single-and-references"
       ? plan.value.references.max
       : null,
 );
-/** The exclusive (Klein) parking rule — see `resolveExclusiveWells`. */
+/**
+ * The adapter's injection strength, from the recipe alone. `null` — no
+ * adapter, or an older host — renders nothing.
+ */
+const referenceWeight = computed(() => caps.value.referenceImages?.weight ?? null);
+const effectiveReferenceWeight = computed(
+  () => props.form.referenceWeight ?? referenceWeight.value?.default ?? 1,
+);
+/** The exclusive (Klein) parking rule — see `resolveExclusiveWells`. An
+ * additive (IP-Adapter) plan never asks: nothing parks there. */
 const exclusive = computed(() =>
   plan.value.kind === "single-or-references"
     ? resolveExclusiveWells({
@@ -227,12 +237,18 @@ const exclusive = computed(() =>
       })
     : null,
 );
-/** Klein renders both: the ordered strip AND the source well. */
+/** Both two-well plans render the ordered strip AND the source well. */
 const showStrip = computed(
-  () => plan.value.kind === "attachments" || plan.value.kind === "single-or-references",
+  () =>
+    plan.value.kind === "attachments" ||
+    plan.value.kind === "single-or-references" ||
+    plan.value.kind === "single-and-references",
 );
 const showSourceWell = computed(
-  () => plan.value.kind === "single" || plan.value.kind === "single-or-references",
+  () =>
+    plan.value.kind === "single" ||
+    plan.value.kind === "single-or-references" ||
+    plan.value.kind === "single-and-references",
 );
 /** Fit, strength and the mask describe a SOURCE image. */
 const sourceRefinements = computed(
@@ -709,11 +725,7 @@ function applyMask(mask: string): void {
     />
   </template>
 
-  <template
-    v-else-if="
-      plan.kind === 'attachments' || plan.kind === 'single' || plan.kind === 'single-or-references'
-    "
-  >
+  <template v-else-if="plan.kind === 'single' || showStrip">
     <fieldset v-if="showStrip" class="mobile-source-controls" data-test="mobile-source-controls">
       <legend class="mobile-source-legend">{{ referencesOnly ? "References" : "Pictures" }}</legend>
       <SourceMediaWells
@@ -765,6 +777,24 @@ function applyMask(mask: string): void {
       >
         {{ exclusive.note }}
       </p>
+      <!-- The adapter's injection strength, gated on the recipe advertising
+           one and left ABSENT from the request until touched. -->
+      <label
+        v-if="referenceWeight && form.imageAttachments.length > 0"
+        class="field"
+        data-test="mobile-reference-weight"
+      >
+        <span>Reference strength · {{ effectiveReferenceWeight.toFixed(2) }}</span>
+        <input
+          class="control"
+          type="range"
+          :min="referenceWeight.min"
+          :max="referenceWeight.max"
+          :step="referenceWeight.step"
+          :value="effectiveReferenceWeight"
+          @input="form.referenceWeight = Number(($event.target as HTMLInputElement).value)"
+        />
+      </label>
       <p
         v-if="validationError"
         class="mobile-source-error"

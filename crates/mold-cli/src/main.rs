@@ -1446,6 +1446,14 @@ Examples:
         #[arg(long, value_name = "PATH", help_heading = "Reference images")]
         reference: Vec<commands::h3::ReferenceArg>,
 
+        /// Reference-adapter strength, 0.0-2.0 (default: 1.0). Applies to a
+        /// recipe whose profile advertises one — SD1.5 and SDXL image
+        /// prompting (`mold pull ip-adapter-sd15` / `ip-adapter-sdxl`).
+        /// Exactly 0.0 renders the unconditioned print: nothing is pulled,
+        /// loaded, or encoded.
+        #[arg(long, requires = "reference", help_heading = "Reference images")]
+        reference_weight: Option<f64>,
+
         /// LTX-2 pipeline mode.
         #[arg(long, help_heading = "Video", value_enum)]
         pipeline: Option<Ltx2PipelineArg>,
@@ -1717,7 +1725,6 @@ Examples:
         /// has one pulls only the other's adapter.
         #[arg(
             long,
-            conflicts_with_all = ["image", "lora"],
             help_heading = "Identity",
             value_hint = ValueHint::FilePath
         )]
@@ -2728,6 +2735,7 @@ async fn run() -> anyhow::Result<()> {
             first_frame,
             last_frame,
             reference,
+            reference_weight,
             pipeline,
             ic_lora_control,
             hdr_exr_dir,
@@ -2919,6 +2927,7 @@ async fn run() -> anyhow::Result<()> {
                 first_frame,
                 last_frame,
                 reference,
+                reference_weight,
                 pipeline,
                 ic_lora_control,
                 hdr_exr_dir,
@@ -5392,13 +5401,22 @@ mod tests {
         assert!(error.to_string().contains("--true-cfg"), "{error}");
     }
 
-    /// The two combinations `mold_core::identity` refuses at admission are
-    /// refused at parse time too, so the user is not told after the upload.
+    /// `--id-image` parses beside `--image` and `--lora`, together or apart.
+    ///
+    /// Both pairings used to be refused by clap itself, which meant the CLI
+    /// stayed closed even after admission qualified them — a parser conflict
+    /// is not the shared refusal const and does not lift with it.
     #[test]
-    fn run_rejects_identity_combined_with_img2img_or_a_lora() {
+    fn run_accepts_identity_combined_with_img2img_and_a_lora() {
         for extra in [
             vec!["--image", "/photos/source.png"],
             vec!["--lora", "/loras/style.safetensors"],
+            vec![
+                "--image",
+                "/photos/source.png",
+                "--lora",
+                "/loras/style.safetensors",
+            ],
         ] {
             let mut args = vec![
                 "run",
@@ -5408,11 +5426,8 @@ mod tests {
                 "/photos/face.png",
             ];
             args.extend(extra.iter().copied());
-            let Err(error) = try_parse(&args) else {
-                panic!("{extra:?}: identity with img2img or a LoRA is not yet qualified");
-            };
-            let error = error.to_string();
-            assert!(error.contains("cannot be used with"), "{extra:?}: {error}");
+            try_parse(&args)
+                .unwrap_or_else(|error| panic!("{extra:?}: must parse beside identity: {error}"));
         }
     }
 

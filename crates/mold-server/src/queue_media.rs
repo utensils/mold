@@ -611,6 +611,7 @@ fn extract_request_fields(
         true_cfg,
         cfg_start_step,
         edit_images,
+        reference_weight,
         references,
         strength,
         mask_image,
@@ -793,6 +794,12 @@ fn extract_request_fields(
         true_cfg,
         cfg_start_step,
         edit_images: None,
+        // RETAINED, exactly as `id_weight` above is. The bytes of a reference
+        // picture move into queue-media storage, but the strength it injects
+        // at describes how the pixels were made — a replayed stage that lost
+        // it would render the same picture at a different weight and say
+        // nothing.
+        reference_weight,
         references,
         strength,
         mask_image: None,

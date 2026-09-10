@@ -138,7 +138,7 @@ they do not, the control is not there at all rather than present and disabled.
 Tap it to pick a PNG or JPEG (at most 16 MiB, 8192 px per side, 32 MP) with the
 usual iOS photo/camera picker. Identity conditioning is offered only for the
 identity-qualified checkpoints on a server built with the feature, and it
-cannot be combined with a LoRA or an img2img source image; see
+rides alongside a LoRA and an img2img source image; see
 [Identity Photos (PuLID)](/guide/generating#identity-photos-pulid) for the full
 rule and the one-time InsightFace licence acceptance.
 
@@ -158,7 +158,7 @@ server's own defaults keep applying:
   (default `0`, always fewer than the print's step count). Delaying it lets the
   composition settle before the likeness is pinned.
 
-If the combination cannot be submitted (a photo alongside a LoRA or a source
+If the request cannot be submitted (a strength or start step out of range, or a
 image, a knob set with no photo, an oversized or unsupported file) the reason
 reads inline beside the control and Develop stays blocked. Prepared Batch N
 siblings inherit the photo and both knobs (and the reviewed card names the same

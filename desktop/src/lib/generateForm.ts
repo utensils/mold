@@ -92,7 +92,13 @@ import {
   effectiveGenerationGuidance,
   isWanFamily,
 } from "@studio/lib/generationCapabilities";
-import { conditioningForRequest, type ExclusiveWell } from "@studio/lib/sourceMediaPlan";
+import {
+  conditioningForRequest,
+  referencesLockBatchSize,
+  requestCarriesReferences,
+  requestCarriesSource,
+  type ExclusiveWell,
+} from "@studio/lib/sourceMediaPlan";
 import { isMeshFamily } from "@studio/lib/legacyRecipeRules";
 import { isAudioOnlyPipeline, stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 import { requestVideoOnly } from "@studio/lib/videoOnly";
@@ -325,6 +331,13 @@ export interface GenerateForm {
    * reads as the source well.
    */
   exclusiveWell: ExclusiveWell | null;
+  /**
+   * IP-Adapter injection strength for the reference strip on an ADDITIVE
+   * (`single-and-references`) recipe. `null` = untouched, which keeps
+   * `reference_weight` off the wire so the server's own default stays the
+   * authority — the `identityWeight` rule, for the same reason.
+   */
+  referenceWeight: number | null;
   /** How a source image that doesn't match width×height maps onto the canvas.
    * Applied client-side on submit (`sourceFitPreprocess.ts`), never wired. */
   sourceFit: SourceFitPolicy;
@@ -435,6 +448,7 @@ export function newGenerateForm(): GenerateForm {
     identitySupported: null,
     imageAttachments: [],
     exclusiveWell: null,
+    referenceWeight: null,
     sourceFit: defaultSourceFitPolicy(),
     maskImage: null,
     controlImage: null,
@@ -818,10 +832,14 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   }
   if (caps.sourceImageMode === "h3-boundaries") {
     // Boundaries are the only source authority here; nothing else moves.
-  } else if (caps.sourceImageMode === "single-or-references") {
-    // Klein takes BOTH wells, so neither layout moves: a source image stays a
-    // source image and a strip stays a strip. Whichever holds media is the
-    // active one and the other parks — the request builder picks exactly one.
+  } else if (
+    caps.sourceImageMode === "single-or-references" ||
+    caps.sourceImageMode === "single-and-references"
+  ) {
+    // A two-well recipe takes BOTH, so neither layout moves: a source image
+    // stays a source image and a strip stays a strip. On the exclusive one
+    // whichever holds media is active and the other parks; on the additive
+    // one neither parks and the request carries both.
     //
     // The strip still has a CEILING though, and it is the recipe's own: a form
     // arriving from qwen-image-edit (unbounded) with six pictures would ship
@@ -1085,11 +1103,12 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // WHICH conditioning this request carries — one shared decision, so an
   // exclusive (Klein) recipe ships `source_image` + `strength` OR
   // `edit_images`, never both, whatever the form is holding.
-  const conditioning = conditioningForRequest(caps.sourceImageMode, {
+  const wells = {
     hasSource: Boolean(form.sourceImage),
     referenceCount: form.imageAttachments.length,
     lastWrite: form.exclusiveWell ?? null,
-  });
+  };
+  const conditioning = conditioningForRequest(caps.sourceImageMode, wells);
 
   const req: GenerateRequest = {
     prompt: form.prompt.trim(),
@@ -1098,7 +1117,10 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     height: form.height,
     steps: form.steps,
     guidance: effectiveGenerationGuidance(caps, form.guidance),
-    batch_size: caps.forcesBatchSizeOne || conditioning === "references" ? 1 : form.batchSize,
+    batch_size:
+      caps.forcesBatchSizeOne || referencesLockBatchSize(caps.sourceImageMode, wells)
+        ? 1
+        : form.batchSize,
     output_format: form.outputFormat,
   };
 
@@ -1155,16 +1177,25 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // qwen-edit ships the ordered picture strip (first = Target, rest =
   // References) and never source_image/strength; batch is already locked to 1
   // by forcesBatchSizeOne + pruneRequestForFamily.
-  if (caps.supportsImg2img && conditioning === "references") {
+  if (caps.supportsImg2img && requestCarriesReferences(conditioning)) {
     // Ordered, and clamped to the ceiling the recipe advertises — a stale
     // restored strip must not ship more pictures than admission accepts.
     // `max: null` (Qwen edit) is unbounded.
     const max = caps.referenceImages?.max ?? null;
     req.edit_images =
       max === null ? [...form.imageAttachments] : form.imageAttachments.slice(0, max);
+    // The adapter strength rides WITH the references it scales, and only on a
+    // recipe that advertises one. Absent while untouched, so a default-valued
+    // render is byte-identical to one that never named it.
+    if (caps.referenceImages?.weight && form.referenceWeight !== null) {
+      req.reference_weight = form.referenceWeight;
+    }
   }
 
-  if (caps.supportsImg2img && conditioning === "source" && form.sourceImage) {
+  // An ADDITIVE recipe answers `both`, so this arm and the one above BOTH
+  // run: the reference is an image prompt injected beside the img2img
+  // conditioning, not instead of it.
+  if (caps.supportsImg2img && requestCarriesSource(conditioning) && form.sourceImage) {
     // Wan's first/last-frame render rides the keyframes contract: BOTH ends
     // travel as `keyframes` and `source_image` stays home — the engine
     // refuses a request carrying both ("first frame from either
@@ -1660,6 +1691,7 @@ export function applyRequestToForm(
     ? { filename: request.id_image_name ?? "identity photo", base64: request.id_image }
     : null;
   form.identityWeight = request.id_weight ?? null;
+  form.referenceWeight = request.reference_weight ?? null;
   form.identityStartStep = request.id_start_step ?? null;
   form.imageAttachments = [...(request.edit_images ?? [])];
   form.namedViews = deserializeNamedViews(request.references);

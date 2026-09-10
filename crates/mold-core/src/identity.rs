@@ -533,19 +533,18 @@ pub fn identity_model_gate_message(model: &str) -> String {
 pub const TRUE_CFG_FLUX_ONLY: &str =
     "true_cfg and cfg_start_step apply only to guidance-distilled FLUX identity renders; SDXL runs classifier-free guidance already, so use guidance instead and remove them";
 
-/// Refusal for an identity request that also carries a LoRA.
-///
-/// A const rather than a formatted message because clients show it before a
-/// request exists — the TUI refuses the pairing inline instead of spending a
-/// round trip to be told the same thing.
-pub const IDENTITY_LORA_CONFLICT: &str =
-    "face-identity conditioning combined with a LoRA is not yet qualified; \
-     remove the LoRA or the id_image";
-
-/// Refusal for an identity request that also carries an img2img source image.
-pub const IDENTITY_IMG2IMG_CONFLICT: &str =
-    "face-identity conditioning combined with img2img is not yet qualified; \
-     remove the source_image or the id_image";
+// A LoRA and an img2img source image used to be refused alongside identity as
+// "not yet qualified". Both are gone.
+//
+// Neither was ever a numerical prohibition — nothing in PuLID upstream forbids
+// them, unlike `TRUE_CFG_FLUX_ONLY` below, which cites
+// `PuLID/flux/sampling.py:112-146`. The plumbing was already orthogonal: a
+// LoRA merges into the base weights at load (`flux/lora.rs`, `sdxl/lora.rs`)
+// or rides a bypass registry inside the linear, while the PuLID hook fires
+// BETWEEN blocks on FLUX and on the `attn2` output on SDXL, and adapter
+// residency keys on device/dtype/depth rather than on the LoRA stack. img2img
+// only ever needed the denoise loop to tell the gate its ABSOLUTE schedule
+// position; SDXL already did, and FLUX now does too (`step_offset`).
 
 /// Validate an `id_weight` against the one advertised range. Surfaces that
 /// collect the value before a request exists call this directly; the shared
@@ -1013,14 +1012,6 @@ pub fn validate_identity_conditioning_with_family(
     let Some(family) = identity_family_with_hint(&req.model, family_hint) else {
         return Err(identity_model_gate_message(&req.model));
     };
-
-    let has_lora = req.lora.is_some() || req.loras.as_ref().is_some_and(|items| !items.is_empty());
-    if has_lora {
-        return Err(IDENTITY_LORA_CONFLICT.to_string());
-    }
-    if req.source_image.is_some() {
-        return Err(IDENTITY_IMG2IMG_CONFLICT.to_string());
-    }
 
     validate_id_weight(effective_id_weight(req))?;
     validate_id_start_step(effective_id_start_step(req), req.steps)?;
@@ -1594,11 +1585,6 @@ mod tests {
             "id_weight (4) must be a finite value in range [0.0, 3]"
         );
 
-        // The two conflict refusals are consts for the same reason: a client
-        // refuses the pairing inline, before a request exists.
-        assert!(IDENTITY_LORA_CONFLICT.contains("remove the LoRA or the id_image"));
-        assert!(IDENTITY_IMG2IMG_CONFLICT.contains("remove the source_image or the id_image"));
-
         assert!(validate_id_start_step(ID_START_STEP_DEFAULT, 1).is_ok());
         assert!(validate_id_start_step(19, 20).is_ok());
         assert!(validate_id_start_step(20, 20).is_err());
@@ -1951,33 +1937,6 @@ mod tests {
                 expect: "id_start_step",
             },
             Case {
-                name: "lora combination",
-                mutate: |req| {
-                    req.loras = Some(vec![crate::types::LoraWeight {
-                        path: "/loras/a.safetensors".to_string(),
-                        scale: 1.0,
-                        expert: None,
-                    }])
-                },
-                expect: "LoRA",
-            },
-            Case {
-                name: "legacy single lora combination",
-                mutate: |req| {
-                    req.lora = Some(crate::types::LoraWeight {
-                        path: "/loras/a.safetensors".to_string(),
-                        scale: 1.0,
-                        expert: None,
-                    })
-                },
-                expect: "LoRA",
-            },
-            Case {
-                name: "img2img combination",
-                mutate: |req| req.source_image = Some(vec![0x89, 0x50, 0x4E, 0x47]),
-                expect: "source_image",
-            },
-            Case {
                 name: "weight without image",
                 mutate: |req| {
                     req.id_image = None;
@@ -2043,6 +2002,49 @@ mod tests {
             result.expect("an empty list is not a merged adapter");
         } else {
             assert_runtime_pending(result, "empty lora list");
+        }
+    }
+
+    /// A LoRA, an img2img source, and both together all ride beside identity.
+    ///
+    /// These three were refused as "not yet qualified" until the pairing was
+    /// qualified. Nothing upstream forbade either: the LoRA merges into the
+    /// base weights (or a bypass registry) UNDER the hook, and img2img only
+    /// ever needed the denoise loop to gate on its absolute schedule position.
+    /// Pinned positively so a future refusal has to argue with a test.
+    #[test]
+    fn identity_rides_beside_a_lora_and_an_img2img_source() {
+        if !identity_runtime_available() {
+            return;
+        }
+        let lora = || crate::types::LoraWeight {
+            path: "/loras/a.safetensors".to_string(),
+            scale: 1.0,
+            expert: None,
+        };
+        let png = || vec![0x89, 0x50, 0x4E, 0x47];
+
+        for model in ["flux-dev:q8", "sdxl-base:fp16"] {
+            let mut with_lora = identity_request(model);
+            with_lora.loras = Some(vec![lora()]);
+            validate_identity_conditioning(&with_lora)
+                .unwrap_or_else(|error| panic!("{model} identity + lora list: {error}"));
+
+            let mut with_legacy_lora = identity_request(model);
+            with_legacy_lora.lora = Some(lora());
+            validate_identity_conditioning(&with_legacy_lora)
+                .unwrap_or_else(|error| panic!("{model} identity + legacy lora: {error}"));
+
+            let mut with_source = identity_request(model);
+            with_source.source_image = Some(png());
+            validate_identity_conditioning(&with_source)
+                .unwrap_or_else(|error| panic!("{model} identity + img2img: {error}"));
+
+            let mut with_both = identity_request(model);
+            with_both.loras = Some(vec![lora()]);
+            with_both.source_image = Some(png());
+            validate_identity_conditioning(&with_both)
+                .unwrap_or_else(|error| panic!("{model} identity + lora + img2img: {error}"));
         }
     }
 
@@ -2501,10 +2503,10 @@ mod tests {
     }
 
     /// Everything the FLUX gate refuses, the SDXL gate refuses identically:
-    /// the adapter is a face reference, not a composition input, and neither
-    /// pairing is qualified on either family.
+    /// the adapter is a face reference, not a composition input — but neither
+    /// pairing is REFUSED any more, on either family.
     #[test]
-    fn the_sdxl_gate_refuses_loras_and_img2img_exactly_as_flux_does() {
+    fn the_sdxl_gate_admits_loras_and_img2img_exactly_as_flux_does() {
         if !identity_runtime_available() {
             return;
         }
@@ -2521,19 +2523,15 @@ mod tests {
                 scale: 1.0,
                 expert: None,
             });
-            assert_eq!(
-                validate_identity_conditioning(&plain).unwrap_err(),
-                IDENTITY_LORA_CONFLICT,
-                "{model}"
-            );
+            validate_identity_conditioning(&plain).unwrap_or_else(|error| {
+                panic!("{model} must admit identity beside a LoRA: {error}")
+            });
 
             let mut img2img = identity_request(model);
             img2img.source_image = Some(vec![0x89, 0x50, 0x4e, 0x47]);
-            assert_eq!(
-                validate_identity_conditioning(&img2img).unwrap_err(),
-                IDENTITY_IMG2IMG_CONFLICT,
-                "{model}"
-            );
+            validate_identity_conditioning(&img2img).unwrap_or_else(|error| {
+                panic!("{model} must admit identity beside an img2img source: {error}")
+            });
         }
     }
 

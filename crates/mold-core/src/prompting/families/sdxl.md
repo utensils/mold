@@ -29,6 +29,14 @@ clothing, setting, pose, composition, and light without re-describing features.
 Start near an identity weight of 0.8. The negative pass is conditioned on the
 unconditional identity automatically.
 
+A reference picture is an IMAGE PROMPT here, not an edit target: IP-Adapter
+carries its appearance — subject, palette, setting — into the render while the
+text still steers. Describe what you want CHANGED and let the reference supply
+the look; re-describing the reference's own colours fights it. Start the
+reference weight near 0.6-0.8, because at 1.0 the picture tends to take the
+prompt over. It rides with a source image, a mask, ControlNet and a LoRA in the
+same pass, so reach for it alongside img2img rather than instead of it.
+
 ## Generation context
 
 The native canvas is 1024x1024 at 25 steps and guidance 7.5. mold ships no

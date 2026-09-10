@@ -52,6 +52,56 @@ pub const MAX_INLINE_SOURCE_VIDEO_BYTES: usize = 64 * 1024 * 1024;
 /// rather than a dev one. `queue_media_store`'s `PROJECTION_EDIT_SLOTS_END
 /// <= 56` assertion is the tripwire if this ever grows.
 pub const FLUX2_MAX_REFERENCE_IMAGES: usize = 4;
+
+/// Default IP-Adapter injection strength when a request attaches a reference
+/// picture without naming one.
+///
+/// `stable-diffusion.cpp`'s `--ip-adapter-strength` default
+/// (`docs/ip_adapter.md`), which is also diffusers'
+/// `IPAdapterAttnProcessor2_0(scale=1.0)`.
+pub const REFERENCE_WEIGHT_DEFAULT: f64 = 1.0;
+
+/// Inclusive upper bound for `reference_weight`. The range is
+/// `0.0..=REFERENCE_WEIGHT_MAX`.
+///
+/// Upstream imposes no ceiling — the scale is a bare multiplier — but a bound
+/// is what lets a client render a slider without inventing one, and past
+/// roughly 2 the image branch swamps the text prompt entirely. Wider than the
+/// 0.6-0.8 upstream suggests as a starting range, so the advice stays advice.
+pub const REFERENCE_WEIGHT_MAX: f64 = 2.0;
+
+/// Validate a `reference_weight` against the one advertised range.
+///
+/// Surfaces that collect the value before a request exists call this directly;
+/// the shared request validator delegates to it so the two cannot drift — the
+/// arrangement `identity::validate_id_weight` already uses.
+pub fn validate_reference_weight(weight: f64) -> Result<(), String> {
+    if !weight.is_finite() || !(0.0..=REFERENCE_WEIGHT_MAX).contains(&weight) {
+        return Err(format!(
+            "reference_weight ({weight}) must be a finite value in range \
+             [0.0, {REFERENCE_WEIGHT_MAX}]"
+        ));
+    }
+    Ok(())
+}
+
+/// The strength a request will actually inject at.
+pub fn effective_reference_weight(req: &crate::GenerateRequest) -> f64 {
+    req.reference_weight.unwrap_or(REFERENCE_WEIGHT_DEFAULT)
+}
+
+/// Whether this request actually conditions on a reference picture.
+///
+/// A zero weight is the falsification case: it must be indistinguishable from
+/// a request that attached nothing, so no bundle is planned, nothing is
+/// downloaded, no tower is loaded, and the render is bit-identical. The same
+/// rule `identity::request_conditions_on_identity` enforces for `id_weight`.
+pub fn request_conditions_on_reference(req: &crate::GenerateRequest) -> bool {
+    req.edit_images
+        .as_ref()
+        .is_some_and(|images| !images.is_empty())
+        && effective_reference_weight(req) != 0.0
+}
 /// BFL's pixel cap for a single FLUX.2 reference. The upstream value is
 /// intentionally 2024 squared, not 2048 squared.
 pub const FLUX2_SINGLE_REFERENCE_MAX_PIXELS: u64 = 2_024 * 2_024;
@@ -4647,6 +4697,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.75,
             mask_image: None,
@@ -7636,7 +7687,17 @@ mod tests {
     /// client renders instead of the control cannot drift apart.
     #[test]
     fn a_family_without_references_refuses_edit_images_by_name() {
-        for model in ["sdxl-base:q4", "wan22-t2v-a14b:q8", "z-image-turbo:q8"] {
+        // Every name here must RESOLVE. `sdxl-base:q4` used to sit in this
+        // list and does not exist — the manifest has only `sdxl-base:fp16` —
+        // so `model_family` answered `None`, the profile fell to the `Hidden`
+        // arm, and the test asserted SDXL refuses references long after SDXL
+        // started accepting them. A nonexistent model is a Hidden recipe by
+        // accident, which makes it useless evidence about a real one.
+        for model in ["wan22-t2v-a14b:q8", "z-image-turbo:q8"] {
+            assert!(
+                crate::manifest::find_manifest(model).is_some(),
+                "{model} must be a real manifest for this test to mean anything"
+            );
             let mut req = valid_req();
             req.model = model.to_string();
             req.edit_images = Some(vec![png_bytes()]);
@@ -7656,6 +7717,34 @@ mod tests {
                 Some(error.as_str()),
                 "{model}"
             );
+        }
+    }
+
+    /// SD1.5 and SDXL ACCEPT `edit_images` — the positive half, which was
+    /// missing entirely while a live test asserted the opposite.
+    #[test]
+    fn the_sd_families_accept_edit_images_beside_a_source_image() {
+        for model in ["sd15:fp16", "sdxl-base:fp16"] {
+            let family = model_family(model).unwrap_or_else(|| panic!("{model} resolves"));
+            let profile = crate::generation_profile::reference_images_for_recipe(family, model);
+            assert_eq!(
+                profile.source_relation,
+                crate::generation_profile::ReferenceSourceRelation::Combines,
+                "{model}"
+            );
+
+            let mut req = valid_req();
+            req.model = model.to_string();
+            req.edit_images = Some(vec![png_bytes()]);
+            validate_generate_request(&req)
+                .unwrap_or_else(|error| panic!("{model} must accept a reference: {error}"));
+
+            // And beside a source image, which is the whole point of Combines.
+            req.source_image = Some(png_bytes());
+            req.strength = 0.6;
+            validate_generate_request(&req).unwrap_or_else(|error| {
+                panic!("{model} must accept a reference beside a source: {error}")
+            });
         }
     }
 

@@ -9,7 +9,7 @@
  */
 import { computed } from "vue";
 import { useRouter } from "vue-router";
-import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
+import { referencesLockBatchSize } from "@studio/lib/sourceMediaPlan";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
@@ -234,18 +234,21 @@ const audioOutputUnavailableReason = computed(() => {
 function setGenerateAudio(value: boolean) {
   patch({ enableAudio: value });
 }
-// Edit families (Qwen image edit) render one print at a time.
+// Edit families (Qwen image edit) render one print at a time. An ADDITIVE
+// reference is an image prompt broadcast across the batch, so it does not
+// lock — the shared rule mirrors admission rather than repeating it here.
 const batchLocked = computed(
   () =>
     capabilities.value.forcesBatchSizeOne ||
-    conditioningForRequest(capabilities.value.sourceImageMode, {
+    referencesLockBatchSize(capabilities.value.sourceImageMode, {
       hasSource: Boolean(props.modelValue.imageAttachments[0]?.base64),
       referenceCount:
-        capabilities.value.sourceImageMode === "single-or-references"
+        capabilities.value.sourceImageMode === "single-or-references" ||
+        capabilities.value.sourceImageMode === "single-and-references"
           ? (props.modelValue.referenceImages?.length ?? 0)
           : props.modelValue.imageAttachments.length,
       lastWrite: props.modelValue.exclusiveWell ?? null,
-    }) === "references",
+    }),
 );
 
 // Reroll: a fresh random seed for the next print without leaving Fixed mode —

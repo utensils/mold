@@ -239,6 +239,40 @@ export function sdxlRecipe(): GenerationRecipeProfile {
 }
 
 /**
+ * SDXL with IP-Adapter image prompting: the first — and so far only —
+ * `combines` recipe. The reference is an image PROMPT, so it rides WITH the
+ * source image, its strength, the mask, ControlNet and a LoRA, and the
+ * adapter's own injection strength travels in the block as a `FloatControl`.
+ *
+ * Copied from `generation_profile::reference_images_for_recipe`'s `sd15|sdxl`
+ * arm, so these tests exercise the wire the server actually emits.
+ */
+export function sdxlIpAdapterRecipe(): GenerationRecipeProfile {
+  const recipe = sdxlRecipe();
+  return {
+    ...recipe,
+    capabilities: {
+      ...recipe.capabilities,
+      reference_images: {
+        mode: "adjustable",
+        required: false,
+        max_count: 1,
+        primary_is_target: false,
+        source_relation: "combines",
+        reason: null,
+        weight: {
+          default: 1.0,
+          min: 0.0,
+          max: 2.0,
+          step: 0.05,
+          mode: "adjustable",
+        },
+      },
+    },
+  };
+}
+
+/**
  * FLUX.2 [dev]: references REPLACE the source image, the mask and LoRA.
  *
  * Copied verbatim from `docs/generated/generation-profiles-v1.json`

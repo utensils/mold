@@ -1599,6 +1599,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: Some(vec![
                 video_reference(1),
                 image_reference(2),

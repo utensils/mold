@@ -3601,6 +3601,7 @@ pub(crate) fn build_stage_generate_request(
         source_image: stage.source_image.clone(),
         source_image_name: None,
         edit_images: None,
+        reference_weight: None,
         references: None,
         strength: if idx == 0 { chain.strength } else { 1.0 },
         mask_image: None,

@@ -4,7 +4,7 @@
   "source_relation_meaning": {
     "replaces": "References replace the source image; `source_image`, `mask_image`, and ControlNet inputs are refused whether or not references are attached.",
     "exclusive": "The recipe renders from a source image OR from references, never both in one pass; the img2img fields are refused only once references are attached.",
-    "combines": "Reserved. Nothing advertises it today."
+    "combines": "The recipe reads a source image and references in the SAME pass. SD1.5 and SDXL with IP-Adapter: both wells stay live and neither parks."
   },
   "models": [
     {

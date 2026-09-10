@@ -17,28 +17,28 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 
 | Model | Family | Guides read in order | Word limit | Excerpt words |
 | --- | --- | --- | --- | --- |
-| `flux-schnell` | `flux` | `shared.md`, `families/flux.md`, `models/flux-schnell.md` | 150 | 627 |
-| `flux-dev` | `flux` | `shared.md`, `families/flux.md` | 150 | 544 |
-| `flux-krea` | `flux` | `shared.md`, `families/flux.md` | 150 | 544 |
-| `jibmix-flux` | `flux` | `shared.md`, `families/flux.md` | 150 | 544 |
-| `ultrareal-v2` | `flux` | `shared.md`, `families/flux.md` | 150 | 544 |
-| `ultrareal-v3` | `flux` | `shared.md`, `families/flux.md` | 150 | 544 |
-| `ultrareal-v4` | `flux` | `shared.md`, `families/flux.md` | 150 | 544 |
-| `iniverse-mix` | `flux` | `shared.md`, `families/flux.md` | 150 | 544 |
-| `sd15` | `sd15` | `shared.md`, `families/sd15.md` | 50 | 471 |
-| `dreamshaper-v8` | `sd15` | `shared.md`, `families/sd15.md` | 50 | 471 |
-| `realistic-vision-v5` | `sd15` | `shared.md`, `families/sd15.md` | 50 | 471 |
+| `flux-schnell` | `flux` | `shared.md`, `families/flux.md`, `models/flux-schnell.md` | 150 | 656 |
+| `flux-dev` | `flux` | `shared.md`, `families/flux.md` | 150 | 573 |
+| `flux-krea` | `flux` | `shared.md`, `families/flux.md` | 150 | 573 |
+| `jibmix-flux` | `flux` | `shared.md`, `families/flux.md` | 150 | 573 |
+| `ultrareal-v2` | `flux` | `shared.md`, `families/flux.md` | 150 | 573 |
+| `ultrareal-v3` | `flux` | `shared.md`, `families/flux.md` | 150 | 573 |
+| `ultrareal-v4` | `flux` | `shared.md`, `families/flux.md` | 150 | 573 |
+| `iniverse-mix` | `flux` | `shared.md`, `families/flux.md` | 150 | 573 |
+| `sd15` | `sd15` | `shared.md`, `families/sd15.md` | 50 | 563 |
+| `dreamshaper-v8` | `sd15` | `shared.md`, `families/sd15.md` | 50 | 563 |
+| `realistic-vision-v5` | `sd15` | `shared.md`, `families/sd15.md` | 50 | 563 |
 | `sd3.5-large` | `sd3` | `shared.md`, `families/sd3.md` | 150 | 470 |
 | `sd3.5-large-turbo` | `sd3` | `shared.md`, `families/sd3.md`, `models/sd3.5-large-turbo.md` | 150 | 555 |
 | `sd3.5-medium` | `sd3` | `shared.md`, `families/sd3.md` | 150 | 470 |
-| `sdxl-base` | `sdxl` | `shared.md`, `families/sdxl.md` | 60 | 509 |
-| `dreamshaper-xl` | `sdxl` | `shared.md`, `families/sdxl.md` | 60 | 509 |
-| `juggernaut-xl` | `sdxl` | `shared.md`, `families/sdxl.md` | 60 | 509 |
-| `realvis-xl` | `sdxl` | `shared.md`, `families/sdxl.md` | 60 | 509 |
-| `playground-v2.5` | `sdxl` | `shared.md`, `families/sdxl.md`, `models/playground-v2.5.md` | 60 | 587 |
-| `pony-v6` | `sdxl` | `shared.md`, `families/sdxl.md`, `models/pony-v6.md` | 60 | 596 |
-| `cyberrealistic-pony` | `sdxl` | `shared.md`, `families/sdxl.md`, `models/pony-v6.md` | 60 | 596 |
-| `sdxl-turbo` | `sdxl` | `shared.md`, `families/sdxl.md`, `models/sdxl-turbo.md` | 60 | 596 |
+| `sdxl-base` | `sdxl` | `shared.md`, `families/sdxl.md` | 60 | 601 |
+| `dreamshaper-xl` | `sdxl` | `shared.md`, `families/sdxl.md` | 60 | 601 |
+| `juggernaut-xl` | `sdxl` | `shared.md`, `families/sdxl.md` | 60 | 601 |
+| `realvis-xl` | `sdxl` | `shared.md`, `families/sdxl.md` | 60 | 601 |
+| `playground-v2.5` | `sdxl` | `shared.md`, `families/sdxl.md`, `models/playground-v2.5.md` | 60 | 679 |
+| `pony-v6` | `sdxl` | `shared.md`, `families/sdxl.md`, `models/pony-v6.md` | 60 | 688 |
+| `cyberrealistic-pony` | `sdxl` | `shared.md`, `families/sdxl.md`, `models/pony-v6.md` | 60 | 688 |
+| `sdxl-turbo` | `sdxl` | `shared.md`, `families/sdxl.md`, `models/sdxl-turbo.md` | 60 | 688 |
 | `z-image-turbo` | `z-image` | `shared.md`, `families/z-image.md` | 150 | 425 |
 | `flux2-klein` | `flux2` | `shared.md`, `families/flux2.md` | 120 | 614 |
 | `flux2-klein-9b` | `flux2` | `shared.md`, `families/flux2.md` | 120 | 614 |
@@ -174,8 +174,11 @@ Output: A rain-slick corner bakery at dusk, the window sign reading "OPEN" in wa
 
 Tag piles and two competing styles weaken prompt following. A negative prompt
 on Dev is silently inert without true CFG. A very high identity weight makes
-skin look waxy. Raise it only when the face drifts. Identity cannot be combined
-with a LoRA or with img2img. Schnell loaded with detail returns its average.
+skin look waxy. Raise it only when the face drifts. A strong style LoRA pulls
+against the identity: lower the LoRA scale before raising the identity weight.
+Under img2img the identity start step counts against the full step count, so a
+low value on a short strength does nothing. Schnell loaded with detail returns
+its average.
 
 #### CLI
 
@@ -364,6 +367,14 @@ On-image lettering is unreliable at this scale, so avoid quoted text. With
 ControlNet the control image owns pose, edges, or depth, so the prompt
 describes only the rendered subject, its materials, and the light.
 
+A reference picture is an IMAGE PROMPT here, not an edit target: IP-Adapter
+carries its appearance — subject, palette, setting — into the render while the
+text still steers. Describe what you want CHANGED and let the reference supply
+the look; re-describing the reference's own colours fights it. Start the
+reference weight near 0.6-0.8, because at 1.0 the picture tends to take the
+prompt over. It rides with a source image, a mask, ControlNet and a LoRA in the
+same pass, so reach for it alongside img2img rather than instead of it.
+
 #### Generation context
 
 The native canvas is 512x512 at 25 steps and guidance 7.5. Above roughly 768
@@ -456,6 +467,14 @@ With an identity reference the reference owns the face, so describe role,
 clothing, setting, pose, composition, and light without re-describing features.
 Start near an identity weight of 0.8. The negative pass is conditioned on the
 unconditional identity automatically.
+
+A reference picture is an IMAGE PROMPT here, not an edit target: IP-Adapter
+carries its appearance — subject, palette, setting — into the render while the
+text still steers. Describe what you want CHANGED and let the reference supply
+the look; re-describing the reference's own colours fights it. Start the
+reference weight near 0.6-0.8, because at 1.0 the picture tends to take the
+prompt over. It rides with a source image, a mask, ControlNet and a LoRA in the
+same pass, so reach for it alongside img2img rather than instead of it.
 
 #### Generation context
 

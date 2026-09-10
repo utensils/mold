@@ -7,7 +7,11 @@ import {
   schedulerLabel,
 } from "./generationCapabilities";
 import type { GenerationRecipeProfile } from "./generationProfile";
-import { hunyuan3dRecipe, sdxlRecipe } from "./generationProfile.testFixtures";
+import {
+  hunyuan3dRecipe,
+  sdxlIpAdapterRecipe,
+  sdxlRecipe,
+} from "./generationProfile.testFixtures";
 
 describe("baseGenerationCapabilities", () => {
   it("takes advanced, scheduler, and output policy from the resolved recipe", () => {
@@ -724,5 +728,57 @@ describe("prompt mode, strength, and mesh from the advertised recipe", () => {
       canvasless: false,
       mesh: undefined,
     });
+  });
+});
+
+describe("the source-image mode is one projection of source_relation", () => {
+  it("gives the ADDITIVE relation its own layout instead of the exclusive one", () => {
+    // `combines` used to fall through to the exclusive arm, which parks one
+    // of the two wells — precisely wrong for an adapter whose reference rides
+    // WITH the source image, the mask, ControlNet and a LoRA in one pass.
+    const caps = baseGenerationCapabilities(
+      "sdxl",
+      "sdxl-base:fp16",
+      null,
+      null,
+      null,
+      sdxlIpAdapterRecipe(),
+    );
+    expect(caps.referenceImages?.sourceRelation).toBe("combines");
+    expect(caps.sourceImageMode).toBe("single-and-references");
+    // The additive recipe keeps every img2img control it already had.
+    expect(caps.supportsStrength).toBe(true);
+    expect(caps.supportsMask).toBe(true);
+    expect(caps.supportsSourceImage).toBe(true);
+  });
+
+  it("carries the adapter's advertised strength range, and only its own", () => {
+    const caps = baseGenerationCapabilities(
+      "sdxl",
+      "sdxl-base:fp16",
+      null,
+      null,
+      null,
+      sdxlIpAdapterRecipe(),
+    );
+    expect(caps.referenceImages?.weight).toEqual({
+      default: 1.0,
+      min: 0.0,
+      max: 2.0,
+      step: 0.05,
+      mode: "adjustable",
+    });
+    // A recipe with no adapter — and an older host, which sends no block at
+    // all — both answer `null`, which is what hides the slider.
+    expect(
+      baseGenerationCapabilities(
+        "sdxl",
+        "sdxl-base:fp16",
+        null,
+        null,
+        null,
+        sdxlRecipe(),
+      ).referenceImages,
+    ).toBeNull();
   });
 });

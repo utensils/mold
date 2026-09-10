@@ -229,18 +229,18 @@ describe("IdentityPanel — attaching a photo", () => {
   });
 });
 
-describe("IdentityPanel — the combinations admission refuses", () => {
-  it("names the LoRA conflict inline, never as an event", () => {
+describe("IdentityPanel — the combinations admission now admits", () => {
+  it("says nothing when a photo rides beside a LoRA", () => {
     const wrapper = factory([recipeModel(true)], {
       identityImage: photo(),
       loras: [{ path: "style.safetensors", scale: 1 }],
     });
     expect(
-      wrapper.get("[data-test='identity-conditioning-error']").text(),
-    ).toContain("cannot be combined with a LoRA");
+      wrapper.find("[data-test='identity-conditioning-error']").exists(),
+    ).toBe(false);
   });
 
-  it("names the source-image conflict inline", () => {
+  it("says nothing when a photo rides beside a source image", () => {
     const wrapper = factory([recipeModel(true)], {
       identityImage: photo(),
       imageAttachments: [
@@ -248,8 +248,21 @@ describe("IdentityPanel — the combinations admission refuses", () => {
       ],
     });
     expect(
-      wrapper.get("[data-test='identity-conditioning-error']").text(),
-    ).toContain("cannot be combined with a source image");
+      wrapper.find("[data-test='identity-conditioning-error']").exists(),
+    ).toBe(false);
+  });
+
+  it("says nothing when a photo rides beside both at once", () => {
+    const wrapper = factory([recipeModel(true)], {
+      identityImage: photo(),
+      loras: [{ path: "style.safetensors", scale: 1 }],
+      imageAttachments: [
+        { kind: "upload", filename: "scene.png", base64: PNG_7x4 },
+      ],
+    });
+    expect(
+      wrapper.find("[data-test='identity-conditioning-error']").exists(),
+    ).toBe(false);
   });
 
   it("asks for the photo when only the knobs are set", () => {

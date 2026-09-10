@@ -102,6 +102,9 @@ describe("flux2 reference parity fixture", () => {
         maxPixelsSingle: null,
         maxPixelsMulti: null,
         reason: null,
+        // No Flux.2 recipe has a reference adapter, so none carries a
+        // strength; `null` is what hides the slider.
+        weight: null,
       });
     }
   });

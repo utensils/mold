@@ -715,9 +715,6 @@ which the scheduler's learned phase timings observe rather than predict.
   Discord surfaces. #1226 shipped the contract, the runtime, and the CLI only.
   SDXL gets both for free once those surfaces gate on `supports_identity`
   rather than a hard-coded FLUX check, since neither is family-specific.
-- Identity alongside a LoRA or img2img. Both combinations remain refused by
-  name at the request contract; a later qualification pass owns them. FLUX.1
-  and non-Turbo SDXL checkpoints are supported family-wide.
 - **`StableDiffusionConfig` exposes no accessor for its `unet` field**, so
   `sdxl::pulid::sdxl_unet_layout()` is mold's own copy of the published SDXL
   `unet/config.json` rather than reading it off the loaded config. A one-line

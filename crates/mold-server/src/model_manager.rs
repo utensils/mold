@@ -1563,6 +1563,11 @@ fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'
         ModelComponent::FaceDetector => "face_detector",
         ModelComponent::FaceRecognizer => "face_recognizer",
         ModelComponent::FaceParser => "face_parser",
+        // The IP-Adapter bundle is auxiliary conditioning too, and gets its
+        // own kinds for the same reason.
+        ModelComponent::ImagePromptAdapter => "image_prompt_adapter",
+        ModelComponent::ImagePromptVisionEncoder => "image_prompt_vision_encoder",
+        ModelComponent::ImagePromptVisionConfig => "image_prompt_vision_config",
     }
 }
 
@@ -1600,6 +1605,9 @@ fn manifest_component_name(component: mold_core::manifest::ModelComponent, filen
         ModelComponent::FaceDetector => "face detector",
         ModelComponent::FaceRecognizer => "face recognizer",
         ModelComponent::FaceParser => "face parser",
+        ModelComponent::ImagePromptAdapter => "image-prompt adapter",
+        ModelComponent::ImagePromptVisionEncoder => "image-prompt vision encoder",
+        ModelComponent::ImagePromptVisionConfig => "image-prompt vision config",
     }
 }
 
@@ -5309,6 +5317,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 1.0,
             mask_image: None,

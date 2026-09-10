@@ -1,7 +1,11 @@
 import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import SourceMediaPanel from "./SourceMediaPanel.vue";
-import { flux2KleinRecipe } from "@studio/lib/generationProfile.testFixtures";
+import {
+  flux2KleinRecipe,
+  sdxlIpAdapterRecipe,
+  sdxlRecipe,
+} from "@studio/lib/generationProfile.testFixtures";
 import {
   useGenerateForm,
   __testing__,
@@ -603,5 +607,109 @@ describe("SourceMediaPanel - the References strip is a drop target", () => {
 
   it("drops the ceiling clause entirely when the recipe is unbounded", () => {
     expect(factory("qwen-image-edit").text()).not.toContain("Up to");
+  });
+});
+
+/**
+ * The ADDITIVE layout: both wells live at once, and the adapter's own
+ * strength slider, gated on the recipe advertising a `weight` control.
+ */
+describe("SourceMediaPanel — an additive (IP-Adapter) recipe", () => {
+  function sdxlModel(recipe: ReturnType<typeof sdxlRecipe>): ModelInfoExtended {
+    return {
+      name: "sdxl-base:fp16",
+      family: "sdxl",
+      downloaded: true,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 25,
+      default_guidance: 7,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "sdxl",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [recipe],
+      },
+    } as unknown as ModelInfoExtended;
+  }
+
+  function ipAdapter(
+    overrides: Partial<GenerateFormState> = {},
+    recipe = sdxlIpAdapterRecipe(),
+  ) {
+    return factory(
+      "sdxl",
+      { model: "sdxl-base:fp16", modelFamily: "sdxl", ...overrides },
+      { models: [sdxlModel(recipe)] },
+    );
+  }
+
+  it("renders the Source well AND the reference strip, parking neither", () => {
+    const wrapper = ipAdapter({
+      imageAttachments: [
+        { kind: "upload", filename: "source.png", base64: "SRC" },
+      ],
+      referenceImages: [{ kind: "upload", filename: "ref.png", base64: "REF" }],
+      exclusiveWell: "references",
+    });
+    expect(wrapper.find("[data-test='source-media-wells']").exists()).toBe(
+      true,
+    );
+    expect(wrapper.find("[data-test='reference-strip']").exists()).toBe(true);
+    // The exclusive parking note is the one thing this layout must never show.
+    expect(wrapper.find("[data-test='source-parked-note']").exists()).toBe(
+      false,
+    );
+    expect(wrapper.find("[data-test='references-parked-note']").exists()).toBe(
+      false,
+    );
+    expect(wrapper.text()).toContain("Source and references");
+  });
+
+  it("keeps the source refinements live while references are attached", () => {
+    const wrapper = ipAdapter({
+      imageAttachments: [
+        { kind: "upload", filename: "source.png", base64: "SRC" },
+      ],
+      referenceImages: [{ kind: "upload", filename: "ref.png", base64: "REF" }],
+      exclusiveWell: "references",
+    });
+    // Strength belongs to the source well, and on an exclusive recipe an
+    // active reference strip would have taken it away.
+    expect(wrapper.text()).toContain("Fit to canvas");
+  });
+
+  it("renders the adapter strength from the recipe's own bounds", () => {
+    const wrapper = ipAdapter({
+      referenceImages: [{ kind: "upload", filename: "ref.png", base64: "REF" }],
+    });
+    const slider = wrapper.get("[data-test='reference-weight'] input");
+    expect(slider.attributes("min")).toBe("0");
+    expect(slider.attributes("max")).toBe("2");
+    expect(slider.attributes("step")).toBe("0.05");
+    // Untouched shows the advertised default without writing it to the form.
+    expect(wrapper.text()).toContain("1.00");
+  });
+
+  it("hides the strength where the recipe advertises no adapter", () => {
+    // An older host, or a recipe with no adapter: `weight` is null, and the
+    // gate is that field alone — never the family name, which is the same
+    // `sdxl` in both cases.
+    const wrapper = ipAdapter(
+      {
+        imageAttachments: [
+          { kind: "upload", filename: "source.png", base64: "SRC" },
+        ],
+      },
+      sdxlRecipe(),
+    );
+    expect(wrapper.find("[data-test='reference-weight']").exists()).toBe(false);
+  });
+
+  it("hides the strength until a reference is actually attached", () => {
+    expect(ipAdapter().find("[data-test='reference-weight']").exists()).toBe(
+      false,
+    );
   });
 });

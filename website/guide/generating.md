@@ -173,7 +173,7 @@ canvas; it is a reference, not a composition input.
 
 Identity conditioning is deliberately narrow today. It is offered only for
 **identity-qualified checkpoints** on a server built with the off-by-default
-`pulid` feature, and it cannot be combined with a LoRA or with an img2img
+`pulid` feature, and it rides alongside a LoRA and an img2img
 source image. Every other model, and every server that was not built with the
 feature, refuses the request with a named reason rather than rendering a print
 with no face in it. The live, authoritative list is whatever the server
@@ -219,7 +219,7 @@ them, so the server's own defaults keep applying:
   (default `0`, and always fewer than the print's step count). Delaying it lets
   the composition settle before the likeness is pinned.
 
-If the combination cannot be submitted (a photo alongside a LoRA or a source
+If the request cannot be submitted (a strength or start step out of range, or a
 image, a knob set with no photo, an oversized or unsupported file) Create says
 so inline beside the control and Generate stays blocked.
 

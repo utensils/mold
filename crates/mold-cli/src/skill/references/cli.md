@@ -50,6 +50,29 @@ edited. `--reference` also carries MiniMax H3's Ref2VA inputs, which is why it
 additionally accepts `video=PATH` and `audio=PATH`; a bare path always means an
 image.
 
+## Image prompting (SD 1.5 and SDXL)
+
+SD 1.5 and SDXL read a reference as an image PROMPT rather than an edit target:
+IP-Adapter encodes it with a CLIP-Vision tower and injects it into every
+cross-attention layer beside the text, so its appearance carries into the
+render while the prompt still steers. Pull `ip-adapter-sd15` or
+`ip-adapter-sdxl` first; the two share a vision tower, so the second costs only
+its adapter.
+
+```bash
+mold run sdxl-base:fp16 "A sailboat on a calm lake at sunrise" --reference streetscape.png --reference-weight 0.7
+```
+
+`--reference-weight` is 0.0 to 2.0, default 1.0; 0.6-0.8 is the usable range
+because 1.0 lets the picture dominate the prompt. Exactly 0.0 renders what the
+same request with no reference renders, pixel for pixel, and downloads and
+loads nothing.
+
+One reference per render, and unlike every other reference family it rides WITH
+everything else: `--image`/`--strength`, `--mask`, ControlNet and a LoRA all
+stay live in the same pass, and batches work because the encoded picture
+applies to every image in the batch.
+
 ## Local and remote execution
 
 `mold run` first targets `MOLD_HOST` (default `http://localhost:7680`) and can

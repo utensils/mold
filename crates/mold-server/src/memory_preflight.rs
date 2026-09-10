@@ -709,6 +709,220 @@ pub(crate) fn identity_adapter_overhead_bytes(family: mold_core::identity::Ident
     }
 }
 
+/// Device memory an SD1.5 IP-Adapter render needs beside the checkpoint.
+///
+/// | Term | Bytes | Where it comes from |
+/// | --- | --- | --- |
+/// | 16 x (`to_k_ip` + `to_v_ip`) + `image_proj`, f16/bf16 | 44,639,232 | pinned below against `ip_adapter::IpAdapter::resident_bytes` |
+/// | Cross-attention injection headroom | 45,360,768 | see the arithmetic below |
+/// | **Total** | **90,000,000** | |
+///
+/// The weight term is exact and is the checkpoint's own inventory. Each of the
+/// 16 SD1.5 cross-attentions carries two bias-free `[hidden_size, 768]`
+/// linears, and the layer table is `5 x 320 + 5 x 640 + 6 x 1280 = 12,480`
+/// (`testdata/pulid_sdxl/attn_layer_map_sd15.json`): `2 x 768 x 12,480 =
+/// 19,169,280` elements. `image_proj` adds
+/// `4 x 768 x 1024 + 4 x 768 + 2 x 768 = 3,150,336` — its
+/// `Linear(clip_dim, tokens * ctx_dim)` matrix, that linear's bias, and the
+/// output `LayerNorm`'s weight and bias. `x 2` bytes at the engine's f16/bf16
+/// compute dtype gives 44,639,232, against a 44,642,768-byte file: the
+/// difference is the safetensors header.
+///
+/// The activation term is generous by construction, and deliberately larger
+/// than the weights it serves — which for this family is the honest ordering,
+/// because a 44 MB adapter injects into activations an order of magnitude
+/// bigger than itself. The largest injection is a 320-wide layer at 768x768:
+/// `[2, 9216, 320]` under the CFG batch, of which the image branch's delta,
+/// its transposed intermediate, and the combined result are three, plus a
+/// `[2, 8, 9216, 4]` score matrix — ~35 MB at bf16, and only one layer's worth
+/// is live at a time.
+pub(crate) const IP_ADAPTER_SD15_VRAM_OVERHEAD_BYTES: u64 = 90_000_000;
+
+/// The adapter half of [`IP_ADAPTER_SD15_VRAM_OVERHEAD_BYTES`], pinned against
+/// the engine's own arithmetic by
+/// `ip_adapter_overhead_matches_the_adapters_own_resident_arithmetic`. The
+/// documented decomposition of the budget rather than a second input to it, so
+/// only that test reads it.
+#[cfg(test)]
+pub(crate) const IP_ADAPTER_SD15_ADAPTER_BF16_BYTES: u64 = 44_639_232;
+
+/// Device memory an SDXL IP-Adapter render needs beside the checkpoint.
+///
+/// | Term | Bytes | Where it comes from |
+/// | --- | --- | --- |
+/// | 70 x (`to_k_ip` + `to_v_ip`) + `image_proj`, f16/bf16 | 698,376,192 | pinned below against `ip_adapter::IpAdapter::resident_bytes` |
+/// | Cross-attention injection headroom | 131,623,808 | see the arithmetic below |
+/// | **Total** | **830,000,000** | |
+///
+/// Derived the same way as the SD1.5 term and from the same table, one family
+/// over. Each of the 70 SDXL cross-attentions carries two bias-free
+/// `[hidden_size, 2048]` linears over `10 x 640 + 60 x 1280 = 83,200`
+/// (`testdata/pulid_sdxl/attn_layer_map.json`): `2 x 2048 x 83,200 =
+/// 340,787,200` elements, plus `image_proj`'s
+/// `4 x 2048 x 1024 + 4 x 2048 + 2 x 2048 = 8,400,896`. `x 2` bytes gives
+/// 698,376,192, against a 698,391,064-byte file.
+///
+/// That the attention half is byte-identical to
+/// `IDENTITY_SDXL_ADAPTER_BF16_BYTES` is a real coincidence, not a shared
+/// derivation: PuLID's `id_to_k`/`id_to_v` are `[hidden_size, ID_TOKEN_DIM]`
+/// with `ID_TOKEN_DIM = 2048`, and SDXL's `cross_attention_dim` is also 2048.
+/// The two are charged from their own arithmetic precisely so a change to
+/// either width cannot silently move the other.
+///
+/// The activation term follows the identity one's shape: the largest injection
+/// is a 640-wide layer at 1024x1024 — `[2, 4096, 640]` under the CFG batch,
+/// three such tensors plus a `[2, 10, 4096, 4]` score matrix, ~32 MB at bf16 —
+/// and ~131 MB leaves better than 4x for allocator caching across the 70
+/// injections rather than budgeting to the arithmetic exactly.
+pub(crate) const IP_ADAPTER_SDXL_VRAM_OVERHEAD_BYTES: u64 = 830_000_000;
+
+/// The adapter half of [`IP_ADAPTER_SDXL_VRAM_OVERHEAD_BYTES`], pinned the same
+/// way and read by the same test.
+#[cfg(test)]
+pub(crate) const IP_ADAPTER_SDXL_ADAPTER_BF16_BYTES: u64 = 698_376_192;
+
+/// The device overhead one family's resident image-prompt adapter costs.
+///
+/// One switch so the estimate cannot charge SDXL's 830 MB for an SD1.5 render
+/// (which parks 8 GB cards that could run it comfortably) or SD1.5's 90 MB for
+/// an SDXL one (which admits a render with 740 MB nowhere to go). The same
+/// reason [`identity_adapter_overhead_bytes`] is a switch.
+pub(crate) fn ip_adapter_overhead_bytes(
+    family: mold_core::ip_adapter_assets::ImagePromptFamily,
+) -> u64 {
+    match family {
+        mold_core::ip_adapter_assets::ImagePromptFamily::Sd15 => {
+            IP_ADAPTER_SD15_VRAM_OVERHEAD_BYTES
+        }
+        mold_core::ip_adapter_assets::ImagePromptFamily::Sdxl => {
+            IP_ADAPTER_SDXL_VRAM_OVERHEAD_BYTES
+        }
+    }
+}
+
+/// Parameters in the OpenCLIP ViT-H/14 vision tower, from its own published
+/// architecture rather than from the file size.
+///
+/// `hidden 1280, layers 32, heads 16, intermediate 5120, patch 14, image 224,
+/// projection 1024` (`h94/IP-Adapter`'s `models/image_encoder/config.json`,
+/// the file this bundle carries for exactly this reason):
+///
+/// * embeddings `1280 + 1280 x 3 x 14 x 14 + 257 x 1280 = 1,082,880`
+/// * `pre_layrnorm` `2 x 1280 = 2,560`
+/// * per encoder layer `4 x (1280² + 1280) + 2 x (2 x 1280) + (1280 x 5120 +
+///   5120) + (5120 x 1280 + 1280) = 19,677,440`, times 32
+/// * `post_layernorm` `2,560`
+/// * bias-free `visual_projection` `1280 x 1024 = 1,310,720`
+///
+/// `x 4` bytes is 2,528,307,200 against the 2,528,373,448-byte f32 file — the
+/// difference is the safetensors header, which is how this is checked rather
+/// than asserted.
+#[cfg(test)]
+pub(crate) const IP_ADAPTER_VISION_TOWER_PARAMETERS: u64 = 632_076_800;
+
+/// Device memory the reference-picture ENCODE peaks at, beside
+/// [`ip_adapter_overhead_bytes`].
+///
+/// **These bytes are a PEAK, not residency.** The tower follows the crate's
+/// drop-and-reload rule — `encoders/openclip_vision.rs`'s "build it, encode,
+/// drop it" — so it is constructed, runs one 224x224 forward per reference
+/// picture, and is released BEFORE the denoise loop allocates a single step's
+/// arena. Nothing here is held for the render. It is charged as its own named
+/// term rather than folded into the adapter's for exactly that reason: every
+/// reference render pays the adapter for the whole denoise, and this is a
+/// strictly earlier, strictly disjoint phase.
+///
+/// It is nevertheless charged ADDITIVELY rather than as a maximum against the
+/// denoise peak, for the same reason
+/// [`IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES`] is: the engine cache is warm
+/// across requests, so the transformer may well already be resident when this
+/// phase runs, and a term that assumed the two peaks were mutually exclusive
+/// would admit a render with nowhere to put the tower.
+///
+/// The figure is `IP_ADAPTER_VISION_TOWER_PARAMETERS` at **f16** —
+/// 1,264,153,600 bytes — plus ~136 MB for the forward's working set (a
+/// `[1, 257, 1280]` hidden stream, a `[1, 16, 257, 257]` score matrix, a
+/// `[1, 257, 5120]` MLP intermediate) and the staging the `VarBuilder` copies
+/// through as it widens the file.
+///
+/// f16 is not a guess about the caller: it is what the caller does. The tower
+/// takes the ENGINE's dtype (`sd_reference::SdReferenceState::encode` hands
+/// `resolve`'s `dtype` straight to `OpenClipVisionTower`), and both SD engines
+/// resolve that to `DType::F16` on every GPU (`sd15/pipeline.rs`,
+/// `sdxl/pipeline.rs`) — this is a VRAM term, so the CPU f32 case is not the
+/// one being charged. An earlier version charged the checkpoint's own f32
+/// width, which is the width on DISK; that over-charged every reference render
+/// by ~1.24 GB and would have parked renders a 12 GB card can run, which is
+/// the mistake the identity terms' history records twice.
+pub(crate) const IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES: u64 = 1_400_000_000;
+
+/// Whether this request will actually condition on a reference picture.
+///
+/// Weight zero is completely inert — no assets are planned, nothing is
+/// downloaded, no tower is built, and no memory is charged — so the predicate
+/// is the effective weight, never the mere presence of `edit_images`. It is
+/// [`crate::ip_adapter_dependencies`]'s own predicate, so the bundle that is
+/// downloaded and the memory that is charged can never disagree.
+#[cfg(test)]
+pub(crate) fn request_charges_ip_adapter_overhead(req: &GenerateRequest) -> bool {
+    request_charges_ip_adapter_overhead_with_projection(req, None)
+}
+
+pub(crate) fn request_charges_ip_adapter_overhead_with_projection(
+    req: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> bool {
+    crate::ip_adapter_dependencies::request_needs_ip_adapter_assets_with_projection(req, projection)
+}
+
+/// The image-prompt family whose overhead this request is charged, or `None`
+/// when it conditions on no reference picture — or does, on a family that has
+/// no image-prompt adapter at all (FLUX.2 and Qwen-Image-Edit both carry
+/// `edit_images`, and neither loads any of this).
+///
+/// The manifest is the authority, exactly as it is for identity: a built-in
+/// checkpoint's own family answers, and the hint is the fallback for the
+/// live-catalog `cv:`/`hf:` ids that have no manifest. Where this differs from
+/// identity is that the hint ALONE cannot answer — `activation_family_for`
+/// maps `sd15` and `sdxl` onto the one `ActivationFamily::SdxlUnet`, so the
+/// two bases that need different adapters are indistinguishable in it. The
+/// second discriminator is the checkpoint's own composition: SDXL conditions
+/// on TWO text encoders and SD1.5 on one, which is a structural fact about the
+/// checkpoint rather than a guess from its name.
+///
+/// Both halves of that second encoder are asked, and that is not belt and
+/// braces. The `paths` this estimate receives are `gpu_resident_paths`', which
+/// clears `clip_encoder_2` whenever CLIP-G is parked on the CPU — reading the
+/// encoder alone would silently reclassify exactly those SDXL renders as
+/// SD1.5 and under-charge them by 740 MB. The tokenizer survives that
+/// stripping (it is host-only by role and is never a GPU resident), and an
+/// SDXL checkpoint cannot run without both, so the pair answers on every
+/// placement.
+fn ip_adapter_overhead_family_with_projection_and_hint(
+    req: &GenerateRequest,
+    paths: &ModelPaths,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+    hint: Option<ActivationHint>,
+) -> Option<mold_core::ip_adapter_assets::ImagePromptFamily> {
+    use mold_core::ip_adapter_assets::ImagePromptFamily;
+    if !request_charges_ip_adapter_overhead_with_projection(req, projection) {
+        return None;
+    }
+    if let Some(manifest) = mold_core::manifest::find_manifest(&req.model) {
+        return ImagePromptFamily::from_generation_family(&manifest.family);
+    }
+    if hint.is_some_and(|hint| hint.family == ActivationFamily::SdxlUnet) {
+        return Some(
+            if paths.clip_encoder_2.is_some() || paths.clip_tokenizer_2.is_some() {
+                ImagePromptFamily::Sdxl
+            } else {
+                ImagePromptFamily::Sd15
+            },
+        );
+    }
+    None
+}
+
 /// Device memory the face-identity EXTRACTION peaks at, beside
 /// [`IDENTITY_VRAM_OVERHEAD_BYTES`].
 ///
@@ -1773,6 +1987,18 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
             .saturating_add(IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES),
         None => peak,
     };
+    // Image prompting adds the same two kinds of term identity does, and is
+    // charged from the request for the same reason: the assets are not part of
+    // the checkpoint's `ModelPaths`. The adapter term follows the FAMILY,
+    // because the adapter does; the tower term does not, because SD1.5 and
+    // SDXL condition on the very same ViT-H/14 file.
+    let peak =
+        match ip_adapter_overhead_family_with_projection_and_hint(req, paths, projection, hint) {
+            Some(family) => peak
+                .saturating_add(ip_adapter_overhead_bytes(family))
+                .saturating_add(IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES),
+            None => peak,
+        };
     // A true-CFG render's second forward per step is additional resident
     // conditioning and a second cross-attention pass. Charged separately from
     // the identity overhead because only a request that engages the branch pays
@@ -3460,6 +3686,326 @@ mod fail_closed_tests {
         assert_eq!(
             identity_adapter_overhead_bytes(mold_core::identity::IdentityFamily::Flux),
             IDENTITY_VRAM_OVERHEAD_BYTES
+        );
+    }
+
+    /// The IP-Adapter charge is each adapter's own arithmetic, derived from
+    /// the UNet cross-attention layout the checkpoint was trained against
+    /// rather than from the published file size.
+    ///
+    /// The engine computes the same figure from
+    /// `ip_adapter::IpAdapter::resident_bytes`, over
+    /// `plan_attn_layers(...)`; `mold_inference::sdxl::pulid`'s
+    /// `the_sd15_layer_table_matches_upstreams_own_processor_enumeration` and
+    /// `the_sdxl_layer_table_...` pin the layer tables themselves against
+    /// upstream's own enumeration of a real diffusers UNet. This end holds the
+    /// budgets honest without linking the engine.
+    ///
+    /// The published file sizes are the cross-check: an arithmetic that is a
+    /// safetensors header away from the bytes upstream actually ships is
+    /// arithmetic about the right file.
+    #[test]
+    fn ip_adapter_overhead_matches_the_adapters_own_resident_arithmetic() {
+        const F16: u64 = 2;
+        // `image_proj` is `Linear(clip_dim, tokens * ctx_dim)` plus that
+        // linear's bias plus the output `LayerNorm`'s weight and bias.
+        const TOKENS: u64 = 4;
+        const CLIP: u64 = 1024;
+        let projection = |context: u64| TOKENS * context * CLIP + TOKENS * context + 2 * context;
+
+        // `testdata/pulid_sdxl/attn_layer_map_sd15.json`: 16 attn2 modules —
+        // 5 x 320, 5 x 640, 6 x 1280 — each with a bias-free `to_k_ip` and
+        // `to_v_ip` of `[hidden_size, 768]`.
+        const SD15_CONTEXT: u64 = 768;
+        let sd15_hidden = 5 * 320 + 5 * 640 + 6 * 1280;
+        assert_eq!(sd15_hidden, 12_480);
+        let sd15 = (2 * SD15_CONTEXT * sd15_hidden + projection(SD15_CONTEXT)) * F16;
+        assert_eq!(
+            sd15, IP_ADAPTER_SD15_ADAPTER_BF16_BYTES,
+            "the SD1.5 term must be the adapter's own resident arithmetic"
+        );
+        // `ip-adapter_sd15.safetensors` as published, less its header.
+        assert!(
+            (44_642_768 - sd15) < 8_192,
+            "the arithmetic must land a header away from the published file"
+        );
+
+        // `testdata/pulid_sdxl/attn_layer_map.json`: 70 attn2 modules —
+        // 10 x 640 and 60 x 1280 — at `[hidden_size, 2048]`.
+        const SDXL_CONTEXT: u64 = 2048;
+        let sdxl_hidden = 10 * 640 + 60 * 1280;
+        assert_eq!(sdxl_hidden, 83_200);
+        let sdxl = (2 * SDXL_CONTEXT * sdxl_hidden + projection(SDXL_CONTEXT)) * F16;
+        assert_eq!(
+            sdxl, IP_ADAPTER_SDXL_ADAPTER_BF16_BYTES,
+            "the SDXL term must be the adapter's own resident arithmetic"
+        );
+        assert!(
+            (698_391_064 - sdxl) < 32_768,
+            "the arithmetic must land a header away from the published file"
+        );
+
+        // Each budget leaves room for the injections the weights serve.
+        assert!(IP_ADAPTER_SD15_VRAM_OVERHEAD_BYTES > sd15);
+        assert!(IP_ADAPTER_SDXL_VRAM_OVERHEAD_BYTES > sdxl);
+
+        // The largest SDXL injection: a 640-wide layer at 1024x1024 is 64x64
+        // tokens after one downsample, doubled by the CFG batch. Its working
+        // set is the image branch's delta, its transposed intermediate, and
+        // the combined result, plus a `[2, 10, 4096, 4]` score matrix.
+        const BATCH: u64 = 2;
+        const SDXL_TOKENS: u64 = 64 * 64;
+        const SDXL_NARROW: u64 = 640;
+        const SDXL_HEADS: u64 = 10;
+        let sdxl_injection = (3 * BATCH * SDXL_TOKENS * SDXL_NARROW
+            + BATCH * SDXL_HEADS * SDXL_TOKENS * TOKENS)
+            * F16;
+        let sdxl_headroom = IP_ADAPTER_SDXL_VRAM_OVERHEAD_BYTES - sdxl;
+        assert!(
+            sdxl_headroom >= 4 * sdxl_injection,
+            "SDXL headroom {sdxl_headroom} must cover a 1024x1024 injection's working set"
+        );
+
+        // The largest SD1.5 injection: a 320-wide layer at 768x768 is 96x96
+        // tokens, doubled by the CFG batch. Unlike SDXL's, this legitimately
+        // EXCEEDS the 44 MB of weights it serves, which is why the SD1.5
+        // budget deliberately does not carry the identity charge's
+        // "headroom must not exceed the weights" bound.
+        const SD15_TOKENS: u64 = 96 * 96;
+        const SD15_NARROW: u64 = 320;
+        const SD15_HEADS: u64 = 8;
+        let sd15_injection = (3 * BATCH * SD15_TOKENS * SD15_NARROW
+            + BATCH * SD15_HEADS * SD15_TOKENS * TOKENS)
+            * F16;
+        let sd15_headroom = IP_ADAPTER_SD15_VRAM_OVERHEAD_BYTES - sd15;
+        assert!(
+            sd15_headroom >= sd15_injection,
+            "SD1.5 headroom {sd15_headroom} must cover a 768x768 injection's working set"
+        );
+
+        // The two families must never be charged the same number: 830 MB on an
+        // SD1.5 render parks 8 GB cards, and 90 MB on an SDXL one admits a
+        // render with 740 MB nowhere to go.
+        assert_ne!(
+            IP_ADAPTER_SD15_VRAM_OVERHEAD_BYTES,
+            IP_ADAPTER_SDXL_VRAM_OVERHEAD_BYTES
+        );
+        assert_eq!(
+            ip_adapter_overhead_bytes(mold_core::ip_adapter_assets::ImagePromptFamily::Sd15),
+            IP_ADAPTER_SD15_VRAM_OVERHEAD_BYTES
+        );
+        assert_eq!(
+            ip_adapter_overhead_bytes(mold_core::ip_adapter_assets::ImagePromptFamily::Sdxl),
+            IP_ADAPTER_SDXL_VRAM_OVERHEAD_BYTES
+        );
+    }
+
+    /// The tower term is the published architecture's own parameter count at
+    /// the checkpoint's f32 width, and it is a TRANSIENT — released before the
+    /// denoise loop — so it must never grow into a resident-sized allowance.
+    #[test]
+    fn the_vision_tower_term_is_the_towers_own_parameter_count() {
+        // `models/image_encoder/config.json`: hidden 1280, 32 layers, 16
+        // heads, intermediate 5120, patch 14, image 224, projection 1024.
+        const HIDDEN: u64 = 1280;
+        const LAYERS: u64 = 32;
+        const INTERMEDIATE: u64 = 5120;
+        const PATCHES: u64 = (224 / 14) * (224 / 14) + 1;
+        const PROJECTION: u64 = 1024;
+        let embeddings = HIDDEN + HIDDEN * 3 * 14 * 14 + PATCHES * HIDDEN;
+        let per_layer = 4 * (HIDDEN * HIDDEN + HIDDEN)
+            + 2 * (2 * HIDDEN)
+            + (HIDDEN * INTERMEDIATE + INTERMEDIATE)
+            + (INTERMEDIATE * HIDDEN + HIDDEN);
+        let parameters =
+            embeddings + 2 * HIDDEN + LAYERS * per_layer + 2 * HIDDEN + HIDDEN * PROJECTION;
+        assert_eq!(parameters, IP_ADAPTER_VISION_TOWER_PARAMETERS);
+        // `models/image_encoder/model.safetensors` as published, less its
+        // header: the architecture and the file are the same tower.
+        let f32_bytes = parameters * 4;
+        assert!(
+            (2_528_373_448 - f32_bytes) < 131_072,
+            "the parameter count must land a header away from the published f32 file"
+        );
+
+        // The CHARGE is against the width the tower is actually built at,
+        // which is the engine's f16 — not the file's f32.
+        let f16_bytes = parameters * 2;
+        assert!(
+            IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES > f16_bytes,
+            "the charge must cover the weights themselves"
+        );
+        assert!(
+            IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES < f32_bytes,
+            "charging the file's f32 width over-charges every reference render \
+             by more than a gigabyte"
+        );
+        let working_set = IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES - f16_bytes;
+        // One 224x224 forward at batch 1: the hidden stream, the score matrix,
+        // and the MLP intermediate, at f32.
+        let forward = (PATCHES * HIDDEN + 16 * PATCHES * PATCHES + PATCHES * INTERMEDIATE) * 4;
+        assert!(
+            working_set >= 4 * forward,
+            "the tower allowance {working_set} must cover its own forward"
+        );
+        assert!(
+            working_set < f32_bytes / 8,
+            "the allowance is for a forward, not a second copy of the tower"
+        );
+    }
+
+    /// The IP-Adapter charge follows the family of the requested model, and the
+    /// two bases that share one [`ActivationFamily`] are still told apart.
+    ///
+    /// This is the case identity does not have: `activation_family_for` maps
+    /// both `sd15` and `sdxl` onto `SdxlUnet`, so a checkpoint with no built-in
+    /// manifest is separated by its own composition — SDXL's second text
+    /// encoder — rather than by a hint that cannot answer.
+    #[test]
+    fn the_ip_adapter_charge_follows_the_family_of_the_requested_model() {
+        use mold_core::ip_adapter_assets::ImagePromptFamily;
+
+        let base: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a lighthouse",
+            "model": "sdxl-base:fp16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 25,
+            "guidance": 7.5,
+        }))
+        .unwrap();
+        let sdxl_paths = ModelPaths {
+            clip_encoder_2: Some(PathBuf::from("/models/clip_g.safetensors")),
+            ..paths("/models/sdxl.safetensors")
+        };
+        let sd15_paths = paths("/models/sd15.safetensors");
+        let family = |req: &GenerateRequest, paths: &ModelPaths| {
+            ip_adapter_overhead_family_with_projection_and_hint(
+                req,
+                paths,
+                None,
+                Some(hint(ActivationFamily::SdxlUnet)),
+            )
+        };
+
+        // No reference attached: nothing is charged, on either base.
+        assert_eq!(family(&base, &sdxl_paths), None);
+        assert!(!request_charges_ip_adapter_overhead(&base));
+
+        let mut sdxl = base.clone();
+        sdxl.edit_images = Some(vec![vec![0x89, 0x50, 0x4e, 0x47]]);
+        assert!(request_charges_ip_adapter_overhead(&sdxl));
+        assert_eq!(
+            family(&sdxl, &sdxl_paths),
+            Some(ImagePromptFamily::Sdxl),
+            "a built-in manifest's own family is the authority"
+        );
+
+        // Weight zero is inert, exactly as `id_weight` 0 is.
+        let mut zero = sdxl.clone();
+        zero.reference_weight = Some(0.0);
+        assert_eq!(family(&zero, &sdxl_paths), None);
+        assert!(!request_charges_ip_adapter_overhead(&zero));
+
+        // An SD1.5 checkpoint charges the SD1.5 adapter.
+        let mut sd15 = sdxl.clone();
+        sd15.model = "sd15:fp16".to_string();
+        assert_eq!(family(&sd15, &sd15_paths), Some(ImagePromptFamily::Sd15));
+
+        // A live-catalog id has no manifest, so the checkpoint's own
+        // composition decides — and it must decide DIFFERENTLY for the two.
+        let mut catalog = sdxl.clone();
+        catalog.model = "cv:123456".to_string();
+        assert_eq!(family(&catalog, &sdxl_paths), Some(ImagePromptFamily::Sdxl));
+        assert_eq!(family(&catalog, &sd15_paths), Some(ImagePromptFamily::Sd15));
+
+        // And it must still decide SDXL once CLIP-G is parked on the CPU.
+        // `gpu_resident_paths` clears `clip_encoder_2` for exactly that
+        // placement, which is how reading the encoder alone would under-charge
+        // a whole class of SDXL renders by 740 MB.
+        let parked_clip_g = ModelPaths {
+            clip_encoder_2: None,
+            clip_tokenizer_2: Some(PathBuf::from("/models/clip_g_tokenizer.json")),
+            ..paths("/models/sdxl.safetensors")
+        };
+        assert_eq!(
+            family(&catalog, &parked_clip_g),
+            Some(ImagePromptFamily::Sdxl)
+        );
+
+        // A family with no image-prompt adapter charges nothing, even carrying
+        // references: FLUX.2 and Qwen-Image-Edit condition on them natively.
+        let mut flux2 = sdxl.clone();
+        flux2.model = "flux2-klein:q8".to_string();
+        assert_eq!(
+            ip_adapter_overhead_family_with_projection_and_hint(
+                &flux2,
+                &paths("/models/flux2.safetensors"),
+                None,
+                Some(hint(ActivationFamily::Flux2Dit)),
+            ),
+            None
+        );
+    }
+
+    /// The whole charge, through the estimate the scheduler actually reads: a
+    /// reference render is charged its adapter AND its tower, and a request
+    /// that attaches nothing is charged neither.
+    #[test]
+    fn the_estimate_charges_the_adapter_and_the_tower_and_only_for_a_reference() {
+        let plain: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a lighthouse",
+            "model": "sdxl-base:fp16",
+            "width": 1024,
+            "height": 1024,
+            "steps": 25,
+            "guidance": 7.5,
+        }))
+        .unwrap();
+        let mut referenced = plain.clone();
+        referenced.edit_images = Some(vec![vec![0x89, 0x50, 0x4e, 0x47]]);
+        let mut zero = referenced.clone();
+        zero.reference_weight = Some(0.0);
+
+        let sdxl_paths = ModelPaths {
+            clip_encoder_2: Some(PathBuf::from("/models/clip_g.safetensors")),
+            ..paths("/models/sdxl.safetensors")
+        };
+        let estimate = |req: &GenerateRequest| {
+            estimate_generation_memory_for_request(
+                req,
+                &sdxl_paths,
+                Some(hint(ActivationFamily::SdxlUnet)),
+                GenerationOffloadPolicy::new(
+                    false,
+                    mold_inference::wan::block_offload::AdmissionPolicy::Disabled,
+                    false,
+                ),
+                None,
+                false,
+                false,
+            )
+            .peak_memory_bytes
+        };
+
+        // The comparison is against the ZERO-weight render, not the plain one,
+        // and that is the point of the test rather than a convenience. Both
+        // carry an attached picture, so the pre-existing decoded-pixel term
+        // (`width x height x 4 x batch`, charged for any source or reference
+        // image) is identical on both sides and what remains is exactly this
+        // slice's charge.
+        assert_eq!(
+            estimate(&referenced) - estimate(&zero),
+            IP_ADAPTER_SDXL_VRAM_OVERHEAD_BYTES + IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES,
+            "a reference render pays exactly its adapter plus its tower"
+        );
+        // And a zero-weight render pays NONE of the bundle: what separates it
+        // from the plain render is that one decoded-pixel buffer and nothing
+        // else. An adapter charge hiding in here would be at least 90 MB.
+        assert_eq!(
+            estimate(&zero) - estimate(&plain),
+            u64::from(plain.width) * u64::from(plain.height) * 4,
+            "reference_weight 0 must charge nothing but the attached picture itself"
         );
     }
 

@@ -53,8 +53,11 @@ Output: A rain-slick corner bakery at dusk, the window sign reading "OPEN" in wa
 
 Tag piles and two competing styles weaken prompt following. A negative prompt
 on Dev is silently inert without true CFG. A very high identity weight makes
-skin look waxy. Raise it only when the face drifts. Identity cannot be combined
-with a LoRA or with img2img. Schnell loaded with detail returns its average.
+skin look waxy. Raise it only when the face drifts. A strong style LoRA pulls
+against the identity: lower the LoRA scale before raising the identity weight.
+Under img2img the identity start step counts against the full step count, so a
+low value on a short strength does nothing. Schnell loaded with detail returns
+its average.
 
 ## CLI
 
