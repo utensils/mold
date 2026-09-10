@@ -244,3 +244,38 @@ Native visual testing found that Choose from gallery opened Local file. Source/e
 Auto and Most capable now resolve fresh Expand and Remix requests across reachable machines instead of using the browsed machine. The shared expansion policy can select a peer with the expander installed while generation remains on its separately captured route. Frozen refreshes and missing-model recovery preserve both authorities. Automatic browsing does not move prepared work, explicit pinning retains quick-result portability, and policy changes are named before stale work can submit.
 
 Validation covers offline browsed hosts with reachable peers, both automatic policies and prompt tools, unavailable expander configuration, pinned behavior, separate generation destinations for Batch 1 and Batch N, immutable recovery, and policy changes during and after expansion. Mobile regression tests, production build/typecheck, architecture, formatting, and independent review pass. This check used local fixtures without generation.
+
+### Style sheet and canvas-first follow-up
+
+The native `<select>` is gone. The composer's style is a 44pt chip naming the
+style in plain sans with its exact runnable id in mono, opening
+`desktop/src/mobile/MobileStyleSheet.vue` — a bottom sheet on the
+MobileLibrarySheet pattern (fixed overlay, grabber, scrim, `useMobileBack`,
+overlay-stack `isTop()` gate, swipe-to-dismiss) hosting the SHARED
+`studio/components/StyleMenu.vue` in `touch` mode. The list, not the container,
+is what the three surfaces share: the phone injects its own multi-machine
+availability tag, keeps `Browse more` pointed at the current output kind, and
+keeps a style no machine has as its own row with the way to get it. The chip
+stays enabled in that case so the row is reachable.
+
+Make now leads with the canvas. The develop bed, the generation status line and
+the finished result were three separate things at the very end of the scroll,
+below Templates; they are one slot directly under the output-kind control.
+Queueing a print scrolls `.mobile-content` to that slot, smoothly unless the
+reader asked for no motion, and never again when the job settles — a submission
+is a move on a screen already being watched, so it does not take focus the way
+a restore from Queue or Library does.
+
+Three iOS items landed with it. More settings is a real bottom sheet on the
+shared `.mobile-sheet-*` chrome with a Reset · title · Done header instead of a
+full-screen overlay with a circular Done. The type vocabulary is the platform's:
+form row labels are 15px sans sentence case (mono uppercase is now only a GROUP
+heading), sheet titles are 17px/600, Back controls are 15px sans accent with a
+chevron — including the viewer's, which was a `×` Close — Settings checkboxes are
+`ui/components/SwitchToggle.vue`, and the host screen says **Machines**. The My
+images scope row is `ui/components/SegmentedControl.vue` in `inline` mode, one
+row with each count beside its name, replacing a radio grid that wrapped onto
+two lines.
+
+Deferred, unchanged: per-screen large titles, the Queue running-job card, Styles
+filter consolidation, Machines cards, DevicePanel density on Settings.

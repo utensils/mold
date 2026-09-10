@@ -8,6 +8,7 @@ import {
   type QueuePlan,
 } from "@studio/api/queuePlan";
 import DevicePanel from "@studio/components/DevicePanel.vue";
+import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import LicenseSettingsPanel from "@studio/components/LicenseSettingsPanel.vue";
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { apiJsonTo } from "../lib/api/client";
@@ -351,22 +352,18 @@ function pickTone(choice: ToneChoice) {
       </div>
       <fieldset class="mobile-settings-fieldset">
         <legend>Generated images</legend>
-        <label class="mobile-photo-setting">
+        <div class="mobile-photo-setting">
           <span>
             <strong>Save to Photos automatically</strong>
             <small>Videos stay in My images. Open one to watch or save it.</small>
           </span>
-          <input
-            name="mobile-auto-save-photos"
-            type="checkbox"
-            :checked="settings.autoSavePhotos"
-            @change="
-              emit('update', {
-                autoSavePhotos: ($event.target as HTMLInputElement).checked,
-              })
-            "
+          <SwitchToggle
+            data-test="mobile-auto-save-photos"
+            label="Save to Photos automatically"
+            :model-value="settings.autoSavePhotos"
+            @update:model-value="emit('update', { autoSavePhotos: $event })"
           />
-        </label>
+        </div>
       </fieldset>
     </section>
 
@@ -392,7 +389,7 @@ function pickTone(choice: ToneChoice) {
       </div>
       <fieldset class="mobile-settings-fieldset">
         <legend>File under</legend>
-        <label class="mobile-settings-switch">
+        <div class="mobile-settings-switch">
           <span>
             <!-- Never a silent write: the tag this files is always shown on
                  Create as the removable ghost chip, before Generate. -->
@@ -402,17 +399,13 @@ function pickTone(choice: ToneChoice) {
               result.</small
             >
           </span>
-          <input
-            name="mobile-auto-tag-title"
-            type="checkbox"
-            :checked="settings.autoTagTitle"
-            @change="
-              emit('update', {
-                autoTagTitle: ($event.target as HTMLInputElement).checked,
-              })
-            "
+          <SwitchToggle
+            data-test="mobile-auto-tag-title"
+            label="Tag new prints with their title"
+            :model-value="settings.autoTagTitle"
+            @update:model-value="emit('update', { autoTagTitle: $event })"
           />
-        </label>
+        </div>
       </fieldset>
     </section>
 

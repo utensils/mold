@@ -1349,7 +1349,6 @@ function selectModel(model: ModelInfoExtended) {
 
 /** Browse more, from inside the style menu — the same destination the card's
  *  own header link carries, which is this output kind's Styles filter. */
-const router = useRouter();
 function browseStyles(to: string) {
   void router.push(to);
 }

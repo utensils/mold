@@ -284,12 +284,22 @@ describe("mobile navigation", () => {
 });
 
 describe("mobile advanced sheet", () => {
-  it("is a full-screen overlay that only becomes visible when opened", () => {
+  it("is a bottom sheet that only becomes visible when opened", () => {
     const sheet = css.match(/\.mobile-advanced-sheet\s*\{([^}]*)\}/s);
     const open = css.match(/\.mobile-advanced-sheet\.is-open\s*\{([^}]*)\}/s);
     expect(sheet?.[1]).toMatch(/position:\s*fixed\s*;/);
     expect(sheet?.[1]).toMatch(/display:\s*none\s*;/);
+    // It rises from the bottom edge over the composer, rather than replacing
+    // the screen: the panel is bounded and the surface behind stays visible.
+    expect(sheet?.[1]).toMatch(/justify-content:\s*flex-end\s*;/);
     expect(open?.[1]).toMatch(/display:\s*flex\s*;/);
+  });
+
+  it("gives its header the shared iOS shape and drops the circular Done", () => {
+    const head = css.match(/\.mobile-advanced-sheet-head\s*\{([^}]*)\}/s);
+    const close = css.match(/\.mobile-advanced-sheet-close\s*\{([^}]*)\}/s);
+    expect(head?.[1]).toMatch(/border-bottom:\s*1px solid var\(--mold-border\)/);
+    expect(close?.[1]).not.toMatch(/border-radius:\s*50%/);
   });
 
   it("scrolls its own body with the pinned mobile containment invariants", () => {
@@ -777,5 +787,132 @@ describe("mobile Library organization", () => {
     expect(chip?.[1]).toMatch(/border-radius:\s*var\(--mold-radius-2\)\s*;/);
     expect(cover?.[1]).toMatch(/border-radius:\s*var\(--mold-radius-2\)\s*;/);
     expect(row?.[1]).toMatch(/border-radius:\s*var\(--mold-radius-3\)\s*;/);
+  });
+});
+
+describe("mobile style chip and sheet", () => {
+  const styleMenu = readFileSync("../studio/components/StyleMenu.vue", "utf8");
+
+  it("gives the chip a 44pt target with the plain name in sans and the id in mono", () => {
+    const chip = css.match(/\.mobile-style-picker-chip\s*\{([^}]*)\}/s);
+    const name = css.match(/\.mobile-style-chip-name\s*\{([^}]*)\}/s);
+    const id = css.match(/\.mobile-style-id\s*\{([^}]*)\}/s);
+    expect(Number(chip?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(name?.[1]).toMatch(/font-family:\s*var\(--font-body\)/);
+    expect(id?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+  });
+
+  it("keeps sheet rows finger-sized and everything editable inside them readable", () => {
+    // The shared menu's touch mode is what the phone gets; pin both halves so
+    // a desktop-sized row can never reach a thumb.
+    const row = styleMenu.match(/\.ms-model__menu--touch \.ms-model__option\s*\{([^}]*)\}/s);
+    const filter = styleMenu.match(
+      /\.ms-model__menu--touch \.ms-model__filter input\s*\{([^}]*)\}/s,
+    );
+    expect(Number(row?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    // --mold-fs-md is 1rem: 16px, below which iOS zooms the page on focus.
+    expect(row?.[1]).toMatch(/font-size:\s*var\(--mold-fs-md/);
+    expect(Number(filter?.[1]?.match(/height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(40);
+    expect(filter?.[1]).toMatch(/font-size:\s*var\(--mold-fs-md/);
+  });
+
+  it("rises from the bottom edge with a grabber, a scrim, and a centred iOS header", () => {
+    const sheet = css.match(/\.mobile-sheet\s*\{([^}]*)\}/s);
+    const open = css.match(/\.mobile-sheet\.is-open\s*\{([^}]*)\}/s);
+    const panel = css.match(/\.mobile-sheet-panel\s*\{([^}]*)\}/s);
+    const grabber = css.match(
+      /\.mobile-library-sheet-grabber,\s*\n\.mobile-sheet-grabber\s*\{([^}]*)\}/s,
+    );
+    const scrim = css.match(
+      /\.mobile-library-sheet-backdrop,\s*\n\.mobile-sheet-scrim\s*\{([^}]*)\}/s,
+    );
+    const title = css.match(/\.mobile-sheet-title\s*\{([^}]*)\}/s);
+    const action = css.match(/\.mobile-sheet-action\s*\{([^}]*)\}/s);
+
+    expect(sheet?.[1]).toMatch(/position:\s*fixed\s*;/);
+    expect(sheet?.[1]).toMatch(/justify-content:\s*flex-end\s*;/);
+    expect(open?.[1]).toMatch(/display:\s*flex\s*;/);
+    expect(panel?.[1]).toContain("78dvh");
+    expect(panel?.[1]).toMatch(/border-radius:\s*18px 18px 0 0\s*;/);
+    // The grabber and the scrim are one rule the library sheet shares.
+    expect(grabber?.[1]).toMatch(/height:\s*4px\s*;/);
+    expect(scrim?.[1]).toMatch(/position:\s*absolute\s*;/);
+    // iOS sheet title: 17px semibold sans, centred.
+    expect(title?.[1]).toMatch(/font-size:\s*17px/);
+    expect(title?.[1]).toMatch(/font-weight:\s*600\s*;/);
+    expect(title?.[1]).toMatch(/font-family:\s*var\(--font-body\)/);
+    // Bar buttons are text, not circular glyphs, and still 44pt.
+    expect(Number(action?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(action?.[1]).toMatch(/border:\s*0\s*;/);
+    expect(action?.[1]).toMatch(/color:\s*var\(--mold-blue\)\s*;/);
+  });
+
+  it("keeps the sheet body scrolling under the phone containment invariants", () => {
+    const body = css.match(/\.mobile-sheet-body\s*\{([^}]*)\}/s);
+    expect(body?.[1]).toMatch(/overflow-y:\s*auto\s*;/);
+    expect(body?.[1]).toMatch(/overscroll-behavior:\s*none\s*;/);
+    expect(body?.[1]).toContain("env(safe-area-inset-left)");
+    expect(body?.[1]).toContain("env(safe-area-inset-right)");
+    expect(body?.[1]).toContain("env(safe-area-inset-bottom)");
+  });
+});
+
+describe("iOS type vocabulary", () => {
+  it("says a row label in plain sans and keeps mono uppercase for group headers", () => {
+    const label = css.match(/\.field > span\s*\{([^}]*)\}/s);
+    // 15px sans, sentence case: a form row's label is a plain word, not a
+    // machine token. `--text-body-lg` is the phone bridge's 0.9375rem.
+    expect(label?.[1]).toMatch(/font-family:\s*var\(--font-body\)/);
+    expect(label?.[1]).toMatch(/font-size:\s*var\(--text-body-lg\)/);
+    expect(label?.[1]).not.toMatch(/text-transform:\s*uppercase/);
+
+    // A GROUP heading is still mono uppercase — that is what separates the
+    // two, and it is the only place the utility face is left on this screen.
+    const legends = css.match(
+      /\.mobile-compact-fieldset > legend,\s*\n\.mobile-generate-legend,[\s\S]*?\{([^}]*)\}/s,
+    );
+    expect(legends?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+    expect(legends?.[1]).toMatch(/text-transform:\s*uppercase/);
+  });
+
+  it("makes every Back control a 15px sans accent label with a chevron", () => {
+    const back = css.match(/\.mobile-back-button\s*\{([^}]*)\}/s);
+    const close = css.match(/\.gallery-viewer-close\s*\{([^}]*)\}/s);
+    for (const control of [back, close]) {
+      expect(control?.[1]).toMatch(/font-family:\s*var\(--font-body\)/);
+      expect(control?.[1]).toMatch(/font-size:\s*var\(--text-body-lg\)/);
+      expect(Number(control?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    }
+    // The viewer's leading control is a Back chevron, never a × dismiss.
+    expect(galleryViewerComponent).toMatch(
+      /<span aria-hidden="true">‹<\/span>\s*<span>Back<\/span>/,
+    );
+  });
+
+  it("names the phone's machines lexicon on the host detail Back control", () => {
+    expect(mobileHostDetailComponent).toContain("‹</span> Machines");
+    expect(mobileHostDetailComponent).not.toContain("‹</span> Hosts");
+  });
+
+  it("gives the library sheet head the iOS sheet title, not a mono kicker", () => {
+    const head = css.match(/\.mobile-library-sheet-head\s*\{([^}]*)\}/s);
+    expect(head?.[1]).toMatch(/font-family:\s*var\(--font-body\)/);
+    expect(head?.[1]).toMatch(/font-size:\s*17px/);
+    expect(head?.[1]).toMatch(/font-weight:\s*600\s*;/);
+    expect(head?.[1]).not.toMatch(/text-transform:\s*uppercase/);
+  });
+});
+
+describe("mobile library scope control", () => {
+  it("keeps the shared segmented control finger-sized in 13px sans", () => {
+    const row = css.match(/\.mobile-library-scope\s*\{([^}]*)\}/s);
+    const segment = css.match(/\.mobile-library-scope button\s*\{([^}]*)\}/s);
+    // The control owns its own layout; the phone only raises the target and
+    // the type, and never re-declares `display`.
+    expect(row?.[1]).not.toMatch(/display:\s*grid/);
+    expect(Number(segment?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(segment?.[1]).toMatch(/font-size:\s*var\(--mold-fs-sm\)/);
+    expect(segment?.[1]).toMatch(/font-weight:\s*650\s*;/);
+    expect(css).not.toContain(".mobile-library-scope-count");
   });
 });

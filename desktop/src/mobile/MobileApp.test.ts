@@ -612,21 +612,95 @@ function fieldControl(label: string): DOMWrapper<Element> {
   return field.find("input, textarea, select");
 }
 
+/** One segment of the My-images scope control, found by its plain label. */
+function libraryScopeSegment(scope: "prints" | "collections" | "trash") {
+  const labels = { prints: "Prints", collections: "Collections", trash: "Trash" } as const;
+  const found = wrapper!
+    .get("[data-test='mobile-library-scope']")
+    .findAll("button")
+    .find((button) => button.get(".ms-seg__label").text() === labels[scope]);
+  if (!found) throw new Error(`Missing ${scope} scope`);
+  return found;
+}
+
+/** The composer's Style chip — the one control that opens the style sheet. */
+function styleChip() {
+  return wrapper!.get("[data-test='mobile-style-picker-chip']");
+}
+
+/** The exact style id the composer carries, in mono on the chip. */
+function currentStyleId(): string {
+  return wrapper!.get(".mobile-style-id").text();
+}
+
+function styleSheetOpen(): boolean {
+  return wrapper!.get("[data-test='mobile-style-sheet']").classes().includes("is-open");
+}
+
+async function openStyleSheet(): Promise<void> {
+  if (!styleSheetOpen()) {
+    await styleChip().trigger("click");
+    await flushPromises();
+  }
+}
+
+async function closeStyleSheet(): Promise<void> {
+  if (styleSheetOpen()) {
+    await wrapper!.get("[data-test='mobile-style-sheet-done']").trigger("click");
+    await flushPromises();
+  }
+}
+
+function styleSheetRows() {
+  return wrapper!.findAll("[data-test='mobile-style-sheet'] .ms-model__option");
+}
+
+/** Every style id the sheet offers, leaving the sheet closed again. */
+async function styleOptionIds(): Promise<string[]> {
+  await openStyleSheet();
+  const ids = wrapper!
+    .findAll("[data-test='mobile-style-sheet'] [data-test='model-option-id']")
+    .map((row) => row.text());
+  await closeStyleSheet();
+  return ids;
+}
+
+/** Every offered row's whole text — name, id, size, and the machine tag. */
+async function styleOptionLabels(): Promise<string[]> {
+  await openStyleSheet();
+  const labels = styleSheetRows().map((row) => row.text());
+  await closeStyleSheet();
+  return labels;
+}
+
+async function pickStyleRow(name: string): Promise<boolean> {
+  await openStyleSheet();
+  const row = styleSheetRows().find(
+    (candidate) => candidate.find("[data-test='model-option-id']").text() === name,
+  );
+  if (!row) {
+    await closeStyleSheet();
+    return false;
+  }
+  await row.trigger("click");
+  await flushPromises();
+  return true;
+}
+
 /** Use the same output-kind doors as a person before picking a style. */
 async function selectStyle(name: string): Promise<void> {
   for (const label of ["Still picture", "Short clip", "3-D object"]) {
-    const select = fieldControl("Style");
-    if (select.findAll("option").some((option) => option.attributes("value") === name)) {
-      await select.setValue(name);
-      return;
-    }
+    if (await pickStyleRow(name)) return;
     const door = wrapper!
       .get("[data-test='mobile-output-kind']")
       .findAll("button")
       .find((button) => button.text() === label);
-    if (door) await door.trigger("click");
+    if (door) {
+      await door.trigger("click");
+      await flushPromises();
+    }
   }
-  await fieldControl("Style").setValue(name);
+  if (!(await pickStyleRow(name))) throw new Error(`Missing style ${name}`);
 }
 
 function mobileTouch(type: string, x: number, y: number, ended = false): Event {
@@ -1011,9 +1085,7 @@ describe("MobileApp generation lifecycle", () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
-    const values = fieldControl("Style")
-      .findAll("option")
-      .map((option) => option.attributes("value"));
+    const values = await styleOptionIds();
     expect(values).toContain(model.name);
     expect(values).not.toContain(restrictedModel.name);
     expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
@@ -1496,7 +1568,7 @@ describe("MobileApp generation lifecycle", () => {
     await flushPromises();
     await flushPromises();
 
-    const before = (fieldControl("Style").element as HTMLSelectElement).value;
+    const before = currentStyleId();
     const autoChainRow = wrapper.get(
       "[data-test='live-activity-select-studio-id:generation:foreign-auto-chain']",
     );
@@ -1513,7 +1585,7 @@ describe("MobileApp generation lifecycle", () => {
     expect(wrapper.get("[data-test='mobile-tab-hosts']").attributes("aria-current")).toBe("page");
     await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
     await flushPromises();
-    expect((fieldControl("Style").element as HTMLSelectElement).value).toBe(before);
+    expect(currentStyleId()).toBe(before);
   });
 
   it("refuses to restore a stale queue row after the server instance changes", async () => {
@@ -1619,10 +1691,9 @@ describe("MobileApp Create output", () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
-    const picker = fieldControl("Style");
-    expect(
-      [...(picker.element as HTMLSelectElement).options].map((option) => option.value),
-    ).toEqual(expect.arrayContaining([model.name, sequenceModel.name]));
+    expect(await styleOptionIds()).toEqual(
+      expect.arrayContaining([model.name, sequenceModel.name]),
+    );
     expect(
       wrapper.findAll("label.field").some((field) => field.find("span").text() === "Video model"),
     ).toBe(false);
@@ -3626,8 +3697,8 @@ describe("MobileApp generation queue", () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
-    expect(fieldControl("Style").attributes("disabled")).toBeDefined();
-    expect(fieldControl("Style").text()).toContain("No generation models available");
+    expect(styleChip().attributes("disabled")).toBeDefined();
+    expect(styleChip().text()).toContain("No generation models available");
     expect(wrapper.get("[data-test='mobile-model-error']").text()).toContain(
       "Couldn’t load generation models",
     );
@@ -3754,7 +3825,7 @@ describe("MobileApp generation queue", () => {
     await fieldControl("Prompt").setValue("next prompt");
     await wrapper.get("[data-test='mobile-generate-host']").setValue("render-id");
     await flushPromises();
-    expect(fieldControl("Style").element).toHaveProperty("value", renderModel.name);
+    expect(currentStyleId()).toBe(renderModel.name);
 
     finishPreprocess();
     await flushPromises();
@@ -3946,7 +4017,7 @@ describe("MobileApp generation queue", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await fieldControl("Prompt").setValue("a clean product orbit");
-    expect(fieldControl("Style").element).toHaveProperty("value", qwen.name);
+    expect(currentStyleId()).toBe(qwen.name);
     expect(wrapper.get("[data-test='mobile-source-validation']").text()).toContain("Target photo");
     expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
       "disabled",
@@ -4062,11 +4133,7 @@ describe("MobileApp generation queue", () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
-    expect(
-      fieldControl("Style")
-        .findAll("option")
-        .map((option) => option.attributes("value")),
-    ).toEqual([imageModel.name]);
+    expect(await styleOptionIds()).toEqual([imageModel.name]);
     expect(wrapper.get("[data-test='mobile-upscale']").text()).toContain(upscaler.name);
     expect(
       wrapper.findAll("label.field").some((field) => field.text().includes("Negative prompt")),
@@ -7075,7 +7142,7 @@ describe("MobileApp transport error copy", () => {
     await flushPromises();
 
     expect(wrapper.find("[data-test='mobile-model-error']").exists()).toBe(false);
-    expect(fieldControl("Style").element).toHaveProperty("value", model.name);
+    expect(currentStyleId()).toBe(model.name);
   });
 });
 
@@ -8030,7 +8097,7 @@ describe("MobileApp primary navigation", () => {
   it("does not switch destinations when a horizontal control owns the gesture", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
-    const modelPicker = fieldControl("Style").element;
+    const modelPicker = styleChip().element;
     modelPicker.dispatchEvent(mobileTouch("touchstart", 280, 180));
     modelPicker.dispatchEvent(mobileTouch("touchmove", 100, 180));
     modelPicker.dispatchEvent(mobileTouch("touchend", 100, 180, true));
@@ -10374,7 +10441,7 @@ describe("MobileApp gallery", () => {
     const prompt = fieldControl("Prompt").element as HTMLTextAreaElement;
     expect(prompt.value).toBe("a harbour at dawn");
     expect(prompt.value).not.toContain("the boats leave");
-    expect((fieldControl("Style").element as HTMLSelectElement).value).toBe(sequenceModel.name);
+    expect(currentStyleId()).toBe(sequenceModel.name);
   });
 
   it("never refuses reuse of an H3 stitched print", async () => {
@@ -10484,10 +10551,7 @@ describe("MobileApp gallery", () => {
     });
 
     wrapper = mountMobileApp();
-    await vi.waitFor(
-      () => expect(fieldControl("Style").element).toHaveProperty("value", studioModel.name),
-      { timeout: 5_000 },
-    );
+    await vi.waitFor(() => expect(currentStyleId()).toBe(studioModel.name), { timeout: 5_000 });
 
     const hostsTab = wrapper
       .findAll("button.mobile-tab")
@@ -10512,7 +10576,7 @@ describe("MobileApp gallery", () => {
     await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
     await flushPromises();
 
-    expect(fieldControl("Style").element).toHaveProperty("value", model.name);
+    expect(currentStyleId()).toBe(model.name);
     expect(wrapper.get(".status-line").text()).toBe("Prompt settings restored");
     const developButton = wrapper.findAll("button").find((button) => button.text() === "Generate");
     expect(developButton?.attributes("disabled")).toBeUndefined();
@@ -11026,10 +11090,7 @@ describe("MobileApp host and catalog coordination", () => {
     );
     await flushPromises();
 
-    const options = fieldControl("Style")
-      .findAll("option")
-      .map((option) => option.attributes("value"));
-    expect(options).toContain(pulledModel.name);
+    expect(await styleOptionIds()).toContain(pulledModel.name);
   });
 
   it("claims a cold-launch iOS Camera pairing link through the existing Keychain path", async () => {
@@ -12037,9 +12098,7 @@ describe("MobileApp automatic generation routing", () => {
 
     // The union picker offers the model even though the browsed machine
     // lacks it, tagged with the machine that has it.
-    const modelOptions = fieldControl("Style")
-      .findAll("option")
-      .map((option) => option.text());
+    const modelOptions = await styleOptionLabels();
     expect(modelOptions.some((label) => label.includes("Render"))).toBe(true);
 
     await develop();
@@ -12326,16 +12385,22 @@ describe("MobileApp Library organization", () => {
     await openLibrary();
 
     const scope = wrapper!.get("[data-test='mobile-library-scope']");
-    expect(scope.get("[data-test='mobile-library-scope-prints']").text()).toContain("Prints");
-    expect(scope.get("[data-test='mobile-library-scope-prints']").text()).toContain("2");
-    expect(scope.get("[data-test='mobile-library-scope-collections']").text()).toContain("1");
+    // The shared segmented control, one row: label and count side by side,
+    // rather than the radio grid that wrapped onto two lines.
+    expect(scope.classes()).toEqual(expect.arrayContaining(["ms-seg", "ms-seg--inline"]));
+    expect(scope.attributes("role")).toBe("radiogroup");
+    expect(scope.findAll("button")).toHaveLength(3);
+    expect(libraryScopeSegment("prints").attributes("aria-checked")).toBe("true");
+    expect(libraryScopeSegment("prints").text()).toContain("Prints");
+    expect(libraryScopeSegment("prints").text()).toContain("2");
+    expect(libraryScopeSegment("collections").text()).toContain("1");
     expect(apiJsonTo).not.toHaveBeenCalledWith(
       target,
       "/api/gallery?view=trash",
       expect.anything(),
     );
 
-    await scope.get("[data-test='mobile-library-scope-trash']").trigger("click");
+    await libraryScopeSegment("trash").trigger("click");
     await flushPromises();
     await vi.waitFor(() =>
       expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/gallery?view=trash", expect.anything()),
@@ -12346,7 +12411,7 @@ describe("MobileApp Library organization", () => {
     const banner = wrapper!.get("[data-test='mobile-library-trash-banner']");
     expect(banner.text()).toContain("Prints stay in the trash");
     expect(banner.text()).toContain("30 d");
-    expect(scope.get("[data-test='mobile-library-scope-trash']").text()).toContain("1");
+    expect(libraryScopeSegment("trash").text()).toContain("1");
   });
 
   it("filters the grid with the Favorites chip and marks favorite tiles", async () => {
@@ -12374,7 +12439,7 @@ describe("MobileApp Library organization", () => {
 
     const gridThumbnail = wrapper!.get("[data-test='gallery-item'] img").attributes("src");
 
-    await wrapper?.get("[data-test='mobile-library-scope-collections']").trigger("click");
+    await libraryScopeSegment("collections").trigger("click");
     await flushPromises();
 
     const card = wrapper!.get("[data-test='mobile-collection-portraits']");
@@ -12426,7 +12491,7 @@ describe("MobileApp Library organization", () => {
     });
     await openLibrary();
 
-    await wrapper?.get("[data-test='mobile-library-scope-collections']").trigger("click");
+    await libraryScopeSegment("collections").trigger("click");
     await flushPromises();
 
     const card = wrapper!.get("[data-test='mobile-collection-portraits']");
@@ -12440,7 +12505,7 @@ describe("MobileApp Library organization", () => {
     installLibraryApi();
     await openLibrary();
 
-    await wrapper?.get("[data-test='mobile-library-scope-collections']").trigger("click");
+    await libraryScopeSegment("collections").trigger("click");
     await flushPromises();
     const card = wrapper!.get("[data-test='mobile-collection-portraits']");
     await card.get("[data-test='mobile-collection-menu']").trigger("click");
@@ -12452,9 +12517,9 @@ describe("MobileApp Library organization", () => {
       ([, path, init]) => path === "/api/gallery/collections/c1" && init?.method === "PATCH",
     );
     expect(JSON.parse(String(patch?.[2]?.body))).toEqual({ hidden: true });
-    await wrapper?.get("[data-test='mobile-library-scope-prints']").trigger("click");
+    await libraryScopeSegment("prints").trigger("click");
     await flushPromises();
-    expect(wrapper?.get("[data-test='mobile-library-scope-prints']").text()).toContain("1");
+    expect(libraryScopeSegment("prints").text()).toContain("1");
     expect(wrapper?.find("[data-test='mobile-library-chip-tag']").exists()).toBe(false);
   });
 
@@ -12658,16 +12723,16 @@ describe("MobileApp Library organization", () => {
     );
     await openLibrary();
 
-    await wrapper?.get("[data-test='mobile-library-scope-trash']").trigger("click");
+    await libraryScopeSegment("trash").trigger("click");
     await flushPromises();
     await vi.waitFor(() => expect(trashReads).toBe(1));
     expect(wrapper?.text()).toContain("unavailable");
 
     // The failed pass never becomes the authoritative snapshot: re-entering
     // the Trash scope refetches instead of trusting the incomplete read.
-    await wrapper?.get("[data-test='mobile-library-scope-prints']").trigger("click");
+    await libraryScopeSegment("prints").trigger("click");
     await flushPromises();
-    await wrapper?.get("[data-test='mobile-library-scope-trash']").trigger("click");
+    await libraryScopeSegment("trash").trigger("click");
     await vi.waitFor(() => expect(trashReads).toBe(2));
     await vi.waitFor(() => expect(wrapper?.find("[data-test='purge-chip']").exists()).toBe(true));
   });
@@ -12774,7 +12839,7 @@ describe("MobileApp Library organization", () => {
   });
 
   async function openTrashScope(): Promise<void> {
-    await wrapper?.get("[data-test='mobile-library-scope-trash']").trigger("click");
+    await libraryScopeSegment("trash").trigger("click");
     await vi.waitFor(() => expect(wrapper?.find("[data-test='purge-chip']").exists()).toBe(true));
   }
 
@@ -12797,7 +12862,7 @@ describe("MobileApp Library organization", () => {
     );
 
     // The restored print rejoined the live Library locally.
-    await wrapper?.get("[data-test='mobile-library-scope-prints']").trigger("click");
+    await libraryScopeSegment("prints").trigger("click");
     await flushPromises();
     await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(3));
   });
@@ -14253,13 +14318,17 @@ describe("MobileApp output kinds", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await selectStyle(selected.name);
-    const option = fieldControl("Style")
-      .findAll("option")
-      .find((entry) => entry.attributes("value") === selected.name)!;
-    expect(option.text().indexOf(selected.description!)).toBeLessThan(
-      option.text().indexOf(selected.name),
-    );
-    expect(wrapper.get(".mobile-style-id").text()).toBe(selected.name);
+    await openStyleSheet();
+    const row = styleSheetRows().find(
+      (entry) => entry.find("[data-test='model-option-id']").text() === selected.name,
+    )!;
+    // The row says the technical truth AND the plain description; the chip
+    // beneath says the plain name first and the exact id second.
+    expect(row.get("[data-test='model-option-id']").text()).toBe(selected.name);
+    expect(row.text()).toContain(selected.description!);
+    await closeStyleSheet();
+    expect(wrapper.get("[data-test='mobile-style-chip-name']").text()).toBe(selected.description);
+    expect(currentStyleId()).toBe(selected.name);
     await wrapper.get("[data-test='mobile-style-browse']").trigger("click");
     await flushPromises();
     expect(
@@ -14284,7 +14353,7 @@ describe("MobileApp output kinds", () => {
       .findAll("button")
       .find((button) => button.text() === "3-D object")!
       .trigger("click");
-    expect((fieldControl("Style").element as HTMLSelectElement).value).toBe(stillModel.name);
+    expect(currentStyleId()).toBe(stillModel.name);
     await wrapper.get("[data-test='mobile-style-browse']").trigger("click");
     await flushPromises();
     const active = wrapper
@@ -14312,20 +14381,16 @@ describe("MobileApp output kinds", () => {
     );
     wrapper = mountMobileApp();
     await flushPromises();
-    expect((fieldControl("Style").element as HTMLSelectElement).value).toBe(secondStill.name);
-    expect(
-      fieldControl("Style")
-        .findAll("option")
-        .map((x) => x.attributes("value")),
-    ).toEqual([stillModel.name, secondStill.name]);
+    expect(currentStyleId()).toBe(secondStill.name);
+    expect(await styleOptionIds()).toEqual([stillModel.name, secondStill.name]);
     await fieldControl("Prompt").setValue("Keep this draft when changing what I make");
     await selectStyle(model.name);
-    expect(fieldControl("Style").findAll("option")).toHaveLength(1);
+    expect(await styleOptionIds()).toHaveLength(1);
     await selectStyle(secondStill.name);
     expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
       "Keep this draft when changing what I make",
     );
-    expect((fieldControl("Style").element as HTMLSelectElement).value).toBe(secondStill.name);
+    expect(currentStyleId()).toBe(secondStill.name);
   });
 
   it("keeps details mounted and reports changed settings behind the closed sheet", async () => {
@@ -14339,5 +14404,177 @@ describe("MobileApp output kinds", () => {
     await wrapper.get("[data-test='mobile-advanced-reset']").trigger("click");
     expect((control.element as HTMLInputElement).value).toBe(String(model.default_steps));
     expect(wrapper.find("[data-test='mobile-advanced-trigger-count']").exists()).toBe(false);
+  });
+});
+
+describe("MobileApp style chip and sheet", () => {
+  function serveStyles(entries: ModelEntry[]): void {
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path, init) =>
+      path === "/api/models" ? Promise.resolve(entries) : base(target, path, init),
+    );
+  }
+
+  it("names the style in plain words on a chip that opens the shared list", async () => {
+    serveStyles([stillModel, model]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const chip = styleChip();
+    expect(chip.attributes("aria-haspopup")).toBe("listbox");
+    // The plain name in sans, the runnable id in mono — never the id twice.
+    expect(chip.get("[data-test='mobile-style-chip-name']").text()).toBe(stillModel.description);
+    expect(currentStyleId()).toBe(stillModel.name);
+    expect(wrapper.find("[data-test='mobile-style-sheet'] .ms-model__option").exists()).toBe(false);
+
+    await openStyleSheet();
+    expect(chip.attributes("aria-expanded")).toBe("true");
+    // Grouped by family, exactly as desktop and web group them.
+    expect(
+      wrapper
+        .findAll("[data-test='mobile-style-sheet'] .ms-model__group")
+        .map((group) => group.text()),
+    ).toHaveLength(1);
+    expect(await styleOptionIds()).toEqual([stillModel.name]);
+  });
+
+  it("picks a style from the sheet, applies it, and closes", async () => {
+    const secondStill: ModelEntry = { ...stillModel, name: "z-image-turbo:q8", family: "zimage" };
+    serveStyles([stillModel, secondStill]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openStyleSheet();
+
+    const row = styleSheetRows().find(
+      (candidate) => candidate.find("[data-test='model-option-id']").text() === secondStill.name,
+    )!;
+    await row.trigger("click");
+    await flushPromises();
+
+    expect(currentStyleId()).toBe(secondStill.name);
+    expect(styleSheetOpen()).toBe(false);
+  });
+
+  it("closes on Escape without changing the style", async () => {
+    serveStyles([stillModel, model]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openStyleSheet();
+
+    await wrapper.get("[data-test='mobile-style-sheet']").trigger("keydown", { key: "Escape" });
+    await flushPromises();
+
+    expect(styleSheetOpen()).toBe(false);
+    expect(currentStyleId()).toBe(stillModel.name);
+  });
+
+  it("sends Browse more from inside the sheet to the catalog for this kind", async () => {
+    serveStyles([stillModel, model, meshModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openStyleSheet();
+
+    await wrapper
+      .get("[data-test='mobile-style-sheet'] [data-test='browse-catalog']")
+      .trigger("click");
+    await flushPromises();
+
+    expect(styleSheetOpen()).toBe(false);
+    expect(
+      wrapper.get("[data-test='mobile-catalog-segment-discover']").attributes("aria-pressed"),
+    ).toBe("true");
+  });
+
+  it("keeps a style no machine has as its own row instead of dropping it", async () => {
+    serveStyles([stillModel]);
+    const draft = newGenerateForm();
+    draft.model = "wan22-i2v-a14b:q8";
+    draft.family = "wan";
+    await createMobileComposerDraft().save(draft, "manual");
+    wrapper = mountMobileApp();
+    await vi.waitFor(() => expect(currentStyleId()).toBe("wan22-i2v-a14b:q8"));
+    await openStyleSheet();
+
+    const phantom = wrapper.get(
+      "[data-test='mobile-style-sheet'] [data-test='model-option-missing']",
+    );
+    expect(phantom.text()).toContain("Not on this machine");
+    await phantom.trigger("click");
+    await flushPromises();
+
+    // The way to get it is the catalog, not a silent drop.
+    expect(styleSheetOpen()).toBe(false);
+    expect(
+      wrapper.get("[data-test='mobile-catalog-segment-discover']").attributes("aria-pressed"),
+    ).toBe("true");
+  });
+});
+
+describe("MobileApp Make screen canvas", () => {
+  function contentScroller(): HTMLElement {
+    return wrapper!.get(".mobile-content").element as HTMLElement;
+  }
+
+  it("puts the canvas above the prompt, not at the end of the scroll", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const html = wrapper.html();
+    const canvas = html.indexOf('data-test="mobile-make-canvas"');
+    const prompt = html.indexOf('id="mobile-prompt"');
+    const queuePeek = html.indexOf('data-test="mobile-queue-peek"');
+    expect(canvas).toBeGreaterThan(-1);
+    // The develop bed, the result and the status line all live in the slot,
+    // which the composer follows — the phone's canvas is the first thing.
+    expect(canvas).toBeLessThan(prompt);
+    expect(
+      wrapper
+        .get("[data-test='mobile-generation-summary']")
+        .element.closest("[data-test='mobile-make-canvas']"),
+    ).not.toBeNull();
+    // The queue peek stays where it was, at the very bottom.
+    expect(queuePeek === -1 || queuePeek > prompt).toBe(true);
+  });
+
+  it("brings the canvas into view when a generation is queued", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const scrollTo = vi.fn();
+    const content = contentScroller();
+    Object.defineProperty(content, "scrollTo", { value: scrollTo, configurable: true });
+    content.scrollTop = 420;
+
+    await fieldControl("Prompt").setValue("a lighthouse in fog");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(admittedRequests()).toHaveLength(1);
+    expect(scrollTo).toHaveBeenCalled();
+    expect(scrollTo.mock.calls[0]?.[0]).toMatchObject({ top: 0, behavior: "smooth" });
+  });
+
+  it("never animates the reveal for a reader who asked for no motion", async () => {
+    const matchMedia = vi.fn((query: string) => ({
+      matches: query.includes("prefers-reduced-motion"),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      onchange: null,
+      dispatchEvent: vi.fn(),
+    }));
+    Object.defineProperty(window, "matchMedia", { value: matchMedia, configurable: true });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const scrollTo = vi.fn();
+    Object.defineProperty(contentScroller(), "scrollTo", { value: scrollTo, configurable: true });
+
+    await fieldControl("Prompt").setValue("a lighthouse in fog");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(scrollTo).toHaveBeenCalled();
+    expect(scrollTo.mock.calls[0]?.[0]).toMatchObject({ behavior: "auto" });
   });
 });

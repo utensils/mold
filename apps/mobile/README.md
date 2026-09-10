@@ -57,6 +57,14 @@ instead.
 The primary tabs are Make, Queue, Images, Styles, and Machines. Settings is a
 pushed screen opened from the header.
 
+- **Make** puts the canvas first: the develop bed, the status line and the
+  finished result form one block directly beneath what you are making, and
+  queueing a print brings it into view (honouring `prefers-reduced-motion`).
+  The style is a chip naming the current style in plain words with its exact id
+  in mono, opening `MobileStyleSheet.vue` — a bottom sheet hosting the SHARED
+  `@studio/components/StyleMenu.vue` in touch mode, the same list desktop's
+  composer popover and web's Create chip open. Only the container differs per
+  surface; the phone injects its own multi-machine availability tag.
 - **Make** picks where work lands. With one connected machine the Machine
   control behaves exactly as before. Once two or more connected machines are
   reachable it also offers **Auto** (the least busy machine that already has
@@ -82,7 +90,7 @@ pushed screen opened from the header.
   local templates, independently cancellable siblings, source/edit images,
   masks, ControlNet, LoRA, scheduler and CFG++, post-generation upscaling,
   target-host estimates, proportional resolution choices, and explicit Random
-  or Fixed seeds. Deeper options open in a full-screen **More settings** sheet, and
+  or Fixed seeds. Deeper options open in a **More settings** bottom sheet, and
   Which image wells the source section renders is the RECIPE's answer, never a
   model name: `sourceMediaPlan` projects `capabilities.reference_images` into
   one source well, an ordered picture strip (its ceiling and its Target role

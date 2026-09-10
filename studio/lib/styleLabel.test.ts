@@ -3,9 +3,9 @@ import { styleDisplayName, styleLabel } from "./styleLabel";
 
 /*
  * One friendly style name across web, desktop and the phone. It was pinned
- * only through `desktop/src/mobile/styleLabel.test.ts`, which re-exports it —
- * so the rule itself, which every style chip and menu row now reads, had no
- * test of its own.
+ * only through a mobile re-export, so the rule itself — which every style chip
+ * and menu row now reads — had no test of its own. The re-export is gone; this
+ * is where the rule is answered for.
  */
 
 describe("styleDisplayName", () => {
