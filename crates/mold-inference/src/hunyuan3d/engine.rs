@@ -1453,6 +1453,21 @@ impl Hunyuan3dEngine {
         )?;
         // Decimation invalidates the old normals.
         super::mesh::compute_smooth_normals(&mut out);
+        // The collapse loop stops when no legal collapse remains, which on a
+        // non-manifold surface can be far above the target — and the stage
+        // still reports 100%, because the progress denominator is the faces it
+        // MEANT to retire. A silent miss is what made #1669 read as an xatlas
+        // problem for two rounds: the mesh handed to the unwrap was 2.4x the
+        // budget the request recorded. Say so rather than let the next one hide.
+        if out.faces.len() > target_faces as usize {
+            tracing::warn!(
+                target_faces,
+                reached = out.faces.len(),
+                "mesh decimation stopped above its face budget: no legal \
+                 collapse remains, which usually means the surface is \
+                 non-manifold. UV unwrapping it may be slow."
+            );
+        }
         self.base
             .progress
             .stage_done("Simplifying mesh", started.elapsed());

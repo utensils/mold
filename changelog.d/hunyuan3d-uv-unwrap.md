@@ -34,10 +34,3 @@
   "Finishes in 0s".** The estimate is stamped once when a job is leased and
   never refreshed, so an overrunning job showed `0s` indefinitely
   ([#1666](https://github.com/utensils/mold/issues/1666)).
-- **Known issue:** a shape whose surface is heavily non-manifold — thin,
-  self-touching geometry such as an open frame or spokes — can still spend a
-  long time in `Unwrapping mesh` whatever its face count, because xatlas's
-  chart-merge pass rescans every chart pair after each merge. That stage now
-  reports its progress and stops within seconds of a cancel, which it
-  previously could not do at all
-  ([#1669](https://github.com/utensils/mold/issues/1669)).

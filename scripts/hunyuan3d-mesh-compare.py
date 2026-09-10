@@ -19,7 +19,8 @@ mismatch here is a real regression, never a convention difference.
 Pass criteria
 -------------
 * every bounding-box extent within 10 % of the reference's,
-* triangle count within +/-35 % of the reference's,
+* triangle count no more than 35 % ABOVE and no more than 50 % below the
+  reference's — see the face-count note below,
 * normalised symmetric vertex Chamfer at or below `--chamfer-max`, default
   0.02.
 
@@ -70,7 +71,22 @@ COMPONENT_DTYPES = {
 TYPE_COMPONENTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
 
 EXTENT_TOLERANCE = 0.10
-FACE_COUNT_TOLERANCE = 0.35
+# The face-count gate is ONE-SIDED, and #1669 is why. mold's surface nets emits
+# a quad only where the grid edge the four cells share actually crosses the
+# threshold; ComfyUI emits one wherever those four cells happen to be active
+# (`nodes_hunyuan3d.py:377-384`). A crossing edge always makes its four cells
+# active, so ComfyUI's rule is a strict SUPERSET and mold's triangle count now
+# sits at or BELOW the reference's by construction. Measured: 0.00 % on every
+# well-resolved surface (spheres of radius 4, 8 and 16, an axis-aligned cube, a
+# torus, a four-cell-thick plate), 6.4 % below on an F-16, and 25.1 % below on a
+# pram whose frame and wheels are one cell across.
+#
+# So a SURPLUS is still a real port divergence and keeps the old bound, while a
+# deficit is expected. The deficit bound is the largest measured (25.1 %) with
+# the same headroom again; a mesh that is genuinely the wrong shape fails the
+# Chamfer gate, which answers that question far better than a count does.
+FACE_COUNT_SURPLUS_TOLERANCE = 0.35
+FACE_COUNT_DEFICIT_TOLERANCE = 0.50
 # See the module docstring: floor ~0.002, framing-matched gap ~0.010, gate 0.02.
 DEFAULT_CHAMFER_MAX = 0.02
 
@@ -349,7 +365,9 @@ def compare(mold_path: str, comfy_path: str) -> dict:
             extent_ratios.append(abs(mold["extents"][axis] - reference) / reference)
 
     if comfy["face_count"] > 0:
-        face_ratio = abs(mold["face_count"] - comfy["face_count"]) / comfy["face_count"]
+        # Signed, because the gate is one-sided: positive means mold emitted
+        # MORE than the reference.
+        face_ratio = (mold["face_count"] - comfy["face_count"]) / comfy["face_count"]
     else:
         face_ratio = float("inf") if mold["face_count"] > 0 else 0.0
 
@@ -405,15 +423,18 @@ def main(argv: list[str]) -> int:
             reasons.append(
                 f"extent axis {axis} differs by {ratio:.3f}, tolerance {EXTENT_TOLERANCE}"
             )
-    if (
-        not args.ignore_face_count
-        and not result["face_count_relative_difference"] <= FACE_COUNT_TOLERANCE
-    ):
-        reasons.append(
-            "face count differs by "
-            f"{result['face_count_relative_difference']:.3f}, "
-            f"tolerance {FACE_COUNT_TOLERANCE}"
-        )
+    if not args.ignore_face_count:
+        face_ratio = result["face_count_relative_difference"]
+        if not face_ratio <= FACE_COUNT_SURPLUS_TOLERANCE:
+            reasons.append(
+                f"face count is {face_ratio:+.3f} of the reference's, "
+                f"surplus tolerance {FACE_COUNT_SURPLUS_TOLERANCE}"
+            )
+        elif not -face_ratio <= FACE_COUNT_DEFICIT_TOLERANCE:
+            reasons.append(
+                f"face count is {face_ratio:+.3f} of the reference's, "
+                f"deficit tolerance {FACE_COUNT_DEFICIT_TOLERANCE}"
+            )
 
     if not result["chamfer_normalized"] <= args.chamfer_max:
         reasons.append(
@@ -454,7 +475,8 @@ def main(argv: list[str]) -> int:
         "extent_relative_differences": result["extent_relative_differences"],
         "extent_tolerance": EXTENT_TOLERANCE,
         "face_count_relative_difference": result["face_count_relative_difference"],
-        "face_count_tolerance": FACE_COUNT_TOLERANCE,
+        "face_count_surplus_tolerance": FACE_COUNT_SURPLUS_TOLERANCE,
+        "face_count_deficit_tolerance": FACE_COUNT_DEFICIT_TOLERANCE,
         "face_count_gated": not args.ignore_face_count,
         "chamfer_normalized": result["chamfer_normalized"],
         "chamfer_max": args.chamfer_max,
@@ -554,6 +576,9 @@ def self_test() -> int:
         sparse_faces = f"{scratch}/sparse-faces.glb"
         with open(sparse_faces, "wb") as handle:
             handle.write(write_glb_bytes(vertices, faces[:1]))
+        dense_faces = f"{scratch}/dense-faces.glb"
+        with open(dense_faces, "wb") as handle:
+            handle.write(write_glb_bytes(vertices, np.concatenate([faces, faces])))
 
         report_path = f"{scratch}/report.json"
         assert main(["--mold", same, "--comfy", reference, "--out", report_path]) == 0
@@ -575,6 +600,18 @@ def self_test() -> int:
         with open(report_path, encoding="utf-8") as handle:
             topology_independent = json.load(handle)
         assert topology_independent["face_count_gated"] is False
+
+        # The face-count gate is ONE-SIDED (#1669): both directions still fail
+        # at these sizes, but they must fail for the reason that names them, so
+        # a widened deficit bound can never quietly widen the surplus one.
+        assert main(["--mold", sparse_faces, "--comfy", reference, "--out", report_path]) == 1
+        with open(report_path, encoding="utf-8") as handle:
+            deficit = json.load(handle)
+        assert any("deficit tolerance" in reason for reason in deficit["reasons"]), deficit
+        assert main(["--mold", dense_faces, "--comfy", reference, "--out", report_path]) == 1
+        with open(report_path, encoding="utf-8") as handle:
+            surplus = json.load(handle)
+        assert any("surplus tolerance" in reason for reason in surplus["reasons"]), surplus
 
         assert main(["--mold", nudged, "--comfy", reference, "--out", report_path]) == 1
         with open(report_path, encoding="utf-8") as handle:

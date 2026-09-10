@@ -382,6 +382,12 @@ const ignoredEnvVars = new Set([
   'MOLD_TEXTURED_GLB_OUTPUT',
   'MOLD_TEXTURE_FILL_ORACLE',
   'MOLD_TEXTURE_FILL_OUTPUT',
+  // The unwrap benchmark harness's cancellation deadline
+  // (crates/mold-inference/examples/unwrap_mesh.rs) and a C preprocessor
+  // define in the xatlas bridge that the scanner reads as an env var
+  // (crates/mold-inference/vendor/xatlas/bridge.cpp). Neither is a setting.
+  'MOLD_UNWRAP_CANCEL_AFTER_SECS',
+  'MOLD_XATLAS_NO_CATEGORY',
   // Internal desktop migration bootstrap override, not a supported end-user
   // configuration knob.
   'MOLD_HOME_POINTER_PATH',

@@ -130,9 +130,96 @@ loader without replacing network or rendering computations.
   the row in under 3 s with the log recording the unwrap aborting 2.4 s after
   the request.
 - A fourth mesh (455,398 triangles, 106,245 valence-3 and 55,285 valence-4 edges
-  — 28% non-manifold against ~2% for the others) is not fixed by the budget:
-  decimated to 5,000 faces it still exceeds 15 minutes, because `mergeCharts` is
-  superlinear in chart count rather than face count. Tracked as #1669.
+  — 28% non-manifold against ~2% for the others) is not fixed by the budget: it
+  never reaches it. `mesh::simplify` stops at 112,135 faces on that mesh whatever
+  target it is given, and the unwrap of what it hands over runs for many minutes
+  (killed at 900 s).
+  Root-caused in the section below and tracked as #1669; the earlier reading of
+  this row — "decimated to 5,000 faces it still exceeds 15 minutes" — was wrong,
+  because the decimation never got there.
+
+## Surface-net quad gate and the non-manifold unwrap (#1669)
+
+- Root cause of #1669 is in extraction, not in xatlas. mold's port of ComfyUI's
+  `voxel_to_mesh_surfnet` emits a quad wherever the four cells around a grid
+  edge are all active (`nodes_hunyuan3d.py:377-384`). Surface nets connects
+  those four cells because the surface passes THROUGH the shared edge, and a
+  crossing edge always makes its four cells active — so ComfyUI's rule is a
+  strict superset and the surplus quads are sheets laid across an edge the
+  isosurface never touches. `extract_surface_net` now tests the shared edge
+  (`mesh::shared_edge_corners`; corners `2^i + 2^j` and `7`, which are
+  `SURFNET_EDGES` `[3, 7]`, `[5, 7]` and `[6, 7]`).
+- Measured on `plato`, one A/B binary carrying both rules, same seed, same
+  delighted source image, octree 256, CUDA device 3. "Simplify" is
+  `mesh::simplify` asked for 40,000 faces; "unwrap" is `uv::unwrap` of what it
+  returned.
+
+| Shape | Rule | Extracted tris | Simplify | Non-manifold edges | Boundary edges | Unwrap |
+| --- | --- | --- | --- | --- | --- | --- |
+| Pram (#1666's own shape) | ComfyUI | 508,838 | stalls at 96,052 | 63,927 / 82,018 | 136 | 1,133 s |
+| Pram | gated | 381,080 | 40,000 in 1.4 s | 119 / 59,881 | 0 | 4.1 s |
+| F-16 | ComfyUI | 144,090 | 40,000 in 0.4 s | 11,755 / 53,400 | 53 | 4.2 s |
+| F-16 | gated | 134,808 | 40,000 in 0.3 s | 5 / 59,995 | 0 | 8.7 s |
+
+- The pram's ungated unwrap does finish, at 1,133 s against 4.1 s gated — 280x —
+  and it emits 165,582 output vertices against 29,573, which is the chart
+  explosion `mergeCharts` is quadratic in.
+- The gate does not make an ordinary shape's unwrap faster — the F-16's is
+  slower, because a cleaner surface survives decimation with more vertices and
+  charts. What it does is stop a thin shape falling off the cliff: both stages
+  behind extraction assume a manifold surface. `mesh::simplify`'s link condition
+  rejects a collapse whose endpoints share a neighbour that is not opposite a
+  dying face, which on a 78%-non-manifold surface is nearly every candidate, so
+  the heap drains and the 40,000-face budget stops at 96,052 — with the stage
+  still reporting 100%, because the progress denominator is the faces it meant
+  to retire. `engine::simplify_surface` now warns when it lands above the
+  budget; the miss is why #1669 was first read as an xatlas problem. xatlas's
+  `ClusteredCharts::mergeCharts` then rescans every chart pair after each merge
+  over what it is handed.
+- The blow-up inside xatlas is call COUNT, not list size. An instrumented build
+  of the pinned revision recorded 21 million `UniformGrid2::computePotentialEdges`
+  calls in 300 s on the retained 455,398-triangle mesh, with a maximum potential-
+  edge list of 55 and a mean of 14 — so the `insertionSort` inside it is not the
+  hot spot and there is no output-identical vendored patch available here.
+  Bounding `mergeCharts` would change the UV layout and break parity with the
+  pinned oracle, which is why the fix is upstream of xatlas.
+- Winding follows the same way. Counting directed edges traversed twice in the
+  same direction — a triangle pair that is either inconsistently oriented or
+  sharing a non-manifold edge — over the undecimated extractions: pram 186,158
+  of 1,336,191 ungated against 1,052 of 1,142,079 gated; F-16 13,524 of 418,360
+  against 48 of 404,371. The residue is not zero: the quad's orientation is
+  still ComfyUI's `gradient . cross(e_i, e_j)` heuristic
+  (`nodes_hunyuan3d.py:388-395`), while the gate now computes the exact answer —
+  which of the shared edge's two corners is inside — and throws it away.
+  Follow-up, not this change.
+- Geometry was inspected visually before and after on both shapes. The pram's
+  ground plate is a clean sheet instead of a field of overlapping fragments, the
+  canopy loses its streaking, and the F-16's wing trailing edges stop being
+  serrated. Silhouettes are unchanged; only quads that spanned no crossing are
+  gone.
+- Every triangle count, GLB byte size and GLB SHA-256 recorded ABOVE this
+  section for a mesh mold extracted was captured under the ungated rule and does
+  not reproduce on a build carrying the gate. The counts taken from Tencent's
+  own retained meshes are unaffected.
+- `scripts/hunyuan3d-mesh-compare.py`'s face-count gate is now ONE-SIDED for the
+  same reason: mold's count sits at or below the ComfyUI reference's by
+  construction, so a surplus keeps the old 35% bound while a deficit is allowed
+  to 50% (the largest measured is 25.1%, and the Chamfer gate is what actually
+  answers whether the two are the same shape).
+- The surplus is exactly zero wherever no two sheets share a cell. Counting both
+  rules straight from the grid: 0.00% on spheres of radius 4, 8 and 16, an
+  axis-aligned cube, a torus and a four-cell-thick plate — and 49.47% on two
+  one-cell plates separated by one empty cell, which is the whole mechanism in
+  one shape.
+- Pins: `every_shared_quad_edge_is_a_cube_edge` (the gate tests a real cube edge)
+  and `thin_features_drop_the_quads_that_span_no_crossing` (the emitted set is
+  exactly the crossing subset, and no edge is shared by more than two triangles).
+  The second fails on the ungated rule. A third is independent of the helper
+  entirely: `surface_net_shares_vertices_where_basic_duplicates_them` now asserts
+  that gated surface nets and `MeshAlgorithm::Basic` emit the SAME triangle
+  count, which they must — `extract_basic` already emits one quad per crossing
+  grid edge, and it reaches that set without consulting `shared_edge_corners`.
+  That equality only became assertable with the gate.
 
 ## Static GLB ingestion and oracle export corrections
 
