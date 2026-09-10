@@ -124,8 +124,8 @@ describe("MobileSettingsView", () => {
     expect(wrapper.findAll('input[name="mobile-theme-tone"]')).toHaveLength(3);
     await wrapper.get('input[name="mobile-theme"][value="graphite"]').setValue(true);
     await wrapper.get('input[name="mobile-theme-tone"][value="dark"]').setValue(true);
-    await wrapper.get('input[name="mobile-auto-save-photos"]').setValue(false);
-    await wrapper.get('input[name="mobile-auto-tag-title"]').setValue(false);
+    await wrapper.get("[data-test='mobile-auto-save-photos']").trigger("click");
+    await wrapper.get("[data-test='mobile-auto-tag-title']").trigger("click");
 
     expect(wrapper.emitted("update")).toEqual([
       // Props are the source of truth and do not change here, so both emits
@@ -152,14 +152,26 @@ describe("MobileSettingsView", () => {
       },
     });
 
-    const toggle = wrapper.get('input[name="mobile-auto-tag-title"]');
-    expect((toggle.element as HTMLInputElement).checked).toBe(false);
+    // A native checkbox is a desktop control; a phone setting is a switch.
+    const toggle = wrapper.get("[data-test='mobile-auto-tag-title']");
+    expect(toggle.attributes("role")).toBe("switch");
+    expect(toggle.attributes("aria-checked")).toBe("false");
+    expect(wrapper.find('input[type="checkbox"][name="mobile-auto-tag-title"]').exists()).toBe(
+      false,
+    );
     expect(wrapper.get("[data-test='mobile-settings-library']").text()).toContain(
       "Tag new prints with their title",
     );
 
-    await toggle.setValue(true);
+    await toggle.trigger("click");
     expect(wrapper.emitted("update")).toEqual([[{ autoTagTitle: true }]]);
+
+    // The whole row is the target, not just the 44×26 switch: on a phone the
+    // words are what a thumb lands on.
+    await wrapper.get(".mobile-settings-switch").trigger("click");
+    expect(wrapper.emitted("update")).toEqual([[{ autoTagTitle: true }], [{ autoTagTitle: true }]]);
+    // One switch per row, announced once — the row is not a second control.
+    expect(wrapper.get(".mobile-settings-switch").findAll("[role='switch']")).toHaveLength(1);
   });
 
   it("routes host management through an explicit action", async () => {

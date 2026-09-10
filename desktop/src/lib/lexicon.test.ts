@@ -387,6 +387,7 @@ describe("lexicon — view copy and assistive labels", () => {
 
   const starterCards = read("../components/generate/StarterCards.vue");
   const modelPicker = read("../components/create/ModelPicker.vue");
+  const styleMenu = read("../../../studio/components/StyleMenu.vue");
   const stylePicker = read("../components/create/StylePicker.vue");
   const librarySource = read("../views/LibraryView.vue");
   const lightbox = read("../components/gallery/Lightbox.vue");
@@ -414,11 +415,17 @@ describe("lexicon — view copy and assistive labels", () => {
   it("calls the Style field's own copy a style, on this machine", () => {
     expect(modelPicker).toContain('"Choose a style"');
     expect(modelPicker).toContain("Not on this machine");
-    expect(modelPicker).toContain("Not on this machine — get it");
     expect(modelPicker).toContain('browseLabel: "Browse more →"');
     expect(modelPicker).not.toContain("Browse all models");
     expect(templateText(modelPicker)).not.toContain("Not installed");
     expect(templateText(modelPicker)).not.toContain("Find a model");
+    // The rows are the shared studio menu's now — web and the phone say
+    // exactly these words too, which is the whole point of sharing it.
+    expect(styleMenu).toContain("Not on this machine — get it");
+    expect(styleMenu).toContain('browseLabel: "Browse more →"');
+    expect(templateText(styleMenu)).not.toContain("Not installed");
+    expect(templateText(styleMenu)).not.toContain("Find a model");
+    expect(styleMenu).toContain("Find a style…");
   });
 
   // The composer's Style chip is that same field's trigger now, so it owes

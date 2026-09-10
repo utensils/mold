@@ -21,7 +21,7 @@ import { formatCount, formatGB } from "../../lib/format";
 import { openExternal } from "../../lib/openExternal";
 import { useToastStore } from "../../stores/toasts";
 import { ApiError, type ApiTarget } from "../../lib/api/client";
-import type { ModelSource } from "../../lib/modelSource";
+import type { ModelSource } from "@studio/lib/modelSource";
 import type { ModelRuntimeNotice } from "@studio/lib/modelRuntimeAvailability";
 import type { CatalogEntry, ModelComponentStatus } from "../../lib/api/types";
 

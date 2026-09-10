@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import createHeaderSource from "./CreateHeader.vue?raw";
 import inspectorSource from "./InspectorPanel.vue?raw";
 import modelPickerSource from "./ModelPicker.vue?raw";
+import styleMenuSource from "../../../../studio/components/StyleMenu.vue?raw";
 import viewSource from "../../views/GenerateView.vue?raw";
 
 /*
@@ -31,8 +32,9 @@ const CLICKABLE: ReadonlyArray<readonly [string, string, string]> = [
   ["InspectorPanel.vue", ".ms-seed__reroll", inspectorSource],
   ["InspectorPanel.vue", ".ms-seed__lock", inspectorSource],
   ["ModelPicker.vue", ".ms-model__button", modelPickerSource],
-  ["ModelPicker.vue", ".ms-model__option", modelPickerSource],
-  ["ModelPicker.vue", ".ms-model__browse", modelPickerSource],
+  // The rows and the footer live in the shared studio menu now.
+  ["StyleMenu.vue", ".ms-model__option", styleMenuSource],
+  ["StyleMenu.vue", ".ms-model__browse", styleMenuSource],
   ["GenerateView.vue", ".caption-action", viewSource],
 ];
 

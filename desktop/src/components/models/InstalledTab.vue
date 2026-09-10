@@ -40,7 +40,7 @@ import {
   modelDisplayName,
   modelSizeLabels,
 } from "../../lib/models";
-import { modelSource } from "../../lib/modelSource";
+import { modelSource } from "@studio/lib/modelSource";
 import { styleDiskSegments, type StyleDiskSegment } from "../../lib/styleDiskSegments";
 import { familyLabel } from "@studio/lib/modelFamily";
 import { openExternal } from "../../lib/openExternal";

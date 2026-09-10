@@ -214,7 +214,8 @@ import {
   sourceMediaPlan,
 } from "@studio/lib/sourceMediaPlan";
 import { modelDisplayNameForId } from "../lib/models";
-import { mobileStyleLabel } from "./styleLabel";
+import { styleDisplayName } from "@studio/lib/styleLabel";
+import { familyLabel } from "@studio/lib/modelFamily";
 import type {
   CompleteEvent,
   DownloadJob,
@@ -459,6 +460,7 @@ import MobilePromptTools from "./MobilePromptTools.vue";
 import MobileRemixReview, { type MobileRemixReviewVariant } from "./MobileRemixReview.vue";
 import MobilePreparedExpansionBatch from "./MobilePreparedExpansionBatch.vue";
 import MobileSettingsView from "./MobileSettingsView.vue";
+import MobileStyleSheet from "./MobileStyleSheet.vue";
 import MobileSharedParams from "./MobileSharedParams.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
@@ -468,6 +470,8 @@ import {
   modelsForOutputKind,
   OUTPUT_KIND_LABEL,
   OUTPUT_KIND_TITLE,
+  OUTPUT_KIND_SECTION_LABEL,
+  OUTPUT_KIND_EMPTY,
   type OutputKind,
 } from "@studio/lib/outputKind";
 import MobileNavigation from "./MobileNavigation.vue";
@@ -705,6 +709,8 @@ const catalogView = ref<
 >(null);
 const hostDetailView = ref<RefreshableMobileView | null>(null);
 const createHeading = ref<HTMLElement | null>(null);
+/** The Make canvas — where a develop bed forms and a result settles. */
+const makeCanvasSlot = ref<HTMLElement | null>(null);
 const settingsOpen = ref(false);
 useMobileBack(settingsOpen, closeSettings);
 const settingsButton = ref<HTMLButtonElement | null>(null);
@@ -1919,9 +1925,45 @@ const organizationSummary = computed(() => {
   );
 });
 let fallbackStyleName: string | null = null;
-const pickerModels = computed(() =>
-  modelsForOutputKind(generationModels.value, selectedOutputKind.value),
-);
+/**
+ * The rows the sheet may render: this section's styles, plus the SELECTED one
+ * whatever its kind. Use as prompt can restore a clip style while the section
+ * still says Still picture — the style is installed, so it is not a phantom
+ * either, and narrowing it out left the sheet showing no current style at all.
+ * Desktop's `useStylePicker` keeps the selected row for the same reason.
+ */
+const pickerModels = computed(() => {
+  const inSection = modelsForOutputKind(generationModels.value, selectedOutputKind.value);
+  const selected = generationModels.value.find((model) => model.name === form.model);
+  if (!selected || inSection.some((model) => model.name === selected.name)) return inSection;
+  return [selected, ...inSection];
+});
+const stylePickerOpen = ref(false);
+/**
+ * The chip's plain half. `styleDisplayName` already stands a family's friendly
+ * label in for a bare manifest id, so the id is never said twice; the mono
+ * half beside it carries the exact runnable name.
+ */
+const styleChipName = computed(() => {
+  const entry = generationModels.value.find((model) => model.name === form.model);
+  if (entry) return styleDisplayName(entry);
+  if (form.model) return form.family ? familyLabel(form.family) : "";
+  return loadingModels.value ? "Loading styles…" : "No generation models available";
+});
+/** The phone's own multi-machine rule, injected into the shared list. */
+function styleAvailabilityTag(model: { name: string }): string | null {
+  return modelAvailabilityTag(model.name);
+}
+function pickStyle(model: { name: string }): void {
+  stylePickerOpen.value = false;
+  if (form.model === model.name) return;
+  form.model = model.name;
+  changeModel();
+}
+function browseStylesFromSheet(): void {
+  stylePickerOpen.value = false;
+  void browseOutputStyles(selectedOutputKind.value);
+}
 function selectOutputKind(value: string | number): void {
   const kind = value as OutputKind;
   if (kind === selectedOutputKind.value) return;
@@ -1989,11 +2031,6 @@ const sourceSectionSummary = computed(() => {
 });
 const outputFormats = computed(
   () => caps.value.outputFormats as ReturnType<typeof outputFormatsForFamily>,
-);
-const selectedModelInstalled = computed(
-  () =>
-    (automaticRouting.value || modelsHostId.value === selectedHostId.value) &&
-    generationModels.value.some((model) => model.name === form.model),
 );
 const selectedGenerationModel = computed(
   () => generationModels.value.find((model) => model.name === form.model) ?? null,
@@ -3141,13 +3178,51 @@ function clearSelectedQueueRender(): void {
   selectedQueueRender.value = null;
 }
 
-function revealRestoredMobileGeneration(): void {
+/**
+ * The one place the Make view is brought back to its canvas — a restored print
+ * arriving from the Queue or the Library, and a generation the person just
+ * queued.
+ *
+ * A restore is a DESTINATION CHANGE: it lands without animation and takes
+ * focus to the heading, because the person asked to come here. A submission is
+ * a MOVE on a screen they are already looking at: it slides (unless they asked
+ * for no motion) and never touches focus, because they may be typing the next
+ * prompt while this one develops. jsdom and older WebViews have no element
+ * `scrollTo`, so the offsets are the fallback.
+ */
+/** `.mobile-content`'s own top padding, so the revealed canvas keeps it. */
+const MAKE_CANVAS_REVEAL_INSET = 16;
+
+function revealRestoredMobileGeneration(submitted = false): void {
   tab.value = "generate";
   void nextTick(() => {
-    if (!mobileContent.value) return;
-    mobileContent.value.scrollTop = 0;
-    mobileContent.value.scrollLeft = 0;
-    createHeading.value?.focus({ preventScroll: true });
+    const scroller = mobileContent.value;
+    if (!scroller) return;
+    // Measure from the scroller's own edge: `offsetTop` is relative to the
+    // shell, whose header sits above the scroller, and parked the canvas one
+    // header-height under the wordmark.
+    // A restore lands on the heading (top); a submission lands on the canvas,
+    // with the scroller's own inset kept above it so the frame does not hug
+    // the wordmark.
+    const slot = submitted ? makeCanvasSlot.value : null;
+    const top = slot
+      ? Math.max(
+          0,
+          slot.getBoundingClientRect().top -
+            scroller.getBoundingClientRect().top +
+            scroller.scrollTop -
+            MAKE_CANVAS_REVEAL_INSET,
+        )
+      : 0;
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
+    const behavior: ScrollBehavior = submitted && !reduced ? "smooth" : "auto";
+    if (typeof scroller.scrollTo === "function") {
+      scroller.scrollTo({ top, left: 0, behavior });
+    } else {
+      scroller.scrollTop = top;
+      scroller.scrollLeft = 0;
+    }
+    if (!submitted) createHeading.value?.focus({ preventScroll: true });
   });
 }
 
@@ -7147,6 +7222,10 @@ async function generate(): Promise<void> {
     );
     if (!progressIsError.value) setGenerationStatus("Queued");
     generationAnnouncement.value = "";
+    // The canvas is where this print now forms. Bring it into view once, on
+    // the submit — never again when it settles, which would yank the screen
+    // out from under someone already reading somewhere else.
+    revealRestoredMobileGeneration(true);
     void admission.catch((error) => {
       setGenerationStatus(describeTransportError(error, route.label), true);
       generationAnnouncement.value = `Generation admission failed. ${progress.value}`;
@@ -7180,6 +7259,7 @@ async function generate(): Promise<void> {
     return;
   }
   const { admitted, settled } = submission;
+  revealRestoredMobileGeneration(true);
   // Keep preprocessing, placement, reference upload, and server admission
   // alive through iOS's finite background grace period. Once every sibling is
   // accepted (or refused), foreground recovery and the remote queue own the
@@ -8987,6 +9067,14 @@ const libraryScopeCounts = computed<Record<MobileLibraryScope, number>>(() => ({
   collections: libraryCollectionCards.value.length,
   trash: trashCount.value,
 }));
+/** The scope control's segments: the plain name with its count beside it. */
+const libraryScopeOptions = computed(() =>
+  libraryScopes.value.map((scope) => ({
+    value: scope,
+    label: MOBILE_LIBRARY_SCOPE_LABELS[scope],
+    sub: String(libraryScopeCounts.value[scope]),
+  })),
+);
 const trashRetention = computed(() =>
   trashRetentionSummary(trashRetentionHosts(connectedHosts.value, librarySupport.value)),
 );
@@ -11813,73 +11901,160 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               Browse styles
             </button>
           </p>
-          <div v-if="resultUrl || resultMeshSrc" class="mobile-make-result">
-            <!-- 3-D lands first: a mesh carries neither frames nor samples,
+          <!-- THE CANVAS, first. The bed forms here while a print develops and
+               the result replaces it in place when it settles; the status line
+               and any preview refusal stay with them. All three used to sit at
+               the very end of the scroll, below Templates, so the thing the
+               phone was asked to make was the one thing off screen. -->
+          <div ref="makeCanvasSlot" class="mobile-make-canvas" data-test="mobile-make-canvas">
+            <div v-if="resultUrl || resultMeshSrc" class="mobile-make-result">
+              <!-- 3-D lands first: a mesh carries neither frames nor samples,
                so any wider arm above it would draw glTF into an <img>. -->
-            <figure
-              v-if="resultIsMesh && resultMeshSrc"
-              class="result-mesh"
-              data-test="mobile-generated-mesh"
-            >
-              <MeshViewer
-                :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
-                class="result-media"
-                :src="resultMeshSrc"
-                :poster="resultPoster"
-                :alt="latestResultJob?.prompt || 'Generated 3-D print'"
-                auto-rotate
-                expandable
-                @ready="generatedMediaReady"
-                @fail="recoverGeneratedMedia"
-              />
-              <figcaption
-                v-if="resultMeshStats"
-                class="status-line"
-                data-test="mobile-generated-mesh-stats"
+              <figure
+                v-if="resultIsMesh && resultMeshSrc"
+                class="result-mesh"
+                data-test="mobile-generated-mesh"
               >
-                {{ resultMeshStats }}
-              </figcaption>
-            </figure>
-            <video
-              v-else-if="resultUrl && resultIsVideo"
-              :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
-              class="result-media"
-              :src="resultUrl"
-              controls
-              playsinline
-              preload="metadata"
-              @play="renewGeneratedResult(false)"
-              @loadedmetadata="generatedMediaReady"
-              @error="recoverGeneratedMedia"
-            />
-            <button
-              v-else-if="resultUrl"
-              class="result-media-button"
-              type="button"
-              data-test="mobile-generated-result"
-              aria-label="Expand generated print"
-              @click="generatedViewerOpen = true"
-            >
-              <img
+                <MeshViewer
+                  :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
+                  class="result-media"
+                  :src="resultMeshSrc"
+                  :poster="resultPoster"
+                  :alt="latestResultJob?.prompt || 'Generated 3-D print'"
+                  auto-rotate
+                  expandable
+                  @ready="generatedMediaReady"
+                  @fail="recoverGeneratedMedia"
+                />
+                <figcaption
+                  v-if="resultMeshStats"
+                  class="status-line"
+                  data-test="mobile-generated-mesh-stats"
+                >
+                  {{ resultMeshStats }}
+                </figcaption>
+              </figure>
+              <video
+                v-else-if="resultUrl && resultIsVideo"
                 :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
                 class="result-media"
                 :src="resultUrl"
-                alt="Generated print"
-                draggable="false"
-                @load="generatedMediaReady"
+                controls
+                playsinline
+                preload="metadata"
+                @play="renewGeneratedResult(false)"
+                @loadedmetadata="generatedMediaReady"
                 @error="recoverGeneratedMedia"
-                @contextmenu.prevent
               />
-            </button>
-            <button
-              v-if="generatedPreviewItem"
-              type="button"
-              class="secondary-button mobile-result-actions"
-              data-test="mobile-result-actions"
-              @click="generatedViewerOpen = true"
+              <button
+                v-else-if="resultUrl"
+                class="result-media-button"
+                type="button"
+                data-test="mobile-generated-result"
+                aria-label="Expand generated print"
+                @click="generatedViewerOpen = true"
+              >
+                <img
+                  :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
+                  class="result-media"
+                  :src="resultUrl"
+                  alt="Generated print"
+                  draggable="false"
+                  @load="generatedMediaReady"
+                  @error="recoverGeneratedMedia"
+                  @contextmenu.prevent
+                />
+              </button>
+              <button
+                v-if="generatedPreviewItem"
+                type="button"
+                class="secondary-button mobile-result-actions"
+                data-test="mobile-result-actions"
+                @click="generatedViewerOpen = true"
+              >
+                View result · Save and share
+              </button>
+            </div>
+            <!-- Live develop bed: once the host streams latent previews the
+             active print literally forms here — the preview's blur tightens
+             with denoise progress while the Develop grain thins over it.
+             Without previews the status line below stands alone, and the
+             grain's rAF loop stays parked (nothing mounts), which keeps the
+             WebKit compositor free during model load. -->
+            <div
+              v-if="
+                selectedQueueRender?.preview || (activeGeneration && activeGeneration.previewUrl)
+              "
+              class="mobile-develop-bed"
+              data-test="mobile-develop-bed"
+              aria-hidden="true"
+              :style="{
+                aspectRatio: `${selectedQueueRender?.width ?? activeGeneration?.width ?? 1} / ${selectedQueueRender?.height ?? activeGeneration?.height ?? 1}`,
+                // The 55vh height cap rides the width axis (see mobile.css) so a
+                // portrait bed shrinks instead of distorting its layered media.
+                '--bed-ar': `${(selectedQueueRender?.width ?? activeGeneration?.width ?? 1) / Math.max(1, selectedQueueRender?.height ?? activeGeneration?.height ?? 1)}`,
+              }"
             >
-              View result · Save and share
-            </button>
+              <img
+                class="mobile-develop-preview"
+                data-test="mobile-develop-preview"
+                :src="selectedQueuePreviewSrc ?? activeGeneration?.previewUrl ?? ''"
+                alt=""
+                :style="{
+                  filter: `blur(${Math.max(2, 14 - 12 * (selectedQueuePreviewFraction ?? (activeGeneration ? jobProgress(activeGeneration) : 0)))}px)`,
+                }"
+              />
+              <DevelopCanvas
+                :seed="activeGeneration?.visualSeed ?? 0"
+                :progress="
+                  selectedQueuePreviewFraction ??
+                  (activeGeneration ? jobProgress(activeGeneration) : 0)
+                "
+                :phase="activeGeneration ? jobPhase(activeGeneration) : 'developing'"
+                class="mobile-develop-grain"
+                :style="{
+                  opacity: String(
+                    Math.max(
+                      0.18,
+                      1 -
+                        (selectedQueuePreviewFraction ??
+                          (activeGeneration ? jobProgress(activeGeneration) : 0)) *
+                          0.9,
+                    ),
+                  ),
+                }"
+              />
+            </div>
+            <!-- The bed's frame, reserved from the moment a job is live: the first
+            latent preview lands seconds later, and a bed that only mounts then
+            grows above the viewport, where scroll anchoring keeps it out of sight. -->
+            <div
+              v-else-if="activeGeneration"
+              class="mobile-develop-bed mobile-develop-placeholder"
+              data-test="mobile-develop-placeholder"
+              aria-hidden="true"
+              :style="{
+                aspectRatio: `${activeGeneration.width || 1} / ${activeGeneration.height || 1}`,
+                '--bed-ar': `${(activeGeneration.width || 1) / Math.max(1, activeGeneration.height || 1)}`,
+              }"
+            />
+            <div v-if="generationStatusIsError" data-test="mobile-generation-summary">
+              <ErrorNotice :message="generationStatus" data-test="mobile-generation-error" />
+            </div>
+            <div v-else class="status-line" data-test="mobile-generation-summary">
+              {{ generationStatus }}
+            </div>
+            <ErrorNotice
+              v-if="resultPreviewError"
+              class="result-preview-error"
+              :message="resultPreviewError"
+            >
+              <template #actions>
+                <button class="secondary-button" type="button" @click="retryGeneratedPreview">
+                  Try preview again
+                </button>
+              </template>
+            </ErrorNotice>
           </div>
           <!-- Persistent inline, never a toast: iPhone has no transient
                chrome, and an outcome the user did not choose has to stay
@@ -12158,35 +12333,32 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                a checkpoint that loses it is parked, not discarded. -->
           <MobileIdentityWell v-if="showIdentity" :form="form" />
 
-          <label class="field mobile-style-picker">
-            <span>Style</span>
-            <select
-              v-model="form.model"
-              class="control"
-              :disabled="loadingModels || pickerModels.length === 0"
-              @change="changeModel"
+          <!-- Style: a chip that says the plain name and the exact id, opening
+               the same list desktop's popover and web's Create chip open. A
+               native <select> could say a label and nothing else — no size, no
+               on-GPU state, no description, no type-to-filter, and no way to
+               see that a restored print's style is simply not here yet. -->
+          <div class="field mobile-style-picker">
+            <span class="mobile-style-picker-label">Style</span>
+            <button
+              type="button"
+              class="mobile-style-picker-chip"
+              data-test="mobile-style-picker-chip"
+              aria-haspopup="listbox"
+              :aria-expanded="stylePickerOpen"
+              :disabled="loadingModels || (pickerModels.length === 0 && !form.model)"
+              @click="stylePickerOpen = true"
             >
-              <option v-if="!form.model" value="" disabled>
-                {{ loadingModels ? "Loading models…" : "No generation models available" }}
-              </option>
-              <option v-if="form.model && !selectedModelInstalled" :value="form.model" disabled>
-                {{
-                  mobileStyleLabel(
-                    selectedGenerationModel ?? { name: form.model, family: form.family },
-                  )
-                }}
-                · not installed
-              </option>
-              <option v-for="model in pickerModels" :key="model.name" :value="model.name">
-                {{ mobileStyleLabel(model)
-                }}{{
-                  modelAvailabilityTag(model.name) ? ` · ${modelAvailabilityTag(model.name)}` : ""
-                }}
-              </option>
-            </select>
-          </label>
+              <span class="mobile-style-picker-body">
+                <span class="mobile-style-chip-name" data-test="mobile-style-chip-name">{{
+                  styleChipName
+                }}</span>
+                <code v-if="form.model" class="mobile-style-id">{{ form.model }}</code>
+              </span>
+              <span class="mobile-style-picker-caret" aria-hidden="true">›</span>
+            </button>
+          </div>
           <div class="mobile-style-details">
-            <code v-if="form.model" class="mobile-style-id">{{ form.model }}</code>
             <button
               type="button"
               class="mobile-text-action"
@@ -12393,72 +12565,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             @load="loadTemplate"
           />
 
-          <!-- Live develop bed: once the host streams latent previews the
-             active print literally forms here — the preview's blur tightens
-             with denoise progress while the Develop grain thins over it.
-             Without previews the status line below stands alone, and the
-             grain's rAF loop stays parked (nothing mounts), which keeps the
-             WebKit compositor free during model load. -->
-          <div
-            v-if="selectedQueueRender?.preview || (activeGeneration && activeGeneration.previewUrl)"
-            class="mobile-develop-bed"
-            data-test="mobile-develop-bed"
-            aria-hidden="true"
-            :style="{
-              aspectRatio: `${selectedQueueRender?.width ?? activeGeneration?.width ?? 1} / ${selectedQueueRender?.height ?? activeGeneration?.height ?? 1}`,
-              // The 55vh height cap rides the width axis (see mobile.css) so a
-              // portrait bed shrinks instead of distorting its layered media.
-              '--bed-ar': `${(selectedQueueRender?.width ?? activeGeneration?.width ?? 1) / Math.max(1, selectedQueueRender?.height ?? activeGeneration?.height ?? 1)}`,
-            }"
-          >
-            <img
-              class="mobile-develop-preview"
-              data-test="mobile-develop-preview"
-              :src="selectedQueuePreviewSrc ?? activeGeneration?.previewUrl ?? ''"
-              alt=""
-              :style="{
-                filter: `blur(${Math.max(2, 14 - 12 * (selectedQueuePreviewFraction ?? (activeGeneration ? jobProgress(activeGeneration) : 0)))}px)`,
-              }"
-            />
-            <DevelopCanvas
-              :seed="activeGeneration?.visualSeed ?? 0"
-              :progress="
-                selectedQueuePreviewFraction ??
-                (activeGeneration ? jobProgress(activeGeneration) : 0)
-              "
-              :phase="activeGeneration ? jobPhase(activeGeneration) : 'developing'"
-              class="mobile-develop-grain"
-              :style="{
-                opacity: String(
-                  Math.max(
-                    0.18,
-                    1 -
-                      (selectedQueuePreviewFraction ??
-                        (activeGeneration ? jobProgress(activeGeneration) : 0)) *
-                        0.9,
-                  ),
-                ),
-              }"
-            />
-          </div>
-          <div v-if="generationStatusIsError" data-test="mobile-generation-summary">
-            <ErrorNotice :message="generationStatus" data-test="mobile-generation-error" />
-          </div>
-          <div v-else class="status-line" data-test="mobile-generation-summary">
-            {{ generationStatus }}
-          </div>
-          <ErrorNotice
-            v-if="resultPreviewError"
-            class="result-preview-error"
-            :message="resultPreviewError"
-          >
-            <template #actions>
-              <button class="secondary-button" type="button" @click="retryGeneratedPreview">
-                Try preview again
-              </button>
-            </template>
-          </ErrorNotice>
-
           <button
             v-if="mobileActivityRows.length"
             class="mobile-queue-peek"
@@ -12560,27 +12666,20 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         <p v-if="emptyTrashConfirming" class="status-line" data-test="mobile-library-empty-prompt">
           Delete everything in the trash forever?
         </p>
-        <div
+        <!-- Prints | Collections | Trash on the shared segmented control, with
+             each scope's count inline beside its name so three of them still
+             fit one row on the narrowest phone. -->
+        <SegmentedControl
           v-if="libraryScopes.length > 1"
           class="mobile-library-scope"
-          role="radiogroup"
-          aria-label="Library scope"
+          :model-value="libraryScope"
+          :options="libraryScopeOptions"
+          label="Library scope"
+          inline
+          variant="neutral"
           data-test="mobile-library-scope"
-        >
-          <button
-            v-for="scope in libraryScopes"
-            :key="scope"
-            type="button"
-            role="radio"
-            :aria-checked="libraryScope === scope"
-            :data-on="libraryScope === scope ? 'true' : undefined"
-            :data-test="`mobile-library-scope-${scope}`"
-            @click="setLibraryScope(scope)"
-          >
-            <span>{{ MOBILE_LIBRARY_SCOPE_LABELS[scope] }}</span>
-            <span class="mobile-library-scope-count">{{ libraryScopeCounts[scope] }}</span>
-          </button>
-        </div>
+          @update:model-value="setLibraryScope"
+        />
         <div
           v-if="libraryChipRowVisible"
           class="mobile-library-chips"
@@ -13901,6 +14000,24 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         />
       </template>
     </MobileLibrarySheet>
+
+    <!-- The style list, under a thumb. It lives outside the scrolling form
+         because a sheet is a fixed overlay, and it is mounted for every
+         destination so a style stays changeable from wherever the composer
+         was left. -->
+    <MobileStyleSheet
+      :open="stylePickerOpen"
+      :models="pickerModels"
+      :selected="selectedGenerationModel"
+      :missing-model="form.model || null"
+      :kicker="OUTPUT_KIND_SECTION_LABEL[selectedOutputKind]"
+      :empty-label="OUTPUT_KIND_EMPTY[selectedOutputKind]"
+      :availability-tag="styleAvailabilityTag"
+      @close="stylePickerOpen = false"
+      @pick="pickStyle"
+      @pick-missing="browseStylesFromSheet"
+      @browse="browseStylesFromSheet"
+    />
 
     <LicenseAcceptanceDialog :open-external="openExternal" />
 

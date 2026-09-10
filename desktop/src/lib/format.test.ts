@@ -12,6 +12,7 @@ import {
   timeAgo,
   vramLevel,
 } from "./format";
+import { formatBytes } from "@studio/lib/formatBytes";
 
 describe("formatUptime", () => {
   it("keeps sub-minute uptimes in seconds", () => {
@@ -143,5 +144,30 @@ describe("formatEta", () => {
   it("renders a dash for unknown ETAs", () => {
     expect(formatEta(null)).toBe("—");
     expect(formatEta(Number.POSITIVE_INFINITY)).toBe("—");
+  });
+});
+
+/*
+ * The shared style menu moved to `@studio/lib/formatBytes`, so the two byte
+ * formatters now sit side by side on the same screen: the picker's TRIGGER
+ * still reads `formatGB` while its rows read `formatBytes`. They agree exactly
+ * from 1 GB up to 1 TB, which is every checkpoint mold ships, and diverge
+ * deliberately outside it — `formatBytes` steps down to MB and up to TB where
+ * `formatGB` would say "0.5 GB" and "1000.0 GB".
+ */
+describe("formatGB against the shared formatBytes", () => {
+  it("agrees on every checkpoint-sized figure", () => {
+    for (const bytes of [
+      1_000_000_000, 2_400_000_000, 6_500_000_000, 23_800_000_000, 999_900_000_000,
+    ]) {
+      expect(formatGB(bytes), String(bytes)).toBe(formatBytes(bytes));
+    }
+  });
+
+  it("differs outside that range, which is why the rows use the shared one", () => {
+    expect(formatGB(500_000_000)).toBe("0.5 GB");
+    expect(formatBytes(500_000_000)).toBe("500.0 MB");
+    expect(formatGB(2_000_000_000_000)).toBe("2000.0 GB");
+    expect(formatBytes(2_000_000_000_000)).toBe("2.0 TB");
   });
 });

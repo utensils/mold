@@ -1224,8 +1224,8 @@ onBeforeUnmount(() => {
         data-test="gallery-viewer-close"
         @click="emit('close')"
       >
-        <span aria-hidden="true">×</span>
-        <span>Close</span>
+        <span aria-hidden="true">‹</span>
+        <span>Back</span>
       </button>
       <div class="gallery-viewer-origin">
         <h1 id="gallery-viewer-title" data-test="gallery-viewer-title">{{ viewerTitle }}</h1>

@@ -9,7 +9,7 @@ import SourceGlyph from "../generate/SourceGlyph.vue";
 import ModelFootprintBar from "./ModelFootprintBar.vue";
 import { isOpaqueModelId } from "../../lib/models";
 import { openExternal } from "../../lib/openExternal";
-import type { ModelSource } from "../../lib/modelSource";
+import type { ModelSource } from "@studio/lib/modelSource";
 
 /**
  * The one row shape for models shown as a table anywhere in the app —

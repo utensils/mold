@@ -473,7 +473,7 @@ describe("CreatePage layout and behavior", () => {
       }
     }
     expect(
-      wrapper.getComponent({ name: "CreateModelPicker" }).props("browseTo"),
+      wrapper.getComponent({ name: "CreateStylePicker" }).props("browseTo"),
     ).toBe("/models?type=image");
     wrapper.unmount();
   });
@@ -740,7 +740,7 @@ describe("CreatePage layout and behavior", () => {
     const markers = [
       "phone-create-title",
       "prompt-style-stub",
-      "model-picker-stub",
+      "style-picker-stub",
       "controls-stub",
       "composer-submit",
       "recent-grid",
@@ -3923,7 +3923,7 @@ describe("CreatePage host routing", () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
-    const picker = wrapper.getComponent({ name: "CreateModelPicker" });
+    const picker = wrapper.getComponent({ name: "CreateStylePicker" });
     const names = (picker.props("models") as { name: string }[]).map(
       (m) => m.name,
     );
@@ -3940,7 +3940,7 @@ describe("CreatePage host routing", () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
-    const picker = wrapper.getComponent({ name: "CreateModelPicker" });
+    const picker = wrapper.getComponent({ name: "CreateStylePicker" });
     expect(
       (picker.props("models") as { name: string }[]).map((m) => m.name),
     ).toEqual(["z-image:bf16"]);
@@ -3961,7 +3961,7 @@ describe("CreatePage host routing", () => {
     await nextTick();
 
     expect(form.state.value.model).toBe("flux-dev:q8");
-    const picker = wrapper.getComponent({ name: "CreateModelPicker" });
+    const picker = wrapper.getComponent({ name: "CreateStylePicker" });
     expect(picker.props("model")).toBe("flux-dev:q8");
     expect(picker.props("missingModel")).toBe("flux-dev:q8");
     expect(
@@ -4614,10 +4614,10 @@ function pageStubs() {
       template:
         '<div data-test="result-canvas" :data-count="(variations||[]).length" :data-caption="resultCaption" :data-preview-src="previewSrc" :data-stage="stage"><button data-test="queue-variations" @click="$emit(\'queue\')">queue</button></div>',
     },
-    CreateModelPicker: {
-      name: "CreateModelPicker",
+    CreateStylePicker: {
+      name: "CreateStylePicker",
       props: ["models", "model", "browseTo", "emptyLabel", "missingModel"],
-      template: "<div data-test='model-picker-stub' />",
+      template: "<div data-test='style-picker-stub' />",
     },
     ControlsAside: {
       name: "ControlsAside",

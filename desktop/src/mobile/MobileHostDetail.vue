@@ -1090,7 +1090,7 @@ onBeforeUnmount(() => {
         data-test="host-detail-back"
         @click="emit('back')"
       >
-        <span aria-hidden="true">‹</span> Hosts
+        <span aria-hidden="true">‹</span> Machines
       </button>
       <span class="host-chip" data-test="host-detail-health">{{
         mobileHostHealthLabel(host)

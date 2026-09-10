@@ -37,7 +37,7 @@ import {
   modelDisplayNameForId,
   modelSizeLabels,
 } from "../lib/models";
-import { modelSource } from "../lib/modelSource";
+import { modelSource } from "@studio/lib/modelSource";
 import { ipc } from "../lib/ipc";
 import type {
   ConfigRow,

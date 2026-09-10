@@ -8,6 +8,7 @@ installMemoryLocalStorage();
 import viewSource from "./GenerateView.vue?raw";
 import inspectorSource from "../components/create/InspectorPanel.vue?raw";
 import modelPickerSource from "../components/create/ModelPicker.vue?raw";
+import styleMenuSource from "../../../studio/components/StyleMenu.vue?raw";
 import advancedSource from "../components/create/AdvancedSettings.vue?raw";
 import composerCardSource from "../components/create/ComposerCard.vue?raw";
 import benchLayoutSource from "../lib/benchLayout?raw";
@@ -144,13 +145,20 @@ describe("GenerateView layout", () => {
     expect(offenders).toEqual([]);
   });
 
+  /*
+   * The rows moved to `studio/components/StyleMenu.vue`, which is shared with
+   * web and the phone and therefore carries no Tailwind: the same promise —
+   * a long id wraps instead of being cut — is kept there in scoped CSS. The
+   * trigger's own label is still ModelPicker's.
+   */
   it("keeps full model names visible in the shared model picker", () => {
     expect(classesFor(modelPickerSource, "selected-model-name")).not.toContain("truncate");
     expect(classesFor(modelPickerSource, "selected-model-name")).toContain("break-all");
-    expect(classesFor(modelPickerSource, "model-option-name")).not.toContain("truncate");
-    expect(classesFor(modelPickerSource, "model-option-name")).toContain("break-all");
-    expect(classesFor(modelPickerSource, "model-availability")).not.toContain("truncate");
-    expect(classesFor(modelPickerSource, "model-availability")).toContain("break-all");
+    for (const selector of [".ms-model__name", ".ms-model__meta", ".ms-model__tag"]) {
+      const rule = styleMenuSource.match(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
+      expect(rule, selector).toContain("overflow-wrap: anywhere");
+      expect(rule, selector).not.toContain("text-overflow: ellipsis");
+    }
   });
 
   it("keeps Advanced in the settings inspector instead of mounting an overlay drawer", () => {

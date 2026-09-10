@@ -53,12 +53,39 @@ describe("MobileAdvancedSheet", () => {
     expect(wrapper.get("[data-test=mobile-advanced-sheet]").attributes("inert")).toBeDefined();
     await wrapper.setProps({ open: true });
     await flushPromises();
-    expect(document.activeElement).toBe(wrapper.get("[data-test=mobile-advanced-sheet]").element);
+    // The panel takes focus, not the overlay: the overlay is the scrim's host.
+    expect(document.activeElement).toBe(wrapper.get(".mobile-sheet-panel").element);
     await wrapper.get("[data-test=mobile-advanced-sheet]").trigger("keydown", { key: "Escape" });
     expect(wrapper.emitted("close")).toHaveLength(1);
     await wrapper.setProps({ open: false });
     expect(document.activeElement).toBe(trigger);
     wrapper.unmount();
     trigger.remove();
+  });
+
+  it("is a bottom sheet: grabber, scrim, and a text Reset · title · Done header", async () => {
+    const wrapper = mount(MobileAdvancedSheet, { props: { open: true, count: 0 } });
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-advanced-sheet']").attributes("aria-modal")).toBe(
+      "true",
+    );
+    expect(wrapper.find(".mobile-sheet-grabber").exists()).toBe(true);
+    expect(wrapper.get(".mobile-sheet-title").text()).toBe("More settings");
+
+    const head = wrapper.get(".mobile-advanced-sheet-head").element;
+    const reset = wrapper.get("[data-test='mobile-advanced-reset']");
+    const done = wrapper.get("[data-test='mobile-advanced-close']");
+    // Both are text controls in the header — Reset leading, Done trailing —
+    // never the 44px circular glyph the full-screen surface used to carry.
+    expect(reset.element.closest(".mobile-advanced-sheet-head")).toBe(head);
+    expect(done.element.closest(".mobile-advanced-sheet-head")).toBe(head);
+    expect(reset.text()).toBe("Reset");
+    expect(done.text()).toBe("Done");
+    expect(done.classes()).toContain("mobile-sheet-action");
+
+    await wrapper.get("[data-test='mobile-advanced-sheet-scrim']").trigger("click");
+    expect(wrapper.emitted("close")).toHaveLength(1);
+    wrapper.unmount();
   });
 });
