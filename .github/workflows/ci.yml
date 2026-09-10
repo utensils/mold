@@ -77,6 +77,8 @@ jobs:
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
+              - 'scripts/ci/affected-packages.py'
               - 'scripts/qualify-local-multi-gpu.py'
               - 'scripts/validate-local-multi-gpu-report.py'
               - 'scripts/tests/local-multi-gpu-qualification-contract.sh'
@@ -271,6 +273,7 @@ jobs:
               - '.github/actionlint.yaml'
               - '.github/workflows/**'
               - 'scripts/tests/ci-routing-contract.sh'
+              - 'scripts/tests/ci-affected-packages.sh'
 
   # Advisory (not a required status check): every PR carries its release note
   # as a changelog.d/<slug>.md fragment and never edits CHANGELOG.md's
@@ -318,6 +321,8 @@ jobs:
       - name: Install docs dependencies
         working-directory: website
         run: bun install
+      - name: Install ripgrep for the env-var coverage check
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Check docs formatting
         working-directory: website
         run: bun run fmt:check
@@ -391,6 +396,10 @@ jobs:
       RUN_RUST_SUITE: ${{ needs.changes.outputs.trusted_release_pr != 'true' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true') }}
       RUN_RUST_FORMAT: ${{ needs.changes.outputs.trusted_release_pr != 'true' && needs.changes.outputs.rust_format == 'true' }}
       SCCACHE_GHA_ENABLED: "true"
+      # Full debuginfo is the single largest cost in a test build's codegen and
+      # link and in the cache save/restore; line tables keep test backtraces
+      # readable.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - name: Require successful change classification
         if: needs.changes.result != 'success'
@@ -474,7 +483,9 @@ jobs:
         uses: docker://rhysd/actionlint:1.7.12
       - name: Validate CI routing policy
         if: github.event_name == 'pull_request' && needs.changes.outputs.workflow == 'true'
-        run: bash scripts/tests/ci-routing-contract.sh
+        run: |
+          bash scripts/tests/ci-routing-contract.sh
+          bash scripts/tests/ci-affected-packages.sh
       - name: Run protected release contracts
         if: needs.changes.outputs.release == 'true'
         run: |
@@ -553,8 +564,38 @@ jobs:
         with:
           shared-key: workspace-default
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Check declared MSRV
+      # ---- Rust suite tiers --------------------------------------------------
+      # A pull request pays for ONE build. `scripts/ci/affected-packages.py`
+      # maps the diff to the workspace packages it can reach (dependents
+      # included, cross-crate `include_str!` pins included) and to the
+      # optional-feature union for those packages, so PuLID, mDNS, mesh
+      # preparation, the private H3 record runtime and every `mold` CLI
+      # feature are linted and tested in the same compile instead of one
+      # recompile each. nextest's `pr` profile (.config/nextest.toml) then
+      # drops the default-feature assertions and the heavy synthetic-render
+      # long tail (about 78% of execution time in 116 tests). A push to
+      # `main` keeps everything: the default-feature workspace under
+      # `cargo test`, the MSRV toolchain, the per-feature H3 arms, the
+      # private developer bins, and the union build that warms the cache PRs
+      # restore.
+      - uses: taiki-e/install-action@nextest
         if: env.RUN_RUST_SUITE == 'true'
+      - name: Select the packages this change can affect
+        id: affected
+        if: env.RUN_RUST_SUITE == 'true'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            python3 scripts/ci/affected-packages.py --base "$BASE_SHA" --head HEAD | tee -a "$GITHUB_OUTPUT"
+          else
+            python3 scripts/ci/affected-packages.py --all | tee -a "$GITHUB_OUTPUT"
+          fi
+      - name: Check declared MSRV
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
         shell: bash
         run: |
           msrv=$(sed -n 's/^rust-version = "\([^"]*\)"$/\1/p' Cargo.toml)
@@ -578,17 +619,23 @@ jobs:
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo run -p mold-ai-core --bin generate_prompting_guides -- --check
       - name: Clippy
-        if: env.RUN_RUST_SUITE == 'true'
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (affected packages, optional features on)
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'pull_request' && steps.affected.outputs.scope != 'none'
+        run: >-
+          cargo clippy ${{ steps.affected.outputs.packages }} --all-targets
+          --features "${{ steps.affected.outputs.features }}" -- -D warnings
       # The live Hugging Face search is an external-service monitor, not a
       # deterministic change gate. It has repeatedly failed release PRs on 429
       # responses, so keep that signal on main without forcing PR reruns.
       - name: Test (deterministic PR suite)
-        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'pull_request'
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'pull_request' && steps.affected.outputs.scope != 'none'
         run: >-
           timeout --signal=TERM --kill-after=60s 20m
-          cargo test --workspace --
-          --skip catalog_api::catalog_live_test::live_search_free_text_can_find_manual_clip_components
+          cargo nextest run --profile pr ${{ steps.affected.outputs.packages }}
+          --features "${{ steps.affected.outputs.features }}"
+          -E "not test(=catalog_api::catalog_live_test::live_search_free_text_can_find_manual_clip_components)"
       - name: Test (full main suite)
         if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
         run: timeout --signal=TERM --kill-after=60s 20m cargo test --workspace
@@ -617,66 +664,48 @@ jobs:
         if: env.RUN_RUST_SUITE == 'true'
         run: python3 scripts/tests/minimax-h3-transformer-capture-contract.py
       - name: Clippy the private MiniMax H3 artifact qualifier
-        if: env.RUN_RUST_SUITE == 'true'
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings
       - name: Clippy the private exact-BF16 Qwen capture adapter
-        if: env.RUN_RUST_SUITE == 'true'
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_qwen_layer50_capture -- -D warnings
       - name: Clippy the private H3 transformer capture adapter
-        if: env.RUN_RUST_SUITE == 'true'
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_transformer_capture -- -D warnings
+      # `h3-private-uat` ALONE is the record-runtime arm
+      # (`private_h3_record_runtime() == cfg!(h3-private-uat) && !cfg!(h3)`),
+      # which the union build below cannot reproduce once `h3` is on.
       - name: Test private MiniMax H3 foundations
-        if: env.RUN_RUST_SUITE == 'true'
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
         run: cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3
       - name: Test the MiniMax H3 conditioner cache with the cache enabled
         # The cache is deliberately inert under `h3-private-uat`, so the step
         # above runs every one of its tests against a disabled cache. Filtered
         # to the module because the unfiltered `--features h3` graph carries
         # private-UAT-only fixtures that only the capture feature satisfies.
-        if: env.RUN_RUST_SUITE == 'true'
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
         run: cargo test -p mold-ai-inference --lib --features h3 minimax_h3::conditioner_cache
-      - name: Check the MiniMax H3 runtime feature
-        # `h3-private-uat` only forwards to mold-candle, so the H3 test step
-        # above never compiles mold-inference's own `h3`-gated runtime. That
-        # is how a shared `GenerateResponse` field landed on main with the
-        # private H3 construction site un-updated (it broke the release
-        # build, not CI). Compile the feature that ships.
-        if: env.RUN_RUST_SUITE == 'true'
-        run: cargo check -p mold-ai-inference --features h3,mp4 --lib
-      - name: Check with all optional features
-        if: env.RUN_RUST_SUITE == 'true'
-        run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns,pulid
-      # `pulid` is the only feature whose lints are otherwise never compiled:
-      # the workspace clippy gate runs featureless, and the PuLID extractor,
-      # the identity extraction seam, and their tests all live behind it.
-      - name: Clippy the PuLID identity stack
-        if: env.RUN_RUST_SUITE == 'true'
-        run: |
-          cargo clippy -p mold-ai-core --features pulid --all-targets -- -D warnings
-          cargo clippy -p mold-ai-inference --features pulid --all-targets -- -D warnings
-          cargo clippy -p mold-ai-server --features pulid --all-targets -- -D warnings
-      - name: Test CPU mesh preparation
-        if: env.RUN_RUST_SUITE == 'true'
-        run: cargo test -p mold-ai-inference --features mesh-texture,mesh-matting,mesh-delight --lib hunyuan3d
-      - name: Clippy CPU mesh preparation
-        if: env.RUN_RUST_SUITE == 'true'
-        run: cargo clippy -p mold-ai-inference --features mesh-texture,mesh-matting,mesh-delight --all-targets -- -D warnings
-      - name: Test the PuLID identity stack
-        if: env.RUN_RUST_SUITE == 'true'
-        run: |
-          cargo test -p mold-ai-core --features pulid --lib identity
-          cargo test -p mold-ai-inference --features pulid --lib identity
-          cargo test -p mold-ai-server --features pulid --lib identity
-      # `mdns` is not a default feature and nothing in the workspace turns it
-      # on, so `cargo test/clippy --workspace` never COMPILES mdns.rs — the
-      # module's tests, including the guard against reintroducing the blocking
-      # `recv()` that hung server shutdown (#1581), were dark. The desktop app
-      # enables the feature but is a separate cargo root.
-      - name: Clippy and test the mDNS surface
-        if: env.RUN_RUST_SUITE == 'true'
-        run: |
-          cargo clippy -p mold-ai-server --features mdns --all-targets -- -D warnings
-          cargo test -p mold-ai-server --features mdns --lib mdns
+      # One lint pass over the optional-feature union replaces the former
+      # per-feature clippy steps (PuLID x3, mesh, mDNS, the `mold` CLI
+      # feature set) and the `h3,mp4` runtime compile check: `h3` is added
+      # here because clippy only needs it to compile, while the test union
+      # must leave it off (see the foundations step).
+      - name: Clippy the feature-gated stacks in one build
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
+        run: >-
+          cargo clippy --workspace --all-targets
+          --features "${{ steps.affected.outputs.features }},mold-ai-inference/h3,mold-ai-inference/mp4"
+          -- -D warnings
+      # One codegen build of the union runs the gated modules' tests (the
+      # former PuLID x3, mesh and mDNS test steps) and, because rust-cache
+      # saves the target directory on main, is what lets a pull request
+      # restore the union's dependencies instead of compiling them.
+      - name: Test the feature-gated stacks in one build
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
+        run: >-
+          cargo nextest run --profile union --workspace
+          --features "${{ steps.affected.outputs.features }}"
+          -E "test(identity) | test(mdns) | test(hunyuan3d) | test(minimax_h3)"
       - name: Record protected gate success
         run: echo "Required Rust and release routes completed successfully."
 

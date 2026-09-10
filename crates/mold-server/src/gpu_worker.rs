@@ -6754,6 +6754,9 @@ mod tests {
     ) {
         let mut request = fake_upscale_job(Config::default(), "unused").request;
         request.model = mold_core::minimax_h3::FL2VA_COMFY.to_string();
+        // The undistilled tag's floor is its smallest reviewed schedule
+        // (#1679); the generic fixture's step count sits below it.
+        request.steps = mold_core::minimax_h3::steps_floor_for_model(&request.model);
         request.width = mold_core::minimax_h3::DEFAULT_WIDTH;
         request.height = mold_core::minimax_h3::DEFAULT_HEIGHT;
         request.frames = Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES);

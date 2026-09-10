@@ -23,7 +23,8 @@ nix flake check             # CI-equivalent gate
 cargo check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
-cargo test --workspace                       # PRs skip only the live HF catalog test; full suite on main
+cargo test --workspace                       # full suite, what a push to main runs
+cargo nextest run --profile pr $(python3 scripts/ci/affected-packages.py --base origin/main --head HEAD | sed -n 's/^packages=//p')   # what a PR runs (see .config/nextest.toml; add --features from the same script)
 cargo test -p mold-ai-core --lib <filter>    # single test/module; use the PACKAGE name (table below), not the dir
 cargo test -p mold-ai-server --features mdns --lib mdns   # feature-gated modules (mdns, pulid, h3) never compile under --workspace
 cargo run -p mold-ai-core --bin generate_prompting_guides -- --check   # CI contract

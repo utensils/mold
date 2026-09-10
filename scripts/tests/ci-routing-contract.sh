@@ -205,9 +205,18 @@ expected_step_conditions = {
         "needs.changes.outputs.release == 'true'"
     ),
     "Clippy the private MiniMax H3 artifact qualifier": (
-        "env.RUN_RUST_SUITE == 'true'"
+        "env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'"
     ),
-    "Test private MiniMax H3 foundations": "env.RUN_RUST_SUITE == 'true'",
+    "Test private MiniMax H3 foundations": (
+        "env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'"
+    ),
+    "Test (deterministic PR suite)": (
+        "env.RUN_RUST_SUITE == 'true' && github.event_name == 'pull_request' && "
+        "steps.affected.outputs.scope != 'none'"
+    ),
+    "Test (full main suite)": (
+        "env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'"
+    ),
 }
 expected_step_conditions["Validate all locked Cargo graphs"] = (
     "needs.changes.outputs.release == 'true'"
@@ -398,11 +407,21 @@ grep -Fq "if: env.RUN_RUST_FORMAT == 'true'" <<< "$rust_gate" \
   || fail "PR Rust formatting is not isolated from the main suite"
 grep -Fq 'Clippy the private MiniMax H3 artifact qualifier' <<< "$rust_gate" \
   || fail "main Rust suite no longer checks the private qualifier"
-grep -Fq 'Check with all optional features' <<< "$rust_gate" \
-  || fail "main Rust suite no longer checks the optional feature combination"
+grep -Fq 'Clippy the feature-gated stacks in one build' <<< "$rust_gate" \
+  || fail "main Rust suite no longer lints the optional-feature union"
+grep -Fq 'Test the feature-gated stacks in one build' <<< "$rust_gate" \
+  || fail "main Rust suite no longer builds the optional-feature union (PR caches go cold)"
+grep -Fq 'scripts/ci/affected-packages.py --base' <<< "$rust_gate" \
+  || fail "the PR suite is not scoped to the packages the diff can reach"
+grep -Fq 'cargo nextest run --profile pr' <<< "$rust_gate" \
+  || fail "the PR suite does not run nextest's pull-request tier"
+[[ -f "$repo_root/.config/nextest.toml" ]] \
+  || fail "nextest profiles are missing"
+grep -Fq '[profile.pr]' "$repo_root/.config/nextest.toml" \
+  || fail "nextest has no pr profile"
 grep -Fq 'name: Test (deterministic PR suite)' <<< "$rust_gate" \
   || fail "protected Rust status does not run deterministic workspace tests on pull requests"
-grep -Fq -- '--skip catalog_api::catalog_live_test::live_search_free_text_can_find_manual_clip_components' <<< "$rust_gate" \
+grep -Fq -- "not test(=catalog_api::catalog_live_test::live_search_free_text_can_find_manual_clip_components)" <<< "$rust_gate" \
   || fail "the PR suite includes the flaky external catalog monitor"
 grep -Fq 'name: Test (full main suite)' <<< "$rust_gate" \
   || fail "main Rust suite does not retain the complete workspace tests"
