@@ -235,9 +235,13 @@ for (const fact of requiredH3DownloadFacts) {
 
 let rustEnvVars
 try {
+  // ripgrep runs ALONE: piped through `sed | sort`, a missing `rg` still
+  // exits 0 (the pipeline's status is `sort`'s), the harvest comes back
+  // empty, and the coverage check below passes vacuously with no warning at
+  // all -- which is how CI stayed green with the check dead.
   rustEnvVars = new Set(
     execSync(
-      "rg -o 'MOLD_[A-Z0-9_]+' crates --glob '!**/*test*' -g'*.rs' | sed 's/.*://' | sort -u",
+      "rg -o --no-filename 'MOLD_[A-Z0-9_]+' crates --glob '!**/*test*' -g '*.rs'",
       { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }
     )
       .trim()
@@ -245,9 +249,18 @@ try {
       .filter(Boolean)
   )
 } catch {
-  console.warn(
-    'warning: ripgrep (rg) not found -- skipping env-var coverage check'
-  )
+  // Without ripgrep the harvest is empty and the coverage check below passes
+  // vacuously. A contributor's laptop may skip it, but CI must never: the
+  // docs job ran green on main for weeks with this check dead (#1679).
+  if (process.env.CI) {
+    fail(
+      'ripgrep (rg) not found -- the env-var coverage check cannot run; install ripgrep in the workflow'
+    )
+  } else {
+    console.warn(
+      'warning: ripgrep (rg) not found -- skipping env-var coverage check'
+    )
+  }
   rustEnvVars = new Set()
 }
 
