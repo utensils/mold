@@ -6,7 +6,7 @@ import { sendHeldQueueJob } from "../api/queueTransfer";
 const props = defineProps<{ controller: HeldQueueTransferController }>();
 const emit = defineEmits<{ (event: "sent"): void }>();
 const selected = ref("");
-const busy = ref(false);
+const busy = props.controller.busy;
 const message = ref("");
 const error = ref("");
 const done = ref(false);
@@ -20,7 +20,7 @@ watch(
   },
 );
 function close() {
-  if (!busy.value) props.controller.selection.value = null;
+  props.controller.close();
 }
 async function send() {
   const selection = props.controller.selection.value;
@@ -147,7 +147,7 @@ async function send() {
 }
 .held-transfer select,
 .held-transfer button {
-  min-height: 44px;
+  min-height: 48px;
   padding: 8px 12px;
   font: inherit;
   font-size: max(

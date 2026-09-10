@@ -1362,6 +1362,10 @@ const queueTransfer = provideHeldQueueTransfer(
     ),
   ),
 );
+useMobileBack(
+  computed(() => queueTransfer.selection.value !== null),
+  queueTransfer.close,
+);
 
 function hostMemLabel(id: string): string {
   const telemetry = hostTelemetry[id];

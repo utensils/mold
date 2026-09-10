@@ -11,6 +11,7 @@ import type { QueueTransferHost } from "../api/queueTransfer";
 export function createHeldQueueTransfer(
   hosts: ComputedRef<QueueTransferHost[]>,
 ) {
+  const busy = ref(false);
   const selection = ref<{ source: QueueTransferHost; jobId: string } | null>(
     null,
   );
@@ -26,6 +27,10 @@ export function createHeldQueueTransfer(
   return {
     hosts,
     selection,
+    busy,
+    close() {
+      if (!busy.value) selection.value = null;
+    },
     canSend,
     destinations: computed(() =>
       hosts.value.filter(
@@ -34,7 +39,7 @@ export function createHeldQueueTransfer(
       ),
     ),
     open(hostId: string, jobId: string) {
-      if (!canSend(hostId)) return;
+      if (busy.value || !canSend(hostId)) return;
       const source = hosts.value.find((host) => host.id === hostId)!;
       selection.value = {
         source: { ...source, target: { ...source.target } },
