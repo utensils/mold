@@ -178,7 +178,7 @@ mold pull flux2-klein-base:q8
 mold run flux2-klein-base:q8 \
   "a weathered brass diving helmet on a workbench, single window light" \
   --guidance 4 --steps 50 \
-  --negative "blurry, low contrast, plastic"
+  --negative-prompt "blurry, low contrast, plastic"
 ```
 
 ---

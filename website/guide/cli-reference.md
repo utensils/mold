@@ -82,12 +82,17 @@ prompt expansion for that run.
 | `--control <PATH>`, `--control-model <NAME>`, `--control-scale <FLOAT>`                      | SD1.5 ControlNet controls                                                                                                                                                        |
 | `-n, --negative-prompt <TEXT>`, `--no-negative`                                              | CFG-family negative prompt controls                                                                                                                                              |
 | `--lora <PATH>`, `--lora-scale <FLOAT>`                                                      | LoRA adapter path and scale; `--lora` is repeatable; suffix `@high`/`@low` binds an adapter to one Wan 2.2 A14B expert                                                           |
+| `--front <PATH>`, `--left <PATH>`, `--back <PATH>`, `--right <PATH>`                         | Named views for a Hunyuan3D 2mv reconstruction; any non-empty subset is accepted                                                                                                 |
+| `--octree <N>`, `--mesh-threshold <T>`, `--target-faces <N>`                                 | 3-D grid resolution (cost is cubic), surface iso-level `0.0`–`1.0`, and the decimation budget; the recipe's `capabilities.mesh` block is the authority on all three              |
+| `--texture`, `--texture-resolution <N>`                                                      | Paint PBR textures beside the geometry, and the atlas edge (1024, 2048, 4096); the resolution requires `--texture`                                                               |
+| `--matting <auto\|on\|off>`, `--delight`                                                     | Background removal before shape conditioning, and the fixed lighting/highlight removal stage that runs after it where the profile advertises it                                  |
 | `--upscale <MODEL>`                                                                          | Apply a Real-ESRGAN upscaler after generation                                                                                                                                    |
 | `--no-metadata`                                                                              | Disable embedded PNG metadata for this run                                                                                                                                       |
 | `--title <TEXT>`                                                                             | Print title (≤ 120 chars): embedded in metadata, seeded into the gallery row, slugged into the default filename                                                                  |
 | `--tag <TAG>`                                                                                | File the print under a tag; repeatable, up to 20 tags of 1–64 chars, matched case-insensitively                                                                                  |
 | `--collection <NAME>`                                                                        | File the print into a collection, creating it if absent; collections merge across machines by name                                                                               |
 | `--no-auto-tag`                                                                              | Do not add the title as a tag, whatever `generate.auto_tag_title` says                                                                                                           |
+| `--no-save`                                                                                  | Keep this render out of the Library: the host publishes the print and moves it straight to trash, so `mold trash restore` recovers it until retention sweeps it                  |
 | `--preview`                                                                                  | Display output inline in the terminal                                                                                                                                            |
 | `--expand`, `--no-expand`, `--expand-backend <URL>`, `--expand-model <MODEL>`                | Prompt expansion controls                                                                                                                                                        |
 | `--local`                                                                                    | Skip the server and run local inference                                                                                                                                          |
@@ -203,10 +208,23 @@ mold jobs list [--json]
 mold jobs show <id> [--json]
 mold jobs resume <id>
 mold jobs retake <id> --stage <N> [--mode cascade|splice] [--seed-offset <U64>] [--prompt <TEXT>]
+mold jobs amend <id> --script <PATH> [--fps N] [--seed N] [--steps N] [--guidance F] [--strength F] [--motion-tail N] [--audio | --no-audio] [--dry-run]
 mold jobs cancel <id>
 mold jobs delete <id> [--yes]
 mold jobs gc
 ```
+
+`mold jobs retake` re-renders ONE stage. `mold jobs amend` replaces the whole
+stage list, which is why it is script-shaped rather than flag-shaped: the
+`POST /api/chain-jobs/:id/amend` body carries every stage in canonical order
+and has no stage index. Export the job's effective script from `mold jobs show
+--json`, edit it, and hand it back. The host keeps the rendered clips of the
+leading stages that did not change and requeues from the first edit, reporting
+how many it preserved. The `[chain]` block supplies the chain-level overlays
+and each flag overrides the one field it names. Model, width, height and
+output format are not amendable — a script that changes one is refused by
+name, because those need a new sequence. `--dry-run` prints the resolved
+stages and overlays without touching the job.
 
 Durable chain jobs store checkpoints under `MOLD_HOME/jobs/<job_id>`.
 `mold jobs gc` mirrors `POST /api/chain-jobs/gc`, pruning successful ephemeral
@@ -265,9 +283,11 @@ mold library title <FILENAME> --clear
 mold library favorite <FILENAME>...
 mold library unfavorite <FILENAME>...
 mold library trash <FILENAME>...
+mold library source-media <FILENAME> [--json]
+mold library source-media <FILENAME> --member <ID> [-o PATH | --output -]
 mold library export <FILENAME.glb> --format glb [-o PATH | --output -]
 mold library export <FILENAME.glb> --format obj|zip|stl|ply [--size-mm 1..1000] [--up-axis y|z] [--origin center|floor] [-o PATH | --output -]
-mold library export <FILENAME.glb> --format gif|apng|webp [--playback loop|bounce] [--repeat forever|once] [--max-dimension 240..2048] [--frames 8..180] [--fps 1..30] [-o PATH | --output -]
+mold library export <FILENAME.glb> --format gif|apng|webp [--playback loop|bounce] [--repeat forever|once] [--max-dimension 240..2048] [--frames 8..180] [--fps 1..30] [--transparent] [-o PATH | --output -]
 
 mold library tag list [--json]
 mold library tag add <FILENAME>... --tag <TAG> [--tag <TAG>]...
@@ -314,6 +334,17 @@ diagnostic. `mold library trash` is allowed only when the host explicitly
 advertises recoverable trash, so an older server cannot reinterpret it as a
 permanent delete.
 
+`mold library source-media` asks the host what it retained of a print's
+conditioning media — the source image, mask, references, audio or clip a
+render was made from — and downloads one member by its opaque id. The host is
+the only authority here, so the command reports the `availability` it answers
+with: `available` lists the members, `unavailable_legacy` means the print
+predates retained source media or recorded its conditioning only as text (a
+fact about the print, not damage), `unavailable_missing_or_corrupt` means the
+retained files can no longer be read, and `unavailable_auth` means the host
+wants its API key. `--output -` writes the bytes to stdout; with no
+`--output`, the member's own display name is used.
+
 `mold library show --preview` reuses the same inline renderer as `mold run
 --preview`; video entries prefer their animated preview and fall back to the
 thumbnail. `mold library grid [--host URL | --local]` opens the existing TUI
@@ -334,9 +365,16 @@ local fallback, because the trash belongs to that host's gallery.
 ```bash
 mold trash list [--json]          # filename, title, trashed, purges, size
 mold trash restore <FILENAME>...  # back to the live gallery (409 if a live print took the name)
+mold trash delete <FILENAME>... [--yes]   # permanent; confirms unless --yes
 mold trash empty [--yes]          # purge everything; confirms unless --yes
 mold trash sweep                  # run the retention sweep now
 ```
+
+`mold trash delete` is the per-file counterpart of `mold trash empty`: it
+permanently removes the named prints through
+`POST /api/gallery/trash/delete-forever`, and it acts on live and trashed
+prints alike. Nothing is recoverable afterwards, so it confirms unless
+`--yes`. To make a live print recoverable instead, use `mold library trash`.
 
 `mold trash list` shows each print's purge countdown as `in 27d`, `kept`
 when retention is keep-forever, or `due` when the next sweep will remove it.
@@ -668,23 +706,61 @@ Common subcommands are `doctor`, `availability`, `deploy`, `status`, `logs`,
 `tunnel`, `ssh`, `filesystems`, `terminate`, and `reset`. See
 [mold lambda CLI](/deployment/lambda-cli).
 
+## `mold quantize`
+
+Derive a smaller Hunyuan3D shape tier from an installed one. The quantized
+transformer is written under the models directory and registered in THIS
+host's `config.models` — no other machine knows the name, and nothing in the
+built-in manifest does either, so a derived tier is a config-only model.
+
+```bash
+mold quantize hunyuan3d-2.1:fp16 --tier q4
+mold quantize hunyuan3d-2.1:fp16 --tier q6 --name hunyuan3d-2.1:small
+```
+
+`--tier` is one of `fp8`, `q8` (default), `q6`, `q5`, `q4`, `q3`. `--name`
+overrides the derived model name (`SOURCE:qN` by default) and `--output` the
+exact GGUF destination. A host that never ran the quantizer answers a request
+for such a name with the `mold quantize` recipe rather than "unknown model".
+
+## `mold video-upscale`
+
+Upscale one Library video frame by frame as a durable job, so it survives a
+dropped connection and can be paused, resumed, or cancelled.
+
+```bash
+mold video-upscale create mold-ltx-2-1700000000000.mp4 --wait
+mold video-upscale list
+mold video-upscale status vu-abc123
+mold video-upscale pause vu-abc123
+mold video-upscale resume vu-abc123
+mold video-upscale cancel vu-abc123
+```
+
+`create` takes `--model` (default `real-esrgan-x4plus:fp16`), `--tile-size`,
+and `--wait` to follow the job through publication. `pause` stops at the next
+frame boundary and `resume` continues from the last completed checkpoint;
+`cancel` stops without replacing or publishing the source media.
+
 ## Other Commands
 
-| Command                                                       | Purpose                                                                                                |
-| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `mold default [MODEL]`                                        | Get or set the default model                                                                           |
-| `mold stats [--json]`                                         | Show disk usage for models, output, logs, and shared components                                        |
-| `mold clean [--force] [--older-than DURATION]`                | Report stale downloads, orphaned files, and old outputs (dry run); `--force` deletes them              |
-| `mold server start/status/stop`                               | Manage a background server daemon                                                                      |
-| `mold server discover`                                        | Find mold servers advertised on the local network (mDNS)                                               |
-| `mold rm <MODELS...> [--force]`                               | Remove downloaded models                                                                               |
-| `mold ps`                                                     | Show server status or local mold processes                                                             |
-| `mold unload`                                                 | Unload the current server model                                                                        |
-| `mold update [--check] [--force] [--nightly] [--version TAG]` | Update a stable, nightly, or exact release binary                                                      |
-| `mold licenses [--local]`                                     | Show third-party model licenses and whether the machine that would run the pull has accepted them      |
-| `mold licenses accept <ID>...`                                | Record acceptance of pinned terms WITHOUT downloading; `--local` records here instead of on the server |
-| `mold skill <COMMAND>`                                        | Manage Mold's embedded Agent Skill                                                                     |
-| `mold version`                                                | Show version, build date, and git SHA                                                                  |
+| Command                                                              | Purpose                                                                                                 |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `mold default [MODEL]`                                               | Get or set the default model                                                                            |
+| `mold stats [--json]`                                                | Show disk usage for models, output, logs, and shared components                                         |
+| `mold clean [--force] [--older-than DURATION]`                       | Report stale downloads, orphaned files, and old outputs (dry run); `--force` deletes them               |
+| `mold server start/status/stop`                                      | Manage a background server daemon                                                                       |
+| `mold server discover`                                               | Find mold servers advertised on the local network (mDNS)                                                |
+| `mold rm <MODELS...> [--force]`                                      | Remove downloaded models                                                                                |
+| `mold ps`                                                            | Show server status or local mold processes                                                              |
+| `mold unload`                                                        | Unload the current server model                                                                         |
+| `mold update [--check] [--force] [--nightly] [--version TAG]`        | Update a stable, nightly, or exact release binary                                                       |
+| `mold licenses [--local]`                                            | Show third-party model licenses and whether the machine that would run the pull has accepted them       |
+| `mold licenses accept <ID>...`                                       | Record acceptance of pinned terms WITHOUT downloading; `--local` records here instead of on the server  |
+| `mold skill <COMMAND>`                                               | Manage Mold's embedded Agent Skill                                                                      |
+| `mold quantize <MODEL> [--tier TIER] [--name MODEL] [--output PATH]` | Derive a smaller Hunyuan3D shape tier from an installed one and register it on THIS host                |
+| `mold video-upscale <COMMAND>`                                       | Durable Framewise upscale of one Library video: `create`, `list`, `status`, `pause`, `resume`, `cancel` |
+| `mold version`                                                       | Show version, build date, and git SHA                                                                   |
 
 ## Running commands without `mold serve`
 

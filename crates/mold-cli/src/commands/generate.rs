@@ -921,9 +921,23 @@ pub struct FilingOptions {
     /// `--no-auto-tag`: never add the title as a tag, whatever
     /// `generate.auto_tag_title` says.
     pub no_auto_tag: bool,
+    /// `--no-save`: keep this render out of the Library.
+    pub no_save: bool,
 }
 
 impl FilingOptions {
+    /// The `save_to_gallery` this invocation puts on the wire.
+    ///
+    /// `None` unless `--no-save` was passed, and then `Some(false)`. Never
+    /// `Some(true)`: saving is the server's default, so an explicit `true`
+    /// would change the request body an older host sees while saying
+    /// nothing. `false` does not discard the render — the host publishes the
+    /// print and moves it straight to trash, so it stays recoverable until
+    /// retention sweeps it.
+    fn save_to_gallery(&self) -> Option<bool> {
+        self.no_save.then_some(false)
+    }
+
     /// Resolve the filing into the wire fields a request carries, plus the
     /// disclosure line for a tag the user did not type.
     ///
@@ -1353,7 +1367,7 @@ pub async fn run(
                         control_model: None,
                         control_scale: 1.0,
                         expand: None,
-                        save_to_gallery: None,
+                        save_to_gallery: filing.save_to_gallery(),
                         original_prompt: None,
                         prompt_transform: None,
                         batch_id: None,
@@ -1577,7 +1591,7 @@ pub async fn run(
         id_start_step: identity.id_start_step,
         true_cfg: identity.true_cfg,
         cfg_start_step: identity.cfg_start_step,
-        save_to_gallery: None,
+        save_to_gallery: filing.save_to_gallery(),
     };
     // A continuation that named no overlap renders with its family's own
     // carryover, and the metadata `record_local_save` builds resolves the
@@ -5452,6 +5466,7 @@ mod tests {
             tags: vec!["village".into()],
             collection: Some("Smurf Village".into()),
             no_auto_tag: false,
+            no_save: false,
         };
         let resolved = filing.resolve(Some("Smurf Village"), true).unwrap();
         assert_eq!(
@@ -5473,6 +5488,7 @@ mod tests {
             tags: vec!["village".into()],
             collection: None,
             no_auto_tag: true,
+            no_save: false,
         };
         for auto_tag_title in [true, false] {
             let resolved = filing
@@ -5489,6 +5505,7 @@ mod tests {
             tags: vec!["village".into()],
             collection: None,
             no_auto_tag: false,
+            no_save: false,
         };
         let resolved = opt_in.resolve(Some("Smurf Village"), false).unwrap();
         assert_eq!(
@@ -5496,6 +5513,45 @@ mod tests {
             Some(["village".to_string()].as_slice())
         );
         assert_eq!(resolved.auto_tagged, None);
+    }
+
+    /// `--no-save` is the ONLY thing that ever puts `save_to_gallery` on the
+    /// wire, and it only ever puts `false` there.
+    ///
+    /// Absence is not `Some(true)`: the server's own default is "save", so an
+    /// explicit `true` would say nothing while changing the request body an
+    /// older host sees.
+    #[test]
+    fn only_no_save_puts_save_to_gallery_on_the_wire_and_only_as_false() {
+        assert_eq!(FilingOptions::default().save_to_gallery(), None);
+        assert_eq!(
+            FilingOptions {
+                no_save: true,
+                ..FilingOptions::default()
+            }
+            .save_to_gallery(),
+            Some(false)
+        );
+    }
+
+    /// Every request `mold run` builds — the ordinary one and the HDR chain
+    /// probe that rides the same invocation — reads that one authority, so a
+    /// `--no-save` render cannot half-save.
+    #[test]
+    fn every_request_this_command_builds_reads_the_one_save_authority() {
+        let source = include_str!("generate.rs");
+        let sites: Vec<&str> = source
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("save_to_gallery:"))
+            .collect();
+        assert!(sites.len() >= 2, "expected both request sites: {sites:?}");
+        for site in sites {
+            assert_eq!(
+                site, "save_to_gallery: filing.save_to_gallery(),",
+                "a request site that hard-wires the field cannot honour --no-save"
+            );
+        }
     }
 
     /// An unfiled, untitled run sends neither field, so an older host sees

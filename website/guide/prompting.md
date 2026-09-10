@@ -417,6 +417,11 @@ mold run sd15:fp16 "a portrait of an old fisherman, weathered face, harbour ligh
 mold run sd15:fp16 "a person in a red raincoat" --control edges.png --control-model controlnet-canny-sd15:fp16
 mold run sd15:fp16 "a sunlit loft interior" --control depth.png --control-model controlnet-depth-sd15:fp16 --control-scale 0.8
 
+# Image prompting: the reference supplies the look, the prompt steers
+mold pull ip-adapter-sd15
+mold run sd15:fp16 "a lighthouse at dusk" --reference seascape.png --reference-weight 0.7
+mold run sd15:fp16 "a lighthouse at dusk" --reference seascape.png --reference-weight 0.7 --image sketch.png --strength 0.6
+
 # img2img and inpainting
 mold run sd15:fp16 "watercolor painting" --image photo.png --strength 0.6
 mold run sd15:fp16 "a golden retriever on the grass" --image park.png --mask mask.png
@@ -522,6 +527,11 @@ mold run juggernaut-xl:fp16 \
   "film-noir detective in a rain-soaked 1940s train station, charcoal overcoat, single platform lamp, wet pavement reflections, black-and-white 35mm photograph" \
   --id-image portrait.png --id-weight 0.8 \
   --negative-prompt "cartoon, waxy skin, distorted face, text, watermark" --seed 83121
+
+# Image prompting: the reference supplies the look, the prompt steers
+mold pull ip-adapter-sdxl
+mold run sdxl-base:fp16 "A sailboat on a calm lake at sunrise" --reference streetscape.png --reference-weight 0.7
+mold run juggernaut-xl:fp16 "a studio portrait on grey seamless" --reference palette.png --reference-weight 0.6 --id-image portrait.png
 
 # LoRA, img2img, and inpainting
 mold run sdxl-base:fp16 "a lighthouse in a storm" --lora style.safetensors --lora-scale 0.8
@@ -792,6 +802,14 @@ mold run hunyuan3d-turbo --image lamp.png --mesh-threshold 0.4 -o lamp.glb
 # Named views keep semantic slots; any non-empty subset is accepted
 mold run hunyuan3d-2mv-turbo --front front.png --left left.png --back back.png -o object.glb
 
+# Decimate to a face budget; matting and delight prepare the source image
+mold run hunyuan3d-2.1 --image chair.png --target-faces 40000 --matting auto -o chair.glb
+mold run hunyuan3d-2.1 --image chair.png --matting on --delight -o chair.glb
+
+# Paint PBR textures as well as geometry (the host must advertise them)
+mold run hunyuan3d-2.1 --image chair.png --texture -o chair.glb
+mold run hunyuan3d-2.1 --image chair.png --texture --texture-resolution 2048 -o chair.glb
+
 # Export a saved mesh from the gallery as STL, OBJ+PBR ZIP, or PLY
 mold library export chair.glb --format stl -o chair.stl
 
@@ -803,7 +821,16 @@ mold library export chair.glb --format gif
 mold library export chair.glb --format gif --playback bounce --repeat once --frames 24
 ```
 
-`--octree`, `--mesh-threshold`, and `--target-faces` are the three mesh
+`--texture` asks for PBR maps beside the geometry and needs the paint bundle;
+without it the request is refused rather than answered with a bare white
+mesh. `--texture-resolution` sets the atlas edge (1024, 2048 or 4096) and only
+means anything with `--texture`. `--matting` decides background removal before
+shape conditioning — `auto` preserves useful alpha and removes opaque
+backgrounds, `on` recomputes every cutout, `off` keeps the pixels — and
+`--delight` runs the fixed lighting and highlight removal stage after matting
+and before shape or paint, only where the profile advertises it.
+
+`--octree`, `--mesh-threshold`, and `--target-faces` are the three geometry
 controls, and the model's generation profile is the authority on their
 values: its `capabilities.mesh` block advertises the octree allowlist and
 default, the threshold range and default, and the face bounds, so read them
@@ -1244,7 +1271,11 @@ mold run ltx-2.5-22b-distilled:q6 "A woman in a red raincoat stands beneath a gl
 # Audio-to-video: motion driven by a supplied track
 mold run ltx-2-19b-distilled:fp8 "paper sculpture reacting to music" --audio-file cello.wav
 
-# Keyframe interpolation between two stills
+# Image-to-video: the attached still opens the clip, so the prompt is optional
+mold run ltx-2-19b-distilled:fp8 --image chef.png --frames 97
+mold run ltx-2-19b-distilled:fp8 "she plates the dish and looks up" --image chef.png --frames 97
+
+# Keyframe interpolation between two stills (LTX-2's first/last form; --last-image is Wan's)
 mold run ltx-2-19b-distilled:fp8 "a canyon flyover" --pipeline keyframe --frames 97 --keyframe 0:start.png --keyframe 96:end.png
 
 # Camera-control preset

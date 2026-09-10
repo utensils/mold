@@ -67,12 +67,16 @@ build is required:
 
 ```bash
 mold run flux-dev "an epic portrait" \
-  --lora cinematic.safetensors --lora-scale 0.8 \
-  --lora moody-light.safetensors --lora-scale 0.4
+  --lora cinematic.safetensors \
+  --lora moody-light.safetensors \
+  --lora-scale 0.8
 ```
 
-The web UI's LoRA picker stacks up to **4** LoRAs per generation; each row
-gets its own scale slider and remove button.
+`--lora-scale` is one value for the whole stack: the CLI applies it to every
+adapter it was given. Per-adapter scales are an API and app feature — the
+request's `loras` array carries a scale per entry, and the web UI's LoRA
+picker stacks up to **4** LoRAs per generation, each row with its own scale
+slider and remove button.
 
 Repeating the same stack is cheap: FLUX and Qwen-Image fingerprint the adapters,
 their order, and their scales, and reuse the merged transformer when the next

@@ -73,7 +73,11 @@ mold run ltx-2.5-22b-distilled:q6 "A woman in a red raincoat stands beneath a gl
 # Audio-to-video: motion driven by a supplied track
 mold run ltx-2-19b-distilled:fp8 "paper sculpture reacting to music" --audio-file cello.wav
 
-# Keyframe interpolation between two stills
+# Image-to-video: the attached still opens the clip, so the prompt is optional
+mold run ltx-2-19b-distilled:fp8 --image chef.png --frames 97
+mold run ltx-2-19b-distilled:fp8 "she plates the dish and looks up" --image chef.png --frames 97
+
+# Keyframe interpolation between two stills (LTX-2's first/last form; --last-image is Wan's)
 mold run ltx-2-19b-distilled:fp8 "a canyon flyover" --pipeline keyframe --frames 97 --keyframe 0:start.png --keyframe 96:end.png
 
 # Camera-control preset

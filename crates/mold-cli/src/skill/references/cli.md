@@ -37,8 +37,14 @@ mold run wan22-ti2v-5b --image still.png
 mold run ltx-2-19b-distilled:fp8 --image chef.png
 ```
 
-`mold run --offload` carries the forced-offload preference to the GPU host,
-including durable sequences. Without it, the request inherits the host policy.
+`--offload` carries the forced-offload preference to the GPU host, for a
+one-shot and for a scripted sequence alike. Without it, the request inherits
+the host policy.
+
+```bash
+mold run wan22-t2v-a14b:q8 "A kite over a harbour" --offload
+```
+
 Wan 1.3B and dense Wan 2.1 14B always run without residual caching because
 cached output is not quality-qualified; setting `MOLD_WAN_STEP_CACHE` cannot
 override that refusal. Wan 2.2 A14B remains qualified for the cache.
@@ -116,14 +122,78 @@ non-zero rather than reporting on the local machine.
 Never paste an API key into a prompt or command example. Supply secrets through
 the user's existing environment or approved secret store at execution time.
 
-## Jobs and queues
+## Scripted sequences
+
+A sequence — several clips rendered as one continuous video — is authored as a
+`mold.chain.v1` TOML script and submitted with `mold run --script`. It is a
+CLI and API shape only: no app composes one. Each `[[stage]]` carries its own
+`prompt`, `frames` and `transition` (`smooth`, the default motion-tail morph;
+`cut`, a fresh latent; `fade`, a cut plus an RGB crossfade), and a stage may
+name a `source_image_path` relative to the script file.
+
+```bash
+mold chain validate shot.toml
+mold run --script shot.toml --dry-run
+mold run --script shot.toml --output walk.mp4
+```
+
+Repeating `--prompt` is the sugar for the uniform case — same length, smooth
+transitions throughout. Anything heterogeneous belongs in a script.
+
+```bash
+mold run ltx-2-19b-distilled:fp8 --prompt "a cat wakes on a windowsill" --prompt "it stretches and jumps down" --frames-per-clip 97
+```
+
+A remote `--script` run is a DURABLE chain job: it survives a dropped
+connection, `mold jobs list` finds it afterwards, and the stitched print is
+hydrated from the host's gallery rather than returned inline. A long one-shot
+(`mold run --frames 200`) is auto-chained by the host when the model cannot
+render that length in one pass; that job is not an authored sequence and does
+not appear in `mold jobs list`.
 
 ```bash
 mold jobs list
+mold jobs show job-abc123 --json
+mold jobs resume job-abc123
+mold jobs retake job-abc123 --stage 2 --mode splice --prompt "it lands on the rug"
+mold jobs cancel job-abc123
+mold jobs gc
+```
+
+`mold jobs retake` re-renders ONE stage. To change the shape of the sequence,
+export its effective script from `mold jobs show --json`, edit it, and hand the
+whole list back — amend replaces every stage, and the host keeps the cached
+clips of the leading stages that did not change. The model, size and container
+are not amendable; those need a new sequence. `--dry-run` prints what would be
+sent without touching the job.
+
+```bash
+mold jobs amend job-abc123 --script edited.toml --dry-run
+mold jobs amend job-abc123 --script edited.toml --fps 30 --no-audio
+mold jobs delete job-abc123 --yes
+```
+
+## Jobs and queues
+
+```bash
 mold queue list
+mold queue list --held --json
+mold queue show job-abc123
 mold queue cancel job-abc123
 mold queue cancel --batch batch-7
+mold queue retry job-abc123
+mold queue move job-abc123 --to 0
+mold queue pause job-abc123
+mold queue resume
+mold queue send job-abc123 --to http://gpu-host:7680
+mold queue sweep
 ```
+
+`mold queue pause` and `mold queue resume` with no job id hold and release
+host-wide dispatch, which affects everyone using that machine. `mold queue
+send` hands a HELD job to another running server with its request intact; the
+destination credential is read from `MOLD_DESTINATION_API_KEY`, never spliced
+into the command.
 
 Accepted generation is asynchronous on queue-backed servers. Retain exact job
 and batch IDs, poll them, and reconcile after transport errors. Queue semantics
@@ -139,9 +209,99 @@ examples because it is a broad destructive action.
 
 ```bash
 mold pull flux2-klein:q8
-mold library list
+mold list
+mold info flux2-klein:q8 --verify
+mold stats --json
+mold default flux2-klein:q8
+mold ps
+mold unload
+mold gpu list --json
+mold version
+```
+
+`mold info MODEL --verify` re-checksums the installed bytes. Normal loading
+checks file sizes and formats only, so this is the explicit way to answer
+"are these weights intact".
+
+`mold quantize` derives a smaller Hunyuan3D shape tier from an installed one
+and registers it in THIS host's config; no other machine knows the name.
+
+```bash
+mold quantize hunyuan3d-2.1:fp16 --tier q4
+```
+
+Settings live in two surfaces — `config.toml` for paths, ports and
+credentials, and the metadata database for user preferences — behind one view.
+`mold config where` says which surface owns a key before you change it.
+
+```bash
+mold config list --json
+mold config get expand.backend
+mold config set expand.enabled true
+mold config where models_dir
+mold config path
+```
+
+The Library is one serving host's gallery, filtered and organized over HTTP.
+
+```bash
+mold library list --tag owl --favorite --limit 20 --json
+mold library show mold-flux-dev-q4-1700000000000.png --json
+mold library title mold-flux-dev-q4-1700000000000.png "Smurf village"
+mold library favorite mold-flux-dev-q4-1700000000000.png
+mold library unfavorite mold-flux-dev-q4-1700000000000.png
+mold library tag list
+mold library tag add mold-flux-dev-q4-1700000000000.png --tag owl --tag night
+mold library tag remove mold-flux-dev-q4-1700000000000.png --tag night
+mold library tag rename owl owls
+mold library tag delete owls --yes
+mold library collection list
+mold library collection create "Night Owls" --description "Long-exposure studies"
+mold library collection show night-owls --json
+mold library collection add night-owls mold-flux-dev-q4-1700000000000.png
+mold library collection remove night-owls mold-flux-dev-q4-1700000000000.png
+mold library collection update night-owls --name "Owls at night"
+mold library collection delete night-owls --yes
+```
+
+Deletion is two-stage. `mold library trash` moves live prints into the
+recoverable trash, and `mold trash restore` brings them back. `mold trash
+delete` is the permanent one: it acts on live and trashed prints alike and
+there is nothing to restore afterwards, so confirm the exact filenames with a
+listing first.
+
+```bash
+mold library trash mold-flux-dev-q4-1700000000000.png
 mold trash list
+mold trash restore mold-flux-dev-q4-1700000000000.png
+mold trash sweep
+mold trash delete mold-flux-dev-q4-1700000000000.png --yes
 mold clean
+```
+
+The host is the only authority on what it kept of a print's conditioning
+media, so ask it rather than inferring from the print's metadata.
+`mold library source-media` lists what was retained and downloads one member
+by its opaque id. A print that predates retention, or whose conditioning was
+recorded only as text, answers `unavailable_legacy` — that is a fact about the
+print, not damage.
+
+```bash
+mold library source-media mold-flux-dev-q4-1700000000000.png
+mold library source-media mold-flux-dev-q4-1700000000000.png --json
+mold library source-media mold-flux-dev-q4-1700000000000.png --member 6f1c1d2e --output recovered.png
+```
+
+A Library video can be upscaled durably, frame by frame, without holding the
+connection open.
+
+```bash
+mold video-upscale create mold-ltx-2-1700000000000.mp4 --wait
+mold video-upscale list
+mold video-upscale status vu-abc123
+mold video-upscale pause vu-abc123
+mold video-upscale resume vu-abc123
+mold video-upscale cancel vu-abc123
 ```
 
 Some weights carry third-party terms mold will not accept on a user's behalf
@@ -165,7 +325,16 @@ and pod termination are destructive; follow the safety reference.
 ```bash
 mold serve --help
 mold mcp --host http://localhost:7680
+mold skill list
 ```
+
+The MCP server exposes thirteen tools: `generate_image`, `generate_mesh`,
+`export_mesh`, `generate_image_async`, `generation_status`,
+`generation_retry`, `list_gallery`, `get_gallery_image`, `list_models`,
+`list_loras`, `server_status`, `expand_prompt` and `remix_prompt`.
+`generate_mesh` is a ONE-SHOT render, not the durable 3-D workflow — a
+multi-stage workflow is `/api/mesh-workflows`, which no tool and no CLI
+command wraps.
 
 Starting, stopping, restarting, or reconfiguring a server changes external
 state. Do so only when requested, and verify health plus the selected host
@@ -227,6 +396,16 @@ transparent palette index makes it a hard cut. Only the formats the
 host lists in `capabilities.mesh.export_formats` succeed (`webp` needs a build
 with the `webp` feature).
 
+`mold expand` rewrites one prompt for a chosen model's style, and `mold remix`
+returns alternatives from an existing prompt. Both are prompt work only —
+neither generates an image — and both take the target model so the rewrite
+matches that family's grammar.
+
+```bash
+mold expand "a cat on a windowsill" --model flux2-klein:q8
+mold remix "a cat on a windowsill at dawn" --model flux2-klein:q8 --variations 3 --json
+```
+
 `expand_prompt` and `remix_prompt` on a Hunyuan3D model (or `mold expand` /
 `mold remix --model hunyuan3d-mini-turbo`) do not call a language model: the
 one result is the family guide's advice on preparing the source image,
@@ -243,13 +422,23 @@ Wan is performance-qualified on Apple Metal for the 1.3B BF16 and 5B Q8/FP16
 paths. Prefer the 5B Q8 tier for sustained 720p work; dense FP16 is supported
 but can slow as unified-memory pressure and VAE decode cost accumulate.
 
-`mold system metal-memory status [--json]` inspects this machine, ignoring
-`MOLD_HOST`. Explicit root-only `set <MiB> [--persist]` and `reset [--persist]`
-administer its system-wide limit; never run the server as root. Use
-`mold gpu list --json` for the inference host's effective capacity and headroom.
-Zero means automatic; increases may require restarting an idle inference process.
+`mold system metal-memory status` inspects THIS machine, ignoring `MOLD_HOST`.
 
-Model checksums are verified when files are downloaded. Complete installed models queue and switch without full checksum scans, including after restart. To check existing bytes explicitly, run `mold info MODEL --verify`. Normal loading still checks file sizes and formats; it does not guarantee detection of same-size corruption.
+```bash
+mold system metal-memory status --json
+```
+
+Its root-only `set <MiB> [--persist]` and `reset [--persist]` administer the
+system-wide limit; never run the server as root, and never run either without
+being asked to. Use `mold gpu list --json` for the inference host's effective
+capacity and headroom. Zero means automatic; increases may require restarting
+an idle inference process.
+
+Model checksums are verified when files are downloaded. Complete installed
+models queue and switch without full checksum scans, including after restart.
+Normal loading still checks file sizes and formats; it does not guarantee
+detection of same-size corruption, which is what `mold info MODEL --verify`
+above is for.
 
 For Z-Image on Metal, whole-decode attempts finish inside the memory-error
 recovery boundary: an OOM can retry with tiles, and the eager path can still

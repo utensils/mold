@@ -86,8 +86,25 @@ pub struct SkillShowArgs {
     #[arg(value_enum, default_value = "agents")]
     agent: Agent,
     /// Bundle-relative file to print
-    #[arg(default_value = "SKILL.md")]
+    #[arg(default_value = "SKILL.md", add = clap_complete::engine::ArgValueCandidates::new(complete_bundle_file))]
     file: PathBuf,
+}
+
+/// Completion candidates for `mold skill show <FILE>`: the bundle's own file
+/// list, which is compiled in, so this answers without touching the disk or
+/// the network. The portable profile's tree is the right one to offer —
+/// `references/prompting/**` is byte-identical across every profile, and the
+/// only per-profile difference is the SKILL.md body, whose path is the same.
+fn complete_bundle_file() -> Vec<clap_complete::engine::CompletionCandidate> {
+    render_bundle(RenderProfile::Portable)
+        .map(|bundle| {
+            bundle
+                .files
+                .keys()
+                .map(clap_complete::engine::CompletionCandidate::new)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1422,6 +1439,12 @@ mod tests {
                         }
                     }
                     '|' | '#' => break,
+                    // A redirection ends the command the CLI is asked to
+                    // parse: `mold completions fish > ~/.config/…` documents
+                    // a shell redirection, not an argument. The space is
+                    // what distinguishes it from a `<PLACEHOLDER>` in a
+                    // documented synopsis, which stays a word.
+                    '>' | '<' if chars.peek().is_none_or(|next| next.is_whitespace()) => break,
                     c if c.is_whitespace() => {
                         if in_word {
                             words.push(std::mem::take(&mut current));
@@ -1504,6 +1527,273 @@ mod tests {
         );
     }
 
+    /// Commands the skill and corpus deliberately do not carry an example
+    /// for, each with the reason it is not agent-facing work.
+    ///
+    /// This list is the whole escape hatch: anything not named here must
+    /// appear in at least one `bash` fence, so a NEW command is a failing
+    /// test rather than a silent omission — which is exactly how
+    /// `mold run --script`, `mold chain validate` and eight of ten
+    /// `library` verbs went untaught while every fence still parsed.
+    const UNDOCUMENTED_BY_DESIGN: &[(&str, &str)] = &[
+        // Interactive surfaces an agent cannot drive from a shell. `tui` and
+        // `discord` need no entry: they are hidden commands, so they are not
+        // in the walk at all.
+        (
+            "library grid",
+            "opens the interactive terminal Library grid",
+        ),
+        // Machine setup a person does once, not work an agent performs.
+        ("completions", "shell setup performed by the user"),
+        ("update", "self-update of the installed binary"),
+        (
+            "skill install",
+            "installs THIS skill; a person's setup step",
+        ),
+        (
+            "skill uninstall",
+            "removes THIS skill; a person's setup step",
+        ),
+        ("config edit", "opens $EDITOR"),
+        // Destructive or lifecycle actions the safety reference governs and
+        // that deliberately carry no copy-paste example, exactly as
+        // `mold queue cancel --all --yes` does.
+        ("server start", "starts a daemon; safety.md governs it"),
+        ("server stop", "stops a daemon; safety.md governs it"),
+        ("trash empty", "purges every trashed print"),
+        ("config reset", "discards user settings"),
+        ("gpu disable", "changes host device lifecycle"),
+        ("gpu enable", "changes host device lifecycle"),
+        ("system metal-memory set", "root-only kernel mutation"),
+        ("system metal-memory reset", "root-only kernel mutation"),
+        ("rm", "permanently deletes installed weights"),
+        ("clean", "deletes cached files once forced"),
+        // Paid cloud provisioning, deliberately outside the corpus.
+        ("runpod", "paid cloud provisioning"),
+        ("lambda", "paid cloud provisioning"),
+    ];
+
+    /// Every command path in the clap tree that a user can invoke.
+    ///
+    /// A command whose subcommand is optional (`mold licenses`) is a
+    /// destination in its own right as well as a parent.
+    fn invocable_command_paths() -> Vec<String> {
+        fn walk(command: &clap::Command, prefix: Vec<String>, out: &mut Vec<String>) {
+            let subcommands: Vec<&clap::Command> = command
+                .get_subcommands()
+                .filter(|sub| !sub.is_hide_set() && sub.get_name() != "help")
+                .collect();
+            if !prefix.is_empty()
+                && (subcommands.is_empty() || !command.is_subcommand_required_set())
+            {
+                out.push(prefix.join(" "));
+            }
+            for sub in subcommands {
+                let mut next = prefix.clone();
+                next.push(sub.get_name().to_string());
+                walk(sub, next, out);
+            }
+        }
+        let command = clap_tree();
+        let mut out = Vec::new();
+        walk(&command, Vec::new(), &mut out);
+        out
+    }
+
+    /// The command path one documented invocation names, by walking the clap
+    /// tree with its argv: `mold library export chair.glb --format stl`
+    /// answers `library export`.
+    fn documented_command_path(command: &clap::Command, argv: &[String]) -> Option<String> {
+        let mut current = command;
+        let mut path = Vec::new();
+        for token in argv.iter().skip(1) {
+            let Some(next) = current
+                .get_subcommands()
+                .find(|sub| sub.get_name() == token || sub.get_all_aliases().any(|a| a == token))
+            else {
+                break;
+            };
+            path.push(next.get_name().to_string());
+            current = next;
+        }
+        (!path.is_empty()).then(|| path.join(" "))
+    }
+
+    /// Every command a user can run appears in at least one `bash` fence of
+    /// the rendered skill or the prompting corpus.
+    ///
+    /// The existing fence test can only check the examples that EXIST, so an
+    /// untaught command is invisible to it. This is the other half: an
+    /// omission fails the build.
+    #[test]
+    fn every_user_facing_command_appears_in_a_documented_example() {
+        let command = clap_tree();
+        let bundle = render_bundle(RenderProfile::Portable).unwrap();
+        let mut documented = std::collections::BTreeSet::new();
+        for (path, contents) in &bundle.files {
+            if !path.ends_with(".md") {
+                continue;
+            }
+            for line in documented_commands(contents) {
+                if let Some(found) = documented_command_path(&command, &shell_words(&line)) {
+                    documented.insert(found);
+                }
+            }
+        }
+        // `mold run` and the other flat commands are named by their own line.
+        let exempt: std::collections::BTreeSet<&str> = UNDOCUMENTED_BY_DESIGN
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        let missing: Vec<String> = invocable_command_paths()
+            .into_iter()
+            .filter(|path| {
+                !documented.contains(path)
+                    && !exempt
+                        .iter()
+                        .any(|name| path == name || path.starts_with(&format!("{name} ")))
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these commands appear in no skill or corpus example, and are not in \
+             UNDOCUMENTED_BY_DESIGN:\n  {}",
+            missing.join("\n  ")
+        );
+    }
+
+    /// Every exemption names a command that exists, so a renamed or retired
+    /// command cannot leave a stale excuse behind.
+    #[test]
+    fn every_coverage_exemption_names_a_real_command() {
+        let paths = invocable_command_paths();
+        for (name, reason) in UNDOCUMENTED_BY_DESIGN {
+            assert!(
+                paths
+                    .iter()
+                    .any(|path| path == name || path.starts_with(&format!("{name} "))),
+                "`{name}` is exempt ({reason}) but is not a command"
+            );
+        }
+    }
+
+    /// Build the clap tree on a thread sized like the real `main`.
+    fn clap_tree() -> clap::Command {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(<crate::Cli as clap::CommandFactory>::command)
+            .expect("spawn clap thread")
+            .join()
+            .expect("clap thread panicked")
+    }
+
+    /// Examples in the user docs that only parse in a build carrying the
+    /// named optional feature. Each is matched as a prefix.
+    ///
+    /// The test binary is built with default features, so these would read
+    /// as broken documentation when they are simply documentation for a
+    /// different build. Every entry is checked to be USED, so an example
+    /// that stops appearing cannot leave a stale excuse behind.
+    const FEATURE_GATED_DOC_EXAMPLES: &[(&str, &str)] = &[
+        ("mold tui", "tui"),
+        ("mold discord", "discord"),
+        ("mold serve --discord", "discord"),
+        ("mold server discover", "mdns"),
+    ];
+
+    /// A documented line that shows a command's SHAPE rather than a command
+    /// to run: `mold library show <FILENAME> [--json | --preview]`.
+    ///
+    /// Those cannot be parsed — the placeholders are the point — so the
+    /// literal examples beside them are what this checks. A synopsis is
+    /// recognised by its placeholder brackets, never by which file it is in.
+    fn is_synopsis(command: &str) -> bool {
+        command.contains('<') || command.contains('[') || command.contains("OPTIONS")
+    }
+
+    /// Every runnable `mold ...` line in a `bash` fence of the user-facing
+    /// docs parses with the real CLI.
+    ///
+    /// The corpus has had this check since the skill existed; README and the
+    /// VitePress site had NOTHING, so a flag renamed in clap stayed right in
+    /// the agent's copy and wrong in the human's — which is how
+    /// `--negative` (the flag is `--negative-prompt`) survived in a model
+    /// page. `website/guide/prompting.md` is excluded because it is
+    /// GENERATED from the corpus, which this module already checks.
+    #[test]
+    fn every_documented_bash_command_in_the_user_docs_parses_with_the_cli() {
+        fn markdown_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| {
+                        name == "node_modules" || name == ".vitepress" || name == "dist"
+                    }) {
+                        continue;
+                    }
+                    markdown_files(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "md") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("repo root")
+            .to_path_buf();
+        let generated = repo.join("website/guide/prompting.md");
+        let mut files = vec![repo.join("README.md")];
+        markdown_files(&repo.join("website"), &mut files);
+        files.retain(|path| path != &generated);
+        files.sort();
+
+        let mut seen = 0usize;
+        let mut used_gates = std::collections::BTreeSet::new();
+        for file in &files {
+            let contents = std::fs::read_to_string(file)
+                .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+            for command in documented_commands(&contents) {
+                if is_synopsis(&command) {
+                    continue;
+                }
+                if let Some((prefix, feature)) = FEATURE_GATED_DOC_EXAMPLES
+                    .iter()
+                    .find(|(prefix, _)| command.starts_with(prefix))
+                {
+                    used_gates.insert(*prefix);
+                    let _ = feature;
+                    continue;
+                }
+                let argv = shell_words(&command);
+                assert_eq!(
+                    argv.first().map(String::as_str),
+                    Some("mold"),
+                    "{}: {command}",
+                    file.display()
+                );
+                seen += 1;
+                parse_on_large_stack(argv[1..].to_vec()).unwrap_or_else(|error| {
+                    panic!("{}: invalid example `{command}`: {error}", file.display())
+                });
+            }
+        }
+        assert!(
+            seen >= 100,
+            "expected the user docs to carry CLI examples, found {seen}"
+        );
+        for (prefix, feature) in FEATURE_GATED_DOC_EXAMPLES {
+            assert!(
+                used_gates.contains(prefix),
+                "`{prefix}` is excused as needing the `{feature}` feature but appears in no example"
+            );
+        }
+    }
+
     #[test]
     fn shell_words_handles_the_corpus_quoting_forms() {
         assert_eq!(
@@ -1531,6 +1821,14 @@ mod tests {
         assert_eq!(
             shell_words("mold run 'it''s' -o out.png # comment"),
             vec!["mold", "run", "its", "-o", "out.png"]
+        );
+        assert_eq!(
+            shell_words("mold completions fish > ~/.config/fish/completions/mold.fish"),
+            vec!["mold", "completions", "fish"]
+        );
+        assert_eq!(
+            shell_words("mold upscale - < input.png > output.png"),
+            vec!["mold", "upscale", "-"]
         );
         assert_eq!(
             documented_commands(

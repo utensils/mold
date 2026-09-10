@@ -21,6 +21,7 @@ pub async fn run(action: TrashAction) -> Result<()> {
     match action {
         TrashAction::List { json } => trash_list(&client, json).await,
         TrashAction::Restore { filenames } => trash_restore(&client, &filenames).await,
+        TrashAction::Delete { filenames, yes } => trash_delete(&client, &filenames, yes).await,
         TrashAction::Empty { yes } => trash_empty(&client, yes).await,
         TrashAction::Sweep => trash_sweep(&client).await,
     }
@@ -58,6 +59,41 @@ async fn trash_restore(client: &MoldClient, filenames: &[String]) -> Result<()> 
     Ok(())
 }
 
+/// `mold trash delete <FILENAME>...` — permanently remove the named prints.
+///
+/// This is the bulk `POST /api/gallery/trash/delete-forever` route, which
+/// acts on trashed and live prints alike. There is no trash to fall back on
+/// afterwards, so it confirms unless `--yes`.
+async fn trash_delete(client: &MoldClient, filenames: &[String], yes: bool) -> Result<()> {
+    if filenames.is_empty() {
+        bail!("no filenames given; run `mold trash list` to see what is there");
+    }
+    if !yes && !confirm(&delete_confirmation(client.host(), filenames.len()))? {
+        bail!("delete aborted");
+    }
+    client
+        .delete_gallery_files_forever(filenames)
+        .await
+        .with_context(|| {
+            format!(
+                "permanent delete failed on {}; run `mold trash list` and `mold library list` to see what remains",
+                client.host()
+            )
+        })?;
+    for name in filenames {
+        println!("{} {}", "deleted".red(), name);
+    }
+    Ok(())
+}
+
+/// The question a permanent delete asks. Pure so the wording is testable.
+fn delete_confirmation(host: &str, count: usize) -> String {
+    format!(
+        "Permanently delete {count} print{} on {host}? This cannot be undone. [y/N] ",
+        if count == 1 { "" } else { "s" }
+    )
+}
+
 async fn trash_empty(client: &MoldClient, yes: bool) -> Result<()> {
     if !yes {
         let rows = fetch_trash(client).await?;
@@ -92,11 +128,17 @@ async fn trash_sweep(client: &MoldClient) -> Result<()> {
 }
 
 fn confirm_empty(count: usize, host: &str) -> Result<bool> {
-    use std::io::{self, Write};
-    eprint!(
+    confirm(&format!(
         "Permanently delete {count} trashed print{} on {host}? This cannot be undone. [y/N] ",
         if count == 1 { "" } else { "s" }
-    );
+    ))
+}
+
+/// Ask on stderr, read one line from stdin. Only a plain `y`/`yes` proceeds:
+/// a destructive answer is never the default and is never typed out.
+fn confirm(question: &str) -> Result<bool> {
+    use std::io::{self, Write};
+    eprint!("{question}");
     io::stderr().flush().ok();
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
@@ -295,6 +337,69 @@ mod tests {
         );
         assert!(lines[3].contains("2d ago"));
         assert!(lines[3].contains("kept"));
+    }
+
+    /// The confirmation says what is about to happen, how many prints it
+    /// touches and on which host, and that it cannot be undone — a permanent
+    /// delete has no trash to fall back to.
+    #[test]
+    fn the_delete_confirmation_names_the_count_the_host_and_the_finality() {
+        let one = delete_confirmation("http://gpu:7680", 1);
+        assert!(
+            one.contains("Permanently delete 1 print on http://gpu:7680"),
+            "{one}"
+        );
+        assert!(!one.contains("prints"), "singular: {one}");
+        assert!(one.contains("cannot be undone"), "{one}");
+        let many = delete_confirmation("http://gpu:7680", 3);
+        assert!(many.contains("Permanently delete 3 prints"), "{many}");
+    }
+
+    /// `--yes` skips the prompt and posts the named list to the bulk
+    /// permanent route; nothing else on the host is touched.
+    #[tokio::test]
+    async fn trash_delete_with_yes_posts_the_named_files() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        colored::control::set_override(false);
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/trash/delete-forever"))
+            .and(body_json(serde_json::json!({ "filenames": ["a.png"] })))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        trash_delete(&client, &["a.png".to_string()], true)
+            .await
+            .unwrap();
+    }
+
+    /// A refusal keeps the host's own status and sentence, and names the
+    /// command that shows what is actually there.
+    #[tokio::test]
+    async fn trash_delete_reports_a_refusal_with_the_host_s_answer() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/gallery/trash/delete-forever"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": "no such print",
+                "code": "GALLERY_ITEM_NOT_FOUND"
+            })))
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        let error = trash_delete(&client, &["gone.png".to_string()], true)
+            .await
+            .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("404"), "{text}");
+        assert!(text.contains("GALLERY_ITEM_NOT_FOUND"), "{text}");
+        assert!(text.contains("mold trash list"), "{text}");
     }
 
     #[test]

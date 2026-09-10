@@ -533,6 +533,25 @@ pub fn complete_config_key() -> Vec<CompletionCandidate> {
     candidates
 }
 
+/// Return completion candidates for `--profile`.
+///
+/// Every profile with at least one settings row, plus `default`, which
+/// exists whether or not anything has been written under it. A machine with
+/// no `mold.db` yet completes nothing rather than failing.
+pub fn complete_profile_name() -> Vec<CompletionCandidate> {
+    crate::metadata_db::handle()
+        .map(profile_candidates)
+        .unwrap_or_default()
+}
+
+fn profile_candidates(db: &mold_db::MetadataDb) -> Vec<CompletionCandidate> {
+    mold_db::settings::list_profiles(db)
+        .unwrap_or_default()
+        .into_iter()
+        .map(CompletionCandidate::new)
+        .collect()
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1062,6 +1081,23 @@ mod tests {
     }
 
     // ── Completion tests ────────────────────────────────
+
+    /// `--profile` completes the profiles that exist in this machine's
+    /// `mold.db`, and `default` is always one of them even before anything
+    /// has been written under it.
+    #[test]
+    fn profile_completion_lists_every_profile_in_the_database() {
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        mold_db::settings::Settings::for_profile(&db, "night-work")
+            .set_str("generate.auto_tag_title", "false")
+            .unwrap();
+        let names: Vec<String> = profile_candidates(&db)
+            .iter()
+            .map(|candidate| candidate.get_value().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"default".to_string()), "{names:?}");
+        assert!(names.contains(&"night-work".to_string()), "{names:?}");
+    }
 
     #[test]
     fn complete_returns_candidates() {
