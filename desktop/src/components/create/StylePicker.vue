@@ -10,7 +10,8 @@ import {
 } from "../../composables/useCreateOutputKind";
 import { useGenerateFormStore } from "../../stores/generateForm";
 import { familyLabel } from "@studio/lib/modelFamily";
-import { modelDisplayName, modelDisplayNameForId } from "../../lib/models";
+import { modelDisplayNameForId } from "../../lib/models";
+import { styleDisplayName } from "@studio/lib/styleLabel";
 import type { GenerateForm } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
 
@@ -39,14 +40,13 @@ const sectionLabel = computed(() => OUTPUT_KIND_SECTION_LABEL[picker.outputKind.
 const sectionEmpty = computed(() => OUTPUT_KIND_EMPTY[picker.outputKind.value]);
 const browseTarget = computed(() => OUTPUT_KIND_BROWSE_TARGET[picker.outputKind.value]);
 
-/** Plain name first. A bare manifest id is not a plain word, so the family's
- *  friendly label stands in for it and the id still rides beside in mono. */
+/** Plain name first, in the lexicon's order: the style's own description, then
+ *  a curated display name, then the family's friendly label. A bare manifest id
+ *  is never the label (`docs/design/README.md` §2) — it rides beside in mono.
+ *  ONE rule with the menu's rows, which read `styleDisplayName` too. */
 const styleLabel = computed(() => {
   const model = picker.selectedPickerModel.value;
-  if (model) {
-    const name = modelDisplayName(model);
-    return name === model.name ? familyLabel(model.family) : name;
-  }
+  if (model) return styleDisplayName(model);
   const missing = picker.missingModelId.value;
   if (!missing) return "";
   const name = modelDisplayNameForId(missing, picker.pickerModels.value);

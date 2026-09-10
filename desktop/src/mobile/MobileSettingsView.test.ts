@@ -165,6 +165,13 @@ describe("MobileSettingsView", () => {
 
     await toggle.trigger("click");
     expect(wrapper.emitted("update")).toEqual([[{ autoTagTitle: true }]]);
+
+    // The whole row is the target, not just the 44×26 switch: on a phone the
+    // words are what a thumb lands on.
+    await wrapper.get(".mobile-settings-switch").trigger("click");
+    expect(wrapper.emitted("update")).toEqual([[{ autoTagTitle: true }], [{ autoTagTitle: true }]]);
+    // One switch per row, announced once — the row is not a second control.
+    expect(wrapper.get(".mobile-settings-switch").findAll("[role='switch']")).toHaveLength(1);
   });
 
   it("routes host management through an explicit action", async () => {

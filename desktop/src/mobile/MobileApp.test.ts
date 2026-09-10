@@ -14550,7 +14550,65 @@ describe("MobileApp Make screen canvas", () => {
 
     expect(admittedRequests()).toHaveLength(1);
     expect(scrollTo).toHaveBeenCalled();
-    expect(scrollTo.mock.calls[0]?.[0]).toMatchObject({ top: 0, behavior: "smooth" });
+    // The exact offset is the geometry test below; here only the motion.
+    expect(scrollTo.mock.calls[0]?.[0]).toMatchObject({ behavior: "smooth" });
+  });
+
+  // `offsetTop` is measured from the shell, whose header sits above the
+  // scroller, so scrolling to it parked the canvas one header-height under
+  // the wordmark. The reveal has to measure from the scroller's own edge.
+  it("measures the canvas from the scroller, not the shell", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const scrollTo = vi.fn();
+    const content = contentScroller();
+    Object.defineProperty(content, "scrollTo", { value: scrollTo, configurable: true });
+    content.scrollTop = 420;
+    const rect = (top: number) => () => ({
+      top,
+      bottom: top + 10,
+      left: 0,
+      right: 0,
+      width: 0,
+      height: 10,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    });
+    Object.defineProperty(content, "getBoundingClientRect", {
+      value: rect(61),
+      configurable: true,
+    });
+    const slot = wrapper.get("[data-test='mobile-make-canvas']").element as HTMLElement;
+    Object.defineProperty(slot, "getBoundingClientRect", { value: rect(200), configurable: true });
+
+    await fieldControl("Prompt").setValue("a lighthouse in fog");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    // Slot edge minus the scroller edge, plus the current offset, minus the
+    // scroller's 16px inset so the frame keeps its breathing room.
+    expect(scrollTo.mock.calls[0]?.[0]).toMatchObject({ top: 200 - 61 + 420 - 16 });
+  });
+
+  // The first latent preview arrives seconds after Generate. If the bed only
+  // mounts then, it grows above the viewport and the browser's scroll
+  // anchoring keeps the person looking at the prompt — exactly the print
+  // they cannot see. The slot reserves the bed's frame from the moment the
+  // job is live.
+  it("reserves the bed's frame before the first preview arrives", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-develop-placeholder']").exists()).toBe(false);
+
+    await fieldControl("Prompt").setValue("a lighthouse in fog");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    const placeholder = wrapper.get("[data-test='mobile-develop-placeholder']");
+    expect(placeholder.element.closest("[data-test='mobile-make-canvas']")).not.toBeNull();
+    expect(placeholder.attributes("style")).toContain("aspect-ratio");
+    expect(wrapper.find("[data-test='mobile-develop-bed']").exists()).toBe(false);
   });
 
   it("never animates the reveal for a reader who asked for no motion", async () => {
@@ -14576,5 +14634,35 @@ describe("MobileApp Make screen canvas", () => {
 
     expect(scrollTo).toHaveBeenCalled();
     expect(scrollTo.mock.calls[0]?.[0]).toMatchObject({ behavior: "auto" });
+  });
+});
+
+describe("MobileApp style sheet across output kinds", () => {
+  it("keeps a restored style of another kind as the current row", async () => {
+    // Reuse settings on a clip print while the section still says Still
+    // picture: the style is installed, so it is not a phantom — narrowing it
+    // out would leave the sheet showing no current style at all.
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path, init) =>
+      path === "/api/models" ? Promise.resolve([stillModel, model]) : base(target, path, init),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect(currentStyleId()).toBe(stillModel.name);
+
+    await selectStyle(model.name);
+    await selectStyle(stillModel.name);
+    // Back on Still picture, restore the clip style the way Use as prompt does.
+    (wrapper.vm as unknown as { form: { model: string; family: string } }).form.model = model.name;
+    await flushPromises();
+
+    expect(currentStyleId()).toBe(model.name);
+    expect(await styleOptionIds()).toContain(model.name);
+    await openStyleSheet();
+    expect(wrapper.find("[data-test='model-option-missing']").exists()).toBe(false);
+    expect(
+      wrapper.find("[data-test='mobile-style-sheet'] [data-test='model-option-current']").exists(),
+    ).toBe(true);
+    await closeStyleSheet();
   });
 });

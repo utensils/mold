@@ -16,7 +16,7 @@
  * keydown on its own root, which is why the menu still walks), and it eats
  * Escape in the capture phase (which is why the menu never claimed it).
  */
-import { computed, ref } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 import {
   isModelRuntimeUnavailable,
@@ -49,6 +49,41 @@ const emit = defineEmits<{
 }>();
 
 const open = ref(false);
+/** The shared menu is a GENERIC SFC, so it has no `InstanceType`: name the two
+ *  things this host calls on it. */
+const menu = ref<{
+  handleKeydown: (event: KeyboardEvent) => void;
+  focus: () => void;
+  $el?: HTMLElement;
+} | null>(null);
+const menuId = ref("");
+
+/*
+ * The popover teleports its panel to <body> and never moves focus into it, and
+ * a list of eight or fewer styles carries no filter field to land on — so the
+ * menu is focused explicitly once it exists. The chip ALSO forwards its own
+ * keys (`onChipKeydown`), because focus can be back on the chip: the popover
+ * returns it there on Escape, and a click on the chip never left it.
+ */
+watch(open, (isOpen) => {
+  if (!isOpen) {
+    menuId.value = "";
+    return;
+  }
+  void nextTick(() => {
+    menu.value?.focus();
+    menuId.value = menu.value?.$el?.id ?? "";
+  });
+});
+
+/** ↑/↓/Enter belong to the menu; Escape is the popover's, in capture. A key
+ *  the menu already handled inside its own root bubbles here too, and
+ *  `defaultPrevented` is how it says so — without that check one press would
+ *  walk two rows. */
+function onChipKeydown(event: KeyboardEvent) {
+  if (!open.value || event.defaultPrevented) return;
+  menu.value?.handleKeydown(event);
+}
 
 const current = computed(
   () => props.models.find((m) => m.name === props.model) ?? null,
@@ -113,8 +148,10 @@ function browse() {
           class="mp__chip"
           data-test="style-chip"
           :aria-expanded="open"
+          :aria-controls="menuId || undefined"
           aria-haspopup="listbox"
           @click="open = !open"
+          @keydown="onChipKeydown"
         >
           <Icon name="layers" :size="13" />
           <span data-test="selected-model-name" class="mp__chip-label">
@@ -130,6 +167,7 @@ function browse() {
         </button>
       </template>
       <StyleMenu
+        ref="menu"
         class="mp__menu"
         :models="models"
         :selected="current"

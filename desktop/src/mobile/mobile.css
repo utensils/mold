@@ -649,8 +649,10 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 /* One switch row in Settings. Named for the Photos preference it shipped
    with; the Library auto-tag switch is the same control, so both selectors
    ride the one rule rather than duplicating it. */
+/* The whole row is the tap target; the switch inside it is only the state. */
 .mobile-photo-setting,
 .mobile-settings-switch {
+  cursor: pointer;
   display: grid;
   min-height: 64px;
   box-sizing: border-box;
@@ -2517,6 +2519,12 @@ button:disabled {
 /* Live develop bed — the active print forming over its latent preview.
    Absolute layers inside an aspect-ratio box; no layout shift as frames
    stream in, and the whole bed leaves the flow the moment the job settles. */
+/* The reserved frame before the first preview: the bed's box, an inset
+   hairline, no media. */
+.mobile-develop-placeholder {
+  border: 1px dashed var(--mold-border);
+}
+
 .mobile-develop-bed {
   position: relative;
   overflow: hidden;
@@ -5265,6 +5273,14 @@ button:disabled {
 
 .mobile-sheet-panel.is-dragging {
   transition: none;
+}
+
+/* The panel is focused programmatically to contain keys, but it is a
+   container, not a control: a ring along its rounded top edge read as a
+   stray highlight on every open. Focus-visible controls inside keep theirs. */
+.mobile-library-sheet-panel:focus,
+.mobile-sheet-panel:focus {
+  outline: none;
 }
 
 .mobile-sheet-head {

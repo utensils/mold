@@ -1,8 +1,9 @@
 <script setup lang="ts" generic="M extends StyleMenuModel">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, useId, watch } from "vue";
 import { familyLabel } from "../lib/modelFamily";
 import { formatBytes } from "../lib/formatBytes";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/modelDisplay";
+import { styleDisplayName } from "../lib/styleLabel";
 import type { StyleMenuModel } from "../lib/styleMenu";
 
 /**
@@ -76,7 +77,14 @@ const emit = defineEmits<{
   browse: [];
 }>();
 
+const rootEl = ref<HTMLElement | null>(null);
 const filterEl = ref<HTMLInputElement | null>(null);
+
+/* A screen reader follows the cursor through `aria-activedescendant`, so
+ * every row needs a stable id of its own and the listbox has to be
+ * addressable — including by a host chip's `aria-controls`. */
+const menuId = useId();
+const rowId = (index: number) => `${menuId}-row-${index}`;
 const query = ref("");
 const activeIndex = ref(0);
 
@@ -94,9 +102,9 @@ const showFilter = computed(() => props.models.length > FILTER_THRESHOLD);
 
 function matches(model: M, needle: string): boolean {
   if (!needle) return true;
-  const haystack = `${model.name} ${modelDisplayName(model)} ${model.family} ${familyLabel(
-    model.family,
-  )}`;
+  const haystack = `${model.name} ${modelDisplayName(model)} ${styleDisplayName(model)} ${
+    model.description ?? ""
+  } ${model.family} ${familyLabel(model.family)}`;
   return haystack.toLocaleLowerCase().includes(needle);
 }
 
@@ -148,14 +156,31 @@ function sizeLabel(model: M): string | null {
 }
 
 /**
- * The row's second line. Only a description that says something the title does
- * not — the catalog synthesises a name-shaped one for `cv:`/`hf:` rows, which
- * `modelDisplayName` has already promoted into the title.
+ * The row's TITLE, in the lexicon's own order: the description first, then a
+ * curated `display_name`, then the family's friendly name — never the id,
+ * which is a "never say" as a primary label (`docs/design/README.md` §2) and
+ * already rides beneath in mono. `modelDisplayName` answers a different
+ * question — "what is this row called" — and for every manifest style the
+ * answer is its id, so using it here printed `flux-schnell:q8` over
+ * `flux-schnell:q8 · 23.1 GB` while the chip above already said the
+ * description.
  */
-function description(model: M): string | null {
-  const text = model.description?.trim();
-  if (!text || modelDisplayName(model) !== model.name) return null;
-  return text;
+function title(model: M): string {
+  return styleDisplayName(model);
+}
+
+/**
+ * The row's second line: the OTHER name it has.
+ *
+ * `styleDisplayName` ranks the description above `display_name`, so a catalog
+ * row carrying both would otherwise lose the curated one entirely. Nothing is
+ * repeated — a name equal to the title, or to the id already in mono, is not
+ * a second fact.
+ */
+function secondaryName(model: M): string | null {
+  const other = modelDisplayName(model);
+  if (other === title(model) || other === model.name) return null;
+  return other;
 }
 
 function isSelected(model: M): boolean {
@@ -215,7 +240,16 @@ function onKeydown(event: KeyboardEvent) {
   }
 }
 
-defineExpose({ handleKeydown: onKeydown });
+/**
+ * A host whose container does not move focus (web's popover teleports the
+ * panel to <body> and leaves focus on the chip) calls `focus()` on open, and
+ * forwards its trigger's keys through `handleKeydown`. Without BOTH, a list
+ * too short to carry a filter field could be opened and then walked nowhere.
+ */
+defineExpose({
+  handleKeydown: onKeydown,
+  focus: () => rootEl.value?.focus(),
+});
 
 // A narrowed list can be shorter than where the cursor was.
 watch(rowCount, (count) => {
@@ -231,10 +265,14 @@ onMounted(() => {
 
 <template>
   <div
+    :id="menuId"
+    ref="rootEl"
     class="ms-model__menu"
     :class="{ 'ms-model__menu--touch': touch }"
     data-test="model-picker-menu"
     role="listbox"
+    tabindex="-1"
+    :aria-activedescendant="rowCount ? rowId(activeIndex) : undefined"
     @keydown="onKeydown"
   >
     <!-- What this menu holds, in the section's own words. -->
@@ -258,6 +296,7 @@ onMounted(() => {
          never reads as "no style". Picking it offers the pull. -->
     <button
       v-if="hasPhantomRow"
+      :id="rowId(0)"
       type="button"
       data-test="model-option-missing"
       class="ms-model__option"
@@ -278,6 +317,7 @@ onMounted(() => {
       <div class="ms-model__group">{{ familyLabel(family) }}</div>
       <button
         v-for="model in list"
+        :id="rowId(rowIndexFor(model))"
         :key="model.name"
         type="button"
         class="ms-model__option"
@@ -298,9 +338,9 @@ onMounted(() => {
           <span
             data-test="model-option-name"
             class="ms-model__name"
-            :title="modelDisplayName(model)"
+            :title="title(model)"
           >
-            {{ modelDisplayName(model) }}
+            {{ title(model) }}
           </span>
           <span class="ms-model__meta">
             <span data-test="model-option-id">{{ model.name }}</span>
@@ -330,11 +370,11 @@ onMounted(() => {
             {{ availabilityTag?.(model) }}
           </span>
           <span
-            v-if="description(model)"
+            v-if="secondaryName(model)"
             data-test="model-option-description"
             class="ms-model__desc"
           >
-            {{ description(model) }}
+            {{ secondaryName(model) }}
           </span>
         </span>
         <span
@@ -371,6 +411,11 @@ onMounted(() => {
 .ms-model__menu {
   display: block;
   overflow-x: hidden;
+}
+/* It takes focus so the arrow keys reach it, but it is not a tab stop and it
+ * draws no ring of its own — the active ROW is what the cursor marks. */
+.ms-model__menu:focus {
+  outline: none;
 }
 /* The section caption: quieter than a family heading, same mono vocabulary. */
 .ms-model__kicker {

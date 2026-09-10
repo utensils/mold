@@ -47,6 +47,17 @@ const emit = defineEmits<{
   "manage-hosts": [];
 }>();
 
+/**
+ * The whole row toggles, not just the 44×26 switch: on a phone the words are
+ * what a thumb lands on. A click that started INSIDE the switch is already
+ * handled by it, so forwarding that one too would toggle twice. The switch
+ * stays the only announced control and the only keyboard target.
+ */
+function toggleFromRow(event: MouseEvent, apply: () => void): void {
+  if (event.target instanceof Element && event.target.closest(".ms-switch")) return;
+  apply();
+}
+
 function openPrivacyPolicy(): void {
   void openExternal(PRIVACY_POLICY_URL);
 }
@@ -352,7 +363,14 @@ function pickTone(choice: ToneChoice) {
       </div>
       <fieldset class="mobile-settings-fieldset">
         <legend>Generated images</legend>
-        <div class="mobile-photo-setting">
+        <div
+          class="mobile-photo-setting"
+          @click="
+            toggleFromRow($event, () =>
+              emit('update', { autoSavePhotos: !settings.autoSavePhotos }),
+            )
+          "
+        >
           <span>
             <strong>Save to Photos automatically</strong>
             <small>Videos stay in My images. Open one to watch or save it.</small>
@@ -389,7 +407,12 @@ function pickTone(choice: ToneChoice) {
       </div>
       <fieldset class="mobile-settings-fieldset">
         <legend>File under</legend>
-        <div class="mobile-settings-switch">
+        <div
+          class="mobile-settings-switch"
+          @click="
+            toggleFromRow($event, () => emit('update', { autoTagTitle: !settings.autoTagTitle }))
+          "
+        >
           <span>
             <!-- Never a silent write: the tag this files is always shown on
                  Create as the removable ghost chip, before Generate. -->

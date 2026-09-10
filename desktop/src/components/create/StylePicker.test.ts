@@ -187,7 +187,7 @@ describe("StylePicker — what each row says", () => {
 
     await wrapper.get('[data-test="style-chip"]').trigger("click");
     expect(wrapper.findAll('[data-test="model-option-name"]').map((o) => o.text())).toEqual([
-      "ltx-video",
+      "LTX Video",
     ]);
   });
 
@@ -214,7 +214,13 @@ describe("StylePicker — what each row says", () => {
     expect(form.model).toBe("cv:23423432");
   });
 
-  it("carries the model's own description as the row's second line", async () => {
+  /*
+   * Description-first, on the chip and on the row alike (`docs/design/README.md`
+   * §2 — a bare id is a "never say" as the primary label). Both used to read
+   * a manifest style's own id back: the chip said "FLUX · flux-dev:q8" and the
+   * row printed `flux-dev:q8` above `flux-dev:q8 · 23.1 GB`.
+   */
+  it("leads the chip and the row with the model's description", async () => {
     const described = {
       ...model,
       description: "full quality, 20+ steps",
@@ -222,16 +228,31 @@ describe("StylePicker — what each row says", () => {
       is_loaded: true,
     } as ModelEntry;
     useModelStore().all = [described];
-    const wrapper = mountPicker(useGenerateFormStore().form);
-    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    const form = useGenerateFormStore().form;
+    form.model = described.name;
+    const wrapper = mountPicker(form);
 
-    // The hint that used to sit under the inspector's picker now lives on the
-    // entry, split into the plain sentence and the mono facts.
-    expect(wrapper.get('[data-test="model-option-description"]').text()).toBe(
-      "full quality, 20+ steps",
-    );
+    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("full quality, 20+ steps");
+    expect(wrapper.get('[data-test="style-chip"]').text()).toContain("flux-dev:q8");
+
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    expect(wrapper.get('[data-test="model-option-name"]').text()).toBe("full quality, 20+ steps");
+    expect(wrapper.get('[data-test="model-option-id"]').text()).toBe("flux-dev:q8");
+    // The description IS the title now, so it is never said twice.
+    expect(wrapper.find('[data-test="model-option-description"]').exists()).toBe(false);
     expect(wrapper.get('[data-test="model-option-size"]').text()).toBe("23.1 GB");
     expect(wrapper.get('[data-test="model-option-loaded"]').text()).toBe("on GPU");
+  });
+
+  it("falls back to the family's own name for a style that describes itself with nothing", async () => {
+    useModelStore().all = [model];
+    const form = useGenerateFormStore().form;
+    form.model = model.name;
+    const wrapper = mountPicker(form);
+
+    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe("FLUX");
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    expect(wrapper.get('[data-test="model-option-name"]').text()).toBe("FLUX");
   });
 
   it("shows a remote H3 download-only install with readable labels and its refusal", async () => {

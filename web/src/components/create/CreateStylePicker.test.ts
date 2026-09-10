@@ -188,6 +188,90 @@ describe("CreateStylePicker menu", () => {
     wrapper.unmount();
   });
 
+  /*
+   * The popover teleports the menu to <body> and never moves focus into it,
+   * and a list of eight or fewer styles carries no filter field to land on.
+   * So without this a keyboard user could open the menu and then walk nowhere:
+   * ↓ moved no row and Tab left the menu behind. Focus goes to the menu root
+   * on open, AND the chip forwards its own keys, so both paths operate it.
+   */
+  it("walks and picks from the keyboard with too few styles for a filter field", async () => {
+    const flux = model({
+      name: "flux-dev:q8",
+      family: "flux",
+      description: "",
+    });
+    const wrapper = mountPicker({ models: [model(), flux] });
+
+    const chip = wrapper.get('[data-test="style-chip"]');
+    await chip.trigger("click");
+    expect(
+      document.body.querySelector('[data-test="model-filter"]'),
+    ).toBeNull();
+    expect(document.activeElement).toBe(menu());
+
+    await chip.trigger("keydown", { key: "ArrowDown" });
+    await chip.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("select")?.[0]?.[0]).toMatchObject({
+      name: "flux-dev:q8",
+    });
+    wrapper.unmount();
+  });
+
+  it("walks from the menu root without the chip counting the same key twice", async () => {
+    const flux = model({
+      name: "flux-dev:q8",
+      family: "flux",
+      description: "",
+    });
+    const wrapper = mountPicker({ models: [model(), flux] });
+    await open(wrapper);
+
+    // Dispatched inside the menu, so it bubbles to the chip's handler too.
+    const root = menu() as HTMLElement;
+    for (const key of ["ArrowDown", "Enter"]) {
+      root.dispatchEvent(
+        new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+      );
+    }
+    await wrapper.vm.$nextTick();
+    expect(wrapper.emitted("select")?.[0]?.[0]).toMatchObject({
+      name: "flux-dev:q8",
+    });
+    wrapper.unmount();
+  });
+
+  it("closes on Escape and hands focus back to the chip", async () => {
+    const wrapper = mountPicker();
+    await open(wrapper);
+    expect(menu()).not.toBeNull();
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await wrapper.vm.$nextTick();
+    expect(menu()).toBeNull();
+    expect(document.activeElement).toBe(
+      wrapper.get('[data-test="style-chip"]').element,
+    );
+    wrapper.unmount();
+  });
+
+  it("names the active row for a screen reader", async () => {
+    const wrapper = mountPicker({
+      models: [model(), model({ name: "flux-dev:q8", family: "flux" })],
+    });
+    const chip = wrapper.get('[data-test="style-chip"]');
+    await chip.trigger("click");
+
+    const root = menu() as HTMLElement;
+    expect(chip.attributes("aria-controls")).toBe(root.id);
+    const first = root.querySelector(".ms-model__option") as HTMLElement;
+    expect(root.getAttribute("aria-activedescendant")).toBe(first.id);
+    expect(first.id).not.toBe("");
+    wrapper.unmount();
+  });
+
   it("sends Browse more to the output kind's own Styles filter", async () => {
     const wrapper = mountPicker({ browseTo: "/models?type=video" });
     expect(

@@ -1925,9 +1925,19 @@ const organizationSummary = computed(() => {
   );
 });
 let fallbackStyleName: string | null = null;
-const pickerModels = computed(() =>
-  modelsForOutputKind(generationModels.value, selectedOutputKind.value),
-);
+/**
+ * The rows the sheet may render: this section's styles, plus the SELECTED one
+ * whatever its kind. Use as prompt can restore a clip style while the section
+ * still says Still picture — the style is installed, so it is not a phantom
+ * either, and narrowing it out left the sheet showing no current style at all.
+ * Desktop's `useStylePicker` keeps the selected row for the same reason.
+ */
+const pickerModels = computed(() => {
+  const inSection = modelsForOutputKind(generationModels.value, selectedOutputKind.value);
+  const selected = generationModels.value.find((model) => model.name === form.model);
+  if (!selected || inSection.some((model) => model.name === selected.name)) return inSection;
+  return [selected, ...inSection];
+});
 const stylePickerOpen = ref(false);
 /**
  * The chip's plain half. `styleDisplayName` already stands a family's friendly
@@ -3180,12 +3190,30 @@ function clearSelectedQueueRender(): void {
  * prompt while this one develops. jsdom and older WebViews have no element
  * `scrollTo`, so the offsets are the fallback.
  */
+/** `.mobile-content`'s own top padding, so the revealed canvas keeps it. */
+const MAKE_CANVAS_REVEAL_INSET = 16;
+
 function revealRestoredMobileGeneration(submitted = false): void {
   tab.value = "generate";
   void nextTick(() => {
     const scroller = mobileContent.value;
     if (!scroller) return;
-    const top = Math.max(0, makeCanvasSlot.value?.offsetTop ?? 0);
+    // Measure from the scroller's own edge: `offsetTop` is relative to the
+    // shell, whose header sits above the scroller, and parked the canvas one
+    // header-height under the wordmark.
+    // A restore lands on the heading (top); a submission lands on the canvas,
+    // with the scroller's own inset kept above it so the frame does not hug
+    // the wordmark.
+    const slot = submitted ? makeCanvasSlot.value : null;
+    const top = slot
+      ? Math.max(
+          0,
+          slot.getBoundingClientRect().top -
+            scroller.getBoundingClientRect().top +
+            scroller.scrollTop -
+            MAKE_CANVAS_REVEAL_INSET,
+        )
+      : 0;
     const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
     const behavior: ScrollBehavior = submitted && !reduced ? "smooth" : "auto";
     if (typeof scroller.scrollTo === "function") {
@@ -11997,6 +12025,19 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 }"
               />
             </div>
+            <!-- The bed's frame, reserved from the moment a job is live: the first
+            latent preview lands seconds later, and a bed that only mounts then
+            grows above the viewport, where scroll anchoring keeps it out of sight. -->
+            <div
+              v-else-if="activeGeneration"
+              class="mobile-develop-bed mobile-develop-placeholder"
+              data-test="mobile-develop-placeholder"
+              aria-hidden="true"
+              :style="{
+                aspectRatio: `${activeGeneration.width || 1} / ${activeGeneration.height || 1}`,
+                '--bed-ar': `${(activeGeneration.width || 1) / Math.max(1, activeGeneration.height || 1)}`,
+              }"
+            />
             <div v-if="generationStatusIsError" data-test="mobile-generation-summary">
               <ErrorNotice :message="generationStatus" data-test="mobile-generation-error" />
             </div>

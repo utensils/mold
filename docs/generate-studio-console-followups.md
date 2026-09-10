@@ -12,7 +12,7 @@ longer exist. `GeneratePage.vue`, `GalleryPage.vue`, `ModelPicker.vue`,
 `GenerateParamsPanel.vue`, `Composer.vue`, `RunningStrip.vue`,
 `RunningJobCard.vue`, `TopBar.vue`, and `useHideMode.ts` are gone, replaced by
 `web/src/pages/CreatePage.vue`, `web/src/pages/LibraryPage.vue`, and
-`web/src/components/create/` (`CreateModelPicker.vue`, `ControlsAside.vue`,
+`web/src/components/create/` (`CreateStylePicker.vue`, `ControlsAside.vue`,
 `AdvancedDrawer.vue`, `ComposerCard.vue`, `ActivityStrip.vue`); hide/blur mode
 and the top bar were removed outright. Read the pointers as historical
 provenance, not as current locations.

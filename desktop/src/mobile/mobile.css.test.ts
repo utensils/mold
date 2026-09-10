@@ -816,6 +816,16 @@ describe("mobile style chip and sheet", () => {
     expect(filter?.[1]).toMatch(/font-size:\s*var\(--mold-fs-md/);
   });
 
+  // The panel takes focus programmatically so keys stay inside it; it is a
+  // container, not a control, and a ring drawn along its rounded top edge
+  // read as a stray highlight on every open.
+  it("draws no focus ring on the sheet panel itself", () => {
+    const focus = css.match(
+      /\.mobile-library-sheet-panel:focus,\s*\n\.mobile-sheet-panel:focus\s*\{([^}]*)\}/s,
+    );
+    expect(focus?.[1]).toMatch(/outline:\s*none\s*;/);
+  });
+
   it("rises from the bottom edge with a grabber, a scrim, and a centred iOS header", () => {
     const sheet = css.match(/\.mobile-sheet\s*\{([^}]*)\}/s);
     const open = css.match(/\.mobile-sheet\.is-open\s*\{([^}]*)\}/s);

@@ -96,7 +96,77 @@ describe("StyleMenu rows", () => {
     expect(marks[0]!.text()).toBe("✓");
   });
 
-  it("renders a description only when it says something the title does not", () => {
+  /*
+   * The lexicon is description-first (§2: "Photoreal — best quality ·
+   * `flux-dev:q4`"; a bare id is a "never say" as the primary label). A
+   * manifest style's `modelDisplayName` IS its id, so the rows used to read
+   * `flux-schnell:q8` over `flux-schnell:q8 23.1 GB` — the id twice — while
+   * the chip above them already said the description. One rule now:
+   * `styleDisplayName`.
+   */
+  it("leads a manifest style with its description, not its id", () => {
+    const wrapper = mountMenu({
+      models: [
+        model({
+          name: "flux-schnell:q8",
+          family: "flux",
+          description: "FLUX.1 Schnell Q8 — fast 4-step, general purpose",
+        }),
+      ],
+    });
+
+    expect(wrapper.get("[data-test='model-option-name']").text()).toBe(
+      "FLUX.1 Schnell Q8 — fast 4-step, general purpose",
+    );
+    expect(wrapper.get("[data-test='model-option-id']").text()).toBe(
+      "flux-schnell:q8",
+    );
+    expect(
+      wrapper.find("[data-test='model-option-description']").exists(),
+    ).toBe(false);
+  });
+
+  it("falls back to the family's own name when a style describes itself with nothing", () => {
+    const wrapper = mountMenu({
+      models: [
+        model({ name: "wan22-ti2v-5b:fp16", family: "wan", description: "" }),
+      ],
+    });
+    expect(wrapper.get("[data-test='model-option-name']").text()).toBe(
+      "Wan Video",
+    );
+    expect(wrapper.get("[data-test='model-option-id']").text()).toBe(
+      "wan22-ti2v-5b:fp16",
+    );
+  });
+
+  /*
+   * `styleDisplayName` ranks the description ABOVE `display_name`, so a
+   * catalog row carrying both would silently lose its curated name. The
+   * second line is where that name goes — never a repeat of the title or of
+   * the id beneath it.
+   */
+  it("keeps the curated name the description outranked, and never repeats one", () => {
+    const wrapper = mountMenu({
+      models: [
+        model({
+          name: "cv:1",
+          family: "sdxl",
+          display_name: "Studio style",
+          description: "RealVisXL V5.0 by SG161222",
+        }),
+      ],
+    });
+
+    expect(wrapper.get("[data-test='model-option-name']").text()).toBe(
+      "RealVisXL V5.0 by SG161222",
+    );
+    expect(wrapper.get("[data-test='model-option-description']").text()).toBe(
+      "Studio style",
+    );
+  });
+
+  it("says nothing on the second line when the row has one name", () => {
     const wrapper = mountMenu({
       models: [
         model({
@@ -108,10 +178,12 @@ describe("StyleMenu rows", () => {
       ],
     });
 
-    const descriptions = wrapper
-      .findAll("[data-test='model-option-description']")
-      .map((n) => n.text());
-    expect(descriptions).toEqual(["Detailed still images"]);
+    expect(wrapper.findAll("[data-test='model-option-description']")).toEqual(
+      [],
+    );
+    expect(
+      wrapper.findAll("[data-test='model-option-name']").map((n) => n.text()),
+    ).toEqual(["Detailed still images", "RealVisXL V5.0"]);
   });
 
   it("renders the host's glyph slot beside every row", () => {
@@ -137,20 +209,29 @@ describe("StyleMenu filter", () => {
     ).toBe(true);
   });
 
-  it("narrows on the id, the plain name and the family label", async () => {
+  /* Everything a person might have read on the row, or remembered from the
+   * command line, reaches the filter — the title, the id, and the family. */
+  it("narrows on the id, the description, the plain name and the family label", async () => {
     const wrapper = mountMenu({
       models: [
         ...many(8),
-        model({ name: "flux-dev:q8", family: "flux", description: "" }),
-        model({ name: "wan22-ti2v-5b:fp16", family: "wan" }),
+        model({
+          name: "flux-dev:q8",
+          family: "flux",
+          description: "Photoreal — best quality",
+        }),
+        model({ name: "wan22-ti2v-5b:fp16", family: "wan", description: "" }),
       ],
     });
 
     await wrapper.get("[data-test='model-filter']").setValue("wan video");
-    expect(rowText(wrapper)).toEqual(["wan22-ti2v-5b:fp16"]);
+    expect(rowText(wrapper)).toEqual(["Wan Video"]);
 
     await wrapper.get("[data-test='model-filter']").setValue("flux-dev");
-    expect(rowText(wrapper)).toEqual(["flux-dev:q8"]);
+    expect(rowText(wrapper)).toEqual(["Photoreal — best quality"]);
+
+    await wrapper.get("[data-test='model-filter']").setValue("photoreal");
+    expect(rowText(wrapper)).toEqual(["Photoreal — best quality"]);
   });
 
   it("says a filter matched nothing in different words from an empty section", async () => {
