@@ -2193,9 +2193,15 @@ impl FluxEngine {
             flux::sampling::get_schedule(req.steps as usize, Some((image_seq_len, 0.5, 1.15)))
         };
 
+        // How far into the FULL schedule this render starts. img2img truncates
+        // the tail off the front, and every gate measured against `req.steps`
+        // — `id_start_step`, `cfg_start_step` — has to be told about it, so
+        // the offset outlives the truncation rather than dying with the `if`.
+        let mut step_offset = 0usize;
         if req.source_image.is_some() {
             let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
             timesteps = timesteps[start_index..].to_vec();
+            step_offset = start_index;
             tracing::info!(
                 strength = req.strength,
                 start_index,
@@ -2356,6 +2362,7 @@ impl FluxEngine {
                 &state.txt_ids,
                 &state.vec,
                 &timesteps,
+                step_offset,
                 req.guidance,
                 &self.base.progress,
                 inpaint_ctx.as_ref(),
@@ -3090,9 +3097,15 @@ impl FluxEngine {
             flux::sampling::get_schedule(req.steps as usize, Some((image_seq_len, 0.5, 1.15)))
         };
 
+        // How far into the FULL schedule this render starts. img2img truncates
+        // the tail off the front, and every gate measured against `req.steps`
+        // — `id_start_step`, `cfg_start_step` — has to be told about it, so
+        // the offset outlives the truncation rather than dying with the `if`.
+        let mut step_offset = 0usize;
         if req.source_image.is_some() {
             let start_index = crate::img2img::img2img_start_index(req.steps as usize, req.strength);
             timesteps = timesteps[start_index..].to_vec();
+            step_offset = start_index;
             tracing::info!(
                 strength = req.strength,
                 start_index,
@@ -3217,6 +3230,7 @@ impl FluxEngine {
                     &state.txt_ids,
                     &state.vec,
                     &timesteps,
+                    step_offset,
                     req.guidance,
                     progress,
                     inpaint_ctx.as_ref(),

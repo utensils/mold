@@ -3262,15 +3262,6 @@ impl App {
                 &params.model,
             ));
         }
-        // Neither pairing is qualified in milestone 1. The Create form can
-        // hold both at once — LoRA and Source are their own sections — so
-        // this is a reachable state, not a defensive check.
-        if params.lora_path.is_some() {
-            return Some(mold_core::identity::IDENTITY_LORA_CONFLICT.to_string());
-        }
-        if params.source_image_path.is_some() {
-            return Some(mold_core::identity::IDENTITY_IMG2IMG_CONFLICT.to_string());
-        }
         if let Err(message) = mold_core::identity::validate_id_weight(params.id_weight) {
             return Some(message);
         }
@@ -17287,12 +17278,11 @@ mod tests {
         .is_ok());
     }
 
-    /// Milestone 1 qualifies neither pairing, and the Create form can hold
-    /// both at once — LoRA and Source are their own Advanced sections — so
-    /// the refusal has to be inline rather than a round trip away. The
-    /// wording is `mold_core::identity`'s const, not a restatement.
+    /// Both pairings are qualified, and the Create form can hold all three at
+    /// once — Photo, LoRA and Source are their own Advanced sections — so the
+    /// row must stay clean rather than carrying a stale refusal.
     #[tokio::test]
-    async fn identity_refuses_the_lora_and_img2img_pairings_inline() {
+    async fn identity_admits_the_lora_and_img2img_pairings_inline() {
         let mut app = make_settings_test_app();
         let model = "flux-dev:q8";
         let mut entry = make_test_catalog_entry(model, 20, 3.5, 1024, 1024, "FLUX dev");
@@ -17306,29 +17296,35 @@ mod tests {
         app.generate.params.lora_path = Some("/loras/pixel.safetensors".into());
         app.sync_generate_capabilities();
         assert_eq!(
-            app.generate.identity_error.as_deref(),
-            Some(mold_core::identity::IDENTITY_LORA_CONFLICT)
+            app.generate.identity_error, None,
+            "identity rides with a LoRA"
         );
 
-        app.generate.params.lora_path = None;
         app.generate.params.source_image_path = Some("/photos/scene.png".into());
         app.sync_generate_capabilities();
         assert_eq!(
-            app.generate.identity_error.as_deref(),
-            Some(mold_core::identity::IDENTITY_IMG2IMG_CONFLICT)
+            app.generate.identity_error, None,
+            "identity rides with a LoRA and an img2img source together"
         );
 
-        // Removing the conflict clears the refusal rather than leaving it
-        // stale on the row.
-        app.generate.params.source_image_path = None;
+        app.generate.params.lora_path = None;
         app.sync_generate_capabilities();
-        assert_eq!(app.generate.identity_error, None);
+        assert_eq!(
+            app.generate.identity_error, None,
+            "identity rides with an img2img source alone"
+        );
 
-        // Neither pairing is a problem without a photo.
-        app.generate.params.identity_image_path = None;
-        app.generate.params.lora_path = Some("/loras/pixel.safetensors".into());
+        // An out-of-range control is still refused on the same row, so the
+        // absence above is a lifted gate rather than a disconnected check.
+        app.generate.params.id_weight = mold_core::identity::ID_WEIGHT_MAX + 1.0;
         app.sync_generate_capabilities();
-        assert_eq!(app.generate.identity_error, None);
+        assert!(
+            app.generate
+                .identity_error
+                .as_deref()
+                .is_some_and(|message| message.contains("id_weight")),
+            "the Photo row still reports a bad id_weight"
+        );
     }
 
     /// A restored print whose start step is at or past the new step count is

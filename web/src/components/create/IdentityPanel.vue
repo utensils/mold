@@ -88,8 +88,6 @@ const conditioningError = computed(() =>
     weight: props.modelValue.identityWeight ?? null,
     startStep: props.modelValue.identityStartStep ?? null,
     steps: props.modelValue.steps,
-    hasLora: props.modelValue.loras.length > 0,
-    hasSourceImage: props.modelValue.imageAttachments.length > 0,
   }),
 );
 

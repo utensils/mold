@@ -4153,7 +4153,7 @@ describe("CreatePage host routing", () => {
     });
   });
 
-  it("blocks Generate for a combination admission would refuse", async () => {
+  it("submits a photo riding beside a LoRA rather than blocking Generate", async () => {
     hostModelsMock.mockResolvedValue([pulid]);
     stageIdentity({ loras: [{ path: "style.safetensors", scale: 1 }] });
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
@@ -4162,10 +4162,10 @@ describe("CreatePage host routing", () => {
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
 
-    expect(submitMock).not.toHaveBeenCalled();
-    expect(wrapper.get("[data-test='composer-submit-error']").text()).toContain(
-      "cannot be combined with a LoRA",
-    );
+    expect(
+      wrapper.find("[data-test='composer-submit-error']").exists(),
+    ).toBe(false);
+    expect(submitMock).toHaveBeenCalled();
   });
 
   it("renders the identity well beside the source media, not in Advanced", async () => {

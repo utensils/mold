@@ -1188,8 +1188,6 @@ const identityError = computed(() =>
     weight: form.state.value.identityWeight ?? null,
     startStep: form.state.value.identityStartStep ?? null,
     steps: form.state.value.steps,
-    hasLora: form.state.value.loras.length > 0,
-    hasSourceImage: form.state.value.imageAttachments.length > 0,
   }),
 );
 

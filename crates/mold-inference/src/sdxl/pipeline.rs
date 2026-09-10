@@ -1066,10 +1066,12 @@ impl SDXLEngine {
             };
 
             let latent_input = scheduler.scale_model_input(latent_input, t)?;
-            // `start_step` is img2img's offset into the schedule; identity
-            // conditioning and img2img are mutually exclusive at the request
-            // contract, so for an identity render `step_idx` IS the absolute
-            // step `id_start_step` is measured against.
+            // `start_step` is img2img's offset into the schedule, and
+            // `id_start_step` is measured against the FULL schedule the
+            // request named — so the gate is asked the absolute position,
+            // never the loop's own index into the truncated tail. Identity
+            // and img2img ride together, so this is a live path, not a
+            // hypothetical one.
             let hook = identity_runtime
                 .as_ref()
                 .and_then(|runtime| runtime.hook_for_step(start_step + step_idx));

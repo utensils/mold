@@ -165,11 +165,35 @@ fn denoise(
     denoise_with_true_cfg(transformer, inputs, pulid, None)
 }
 
+/// Drive the loop as if the schedule had already been truncated by img2img.
+///
+/// `step_offset` is what `flux/pipeline.rs` passes when `strength` cut the
+/// front off the schedule: the loop still runs `timesteps.len() - 1` windows,
+/// but the FIRST of them sits at absolute position `step_offset`.
+fn denoise_at_offset(
+    transformer: &FluxTransformer,
+    inputs: &Inputs,
+    pulid: Option<PulidRuntime<'_>>,
+    step_offset: usize,
+) -> Vec<f32> {
+    denoise_inner(transformer, inputs, pulid, None, step_offset)
+}
+
 fn denoise_with_true_cfg(
     transformer: &FluxTransformer,
     inputs: &Inputs,
     pulid: Option<PulidRuntime<'_>>,
     true_cfg: Option<&TrueCfgBranch<'_>>,
+) -> Vec<f32> {
+    denoise_inner(transformer, inputs, pulid, true_cfg, 0)
+}
+
+fn denoise_inner(
+    transformer: &FluxTransformer,
+    inputs: &Inputs,
+    pulid: Option<PulidRuntime<'_>>,
+    true_cfg: Option<&TrueCfgBranch<'_>>,
+    step_offset: usize,
 ) -> Vec<f32> {
     let progress = ProgressReporter::default();
     transformer
@@ -180,6 +204,7 @@ fn denoise_with_true_cfg(
             &inputs.txt_ids,
             &inputs.vec_,
             &inputs.timesteps,
+            step_offset,
             0.0,
             &progress,
             None,
@@ -354,6 +379,78 @@ fn a_partial_start_step_lands_between_the_two_gated_extremes() {
         assert_ne!(
             all_steps, late,
             "{name}: skipping the first two steps must change the result"
+        );
+    }
+}
+
+/// `id_start_step` counts against the FULL schedule, not the img2img remnant.
+///
+/// img2img truncates the front off the timestep schedule, so the denoise
+/// loop's own index starts at 0 while the request's `id_start_step` was
+/// validated against `req.steps` (`mold_core::identity::validate_id_start_step`).
+/// Before `step_offset` existed the loop asked the gate its LOCAL index, which
+/// made `id_start_step` mean "steps into the remaining tail" — and at any value
+/// at or above the remaining length it silently meant *nothing at all*, an
+/// unconditioned render that still reported success.
+///
+/// Four windows at an offset of 10 occupy absolute steps 10..=13.
+#[test]
+fn id_start_step_is_measured_against_the_untruncated_schedule() {
+    let cfg = tiny_flux_config();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gguf = dir.path().join("tiny-flux.gguf");
+    let inputs = inputs();
+    let adapter = adapter();
+
+    const OFFSET: usize = 10;
+
+    // Absolute 10 is the first window, so this conditions every step — the
+    // same render an un-truncated schedule produces from step 0.
+    let from_the_first_window = context(1.0, OFFSET);
+    // Absolute 13 is the last of the four windows.
+    let from_the_last_window = context(1.0, OFFSET + 3);
+    // Absolute 14 is past the end: genuinely never reached.
+    let never_reached = context(1.0, OFFSET + 4);
+
+    for (name, transformer) in variants(&cfg, &gguf) {
+        let baseline = denoise_at_offset(&transformer, &inputs, None, OFFSET);
+
+        let all_steps = denoise_at_offset(
+            &transformer,
+            &inputs,
+            Some(PulidRuntime::new(&adapter, &from_the_first_window)),
+            OFFSET,
+        );
+        assert_ne!(
+            baseline, all_steps,
+            "{name}: id_start_step == step_offset must condition the very first window; \
+             reading the loop's local index instead would gate it off entirely"
+        );
+
+        let last_only = denoise_at_offset(
+            &transformer,
+            &inputs,
+            Some(PulidRuntime::new(&adapter, &from_the_last_window)),
+            OFFSET,
+        );
+        assert_ne!(
+            baseline, last_only,
+            "{name}: the final window sits at absolute step_offset + 3 and must be conditioned"
+        );
+        assert_ne!(
+            all_steps, last_only,
+            "{name}: skipping the first three windows must change the result"
+        );
+
+        let gated = denoise_at_offset(
+            &transformer,
+            &inputs,
+            Some(PulidRuntime::new(&adapter, &never_reached)),
+            OFFSET,
+        );
+        assert_eq!(
+            baseline, gated,
+            "{name}: a start past the end of the truncated schedule must render bit-identically"
         );
     }
 }
