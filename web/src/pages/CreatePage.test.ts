@@ -4162,9 +4162,9 @@ describe("CreatePage host routing", () => {
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
 
-    expect(
-      wrapper.find("[data-test='composer-submit-error']").exists(),
-    ).toBe(false);
+    expect(wrapper.find("[data-test='composer-submit-error']").exists()).toBe(
+      false,
+    );
     expect(submitMock).toHaveBeenCalled();
   });
 
