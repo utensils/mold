@@ -217,9 +217,9 @@ mold jobs gc
 `mold jobs retake` re-renders ONE stage. `mold jobs amend` replaces the whole
 stage list, which is why it is script-shaped rather than flag-shaped: the
 `POST /api/chain-jobs/:id/amend` body carries every stage in canonical order
-and has no stage index. Export the job's effective script with `mold jobs show
-<ID> --script` (`--json` prints a `ChainJobDetail`, a different document),
-edit it, and hand it back. The host keeps the rendered clips of the
+and has no stage index. Export the job's effective script with
+`mold jobs show ID --script` (`--json` prints a `ChainJobDetail`, a different
+document), edit it, and hand it back. The host keeps the rendered clips of the
 leading stages that did not change and requeues from the first edit, reporting
 how many it preserved. The `[chain]` block supplies the chain-level overlays
 and each flag overrides the one field it names. Model, width, height and
