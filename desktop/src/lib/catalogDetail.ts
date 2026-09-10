@@ -5,7 +5,7 @@
  * Pull-vs-Repair action state. Framework-free so the contracts are unit
  * testable (project test rule).
  */
-import { modelSource } from "./modelSource";
+import { modelSource } from "@studio/lib/modelSource";
 import { modelDisplayName } from "./models";
 import { modelKindValue } from "@studio/lib/modelMetadata";
 import type { CatalogEntry, ModelEntry } from "./api/types";

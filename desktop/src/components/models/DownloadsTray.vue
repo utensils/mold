@@ -15,7 +15,7 @@ import { useDownloadsStore, type HostedDownloadJob } from "../../stores/download
 import { useHostsStore } from "../../stores/hosts";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useToastStore } from "../../stores/toasts";
-import { modelSource } from "../../lib/modelSource";
+import { modelSource } from "@studio/lib/modelSource";
 import { formatEta, formatGB, formatRate, percent } from "../../lib/format";
 import { PLATFORM_UI } from "../../lib/platform";
 import { modelDisplayNameForId } from "../../lib/models";

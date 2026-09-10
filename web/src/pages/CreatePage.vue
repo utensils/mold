@@ -14,7 +14,7 @@ import ResultCanvas from "../components/create/ResultCanvas.vue";
 import { REQUIRED_PROMPT_GUIDANCE } from "../components/create/emptyCanvasGuidance";
 import { generationProgressCopy } from "@studio/lib/generationProgress";
 import ControlsAside from "../components/create/ControlsAside.vue";
-import CreateModelPicker from "../components/create/CreateModelPicker.vue";
+import CreateStylePicker from "../components/create/CreateStylePicker.vue";
 import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import SourceMediaPanel from "../components/create/SourceMediaPanel.vue";
 import IdentityPanel from "../components/create/IdentityPanel.vue";
@@ -1345,6 +1345,13 @@ const showColdStart = computed(
 
 function selectModel(model: ModelInfoExtended) {
   output.selectStyle(model);
+}
+
+/** Browse more, from inside the style menu — the same destination the card's
+ *  own header link carries, which is this output kind's Styles filter. */
+const router = useRouter();
+function browseStyles(to: string) {
+  void router.push(to);
 }
 
 // The persisted model can name something the routing target doesn't have — it
@@ -4682,13 +4689,14 @@ onBeforeUnmount(() => {
               class="mt-3 flex flex-col gap-3"
               data-test="phone-create-controls"
             >
-              <CreateModelPicker
+              <CreateStylePicker
                 :models="composerModels"
                 :model="form.state.value.model"
                 :missing-model="missingModelId"
                 :browse-to="output.browseTo.value"
                 empty-label="No styles ready"
                 @select="selectModel"
+                @browse="browseStyles"
               />
               <ControlsAside
                 v-model="form.state.value"
@@ -4880,13 +4888,14 @@ onBeforeUnmount(() => {
       <!-- Primary controls stay visible. Extra settings disclose inline on
            wide screens and use the same controls in a sheet below 900px. -->
       <div v-if="!isPhone" class="flex min-w-0 flex-col gap-4">
-        <CreateModelPicker
+        <CreateStylePicker
           :models="composerModels"
           :model="form.state.value.model"
           :missing-model="missingModelId"
           :browse-to="output.browseTo.value"
           empty-label="No styles ready"
           @select="selectModel"
+          @browse="browseStyles"
         />
         <ControlsAside
           v-model="form.state.value"

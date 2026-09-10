@@ -17,7 +17,7 @@ import { formatCount } from "../../lib/format";
 import { openExternal } from "../../lib/openExternal";
 import { RUNTIME_UNAVAILABLE_BADGE } from "@studio/lib/modelRuntimeAvailability";
 import type { ModelRuntimeNotice } from "@studio/lib/modelRuntimeAvailability";
-import type { ModelSource } from "../../lib/modelSource";
+import type { ModelSource } from "@studio/lib/modelSource";
 import type { CatalogEntry } from "../../lib/api/types";
 
 /**

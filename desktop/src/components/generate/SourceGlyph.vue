@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, useId } from "vue";
-import type { ModelSource } from "../../lib/modelSource";
+import type { ModelSource } from "@studio/lib/modelSource";
 
 /**
  * Source mark for model rows and catalog cards: where did this model come

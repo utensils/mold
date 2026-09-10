@@ -5,7 +5,10 @@
  */
 export type ModelSource = "hf" | "civitai" | "local";
 
-export function modelSource(model: { name: string; hf_repo?: string | null }): ModelSource {
+export function modelSource(model: {
+  name: string;
+  hf_repo?: string | null;
+}): ModelSource {
   if (model.name.startsWith("cv:")) return "civitai";
   if (model.name.startsWith("hf:")) return "hf";
   if (model.hf_repo) return "hf";

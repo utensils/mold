@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import MeshWorkflowStudio from "@studio/components/MeshWorkflowStudio.vue";
-import CreateModelPicker from "../components/create/CreateModelPicker.vue";
+import CreateStylePicker from "../components/create/CreateStylePicker.vue";
 import {
   supportsMeshWorkflow,
   type MeshWorkflowRequirements,
 } from "@studio/lib/meshWorkflowRouting";
 import type { WorkflowModel } from "@studio/lib/meshWorkflowAuthoring";
 import MeshWorkflowHostPicker from "@studio/components/MeshWorkflowHostPicker.vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import {
   meshWorkflowHostFromQuery,
   meshWorkflowIdFromQuery,
@@ -84,6 +84,12 @@ watch(
   { immediate: true },
 );
 
+/** Browse more, from inside a style menu — the same Styles filter its own
+ *  header link carries. */
+const router = useRouter();
+function browseStyles(to: string) {
+  void router.push(to);
+}
 function pickerModels(filtered: WorkflowModel[]) {
   const names = new Set(filtered.map((model) => model.name));
   return routing.targetModels.value.filter((model) => names.has(model.name));
@@ -131,19 +137,21 @@ function hostStatus(): string {
     :host-label="selectedHost?.label ?? ''"
   >
     <template #mesh-picker="{ models, selected, select }">
-      <CreateModelPicker
+      <CreateStylePicker
         :models="pickerModels(models)"
         :model="selected"
         browse-to="/models?type=mesh"
         @select="(model) => select(model.name)"
+        @browse="browseStyles"
       />
     </template>
     <template #image-picker="{ models, selected, select }">
-      <CreateModelPicker
+      <CreateStylePicker
         :models="pickerModels(models)"
         :model="selected"
         browse-to="/models?type=image"
         @select="(model) => select(model.name)"
+        @browse="browseStyles"
       />
     </template>
     <template #machine="{ busy }">

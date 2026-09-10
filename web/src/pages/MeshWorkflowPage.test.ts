@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const routeQuery = vi.hoisted(() => ({ value: {} as Record<string, string> }));
 vi.mock("vue-router", () => ({
   useRoute: () => ({ query: routeQuery.value }),
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
 }));
 
 vi.mock("@studio/components/MeshWorkflowStudio.vue", () => ({
