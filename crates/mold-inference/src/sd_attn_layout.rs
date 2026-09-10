@@ -50,22 +50,26 @@ impl AttnLayerSite {
         self.hidden_size / self.heads
     }
 
-    /// Position among `attn2` modules in DIFFUSERS registration order — the
-    /// `<i>` in IP-Adapter's `ip_adapter.<i>.to_k_ip.weight`.
+    /// IP-Adapter keys its per-layer weights off the SAME index space PuLID
+    /// does — [`Self::processor_index`], which counts `attn1` and `attn2`
+    /// interleaved — and NOT off a filtered count of cross-attentions.
     ///
-    /// PuLID and IP-Adapter key their per-layer weights off two DIFFERENT
-    /// index spaces, and the difference is exactly a factor of two. PuLID's
-    /// `id_adapter_attn_layers.<i>` counts `unet.attn_processors` positions,
-    /// which interleave `attn1` and `attn2`; IP-Adapter's checkpoint only ever
-    /// has cross-attention entries, so its `<i>` counts the filtered list.
+    /// This is easy to get wrong in the direction that still loads. Upstream
+    /// builds `ip_layers = ModuleList(unet.attn_processors.values())`
+    /// (`IP-Adapter/ip_adapter/ip_adapter.py`), which walks EVERY processor.
+    /// The `attn1` entries are plain `AttnProcessor`s with no parameters, so
+    /// they contribute nothing to the state dict — but they still consume a
+    /// position. The published `ip-adapter_sdxl_vit-h.safetensors` therefore
+    /// carries `ip_adapter.1`, `.3`, `.5` … `.139`: seventy modules at odd
+    /// indices, not `.0`..`.69`.
     ///
-    /// Every transformer block registers `attn1` at an even position and
-    /// `attn2` at the odd one after it, so [`Self::processor_index`] is always
-    /// `2 * ip_index + 1`. Derived rather than stored so the two can never
-    /// disagree; pinned against upstream's own `attn2_ordinal` column in
-    /// `testdata/pulid_sdxl/attn_layer_map*.json`.
+    /// Reading it as a filtered ordinal loads module `2i+1`'s weights into
+    /// module `i`'s slot. Half of those pairings happen to share a width and
+    /// load without complaint, which is why this is pinned against the real
+    /// checkpoint's own inventory rather than against a capture of the layer
+    /// table — the capture agreed with the wrong derivation.
     pub fn ip_index(&self) -> usize {
-        (self.processor_index - 1) / 2
+        self.processor_index
     }
 }
 

@@ -344,14 +344,21 @@ impl IpAdapter {
                 missing[0]
             );
         }
-        // The file's own index space is dense from zero, so one probe past the
-        // plan is enough to catch an SDXL checkpoint loaded against an SD1.5
-        // plan — the case where every planned index IS present.
-        if adapter.contains_tensor(&format!("{planned}.to_k_ip.weight")) {
-            bail!(
-                "this IP-Adapter carries more than the {planned} cross-attention modules this \
-                 UNet has; it belongs to a different architecture"
-            );
+        // Scan PAST the plan. An SD1.5-shaped plan's indices are a PREFIX of
+        // the SDXL file's — 1..=31 against 1..=139 — so every index it looks
+        // for is present and a one-directional check would load 16 of 70
+        // modules and render a picture conditioned on a fraction of the
+        // reference. The index space is dense in odd numbers, so the next two
+        // planned positions are enough; the margin mirrors PuLID's
+        // `ORPHAN_SCAN_MARGIN` and exists for the same reason.
+        let highest = sites.iter().map(AttnLayerSite::ip_index).max().unwrap_or(0);
+        for surplus in [highest + 2, highest + 4] {
+            if adapter.contains_tensor(&format!("{surplus}.to_k_ip.weight")) {
+                bail!(
+                    "this IP-Adapter carries more than the {planned} cross-attention modules \
+                     this UNet has; it belongs to a different architecture"
+                );
+            }
         }
 
         Ok(Self {
@@ -679,12 +686,26 @@ mod tests {
             }
         }
         if surplus {
-            let last = sites.last().expect("a UNet with cross-attention");
+            // The next position the index space would use — two past the
+            // HIGHEST planned one, since every other index belongs to an
+            // `attn1` processor that carries no weights. The highest is not
+            // the last site: candle's traversal ends on an up block, while
+            // diffusers registers the mid block last, so the two orders
+            // disagree about which module sits at the end.
+            let highest = sites
+                .iter()
+                .map(AttnLayerSite::ip_index)
+                .max()
+                .expect("a UNet with cross-attention");
+            let width = sites
+                .last()
+                .expect("a UNet with cross-attention")
+                .hidden_size;
             for name in ["to_k_ip", "to_v_ip"] {
                 tensor(
                     varmap,
-                    (last.hidden_size, context_dim),
-                    &format!("{ADAPTER_PREFIX}.{}.{name}.weight", sites.len()),
+                    (width, context_dim),
+                    &format!("{ADAPTER_PREFIX}.{}.{name}.weight", highest + 2),
                 );
             }
         }
@@ -910,9 +931,89 @@ mod tests {
             .is_err());
     }
 
-    /// The names the loader looks for are the names the file has.
+    /// The published checkpoints' own inventory, read from the real files.
+    ///
+    /// This is the test that would have caught the index-space mistake, and
+    /// the reason it exists: the synthetic fixtures above are generated FROM
+    /// `plan_attn_layers`, so they agree with whatever it says. Only the
+    /// shipped bytes are independent of mold's own arithmetic.
+    ///
+    /// Weight-gated because the files are 44 MB and 700 MB. Point
+    /// `MOLD_TEST_IP_ADAPTER_DIR` at a mold models root that has the bundles
+    /// installed (`mold pull ip-adapter-sd15 ip-adapter-sdxl`) to run it —
+    /// `shared/ip-adapter/` beneath it is what is read.
     #[test]
-    fn the_planned_names_are_dense_from_zero() {
+    fn the_published_adapters_inventory_matches_the_plan() {
+        let Ok(root) = std::env::var("MOLD_TEST_IP_ADAPTER_DIR") else {
+            eprintln!("skipping: set MOLD_TEST_IP_ADAPTER_DIR to a models root with the bundles");
+            return;
+        };
+        let root = std::path::Path::new(&root).join("shared/ip-adapter");
+        for (relative, config, expected_tokens) in [
+            ("models/ip-adapter_sd15.safetensors", sd15_config(), 4usize),
+            (
+                "sdxl_models/ip-adapter_sdxl_vit-h.safetensors",
+                sdxl_config(),
+                4,
+            ),
+        ] {
+            let path = root.join(relative);
+            if !path.exists() {
+                eprintln!("skipping {relative}: not installed");
+                continue;
+            }
+
+            // The shape the loader will derive, against the real header.
+            let shape = IpAdapterShape::from_safetensors(&path, config.cross_attention_dim)
+                .unwrap_or_else(|error| panic!("{relative}: {error}"));
+            assert_eq!(shape.tokens, expected_tokens, "{relative}");
+            assert_eq!(shape.clip_dim, CLIP_EMBED_DIM, "{relative}");
+
+            // Every planned module must be present AT THE PLANNED INDEX and
+            // AT THE PLANNED WIDTH. The width is the half that matters: a
+            // wrong index space still finds a tensor for roughly half the
+            // modules, and only the shape disagrees.
+            let bytes = std::fs::read(&path).expect("read adapter");
+            let (_, metadata) =
+                safetensors::SafeTensors::read_metadata(&bytes).expect("parse adapter header");
+            let tensors = metadata.tensors();
+
+            let sites = plan_attn_layers(&config);
+            for site in &sites {
+                for name in ["to_k_ip", "to_v_ip"] {
+                    let key = format!("{ADAPTER_PREFIX}.{}.{name}.weight", site.ip_index());
+                    let info = tensors
+                        .get(&key)
+                        .unwrap_or_else(|| panic!("{relative}: {key} is absent"));
+                    assert_eq!(
+                        info.shape,
+                        vec![site.hidden_size, config.cross_attention_dim],
+                        "{relative}: {key}"
+                    );
+                }
+            }
+
+            // And nothing beyond the plan, so a cross-family pairing cannot
+            // pass by being a prefix.
+            let present: std::collections::BTreeSet<usize> = tensors
+                .keys()
+                .filter_map(|key| key.strip_prefix(&format!("{ADAPTER_PREFIX}.")))
+                .filter_map(|rest| rest.split('.').next())
+                .filter_map(|index| index.parse().ok())
+                .collect();
+            let planned: std::collections::BTreeSet<usize> =
+                sites.iter().map(AttnLayerSite::ip_index).collect();
+            assert_eq!(
+                present, planned,
+                "{relative}: index sets must agree exactly"
+            );
+        }
+    }
+
+    /// The names the loader looks for are the names the file has: odd indices
+    /// from 1, because the parameterless `attn1` processors take the even ones.
+    #[test]
+    fn the_planned_names_sit_at_odd_processor_positions() {
         for config in [sd15_config(), sdxl_config()] {
             let names = planned_module_names(&config);
             let count = plan_attn_layers(&config).len();
@@ -921,7 +1022,12 @@ mod tests {
                 .values()
                 .map(|name| name.rsplit('.').next().unwrap().parse().unwrap())
                 .collect();
-            assert_eq!(suffixes, (0..count).collect());
+            assert_eq!(
+                suffixes,
+                (0..count)
+                    .map(|i| 2 * i + 1)
+                    .collect::<std::collections::BTreeSet<_>>()
+            );
         }
     }
 }

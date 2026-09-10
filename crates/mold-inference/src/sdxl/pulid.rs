@@ -720,60 +720,55 @@ pub(crate) mod tests {
         }
     }
 
-    /// IP-Adapter's per-layer index is upstream's own `attn2_ordinal`.
+    /// IP-Adapter and PuLID key their per-layer weights off the SAME index.
     ///
-    /// PuLID keys `id_adapter_attn_layers.<i>` off `unet.attn_processors`
-    /// position, which interleaves `attn1` and `attn2`; IP-Adapter's
-    /// checkpoint has only cross-attention entries, so `ip_adapter.<i>` counts
-    /// the filtered list. Getting that factor of two wrong would load every
-    /// layer's weights into the wrong module and still produce a plausible
-    /// picture, so it is pinned against the SAME capture the processor indices
-    /// are — `attn2_ordinal` was recorded by enumerating the real diffusers
-    /// UNet, not derived from mold's arithmetic.
+    /// Both walk `unet.attn_processors`, which interleaves `attn1` and
+    /// `attn2`, so both name a module by its position in that list — PuLID as
+    /// `id_adapter_attn_layers.<i>` and IP-Adapter as `ip_adapter.<i>`. The
+    /// published SDXL adapter carries `.1` through `.139`, seventy modules at
+    /// odd positions, because the parameterless `attn1` processors consume the
+    /// even ones.
+    ///
+    /// This test exists because the opposite was assumed first, and the
+    /// FIXTURE agreed with it: `attn_layer_map*.json` carries an
+    /// `attn2_ordinal` column, and pinning `ip_index()` against that column
+    /// passed while loading `ip_adapter.2i+1`'s weights into module `i`. Only
+    /// the real checkpoint settles it, so this asserts the shape of the space
+    /// and `the_published_adapters_inventory_matches_the_plan` checks the
+    /// bytes.
     #[test]
-    fn the_ip_adapter_index_is_upstreams_own_attn2_ordinal() {
-        for (name, config, expected) in [
-            ("attn_layer_map_sd15.json", sd15_config(), 16usize),
-            ("attn_layer_map.json", sdxl_unet_layout(), 70),
-        ] {
+    fn the_ip_adapter_index_is_the_interleaved_processor_index() {
+        for (config, expected) in [(sd15_config(), 16usize), (sdxl_unet_layout(), 70)] {
             let sites = plan_attn_layers(&config);
-            assert_eq!(sites.len(), expected, "{name}");
-
-            let ordinals: std::collections::BTreeMap<usize, usize> = layer_map_fixture(name)
-                ["layers"]
-                .as_array()
-                .expect("layers is an array")
-                .iter()
-                .filter(|entry| entry["kind"] == "attn2")
-                .map(|entry| {
-                    (
-                        entry["processor_index"].as_u64().unwrap() as usize,
-                        entry["attn2_ordinal"].as_u64().unwrap() as usize,
-                    )
-                })
-                .collect();
-            assert_eq!(ordinals.len(), expected, "{name}");
-
+            assert_eq!(sites.len(), expected);
             for site in &sites {
-                let captured = ordinals[&site.processor_index];
-                assert_eq!(
-                    site.ip_index(),
-                    captured,
-                    "{name}: processor {} carries ip index {captured}",
-                    site.processor_index
-                );
+                assert_eq!(site.ip_index(), site.processor_index);
+                // Every cross-attention sits at an odd position: its own
+                // block's `attn1` took the even one before it.
+                assert_eq!(site.ip_index() % 2, 1, "{site:?}");
             }
-
-            // The filtered list is dense and starts at zero — an IP-Adapter
-            // checkpoint has exactly one entry per cross-attention.
-            let planned: std::collections::BTreeSet<usize> =
+            let indices: std::collections::BTreeSet<usize> =
                 sites.iter().map(AttnLayerSite::ip_index).collect();
             assert_eq!(
-                planned,
-                (0..expected).collect::<std::collections::BTreeSet<_>>(),
-                "{name}"
+                indices,
+                (0..expected)
+                    .map(|i| 2 * i + 1)
+                    .collect::<std::collections::BTreeSet<_>>()
             );
         }
+
+        // SD1.5's indices are a strict PREFIX of SDXL's, which is why the
+        // loader has to scan past its own plan rather than trusting that every
+        // index it wants is present.
+        let sd15: std::collections::BTreeSet<usize> = plan_attn_layers(&sd15_config())
+            .iter()
+            .map(AttnLayerSite::ip_index)
+            .collect();
+        let sdxl: std::collections::BTreeSet<usize> = plan_attn_layers(&sdxl_unet_layout())
+            .iter()
+            .map(AttnLayerSite::ip_index)
+            .collect();
+        assert!(sd15.is_subset(&sdxl));
     }
 
     /// Records the `(index, heads)` sequence a real UNet forward hands the
