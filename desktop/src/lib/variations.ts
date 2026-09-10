@@ -1,4 +1,4 @@
-import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
+import { referencesLockBatchSize } from "@studio/lib/sourceMediaPlan";
 import { isAudioCompletion } from "@studio/lib/ltx2Pipeline";
 import { isMeshArtifact } from "@studio/lib/meshCompletion";
 import type { GenerationCapabilities } from "./capabilities";
@@ -7,18 +7,19 @@ import type { CompleteEvent, GenerateRequest } from "./api/types";
 
 /**
  * The recipe renders one at a time: an edit model, or a request that carries
- * references. New image resolves the capabilities against the recipe it has
- * loaded; a surface with only the form asks the family and model.
+ * references the checkpoint edits ONE picture from. An additive (IP-Adapter)
+ * reference is an image prompt and does not lock the batch — the shared rule
+ * mirrors admission, so this never has to know which is which. New image
+ * resolves the capabilities against the recipe it has loaded; a surface with
+ * only the form asks the family and model.
  */
 export function batchLockedForForm(form: GenerateForm, caps: GenerationCapabilities): boolean {
   if (caps.forcesBatchSizeOne) return true;
-  return (
-    conditioningForRequest(caps.sourceImageMode, {
-      hasSource: Boolean(form.sourceImage),
-      referenceCount: form.imageAttachments.length,
-      lastWrite: form.exclusiveWell ?? null,
-    }) === "references"
-  );
+  return referencesLockBatchSize(caps.sourceImageMode, {
+    hasSource: Boolean(form.sourceImage),
+    referenceCount: form.imageAttachments.length,
+    lastWrite: form.exclusiveWell ?? null,
+  });
 }
 
 /**
@@ -37,13 +38,11 @@ export function batchLockedForRequest(
 ): boolean {
   if (caps.forcesBatchSizeOne) return true;
   const referenceCount = request.edit_images?.length ?? 0;
-  return (
-    conditioningForRequest(caps.sourceImageMode, {
-      hasSource: Boolean(request.source_image),
-      referenceCount,
-      lastWrite: referenceCount > 0 ? "references" : null,
-    }) === "references"
-  );
+  return referencesLockBatchSize(caps.sourceImageMode, {
+    hasSource: Boolean(request.source_image),
+    referenceCount,
+    lastWrite: referenceCount > 0 ? "references" : null,
+  });
 }
 
 /**

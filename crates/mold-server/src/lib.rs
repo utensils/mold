@@ -54,6 +54,7 @@ mod identity_dependencies;
 /// lifetime.
 pub mod identity_extraction;
 pub mod instance;
+mod ip_adapter_dependencies;
 pub mod job_registry;
 pub mod job_supervisor;
 pub mod logging;

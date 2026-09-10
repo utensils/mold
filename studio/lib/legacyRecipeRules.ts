@@ -111,6 +111,9 @@ export function legacyReferenceImages(
       maxPixelsSingle: null,
       maxPixelsMulti: null,
       reason: null,
+      // An older host advertises no block at all, so it can never have told
+      // us about an adapter strength. `null` renders no slider.
+      weight: null,
     };
   }
   if (isFlux2DevModel(model)) {
@@ -122,6 +125,9 @@ export function legacyReferenceImages(
       maxPixelsSingle: null,
       maxPixelsMulti: null,
       reason: null,
+      // An older host advertises no block at all, so it can never have told
+      // us about an adapter strength. `null` renders no slider.
+      weight: null,
     };
   }
   return null;

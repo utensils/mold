@@ -214,7 +214,7 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
         media: MediaKind::Image,
         workflows: WorkflowCapabilities {
             source: true,
-            edit_references: false,
+            edit_references: true,
             lora: true,
             generated_audio: false,
             chain: false,
@@ -241,7 +241,7 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
         media: MediaKind::Image,
         workflows: WorkflowCapabilities {
             source: true,
-            edit_references: false,
+            edit_references: true,
             lora: true,
             generated_audio: false,
             chain: false,

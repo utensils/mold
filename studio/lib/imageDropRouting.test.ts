@@ -30,6 +30,11 @@ const klein: SourceMediaPlan = {
   single: { required: false, endFrame: false, video: false },
   references: { max: 4, maxPixelsSingle: null, maxPixelsMulti: null },
 };
+const ipAdapter: SourceMediaPlan = {
+  kind: "single-and-references",
+  single: { required: false, endFrame: false, video: false },
+  references: { max: 1, maxPixelsSingle: null, maxPixelsMulti: null },
+};
 const h3Boundaries: SourceMediaPlan = {
   kind: "h3-boundaries",
   requiredEndpoint: null,
@@ -184,5 +189,35 @@ describe("resolveDropTarget strip bounds", () => {
         state({ h3ReferenceCount: 8, h3ReferenceMax: 9 }),
       ),
     ).toBe("h3-reference");
+  });
+});
+
+describe("the additive (IP-Adapter) plan", () => {
+  it("sends an unhovered drop to the SOURCE well, whatever is already attached", () => {
+    // Both wells are live at once, so there is no active well to prefer. The
+    // exclusive rule ("whichever already holds media") would send the second
+    // drag back to the well that is already full.
+    expect(resolveDropTarget(ipAdapter, null, state())).toBe("source");
+    expect(
+      resolveDropTarget(ipAdapter, null, state({ referenceCount: 1 })),
+    ).toBe("source");
+    expect(resolveDropTarget(ipAdapter, null, state({ hasSource: true }))).toBe(
+      "source",
+    );
+  });
+
+  it("lets the hovered well win, both ways", () => {
+    expect(
+      resolveDropTarget(ipAdapter, "references", state({ hasSource: true })),
+    ).toBe("references");
+    expect(
+      resolveDropTarget(ipAdapter, "source", state({ referenceCount: 1 })),
+    ).toBe("source");
+  });
+
+  it("refuses a strip already at the recipe's own ceiling", () => {
+    expect(
+      resolveDropTarget(ipAdapter, "references", state({ referenceCount: 1 })),
+    ).toEqual({ refused: referenceCountRefusal(1) });
   });
 });

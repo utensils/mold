@@ -1576,6 +1576,26 @@ pub(crate) async fn prepare_inputs_for_devices(
             }
             Err(error) => Err(error),
         };
+        // The image-prompt bundle is orthogonal to BOTH the encoder ladder and
+        // the identity bundle above: a request may attach a reference picture
+        // and a face at once, and the two conditionings load different files
+        // into different modules. It runs after the identity one for no reason
+        // beyond a stable order, and is inert for every request that attaches
+        // no reference and for every family that has no adapter.
+        let materialized = match materialized {
+            Ok(()) => {
+                crate::ip_adapter_dependencies::materialize_ip_adapter_assets(
+                    &dependency_context,
+                    request,
+                    context.queue_media_projection.as_ref(),
+                    &family,
+                    &mut frozen,
+                    &mut pending,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         let materialized = match materialized {
             Ok(()) => {
                 crate::paint_dependencies::materialize_paint_assets(

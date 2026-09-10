@@ -67,12 +67,19 @@ export type {
  * `single-or-references` is the EXCLUSIVE relation: the checkpoint renders
  * from a source image OR from ordered references, never both in one pass, so
  * both wells render and whichever holds media parks the other.
+ *
+ * `single-and-references` is the ADDITIVE one (`combines`, IP-Adapter on
+ * SD1.5/SDXL): the reference is an image PROMPT injected alongside the text
+ * conditioning, so it rides WITH a source image, a mask, ControlNet and a
+ * LoRA in the same pass. Both wells are live at once and NEITHER parks —
+ * which is exactly why it cannot borrow the exclusive layout.
  */
 export type SourceImageMode =
   | "single"
   | "qwen-edit"
   | "references"
   | "single-or-references"
+  | "single-and-references"
   | "h3-boundaries"
   | "ordered-references";
 
@@ -91,9 +98,18 @@ export function sourceImageModeForReferences(
 ): SourceImageMode {
   if (!referenceImages) return "single";
   if (referenceImages.primaryIsTarget) return "qwen-edit";
-  return referenceImages.sourceRelation === "replaces"
-    ? "references"
-    : "single-or-references";
+  // One switch over the advertised relation, so a relation this build does
+  // not know is a COMPILE error here rather than a silently wrong layout
+  // somewhere downstream. `combines` fell into the exclusive arm before it
+  // had one of its own, which parked a well an additive adapter needs live.
+  switch (referenceImages.sourceRelation) {
+    case "replaces":
+      return "references";
+    case "exclusive":
+      return "single-or-references";
+    case "combines":
+      return "single-and-references";
+  }
 }
 
 /** Whether the resolved model takes the wan sampler-recipe controls. */
@@ -525,9 +541,8 @@ export function baseGenerationCapabilities(
       : ltx,
     requiresAudioInput: profileCaps?.audio.required ?? false,
     // H3's two tasks own their own layouts; every other family's layout is a
-    // projection of the reference contract. `combines` has no shipped recipe
-    // and renders as the two-well layout, whose parking rule is the
-    // conservative reading until a family actually takes both at once.
+    // projection of the reference contract — one call, so no surface has to
+    // read `source_relation` itself.
     sourceImageMode: h3Ref2va
       ? "ordered-references"
       : h3

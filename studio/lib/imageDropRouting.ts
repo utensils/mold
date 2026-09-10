@@ -70,7 +70,11 @@ export function referenceCountRefusal(max: number): string {
 /** The reference strip's ceiling for this plan; `null` is unbounded. */
 function referenceMax(plan: SourceMediaPlan): number | null {
   if (plan.kind === "attachments") return plan.max;
-  if (plan.kind === "single-or-references") return plan.references.max;
+  if (
+    plan.kind === "single-or-references" ||
+    plan.kind === "single-and-references"
+  )
+    return plan.references.max;
   return null;
 }
 
@@ -96,6 +100,7 @@ function planRenders(
         (target === "source" && plan.primary === "target")
       );
     case "single-or-references":
+    case "single-and-references":
       return (
         target === "source" ||
         target === "references" ||
@@ -130,6 +135,13 @@ function planDefault(
           lastWrite: state.lastWrite ?? null,
         }).active ?? "source"
       );
+    case "single-and-references":
+      // Both wells are live at once, so there is no "active" one to prefer —
+      // an unhovered drop takes the same default a plain `single` plan takes.
+      // The exclusive rule (whichever well already holds media) would be
+      // actively wrong here: on an additive recipe the second picture the
+      // user drags is nearly always for the OTHER well.
+      return "source";
     case "h3-boundaries":
       return state.h3FirstPresent ? "h3-last" : "h3-first";
     case "h3-references":

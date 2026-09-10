@@ -283,12 +283,13 @@ export function cameraControlValidationError(
 
 /**
  * Whether the form holds an image the request would condition on, in whichever
- * well this layout keeps it. An EXCLUSIVE recipe (Klein) has two wells and
- * either satisfies the contract — the request ships exactly one of them.
+ * well this layout keeps it. A two-well recipe — exclusive (Klein) or additive
+ * (IP-Adapter) — is satisfied by EITHER: the exclusive one ships exactly one
+ * of them, the additive one ships whatever each holds.
  */
 function holdsConditioningImage(mode: SourceImageMode, form: GenerateForm): boolean {
   if (mode === "single") return Boolean(form.sourceImage);
-  if (mode === "single-or-references") {
+  if (mode === "single-or-references" || mode === "single-and-references") {
     return Boolean(form.sourceImage) || form.imageAttachments.length > 0;
   }
   return form.imageAttachments.length > 0;

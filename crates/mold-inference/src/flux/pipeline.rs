@@ -3760,6 +3760,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.75,
             mask_image: None,

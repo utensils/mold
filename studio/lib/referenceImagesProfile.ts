@@ -25,6 +25,7 @@ export type {
 } from "./generated/generationProfileV1";
 
 import type {
+  FloatControl,
   ReferenceImagesProfile,
   ReferenceSourceRelation,
 } from "./generated/generationProfileV1";
@@ -43,6 +44,18 @@ export interface ReferenceImagesCapabilities {
   maxPixelsMulti: number | null;
   /** The server's own sentence for a hidden block, for refusal copy. */
   reason: string | null;
+  /**
+   * The adapter's injection-strength control (`GenerateRequest.reference_weight`),
+   * or `null` where this reference protocol has no strength at all.
+   *
+   * The RANGE travels with the capability on purpose, so a surface renders the
+   * slider from the server's own bounds instead of hard-coding them the way
+   * `id_weight` forces every client to hard-code `0..3`. `null` is BOTH "an
+   * older host that never sent the field" and "a recipe with no adapter", and
+   * the two want the same thing here: render no slider. That is safe because a
+   * recipe with no adapter has no strength to set.
+   */
+  weight: FloatControl | null;
 }
 
 /**
@@ -62,6 +75,7 @@ export function referenceImagesFromProfile(
     maxPixelsSingle: profile.max_pixels_single ?? null,
     maxPixelsMulti: profile.max_pixels_multi ?? null,
     reason: profile.reason ?? null,
+    weight: profile.weight ?? null,
   };
 }
 

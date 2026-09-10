@@ -457,24 +457,34 @@ describe("identityConditioningValidationError", () => {
     expect(identityConditioningValidationError(form)).toBeNull();
   });
 
-  it("refuses the combination with a LoRA", () => {
+  it("admits the combination with a LoRA", () => {
+    // The adapter injects between transformer blocks (FLUX) or on the attn2
+    // output (SDXL), underneath whatever a LoRA merged into the base weights,
+    // so the two are structurally orthogonal.
     const form = identityForm();
     form.loras = [{ path: "style.safetensors", name: "style", scale: 1, trainedWords: [] }];
-    expect(identityConditioningValidationError(form)).toContain("LoRA");
+    expect(identityConditioningValidationError(form)).toBeNull();
   });
 
-  it("refuses the combination with an img2img source image", () => {
+  it("admits the combination with an img2img source image", () => {
     const form = identityForm();
     form.family = "sd15";
     form.model = "sd15:fp16";
     form.sourceImage = "c291cmNl";
-    expect(identityConditioningValidationError(form)).toContain("source image");
+    expect(identityConditioningValidationError(form)).toBeNull();
   });
 
-  it("ignores a parked source image the selected checkpoint would drop", () => {
+  it("admits a photo, a LoRA and a source image together", () => {
+    const form = identityForm();
+    form.loras = [{ path: "style.safetensors", name: "style", scale: 1, trainedWords: [] }];
+    form.sourceImage = "c291cmNl";
+    expect(identityConditioningValidationError(form)).toBeNull();
+  });
+
+  it("says nothing about a parked source image either", () => {
     // Source media is parked across model switches so switching back restores
-    // the draft. A checkpoint that advertises no source image drops it in
-    // `buildRequest`, so it must not refuse the identity partition either.
+    // the draft. Neither the parked state nor a live one refuses the identity
+    // partition any more.
     const form = identityForm();
     form.sourceImageCapability = "unsupported";
     form.sourceImage = "c291cmNl";

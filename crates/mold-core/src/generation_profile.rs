@@ -412,9 +412,14 @@ pub enum ReferenceSourceRelation {
     /// (`pipeline_flux2_klein_inpaint.py`) are separate classes, so no single
     /// pass takes an img2img latent and a reference group together.
     Exclusive,
-    /// Reserved: a recipe that reads a source image and references in the same
-    /// pass. Nothing advertises it today; it exists so a client's `match` is
-    /// written against the contract rather than against today's families.
+    /// The recipe reads a source image and references in the SAME pass.
+    ///
+    /// SD1.5 and SDXL with IP-Adapter: the image prompt is a second key/value
+    /// stream added onto every cross-attention output, so it composes with
+    /// img2img, inpaint, ControlNet and a LoRA rather than replacing any of
+    /// them (`stable-diffusion.cpp` `src/model/common/block.hpp:385-392`).
+    /// This is the only relation for which none of the img2img fields are
+    /// refused; the two wells are both live and neither parks.
     Combines,
 }
 
@@ -425,7 +430,9 @@ pub enum ReferenceSourceRelation {
 /// every surface re-derived the answer from the model NAME — which is exactly
 /// how FLUX.2 [klein]'s reference support stayed invisible on the wire while
 /// the engine already had the plumbing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
+// `Eq` is deliberately absent: `weight` carries an `f64` range, so the profile
+// is only ever partially comparable. Nothing keys a map on it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct ReferenceImagesProfile {
     /// `Hidden` on a recipe that has no reference protocol at all; every
     /// recipe that does advertises `Adjustable`.
@@ -455,6 +462,22 @@ pub struct ReferenceImagesProfile {
     /// refusal a `Hidden` recipe answers `edit_images` with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Injection strength for a decoupled-cross-attention reference adapter
+    /// (`GenerateRequest.reference_weight`). `None` on a recipe whose
+    /// reference protocol has no weight at all.
+    ///
+    /// It lives INSIDE this block rather than as a sibling bool, deliberately.
+    /// `supports_identity` is a bare bool whose numeric bounds are constants in
+    /// `mold_core::identity`, which forces every client to hard-code `0..3`;
+    /// here the range travels with the capability, so a client that renders a
+    /// slider reads one answer and a host that retunes the bounds does not
+    /// need a client release.
+    ///
+    /// Absent on an older host is the same statement as `None`: no weight
+    /// control. That is safe because a recipe with no adapter has no strength
+    /// to set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<FloatControl>,
 }
 
 /// The sentence a recipe with no reference protocol shows and refuses with.
@@ -821,6 +844,9 @@ pub fn reference_images_for_recipe(family: &str, model: &str) -> ReferenceImages
             max_pixels_single: Some(validation::QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS),
             max_pixels_multi: Some(validation::QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS),
             reason: None,
+            // The references ARE the conditioning; there is no adapter to
+            // dial down.
+            weight: None,
         },
         "flux2" => ReferenceImagesProfile {
             mode: ControlMode::Adjustable,
@@ -838,6 +864,41 @@ pub fn reference_images_for_recipe(family: &str, model: &str) -> ReferenceImages
             max_pixels_single: Some(validation::FLUX2_SINGLE_REFERENCE_MAX_PIXELS),
             max_pixels_multi: Some(validation::FLUX2_MULTI_REFERENCE_MAX_PIXELS),
             reason: None,
+            // References are packed as extra transformer tokens, not injected
+            // through an adapter, so there is no strength to set.
+            weight: None,
+        },
+        // IP-Adapter image prompting. The FIRST recipe to advertise
+        // `Combines`: the reference is an image PROMPT injected as a second
+        // key/value stream on every cross-attention output
+        // (`stable-diffusion.cpp` `src/model/common/block.hpp:385-392`), so it
+        // rides WITH img2img, inpaint, ControlNet and a LoRA rather than
+        // replacing any of them. Every other reference family refuses a
+        // source image; this one must not.
+        //
+        // One image, because the classic adapters project exactly one CLIP
+        // embedding. Upstream averages several, which is a later change and a
+        // larger `max_count`, not a different contract.
+        //
+        // No pixel ceilings: the tower resizes to 224 regardless, so a bound
+        // here would refuse pictures it is about to shrink anyway.
+        "sd15" | "sdxl" => ReferenceImagesProfile {
+            mode: ControlMode::Adjustable,
+            required: false,
+            max_count: Some(1),
+            primary_is_target: false,
+            source_relation: ReferenceSourceRelation::Combines,
+            max_pixels_single: None,
+            max_pixels_multi: None,
+            reason: None,
+            weight: Some(FloatControl {
+                default: validation::REFERENCE_WEIGHT_DEFAULT,
+                min: 0.0,
+                max: validation::REFERENCE_WEIGHT_MAX,
+                step: 0.05,
+                mode: ControlMode::Adjustable,
+                note: None,
+            }),
         },
         _ => ReferenceImagesProfile {
             mode: ControlMode::Hidden,
@@ -848,6 +909,7 @@ pub fn reference_images_for_recipe(family: &str, model: &str) -> ReferenceImages
             max_pixels_single: None,
             max_pixels_multi: None,
             reason: Some(REFERENCE_IMAGES_UNSUPPORTED_REASON.to_string()),
+            weight: None,
         },
     }
 }
@@ -921,7 +983,15 @@ pub fn validate_edit_images_against(
     }
     if attached {
         let images = images.unwrap_or_default();
-        if request.batch_size != 1 {
+        // A recipe whose references REPLACE or EXCLUDE the source image edits
+        // one picture, and a batch of edits of one picture is not a thing the
+        // engines express. A `Combines` recipe's reference is an image PROMPT:
+        // its tokens are the same for every row and broadcast across the
+        // batch, so batching is ordinary and refusing it would take away a
+        // normal SD workflow for no reason.
+        if request.batch_size != 1
+            && !matches!(profile.source_relation, ReferenceSourceRelation::Combines)
+        {
             return Err(format!(
                 "{subject} reference editing only supports batch_size = 1"
             ));
@@ -939,6 +1009,20 @@ pub fn validate_edit_images_against(
         {
             return Err("edit_images must contain only PNG or JPEG images".to_string());
         }
+    }
+    // The weight belongs to the adapter, so a recipe with no adapter refuses
+    // it rather than accepting and ignoring it — the accept-and-ignore failure
+    // the whole capability contract exists to prevent. It is checked whether
+    // or not references are attached, because naming a strength for nothing is
+    // the same mistake either way.
+    match (&profile.weight, request.reference_weight) {
+        (Some(_), Some(weight)) => crate::validation::validate_reference_weight(weight)?,
+        (None, Some(_)) => {
+            return Err(format!(
+                "{subject} has no reference adapter, so reference_weight does not apply"
+            ));
+        }
+        _ => {}
     }
     // `Replaces` never reads `source_image`, so the img2img fields are refused
     // whether or not references are attached. `Exclusive` renders from ONE of
@@ -2692,6 +2776,71 @@ mod tests {
 
     /// One function answers the reference question for every family, and the
     /// recipe serializes exactly what it returned.
+    /// A `Combines` recipe keeps every img2img field, which is a behavioural
+    /// FIRST: every other reference family refuses `source_image`,
+    /// `mask_image` and the ControlNet pair the moment references are
+    /// attached. IP-Adapter must not, because its injection is additive.
+    #[test]
+    fn a_combines_recipe_keeps_every_img2img_field() {
+        let profile = reference_images_for_recipe("sdxl", "sdxl-base:fp16");
+        let png = || vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+        let mut req = crate::test_support::minimal_generate_request("sdxl-base:fp16");
+        req.edit_images = Some(vec![png()]);
+        req.source_image = Some(png());
+        req.mask_image = Some(png());
+        req.control_image = Some(png());
+        req.control_model = Some("canny".to_string());
+        validate_edit_images_against(&profile, "SDXL", &req)
+            .expect("an image prompt rides with img2img, a mask and ControlNet");
+
+        // And it batches: the projected tokens are the same for every row.
+        req.batch_size = 4;
+        validate_edit_images_against(&profile, "SDXL", &req)
+            .expect("an image prompt broadcasts across a batch");
+
+        // The families that REPLACE or EXCLUDE still refuse, so the relaxation
+        // is scoped to the relation rather than to references in general.
+        let qwen = reference_images_for_recipe("qwen-image-edit", "qwen-image-edit-2511:q4");
+        let mut edit = crate::test_support::minimal_generate_request("qwen-image-edit-2511:q4");
+        edit.edit_images = Some(vec![png()]);
+        edit.source_image = Some(png());
+        assert!(validate_edit_images_against(&qwen, "Qwen Image Edit", &edit).is_err());
+        edit.source_image = None;
+        edit.batch_size = 4;
+        assert!(validate_edit_images_against(&qwen, "Qwen Image Edit", &edit).is_err());
+    }
+
+    /// The strength belongs to the adapter: a recipe without one refuses the
+    /// field rather than accepting and ignoring it.
+    #[test]
+    fn reference_weight_is_bounded_where_it_applies_and_refused_where_it_does_not() {
+        let ip = reference_images_for_recipe("sd15", "sd15:fp16");
+        let mut req = crate::test_support::minimal_generate_request("sd15:fp16");
+        req.edit_images = Some(vec![vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]]);
+
+        for good in [0.0, 1.0, validation::REFERENCE_WEIGHT_MAX] {
+            req.reference_weight = Some(good);
+            validate_edit_images_against(&ip, "SD 1.5", &req)
+                .unwrap_or_else(|error| panic!("{good} must be admitted: {error}"));
+        }
+        for bad in [-0.1, validation::REFERENCE_WEIGHT_MAX + 0.1, f64::NAN] {
+            req.reference_weight = Some(bad);
+            assert!(
+                validate_edit_images_against(&ip, "SD 1.5", &req).is_err(),
+                "{bad} must be refused"
+            );
+        }
+
+        // A recipe with references but no adapter has no strength to set.
+        let klein = reference_images_for_recipe("flux2", "flux2-klein:bf16");
+        let mut k = crate::test_support::minimal_generate_request("flux2-klein:bf16");
+        k.reference_weight = Some(1.0);
+        let error = validate_edit_images_against(&klein, "FLUX.2 [klein]", &k)
+            .expect_err("klein has no reference adapter");
+        assert!(error.contains("reference_weight"), "{error}");
+    }
+
     #[test]
     fn reference_images_for_recipe_is_the_single_family_answer() {
         let qwen = reference_images_for_recipe("qwen-image-edit", "qwen-image-edit-2511:q4");
@@ -2715,9 +2864,32 @@ mod tests {
         let klein = reference_images_for_recipe("flux2", "flux2-klein:bf16");
         assert_eq!(klein.source_relation, ReferenceSourceRelation::Exclusive);
 
+        // IP-Adapter is the first — and so far only — `Combines` recipe: the
+        // image prompt rides WITH a source image rather than replacing or
+        // excluding it, so none of the img2img fields are refused.
+        for (family, model) in [("sd15", "sd15:fp16"), ("sdxl", "sdxl-base:fp16")] {
+            let ip = reference_images_for_recipe(family, model);
+            assert_eq!(ip.mode, ControlMode::Adjustable, "{model}");
+            assert!(!ip.required, "{model}");
+            assert_eq!(ip.max_count, Some(1), "{model}");
+            assert!(!ip.primary_is_target, "{model}");
+            assert_eq!(
+                ip.source_relation,
+                ReferenceSourceRelation::Combines,
+                "{model}"
+            );
+            let weight = ip.weight.as_ref().expect("an adapter has a strength");
+            assert_eq!(
+                weight.default,
+                validation::REFERENCE_WEIGHT_DEFAULT,
+                "{model}"
+            );
+            assert_eq!(weight.min, 0.0, "{model}");
+            assert_eq!(weight.max, validation::REFERENCE_WEIGHT_MAX, "{model}");
+        }
+
         for (family, model) in [
             ("flux", "flux-dev:q4"),
-            ("sdxl", "sdxl-base:q4"),
             ("wan", "wan22-t2v-a14b:q8"),
             ("hunyuan3d", "hunyuan3d-2:q8"),
             ("", "not-a-model"),
@@ -2725,12 +2897,24 @@ mod tests {
             let none = reference_images_for_recipe(family, model);
             assert_eq!(none.mode, ControlMode::Hidden, "{model}");
             assert_eq!(none.max_count, Some(0), "{model}");
+            assert!(none.weight.is_none(), "{model}");
             assert_eq!(
                 none.reason.as_deref(),
                 Some(REFERENCE_IMAGES_UNSUPPORTED_REASON),
                 "{model}"
             );
         }
+
+        // The two families that DO have references but no adapter advertise no
+        // strength, so a client cannot render a slider that means nothing.
+        assert!(
+            reference_images_for_recipe("qwen-image-edit", "qwen-image-edit-2511:q4")
+                .weight
+                .is_none()
+        );
+        assert!(reference_images_for_recipe("flux2", "flux2-klein:bf16")
+            .weight
+            .is_none());
 
         // The recipe serializes the same answer it was given.
         let profile = resolve_generation_profile(input("flux2-klein:bf16", "flux2"));

@@ -25,7 +25,12 @@ import {
   type BaseGenerationCapabilities,
   type ReferenceImagesCapabilities,
 } from "@studio/lib/generationCapabilities";
-import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
+import {
+  conditioningForRequest,
+  referencesLockBatchSize,
+  requestCarriesReferences,
+  requestCarriesSource,
+} from "@studio/lib/sourceMediaPlan";
 import {
   recipeIsCanvasless,
   type GenerationRecipeProfile,
@@ -362,32 +367,44 @@ export function pruneRequestForFamily(
   // builder asked rather than re-deriving one from the mode. The sanitizer
   // used to strip the image entirely for qwen-edit — keep `edit_images`
   // intact there (P7 regression flip).
-  const conditioning = conditioningForRequest(caps.sourceImageMode, {
+  const wells = {
     hasSource: Boolean(next.source_image),
     referenceCount: next.edit_images?.length ?? 0,
-    // A request is already resolved: only one of the two can be on the wire,
-    // and a stale pair prefers the references the edit families ship.
-    lastWrite: (next.edit_images?.length ?? 0) > 0 ? "references" : null,
-  });
+    // A request is already resolved: on an exclusive recipe only one of the
+    // two can be on the wire, and a stale pair prefers the references the
+    // edit families ship. An ADDITIVE recipe ignores this — nothing parks.
+    lastWrite: ((next.edit_images?.length ?? 0) > 0 ? "references" : null) as "references" | null,
+  };
+  const conditioning = conditioningForRequest(caps.sourceImageMode, wells);
 
-  if (caps.forcesBatchSizeOne || conditioning === "references") {
+  if (caps.forcesBatchSizeOne || referencesLockBatchSize(caps.sourceImageMode, wells)) {
     next.batch_size = 1;
   }
 
   // An empty single-source request keeps its strength (it is a form value on
   // an ordinary img2img family, not conditioning); only a request whose
-  // conditioning is REFERENCES loses the source pair.
+  // conditioning excludes the source loses the pair. An additive recipe's
+  // answer is `both`, which keeps BOTH sides below.
   if (
     !caps.supportsImg2img ||
-    (conditioning !== "source" &&
+    (!requestCarriesSource(conditioning) &&
       caps.sourceImageMode !== "single" &&
-      !(caps.sourceImageMode === "single-or-references" && conditioning === "none"))
+      !(
+        (caps.sourceImageMode === "single-or-references" ||
+          caps.sourceImageMode === "single-and-references") &&
+        conditioning === "none"
+      ))
   ) {
     delete next.source_image;
     delete next.strength;
   }
-  if (!caps.supportsImg2img || conditioning !== "references") {
+  if (!caps.supportsImg2img || !requestCarriesReferences(conditioning)) {
     delete next.edit_images;
+  }
+  // The adapter strength belongs to the references: a request with none has
+  // nothing for it to scale, and a recipe with no adapter refuses it outright.
+  if (!requestCarriesReferences(conditioning) || !caps.referenceImages?.weight) {
+    delete next.reference_weight;
   }
   if (!caps.supportsMask) delete next.mask_image;
   if (!caps.supportsControlNet) {

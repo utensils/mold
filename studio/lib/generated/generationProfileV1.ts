@@ -186,7 +186,24 @@ max_pixels_multi?: number | null,
  * The one human sentence a client shows instead of the control, and the
  * refusal a `Hidden` recipe answers `edit_images` with.
  */
-reason?: string | null, };
+reason?: string | null,
+/**
+ * Injection strength for a decoupled-cross-attention reference adapter
+ * (`GenerateRequest.reference_weight`). `None` on a recipe whose
+ * reference protocol has no weight at all.
+ *
+ * It lives INSIDE this block rather than as a sibling bool, deliberately.
+ * `supports_identity` is a bare bool whose numeric bounds are constants in
+ * `mold_core::identity`, which forces every client to hard-code `0..3`;
+ * here the range travels with the capability, so a client that renders a
+ * slider reads one answer and a host that retunes the bounds does not
+ * need a client release.
+ *
+ * Absent on an older host is the same statement as `None`: no weight
+ * control. That is safe because a recipe with no adapter has no strength
+ * to set.
+ */
+weight?: FloatControl | null, };
 
 export type Scheduler = "ddim" | "euler-ancestral" | "uni-pc" | "edm-dpm-pp-2m" | "euler" | "dpm-pp";
 

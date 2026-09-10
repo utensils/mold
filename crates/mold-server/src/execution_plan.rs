@@ -82,6 +82,27 @@ pub enum ComponentRole {
     /// facexlib's BiSeNet face parser. Runs on the host beside the other two,
     /// masking the aligned crop before the vision tower sees it (#1225).
     FaceParser,
+    /// IP-Adapter's image-prompt adapter — `image_proj` plus one
+    /// `to_k_ip`/`to_v_ip` pair per hooked cross-attention. Loads on the
+    /// generation device beside the UNet it injects into, and stays resident
+    /// for the whole denoise, exactly as [`Self::IdentityAdapter`] does.
+    ImagePromptAdapter,
+    /// The OpenCLIP ViT-H/14 tower IP-Adapter encodes the reference picture
+    /// with.
+    ///
+    /// Deliberately NOT host-only, which is where it parts company with
+    /// [`Self::IdentityVisionEncoder`]: PuLID's tower runs on the host at
+    /// admission, before any device is leased, whereas this one is built,
+    /// encodes, and is dropped INSIDE the render's own lease on the generation
+    /// device (`encoders/openclip_vision.rs`'s "build it, encode, drop it").
+    /// Its bytes are therefore a device transient, and the peak they set is
+    /// charged by `memory_preflight`'s
+    /// `IP_ADAPTER_VISION_TOWER_VRAM_PEAK_BYTES`.
+    ImagePromptVisionEncoder,
+    /// The vision tower's published `config.json`. 560 bytes of architecture
+    /// read on the host before the tower is built, so it is host-only for the
+    /// same reason a tokenizer is.
+    ImagePromptVisionConfig,
     /// Hunyuan3D Paint's multiview diffusion network. It is loaded only after
     /// the shape checkpoint has been released.
     PaintUnet,
@@ -143,6 +164,10 @@ impl ComponentRole {
                 | Self::FaceRecognizer
                 | Self::FaceParser
                 | Self::IdentityVisionEncoder
+                // The image-prompt CONFIG only; its tower is device-resident
+                // while it encodes, so it is deliberately absent from this
+                // list. See `ImagePromptVisionEncoder`'s own note.
+                | Self::ImagePromptVisionConfig
                 | Self::DelightTokenizer
         )
     }
@@ -660,6 +685,9 @@ impl ExecutionSemanticConfig {
             // content/format facts in the enclosing descriptor, exactly like
             // the selected encoder artifacts above.
             identity_assets: _,
+            // Likewise the image-prompt bundle: its adapter, tower and config
+            // are three components of the enclosing descriptor.
+            ip_adapter_assets: _,
             paint_assets,
             matting_asset: _,
             delight_paths: _,
@@ -2666,6 +2694,25 @@ fn concrete_artifacts_for_family(
         artifacts.insert(
             ComponentRole::FaceParser,
             identity.face_parser_source.clone(),
+        );
+    }
+    // Image prompting is frozen, not requested, exactly as identity is:
+    // `ip_adapter_assets` is populated by dependency preparation only for a
+    // request that attaches a reference picture with a non-zero effective
+    // weight, so a plain render and a `reference_weight` 0 render carry no
+    // image-prompt components at all.
+    if let Some(image_prompt) = &engine_config.ip_adapter_assets {
+        artifacts.insert(
+            ComponentRole::ImagePromptAdapter,
+            image_prompt.adapter.clone(),
+        );
+        artifacts.insert(
+            ComponentRole::ImagePromptVisionEncoder,
+            image_prompt.vision_encoder.clone(),
+        );
+        artifacts.insert(
+            ComponentRole::ImagePromptVisionConfig,
+            image_prompt.vision_config.clone(),
         );
     }
     if let Some(paint) = &engine_config.paint_assets {
@@ -4917,6 +4964,7 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             selected_gemma_paths,
             selected_umt5_path,
             identity_assets,
+            ip_adapter_assets,
             paint_assets,
             matting_asset,
             delight_paths,
@@ -4957,6 +5005,12 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
         // identity conditioning keeps its exact bytes.
         if let Some(identity) = identity_assets {
             debug.field("identity_assets", identity);
+        }
+        // Emitted only when present, so every fingerprint that predates image
+        // prompting keeps its exact bytes while a bundle change still forces a
+        // distinct execution identity.
+        if let Some(image_prompt) = ip_adapter_assets {
+            debug.field("ip_adapter_assets", image_prompt);
         }
         // Emitted only when present, so every fingerprint that predates PBR
         // paint keeps its exact bytes while paint asset changes still force a
@@ -8138,6 +8192,7 @@ mod tests {
             selected_gemma_paths: Vec::new(),
             selected_umt5_path: None,
             identity_assets: None,
+            ip_adapter_assets: None,
             paint_assets: None,
             matting_asset: None,
             delight_paths: None,

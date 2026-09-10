@@ -451,6 +451,14 @@ export interface GenerateRequestWire {
    * subsequent images are references. Mutually exclusive with
    * `source_image`. */
   edit_images?: string[] | null;
+  /**
+   * IP-Adapter injection strength for `edit_images` on an ADDITIVE recipe
+   * (`capabilities.reference_images.weight`). Absent takes the server's own
+   * default (1.0), so a default-valued render is byte-identical on the wire
+   * to one that never named it — and an older host, which drops the unknown
+   * field rather than refusing it, renders exactly what it always did.
+   */
+  reference_weight?: number | null;
   /** Ordered heterogeneous MiniMax H3 Ref2VA inputs. */
   references?: GenerationReference[] | null;
   /** Face-identity (PuLID) reference, base64 PNG/JPEG with no data-URI
@@ -1163,11 +1171,12 @@ export interface GenerateFormState {
   sourceFitPolicy?: SourceFitPolicy;
   imageAttachments: SourceImageState[];
   /**
-   * The ordered reference strip of an EXCLUSIVE recipe (FLUX.2 [klein]),
-   * whose source image and references are mutually exclusive and therefore
-   * need two stores: `imageAttachments[0]` stays the source well, these are
-   * the references. Every other layout keeps its single list — a `replaces`
-   * strip (Qwen edit, FLUX.2 [dev]) is `imageAttachments`.
+   * The ordered reference strip of a TWO-WELL recipe — exclusive (FLUX.2
+   * [klein], one well ships) or additive (IP-Adapter, both ship) — whose
+   * source image and references need two stores:
+   * `imageAttachments[0]` stays the source well, these are the references.
+   * Every other layout keeps its single list — a `replaces` strip (Qwen edit,
+   * FLUX.2 [dev]) is `imageAttachments`.
    *
    * Optional because a draft persisted before this field existed has none,
    * and every read spells that `?? []` rather than assuming an array.
@@ -1179,6 +1188,13 @@ export interface GenerateFormState {
    * a draft saved before the field existed — reads as the source well.
    */
   exclusiveWell?: "source" | "references" | null;
+  /**
+   * IP-Adapter injection strength for the reference strip on an ADDITIVE
+   * recipe. `null` (and absence, on a draft saved before the field existed)
+   * means untouched, which keeps `reference_weight` off the wire so the
+   * server's own default stays the authority — the `identityWeight` rule.
+   */
+  referenceWeight?: number | null;
   maskImage: SourceImageState | null;
   controlImage: SourceImageState | null;
   controlModel: string;

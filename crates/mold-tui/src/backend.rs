@@ -1649,6 +1649,7 @@ pub(crate) fn build_request(
         scheduler: params.scheduler,
         cfg_plus: None,
         edit_images,
+        reference_weight: None,
         references: (!named_views.is_empty()).then_some(named_views),
         source_image: if params.named_view_paths.is_empty() {
             source_image

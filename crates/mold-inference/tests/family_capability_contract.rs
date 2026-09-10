@@ -178,6 +178,9 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
                 chain: false,
             },
         ),
+        // Both SD families take an IP-Adapter image prompt, and both keep
+        // their source-image path: the reference is a second key/value stream
+        // on every cross-attention output, not a replacement for img2img.
         (
             "sd15",
             ComponentPlacementCapability::default(),
@@ -185,7 +188,7 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
             MediaKind::Image,
             WorkflowCapabilities {
                 source: true,
-                edit_references: false,
+                edit_references: true,
                 lora: true,
                 generated_audio: false,
                 chain: false,
@@ -198,7 +201,7 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
             MediaKind::Image,
             WorkflowCapabilities {
                 source: true,
-                edit_references: false,
+                edit_references: true,
                 lora: true,
                 generated_audio: false,
                 chain: false,

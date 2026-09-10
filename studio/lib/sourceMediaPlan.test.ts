@@ -3,6 +3,9 @@ import { baseGenerationCapabilities } from "./generationCapabilities";
 import {
   conditioningForRequest,
   EXCLUSIVE_WELLS_NOTE,
+  referencesLockBatchSize,
+  requestCarriesReferences,
+  requestCarriesSource,
   resolveExclusiveWells,
   sourceMediaPlan,
 } from "./sourceMediaPlan";
@@ -10,6 +13,7 @@ import {
   flux2DevRecipe,
   flux2KleinRecipe,
   qwenImageEditRecipe,
+  sdxlIpAdapterRecipe,
 } from "./generationProfile.testFixtures";
 import type { GenerationRecipeProfile } from "./generationProfile";
 
@@ -300,5 +304,72 @@ describe("conditioningForRequest", () => {
         lastWrite: "source",
       }),
     ).toBe("source");
+  });
+});
+
+describe("the additive (IP-Adapter) plan", () => {
+  const additive = () =>
+    plan("sdxl", "sdxl-base:fp16", null, sdxlIpAdapterRecipe());
+
+  it("renders BOTH wells with the recipe's own reference ceiling", () => {
+    expect(additive()).toEqual({
+      kind: "single-and-references",
+      single: { required: false, endFrame: false, video: false },
+      references: { max: 1, maxPixelsSingle: null, maxPixelsMulti: null },
+    });
+  });
+
+  it("parks NEITHER well, however much media is attached", () => {
+    // The exclusive plan's whole job is to park one well; the additive one
+    // must never call that rule, because both streams ride the same pass.
+    const conditioning = conditioningForRequest("single-and-references", {
+      hasSource: true,
+      referenceCount: 1,
+      lastWrite: "references",
+    });
+    expect(conditioning).toBe("both");
+    expect(requestCarriesSource(conditioning)).toBe(true);
+    expect(requestCarriesReferences(conditioning)).toBe(true);
+  });
+
+  it("answers with whatever each well happens to hold", () => {
+    const empty = { hasSource: false, referenceCount: 0 };
+    expect(conditioningForRequest("single-and-references", empty)).toBe("none");
+    expect(
+      conditioningForRequest("single-and-references", {
+        ...empty,
+        hasSource: true,
+      }),
+    ).toBe("source");
+    expect(
+      conditioningForRequest("single-and-references", {
+        ...empty,
+        referenceCount: 1,
+      }),
+    ).toBe("references");
+  });
+
+  it("never locks the batch, unlike every exclusive reference recipe", () => {
+    // Mirrors `validate_edit_images_against`: an image PROMPT broadcasts the
+    // same tokens across every row, so the server accepts batch_size > 1.
+    const withReferences = { hasSource: false, referenceCount: 1 };
+    expect(
+      referencesLockBatchSize("single-and-references", withReferences),
+    ).toBe(false);
+    expect(
+      referencesLockBatchSize("single-and-references", {
+        hasSource: true,
+        referenceCount: 1,
+      }),
+    ).toBe(false);
+    // …while the relations that edit ONE picture still lock.
+    expect(
+      referencesLockBatchSize("single-or-references", withReferences),
+    ).toBe(true);
+    expect(referencesLockBatchSize("qwen-edit", withReferences)).toBe(true);
+    expect(referencesLockBatchSize("references", withReferences)).toBe(true);
+    expect(
+      referencesLockBatchSize("single", { hasSource: true, referenceCount: 0 }),
+    ).toBe(false);
   });
 });

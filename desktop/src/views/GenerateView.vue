@@ -167,7 +167,7 @@ import {
 } from "@studio/lib/sourceFit";
 import { expansionContextForRequest, expansionTaskForRequest } from "@studio/lib/expandTask";
 import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
-import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
+import { conditioningForRequest, requestCarriesSource } from "@studio/lib/sourceMediaPlan";
 import { upscaleImage } from "../lib/api/upscale";
 import { expandPrompt } from "../lib/api/expand";
 import { remixPrompt } from "../lib/api/remix";
@@ -3022,13 +3022,14 @@ async function preprocessSourceFit(
   }
   // Source fit applies to the image the request will actually carry — on an
   // exclusive (Klein) recipe that is the source well only while it is the
-  // active one; a parked source is never preprocessed.
+  // active one; a parked source is never preprocessed. An additive
+  // (IP-Adapter) recipe carries both, and its source is fitted as usual.
   const draftConditioning = conditioningForRequest(draftCaps.sourceImageMode, {
     hasSource: Boolean(draft.sourceImage),
     referenceCount: draft.imageAttachments.length,
     lastWrite: draft.exclusiveWell ?? null,
   });
-  if (!draftCaps.supportsImg2img || draftConditioning !== "source") return true;
+  if (!draftCaps.supportsImg2img || !requestCarriesSource(draftConditioning)) return true;
   if (!draft.sourceImage) return true;
   try {
     const result = await applySourceFitPreprocess(
@@ -3088,7 +3089,7 @@ function sourcePreprocessingNeedsRoute(draft: ReturnType<typeof cloneGenerateFor
   });
   return (
     draftCaps.supportsImg2img &&
-    ((conditioning === "source" && Boolean(draft.sourceImage)) ||
+    ((requestCarriesSource(conditioning) && Boolean(draft.sourceImage)) ||
       (draftCaps.sourceImageMode === "qwen-edit" && Boolean(draft.imageAttachments[0]))) &&
     draft.sourceFit.mode === "upscale-then-fit" &&
     Boolean(draft.sourceFit.upscalerModel)
@@ -3972,13 +3973,26 @@ async function restoreRequestSource(request: GenerateRequest, epoch: number) {
 async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
   if (!metadataReferencesSource(metadata)) return;
   if (!caps.value.supportsImg2img) return;
-  // Which well this PRINT used. An exclusive (Klein) recipe has two, so the
-  // print's own recorded conditioning decides — not the layout.
-  const attachmentMode =
-    caps.value.sourceImageMode === "single-or-references"
-      ? (metadata.edit_image_sha256s?.length ?? 0) > 0
-      : caps.value.sourceImageMode !== "single";
-  if (attachmentMode ? form.imageAttachments.length > 0 : Boolean(form.sourceImage)) return;
+  // Which well(s) this PRINT used. A two-well recipe has both, so the print's
+  // own recorded conditioning decides — not the layout. The exclusive one
+  // (Klein) used exactly ONE, so recorded reference digests mean the strip and
+  // their absence means the source; the ADDITIVE one (IP-Adapter) may have
+  // used both at once, and restoring only one of them would silently drop
+  // half the conditioning the print was made with.
+  const twoWells =
+    caps.value.sourceImageMode === "single-or-references" ||
+    caps.value.sourceImageMode === "single-and-references";
+  const printUsedReferences = (metadata.edit_image_sha256s?.length ?? 0) > 0;
+  const wantsReferences = twoWells ? printUsedReferences : caps.value.sourceImageMode !== "single";
+  const wantsSource =
+    caps.value.sourceImageMode === "single-and-references"
+      ? !printUsedReferences || Boolean(metadata.source_image_sha256)
+      : !wantsReferences;
+  if (
+    (!wantsReferences || form.imageAttachments.length > 0) &&
+    (!wantsSource || Boolean(form.sourceImage))
+  )
+    return;
   const modelAtStart = form.model;
   const deps: SourceRestoreDeps = {
     stashGet: (sha) => ipc.sourceStashGet(sha),
@@ -4048,23 +4062,29 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
     }
     return;
   }
-  const editRestore = attachmentMode ? await restoreEditImages(metadata, deps) : null;
-  const restored = attachmentMode ? null : await restoreSourceImage(metadata, deps);
+  const editRestore = wantsReferences ? await restoreEditImages(metadata, deps) : null;
+  const restored = wantsSource ? await restoreSourceImage(metadata, deps) : null;
   // The lookups can take seconds (cold gallery, cross-host fetch). Bail if
   // this restore was superseded: a newer prefill or ⌘N bumped the epoch, the
   // user attached their own source, the model changed under us, or the new
   // family can't take an image at all.
   if (epoch !== restoreEpoch || form.model !== modelAtStart) return;
   if (!caps.value.supportsImg2img) return;
-  if (attachmentMode ? form.imageAttachments.length > 0 : Boolean(form.sourceImage)) return;
-  if (attachmentMode && editRestore?.images.length) {
+  const stripFree = wantsReferences && form.imageAttachments.length === 0;
+  const sourceFree = wantsSource && !form.sourceImage;
+  if (!stripFree && !sourceFree) return;
+  let landed = false;
+  if (stripFree && editRestore?.images.length) {
     // The strip ceiling is the RECIPE's, never a client constant.
     const max = caps.value.referenceImages?.max ?? null;
     const restoredImages = max === null ? editRestore.images : editRestore.images.slice(0, max);
     const omitted = editRestore.images.length - restoredImages.length;
-    preserveRestoredSourceCanvas(restoredImages[0]!);
+    // The additive layout keeps its own source well, so the strip must not
+    // steal the canvas from the source image restored beside it.
+    if (!sourceFree) preserveRestoredSourceCanvas(restoredImages[0]!);
     form.imageAttachments = restoredImages;
     form.exclusiveWell = "references";
+    landed = true;
     if (editRestore.missing > 0 || omitted > 0) {
       toasts.push(
         `Restored ${restoredImages.length} source ${
@@ -4075,7 +4095,8 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
         "error",
       );
     }
-  } else if (!attachmentMode && restored) {
+  }
+  if (sourceFree && restored) {
     const generationWidth = metadata.generation_width ?? metadata.width;
     const generationHeight = metadata.generation_height ?? metadata.height;
     preserveRestoredSourceCanvas(restored.base64);
@@ -4095,9 +4116,11 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
     form.height = generationHeight;
     const fit = parseSourceFitPolicy(metadata.source_fit);
     if (fit) form.sourceFit = fit;
-  } else {
+    landed = true;
+  }
+  if (!landed) {
     toasts.push(
-      attachmentMode
+      wantsReferences
         ? "Couldn't restore the edit images — the original local files are no longer available."
         : "Couldn't restore the source image — the original file wasn't found on any connected host.",
       "error",

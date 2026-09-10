@@ -1435,6 +1435,14 @@ Examples:
         #[arg(long, value_name = "PATH", help_heading = "Reference images")]
         reference: Vec<commands::h3::ReferenceArg>,
 
+        /// Reference-adapter strength, 0.0-2.0 (default: 1.0). Applies to a
+        /// recipe whose profile advertises one — SD1.5 and SDXL image
+        /// prompting (`mold pull ip-adapter-sd15` / `ip-adapter-sdxl`).
+        /// Exactly 0.0 renders the unconditioned print: nothing is pulled,
+        /// loaded, or encoded.
+        #[arg(long, requires = "reference", help_heading = "Reference images")]
+        reference_weight: Option<f64>,
+
         /// LTX-2 pipeline mode.
         #[arg(long, help_heading = "Video", value_enum)]
         pipeline: Option<Ltx2PipelineArg>,
@@ -2716,6 +2724,7 @@ async fn run() -> anyhow::Result<()> {
             first_frame,
             last_frame,
             reference,
+            reference_weight,
             pipeline,
             ic_lora_control,
             hdr_exr_dir,
@@ -2907,6 +2916,7 @@ async fn run() -> anyhow::Result<()> {
                 first_frame,
                 last_frame,
                 reference,
+                reference_weight,
                 pipeline,
                 ic_lora_control,
                 hdr_exr_dir,

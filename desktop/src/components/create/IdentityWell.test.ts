@@ -148,10 +148,25 @@ describe("IdentityWell", () => {
   });
 
   it("renders the shared admission refusal inline, never as a toast", () => {
+    // The LoRA and img2img pairings this used to assert are qualified now, so
+    // the claim is pinned against a refusal that still exists: the strength
+    // bound. What is being tested is WHERE the sentence lands, not which
+    // sentence it is.
+    const form = identityForm();
+    form.identityImage = { filename: "face.png", base64: btoa("nope") };
+    form.identityWeight = 99;
+    const wrapper = mountWell(form);
+    expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain(
+      "Identity strength",
+    );
+  });
+
+  it("says nothing when a photo rides beside a LoRA", () => {
     const form = identityForm();
     form.identityImage = { filename: "face.png", base64: btoa("nope") };
     form.loras = [{ path: "style.safetensors", name: "style", scale: 1, trainedWords: [] }];
     const wrapper = mountWell(form);
-    expect(wrapper.get("[data-test='identity-conditioning-error']").text()).toContain("LoRA");
+    const error = wrapper.find("[data-test='identity-conditioning-error']");
+    expect(error.exists() ? error.text() : "").not.toContain("LoRA");
   });
 });

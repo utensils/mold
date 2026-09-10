@@ -510,6 +510,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             source_image: None,
             source_image_name: None,

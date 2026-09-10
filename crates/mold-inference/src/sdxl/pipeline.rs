@@ -75,6 +75,12 @@ pub struct SDXLEngine {
     /// Inert — and costs nothing — for every request that does not condition
     /// on a face.
     identity: super::identity::SdxlIdentityState,
+    /// Image-prompt conditioning: the frozen IP-Adapter bundle and the
+    /// resident per-layer projections. Independent of [`Self::identity`] —
+    /// see `sd_reference::LayeredCrossAttentionHook` for why the two compose
+    /// rather than exclude each other — and inert for every request that
+    /// attaches no reference picture.
+    reference: crate::sd_reference::SdReferenceState,
 }
 
 /// Compute a stable fingerprint for a LoRA stack: ordered list of
@@ -145,6 +151,7 @@ impl SDXLEngine {
         gpu_ordinal: usize,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
         identity_assets: Option<mold_core::pulid_assets::PulidPaths>,
+        ip_adapter_assets: Option<mold_core::ip_adapter_assets::IpAdapterPaths>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
@@ -159,6 +166,10 @@ impl SDXLEngine {
             pending_loras: Vec::new(),
             active_lora_fingerprint: Vec::new(),
             identity: super::identity::SdxlIdentityState::new(identity_assets),
+            reference: crate::sd_reference::SdReferenceState::new(
+                mold_core::ip_adapter_assets::ImagePromptFamily::Sdxl,
+                ip_adapter_assets,
+            ),
         }
     }
 
@@ -199,6 +210,7 @@ impl SDXLEngine {
         gpu_ordinal: usize,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
         identity_assets: Option<mold_core::pulid_assets::PulidPaths>,
+        ip_adapter_assets: Option<mold_core::ip_adapter_assets::IpAdapterPaths>,
     ) -> Result<Self> {
         if !single_file_path.exists() {
             bail!(
@@ -267,6 +279,10 @@ impl SDXLEngine {
             pending_loras: Vec::new(),
             active_lora_fingerprint: Vec::new(),
             identity: super::identity::SdxlIdentityState::new(identity_assets),
+            reference: crate::sd_reference::SdReferenceState::new(
+                mold_core::ip_adapter_assets::ImagePromptFamily::Sdxl,
+                ip_adapter_assets,
+            ),
         })
     }
 
@@ -380,6 +396,33 @@ impl SDXLEngine {
     /// for.
     pub fn identity_resident_bytes(&self) -> u64 {
         self.identity.resident_bytes()
+    }
+
+    /// The IP-Adapter path admission froze, or `None`.
+    pub fn reference_adapter_path(&self) -> Option<&std::path::Path> {
+        self.reference.adapter_path()
+    }
+
+    /// The image-prompt projections follow the same residency rule the
+    /// identity adapter does, and for the same three reasons recorded on
+    /// [`Self::release_identity_adapter_unless_unet_resident`]. They are a
+    /// second slot rather than a shared one because the two adapters are
+    /// loaded independently: a render may condition on a face, a picture,
+    /// both, or neither.
+    fn release_reference_adapter_unless_unet_resident(&mut self) {
+        let unet_resident = self
+            .base
+            .loaded
+            .as_ref()
+            .is_some_and(|loaded| loaded.unet.is_some());
+        if !unet_resident {
+            self.reference.drop_adapter();
+        }
+    }
+
+    /// Device bytes the IP-Adapter projections are currently holding, or 0.
+    pub fn reference_resident_bytes(&self) -> u64 {
+        self.reference.resident_bytes()
     }
 
     /// Create the SDXL config.
@@ -994,6 +1037,7 @@ impl SDXLEngine {
         start_step: usize,
         inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
         identity: Option<&super::identity::ResolvedSdxlIdentity>,
+        reference: Option<&crate::sd_reference::ResolvedReference>,
     ) -> Result<()> {
         if matches!(sched, Scheduler::EdmDpmPp2m) {
             return self.denoise_loop_playground_edm(
@@ -1006,6 +1050,7 @@ impl SDXLEngine {
                 start_step,
                 inpaint_ctx,
                 identity,
+                reference,
             );
         }
         let use_cfg = cfg_active(guidance);
@@ -1051,6 +1096,17 @@ impl SDXLEngine {
                 resolved.module_count()
             ));
         }
+        // Image prompting rides WITH identity rather than instead of it; see
+        // `sd_reference::LayeredCrossAttentionHook` for the arithmetic that
+        // makes the two additive branches order-independent.
+        let reference_runtime = reference.map(crate::sd_reference::ResolvedReference::runtime);
+        if let Some(resolved) = reference {
+            self.base.progress.info(&format!(
+                "Reference image: {} tokens across {} cross-attention modules",
+                resolved.tokens(),
+                resolved.module_count()
+            ));
+        }
 
         let denoise_label = format!("Denoising ({} steps)", active_timesteps.len());
         self.base.progress.stage_start(&denoise_label);
@@ -1072,14 +1128,26 @@ impl SDXLEngine {
             // never the loop's own index into the truncated tail. Identity
             // and img2img ride together, so this is a live path, not a
             // hypothetical one.
-            let hook = identity_runtime
+            let id_hook = identity_runtime
                 .as_ref()
                 .and_then(|runtime| runtime.hook_for_step(start_step + step_idx));
-            let noise_pred = match hook.as_ref() {
-                Some(hook) => {
+            let ip_hook = reference_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.hook_for_step(start_step + step_idx));
+            let noise_pred = match (id_hook.as_ref(), ip_hook.as_ref()) {
+                (None, None) => unet.forward(&latent_input, t as f64, text_embeddings)?,
+                (Some(hook), None) => {
                     unet.forward_with_hook(&latent_input, t as f64, text_embeddings, hook)?
                 }
-                None => unet.forward(&latent_input, t as f64, text_embeddings)?,
+                (None, Some(hook)) => {
+                    unet.forward_with_hook(&latent_input, t as f64, text_embeddings, hook)?
+                }
+                (Some(id), Some(ip)) => unet.forward_with_hook(
+                    &latent_input,
+                    t as f64,
+                    text_embeddings,
+                    &crate::sd_reference::LayeredCrossAttentionHook::new(id, ip),
+                )?,
             };
 
             // Hold onto the raw uncond row when CFG++ is active so we can use
@@ -1135,6 +1203,7 @@ impl SDXLEngine {
         start_step: usize,
         inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
         identity: Option<&super::identity::ResolvedSdxlIdentity>,
+        reference: Option<&crate::sd_reference::ResolvedReference>,
     ) -> Result<()> {
         if start_step >= steps as usize {
             return Ok(());
@@ -1156,6 +1225,17 @@ impl SDXLEngine {
                 resolved.module_count()
             ));
         }
+        // Image prompting rides WITH identity rather than instead of it; see
+        // `sd_reference::LayeredCrossAttentionHook` for the arithmetic that
+        // makes the two additive branches order-independent.
+        let reference_runtime = reference.map(crate::sd_reference::ResolvedReference::runtime);
+        if let Some(resolved) = reference {
+            self.base.progress.info(&format!(
+                "Reference image: {} tokens across {} cross-attention modules",
+                resolved.tokens(),
+                resolved.module_count()
+            ));
+        }
 
         let denoise_label = format!("Denoising ({} EDM steps)", active_timesteps.len());
         self.base.progress.stage_start(&denoise_label);
@@ -1170,12 +1250,26 @@ impl SDXLEngine {
                 latents.clone()
             };
             let latent_input = scheduler.scale_model_input(&latent_input)?;
-            let hook = identity_runtime
+            let id_hook = identity_runtime
                 .as_ref()
                 .and_then(|runtime| runtime.hook_for_step(start_step + step_idx));
-            let noise_pred = match hook.as_ref() {
-                Some(hook) => unet.forward_with_hook(&latent_input, t, text_embeddings, hook)?,
-                None => unet.forward(&latent_input, t, text_embeddings)?,
+            let ip_hook = reference_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.hook_for_step(start_step + step_idx));
+            let noise_pred = match (id_hook.as_ref(), ip_hook.as_ref()) {
+                (None, None) => unet.forward(&latent_input, t, text_embeddings)?,
+                (Some(hook), None) => {
+                    unet.forward_with_hook(&latent_input, t, text_embeddings, hook)?
+                }
+                (None, Some(hook)) => {
+                    unet.forward_with_hook(&latent_input, t, text_embeddings, hook)?
+                }
+                (Some(id), Some(ip)) => unet.forward_with_hook(
+                    &latent_input,
+                    t,
+                    text_embeddings,
+                    &crate::sd_reference::LayeredCrossAttentionHook::new(id, ip),
+                )?,
             };
             let noise_pred = if use_cfg {
                 let chunks = noise_pred.chunk(2, 0)?;
@@ -1674,6 +1768,19 @@ impl SDXLEngine {
             dtype,
             &super::pulid::sdxl_unet_layout(),
         )?;
+        // Same layout authority as the identity adapter, and for the same
+        // reason: both key their per-layer weights off `plan_attn_layers` of
+        // THIS UNet's config. The 2.5 GB vision tower runs and is dropped
+        // inside this call, so what survives it is only the projections the
+        // loop reads.
+        let reference = self.reference.resolve(
+            req,
+            self.base.model_name(),
+            &device,
+            dtype,
+            &super::pulid::sdxl_unet_layout(),
+            &self.base.progress,
+        )?;
         self.denoise_loop(
             &unet,
             &text_embeddings,
@@ -1685,11 +1792,14 @@ impl SDXLEngine {
             start_step,
             inpaint_ctx.as_ref(),
             identity.as_ref(),
+            reference.as_ref(),
         )?;
 
         drop(inpaint_ctx);
         drop(identity);
         self.identity.drop_adapter();
+        drop(reference);
+        self.reference.drop_adapter();
         drop(unet);
         drop(text_embeddings);
         device.synchronize()?;
@@ -1918,6 +2028,14 @@ impl SDXLEngine {
             loaded.dtype,
             &super::pulid::sdxl_unet_layout(),
         )?;
+        let reference = self.reference.resolve(
+            req,
+            self.base.model_name(),
+            &loaded.device,
+            loaded.dtype,
+            &super::pulid::sdxl_unet_layout(),
+            &self.base.progress,
+        )?;
         self.denoise_loop(
             unet,
             &text_embeddings,
@@ -1929,6 +2047,7 @@ impl SDXLEngine {
             start_step,
             inpaint_ctx.as_ref(),
             identity.as_ref(),
+            reference.as_ref(),
         )?;
 
         // Drop UNet before VAE decode to free VRAM for conv2d intermediates.
@@ -1938,6 +2057,8 @@ impl SDXLEngine {
         drop(inpaint_ctx);
         drop(identity);
         self.identity.drop_adapter();
+        drop(reference);
+        self.reference.drop_adapter();
         let _ = loaded;
         let loaded = self.base.loaded.as_mut().unwrap();
         loaded.unet = None;
@@ -2050,6 +2171,7 @@ impl InferenceEngine for SDXLEngine {
         self.pending_placement = None;
         self.pending_loras.clear();
         self.release_identity_adapter_unless_unet_resident();
+        self.release_reference_adapter_unless_unet_resident();
         result
     }
 
@@ -2083,6 +2205,7 @@ impl InferenceEngine for SDXLEngine {
         // entry's `vram_bytes` while keeping the engine cached, so an adapter
         // that survived would be device memory nothing accounts for.
         self.identity.drop_adapter();
+        self.reference.drop_adapter();
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
@@ -2205,6 +2328,7 @@ mod tests {
             0,
             None,
             None,
+            None,
         )
         .expect("constructor must accept a valid SDXL single-file layout");
 
@@ -2276,6 +2400,7 @@ mod tests {
             0,
             Some(shared_pool),
             None,
+            None,
         );
 
         let loaded_l = engine
@@ -2337,6 +2462,7 @@ mod tests {
             0,
             Some(shared_pool),
             None,
+            None,
         );
 
         let loaded = engine.load_vae_cpu_tensors().unwrap().unwrap();
@@ -2364,6 +2490,7 @@ mod tests {
             false,
             LoadStrategy::Eager,
             0,
+            None,
             None,
             None,
         );
@@ -2411,6 +2538,7 @@ mod tests {
             false,
             LoadStrategy::Eager,
             0,
+            None,
             None,
             None,
         )
@@ -2555,6 +2683,7 @@ mod tests {
             0,
             None,
             None,
+            None,
         )
         .expect("constructor must accept is_turbo = true");
 
@@ -2581,6 +2710,7 @@ mod tests {
             false,
             LoadStrategy::Eager,
             0,
+            None,
             None,
             None,
         )
@@ -2670,6 +2800,7 @@ mod tests {
             false,
             LoadStrategy::Eager,
             0,
+            None,
             None,
             None,
         );

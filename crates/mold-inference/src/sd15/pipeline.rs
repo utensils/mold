@@ -81,6 +81,10 @@ pub struct SD15Engine {
     /// `reload_unet_if_needed` call rebuilds it with the new wrapper.
     /// Empty when no LoRA is active.
     active_lora_fingerprint: Vec<(String, u64)>,
+    /// Image-prompt conditioning: the frozen IP-Adapter bundle and the
+    /// resident per-layer projections. Inert — and costs nothing — for every
+    /// request that attaches no reference picture.
+    reference: crate::sd_reference::SdReferenceState,
 }
 
 /// Compute a stable fingerprint for a LoRA stack: ordered list of
@@ -102,6 +106,7 @@ impl SD15Engine {
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
+        ip_adapter_assets: Option<mold_core::ip_adapter_assets::IpAdapterPaths>,
     ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
@@ -115,6 +120,10 @@ impl SD15Engine {
             single_file_path: None,
             pending_loras: Vec::new(),
             active_lora_fingerprint: Vec::new(),
+            reference: crate::sd_reference::SdReferenceState::new(
+                mold_core::ip_adapter_assets::ImagePromptFamily::Sd15,
+                ip_adapter_assets,
+            ),
         }
     }
 
@@ -134,6 +143,7 @@ impl SD15Engine {
     /// `clip_tokenizer` is the path to a companion-pulled CLIP-L
     /// tokenizer; the tokenizer never lives inside the
     /// single-file checkpoint.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_single_file(
         model_name: String,
         single_file_path: PathBuf,
@@ -142,6 +152,7 @@ impl SD15Engine {
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
+        ip_adapter_assets: Option<mold_core::ip_adapter_assets::IpAdapterPaths>,
     ) -> Result<Self> {
         if !single_file_path.exists() {
             bail!(
@@ -200,7 +211,48 @@ impl SD15Engine {
             single_file_path: Some(single_file_path),
             pending_loras: Vec::new(),
             active_lora_fingerprint: Vec::new(),
+            reference: crate::sd_reference::SdReferenceState::new(
+                mold_core::ip_adapter_assets::ImagePromptFamily::Sd15,
+                ip_adapter_assets,
+            ),
         })
+    }
+
+    /// The IP-Adapter path admission froze, or `None`.
+    pub fn reference_adapter_path(&self) -> Option<&Path> {
+        self.reference.adapter_path()
+    }
+
+    /// The projections' residency follows the UNet's.
+    ///
+    /// Called once at the end of every `generate`, so the render's own drop
+    /// sites — the sequential path's `drop(unet)` and the eager path's
+    /// VAE-decode drop — do not each need a copy of this rule and neither can
+    /// forget it. It is also the backstop for a render that reaches no drop
+    /// site at all: a cancellation checkpoint or an error inside
+    /// `denoise_loop` returns straight out of `generate_inner`, and without
+    /// this the projections would stay resident until a later unload or
+    /// unreferenced request. Mirrors
+    /// [`crate::sdxl::SDXLEngine`]'s identity rule for the same reason.
+    fn release_reference_adapter_unless_unet_resident(&mut self) {
+        let unet_resident = self
+            .base
+            .loaded
+            .as_ref()
+            .is_some_and(|loaded| loaded.unet.is_some());
+        if !unet_resident {
+            self.reference.drop_adapter();
+        }
+    }
+
+    /// Device bytes the IP-Adapter projections are currently holding, or 0.
+    ///
+    /// The `InferenceEngine` trait has no resident-bytes method to fold this
+    /// into, so it is exposed here exactly as the PuLID adapters are: it is
+    /// the only way a caller can confirm that a park or an unload actually
+    /// released them rather than leaving device memory nothing accounts for.
+    pub fn reference_resident_bytes(&self) -> u64 {
+        self.reference.resident_bytes()
     }
 
     /// Validate and return required SD1.5 paths (CLIP-L encoder + tokenizer).
@@ -804,6 +856,7 @@ impl SD15Engine {
         start_step: usize,
         inpaint_ctx: Option<&crate::img_utils::InpaintContext>,
         controlnet_ctx: Option<&ControlNetContext>,
+        reference: Option<&crate::sd_reference::ResolvedReference>,
     ) -> Result<()> {
         let use_cfg = cfg_active(guidance);
         let mut scheduler = crate::scheduler::build_scheduler(
@@ -834,6 +887,21 @@ impl SD15Engine {
             None
         };
 
+        // Image prompting, when this render conditions on a reference picture.
+        // The runtime is the gate: `hook_for_step` yields `None` at an
+        // effective weight of 0, and a `None` step calls the UNet's ordinary
+        // `forward` — so an unreferenced step executes the exact code an
+        // unreferenced build executes, which is what
+        // `a_null_hook_is_bit_identical_to_the_plain_forward` pins.
+        let reference_runtime = reference.map(crate::sd_reference::ResolvedReference::runtime);
+        if let Some(resolved) = reference {
+            self.base.progress.info(&format!(
+                "Reference image: {} tokens across {} cross-attention modules",
+                resolved.tokens(),
+                resolved.module_count()
+            ));
+        }
+
         let denoise_label = format!("Denoising ({} steps)", active_timesteps.len());
         self.base.progress.stage_start(&denoise_label);
         let denoise_start = Instant::now();
@@ -849,6 +917,18 @@ impl SD15Engine {
 
             let latent_input = scheduler.scale_model_input(latent_input, t)?;
 
+            // `start_step` is img2img's offset into the schedule. IP-Adapter
+            // has no start-step control of its own, but the runtime takes the
+            // absolute position anyway so this call site cannot be the one
+            // that has to change if it ever gains one.
+            let hook = reference_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.hook_for_step(start_step + step_idx));
+            // Four ways, because ControlNet and IP-Adapter are independent:
+            // one supplies residuals the UNet adds to its skip connections,
+            // the other replaces cross-attention outputs. They ride together —
+            // `capabilities.reference_images.source_relation` is `Combines`
+            // for exactly this family — so neither may shadow the other.
             let noise_pred = if let Some(cn_ctx) = controlnet_ctx {
                 let (down_residuals, mid_residual) = cn_ctx.model.forward(
                     &latent_input,
@@ -857,15 +937,30 @@ impl SD15Engine {
                     &cn_ctx.control_tensor,
                     cn_ctx.scale,
                 )?;
-                unet.forward_with_additional_residuals(
-                    &latent_input,
-                    t as f64,
-                    text_embeddings,
-                    Some(&down_residuals),
-                    Some(&mid_residual),
-                )?
+                match hook.as_ref() {
+                    Some(hook) => unet.forward_with_additional_residuals_and_hook(
+                        &latent_input,
+                        t as f64,
+                        text_embeddings,
+                        Some(&down_residuals),
+                        Some(&mid_residual),
+                        hook,
+                    )?,
+                    None => unet.forward_with_additional_residuals(
+                        &latent_input,
+                        t as f64,
+                        text_embeddings,
+                        Some(&down_residuals),
+                        Some(&mid_residual),
+                    )?,
+                }
             } else {
-                unet.forward(&latent_input, t as f64, text_embeddings)?
+                match hook.as_ref() {
+                    Some(hook) => {
+                        unet.forward_with_hook(&latent_input, t as f64, text_embeddings, hook)?
+                    }
+                    None => unet.forward(&latent_input, t as f64, text_embeddings)?,
+                }
             };
 
             // Hold onto the raw uncond row when CFG++ is active so we can use
@@ -1384,6 +1479,25 @@ impl SD15Engine {
         // Load ControlNet if requested
         let controlnet_ctx = self.load_controlnet(req, &device, dtype)?;
 
+        // Resolved before the denoise and released with the UNet. The
+        // 2.5 GB vision tower runs and is dropped INSIDE this call — see
+        // `sd_reference`'s header — so what survives it is only the
+        // per-layer projections the loop actually reads.
+        //
+        // The layout is `sd15_unet()`, the production UNet's own config, NOT
+        // `UNet2DConditionModelConfig::default()`: `load_controlnet` above
+        // uses the default for the CONTROLNET architecture, and feeding that
+        // to the layer planner would build the adapter against the wrong
+        // module table.
+        let reference = self.reference.resolve(
+            req,
+            self.base.model_name(),
+            &device,
+            dtype,
+            &mold_candle::stable_diffusion::sd15_unet(),
+            &self.base.progress,
+        )?;
+
         self.denoise_loop(
             &unet,
             &text_embeddings,
@@ -1395,11 +1509,17 @@ impl SD15Engine {
             start_step,
             inpaint_ctx.as_ref(),
             controlnet_ctx.as_ref(),
+            reference.as_ref(),
         )?;
 
         // Drop UNet to free memory for VAE decode
         drop(controlnet_ctx);
         drop(inpaint_ctx);
+        // The projections go with it, through BOTH of their owners — the
+        // render's handle and the engine's resident slot — because releasing
+        // one of them frees nothing.
+        drop(reference);
+        self.reference.drop_adapter();
         drop(unet);
         drop(text_embeddings);
         device.synchronize()?;
@@ -1610,6 +1730,14 @@ impl SD15Engine {
             .unet
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("UNet not loaded"))?;
+        let reference = self.reference.resolve(
+            req,
+            self.base.model_name(),
+            &loaded.device,
+            loaded.dtype,
+            &mold_candle::stable_diffusion::sd15_unet(),
+            &self.base.progress,
+        )?;
         self.denoise_loop(
             unet,
             &text_embeddings,
@@ -1621,11 +1749,14 @@ impl SD15Engine {
             start_step,
             inpaint_ctx.as_ref(),
             controlnet_ctx.as_ref(),
+            reference.as_ref(),
         )?;
 
         // Drop UNet before VAE decode to free VRAM for conv2d intermediates.
         drop(controlnet_ctx);
         drop(inpaint_ctx);
+        drop(reference);
+        self.reference.drop_adapter();
         // End the immutable borrow of `loaded` so we can take a mutable one.
         let _ = loaded;
         let loaded = self.base.loaded.as_mut().unwrap();
@@ -1705,6 +1836,7 @@ impl InferenceEngine for SD15Engine {
         let result = self.generate_inner(req);
         self.pending_placement = None;
         self.pending_loras.clear();
+        self.release_reference_adapter_unless_unet_resident();
         result
     }
 
@@ -1734,6 +1866,11 @@ impl InferenceEngine for SD15Engine {
         clear_cache(&self.mask_cache);
         clear_cache(&self.control_tensor_cache);
         self.active_lora_fingerprint.clear();
+        // Not optional: `ModelCache` parks by calling this and zeroing the
+        // entry's `vram_bytes` while keeping the engine cached, so
+        // projections that survived would be device memory nothing accounts
+        // for.
+        self.reference.drop_adapter();
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
@@ -1828,6 +1965,7 @@ mod tests {
             LoadStrategy::Eager,
             0,
             None,
+            None,
         )
         .expect("constructor must accept a valid SD1.5 single-file layout");
 
@@ -1888,6 +2026,7 @@ mod tests {
             LoadStrategy::Eager,
             0,
             Some(shared_pool),
+            None,
         );
 
         let loaded = engine.load_clip_tokenizer(&tokenizer_path).unwrap();
@@ -1941,6 +2080,7 @@ mod tests {
             LoadStrategy::Eager,
             0,
             Some(shared_pool),
+            None,
         );
 
         let loaded = engine.load_vae_cpu_tensors().unwrap().unwrap();
@@ -1977,6 +2117,7 @@ mod tests {
             Scheduler::Ddim,
             LoadStrategy::Eager,
             0,
+            None,
             None,
         )
         .expect("constructor");
@@ -2093,6 +2234,7 @@ mod tests {
             Scheduler::default(),
             LoadStrategy::Eager,
             0,
+            None,
             None,
         );
 

@@ -610,6 +610,14 @@ export interface GenerateRequest {
   /** Qwen-Image-Edit multi-image inputs, base64 each (no data-URI prefix).
    * Order is load-bearing: first = primary edit target, rest = references. */
   edit_images?: string[];
+  /**
+   * IP-Adapter injection strength for `edit_images` on an ADDITIVE recipe
+   * (`capabilities.reference_images.weight`). Absent takes the server's own
+   * default (1.0), so a default-valued render is byte-identical on the wire
+   * to one that never named it — and an older host, which drops the unknown
+   * field rather than refusing it, renders exactly what it always did.
+   */
+  reference_weight?: number;
   /** Ordered heterogeneous MiniMax H3 Ref2VA inputs. */
   references?: GenerationReference[];
   strength?: number;

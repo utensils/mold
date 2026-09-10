@@ -507,6 +507,7 @@ fn build_stage_generate_request(
         source_image: stage.source_image.clone(),
         source_image_name: None,
         edit_images: None,
+        reference_weight: None,
         references: None,
         // Replacement strength from the chain request is only meaningful
         // for stage 0's frame-0 i2v pin. Continuations override this at

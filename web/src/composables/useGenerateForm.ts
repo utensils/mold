@@ -55,7 +55,11 @@ import {
   defaultEnableAudio,
   effectiveGenerationGuidance,
 } from "@studio/lib/generationCapabilities";
-import { conditioningForRequest } from "@studio/lib/sourceMediaPlan";
+import {
+  conditioningForRequest,
+  referencesLockBatchSize,
+  requestCarriesReferences,
+} from "@studio/lib/sourceMediaPlan";
 import { coerceOutputFormatForRecipe } from "@studio/lib/outputFormat";
 import {
   emptyMeshForm,
@@ -188,6 +192,7 @@ function defaultForm(): GenerateFormState {
     imageAttachments: [],
     referenceImages: [],
     exclusiveWell: null,
+    referenceWeight: null,
     maskImage: null,
     controlImage: null,
     controlModel: "",
@@ -547,7 +552,8 @@ function modelDefaultsPatch(
   }
   if (
     capabilities.sourceImageMode !== "single" &&
-    capabilities.sourceImageMode !== "single-or-references"
+    capabilities.sourceImageMode !== "single-or-references" &&
+    capabilities.sourceImageMode !== "single-and-references"
   ) {
     if (
       capabilities.sourceImageMode !== "references" &&
@@ -559,7 +565,7 @@ function modelDefaultsPatch(
     // Leaving an exclusive layout: its references cannot ride any other
     // recipe's request, so they park rather than leak onto the wire.
   } else if (next.imageAttachments.length > 1) {
-    // An exclusive recipe keeps ONE source in `imageAttachments`; its strip
+    // A two-well recipe keeps ONE source in `imageAttachments`; its strip
     // lives in `referenceImages`, so this truncation is the same as before.
     next.imageAttachments = next.imageAttachments.slice(0, 1);
   }
@@ -1305,27 +1311,48 @@ export function useGenerateForm(): UseGenerateForm {
       );
       const attachments = s.imageAttachments ?? [];
       const references = s.referenceImages ?? [];
+      // A two-well layout — exclusive (Klein) or additive (IP-Adapter) —
+      // keeps its references in their own store, because
+      // `imageAttachments[0]` is still the source well. A strip-only layout
+      // keeps `imageAttachments` as its references.
+      const twoWells =
+        capabilities.sourceImageMode === "single-or-references" ||
+        capabilities.sourceImageMode === "single-and-references";
+      // Clamped to the ceiling the recipe advertises — a stale restored strip
+      // must not ship more pictures than admission accepts. `null` (Qwen
+      // edit) is unbounded. Desktop's builder applies the same clamp.
+      const referenceCeiling = capabilities.referenceImages?.max ?? null;
+      const editImages = (twoWells ? references : attachments).slice(
+        0,
+        referenceCeiling ?? undefined,
+      );
+      const wells = {
+        hasSource: Boolean(attachments[0]?.base64),
+        referenceCount: twoWells ? references.length : attachments.length,
+        lastWrite: s.exclusiveWell ?? null,
+      };
       // WHICH conditioning this request carries — one shared decision, so an
       // exclusive (Klein) recipe ships `source_image` + `strength` (+ mask)
       // OR `edit_images`, never both, whatever the form is holding.
       const conditioning = conditioningForRequest(
         capabilities.sourceImageMode,
-        {
-          hasSource: Boolean(attachments[0]?.base64),
-          referenceCount:
-            capabilities.sourceImageMode === "single-or-references"
-              ? references.length
-              : attachments.length,
-          lastWrite: s.exclusiveWell ?? null,
-        },
+        wells,
       );
-      // A strip-only layout keeps `imageAttachments` as its references; the
-      // exclusive layout keeps them in their own store.
-      const editImages =
-        capabilities.sourceImageMode === "single-or-references"
-          ? references
-          : attachments;
-      const attachmentMode = conditioning === "references";
+      // The strip INSTEAD of the source block — a `replaces` recipe, or an
+      // exclusive one whose references are the active well.
+      const attachmentMode =
+        capabilities.sourceImageMode !== "single-and-references" &&
+        conditioning === "references";
+      // …and the strip BESIDE it. An additive reference is an image PROMPT,
+      // so it rides with `source_image`, its strength, the mask and
+      // ControlNet rather than replacing any of them.
+      const additiveReferences =
+        capabilities.sourceImageMode === "single-and-references" &&
+        requestCarriesReferences(conditioning);
+      // The adapter strength the recipe advertises; `null` means no adapter
+      // (or an older host), which is what keeps the field off the wire.
+      const referenceWeightControl =
+        capabilities.referenceImages?.weight ?? null;
       // Wan's first/last-frame render (#779) rides the existing `keyframes`
       // contract: both stills travel there and `source_image` stays home —
       // the engine refuses a request carrying both, and admission counts
@@ -1350,7 +1377,8 @@ export function useGenerateForm(): UseGenerateForm {
             )
           : null;
       const requestForcesBatchSizeOne =
-        capabilities.forcesBatchSizeOne || conditioning === "references";
+        capabilities.forcesBatchSizeOne ||
+        referencesLockBatchSize(capabilities.sourceImageMode, wells);
       const controlModel = capabilities.supportsControlNet
         ? s.controlModel.trim()
         : "";
@@ -1446,6 +1474,18 @@ export function useGenerateForm(): UseGenerateForm {
               edit_images: editImages.map((image) => image.base64),
             }
           : {
+              // The additive strip, beside everything below rather than
+              // instead of it, with its strength absent until touched so a
+              // default-valued render is byte-identical on the wire.
+              ...(additiveReferences
+                ? {
+                    edit_images: editImages.map((image) => image.base64),
+                    ...(referenceWeightControl &&
+                    typeof s.referenceWeight === "number"
+                      ? { reference_weight: s.referenceWeight }
+                      : {}),
+                  }
+                : {}),
               // A first/last-frame render ships BOTH stills as `keyframes`
               // and no `source_image` — the engine refuses a request
               // carrying both, and admission counts keyframes as source

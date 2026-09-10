@@ -8,6 +8,8 @@ import MaskEditorModal from "./MaskEditorModal.vue";
 import ReferenceCropEditor from "@studio/components/ReferenceCropEditor.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import { sdxlIpAdapterRecipe, sdxlRecipe } from "@studio/lib/generationProfile.testFixtures";
+import type { ModelEntry } from "../../lib/api/types";
 
 vi.mock("../../lib/api/client", () => ({
   apiJson: vi.fn(() => Promise.resolve([])),
@@ -551,5 +553,90 @@ describe("SourceImageWell strength direction", () => {
     expect(ltx.row?.props("low")).toBe("Start fresh");
     expect(ltx.row?.props("high")).toBe("Keep the photo");
     ltx.wrapper.unmount();
+  });
+});
+
+/**
+ * The ADDITIVE (IP-Adapter) layout: both wells live at once, and the
+ * adapter's own strength slider, gated on the recipe advertising one.
+ */
+describe("SourceImageWell — an additive recipe", () => {
+  beforeEach(() => setActivePinia(createPinia()));
+  afterEach(() => (document.body.innerHTML = ""));
+
+  function ipAdapterModel(recipe = sdxlIpAdapterRecipe()) {
+    return {
+      name: "sdxl-base:fp16",
+      family: "sdxl",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "sdxl",
+        profile_hash: "test",
+        default_recipe_id: "default",
+        recipes: [recipe],
+      },
+    } as unknown as ModelEntry;
+  }
+
+  function mountWell(form: GenerateForm, recipe = sdxlIpAdapterRecipe()) {
+    return mount(SourceImageWell, {
+      props: { form, selectedModel: ipAdapterModel(recipe) },
+      attachTo: document.body,
+    });
+  }
+
+  function ipAdapterForm(): GenerateForm {
+    return reactive({
+      ...newGenerateForm(),
+      family: "sdxl",
+      model: "sdxl-base:fp16",
+    });
+  }
+
+  it("renders both wells and parks neither", () => {
+    const form = ipAdapterForm();
+    form.sourceImage = "SRC";
+    form.imageAttachments = ["REF"];
+    // Nothing parks here, so the last-write marker must change nothing.
+    form.exclusiveWell = "references";
+    const wrapper = mountWell(form);
+
+    expect(wrapper.find("[data-test='source-media-wells']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='attachment-strip']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='references-parked-note']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='source-media-wells']").attributes("data-parked")).toBe(
+      undefined,
+    );
+    // The source refinements belong to the source well and stay live — on an
+    // exclusive recipe an active strip would have taken them away.
+    expect(wrapper.find("[data-test='source-fit-policy']").exists()).toBe(true);
+  });
+
+  it("renders the adapter strength from the recipe's own bounds", () => {
+    const form = ipAdapterForm();
+    form.imageAttachments = ["REF"];
+    const wrapper = mountWell(form);
+
+    const row = wrapper.get("[data-test='reference-weight']");
+    const slider = row.findComponent(SliderRow);
+    expect(slider.props("min")).toBe(0);
+    expect(slider.props("max")).toBe(2);
+    expect(slider.props("step")).toBe(0.05);
+    // Untouched renders the advertised default without writing it down.
+    expect(form.referenceWeight).toBeNull();
+    slider.vm.$emit("update:modelValue", 0.6);
+    expect(form.referenceWeight).toBe(0.6);
+  });
+
+  it("hides the strength where the recipe advertises no adapter", () => {
+    const form = ipAdapterForm();
+    form.imageAttachments = ["REF"];
+    // Same family, same model name: the gate is the advertised `weight`.
+    const wrapper = mountWell(form, sdxlRecipe());
+    expect(wrapper.find("[data-test='reference-weight']").exists()).toBe(false);
+  });
+
+  it("hides the strength until a reference is attached", () => {
+    expect(mountWell(ipAdapterForm()).find("[data-test='reference-weight']").exists()).toBe(false);
   });
 });

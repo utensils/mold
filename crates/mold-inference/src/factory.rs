@@ -84,6 +84,13 @@ pub struct FrozenEngineConfig {
     /// memory demand. Populated, these four paths are verified local below
     /// exactly like the selected encoder artifacts.
     pub identity_assets: Option<mold_core::pulid_assets::PulidPaths>,
+    /// Exact IP-Adapter image-prompt assets admission materialized for a
+    /// request that attaches a reference picture with a non-zero weight.
+    ///
+    /// `None` is the whole story for every other request, exactly as it is for
+    /// [`Self::identity_assets`]: no reference images, or a zero weight, plans
+    /// no assets, downloads nothing, and adds no memory demand.
+    pub ip_adapter_assets: Option<mold_core::ip_adapter_assets::IpAdapterPaths>,
     /// Exact Hunyuan3D paint runtime weights materialized for a textured mesh
     /// request before scheduler admission.
     pub paint_assets: Option<mold_core::hunyuan3d_paint_assets::Hunyuan3dPaintPaths>,
@@ -154,6 +161,7 @@ impl FrozenEngineConfig {
             selected_gemma_paths: Vec::new(),
             selected_umt5_path: None,
             identity_assets: None,
+            ip_adapter_assets: None,
             paint_assets: None,
             matting_asset: None,
             delight_paths: None,
@@ -472,6 +480,22 @@ pub fn create_engine_with_pool(
             mold_core::identity::identity_family_with_hint(&model_name, family_hint.as_deref())
                 .and_then(|family| mold_core::pulid_assets::pulid_paths_for(config, family));
     }
+    // The IP-Adapter bundle takes the identical treatment, for the identical
+    // reason: the forced-local path has no scheduler admission to materialize
+    // it, and `FrozenEngineConfig::resolve` must stay `None` or every admitted
+    // job's frozen config would disagree with the live one the moment a bundle
+    // is installed. `ip_adapter_paths_for` answers `Some` only for a complete
+    // on-disk bundle, so the "every populated frozen path must already be
+    // local" check above holds by construction, and the bundle follows the
+    // MODEL's family because the adapter's projections are that
+    // architecture's width.
+    if frozen.ip_adapter_assets.is_none() {
+        frozen.ip_adapter_assets =
+            mold_core::ip_adapter_assets::ImagePromptFamily::from_generation_family(&frozen.family)
+                .and_then(|family| {
+                    mold_core::ip_adapter_assets::ip_adapter_paths_for(config, family)
+                });
+    }
     if frozen.paint_assets.is_none() {
         frozen.paint_assets = mold_core::hunyuan3d_paint_assets::paint_paths(config);
     }
@@ -618,6 +642,14 @@ where
             &assets.face_parser_source,
         ]
     });
+    // The IP-Adapter bundle joins them under the same one rule. Both files
+    // are checked, not just the adapter: the tower is 2.5 GB and is opened
+    // mid-render, so a missing one would surface as a failure inside a leased
+    // job rather than as a refusal to dispatch.
+    let ip_adapter_paths = frozen
+        .ip_adapter_assets
+        .iter()
+        .flat_map(|assets| [&assets.adapter, &assets.vision_encoder]);
     let paint_paths = frozen
         .paint_assets
         .iter()
@@ -630,6 +662,7 @@ where
         .chain(frozen.selected_gemma_paths.iter())
         .chain(frozen.selected_umt5_path.iter())
         .chain(identity_paths)
+        .chain(ip_adapter_paths)
         .chain(paint_paths)
     {
         if !path.is_file() {
@@ -676,6 +709,7 @@ where
                     load_strategy,
                     gpu_ordinal,
                     shared_pool,
+                    frozen.ip_adapter_assets.clone(),
                 )?))
             } else {
                 Ok(boxed_inference_engine(SD15Engine::new(
@@ -685,6 +719,7 @@ where
                     load_strategy,
                     gpu_ordinal,
                     shared_pool,
+                    frozen.ip_adapter_assets.clone(),
                 )))
             }
         }
@@ -721,6 +756,7 @@ where
                     gpu_ordinal,
                     shared_pool,
                     frozen.identity_assets.clone(),
+                    frozen.ip_adapter_assets.clone(),
                 )?))
             } else {
                 Ok(boxed_inference_engine(SDXLEngine::new(
@@ -732,6 +768,7 @@ where
                     gpu_ordinal,
                     shared_pool,
                     frozen.identity_assets.clone(),
+                    frozen.ip_adapter_assets.clone(),
                 )))
             }
         }

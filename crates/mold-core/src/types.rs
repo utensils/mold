@@ -1925,6 +1925,17 @@ pub struct GenerateRequest {
         with = "base64_vec_opt"
     )]
     pub edit_images: Option<Vec<Vec<u8>>>,
+    /// Injection strength for a decoupled-cross-attention reference adapter —
+    /// IP-Adapter on SD1.5 and SDXL.
+    ///
+    /// It sits beside [`Self::edit_images`], the input it modulates, rather
+    /// than in the identity block above: the two contracts are independent and
+    /// a request may carry both. Absent means the recipe's advertised default
+    /// (`capabilities.reference_images.weight`); exactly `0.0` renders the
+    /// unconditioned print, so nothing is pulled, loaded, or encoded — the
+    /// same falsification case `id_weight` has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_weight: Option<f64>,
     /// Ordered heterogeneous MiniMax H3 Ref2VA inputs. Other families retain
     /// their existing source/edit fields and must reject this additive field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7057,6 +7068,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.75,
             mask_image: None,
@@ -7312,6 +7324,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.75,
             mask_image: None,
@@ -7395,6 +7408,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.75,
             mask_image: None,
@@ -7681,6 +7695,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.75,
             mask_image: None,
@@ -8015,6 +8030,7 @@ mod tests {
             source_image: Some(b"fake-png-bytes".to_vec()),
             source_image_name: Some("mold-flux-123-456.png".to_string()),
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.6,
             mask_image: None,
@@ -8265,6 +8281,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.75,
             mask_image: None,
@@ -8345,6 +8362,7 @@ mod tests {
             source_image: Some(vec![1, 2, 3]),
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.5,
             mask_image: None,
@@ -8428,6 +8446,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.75,
             mask_image: None,
@@ -9229,6 +9248,7 @@ mod tests {
             source_image: Some(image_bytes.clone()),
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.5,
             mask_image: None,
@@ -9315,6 +9335,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: Some(vec![image_a.clone(), image_b.clone()]),
+            reference_weight: None,
             references: None,
             strength: 0.75,
             mask_image: None,
@@ -9414,6 +9435,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.75,
             mask_image: None,
@@ -9498,6 +9520,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.75,
             mask_image: None,
@@ -9603,6 +9626,7 @@ mod tests {
             source_image: Some(source_bytes),
             source_image_name: None,
             edit_images: None,
+            reference_weight: None,
             references: None,
             strength: 0.75,
             mask_image: Some(mask_bytes.clone()),

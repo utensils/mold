@@ -54,7 +54,10 @@ fn resolve_file_path(
         | ModelComponent::IdentityVisionEncoder
         | ModelComponent::FaceDetector
         | ModelComponent::FaceRecognizer
-        | ModelComponent::FaceParser => None,
+        | ModelComponent::FaceParser
+        | ModelComponent::ImagePromptAdapter
+        | ModelComponent::ImagePromptVisionEncoder
+        | ModelComponent::ImagePromptVisionConfig => None,
         ModelComponent::Upscaler => mcfg.transformer.clone(),
     }
 }
@@ -99,6 +102,9 @@ fn resolve_verify_path(
             | ModelComponent::FaceDetector
             | ModelComponent::FaceRecognizer
             | ModelComponent::FaceParser
+            | ModelComponent::ImagePromptAdapter
+            | ModelComponent::ImagePromptVisionEncoder
+            | ModelComponent::ImagePromptVisionConfig
             | ModelComponent::Upscaler => None,
         };
         if let Some(p) = path {
@@ -142,6 +148,9 @@ fn component_label(component: &ModelComponent) -> &'static str {
         ModelComponent::FaceDetector => "Face Detector",
         ModelComponent::FaceRecognizer => "Face Recognizer",
         ModelComponent::FaceParser => "Face Parser",
+        ModelComponent::ImagePromptAdapter => "Image Prompt Adapter",
+        ModelComponent::ImagePromptVisionEncoder => "Image Prompt Vision Encoder",
+        ModelComponent::ImagePromptVisionConfig => "Image Prompt Vision Config",
     }
 }
 
