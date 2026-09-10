@@ -15,6 +15,9 @@ physically continuous path between them and the change that happens: walking
 into, appearing, turning into, camera left, camera right. Check the model row
 for its supported source roles.
 
+The prompt is optional here: the attached frame decides the shot. Unprompted,
+expect near-static micro-motion.
+
 ## Examples
 
 Input: dancing

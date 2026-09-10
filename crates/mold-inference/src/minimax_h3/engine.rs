@@ -2502,7 +2502,10 @@ mod tests {
             _checkpoint: &mut dyn H3PipelineCheckpoint,
         ) -> Result<H3TextConditioning> {
             self.trace.lock().unwrap().push("encode-text");
-            assert!(!prompt.is_empty());
+            // An unprompted render is legal once the request is conditioned,
+            // so the double asserts the sequence is not degenerate rather
+            // than that a prompt exists.
+            assert!(!prompt.is_empty() || !references.is_empty());
             assert_eq!(references.len(), 1);
             // Two merged pads plus the two flanking markers, which are vision
             // rows too (`PresentationBuilder::vision`).
@@ -2716,7 +2719,10 @@ mod tests {
             references: &[H3ReferencePresentation],
             _checkpoint: &mut dyn H3PipelineCheckpoint,
         ) -> Result<H3TextConditioning> {
-            assert!(!prompt.is_empty());
+            // An unprompted render is legal once the request is conditioned,
+            // so the double asserts the sequence is not degenerate rather
+            // than that a prompt exists.
+            assert!(!prompt.is_empty() || !references.is_empty());
             let mut tags = vec![H3ModalityTag::Text];
             for reference in references {
                 // The trace records the presentation's merged pads; the tags

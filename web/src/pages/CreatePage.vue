@@ -217,6 +217,7 @@ import {
   submitsExtend,
 } from "@studio/lib/extend";
 import {
+  promptConditioningInputFor,
   promptGuidance,
   promptOptional,
   promptPlaceholder,
@@ -1202,41 +1203,50 @@ const h3FrameError = computed(() =>
     capabilities.value.requiresSourceImage,
   ),
 );
-const h3GenerationInputBlocker = computed<string | null>(() => {
-  if (h3FrameError.value) return h3FrameError.value;
-  if (
-    isMinimaxH3Identity(currentFamily.value, form.state.value.model) &&
-    promptRequired({
-      recipe: activeRecipe.value,
-      family: currentFamily.value,
-      model: form.state.value.model,
-      sourceImage: form.state.value.h3Authoring?.firstFrame,
-    }) &&
-    !form.state.value.prompt.trim()
-  ) {
-    return "Add a prompt before generating.";
-  }
-  return null;
-});
-
 /** The prompt rule for the request being built. The resolved recipe is the
  * authority when the host advertises one, so `ignored` (Hunyuan3D has no
  * text encoder at all) and `optional` both reach the composer from the
- * server rather than a client family list. */
-const promptConditioning = computed(() => ({
-  recipe: activeRecipe.value,
-  family: currentFamily.value,
-  model: form.state.value.model,
-  imageAttachments: form.state.value.imageAttachments,
-  keyframes: form.state.value.keyframes,
-  sourceVideo: form.state.value.sourceVideo,
-  sourceVideoPath: form.state.value.sourceVideoPath,
-  extendVideo: form.state.value.extendVideo,
-  extendVideoPath: form.state.value.extendVideoPath,
-}));
-// A conditioned LTX-2 render may go out undescribed — the server admits it,
-// so the composer says so instead of implying a prompt is mandatory. Nothing
-// here gates submit: `validateSubmit` never required a prompt.
+ * server rather than a client family list. The projection is studio's one
+ * shared mapper, so H3's boundary frames and references and LTX-2's end
+ * frame are read here exactly as desktop and the phone read them. */
+const promptConditioning = computed(() =>
+  promptConditioningInputFor(
+    {
+      family: currentFamily.value,
+      model: form.state.value.model,
+      imageAttachments: form.state.value.imageAttachments,
+      keyframes: form.state.value.keyframes,
+      sourceVideo: form.state.value.sourceVideo,
+      sourceVideoPath: form.state.value.sourceVideoPath,
+      extendVideo: form.state.value.extendVideo,
+      extendVideoPath: form.state.value.extendVideoPath,
+      endFrame: form.state.value.endFrame,
+      h3Authoring: form.state.value.h3Authoring,
+    },
+    activeRecipe.value,
+  ),
+);
+
+/**
+ * The one prompt refusal, family-agnostic. It used to exist only for MiniMax
+ * H3, so every other model on web could be submitted undescribed and answered
+ * with a server 422; the shared rule refuses here instead, and a family whose
+ * conditioning decides the render (LTX-2, Wan, H3) or that reads no prompt at
+ * all (Hunyuan3D) is never refused.
+ */
+const promptBlocker = computed<string | null>(() =>
+  promptRequired(promptConditioning.value) && !form.state.value.prompt.trim()
+    ? "Add a prompt before generating."
+    : null,
+);
+
+/** Everything that stops this render before it is planned, in the order the
+ * person can act on it. Rendered inline beside Generate, never as a toast. */
+const generationInputBlocker = computed<string | null>(
+  () => h3FrameError.value ?? promptBlocker.value,
+);
+// A conditioned render may go out undescribed — the server admits it, so the
+// composer says so instead of implying a prompt is mandatory.
 const canSkipPrompt = computed(() => promptOptional(promptConditioning.value));
 /** The empty canvas's one what-to-do sentence, resolved by studio's
  * precedence (required / optional / prompt-ignored) and handed down whole:
@@ -2254,8 +2264,8 @@ function validateSubmit(): boolean {
     showAdvanced.value = true;
     return false;
   }
-  if (h3GenerationInputBlocker.value) {
-    composerError.value = h3GenerationInputBlocker.value;
+  if (promptBlocker.value) {
+    composerError.value = promptBlocker.value;
     return false;
   }
   const recipe = effectiveGenerationRecipe(
@@ -4653,7 +4663,7 @@ onBeforeUnmount(() => {
           :busy="ordinarySubmitBlocked || submitInFlight"
           :cancellable="submitInFlight"
           :busy-label="placementStatus ?? 'Planning generation…'"
-          :disabled-reason="h3GenerationInputBlocker"
+          :disabled-reason="generationInputBlocker"
           :expanded="expanded"
           :prompt-optional="canSkipPrompt"
           :required-placeholder="requiredPromptPlaceholder"

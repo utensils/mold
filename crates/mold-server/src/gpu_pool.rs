@@ -2974,11 +2974,31 @@ mod tests {
             source_image: Some(vec![0x89, 0x50, 0x4e, 0x47]),
             ..base.clone()
         };
+        // A reference set is the ONLY well MiniMax H3 Ref2VA has, and it is
+        // encoded and resident like any other conditioning, so it must not
+        // inherit a bare render's cooldown or reduced grant.
+        let with_references = mold_core::GenerateRequest {
+            references: Some(vec![mold_core::GenerationReference::Image {
+                media: mold_core::GenerationReferenceAuthority::Inline {
+                    data: vec![0x89, 0x50, 0x4e, 0x47],
+                },
+                provenance: mold_core::GenerationReferenceProvenance {
+                    name: Some("reference.png".to_string()),
+                    sha256: None,
+                    crop: None,
+                },
+                mime_type: "image/png".to_string(),
+                width: 1920,
+                height: 1080,
+            }]),
+            ..base.clone()
+        };
 
         for (label, conditioned) in [
             ("keyframes", &with_keyframes),
             ("source_video_path", &with_source_video_path),
             ("source_image", &with_source_image),
+            ("references", &with_references),
         ] {
             assert_ne!(
                 oom_shape_bucket(conditioned),

@@ -365,6 +365,7 @@ mod tests {
     fn test_encode_png_with_metadata_chunks() {
         let tensor = solid_red_tensor(4, 4);
         let metadata = OutputMetadata {
+            family: None,
             mesh_workflow: None,
             video_only: None,
             attention_path: None,
@@ -563,6 +564,7 @@ mod tests {
     #[test]
     fn test_update_output_metadata_size_overrides_dimensions() {
         let mut metadata = Some(OutputMetadata {
+            family: None,
             mesh_workflow: None,
             video_only: None,
             attention_path: None,
@@ -652,6 +654,7 @@ mod tests {
 
     fn test_metadata() -> OutputMetadata {
         OutputMetadata {
+            family: None,
             mesh_workflow: None,
             video_only: None,
             attention_path: None,
@@ -834,6 +837,7 @@ mod tests {
     fn test_encode_jpeg_metadata_roundtrip() {
         let tensor = solid_red_tensor(8, 8);
         let metadata = OutputMetadata {
+            family: None,
             mesh_workflow: None,
             video_only: None,
             attention_path: None,

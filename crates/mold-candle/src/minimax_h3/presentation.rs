@@ -286,6 +286,44 @@ mod tests {
         assert!(!empty.token_ids.contains(&151_643));
     }
 
+    /// The prompt is optional wherever conditioning already decides the
+    /// render, so an unprompted FL2VA or Ref2VA presentation is now an
+    /// ordinary request. It must still carry a real sequence: the boundary
+    /// frames and the reference tags contribute tokens of their own, so only
+    /// the UNCONDITIONED case is degenerate — and that case keeps the prompt
+    /// required.
+    #[test]
+    fn an_unprompted_conditioned_presentation_still_carries_tokens() {
+        let tokenizer = RecordingTokenizer::new();
+
+        let fl2va = build_fl2va_presentation(&tokenizer, "", &[4], 64).unwrap();
+        assert!(!fl2va.token_ids.is_empty());
+        assert_eq!(fl2va.token_ids.len(), fl2va.h3_tags.len());
+        assert!(fl2va.token_ids.contains(&H3_VISION_START_TOKEN_ID));
+        assert!(fl2va.h3_tags.contains(&H3ModalityTag::Vision));
+
+        let ref2va = build_ref2va_presentation(
+            &tokenizer,
+            "",
+            &[RefPresentation {
+                kind: RefPresentationKind::Image { vision_tokens: 3 },
+                has_audio: false,
+            }],
+            64,
+        )
+        .unwrap();
+        assert!(!ref2va.token_ids.is_empty());
+        assert_eq!(ref2va.token_ids.len(), ref2va.h3_tags.len());
+        assert!(ref2va.token_ids.contains(&H3_VISION_START_TOKEN_ID));
+
+        // The unconditioned twin is the degenerate one the rule still keeps
+        // behind a required prompt.
+        assert!(build_text_presentation(&tokenizer, "", 64)
+            .unwrap()
+            .token_ids
+            .is_empty());
+    }
+
     #[test]
     fn mixed_references_keep_authoritative_order_and_separate_tag_types() {
         let tokenizer = RecordingTokenizer::new();

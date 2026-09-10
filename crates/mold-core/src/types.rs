@@ -583,9 +583,13 @@ impl ExpandContext {
                 loras.push(lora_display_name(&lora.path));
             }
         }
+        // The narrowed answer, not the raw "is anything attached" predicate:
+        // an audio-only render reads no pixels, so telling the expander its
+        // prompt is optional would contradict the same recipe's advertised
+        // mode and the refusal admission is about to issue.
         let prompt_mode = Some(crate::generation_profile::prompt_requirement_for_family(
             Some(family),
-            crate::validation::has_visual_conditioning(req),
+            crate::validation::prompt_conditioning_for(req),
         ));
         Self {
             model: Some(req.model.clone()),
@@ -3141,6 +3145,18 @@ pub struct OutputMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     pub model: String,
+    /// The family that rendered this print, resolved through the manifest at
+    /// the moment metadata was built.
+    ///
+    /// `model` alone is not enough for a client restoring a print whose
+    /// checkpoint is not installed on the fleet: with no catalog row to
+    /// resolve it cannot tell a 3-D print — whose prompt is `Ignored` — from
+    /// an image one, and holds Generate behind a prompt the family has no
+    /// text encoder for. Additive: **absence means an older print or a model
+    /// the manifest cannot classify, never "no family"**, so a client must
+    /// fall back rather than treat it as an answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
     pub seed: u64,
     pub steps: u32,
     pub guidance: f64,
@@ -3412,6 +3428,11 @@ impl OutputMetadata {
         Self {
             prompt: req.prompt.clone(),
             title: req.title.clone(),
+            // Resolved the same way every other family-derived field here is:
+            // through the manifest, which an installed `cv:` / `hf:`
+            // checkpoint has no row in. That leaves the field absent rather
+            // than guessed.
+            family: crate::validation::resolved_family_for(&req.model).map(str::to_owned),
             generation_time_ms: None,
             // Creation-time filing rides through as requested. Admission has
             // already normalized the tags and resolved the collection ref to
@@ -6689,6 +6710,98 @@ mod tests {
         assert_eq!(derived.loras, vec!["paper-boat".to_string()]);
     }
 
+    /// The expander must be told the SAME contract admission enforces.
+    ///
+    /// An audio-only render reads no pixels, so an attached still conditions
+    /// nothing; the recipe advertises `Required` and admission refuses a
+    /// blank prompt. `ExpandContext` asked the raw "is anything attached"
+    /// predicate instead, so it told the expander the prompt was optional for
+    /// a request the server was about to refuse.
+    #[test]
+    fn a_conditioned_audio_only_context_records_a_required_prompt() {
+        use crate::generation_profile::PromptRequirement;
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "model": "ltx-2.3-22b-dev:fp8",
+            "prompt": "rain on a tin roof",
+            "width": 0,
+            "height": 0,
+            "steps": 4,
+            "source_image": "AQID"
+        }))
+        .unwrap();
+        request.pipeline = Some(Ltx2PipelineMode::T2a);
+        let audio_only = ExpandContext::for_generation("ltx2", &request, None);
+        assert_eq!(audio_only.prompt_mode, Some(PromptRequirement::Required));
+
+        // The same checkpoint on a video pipeline still answers Optional.
+        request.pipeline = None;
+        let video = ExpandContext::for_generation("ltx2", &request, None);
+        assert_eq!(video.prompt_mode, Some(PromptRequirement::Optional));
+    }
+
+    /// A print names the family that rendered it, not only the model.
+    ///
+    /// A client restoring a print whose checkpoint is not installed on the
+    /// fleet has no catalog row to resolve, so without this it cannot tell a
+    /// 3-D print (whose prompt is ignored) from an image one and holds
+    /// Generate behind a prompt the family has no encoder for.
+    #[test]
+    fn metadata_records_the_resolved_family() {
+        let request = |model: &str| -> GenerateRequest {
+            serde_json::from_value(serde_json::json!({
+                "model": model,
+                "prompt": "a chair",
+                "width": 1024,
+                "height": 1024,
+                "steps": 4
+            }))
+            .unwrap()
+        };
+        for (model, family) in [
+            ("hunyuan3d-2.1:fp16", "hunyuan3d"),
+            ("flux-dev:q8", "flux"),
+            ("wan22-ti2v-5b:fp16", "wan"),
+        ] {
+            let metadata = OutputMetadata::from_generate_request(&request(model), 7, None, "test");
+            assert_eq!(metadata.family.as_deref(), Some(family), "{model}");
+        }
+        // A catalog id the manifest cannot classify records no family at all,
+        // rather than a guess. Absence is "unknown here", never "none".
+        let opaque = OutputMetadata::from_generate_request(&request("cv:2041121"), 7, None, "test");
+        assert_eq!(opaque.family, None);
+    }
+
+    /// Additive on the wire in both directions: metadata written before the
+    /// field parses with `family: None`, and a print with no family
+    /// serializes exactly the JSON older readers already saw.
+    #[test]
+    fn pre_field_metadata_round_trips_with_no_family() {
+        let mut metadata = OutputMetadata::from_generate_request(
+            &serde_json::from_value::<GenerateRequest>(serde_json::json!({
+                "model": "cv:2041121",
+                "prompt": "a chair",
+                "width": 1024,
+                "height": 1024,
+                "steps": 4
+            }))
+            .unwrap(),
+            7,
+            None,
+            "test",
+        );
+        assert_eq!(metadata.family, None);
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(!json.contains("family"), "got: {json}");
+        let parsed: OutputMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.family, None);
+
+        metadata.family = Some("wan".to_string());
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(json.contains(r#""family":"wan""#), "got: {json}");
+        let parsed: OutputMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.family.as_deref(), Some("wan"));
+    }
+
     #[test]
     fn expand_context_reads_the_prompt_mode_from_the_profile_rule() {
         use crate::generation_profile::PromptRequirement;
@@ -6725,6 +6838,24 @@ mod tests {
         assert_eq!(bare.prompt_mode, Some(PromptRequirement::Required));
         let image = ExpandContext::for_generation("flux", &request("flux-schnell", false), None);
         assert_eq!(image.prompt_mode, Some(PromptRequirement::Required));
+        // Wan and MiniMax H3 answer the same way LTX-2 does.
+        let wan = ExpandContext::for_generation("wan", &request("wan22-ti2v-5b:fp16", true), None);
+        assert_eq!(wan.prompt_mode, Some(PromptRequirement::Optional));
+        let wan_bare =
+            ExpandContext::for_generation("wan", &request("wan22-t2v-a14b:q5", false), None);
+        assert_eq!(wan_bare.prompt_mode, Some(PromptRequirement::Required));
+        let h3 = ExpandContext::for_generation(
+            "minimax-h3",
+            &request(crate::minimax_h3::FL2VA_COMFY, true),
+            None,
+        );
+        assert_eq!(h3.prompt_mode, Some(PromptRequirement::Optional));
+        let h3_bare = ExpandContext::for_generation(
+            "minimax-h3",
+            &request(crate::minimax_h3::FL2VA_COMFY, false),
+            None,
+        );
+        assert_eq!(h3_bare.prompt_mode, Some(PromptRequirement::Required));
         // Additive on the wire: absent for old clients, lowercase when sent.
         let old_wire: ExpandContext = serde_json::from_str(r#"{"model":"flux-schnell"}"#).unwrap();
         assert_eq!(old_wire.prompt_mode, None);

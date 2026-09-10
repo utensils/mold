@@ -9802,6 +9802,8 @@ impl App {
                         .map(|composed| composed.tags)
                         .unwrap_or_else(|_| submitted_params.tags.clone());
                         let meta = mold_core::OutputMetadata {
+                            family: mold_core::validation::resolved_family_for(&actual_model)
+                                .map(str::to_owned),
                             video_only: None,
                             attention_path: None,
                             mesh_workflow: None,
@@ -10398,6 +10400,8 @@ impl App {
                         .map(|e| e.metadata.clone());
 
                     let meta = mold_core::OutputMetadata {
+                        family: mold_core::validation::resolved_family_for(&model)
+                            .map(str::to_owned),
                         video_only: None,
                         attention_path: None,
                         mesh_workflow: None,
@@ -11811,6 +11815,7 @@ mod tests {
         let entry = GalleryEntry {
             path: std::path::PathBuf::from("/home/user/.mold/output/mold-flux-1234.png"),
             metadata: mold_core::OutputMetadata {
+                family: None,
                 mesh_workflow: None,
                 video_only: None,
                 attention_path: None,
@@ -11902,6 +11907,7 @@ mod tests {
         let entry = GalleryEntry {
             path: std::path::PathBuf::new(),
             metadata: mold_core::OutputMetadata {
+                family: None,
                 mesh_workflow: None,
                 video_only: None,
                 attention_path: None,
@@ -12054,6 +12060,7 @@ mod tests {
 
     fn make_test_metadata() -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            family: None,
             mesh_workflow: None,
             video_only: None,
             attention_path: None,

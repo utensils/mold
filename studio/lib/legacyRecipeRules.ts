@@ -29,14 +29,18 @@ const PROMPT_OPTIONAL_FAMILIES: ReadonlySet<string> = new Set([
 /**
  * The pre-profile prompt rule, spelled as the ADVERTISED mode: the answer for
  * a conditioned request, exactly as a host that emits the field would say it.
- * Never `ignored` — no family that predates the field lacked a text encoder.
+ *
+ * A mesh family answers `ignored` on every host version: Hunyuan3D has no
+ * text encoder anywhere, so the prompt was never read even before the field
+ * existed. Answering `required` here held Generate on a restored 3-D print
+ * whose model is not installed — the one case where no recipe can speak.
  */
 export function legacyPromptRequirementForFamily(
   family: string | null | undefined,
 ): PromptRequirement {
-  return PROMPT_OPTIONAL_FAMILIES.has((family ?? "").trim().toLowerCase())
-    ? "optional"
-    : "required";
+  const normalized = (family ?? "").trim().toLowerCase();
+  if (isMeshFamily(normalized)) return "ignored";
+  return PROMPT_OPTIONAL_FAMILIES.has(normalized) ? "optional" : "required";
 }
 
 export function isWanFamily(family: string): boolean {

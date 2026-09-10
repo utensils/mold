@@ -367,11 +367,14 @@ mold run ltx-2-19b-distilled:fp8 \
 mold run ltx-2-19b-distilled:fp8 --image ./still.png --frames 97 --format mp4
 ```
 
-The prompt is optional for `ltx2` when the
-request already carries visual conditioning (`--image`, `--keyframe`, `--video`,
-or `--extend`). It saves no VRAM and usually yields near-static motion; see
-[the LTX-2 page](/models/ltx2#the-prompt-is-optional-for-image-to-video).
-Legacy `ltx-video` remains prompt-required and rejects image conditioning.
+The prompt is optional for `ltx2`, `wan` and `minimax-h3` when the request
+already carries visual conditioning (`--image`, `--keyframe`, `--video`,
+`--extend`, or a reference set). What you attached already decides the render,
+so a prompt refines it. It saves no VRAM and usually yields near-static motion;
+see [the LTX-2 page](/models/ltx2#the-prompt-is-optional-for-image-to-video).
+A tier that takes no source keeps the prompt required — legacy `ltx-video`,
+which rejects image conditioning outright, and every Wan text-to-video tier —
+and so does an audio-only `--pipeline t2a` render, which reads no pixels.
 
 LTX-2 also adds:
 

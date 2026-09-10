@@ -20,6 +20,8 @@ import { MAX_LORA_STACK } from "./capabilities";
 import { WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT } from "@studio/lib/negativePrompt";
 import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import { addTag, emptyFileUnderState, pickCollection } from "@studio/lib/fileUnder";
+import { promptRequired, promptRequirementFor } from "@studio/lib/promptRequirement";
+import { promptInputForForm } from "./promptRecipe";
 import type { ModelEntry, OutputMetadata } from "./api/types";
 import type { GenerationProfileSet, GenerationRecipeProfile } from "@studio/lib/generationProfile";
 import {
@@ -2325,6 +2327,30 @@ describe("applyMetadataToForm", () => {
     expect(form.prompt).toBe("a lighthouse at dusk");
     expect(form.negativePrompt).toBe("blurry, low quality");
     expect(form.seed).toBe("42");
+  });
+
+  // The print's own recorded family is the ONLY thing left that can answer
+  // for a model no connected machine has. Clearing it left the shared prompt
+  // rule with nothing to read, and a restored Hunyuan3D print — a family with
+  // no text encoder at all — sat behind a prompt nobody could satisfy.
+  it("keeps the family a print recorded when its model is not installed", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, { ...richImageMetadata(), family: "hunyuan3d" }, []);
+    expect(form.family).toBe("hunyuan3d");
+    // A stale snapshot must still not speak for another model.
+    expect(form.recipeCapabilities).toBeNull();
+  });
+
+  it("ignores the prompt for an uninstalled 3-D print", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      { ...richImageMetadata(), model: "hunyuan3d-2.1:fp16", family: "hunyuan3d" },
+      [],
+    );
+    form.prompt = "";
+    expect(promptRequirementFor(promptInputForForm(form))).toBe("ignored");
+    expect(promptRequired(promptInputForForm(form))).toBe(false);
   });
 
   it("preserves H3 boundary provenance while requiring reattachment", () => {

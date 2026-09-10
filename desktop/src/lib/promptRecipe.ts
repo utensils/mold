@@ -14,7 +14,11 @@
  * A form with no snapshot is an older host that advertises no recipe: return
  * `null` and the legacy family rule answers, exactly as before.
  */
-import type { PromptConditioningInput, PromptRecipe } from "@studio/lib/promptRequirement";
+import {
+  promptConditioningInputFor,
+  type PromptConditioningInput,
+  type PromptRecipe,
+} from "@studio/lib/promptRequirement";
 import type { GenerateForm } from "./generateForm";
 
 export function promptRecipeFromForm(
@@ -25,11 +29,15 @@ export function promptRecipeFromForm(
 }
 
 /**
- * The form as the shared prompt rule reads it: its own conditioning fields
- * (`GenerateForm` satisfies `PromptConditioningInput` structurally) plus the
- * advertised recipe when the host sent one.
+ * The form as the shared prompt rule reads it: an EXPLICIT projection of its
+ * conditioning fields through studio's one shared mapper, plus the advertised
+ * recipe when the host sent one.
+ *
+ * It was a spread, which silently carried only the fields whose names already
+ * matched — so an LTX-2 end frame and every MiniMax H3 boundary frame or
+ * reference (they live inside `h3Authoring`) were invisible to the rule, and
+ * a conditioned render the host would admit still demanded a prompt.
  */
 export function promptInputForForm(form: GenerateForm): PromptConditioningInput {
-  const recipe = promptRecipeFromForm(form);
-  return recipe ? { ...form, recipe } : form;
+  return promptConditioningInputFor(form, promptRecipeFromForm(form));
 }

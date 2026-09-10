@@ -185,6 +185,7 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            family: None,
             mesh_workflow: None,
             video_only: None,
             attention_path: None,

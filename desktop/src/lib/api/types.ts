@@ -798,6 +798,11 @@ export interface OutputMetadata {
   batch_index?: number | null;
   batch_count?: number | null;
   model: string;
+  /** The family the host resolved this render to. Additive: absent on every
+   * print made before it was recorded, which reads as "unknown family", never
+   * as a refusal. It is the only answer a client has for a print whose model
+   * is not installed anywhere. */
+  family?: string | null;
   seed: number;
   steps: number;
   guidance: number;

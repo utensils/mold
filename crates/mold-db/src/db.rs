@@ -893,7 +893,11 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Generat
         .unwrap_or(OutputFormat::Png);
     let scheduler_s: Option<String> = row.get(17)?;
     let scheduler = scheduler_s.as_deref().and_then(scheduler_from_str);
+    let model: String = row.get(7)?;
     let legacy_metadata = OutputMetadata {
+        // A row with no embedded metadata still names its model, so the
+        // family is resolvable here exactly as it is at the build site.
+        family: mold_core::validation::resolved_family_for(&model).map(str::to_owned),
         video_only: None,
         attention_path: None,
         int8_arm: None,
@@ -907,7 +911,7 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Generat
         distill_strength_high: None,
         distill_strength_low: None,
         job_id: None,
-        model: row.get(7)?,
+        model,
         prompt: row.get(8)?,
         negative_prompt: row.get(9)?,
         original_prompt: row.get(10)?,
@@ -1091,6 +1095,7 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            family: None,
             mesh_workflow: None,
             video_only: None,
             attention_path: None,

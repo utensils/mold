@@ -111,19 +111,33 @@ fn canonicalize_prompt(text: &str) -> String {
 /// reserves the final slot for `</s>`; naively truncating after the
 /// post-processor has appended it would drop EOS and treat 512 content
 /// tokens as valid, changing the conditioning for long prompts.
-fn fit_ids_to_window(mut ids: Vec<u32>) -> (Vec<u32>, usize) {
+///
+/// A zero-length window is refused by name rather than padded. Every position
+/// past `len` is masked with [`MASK_NEG`], so a row reporting no valid tokens
+/// masks every key of every query row and its softmax is NaN — a silent
+/// corruption with the right tensor shape. An empty PROMPT never reaches this
+/// (the tokenizer's post-processor appends EOS, so `len == 1`), which is
+/// exactly why the failure would only ever appear through some other bug.
+fn fit_ids_to_window(mut ids: Vec<u32>) -> Result<(Vec<u32>, usize)> {
+    if ids.is_empty() {
+        return Err(anyhow!(
+            "UMT5 tokenization produced an empty token window; every query row would be fully \
+             masked and its attention softmax would be NaN"
+        ));
+    }
     if ids.len() > WAN_TEXT_LEN {
         ids.truncate(WAN_TEXT_LEN);
         ids[WAN_TEXT_LEN - 1] = UMT5_EOS_ID;
     }
     let len = ids.len();
     ids.resize(WAN_TEXT_LEN, UMT5_PAD_ID);
-    (ids, len)
+    Ok((ids, len))
 }
 
 /// Additive key-mask value. Applied in f32 before softmax; large enough to
-/// zero the weight without producing NaN on rows that keep valid keys (query
-/// rows are never fully masked because every prompt has at least one token).
+/// zero the weight without producing NaN on rows that keep valid keys. A row
+/// with NO valid key would be NaN, which is why [`fit_ids_to_window`] refuses
+/// an empty window rather than trusting that every prompt has a token.
 const MASK_NEG: f32 = -1e9;
 
 /// UMT5 geometry. A struct rather than constants so tests can build tiny
@@ -688,7 +702,7 @@ impl WanTextEncoder {
                 .tokenizer
                 .encode(cleaned.as_str(), true)
                 .map_err(|e| anyhow!("UMT5 tokenization failed: {e}"))?;
-            let (row, len) = fit_ids_to_window(encoding.get_ids().to_vec());
+            let (row, len) = fit_ids_to_window(encoding.get_ids().to_vec())?;
             lengths.push(len);
             ids.push(row);
         }
@@ -829,6 +843,19 @@ mod tests {
         assert_eq!(canonicalize_prompt("a\u{a0}b"), "a b");
     }
 
+    /// A zero-length window masks every key of every query row, and the
+    /// softmax over a row of `MASK_NEG` is NaN — silently, with no error and
+    /// no visibly wrong tensor shape. The window's own comment used to assume
+    /// this away ("every prompt has at least one token"), which holds only
+    /// because the tokenizer's post-processor appends EOS. Make it a refusal.
+    #[test]
+    fn an_empty_token_window_is_refused_rather_than_masked_to_nan() {
+        let error = fit_ids_to_window(Vec::new())
+            .expect_err("a zero-length window leaves no valid key for any query row");
+        let message = error.to_string();
+        assert!(message.contains("empty token window"), "got: {message}");
+    }
+
     /// HF-style truncation reserves the final slot for EOS; the window is
     /// padded with PAD=0 and the reported length covers EOS.
     #[test]
@@ -836,7 +863,7 @@ mod tests {
         // Short input: untouched, padded, length = content + EOS.
         let mut short: Vec<u32> = vec![7, 8, 9];
         short.push(UMT5_EOS_ID);
-        let (row, len) = fit_ids_to_window(short);
+        let (row, len) = fit_ids_to_window(short).unwrap();
         assert_eq!(len, 4);
         assert_eq!(row.len(), WAN_TEXT_LEN);
         assert_eq!(row[3], UMT5_EOS_ID);
@@ -845,7 +872,7 @@ mod tests {
         // Overlength input: truncated to the window with EOS forced last.
         let mut long: Vec<u32> = (10..700).collect();
         long.push(UMT5_EOS_ID);
-        let (row, len) = fit_ids_to_window(long);
+        let (row, len) = fit_ids_to_window(long).unwrap();
         assert_eq!(len, WAN_TEXT_LEN);
         assert_eq!(row[WAN_TEXT_LEN - 1], UMT5_EOS_ID);
         assert_eq!(row[WAN_TEXT_LEN - 2], 10 + (WAN_TEXT_LEN as u32) - 2);
@@ -1912,7 +1939,7 @@ mod tests {
         assert_eq!(raw.len(), UMT5_XXL_RAW_LEN);
         assert!(raw.len() > WAN_TEXT_LEN, "fixture must overflow the window");
 
-        let (row, len) = fit_ids_to_window(raw.clone());
+        let (row, len) = fit_ids_to_window(raw.clone()).unwrap();
         assert_eq!(len, WAN_TEXT_LEN);
         assert_eq!(row.len(), WAN_TEXT_LEN);
         // HF's window is trim-to-511 + EOS; ours must be byte-identical.

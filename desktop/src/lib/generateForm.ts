@@ -1468,7 +1468,13 @@ export function applyMetadataToForm(
     applyModelDefaults(form, model);
   } else {
     form.model = metadata.model;
-    form.family = "";
+    // The print's own recorded family is all that is left to answer with when
+    // nothing installed can: it is what the shared prompt rule reads for a
+    // family with no text encoder (Hunyuan3D), and clearing it held Generate
+    // behind a prompt no engine would ever encode. Absent on an older print,
+    // which reads exactly as it did before. The recipe snapshot still goes to
+    // `null` — a stale snapshot must not speak for another model.
+    form.family = metadata.family ?? "";
     form.negativePromptDefault = "";
     form.recipeCapabilities = null;
   }
@@ -1823,7 +1829,9 @@ export function applyPrefillToForm(
     reconcileModelCapabilities(form, m);
   } else {
     // Nothing installed can answer for this model: a stale snapshot must not
-    // speak for it (the same reading `applyMetadataToForm` takes).
+    // speak for it (the same reading `applyMetadataToForm` takes). Unlike a
+    // metadata restore there is no recorded family to keep — a scalar prefill
+    // carries only the model name.
     form.family = "";
     form.recipeCapabilities = null;
     form.mesh = emptyMeshForm();

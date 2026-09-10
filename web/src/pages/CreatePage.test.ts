@@ -1711,6 +1711,7 @@ describe("CreatePage layout and behavior", () => {
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse at dusk";
     form.state.value.maskImage = {
       kind: "upload",
       filename: "mask.png",
@@ -1743,6 +1744,7 @@ describe("CreatePage layout and behavior", () => {
     const form = useGenerateForm();
     form.state.value.model = "ltx-2-19b-distilled:fp8";
     form.state.value.modelFamily = "ltx2";
+    form.state.value.prompt = "a lighthouse at dusk";
     form.state.value.guidanceOverrides = {
       stgScale: 1.5,
       stgBlocks: "28,twenty-nine",
@@ -1781,6 +1783,7 @@ describe("CreatePage layout and behavior", () => {
     const form = useGenerateForm();
     form.state.value.model = "ltx-2-19b-distilled:fp8";
     form.state.value.modelFamily = "ltx2";
+    form.state.value.prompt = "a lighthouse at dusk";
     form.state.value.guidanceOverrides = {
       stgScale: null,
       stgBlocks: "",
@@ -1808,6 +1811,7 @@ describe("CreatePage layout and behavior", () => {
     const form = useGenerateForm();
     form.state.value.model = "wan22-i2v-a14b:q8";
     form.state.value.modelFamily = "wan";
+    form.state.value.prompt = "a lighthouse at dusk";
     form.state.value.sourceImageCapability = "required";
     form.state.value.frames = 81;
     await nextTick();
@@ -1843,6 +1847,7 @@ describe("CreatePage layout and behavior", () => {
     const form = useGenerateForm();
     form.state.value.model = "wan22-i2v-a14b:q8";
     form.state.value.modelFamily = "wan";
+    form.state.value.prompt = "a lighthouse at dusk";
     form.state.value.sourceImageCapability = "required";
     form.state.value.frames = 49;
     form.state.value.extendVideo = {
@@ -1868,6 +1873,7 @@ describe("CreatePage layout and behavior", () => {
     const form = useGenerateForm();
     form.state.value.model = "wan22-t2v-a14b:q8";
     form.state.value.modelFamily = "wan";
+    form.state.value.prompt = "a lighthouse at dusk";
     form.state.value.sourceImageCapability = "unsupported";
     form.state.value.frames = 49;
     form.state.value.extendVideoPath = "/srv/mold/clip.mp4";
@@ -1889,6 +1895,7 @@ describe("CreatePage layout and behavior", () => {
     const form = useGenerateForm();
     form.state.value.model = "wan22-t2v-a14b:q5";
     form.state.value.modelFamily = "wan";
+    form.state.value.prompt = "a lighthouse at dusk";
     form.state.value.sourceImageCapability = "unsupported";
     form.state.value.imageAttachments = [
       { kind: "upload", filename: "stale.png", base64: "STALE" },
@@ -1936,6 +1943,7 @@ describe("CreatePage layout and behavior", () => {
     const form = useGenerateForm();
     form.state.value.model = "wan22-ti2v-5b:fp16";
     form.state.value.modelFamily = "wan";
+    form.state.value.prompt = "a lighthouse at dusk";
     form.state.value.sourceImageCapability = "optional";
     form.state.value.frames = 81;
     form.state.value.imageAttachments = [
@@ -2053,6 +2061,7 @@ describe("CreatePage layout and behavior", () => {
     const form = useGenerateForm();
     form.state.value.model = "qwen-image-edit:q4";
     form.state.value.modelFamily = "qwen-image-edit";
+    form.state.value.prompt = "a lighthouse at dusk";
     form.state.value.imageAttachments = [
       {
         kind: "upload",
@@ -2215,6 +2224,7 @@ describe("CreatePage layout and behavior", () => {
     const form = useGenerateForm();
     form.state.value.model = guidedModel.name;
     form.state.value.modelFamily = "ltx2";
+    form.state.value.prompt = "a lighthouse at dusk";
     form.state.value.frames = 153;
     form.state.value.fps = 24;
     form.state.value.negativePrompt = "flicker";
@@ -3569,6 +3579,8 @@ describe("CreatePage host routing", () => {
     hostModelsMock.mockResolvedValue([flux]);
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
+    useGenerateForm().state.value.prompt = "a lighthouse at dusk";
+    await nextTick();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
@@ -3592,6 +3604,10 @@ describe("CreatePage host routing", () => {
 
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
+
+    useGenerateForm().state.value.prompt = "a lighthouse at dusk";
+
+    await nextTick();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
@@ -3887,6 +3903,10 @@ describe("CreatePage host routing", () => {
     await flushPromises();
     await nextTick();
 
+    useGenerateForm().state.value.prompt = "a lighthouse at dusk";
+
+    await nextTick();
+
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
 
@@ -4140,6 +4160,10 @@ describe("CreatePage host routing", () => {
 
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
+
+    useGenerateForm().state.value.prompt = "a lighthouse at dusk";
+
+    await nextTick();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
@@ -4640,3 +4664,147 @@ function pageStubs() {
     RouterLink: { template: "<a><slot /></a>" },
   };
 }
+
+/**
+ * The submit gate on the prompt. Web had none: the only prompt refusal was
+ * MiniMax H3's, so a text-to-image render went out undescribed and came back
+ * as a server 422. The rule is the shared one — the recipe's advertised mode
+ * resolved against the conditioning this request carries — so the families
+ * whose conditioning decides the render (LTX-2, Wan, H3) submit blank.
+ */
+describe("CreatePage prompt gate", () => {
+  /** A recipe as a host advertises it for a family whose prompt is optional
+   * ONCE the request carries visual conditioning. */
+  function optionalPromptRecipe() {
+    const recipe = sdxlRecipe();
+    recipe.capabilities.prompt = {
+      mode: "optional",
+      reason: "The attached image decides the render.",
+    };
+    return recipe;
+  }
+
+  function modelWithOptionalPrompt(
+    name: string,
+    family: string,
+    extra: Record<string, unknown> = {},
+  ): ModelInfoExtended {
+    return {
+      ...installedModelRow(name, family),
+      generation_profile: {
+        schema_version: 1,
+        profile_id: family,
+        profile_hash: `${family}-optional`,
+        default_recipe_id: "default",
+        recipes: [optionalPromptRecipe()],
+      },
+      ...extra,
+    } as unknown as ModelInfoExtended;
+  }
+
+  function blockerText(wrapper: ReturnType<typeof mount>): string | null {
+    const blocker = wrapper.find("[data-test='page-generation-blocker']");
+    return blocker.exists() ? blocker.text() : null;
+  }
+
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  it("blocks Generate with an empty prompt on a text-to-image model", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "";
+    await nextTick();
+    expect(blockerText(wrapper)).toBe("Add a prompt before generating.");
+
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+    expect(blockerText(wrapper)).toBeNull();
+  });
+
+  it("lets an LTX-2 render go out undescribed once a source image is attached", async () => {
+    const model = modelWithOptionalPrompt("ltx2-video:bf16", "ltx2");
+    hostModelsMock.mockResolvedValue([model]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = model.name;
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.prompt = "";
+    await nextTick();
+    expect(blockerText(wrapper)).toBe("Add a prompt before generating.");
+
+    // On a single-well web recipe `imageAttachments[0]` IS the source image.
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "source.png", base64: "c291cmNl" },
+    ];
+    await nextTick();
+    expect(blockerText(wrapper)).toBeNull();
+  });
+
+  it("lets a conditioned Wan render go out undescribed", async () => {
+    const model = modelWithOptionalPrompt("wan22-i2v-a14b:q8", "wan");
+    hostModelsMock.mockResolvedValue([model]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = model.name;
+    form.state.value.modelFamily = "wan";
+    form.state.value.prompt = "";
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "source.png", base64: "c291cmNl" },
+    ];
+    await nextTick();
+    expect(blockerText(wrapper)).toBeNull();
+  });
+
+  it("reads an H3 first frame as the conditioning and still refuses without one", async () => {
+    const model = modelWithOptionalPrompt(
+      "minimax-h3-fl2va:official-bf16",
+      "minimax-h3",
+      { source_image: "optional" },
+    );
+    hostModelsMock.mockResolvedValue([model]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = model.name;
+    form.state.value.modelFamily = "minimax-h3";
+    form.state.value.prompt = "";
+    form.state.value.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [],
+    };
+    await nextTick();
+    expect(blockerText(wrapper)).toBe("Add a prompt before generating.");
+
+    form.state.value.h3Authoring.firstFrame = {
+      filename: "opening.png",
+      mimeType: "image/png",
+      width: 1344,
+      height: 768,
+      data: "FIRST",
+    };
+    await nextTick();
+    expect(blockerText(wrapper)).toBeNull();
+  });
+});

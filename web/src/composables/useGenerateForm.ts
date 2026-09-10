@@ -679,7 +679,12 @@ export function applyMetadataToForm(
     : {
         ...cloneFormState(current),
         model: metadata.model,
-        modelFamily: "",
+        // The print's own recorded family is all that is left to answer with
+        // when nothing installed can: it is what the shared prompt rule reads
+        // for a family with no text encoder (Hunyuan3D), and clearing it held
+        // Generate behind a prompt no engine would ever encode. Absent on an
+        // older print, which reads exactly as it did before.
+        modelFamily: metadata.family ?? "",
         negativePromptDefault: "",
       };
   const recipe = model ? effectiveGenerationRecipe(model, null) : null;

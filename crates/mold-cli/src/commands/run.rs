@@ -141,6 +141,31 @@ fn require_prompt(
     ))
 }
 
+/// The CLI's projection into `mold_core`'s shared conditioning parts.
+///
+/// The prompt is resolved before the request exists, so this cannot call
+/// `has_visual_conditioning`. Projecting rather than rebuilding the list is
+/// what keeps `--reference` and `--pipeline t2a` from being forgotten here
+/// while the server counts them.
+fn cli_prompt_conditioning(
+    source_image: bool,
+    keyframes: bool,
+    source_video: bool,
+    extend: bool,
+    references: bool,
+    pipeline: Option<mold_core::Ltx2PipelineMode>,
+) -> bool {
+    mold_core::validation::PromptConditioningParts {
+        source_image,
+        keyframes,
+        source_video,
+        extend,
+        references,
+        audio_only: pipeline.is_some_and(mold_core::Ltx2PipelineMode::is_audio_only),
+    }
+    .is_conditioned()
+}
+
 /// Whether a `mold run` expands its prompt before generating, and why not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExpansionDecision {
@@ -1487,10 +1512,18 @@ pub async fn run(
         None => None,
     };
 
-    let has_visual_conditioning = source_image.is_some()
-        || keyframes.as_ref().is_some_and(|k| !k.is_empty())
-        || source_video_bytes.is_some()
-        || extend_video_bytes.is_some();
+    let has_visual_conditioning = cli_prompt_conditioning(
+        source_image.is_some(),
+        keyframes.as_ref().is_some_and(|k| !k.is_empty()),
+        source_video_bytes.is_some(),
+        extend_video_bytes.is_some(),
+        // `references` on the wire, which is H3 Ref2VA's only well. The
+        // ordered `--reference` group for an edit family travels as
+        // `edit_images`, which the server's own predicate does not count, so
+        // counting it here would be a fresh divergence rather than a fix.
+        !h3_references.is_empty(),
+        pipeline,
+    );
     let prompt = require_normalized_prompt(prompt, &family, has_visual_conditioning)?;
 
     // --- Prompt expansion ---
@@ -3374,19 +3407,72 @@ mod tests {
         );
     }
 
+    /// The CLI resolves the prompt before it assembles the request, so it
+    /// projects into the shared conditioning parts rather than rebuilding the
+    /// list. It had rebuilt it from four fields and omitted `--reference`, so
+    /// a Ref2VA run — whose references are its ONLY well — was refused
+    /// locally for a blank prompt the server would have admitted.
     #[test]
-    fn prompt_optional_for_conditioned_ltx2() {
-        // An LTX-2 request that already carries a source image, keyframes, a
-        // source video, or an extend may run unprompted. Legacy LTX-Video's
-        // Mold engine cannot carry that conditioning, so its prompt remains
-        // required.
-        assert_eq!(require_prompt(None, "ltx2", true).unwrap(), "");
-        assert!(require_prompt(None, "ltx-video", true).is_err());
-        // An explicit prompt still wins.
+    fn a_reference_conditions_the_run_like_any_other_attachment() {
+        let referenced = cli_prompt_conditioning(false, false, false, false, true, None);
+        assert!(referenced, "--reference is visual conditioning");
         assert_eq!(
-            require_prompt(Some("a turtle".to_string()), "ltx2", true).unwrap(),
-            "a turtle"
+            require_prompt(None, mold_core::minimax_h3::FAMILY, referenced).unwrap(),
+            ""
         );
+
+        // Nothing attached at all is still refused.
+        let bare = cli_prompt_conditioning(false, false, false, false, false, None);
+        assert!(!bare);
+        assert!(require_prompt(None, mold_core::minimax_h3::FAMILY, bare).is_err());
+    }
+
+    /// An audio-only render reads no pixels, so an attached still conditions
+    /// nothing. Without this the CLI accepted a blank prompt locally and the
+    /// server answered 422.
+    #[test]
+    fn an_audio_only_run_needs_a_prompt_despite_an_attached_image() {
+        let conditioned = cli_prompt_conditioning(
+            true,
+            false,
+            false,
+            false,
+            false,
+            Some(mold_core::Ltx2PipelineMode::T2a),
+        );
+        assert!(!conditioned, "t2a reads no pixels");
+        assert!(require_prompt(None, "ltx2", conditioned).is_err());
+
+        // The same image on a video pipeline still conditions the render.
+        assert!(cli_prompt_conditioning(
+            true, false, false, false, false, None
+        ));
+    }
+
+    #[test]
+    fn prompt_optional_for_a_conditioned_video_family() {
+        // A request that already carries a source image, keyframes, a
+        // reference set, a source video, or an extend may run unprompted —
+        // LTX-2, Wan and MiniMax H3 alike, because the attached media
+        // decides the render. Legacy LTX-Video's mold engine cannot carry
+        // that conditioning at all, so its prompt remains required.
+        for family in ["ltx2", "wan", "minimax-h3"] {
+            assert_eq!(
+                require_prompt(None, family, true).unwrap(),
+                "",
+                "{family} conditioned"
+            );
+            assert!(
+                require_prompt(None, family, false).is_err(),
+                "{family} unconditioned"
+            );
+            // An explicit prompt still wins.
+            assert_eq!(
+                require_prompt(Some("a turtle".to_string()), family, true).unwrap(),
+                "a turtle"
+            );
+        }
+        assert!(require_prompt(None, "ltx-video", true).is_err());
     }
 
     /// `mold run hunyuan3d-mini-turbo --image cutout.png -o chair.glb` must

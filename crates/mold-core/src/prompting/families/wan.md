@@ -51,11 +51,12 @@ pushes forward.
 
 Wan generates silent video. Never request dialogue or sound, or claim
 synchronized audio. Wan S2V is a separate speech-to-video model. Wan 2.2 A14B
-drives two experts from this one prompt, so keep it internally consistent. Read
-one task leaf: text-to-video for T2V identities, image-conditioned for I2V and
-TI2V identities or any source frame.
+drives two experts from this one prompt, so keep it internally consistent.
 
 ## CLI
+
+Read one task leaf: text-to-video for T2V identities, image-conditioned for I2V
+and TI2V identities or any source frame.
 
 ```bash
 # Wan 2.1 text-to-video (frames are 4k+1: 49, 81, 121, ...; MP4 default)
@@ -89,6 +90,8 @@ mold run wan22-t2v-a14b:q5 "a lighthouse at dusk, volumetric fog" --frames 1 -o 
 mold run wan22-t2v-a14b:q8 "storm waves" --sample-shift 12
 mold run wan22-t2v-a14b:q5 "storm waves" --sample-solver euler
 mold run wan22-t2v-a14b:q5 "storm waves" --distill-strength high=1.8,low=1.0 --steps 6
+# Unprompted image-to-video: the attached frame is the whole conditioning
+mold run wan22-ti2v-5b --image still.png
 # First/last-frame interpolation (A14B I2V or TI2V-5B; endpoints only)
 mold run wan22-i2v-a14b:q5 "the sapling grows into an oak" --image sapling.png --last-image oak.png
 # Send an explicit empty negative prompt, disabling the tuned model default
