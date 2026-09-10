@@ -57,14 +57,14 @@ describe("mobile Android Back", () => {
           label: "Source",
           instanceId: "source",
           ready: true,
-          target: { baseUrl: "http://source" },
+          target: { baseUrl: "http://source", apiKey: null },
         },
         {
           id: "dest",
           label: "Destination",
           instanceId: "dest",
           ready: true,
-          target: { baseUrl: "http://dest" },
+          target: { baseUrl: "http://dest", apiKey: null },
         },
       ]),
     );
