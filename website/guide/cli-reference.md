@@ -55,6 +55,7 @@ other run, including img2img on an image family, still errors with
 | `--first-frame <PATH>`                                                                       | MiniMax H3 FL2VA opening frame; required by the current compact runtime                                                                                                          |
 | `--last-frame <PATH>`                                                                        | MiniMax H3 closing endpoint flag; the current compact runtime refuses this not-yet-qualified route                                                                               |
 | `--reference <PATH>`                                                                         | Repeatable ordered reference image (a bare path means `image=PATH`); on MiniMax H3 Ref2VA it also takes `video=PATH` / `audio=PATH`, whose remote upload requires `MOLD_API_KEY` |
+| `--reference-weight <FLOAT>`                                                                  | Strength of a reference adapter's injection, 0.0-2.0 (default 1.0). SD 1.5 and SDXL image prompting; requires `--reference` |
 | `--pipeline <MODE>`                                                                          | `one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2-vid`, `retake`, `lip-dub`, or `t2a`                                                            |
 | `--retake <START:END>`                                                                       | LTX-2 retake range in seconds                                                                                                                                                    |
 | `--camera-control <NAME\|PATH>`                                                              | LTX-2 camera-control preset or `.safetensors` path                                                                                                                               |
@@ -138,6 +139,35 @@ from a source image **or** from references, never both in one pass, so
 Qwen-Image-Edit read no source image at all — there the ordered group **is**
 repeated `--image`, and for Qwen-Image-Edit the first image is the one being
 edited. FLUX.2 accepts at most four references per render.
+
+### Image prompting (SD 1.5 and SDXL)
+
+SD 1.5 and SDXL read a reference differently again: it is an image **prompt**,
+not an edit target. IP-Adapter encodes the picture with a CLIP-Vision tower and
+injects it into every cross-attention layer beside the text, so the reference's
+appearance — its subject, palette and setting — is carried into the render
+while the prompt still steers it.
+
+```bash
+mold pull ip-adapter-sdxl   # or ip-adapter-sd15
+mold run sdxl-base:fp16 "a sailboat on a calm lake at sunrise" \
+  --reference streetscape.png --reference-weight 0.7
+```
+
+`--reference-weight` runs from 0.0 to 2.0 and defaults to 1.0. Start around
+**0.6-0.8**: at 1.0 the picture tends to dominate the prompt outright. Exactly
+`0.0` renders pixel-for-pixel what the same request with no reference renders,
+and nothing is downloaded, loaded or encoded — so it is a real way to A/B the
+adapter rather than a rounding of "almost off".
+
+One reference per render, and unlike every other reference family it **rides
+with everything else**: `--image` and `--strength`, `--mask`, ControlNet, and a
+LoRA all stay live in the same pass. Batches work too, since the same encoded
+picture applies to every image in the batch.
+
+The two bundles share their 2.4 GB vision tower, so whichever you pull second
+costs only its adapter (44 MB for SD 1.5, 666 MB for SDXL). Both are Apache-2.0
+and MIT — unlike the identity bundles, neither needs a licence acceptance.
 
 ### LTX-2 Notes
 
