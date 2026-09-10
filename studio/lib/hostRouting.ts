@@ -32,12 +32,54 @@ export interface RoutingGpu {
   vramTotalMb?: number | null;
 }
 
+/** Parallel execution lanes and current work, independent of free VRAM. */
+export interface HostRoutingLoad {
+  gpuCount: number;
+  activeJobs: number;
+  paused: boolean;
+}
+
+/** Use the device inventory when available; busy GPUs remain queueable lanes. */
+export function hostRoutingLoad(
+  status: {
+    busy?: boolean;
+    queue_paused?: boolean | null;
+    gpus?: readonly { state: string }[] | null;
+  },
+  devices?:
+    | readonly {
+        schedulable: boolean;
+        ordinal: number | null;
+        activity: string;
+      }[]
+    | null,
+): HostRoutingLoad {
+  const workers =
+    devices != null
+      ? devices.filter(
+          (device) => device.schedulable && device.ordinal !== null,
+        )
+      : status.gpus?.filter((worker) =>
+          ["idle", "loading", "generating"].includes(worker.state),
+        );
+  return {
+    gpuCount: workers?.length ?? 1,
+    activeJobs:
+      workers?.filter(
+        (worker) =>
+          ("activity" in worker ? worker.activity : worker.state) !== "idle",
+      ).length ?? (status.busy ? 1 : 0),
+    paused: status.queue_paused === true,
+  };
+}
+
 /** The slice of a host the Auto router reasons over. */
 export interface RoutableHostBase {
   id: string;
   status: HostRoutingStatus;
   /** Live queue depth; null while unknown (counts as busiest). */
   queueDepth: number | null;
+  routingLoad?: HostRoutingLoad | null;
   /** Predicted end of this host's current plan. Null on legacy hosts. */
   predictedCompletionMs?: number | null;
 }
@@ -47,6 +89,7 @@ export interface CapableHostBase {
   id: string;
   status: HostRoutingStatus;
   queueDepth: number | null;
+  routingLoad?: HostRoutingLoad | null;
   gpu: RoutingGpu | null;
 }
 
@@ -65,20 +108,48 @@ function queueDepthOf(host: { queueDepth: number | null }): number {
 }
 
 /**
- * Auto routing: when both hosts expose an authoritative plan, predicted
- * completion wins before raw queue depth. If either host is planless, queue
- * depth is the deterministic backward-compatible fallback.
+ * Auto compares incoming and current work per schedulable GPU lane.
+ * Legacy hosts fall back to predicted completion and raw queue depth.
  */
 export function pickAutoHost<T extends RoutableHostBase>(
   hosts: readonly T[],
   tieBreak: RoutingTieBreak<T> = {},
+  copies = 1,
 ): T | null {
-  const ready = hosts.filter((host) => host.status === "ready");
+  const ready = hosts.filter(
+    (host) =>
+      host.status === "ready" &&
+      host.routingLoad?.paused !== true &&
+      host.routingLoad?.gpuCount !== 0,
+  );
+  const incoming = Number.isSafeInteger(copies) && copies > 0 ? copies : 1;
+  const load = (host: T) =>
+    host.queueDepth === null
+      ? Number.POSITIVE_INFINITY
+      : (Math.max(0, host.queueDepth) +
+          (host.routingLoad?.activeJobs ?? 0) +
+          incoming) /
+        Math.max(1, host.routingLoad?.gpuCount ?? 1);
   if (ready.length === 0) return null;
+  const capacityAware = ready.every((host) => host.routingLoad != null);
+  const allPlanned = ready.every((host) => host.predictedCompletionMs != null);
   return ready.reduce((best, host) => {
+    // A current-plan finish omits the incoming batch. When both machines
+    // report lanes, compare projected work per lane instead. This keeps a
+    // busy four-GPU host queueable rather than favoring an idle single GPU.
+    if (capacityAware) {
+      const difference = load(host) - load(best);
+      if (difference !== 0 && !Number.isNaN(difference))
+        return difference < 0 ? host : best;
+    }
     const hostFinish = host.predictedCompletionMs;
     const bestFinish = best.predictedCompletionMs;
-    if (hostFinish != null && bestFinish != null && hostFinish !== bestFinish)
+    if (
+      allPlanned &&
+      hostFinish != null &&
+      bestFinish != null &&
+      hostFinish !== bestFinish
+    )
       return hostFinish < bestFinish ? host : best;
     if (queueDepthOf(host) < queueDepthOf(best)) return host;
     if (queueDepthOf(host) > queueDepthOf(best)) return best;

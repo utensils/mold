@@ -13,6 +13,7 @@ import type { QueueJobProgress } from "@studio/api/generationSelection";
 
 defineProps<{
   model: QueueEntryDetailModel;
+  transferHostId?: string | undefined;
   preview?: QueueJobProgress | null;
   cancelling?: boolean;
   retrying?: boolean;
@@ -42,6 +43,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
   >
     <QueueEntryDetail
       :model="model"
+      :transfer-host-id="transferHostId"
       :preview="preview ?? null"
       :cancelling="cancelling ?? false"
       :retrying="retrying ?? false"

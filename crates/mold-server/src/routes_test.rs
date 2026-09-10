@@ -23069,6 +23069,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn held_queue_transfer_admission_fences_destination_before_persisting() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let app = app_with_state(state.clone());
+        let body = serde_json::json!({"client_batch_id": uuid::Uuid::new_v4().to_string(), "requests": [serde_json::from_str::<serde_json::Value>(&generate_body("original", 64, 64)).unwrap()]});
+        for expected in [None, Some("previous-instance")] {
+            let mut builder = Request::post("/api/generation-batches/transfer")
+                .header("content-type", "application/json");
+            if let Some(expected) = expected {
+                builder = builder.header("x-mold-destination-instance", expected);
+            }
+            let response = app
+                .clone()
+                .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+        let response = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/generation-batches/by-client/{}",
+                    body["client_batch_id"].as_str().unwrap()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn held_queue_transfer_exports_original_and_fences_source_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let id = hold_one_durable_job(&state, 70, 100).await;
+        let request = generate_body("the original words", 64, 64);
+        db.as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE generation_queue SET request_json = ?1 WHERE id = ?2",
+                    [request.as_str(), id.as_str()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let authority = serde_json::json!({"instance_id": state.instance_id.as_str(), "job_id": id,
+            "batch_id":"held-batch-70", "client_batch_id":"client-70"});
+        let app = app_with_state(state.clone());
+        let post = |suffix: &str, body: &serde_json::Value| {
+            Request::post(format!("/api/queue/{id}/{suffix}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let response = app
+            .clone()
+            .oneshot(post("transfer", &authority))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(json_body(response).await["prompt"], "the original words");
+        assert_eq!(
+            state.queue_journal.row(&id).unwrap().unwrap().state,
+            mold_db::generation_queue::QueueRowState::Held
+        );
+        let mut wrong = authority.clone();
+        wrong["instance_id"] = "replacement".into();
+        assert_eq!(
+            app.clone()
+                .oneshot(post("transfer/complete", &wrong))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        // Another client resumes the original during transfer. Completion must
+        // leave that queued work alone, rather than cancelling the new attempt.
+        assert_eq!(
+            app.clone()
+                .oneshot(post("retry", &authority))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(post("transfer/complete", &authority))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            state.queue_journal.row(&id).unwrap().unwrap().state,
+            mold_db::generation_queue::QueueRowState::Queued
+        );
+    }
+
+    #[tokio::test]
+    async fn held_queue_transfer_completion_settles_only_the_named_original() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db, root.path());
+        let id = hold_one_durable_job(&state, 71, 100).await;
+        let other = hold_one_durable_job(&state, 72, 100).await;
+        let body = serde_json::json!({"instance_id":state.instance_id.as_str(), "job_id":id,
+            "batch_id":"held-batch-71", "client_batch_id":"client-71"});
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::post(format!("/api/queue/{id}/transfer/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(state.queue_journal.row(&id).unwrap().is_none());
+        assert!(state.queue_journal.row(&other).unwrap().is_some());
+    }
+
+    #[tokio::test]
     async fn retention_purges_an_abandoned_hold_and_keeps_a_fresh_one() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));

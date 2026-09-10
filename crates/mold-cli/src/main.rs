@@ -825,6 +825,17 @@ pub enum QueueAction {
         #[arg(long, conflicts_with = "job_ids")]
         held: bool,
     },
+    /// Send a held job to another running Mold server, preserving its request
+    Send {
+        #[arg(value_name = "JOB-ID")]
+        job_id: String,
+        /// Destination URL (source remains MOLD_HOST)
+        #[arg(long, value_name = "HOST")]
+        to: String,
+        /// Destination credential, independent of the source API key
+        #[arg(long, env = "MOLD_DESTINATION_API_KEY", hide_env_values = true)]
+        destination_api_key: Option<String>,
+    },
     /// Move one queued job to a new place in line
     Move {
         /// Job id as shown by `mold queue list`
@@ -4347,6 +4358,15 @@ mod tests {
                 "{conflicting:?} must not parse"
             );
         }
+    }
+
+    #[test]
+    fn queue_send_requires_an_explicit_destination() {
+        assert!(try_parse(&["queue", "send", "job-1"]).is_err());
+        assert!(
+            matches!(parse(&["queue", "send", "job-1", "--to", "http://plato:7680"]).command,
+            Commands::Queue { action: QueueAction::Send { job_id, to, .. } } if job_id == "job-1" && to == "http://plato:7680")
+        );
     }
 
     #[test]

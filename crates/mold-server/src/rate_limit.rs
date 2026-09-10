@@ -179,6 +179,7 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
             "/api/generate"
             | "/api/generate/stream"
             | "/api/generation-batches"
+            | "/api/generation-batches/transfer"
             | "/api/generate/placement-preview"
             | "/api/chain-jobs/placement-preview"
             | "/api/expand"
@@ -191,7 +192,12 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
         // Re-queues real GPU work and restores the dispatch budget, so it
         // belongs with generation rather than in the cheap read bucket it
         // fell into by default.
-        ("POST", path) if path.starts_with("/api/queue/") && path.ends_with("/retry") => {
+        ("POST", path)
+            if path.starts_with("/api/queue/")
+                && (path.ends_with("/retry")
+                    || path.ends_with("/transfer")
+                    || path.ends_with("/transfer/complete")) =>
+        {
             Some(RouteTier::Generation)
         }
         // A retention sweep walks the held rows and unlinks encrypted media.

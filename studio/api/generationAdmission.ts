@@ -356,17 +356,27 @@ export async function admitGenerationBatch<TRequest>(
   request: GenerationBatchAdmissionRequest<TRequest>,
   signal?: AbortSignal,
   extraHeaders?: HeadersInit,
+  destinationInstance?: string,
 ): Promise<GenerationBatchStatus> {
   return parseGenerationBatchStatus(
-    await apiJsonTo<unknown>(target, "/api/generation-batches", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...Object.fromEntries(new Headers(extraHeaders)),
+    await apiJsonTo<unknown>(
+      target,
+      destinationInstance
+        ? "/api/generation-batches/transfer"
+        : "/api/generation-batches",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(destinationInstance
+            ? { "x-mold-destination-instance": destinationInstance }
+            : {}),
+          ...Object.fromEntries(new Headers(extraHeaders)),
+        },
+        body: JSON.stringify(request),
+        ...(signal ? { signal } : {}),
       },
-      body: JSON.stringify(request),
-      ...(signal ? { signal } : {}),
-    }),
+    ),
   );
 }
 

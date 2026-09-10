@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import HeldQueueTransferDialog from "@studio/components/HeldQueueTransferDialog.vue";
+import { provideHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
+
+import { hostRoutingLoad } from "@studio/lib/hostRouting";
 import { useMobileBack } from "./useMobileBack";
 import { createMobileComposerDraft } from "./mobileComposerDraft";
 import {
@@ -1325,6 +1329,7 @@ interface HostTelemetry {
   vramUsedMb: number | null;
   vramTotalMb: number | null;
   queueDepth: number | null;
+  routingLoad: import("@studio/lib/hostRouting").HostRoutingLoad;
   /** Runtime queue capacity is the server's authority for one hot queue page.
    * `null` means a legacy status response; an absent telemetry row means the
    * host has not answered status yet and queue polling must wait. */
@@ -1337,6 +1342,30 @@ interface HostTelemetry {
   gpuName: string | null;
 }
 const hostTelemetry = reactive<Record<string, HostTelemetry>>({});
+
+const queueTransfer = provideHeldQueueTransfer(
+  computed(() =>
+    connectedHosts.value.flatMap((host) =>
+      host.instanceId
+        ? [
+            {
+              id: host.id,
+              label: host.name,
+              instanceId: host.instanceId,
+              target: mobileHostTarget(host),
+              ready: host.online && !host.stale,
+              gpuCount: hostTelemetry[host.id]?.routingLoad.gpuCount,
+              queueDepth: hostTelemetry[host.id]?.queueDepth,
+            },
+          ]
+        : [],
+    ),
+  ),
+);
+useMobileBack(
+  computed(() => queueTransfer.selection.value !== null),
+  queueTransfer.close,
+);
 
 function hostMemLabel(id: string): string {
   const telemetry = hostTelemetry[id];
@@ -1360,6 +1389,7 @@ function captureHostTelemetry(hostId: string, status: ServerStatus): void {
     vramUsedMb: memory?.usedMb ?? null,
     vramTotalMb: memory?.totalMb ?? null,
     queueDepth: status.queue_depth ?? null,
+    routingLoad: hostRoutingLoad(status),
     queueCapacity: status.queue_capacity ?? null,
     queuePaused: status.queue_paused ?? null,
     gpuBackend: status.gpu_info?.backend ?? null,
@@ -1449,6 +1479,7 @@ function routingHostView(host: MobileHost) {
     id: host.id,
     status: "ready" as const,
     queueDepth: telemetry?.queueDepth ?? null,
+    routingLoad: telemetry?.routingLoad ?? null,
     gpu: {
       backend: telemetry?.gpuBackend ?? null,
       name: telemetry?.gpuName ?? null,
@@ -11507,6 +11538,9 @@ function mobileQueueRowActions(row: MobileActivityRow): SwipeRowAction[] {
       label: activityRowQueuePaused(row) ? "Resume" : "Pause",
     });
   }
+  if (durableHold(row.print) && row.print.hostId && queueTransfer.canSend(row.print.hostId)) {
+    actions.push({ id: "transfer", label: "Send to…" });
+  }
   if (durableHold(row.print)?.retryable && !durableHeldIsRetrying(row.print)) {
     actions.push({ id: "retry", label: "Retry" });
   }
@@ -11521,6 +11555,8 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
     void setActivityJobPaused(row, action === "queue-pause");
     return;
   }
+  if (action === "transfer" && row.print.hostId && activityRowJobId(row))
+    queueTransfer.open(row.print.hostId, activityRowJobId(row)!);
   if (action === "retry") void retryHeldGeneration(row.print);
   if (action === "cancel") void cancelGeneration(row.print);
 }
@@ -11536,6 +11572,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
     }"
     :data-mobile-platform="androidNativeRuntime ? 'android' : 'ios'"
   >
+    <HeldQueueTransferDialog :controller="queueTransfer" />
     <section
       v-if="pairingScannerOpen"
       class="mobile-pair-scanner"
@@ -13572,6 +13609,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         v-if="queueDetailModel"
         :key="queueDetailModel.jobId"
         :model="queueDetailModel"
+        :transfer-host-id="queueDetailHost?.id"
         :preview="queueDetailPreview"
         :cancelling="queueDetailBusy || !!queueDetailJob?.cancelling"
         :retrying="queueDetailJob ? durableHeldIsRetrying(queueDetailJob) : false"

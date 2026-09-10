@@ -1,3 +1,4 @@
+import { hostRoutingLoad } from "@studio/lib/hostRouting";
 import { defineStore } from "pinia";
 import { modelAccessRestrictionFor } from "@studio/lib/modelAccess";
 import { profileHashConflict } from "@studio/lib/profileFleet";
@@ -108,6 +109,7 @@ export interface HostView {
   stale?: boolean;
   primary: boolean;
   queueDepth: number | null;
+  routingLoad?: import("@studio/lib/hostRouting").HostRoutingLoad | null;
   queueCapacity: number | null;
   predictedCompletionMs?: number | null;
   version: string | null;
@@ -117,6 +119,7 @@ export interface HostView {
 
 export interface HostTelemetry {
   queueDepth: number | null;
+  routingLoad?: import("@studio/lib/hostRouting").HostRoutingLoad | null;
   queueCapacity: number | null;
   predictedCompletionMs?: number | null;
   version: string | null;
@@ -332,6 +335,7 @@ export const useHostsStore = defineStore("hosts", {
         stale: t?.stale ?? false,
         primary: true,
         queueDepth: t?.queueDepth ?? null,
+        routingLoad: t?.routingLoad ?? null,
         queueCapacity: t?.queueCapacity ?? null,
         predictedCompletionMs: t?.predictedCompletionMs ?? null,
         version: t?.version ?? null,
@@ -377,6 +381,7 @@ export const useHostsStore = defineStore("hosts", {
           stale: t?.stale ?? false,
           primary: false,
           queueDepth: t?.queueDepth ?? null,
+          routingLoad: t?.routingLoad ?? null,
           queueCapacity: t?.queueCapacity ?? null,
           predictedCompletionMs: t?.predictedCompletionMs ?? null,
           version: t?.version ?? null,
@@ -1092,6 +1097,7 @@ export const useHostsStore = defineStore("hosts", {
                     modelHostIds.length > 0
                       ? routable.filter((host) => modelHostIds.includes(host.id))
                       : routable,
+                    copies,
                   );
           const observation = chosen ? usable.find((probe) => probe.host.id === chosen.id) : null;
           const route = chosen ? hostRoute(chosen, this.capabilities[chosen.id]) : null;
@@ -1362,6 +1368,7 @@ export const useHostsStore = defineStore("hosts", {
             const previousPredictedCompletion = previousTelemetry?.predictedCompletionMs ?? null;
             this.telemetry[host.id] = {
               queueDepth: status.queue_depth ?? null,
+              routingLoad: hostRoutingLoad(status, devices),
               queueCapacity: status.queue_capacity ?? null,
               predictedCompletionMs:
                 queue === null

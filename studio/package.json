@@ -2,5 +2,8 @@
   "name": "@mold/studio",
   "version": "0.0.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@noble/hashes": "^2.4.0"
+  }
 }

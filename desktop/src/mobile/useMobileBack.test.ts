@@ -1,5 +1,6 @@
+import { createHeldQueueTransfer } from "@studio/composables/useHeldQueueTransfer";
 import { mount } from "@vue/test-utils";
-import { defineComponent, ref, nextTick } from "vue";
+import { computed, defineComponent, ref, nextTick } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useMobileBack } from "./useMobileBack";
 vi.mock("./platform", () => ({ isNativeAndroidRuntime: () => true }));
@@ -47,6 +48,55 @@ function setup() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("mobile Android Back", () => {
+  it("dismisses a held-transfer picker without losing an active send or its parent", async () => {
+    const h = setup();
+    const transfer = createHeldQueueTransfer(
+      computed(() => [
+        {
+          id: "source",
+          label: "Source",
+          instanceId: "source",
+          ready: true,
+          target: { baseUrl: "http://source", apiKey: null },
+        },
+        {
+          id: "dest",
+          label: "Destination",
+          instanceId: "dest",
+          ready: true,
+          target: { baseUrl: "http://dest", apiKey: null },
+        },
+      ]),
+    );
+    const picker = mount(
+      defineComponent({
+        setup() {
+          useMobileBack(
+            computed(() => transfer.selection.value !== null),
+            transfer.close,
+          );
+          return () => null;
+        },
+      }),
+    );
+    h.first.value = true;
+    transfer.open("source", "held-job");
+    transfer.busy.value = true;
+    window.dispatchEvent(new Event("mold:native-back", { cancelable: true }));
+    expect(transfer.selection.value?.jobId).toBe("held-job");
+    expect(h.first.value).toBe(true);
+    transfer.busy.value = false;
+    window.dispatchEvent(new Event("mold:native-back", { cancelable: true }));
+    expect(transfer.selection.value).toBeNull();
+    expect(h.first.value).toBe(true);
+    await settle();
+    h.first.value = false;
+    await settle();
+    picker.unmount();
+    h.harness.unmount();
+    await settle();
+  });
+
   it("consumes immediate native Back before history reconciliation", async () => {
     const h = setup();
     h.first.value = true;

@@ -366,7 +366,7 @@ export async function routeAutomaticMobileGeneration(
     const chosen =
       options.policy === CAPABLE_TARGET_ID
         ? pickMostCapableHost(views, null, { lowestIdWins: true })
-        : pickAutoHost(views, { lowestIdWins: true });
+        : pickAutoHost(views, { lowestIdWins: true }, options.copies);
     if (chosen) {
       const probe = telemetryOnly.find((entry) => entry.view.id === chosen.id)!;
       return {
@@ -401,7 +401,7 @@ export async function routeAutomaticMobileGeneration(
     const selected =
       options.policy === CAPABLE_TARGET_ID
         ? pickMostCapableHost(views, null, { lowestIdWins: true })
-        : pickAutoHost(views, { lowestIdWins: true });
+        : pickAutoHost(views, { lowestIdWins: true }, options.copies);
     const probe = selected
       ? knownMissing.find((entry) => entry.host.id === selected.id)
       : knownMissing[0];
@@ -426,7 +426,7 @@ export async function routeAutomaticMobileGeneration(
     const fallback =
       options.policy === CAPABLE_TARGET_ID
         ? pickMostCapableHost(views, null, { lowestIdWins: true })
-        : pickAutoHost(views, { lowestIdWins: true });
+        : pickAutoHost(views, { lowestIdWins: true }, options.copies);
     if (fallback) {
       const probe = nonAuthoritative.find((entry) => entry.host.id === fallback.id)!;
       return {
