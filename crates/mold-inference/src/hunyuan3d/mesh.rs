@@ -8,6 +8,18 @@
 //!   - `comfy_extras/nodes_hunyuan3d.py:120-224`  `voxel_to_mesh`          ([`MeshAlgorithm::Basic`])
 //!   - `comfy_extras/nodes_hunyuan3d.py:225-413`  `voxel_to_mesh_surfnet`  ([`MeshAlgorithm::SurfaceNet`], the default)
 //!
+//! # Where the emitted geometry diverges from that port
+//!
+//! [`MeshAlgorithm::SurfaceNet`] emits a quad only where the grid edge the
+//! four cells share actually crosses the threshold; ComfyUI emits one wherever
+//! all four cells happen to be active (`nodes_hunyuan3d.py:377-384`). A
+//! crossing edge always makes its four cells active, so ComfyUI's rule is a
+//! strict superset and the difference is quads laid across an edge the surface
+//! never passes through. See [`shared_edge_corners`] for which edge that is,
+//! and `thin_features_drop_the_quads_that_span_no_crossing` for the pin. It is
+//! the only place the two disagree about what to EMIT; `extract_basic` carries
+//! a separate, labelled deviation about what to do with an empty grid.
+//!
 //! # Grid axis order
 //!
 //! [`OccupancyGrid`] holds the tensor exactly as `ShapeVAE.decode` returns it,
@@ -643,9 +655,19 @@ fn extract_surface_net(
                 dir_i[1] + dir_j[1],
                 dir_i[2] + dir_j[2],
             ];
-            if let (Some(v0), Some(v1), Some(v2), Some(v3)) =
-                (probe([0, 0, 0]), probe(dir_i), probe(dir_j), probe(diag))
-            {
+            // MOLD DIVERGENCE from `nodes_hunyuan3d.py:377-384`, which emits a
+            // quad whenever all four cells are active. Surface nets connects
+            // the four cells around a grid edge because the surface passes
+            // THROUGH that edge; a crossing edge always makes all four of its
+            // cells active, so "all four active" is a strict superset of "the
+            // shared edge crosses". The extra quads are sheets across an edge
+            // the surface never touches, which is why they weld unrelated
+            // parts of a thin shape together. See [`shared_edge_corners`].
+            let (near, far) = shared_edge_corners(i, j);
+            let crosses = cell.signs >> near & 1 != cell.signs >> far & 1;
+            let corners =
+                crosses.then(|| (probe([0, 0, 0]), probe(dir_i), probe(dir_j), probe(diag)));
+            if let Some((Some(v0), Some(v1), Some(v2), Some(v3))) = corners {
                 let alignment = gradients[ci][0] * cross[0]
                     + gradients[ci][1] * cross[1]
                     + gradients[ci][2] * cross[2];
@@ -677,6 +699,20 @@ fn extract_surface_net(
         faces,
         ..Mesh::default()
     })
+}
+
+/// The grid edge shared by the four cells one quad spans, as corner indices of
+/// the cell that owns the quad.
+///
+/// A quad for axis pair `(i, j)` joins the dual vertices of cells `p`,
+/// `p + e_i`, `p + e_j` and `p + e_i + e_j`. Those four cubes have exactly one
+/// edge in common: the one along the remaining axis `k`, between the corner of
+/// `p` that is at 1 on both `i` and `j` and the corner that is at 1 on all
+/// three. In [`SURFNET_CORNERS`] indexing corner `c` sits at
+/// `(c >> 0 & 1, c >> 1 & 1, c >> 2 & 1)`, so those are `2^i + 2^j` and 7 —
+/// [`SURFNET_EDGES`] entries `[3, 7]`, `[5, 7]` and `[6, 7]` respectively.
+const fn shared_edge_corners(i: usize, j: usize) -> (usize, usize) {
+    ((1 << i) | (1 << j), 7)
 }
 
 /// `cross(e_i, e_j)` for the standard basis vectors.
@@ -1539,6 +1575,129 @@ mod tests {
         |_, _| Ok(())
     }
 
+    /// Every quad's shared grid edge must be one of the twelve cube edges the
+    /// crossing pass already evaluates — otherwise the gate in
+    /// `extract_surface_net` would be testing corners that never define a
+    /// dual vertex.
+    #[test]
+    fn every_shared_quad_edge_is_a_cube_edge() {
+        for (i, j) in [(0usize, 1usize), (0, 2), (1, 2)] {
+            let (near, far) = shared_edge_corners(i, j);
+            assert_eq!(far, 7, "the far corner is always the all-ones corner");
+            assert!(
+                SURFNET_EDGES.contains(&[near, far]) || SURFNET_EDGES.contains(&[far, near]),
+                "pair ({i}, {j}) spans corners {near}-{far}, which is not a cube edge"
+            );
+            // The near corner is at 1 on both quad axes and 0 on the third,
+            // which is what makes the edge run along the third axis.
+            let k = 3 - i - j;
+            assert_eq!(near >> i & 1, 1);
+            assert_eq!(near >> j & 1, 1);
+            assert_eq!(near >> k & 1, 0);
+        }
+    }
+
+    /// Thin geometry is where ComfyUI's "all four cells are active" rule and
+    /// surface nets' "the shared edge crosses" rule diverge, and the extra
+    /// quads are what make the mesh non-manifold. Two bars one cell apart is
+    /// the smallest shape that shows both halves: the gated rule emits
+    /// strictly fewer quads, and the mesh it emits has no edge shared by more
+    /// than two triangles.
+    #[test]
+    fn thin_features_drop_the_quads_that_span_no_crossing() {
+        let n = 40usize;
+        let mut logits = Vec::with_capacity(n * n * n);
+        for i0 in 0..n {
+            for i1 in 0..n {
+                for i2 in 0..n {
+                    // Two thin rods running along axis 2, three cells apart,
+                    // plus one crossing rod along axis 0.
+                    let p = [i0 as f32, i1 as f32, i2 as f32];
+                    let rod = |a: f32, b: f32| (a * a + b * b).sqrt() - 1.2;
+                    let d = rod(p[0] - 14.0, p[1] - 20.0)
+                        .min(rod(p[0] - 18.0, p[1] - 20.0))
+                        .min(rod(p[1] - 24.0, p[2] - 20.0));
+                    logits.push(-d);
+                }
+            }
+        }
+        let grid = OccupancyGrid::new(logits, [n, n, n]).unwrap();
+        let mesh = extract(&grid, MeshAlgorithm::SurfaceNet, 0.0, &mut noop()).unwrap();
+        assert!(!mesh.faces.is_empty());
+
+        // What ComfyUI would have emitted: one quad per active cell per axis
+        // pair whose three neighbours are also active, gate or no gate.
+        let active = |p: [usize; 3]| -> bool {
+            if p.iter().zip(grid.dim).any(|(&a, d)| a >= d) {
+                return false;
+            }
+            let mut signs = 0u8;
+            for (c, off) in SURFNET_CORNERS.iter().enumerate() {
+                if grid.padded(p[0] + off[0], p[1] + off[1], p[2] + off[2]) > 0.0 {
+                    signs |= 1 << c;
+                }
+            }
+            signs != 0 && signs != 0xFF
+        };
+        let (mut ungated, mut gated) = (0usize, 0usize);
+        for i0 in 0..n {
+            for i1 in 0..n {
+                for i2 in 0..n {
+                    let p = [i0, i1, i2];
+                    if !active(p) {
+                        continue;
+                    }
+                    let mut signs = 0u8;
+                    for (c, off) in SURFNET_CORNERS.iter().enumerate() {
+                        if grid.padded(p[0] + off[0], p[1] + off[1], p[2] + off[2]) > 0.0 {
+                            signs |= 1 << c;
+                        }
+                    }
+                    for (i, j) in [(0usize, 1usize), (0, 2), (1, 2)] {
+                        let step = |axes: &[usize]| {
+                            let mut q = p;
+                            for &a in axes {
+                                q[a] += 1;
+                            }
+                            q
+                        };
+                        if !(active(step(&[i])) && active(step(&[j])) && active(step(&[i, j]))) {
+                            continue;
+                        }
+                        ungated += 1;
+                        let (near, far) = shared_edge_corners(i, j);
+                        if signs >> near & 1 != signs >> far & 1 {
+                            gated += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            gated < ungated,
+            "this shape must exercise the gate: {gated} of {ungated} quads cross"
+        );
+        assert_eq!(
+            mesh.faces.len(),
+            gated * 2,
+            "only the quads spanning a crossing edge may be emitted"
+        );
+
+        let mut valence: HashMap<(u32, u32), u32> = HashMap::new();
+        for face in &mesh.faces {
+            for k in 0..3 {
+                let (a, b) = (face[k], face[(k + 1) % 3]);
+                *valence.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        let worst = valence.values().copied().max().unwrap_or(0);
+        assert!(
+            worst <= 2,
+            "gated surface nets must not share an edge between more than two \
+             triangles; worst valence was {worst}"
+        );
+    }
+
     /// A sphere displaced along ONE query axis must come out displaced along
     /// the SAME glTF axis. The grid is laid out `[qz][qy][qx]` exactly as
     /// `ShapeVae::reshape_grid_logits` hands it over (`comfy/sd.py:1277`
@@ -1795,8 +1954,15 @@ mod tests {
         // TRIANGLE counts coincide for a shape that does not touch the grid
         // boundary. Surface nets is not a decimation pass; the saving is in
         // vertices, and in the surface being smooth instead of blocky.
-        assert!(
-            sn.face_count() <= basic.face_count(),
+        //
+        // This equality is the independent check on `shared_edge_corners`:
+        // `extract_basic` reaches the same quad set without consulting it, so a
+        // wrong corner pair shows up here and not only in the tests that call
+        // the helper themselves. It only became true with the gate — ComfyUI's
+        // rule emits strictly more than `basic` on anything thin.
+        assert_eq!(
+            sn.face_count(),
+            basic.face_count(),
             "surface net {} faces vs basic {}",
             sn.face_count(),
             basic.face_count()
