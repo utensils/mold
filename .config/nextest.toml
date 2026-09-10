@@ -1,0 +1,173 @@
+# cargo-nextest configuration. Three profiles:
+#
+#   default  everything -- what `cargo nextest run` does locally and what a
+#            push to `main` executes for the default-feature workspace.
+#   union    the DEFAULT-FEATURE ASSERTIONS excluded -- for a build with the
+#            optional-feature union (`scripts/ci/affected-packages.py`,
+#            FEATURE_UNION) on. The 6 tests below pin what a
+#            default-feature build advertises (the factory family registry, the
+#            checked-in capability matrix, a media-preprocessing path that the
+#            mesh/PuLID ONNX stack changes) and are false by construction once
+#            every feature is on; `main` still runs them in its default build.
+#   pr       `union` plus the HEAVY long tail excluded -- the pull-request
+#            tier. 116 tests that each took 3 s or more in a local run
+#            (2026-09-10, `cargo nextest run -p mold-ai-inference -p
+#            mold-ai-server --lib --status-level pass`) together held about
+#            78% of the workspace's execution time on the 4-vCPU GitHub runner,
+#            where the `rust` job spent 10.6 of its 15 test minutes executing
+#            rather than compiling. They are synthetic CPU renders (LTX-2
+#            runtime, Wan VAE tiling, PuLID variant bit-identity, the 10k-entry
+#            batch journal) and still run on every push to `main` and locally
+#            by default; a PR only stops paying for them. To refresh the list
+#            rerun that command, sort by duration, and replace the block.
+#
+# Every clause is an EXACT `test(=name)` match, so a renamed or new heavy test
+# rejoins the PR tier on its own rather than vanishing from `main`.
+
+[profile.default]
+fail-fast = false
+slow-timeout = { period = "120s" }
+
+[profile.union]
+fail-fast = false
+slow-timeout = { period = "120s" }
+default-filter = """
+not (
+  (binary_id(mold-ai-inference) & test(=batch::tests::production_family_batch_registry_is_explicit_valid_and_singleton_only)) |
+  (binary_id(mold-ai-inference::family_capability_contract) & test(=every_factory_family_has_one_complete_weight_free_capability_contract)) |
+  (binary_id(mold-ai-inference::family_capability_contract) & test(=qualification_references_and_checked_in_matrix_are_concrete)) |
+  (binary_id(mold-ai-inference::family_capability_contract) & test(=the_qualification_matrix_block_offload_column_matches_the_registry)) |
+  (binary_id(mold-ai-inference) & test(=minimax_h3::engine::tests::ref2va_runtime_executes_the_phase_sequence_over_production_media_preprocessing)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::durable_direct_raw_observer_preserves_the_legacy_media_response))
+)
+"""
+
+[profile.pr]
+fail-fast = false
+slow-timeout = { period = "120s" }
+default-filter = """
+not (
+  (binary_id(mold-ai-inference) & test(=batch::tests::production_family_batch_registry_is_explicit_valid_and_singleton_only)) |
+  (binary_id(mold-ai-inference::family_capability_contract) & test(=every_factory_family_has_one_complete_weight_free_capability_contract)) |
+  (binary_id(mold-ai-inference::family_capability_contract) & test(=qualification_references_and_checked_in_matrix_are_concrete)) |
+  (binary_id(mold-ai-inference::family_capability_contract) & test(=the_qualification_matrix_block_offload_column_matches_the_registry)) |
+  (binary_id(mold-ai-inference) & test(=minimax_h3::engine::tests::ref2va_runtime_executes_the_phase_sequence_over_production_media_preprocessing)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::durable_direct_raw_observer_preserves_the_legacy_media_response)) |
+  (binary_id(mold-ai-inference) & test(=artifact_format::tests::json_probe_streams_large_values_without_materializing_a_dom)) |
+  (binary_id(mold-ai-inference) & test(=chain::orchestrator::tests::chain_fails_closed_mid_chain_discarding_accumulated_frames)) |
+  (binary_id(mold-ai-inference) & test(=chain::orchestrator::tests::chain_orchestrator_emits_full_per_stage_clips)) |
+  (binary_id(mold-ai-inference) & test(=chain::orchestrator::tests::chain_run_output_preserves_per_stage_frames)) |
+  (binary_id(mold-ai-inference) & test(=chain::orchestrator::tests::chain_with_zero_tail_concats_full_clips_without_drop)) |
+  (binary_id(mold-ai-inference) & test(=chain::orchestrator::tests::hdr_overlay_reaches_every_stage_request)) |
+  (binary_id(mold-ai-inference) & test(=chain::orchestrator::tests::hdr_sidecar_files_tile_the_stitched_timeline)) |
+  (binary_id(mold-ai-inference) & test(=chain::orchestrator::tests::mixed_transitions_end_to_end)) |
+  (binary_id(mold-ai-inference) & test(=chain::orchestrator::tests::orchestrator_passes_none_carry_for_cut_transition)) |
+  (binary_id(mold-ai-inference) & test(=chain::orchestrator::tests::orchestrator_passes_some_carry_for_smooth_transition)) |
+  (binary_id(mold-ai-inference) & test(=chain::orchestrator::tests::ordinary_chains_carry_no_sidecar_and_no_overlay)) |
+  (binary_id(mold-ai-inference) & test(=flux::pulid_variants::a_partial_start_step_lands_between_the_two_gated_extremes)) |
+  (binary_id(mold-ai-inference) & test(=flux::pulid_variants::cfg_start_step_is_measured_against_the_untruncated_schedule)) |
+  (binary_id(mold-ai-inference) & test(=flux::pulid_variants::every_variant_is_bit_identical_when_identity_contributes_nothing)) |
+  (binary_id(mold-ai-inference) & test(=flux::pulid_variants::every_variant_is_bit_identical_when_true_cfg_is_not_engaged)) |
+  (binary_id(mold-ai-inference) & test(=flux::pulid_variants::id_start_step_is_measured_against_the_untruncated_schedule)) |
+  (binary_id(mold-ai-inference) & test(=flux::pulid_variants::the_four_variants_are_the_same_model)) |
+  (binary_id(mold-ai-inference) & test(=flux::pulid_variants::the_true_cfg_combination_matches_upstreams_formula)) |
+  (binary_id(mold-ai-inference) & test(=hunyuan3d::paint_block::tests::complete_paint_block_matches_tencent)) |
+  (binary_id(mold-ai-inference) & test(=hunyuan3d::paint_upscale::tests::ordered_materials_reverse_channels_and_share_one_loaded_engine)) |
+  (binary_id(mold-ai-inference) & test(=img_utils::normalization_tests::flux2_reference_prep_downscales_only_above_the_cap)) |
+  (binary_id(mold-ai-inference) & test(=ip_adapter::tests::a_cfg_context_carries_the_null_projection_on_the_negative_row)) |
+  (binary_id(mold-ai-inference) & test(=ip_adapter::tests::a_checkpoint_for_a_different_unet_is_refused_in_both_directions)) |
+  (binary_id(mold-ai-inference) & test(=ip_adapter::tests::a_conditional_only_context_is_refused_on_a_cfg_forward)) |
+  (binary_id(mold-ai-inference) & test(=ip_adapter::tests::a_hook_refuses_what_it_was_not_planned_for)) |
+  (binary_id(mold-ai-inference) & test(=ip_adapter::tests::a_zero_scale_leaves_the_attention_output_untouched)) |
+  (binary_id(mold-ai-inference) & test(=ip_adapter::tests::a_zero_scale_yields_no_hook_at_all)) |
+  (binary_id(mold-ai-inference) & test(=ip_adapter::tests::both_families_load_their_own_geometry)) |
+  (binary_id(mold-ai-inference) & test(=ip_adapter::tests::the_token_count_comes_from_the_checkpoint)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::model::video_vae::tests::autoencoder_framewise_decode_matches_full_decode_across_chunk_boundaries)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::model::video_vae::tests::autoencoder_spatial_tiled_decode_converges_on_the_full_decode)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::pipeline::tests::changed_prompt_forces_a_runtime_session_rebuild)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::pipeline::tests::generate_runs_native_runtime_without_bridge_process)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::pipeline::tests::keep_session_opt_out_restores_transient_runtime_sessions)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::pipeline::tests::second_same_prompt_generation_reuses_the_retained_session)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::pipeline::tests::unload_releases_a_session_retained_by_a_generation)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::runtime::tests::attention_path_follows_the_device_and_the_effective_backend)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::runtime::tests::resize_tail_frames_to_pixel_shape_downscales_for_stage1_half_res_grid)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::runtime::tests::runtime_prepare_keeps_av_audio_latents_for_silent_outputs)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::runtime::tests::runtime_prepare_tracks_audio_and_video_latent_shapes)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::runtime::tests::runtime_prepare_uses_stage_one_shape_for_spatial_upscale)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::runtime::tests::runtime_prepare_uses_stage_one_shape_for_temporal_upscale)) |
+  (binary_id(mold-ai-inference) & test(=ltx2::runtime::tests::runtime_render_native_video_accepts_bf16_prompt_encodings)) |
+  (binary_id(mold-ai-inference) & test(=minimax_h3::private_qwen_support::tests::revalidate_fully_rehashes_each_descriptor_exactly_once)) |
+  (binary_id(mold-ai-inference) & test(=minimax_h3::reference_media::tests::image_preprocessing_uses_its_own_2048_short_edge_canvas)) |
+  (binary_id(mold-ai-inference) & test(=sd_reference::tests::a_live_reference_weight_changes_the_prediction)) |
+  (binary_id(mold-ai-inference) & test(=sd_reference::tests::a_null_hook_is_bit_identical_to_the_plain_forward)) |
+  (binary_id(mold-ai-inference) & test(=sdxl::pulid::tests::a_zero_weighted_adapter_leaves_the_unet_output_unchanged)) |
+  (binary_id(mold-ai-inference) & test(=upscaler::rrdbnet::tests::rrdb_cancellation_at_every_boundary_preserves_reuse)) |
+  (binary_id(mold-ai-inference) & test(=wan::experts::tests::each_expert_runs_on_its_own_side_of_the_boundary)) |
+  (binary_id(mold-ai-inference) & test(=wan::lora::tests::a_k_quantized_gguf_receives_the_adapter_at_full_precision)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::decode_clamps_to_unit_range)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::wan21_decode_is_chunk_plan_invariant)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::wan21_decode_matches_the_upstream_golden)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::wan21_encode_is_chunk_plan_invariant)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::wan21_encode_matches_the_upstream_golden)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::wan21_encode_prefix_is_stable)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::wan21_shape_contract)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::wan21_tiled_decode_covers_the_canvas_and_short_circuits)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::wan22_decode_is_chunk_plan_invariant)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::wan22_decode_matches_the_upstream_golden)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::wan22_encode_is_chunk_plan_invariant)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::wan22_encode_matches_the_upstream_golden)) |
+  (binary_id(mold-ai-inference) & test(=wan::model::vae::tests::wan22_shape_contract)) |
+  (binary_id(mold-ai-inference) & test(=wan::pipeline::tests::channel_concat_conditioning_depends_on_the_source_image)) |
+  (binary_id(mold-ai-inference) & test(=wan::pipeline::tests::preview_projects_the_solvers_own_x0)) |
+  (binary_id(mold-ai-inference) & test(=wan::pipeline::tests::single_pass_guidance_runs_the_same_pipeline)) |
+  (binary_id(mold-ai-inference) & test(=wan::pipeline::tests::the_step_cache_is_invisible_when_off_and_skips_blocks_when_on)) |
+  (binary_id(mold-ai-inference) & test(=wan::pipeline::tests::tiny_channel_concat_i2v_runs_end_to_end)) |
+  (binary_id(mold-ai-inference) & test(=wan::pipeline::tests::tiny_dmd_ladder_i2v_run_keeps_latent_frame_zero_pinned)) |
+  (binary_id(mold-ai-inference) & test(=wan::pipeline::tests::tiny_dmd_ladder_run_previews_and_is_seed_deterministic)) |
+  (binary_id(mold-ai-inference) & test(=wan::pipeline::tests::tiny_end_to_end_denoise_and_decode_produces_frames)) |
+  (binary_id(mold-ai-inference) & test(=wan::pipeline::tests::tiny_end_to_end_pixels_are_pinned)) |
+  (binary_id(mold-ai-inference) & test(=wan::pipeline::tests::tiny_ti2v_is_deterministic_for_one_source)) |
+  (binary_id(mold-ai-inference) & test(=wan::pipeline::tests::tiny_ti2v_run_pins_latent_frame_zero_to_the_source)) |
+  (binary_id(mold-ai-inference) & test(=wan::pipeline::tests::tiny_ti2v_source_image_controls_frame_zero)) |
+  (binary_id(mold-ai-server) & test(=batch_transaction::tests::deleting_one_of_ten_thousand_authority_entries_hashes_no_unrelated_media)) |
+  (binary_id(mold-ai-server) & test(=batch_transaction::tests::every_durable_commit_boundary_rolls_forward_atomically_after_restart)) |
+  (binary_id(mold-ai-server) & test(=downloads::tests::driver_failed_retry_sequence_cleans_up_partials)) |
+  (binary_id(mold-ai-server) & test(=downloads::tests::driver_retries_once_then_succeeds)) |
+  (binary_id(mold-ai-server) & test(=durable_queue_feeder::tests::attached_deep_hints_cannot_occupy_all_preparation_workers)) |
+  (binary_id(mold-ai-server) & test(=durable_queue_feeder::tests::default_capacity_publishes_more_than_one_worker_width_without_deadlock)) |
+  (binary_id(mold-ai-server) & test(=gpu_worker::tests::engine_create_load_generate_unload_and_drop_stay_on_one_owner_thread)) |
+  (binary_id(mold-ai-server) & test(=gpu_worker::tests::generation_panic_contains_engine_and_blocks_followup_job)) |
+  (binary_id(mold-ai-server) & test(=gpu_worker::tests::legacy_generation_preserves_f0_when_upscale_weights_disappear_before_freeze)) |
+  (binary_id(mold-ai-server) & test(=host_reclaim::tests::an_uncoverable_shortfall_still_releases_everything_and_refuses_honestly)) |
+  (binary_id(mold-ai-server) & test(=queue_media_store::tests::round_trip_streams_large_paths_and_keeps_the_manifest_encrypted)) |
+  (binary_id(mold-ai-server) & test(=queue_media_store::tests::tampering_and_truncation_never_release_plaintext)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::a_cpu_rendered_generation_stamps_its_job_id_and_clears_its_row)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::a_reordered_and_relaned_job_replays_where_the_user_put_it)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::a_transparent_turntable_is_encoded_and_refused_where_it_cannot_apply)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::an_idle_host_still_seeds_position_zero)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::concurrent_prints_keep_their_own_observers)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::concurrent_requests_only_load_existing_engine_once)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::concurrent_stream_requests_both_complete)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::delete_after_completion_claim_cannot_cancel_during_gallery_publication)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::delete_racing_single_worker_completion_cannot_publish_or_overwrite_cancel)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::durable_direct_raw_failure_is_the_held_childs_error)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::durable_direct_raw_observer_preserves_the_legacy_media_response)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::durable_raw_failure_keeps_server_generated_identity_when_refresh_fails)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::generate_empty_images_is_an_inference_error_naming_the_held_job)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::generate_replays_a_client_batch_id_with_its_batch_status)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::generate_stream_dedupes_consecutive_identical_prompts)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::generate_valid_request_returns_image_bytes)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::generation_batch_events_stream_authoritative_status_until_settled)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::heterogeneous_batch_admits_thirty_once_and_returns_same_ids_on_retry)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::list_models_does_not_block_during_generation)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::non_streaming_generate_queues_correctly)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::queued_stream_receives_position_event)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::reused_engine_clears_progress_callbacks_between_stream_and_generate)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::shutdown_cancellation_retains_single_worker_attempt_without_publication)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::snapshot_consistent_after_queue_load)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::status_does_not_block_during_generation)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::stream_metadata_only_returns_saved_filename_without_base64_media)) |
+  (binary_id(mold-ai-server) & test(=routes_test::tests::turntable_playback_and_repeat_follow_the_video_gif_contract)) |
+  (binary_id(mold-ai-server) & test(=video_upscale::tests::encoder_fits_oversized_frames_so_the_thumbnailer_can_decode_them))
+)
+"""

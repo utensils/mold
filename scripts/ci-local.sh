@@ -271,6 +271,7 @@ fi
 
 if wants contracts; then
   step "contracts: CI routing policy" bash scripts/tests/ci-routing-contract.sh
+  step "contracts: diff-scoped package selector" bash scripts/tests/ci-affected-packages.sh
   # All three graphs, not just the root: the desktop and mobile crates are
   # excluded from the workspace and have their own lockfiles.
   step "contracts: locked Cargo graphs" bash -c '
