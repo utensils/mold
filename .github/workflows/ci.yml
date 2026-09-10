@@ -395,7 +395,6 @@ jobs:
     env:
       RUN_RUST_SUITE: ${{ needs.changes.outputs.trusted_release_pr != 'true' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true') }}
       RUN_RUST_FORMAT: ${{ needs.changes.outputs.trusted_release_pr != 'true' && needs.changes.outputs.rust_format == 'true' }}
-      SCCACHE_GHA_ENABLED: "true"
       # Full debuginfo is the single largest cost in a test build's codegen and
       # link and in the cache save/restore; line tables keep test backtraces
       # readable.
@@ -540,25 +539,10 @@ jobs:
         # `protobuf-compiler` is for the `pulid` feature: `candle-onnx`'s build
         # script drives `prost-build`, which shells out to `protoc`.
         run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev protobuf-compiler
-      - uses: mozilla-actions/sccache-action@v0.0.7
-        if: env.RUN_RUST_SUITE == 'true'
-      - name: Enable sccache
-        if: env.RUN_RUST_SUITE == 'true'
-        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-      - name: Probe sccache (disable on cache outage)
-        if: env.RUN_RUST_SUITE == 'true'
-        shell: bash
-        run: |
-          set +e
-          printf 'fn main() {}\n' > /tmp/sccache_probe.rs
-          sccache rustc --edition 2021 -- /tmp/sccache_probe.rs -o /tmp/sccache_probe
-          status=$?
-          rm -f /tmp/sccache_probe /tmp/sccache_probe.rs
-          if [ $status -ne 0 ]; then
-            echo "sccache probe failed — disabling RUSTC_WRAPPER for this job"
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-            sccache --stop-server >/dev/null 2>&1 || true
-          fi
+      # No sccache here: its GitHub cache backend never stored an object in this
+      # repository (the store is at the 10 GB ceiling), and the probe that
+      # disabled it flipped RUSTC_WRAPPER, which rust-cache hashes into the key,
+      # so a PR could miss the cache main had just saved.
       - uses: Swatinem/rust-cache@v2
         if: env.RUN_RUST_SUITE == 'true'
         with:
@@ -573,11 +557,13 @@ jobs:
       # feature are linted and tested in the same compile instead of one
       # recompile each. nextest's `pr` profile (.config/nextest.toml) then
       # drops the default-feature assertions and the heavy synthetic-render
-      # long tail (about 78% of execution time in 116 tests). A push to
-      # `main` keeps everything: the default-feature workspace under
-      # `cargo test`, the MSRV toolchain, the per-feature H3 arms, the
-      # private developer bins, and the union build that warms the cache PRs
-      # restore.
+      # long tail (about 78% of execution time in 116 tests).
+      #
+      # A push to `main` runs two lanes in parallel. This job keeps the
+      # per-feature H3 arms, the private developer bins, and the union build
+      # that warms the cache PRs restore; `rust-default` below runs the
+      # default-feature clippy and the complete workspace suite. The MSRV
+      # toolchain runs weekly in msrv.yml.
       - uses: taiki-e/install-action@nextest
         if: env.RUN_RUST_SUITE == 'true'
       - name: Select the packages this change can affect
@@ -594,21 +580,6 @@ jobs:
           else
             python3 scripts/ci/affected-packages.py --all | tee -a "$GITHUB_OUTPUT"
           fi
-      - name: Check declared MSRV
-        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
-        shell: bash
-        run: |
-          msrv=$(sed -n 's/^rust-version = "\([^"]*\)"$/\1/p' Cargo.toml)
-          test -n "$msrv"
-          case "$msrv" in
-            *.*.*) msrv_toolchain=$msrv ;;
-            *.*) msrv_toolchain=$msrv.0 ;;
-            *) echo "Invalid rust-version: $msrv" >&2; exit 1 ;;
-          esac
-          rustup toolchain install "$msrv_toolchain" --profile minimal
-          cargo "+$msrv_toolchain" check --workspace --all-targets --locked
-          cargo "+$msrv_toolchain" check -p mold-ai --locked \
-            --features preview,discord,expand,tui,metrics,webp,mp4,mdns,pulid
       - name: Format
         if: env.RUN_RUST_FORMAT == 'true'
         run: cargo fmt --all -- --check
@@ -618,9 +589,6 @@ jobs:
       - name: Check generated prompting guides
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo run -p mold-ai-core --bin generate_prompting_guides -- --check
-      - name: Clippy
-        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
-        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Clippy (affected packages, optional features on)
         if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'pull_request' && steps.affected.outputs.scope != 'none'
         run: >-
@@ -636,9 +604,6 @@ jobs:
           cargo nextest run --profile pr ${{ steps.affected.outputs.packages }}
           --features "${{ steps.affected.outputs.features }}"
           -E "not test(=catalog_api::catalog_live_test::live_search_free_text_can_find_manual_clip_components)"
-      - name: Test (full main suite)
-        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
-        run: timeout --signal=TERM --kill-after=60s 20m cargo test --workspace
       - name: Test local multi-GPU qualification contract
         if: env.RUN_RUST_SUITE == 'true'
         run: bash scripts/tests/local-multi-gpu-qualification-contract.sh
@@ -708,6 +673,43 @@ jobs:
           -E "test(identity) | test(mdns) | test(hunyuan3d) | test(minimax_h3)"
       - name: Record protected gate success
         run: echo "Required Rust and release routes completed successfully."
+
+  # Main's second Rust lane: the default-feature workspace, which the union
+  # build above cannot stand in for (six tests assert default-feature
+  # behaviour and code behind `#[cfg(not(feature))]` only compiles here).
+  # It restores the union cache and never saves, so `rust` stays the one
+  # writer of `workspace-default` and PRs keep restoring a union-warm cache.
+  rust-default:
+    timeout-minutes: 40
+    needs: changes
+    if: >-
+      github.event_name == 'push' && needs.changes.result == 'success' &&
+      (needs.changes.outputs.rust == 'true' ||
+       needs.changes.outputs.workflow == 'true')
+    runs-on: ubuntu-latest
+    env:
+      # Must match `rust` exactly: rust-cache hashes every CARGO_*/RUST* value
+      # into the key this job restores.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install Rust build deps
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev protobuf-compiler
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace-default
+          save-if: false
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # nextest's `main` profile runs every test, the live external catalog
+      # monitor included, one binary's tests interleaved with the next's
+      # instead of `cargo test`'s one-binary-at-a-time schedule.
+      - name: Test (full main suite)
+        run: timeout --signal=TERM --kill-after=60s 20m cargo nextest run --profile main --workspace
 
   # The shipping Windows CLI compiles mold-server routes that Unix cfgs can
   # accidentally hide from every Linux PR gate. Keep this as a typecheck: the

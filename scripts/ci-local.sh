@@ -224,7 +224,8 @@ msrv_toolchain() {
 if wants rust; then
   # The MSRV gate is a different compiler, not a different command: an API
   # newer than the declared minimum passes every step below on the ambient
-  # toolchain and fails the required job.
+  # toolchain and fails the weekly MSRV workflow (.github/workflows/msrv.yml),
+  # which also runs on every manifest or lockfile change that reaches main.
   msrv=$(msrv_toolchain || true)
   if [ -z "${msrv:-}" ]; then
     # An unreadable `rust-version` is a failure, not a skip: the gate exists and
@@ -249,7 +250,13 @@ if wants rust; then
   step "rust: generated prompting guides" \
     cargo run -p mold-ai-core --bin generate_prompting_guides -- --check
   step "rust: clippy" cargo clippy --workspace --all-targets -- -D warnings
-  step "rust: test (full main suite)" cargo test --workspace
+  # Main runs the complete suite through nextest's `main` profile; fall back
+  # to cargo test where cargo-nextest is not installed.
+  if cargo nextest --version >/dev/null 2>&1; then
+    step "rust: test (full main suite)" cargo nextest run --profile main --workspace
+  else
+    step "rust: test (full main suite, cargo-nextest not installed)" cargo test --workspace
+  fi
   step "rust: optional feature check" \
     cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns,pulid
   step "rust: mesh preparation tests" \

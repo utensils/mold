@@ -1,0 +1,55 @@
+name: MSRV
+
+# The declared `rust-version` is checked off the merge path. A push to `main`
+# used to pay 4 minutes for this on every commit; it now runs weekly, on
+# demand, and whenever a manifest or the lockfile changes, since a dependency
+# raising its own floor is the usual way the claim goes stale. No rust-cache:
+# the repository's cache store sits at its 10 GB ceiling and a cold check of
+# this size finishes in a few minutes on its own runner.
+on:
+  schedule:
+    # Mondays 13:17 UTC (06:17 America/Phoenix), off the top of the hour.
+    - cron: "17 13 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/*/Cargo.toml"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
+      - ".github/workflows/msrv.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+concurrency:
+  group: msrv-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  msrv:
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust build deps
+        # `protobuf-compiler` is for the `pulid` feature: `candle-onnx`'s build
+        # script drives `prost-build`, which shells out to `protoc`.
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev protobuf-compiler
+      - name: Check declared MSRV
+        shell: bash
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\([^"]*\)"$/\1/p' Cargo.toml)
+          test -n "$msrv"
+          case "$msrv" in
+            *.*.*) msrv_toolchain=$msrv ;;
+            *.*) msrv_toolchain=$msrv.0 ;;
+            *) echo "Invalid rust-version: $msrv" >&2; exit 1 ;;
+          esac
+          rustup toolchain install "$msrv_toolchain" --profile minimal
+          cargo "+$msrv_toolchain" check --workspace --all-targets --locked
+          cargo "+$msrv_toolchain" check -p mold-ai --locked \
+            --features preview,discord,expand,tui,metrics,webp,mp4,mdns,pulid

@@ -23,12 +23,12 @@ nix flake check             # CI-equivalent gate
 cargo check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
-cargo test --workspace                       # full suite, what a push to main runs
+cargo nextest run --profile main --workspace   # full suite, what a push to main runs (cargo test --workspace is equivalent, slower)
 cargo nextest run --profile pr $(python3 scripts/ci/affected-packages.py --base origin/main --head HEAD | sed -n 's/^packages=//p')   # what a PR runs (see .config/nextest.toml; add --features from the same script)
 cargo test -p mold-ai-core --lib <filter>    # single test/module; use the PACKAGE name (table below), not the dir
 cargo test -p mold-ai-server --features mdns --lib mdns   # feature-gated modules (mdns, pulid, h3) never compile under --workspace
 cargo run -p mold-ai-core --bin generate_prompting_guides -- --check   # CI contract
-cargo +1.93 check -p mold-ai --locked --features preview,discord,expand,tui,metrics,webp,mp4,mdns,pulid   # CI MSRV gate
+cargo +1.93 check -p mold-ai --locked --features preview,discord,expand,tui,metrics,webp,mp4,mdns,pulid   # MSRV gate (weekly msrv.yml, not on the merge path)
 cargo run -p mold-ai-core --bin generate_generation_profiles -- --check   # CI contract
 bash scripts/tests/ci-routing-contract.sh                                 # CI contract
 bash scripts/tests/candle-single-identity.sh                              # every candle crate on ONE fork rev

@@ -214,9 +214,6 @@ expected_step_conditions = {
         "env.RUN_RUST_SUITE == 'true' && github.event_name == 'pull_request' && "
         "steps.affected.outputs.scope != 'none'"
     ),
-    "Test (full main suite)": (
-        "env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'"
-    ),
 }
 expected_step_conditions["Validate all locked Cargo graphs"] = (
     "needs.changes.outputs.release == 'true'"
@@ -423,10 +420,58 @@ grep -Fq 'name: Test (deterministic PR suite)' <<< "$rust_gate" \
   || fail "protected Rust status does not run deterministic workspace tests on pull requests"
 grep -Fq -- "not test(=catalog_api::catalog_live_test::live_search_free_text_can_find_manual_clip_components)" <<< "$rust_gate" \
   || fail "the PR suite includes the flaky external catalog monitor"
-grep -Fq 'name: Test (full main suite)' <<< "$rust_gate" \
+# The default-feature lane is main's second Rust job. It must stay push-only
+# (it is not a required status), restore the SAME cache key `rust` saves
+# without ever writing it (two writers would race and a PR could restore a
+# cache with no union artifacts), and keep the complete workspace suite.
+rust_default="$(extract_job "$ci" rust-default)"
+[[ -n "$rust_default" ]] \
+  || fail "main has no rust-default lane"
+grep -Fq "github.event_name == 'push' &&" <<< "$rust_default" \
+  || fail "the rust-default lane is not restricted to pushes"
+grep -Fq 'shared-key: workspace-default' <<< "$rust_default" \
+  || fail "the rust-default lane does not restore the union cache"
+grep -Fq 'save-if: false' <<< "$rust_default" \
+  || fail "the rust-default lane writes the cache key rust owns"
+grep -Fq 'CARGO_PROFILE_DEV_DEBUG: line-tables-only' <<< "$rust_default" \
+  || fail "the rust-default lane's cache key diverges from rust (CARGO_PROFILE_DEV_DEBUG)"
+grep -Fq 'run: cargo clippy --workspace --all-targets -- -D warnings' <<< "$rust_default" \
+  || fail "main no longer lints the default-feature workspace"
+grep -Fq 'name: Test (full main suite)' <<< "$rust_default" \
   || fail "main Rust suite does not retain the complete workspace tests"
-grep -Fq 'run: timeout --signal=TERM --kill-after=60s 20m cargo test --workspace' <<< "$rust_gate" \
+grep -Fq 'run: timeout --signal=TERM --kill-after=60s 20m cargo nextest run --profile main --workspace' <<< "$rust_default" \
   || fail "main Rust suite does not bound the complete workspace tests"
+grep -Fq '[profile.main]' "$repo_root/.config/nextest.toml" \
+  || fail "nextest has no main profile"
+if grep -Fq 'default-filter' <<< "$(sed -n '/^\[profile.main\]/,/^\[/p' "$repo_root/.config/nextest.toml")"; then
+  fail "nextest's main profile filters tests out; main must run every test"
+fi
+if grep -Fq 'Test (full main suite)' <<< "$rust_gate"; then
+  fail "the required rust job still runs the complete workspace suite on main (it belongs to rust-default)"
+fi
+# sccache never stored an object here and its enable/disable probe flipped
+# RUSTC_WRAPPER, which rust-cache hashes into the key PRs restore.
+if grep -Fq 'sccache-action' <<< "$rust_gate$rust_default"; then
+  fail "sccache is back in the Rust lanes; its probe makes the rust-cache key nondeterministic"
+fi
+# The MSRV toolchain is off the merge path: weekly, on demand, and on
+# manifest or lockfile changes, in its own workflow.
+msrv="$repo_root/.github/workflows/msrv.yml"
+[[ -f "$msrv" ]] \
+  || fail "the MSRV workflow is missing"
+grep -Fq 'schedule:' "$msrv" \
+  || fail "the MSRV workflow has no schedule"
+grep -Fq 'workflow_dispatch:' "$msrv" \
+  || fail "the MSRV workflow cannot be run on demand"
+grep -Fq '"Cargo.lock"' "$msrv" \
+  || fail "the MSRV workflow does not run when the lockfile changes"
+grep -Fq 'cargo "+$msrv_toolchain" check --workspace --all-targets --locked' "$msrv" \
+  || fail "the MSRV workflow does not check the workspace on the declared toolchain"
+grep -Fq -- '--features preview,discord,expand,tui,metrics,webp,mp4,mdns,pulid' "$msrv" \
+  || fail "the MSRV workflow does not check the mold CLI feature set"
+if grep -Fq 'Check declared MSRV' <<< "$rust_gate"; then
+  fail "the MSRV toolchain is back on main's merge path"
+fi
 if grep -Fq 'run: cargo check --workspace' "$ci"; then
   fail "root Rust CI still runs cargo check immediately before all-target Clippy"
 fi
