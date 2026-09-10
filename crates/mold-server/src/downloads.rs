@@ -107,6 +107,16 @@ pub enum EnqueueError {
     ModelActivation(#[from] mold_core::ModelActivationError),
     #[error("unknown model '{0}'. Run 'mold list' to see available models.")]
     UnknownModel(String),
+    /// A `mold quantize` output another host advertises. Nothing serves it.
+    #[error(
+        "'{requested}' is a locally derived quantized tier, not a download. Install '{from}' \
+         on this host and run `mold quantize {from} --tier {tier}` to create it here."
+    )]
+    DerivedTier {
+        requested: String,
+        from: &'static str,
+        tier: &'static str,
+    },
     #[error("download queue lock poisoned")]
     LockPoisoned,
 }
@@ -235,8 +245,19 @@ impl DownloadQueue {
         // Manifest validation up front so the caller gets a real 400 instead of a
         // background failure.
         let canonical = mold_core::manifest::resolve_model_name(&model);
-        let manifest = mold_core::manifest::find_manifest(&canonical)
-            .ok_or(EnqueueError::UnknownModel(model))?;
+        let Some(manifest) = mold_core::manifest::find_manifest(&canonical) else {
+            // A derived tier is registered on the host that quantized it and
+            // listed by `/api/models` there beside the built-in tiers, so a
+            // client on another machine asks to pull it by name (#1672).
+            if let Some(derived) = mold_core::manifest::hunyuan3d_derived_tier(&canonical) {
+                return Err(EnqueueError::DerivedTier {
+                    requested: model,
+                    from: derived.source,
+                    tier: derived.tier,
+                });
+            }
+            return Err(EnqueueError::UnknownModel(model));
+        };
         self.enqueue_resolved_manifest(canonical, manifest, hf_fallback_token)
             .await
     }

@@ -57,6 +57,7 @@ pub mod paint_reliability;
 #[cfg(feature = "mesh-texture")]
 pub mod paint_runtime;
 pub mod paint_sampler;
+pub mod paint_stages;
 pub mod paint_unet;
 pub mod paint_upscale;
 pub mod paint_uv;

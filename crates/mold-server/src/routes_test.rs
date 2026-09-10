@@ -6823,6 +6823,103 @@ mod tests {
         );
     }
 
+    /// A locally derived Hunyuan3D tier — what `mold quantize` registers in
+    /// `config.models` with `family = "hunyuan3d"` — is absent from the
+    /// built-in manifest. Durable admission resolved that family and then
+    /// validated the request with NO hint, so family validation fell back to
+    /// the manifest, found nothing, and refused the `mesh` block as raster
+    /// output while the built-in `:fp16` tier of the same architecture was
+    /// admitted (#1672). The family the door resolves is the family it
+    /// validates with.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_derived_hunyuan3d_tier_is_admitted_with_its_mesh_block() {
+        let (state, _rx, _root) = durable_test_state(MockEngine::ready());
+        state.config.write().await.models.insert(
+            "hunyuan3d-mini-turbo:q4".to_string(),
+            mold_core::ModelConfig {
+                family: Some(mold_core::manifest::HUNYUAN3D_FAMILY.to_string()),
+                description: Some(
+                    "Hunyuan3D 2.0 Mini Turbo (q4, locally derived from hunyuan3d-mini-turbo:fp16)"
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+        );
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+        let mut request_json = serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
+            "an armchair",
+            "hunyuan3d-mini-turbo:q4",
+            0,
+            0,
+        ))
+        .unwrap();
+        request_json["output_format"] = serde_json::json!("glb");
+        request_json["steps"] = serde_json::json!(5);
+        request_json["source_image"] =
+            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(minimal_png()));
+        request_json["mesh"] = serde_json::json!({ "octree_resolution": 256 });
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [request_json],
+        });
+
+        let response = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let response_body = json_body(response).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response_body}");
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1, "{response_body}");
+        assert_eq!(rows[0].model, "hunyuan3d-mini-turbo:q4");
+    }
+
+    /// The mirror: the raster refusal itself is still real. A derived tier
+    /// registered under a raster family keeps refusing a `mesh` block at
+    /// the door, so the fix above is the family hint, not a loosened gate.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_derived_raster_tier_still_refuses_a_mesh_block_at_the_door() {
+        let (state, _rx, _root) = durable_test_state(MockEngine::ready());
+        state.config.write().await.models.insert(
+            "my-flux:q4".to_string(),
+            mold_core::ModelConfig {
+                family: Some("flux".to_string()),
+                ..Default::default()
+            },
+        );
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+        let mut request_json = serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
+            "a cat with an octree it cannot use",
+            "my-flux:q4",
+            512,
+            512,
+        ))
+        .unwrap();
+        request_json["mesh"] = serde_json::json!({ "octree_resolution": 256 });
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [request_json],
+        });
+
+        let response = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let response_body = json_body(response).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response_body}");
+        assert_eq!(
+            response_body["error"],
+            "requests[1]: mesh options are only supported by 3-D families; this model renders raster output"
+        );
+        assert!(journal.list_all().is_empty());
+    }
+
     /// An LTX-2.5 GGUF tier is an ordinary durable admission since the
     /// native quantized runtime landed (#1414): the batch is accepted, the
     /// row is journaled, and preparation starts only in the feeder.
@@ -19912,6 +20009,38 @@ mod tests {
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// `hunyuan3d-2.1:q4` is what another host advertises after
+    /// `mold quantize`; no registry serves it, so "unknown model, run mold
+    /// list" sent the person looking for a download that does not exist
+    /// (#1672). The refusal names the source tier and the command instead.
+    #[tokio::test]
+    async fn post_api_downloads_derived_hunyuan3d_tier_says_how_to_make_it() {
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state);
+        let body = serde_json::json!({ "model": "hunyuan3d-2.1:q4" });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/downloads")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(res).await;
+        let error = body["error"].as_str().unwrap();
+        assert!(
+            error.contains("locally derived")
+                && error.contains("mold quantize hunyuan3d-2.1:fp16 --tier q4"),
+            "{error}"
+        );
+        assert!(!error.contains("mold list"), "{error}");
     }
 
     #[tokio::test]
