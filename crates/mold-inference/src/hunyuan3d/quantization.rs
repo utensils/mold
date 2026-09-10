@@ -1064,4 +1064,23 @@ mod tests {
         assert!(!output.exists());
         Ok(())
     }
+
+    /// The core download door recognises a derived tier by tag without this
+    /// crate; the two lists must not drift.
+    #[test]
+    fn every_shape_tier_is_a_core_derived_tier_and_nothing_else_is() {
+        let tags = [
+            ShapeQuantization::Fp8,
+            ShapeQuantization::Q8,
+            ShapeQuantization::Q6,
+            ShapeQuantization::Q5,
+            ShapeQuantization::Q4,
+            ShapeQuantization::Q3,
+        ]
+        .map(ShapeQuantization::tag);
+        assert_eq!(
+            tags.as_slice(),
+            mold_core::manifest::HUNYUAN3D_DERIVED_TIERS
+        );
+    }
 }

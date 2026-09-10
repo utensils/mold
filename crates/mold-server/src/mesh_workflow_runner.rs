@@ -468,6 +468,28 @@ async fn drive_job(
             }
             NextAction::WaitMesh { batch_id } => {
                 let Some(filename) = completed_child_filename(state, &batch_id).await? else {
+                    if let Some(paint_index) =
+                        shape_stage_to_complete(&stages, live_child_stage(state, &batch_id).await?)
+                            .and_then(|shape_index| {
+                                mesh_workflow_jobs::complete_stage_live(
+                                    db,
+                                    &current.id,
+                                    shape_index,
+                                    now_ms(),
+                                )
+                                .ok()
+                                .filter(|changed| *changed)
+                                .and(stage_index_for(&stages, MeshWorkflowStageKind::Paint).ok())
+                            })
+                    {
+                        let _ = mesh_workflow_jobs::set_current_stage(
+                            db,
+                            &current.id,
+                            paint_index,
+                            now_ms(),
+                        )?;
+                        update_manifest_from_db(db, &current)?;
+                    }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 };
@@ -766,6 +788,58 @@ async fn completed_child_filename(
     }
 }
 
+/// The named progress stage the batch's child is reporting right now, if
+/// any. `None` while it is queued, loading weights with no named stage,
+/// between two stages, or already settled.
+async fn live_child_stage(state: &AppState, batch_id: &str) -> anyhow::Result<Option<String>> {
+    let detail = state
+        .queue_journal
+        .durable_generation_batch(batch_id)
+        .map_err(anyhow::Error::msg)?
+        .context("mesh workflow child generation batch is missing")?;
+    let child = detail
+        .children
+        .first()
+        .context("mesh workflow child batch is empty")?;
+    Ok(state
+        .job_registry
+        .progress_snapshot(&child.job_id)
+        .flatten()
+        .and_then(|progress| progress.stage))
+}
+
+/// The Shape stage to report complete from the child's live progress, if the
+/// child has moved on to painting.
+///
+/// Shape and paint run inside ONE queue job — the engine builds geometry,
+/// drops the shape checkpoint, then textures — so the workflow only ever
+/// learns that the job started and finished, and both stages read RUNNING
+/// for the whole render while the queue card already says "Generating PBR
+/// views · 3/15". The one live signal separating the halves is the progress
+/// stage name; `paint_stages` is the contract both sides read. Progress
+/// clears its stage between two named stages, so this fires on the first
+/// paint stage observed and `complete_stage_live` makes it idempotent.
+fn shape_stage_to_complete(
+    stages: &[MeshWorkflowStageRow],
+    live_stage: Option<String>,
+) -> Option<u32> {
+    let live_stage = live_stage?;
+    if !mold_inference::hunyuan3d::paint_stages::is_paint_stage(&live_stage) {
+        return None;
+    }
+    let shape = stages
+        .iter()
+        .find(|stage| stage.kind == MeshWorkflowStageKind::Shape)?;
+    let paint = stages
+        .iter()
+        .find(|stage| stage.kind == MeshWorkflowStageKind::Paint)?;
+    (shape.state == MeshWorkflowStageState::Running
+        && paint.state == MeshWorkflowStageState::Running
+        && shape.execution_batch_id.is_some()
+        && shape.execution_batch_id == paint.execution_batch_id)
+        .then_some(shape.stage_index)
+}
+
 fn attach_batch(
     db: &mold_db::MetadataDb,
     job_id: &str,
@@ -946,6 +1020,84 @@ mod tests {
             error: None,
             updated_at_ms: 1,
         }
+    }
+
+    /// Both halves of a textured render read RUNNING for the whole job while
+    /// the queue card already said "Generating PBR views" (#1672's sibling).
+    /// The first paint stage observed completes Shape; nothing else does.
+    #[test]
+    fn a_live_paint_stage_completes_shape_and_a_shape_stage_does_not() {
+        let running = |index, kind| {
+            stage(
+                index,
+                kind,
+                MeshWorkflowStageState::Running,
+                Some("mesh-batch"),
+            )
+        };
+        let stages = vec![
+            stage(
+                0,
+                MeshWorkflowStageKind::Matting,
+                MeshWorkflowStageState::Completed,
+                Some("matting-batch"),
+            ),
+            running(1, MeshWorkflowStageKind::Shape),
+            running(2, MeshWorkflowStageKind::Paint),
+            stage(
+                3,
+                MeshWorkflowStageKind::Finalize,
+                MeshWorkflowStageState::Pending,
+                None,
+            ),
+        ];
+        for live in [
+            "Sampling",
+            "Decoding volume",
+            "Extracting surface",
+            "Simplifying mesh",
+        ] {
+            assert_eq!(
+                shape_stage_to_complete(&stages, Some(live.to_string())),
+                None,
+                "{live} is geometry"
+            );
+        }
+        assert_eq!(shape_stage_to_complete(&stages, None), None);
+        for live in [
+            "Unwrapping mesh",
+            "Generating PBR views",
+            "Baking PBR textures",
+        ] {
+            assert_eq!(
+                shape_stage_to_complete(&stages, Some(live.to_string())),
+                Some(1),
+                "{live} means geometry is done"
+            );
+        }
+
+        // Already reported: nothing to do twice.
+        let mut reported = stages.clone();
+        reported[1].state = MeshWorkflowStageState::Completed;
+        assert_eq!(
+            shape_stage_to_complete(&reported, Some("Generating PBR views".to_string())),
+            None
+        );
+
+        // A texture-only run has no Shape stage to complete.
+        let texture_only = vec![
+            running(0, MeshWorkflowStageKind::Paint),
+            stage(
+                1,
+                MeshWorkflowStageKind::Finalize,
+                MeshWorkflowStageState::Pending,
+                None,
+            ),
+        ];
+        assert_eq!(
+            shape_stage_to_complete(&texture_only, Some("Generating PBR views".to_string())),
+            None
+        );
     }
 
     #[test]

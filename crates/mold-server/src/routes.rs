@@ -5464,6 +5464,9 @@ async fn pull_model_endpoint(
                 body.model
             )));
         }
+        Err(error @ crate::downloads::EnqueueError::DerivedTier { .. }) => {
+            return Err(ApiError::validation(error.to_string()));
+        }
         Err(crate::downloads::EnqueueError::LockPoisoned) => {
             return Err(ApiError::internal("download queue state is corrupt"));
         }
@@ -11507,6 +11510,11 @@ pub async fn create_download(
             Json(serde_json::json!({
                 "error": format!("unknown model '{}'. Run 'mold list' to see available models.", body.model)
             })),
+        )
+            .into_response(),
+        Err(error @ EnqueueError::DerivedTier { .. }) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error.to_string() })),
         )
             .into_response(),
         Err(EnqueueError::LockPoisoned) => (

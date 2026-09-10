@@ -56,6 +56,47 @@ pub fn hunyuan3d_uses_21_license(model: &str) -> bool {
         || model.split(':').next() == Some("hunyuan3d-2.1")
         || model.starts_with("hunyuan3d-2.1-")
 }
+/// The tiers `mold quantize` can derive from a Hunyuan3D shape checkpoint,
+/// by tag. Mirrors `ShapeQuantization::tag` in mold-inference (pinned by a
+/// test there); it lives here because the download door has to recognise a
+/// derived NAME on a host that has never run the quantizer.
+pub const HUNYUAN3D_DERIVED_TIERS: &[&str] = &["fp8", "q8", "q6", "q5", "q4", "q3"];
+
+/// A derived Hunyuan3D shape tier, as advertised by the host that made it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hunyuan3dDerivedTier {
+    /// The registered manifest it is quantized from, e.g. `hunyuan3d-2.1:fp16`.
+    pub source: &'static str,
+    /// The quantization tag, e.g. `q4`.
+    pub tier: &'static str,
+}
+
+/// Recognise `<hunyuan3d base>:<tier>` for a tier the quantizer derives
+/// locally and no registry serves.
+///
+/// A derived tier is registered in ONE host's `config.models` by
+/// `mold quantize`; `/api/models` on that host lists it beside the built-in
+/// tiers, so a client on another machine reads the name and asks to pull it.
+/// There is nothing to pull. `None` for every registered manifest name and for
+/// anything that is not a Hunyuan3D shape base.
+pub fn hunyuan3d_derived_tier(model: &str) -> Option<Hunyuan3dDerivedTier> {
+    let canonical = resolve_model_name(model);
+    if find_manifest(&canonical).is_some() {
+        return None;
+    }
+    let (base, tier) = canonical.split_once(':')?;
+    let tier = HUNYUAN3D_DERIVED_TIERS
+        .iter()
+        .copied()
+        .find(|known| *known == tier)?;
+    let source = find_manifest(&format!("{base}:fp16"))
+        .filter(|manifest| manifest.family == HUNYUAN3D_FAMILY)?;
+    Some(Hunyuan3dDerivedTier {
+        source: source.name.as_str(),
+        tier,
+    })
+}
+
 /// The Hunyuan3D 2.1 PBR paint bundle: auxiliary, hidden, files-only.
 ///
 /// Separate from [`HUNYUAN3D_FAMILY`] because it is a different upstream
@@ -8001,6 +8042,23 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
 
 #[cfg(test)]
 mod tests {
+    /// `hunyuan3d-2.1:q4` is what plato advertises after `mold quantize`;
+    /// no registry serves it, and a pull of it on another host must say so
+    /// rather than "unknown model" (#1672).
+    #[test]
+    fn a_derived_hunyuan3d_tier_names_its_source_and_a_registered_name_does_not() {
+        let derived = super::hunyuan3d_derived_tier("hunyuan3d-2.1:q4").unwrap();
+        assert_eq!(derived.source, "hunyuan3d-2.1:fp16");
+        assert_eq!(derived.tier, "q4");
+        let mini = super::hunyuan3d_derived_tier("hunyuan3d-mini-turbo:fp8").unwrap();
+        assert_eq!(mini.source, "hunyuan3d-mini-turbo:fp16");
+        assert!(super::hunyuan3d_derived_tier("hunyuan3d-2.1:fp16").is_none());
+        assert!(super::hunyuan3d_derived_tier("hunyuan3d-2.1").is_none());
+        assert!(super::hunyuan3d_derived_tier("hunyuan3d-2.1:q2").is_none());
+        assert!(super::hunyuan3d_derived_tier("flux-dev:q4").is_none());
+        assert!(super::hunyuan3d_derived_tier("not-a-model:q4").is_none());
+    }
+
     #[test]
     fn hunyuan3d_multiview_tiers_pin_their_distinct_weights_and_recipes() {
         let normal = super::find_manifest("hunyuan3d-2mv:fp16").expect("2mv shape recipe");

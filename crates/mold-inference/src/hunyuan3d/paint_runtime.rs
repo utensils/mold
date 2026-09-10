@@ -8,6 +8,7 @@ use rand::{rngs::StdRng, SeedableRng};
 use rand_distr::{Distribution, StandardNormal};
 use std::time::Instant;
 
+use super::paint_stages;
 use super::{
     mesh::Mesh,
     paint_images::PaintImages,
@@ -154,12 +155,12 @@ fn request(images: PaintImages, views: usize, seed: u64) -> Result<PaintRequest>
 
 fn stage_name(stage: PaintStage) -> &'static str {
     match stage {
-        PaintStage::Appearance => "Encoding paint appearance",
-        PaintStage::Reference => "Encoding paint reference",
-        PaintStage::Normal => "Encoding paint normals",
-        PaintStage::Position => "Encoding paint positions",
-        PaintStage::Denoise => "Generating PBR views",
-        PaintStage::Decode => "Decoding PBR views",
+        PaintStage::Appearance => paint_stages::ENCODING_PAINT_APPEARANCE,
+        PaintStage::Reference => paint_stages::ENCODING_PAINT_REFERENCE,
+        PaintStage::Normal => paint_stages::ENCODING_PAINT_NORMALS,
+        PaintStage::Position => paint_stages::ENCODING_PAINT_POSITIONS,
+        PaintStage::Denoise => paint_stages::GENERATING_PBR_VIEWS,
+        PaintStage::Decode => paint_stages::DECODING_PBR_VIEWS,
     }
 }
 
@@ -234,7 +235,7 @@ impl PaintRuntime<'_> {
         // stage emits `StageStart` and nothing else until it finishes, which
         // is what `/api/activity` reads as `phase: "loading"` and what left an
         // hour-long unwrap reporting no progress at all (#1666).
-        let unwrapped = report_display_stage(progress, "Unwrapping mesh", || {
+        let unwrapped = report_display_stage(progress, paint_stages::UNWRAPPING_MESH, || {
             // The callback is also the cancellation poll, so it fires on a
             // fixed cadence during phases whose percent does not move. Emit
             // only when the position actually changes: every event downstream
@@ -246,30 +247,31 @@ impl PaintRuntime<'_> {
                     return;
                 }
                 progress.stage_progress(
-                    "Unwrapping mesh",
+                    paint_stages::UNWRAPPING_MESH,
                     position as usize,
                     (uv::UnwrapPhase::COUNT * 100) as usize,
                 );
             })
             .context("unwrap the generated mesh")
         })?;
-        let prepared = report_display_stage(progress, "Preparing paint mesh", || {
+        let prepared = report_display_stage(progress, paint_stages::PREPARING_PAINT_MESH, || {
             prepare_mesh(&unwrapped)
         })?;
         let mut checkpoint = || -> Result<()> { Ok(progress.checkpoint()?) };
-        let (views, images) = report_display_stage(progress, "Preparing paint views", || {
-            let views = selected_views(&prepared, &mut checkpoint)?;
-            let (normals, positions) = condition_images(&prepared, &views, &mut checkpoint)?;
-            let images = PaintImages::prepare(
-                appearance,
-                &normals,
-                &positions,
-                VIEW_SIZE,
-                DType::F16,
-                &mut checkpoint,
-            )?;
-            Ok((views, images))
-        })?;
+        let (views, images) =
+            report_display_stage(progress, paint_stages::PREPARING_PAINT_VIEWS, || {
+                let views = selected_views(&prepared, &mut checkpoint)?;
+                let (normals, positions) = condition_images(&prepared, &views, &mut checkpoint)?;
+                let images = PaintImages::prepare(
+                    appearance,
+                    &normals,
+                    &positions,
+                    VIEW_SIZE,
+                    DType::F16,
+                    &mut checkpoint,
+                )?;
+                Ok((views, images))
+            })?;
         let input = request(images, views.len(), seed)?;
         let _scope = crate::conv_policy::ConvScope::apply(crate::conv_policy::resolve_for(
             crate::conv_policy::ConvPolicy::Paint,
@@ -298,10 +300,10 @@ impl PaintRuntime<'_> {
             placement,
         )?
         .for_paint_materials()?;
-        let materials = report_display_stage(progress, "Upscaling PBR views", || {
+        let materials = report_display_stage(progress, paint_stages::UPSCALING_PBR_VIEWS, || {
             upscale_materials(upscale, &materials, token, || Ok(progress.checkpoint()?))
         })?;
-        let baked = report_display_stage(progress, "Baking PBR textures", || {
+        let baked = report_display_stage(progress, paint_stages::BAKING_PBR_TEXTURES, || {
             bake_materials(
                 &prepared,
                 &materials,
@@ -311,12 +313,13 @@ impl PaintRuntime<'_> {
                 &mut checkpoint,
             )
         })?;
-        let textures = report_display_stage(progress, "Filling PBR textures", || {
+        let textures = report_display_stage(progress, paint_stages::FILLING_PBR_TEXTURES, || {
             finish_materials(&prepared, baked, &mut checkpoint)
         })?;
-        let (mesh, glb) = report_display_stage(progress, "Writing textured GLB", || {
-            encode_textured_glb(&prepared, &textures, None, &mut checkpoint)
-        })?;
+        let (mesh, glb) =
+            report_display_stage(progress, paint_stages::WRITING_TEXTURED_GLB, || {
+                encode_textured_glb(&prepared, &textures, None, &mut checkpoint)
+            })?;
         Ok(TexturedMesh { mesh, glb })
     }
 }

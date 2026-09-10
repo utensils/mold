@@ -497,8 +497,17 @@ impl DurableMediaAdmission {
                 error.error = format!("requests[{}]: {}", offset + 1, error.error);
                 error
             })?;
+            // The family this door resolves is the family it validates with.
+            // A locally derived tier (`mold quantize`) lives only in
+            // `config.models`, so the manifest fallback inside field
+            // validation finds NO family for it and refuses its `mesh` block
+            // as raster output — while the built-in `:fp16` of the same
+            // architecture is admitted (#1672). `None` stays `None` for a
+            // genuinely unknown model, so the persist-and-diagnose-later
+            // behaviour is untouched.
+            let mut family = None;
             if !private_ingress {
-                let family = crate::routes::require_server_model_activation(state, &request.model)
+                family = crate::routes::require_server_model_activation(state, &request.model)
                     .await
                     .map_err(|mut error| {
                         error.error = format!("requests[{}]: {}", offset + 1, error.error);
@@ -527,10 +536,10 @@ impl DurableMediaAdmission {
                 }
                 #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
                 {
-                    mold_core::validate_generate_request_fields(&request, None)
+                    mold_core::validate_generate_request_fields(&request, family.as_deref())
                 }
             } else {
-                mold_core::validate_generate_request_fields(&request, None)
+                mold_core::validate_generate_request_fields(&request, family.as_deref())
             };
             validation.map_err(|error| {
                 ApiError::validation(format!("requests[{}]: {error}", offset + 1))

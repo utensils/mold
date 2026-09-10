@@ -59,6 +59,10 @@ No quantized variants exist upstream. mold can derive them locally from an
 installed fp16 checkpoint with `mold quantize`; the source file is preserved,
 the derived model is registered atomically, and every app discovers it through
 the normal installed-model list.
+A derived tier belongs to the machine that made it: it is registered in that
+host's `config.toml`, not in any registry, so asking another host to install
+`hunyuan3d-2.1:q4` is answered with the `mold quantize` command to run there
+rather than a download.
 
 | Shape checkpoint      | CUDA-qualified derived tiers        |
 | --------------------- | ----------------------------------- |

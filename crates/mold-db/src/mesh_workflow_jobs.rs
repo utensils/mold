@@ -311,12 +311,42 @@ pub fn complete_stage_execution(
         if expected == 0 {
             return Ok(false);
         }
+        // A stage the runner already reported complete from the child's
+        // live progress (`complete_stage_live`) is settled here too: the
+        // batch's artifact is the whole group's, and the count has to cover
+        // every row the batch owns or the claim reads as lost.
         Ok(connection.execute(
             "UPDATE mesh_workflow_stages
              SET state='completed',artifacts_json=?3,error=NULL,updated_at_ms=?4
-             WHERE job_id=?1 AND execution_batch_id=?2 AND state='running'",
+             WHERE job_id=?1 AND execution_batch_id=?2 AND state IN ('running','completed')",
             params![id, batch_id, artifacts, now_ms],
         )? == expected)
+    })
+}
+
+/// Report one stage of a shared child batch complete from the child's LIVE
+/// progress, before the batch itself settles.
+///
+/// Shape and paint run inside one queue job, so the workflow only ever learns
+/// that the job started and finished — and both stages read RUNNING for the
+/// whole render. The runner watches the child's progress stage name and calls
+/// this the moment paint begins, so "Build geometry" completes when the
+/// geometry is built. No artifact: the batch's GLB lands on the whole group in
+/// `complete_stage_execution`, and `resume_job` resets the row with its batch
+/// if that batch later fails.
+pub fn complete_stage_live(
+    db: &MetadataDb,
+    id: &str,
+    stage_index: u32,
+    now_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|connection| {
+        Ok(connection.execute(
+            "UPDATE mesh_workflow_stages SET state='completed',updated_at_ms=?3
+             WHERE job_id=?1 AND stage_index=?2 AND state='running'
+               AND execution_batch_id IS NOT NULL",
+            params![id, stage_index, now_ms],
+        )? == 1)
     })
 }
 
@@ -329,13 +359,22 @@ pub fn fail_stage_and_job(
 ) -> Result<bool> {
     db.with_conn(|connection| {
         let transaction = connection.unchecked_transaction()?;
+        // Every running stage sharing the failed stage's child batch goes
+        // with it — and the failed stage ITSELF, batch or no batch. A child
+        // refused at durable admission was never attached, so the stage has
+        // no batch id and is still `pending`; matching only on the batch
+        // (`= NULL`) flipped nothing, and Resume then re-queued the same
+        // refusal with every stage reading PENDING (#1672).
         let stage_changed = transaction.execute(
             "UPDATE mesh_workflow_stages SET state='failed',error=?3,updated_at_ms=?4
-             WHERE job_id=?1 AND state='running'
-               AND execution_batch_id = (
-                   SELECT execution_batch_id FROM mesh_workflow_stages
-                    WHERE job_id=?1 AND stage_index=?2
-               )",
+             WHERE job_id=?1 AND (
+               (stage_index=?2 AND state IN ('pending','running'))
+               OR (state='running' AND execution_batch_id IS NOT NULL
+                   AND execution_batch_id = (
+                       SELECT execution_batch_id FROM mesh_workflow_stages
+                        WHERE job_id=?1 AND stage_index=?2
+                   ))
+             )",
             params![id, stage_index, error, now_ms],
         )? > 0;
         if !stage_changed {
@@ -391,11 +430,21 @@ pub fn resume_job(db: &MetadataDb, id: &str, now_ms: i64) -> Result<bool> {
         let Some(current_stage) = current_stage else {
             return Ok(false);
         };
+        // The child batch is the unit of retry: a stage that shares a failed
+        // stage's batch — a shape stage `complete_stage_live` reported done
+        // while paint then failed inside the same job — goes back with it,
+        // or the retry would wait on the dead batch forever.
         transaction.execute(
             "UPDATE mesh_workflow_stages
              SET state='pending',execution_batch_id=NULL,error=NULL,
                  updated_at_ms=MAX(updated_at_ms + 1, ?3)
-             WHERE job_id=?1 AND stage_index>=?2 AND state='failed'",
+             WHERE job_id=?1 AND (
+               (stage_index>=?2 AND state='failed')
+               OR (execution_batch_id IS NOT NULL AND execution_batch_id IN (
+                     SELECT execution_batch_id FROM mesh_workflow_stages
+                      WHERE job_id=?1 AND stage_index>=?2 AND state='failed'
+                        AND execution_batch_id IS NOT NULL))
+             )",
             params![id, current_stage, now_ms],
         )?;
         let changed = transaction.execute(
@@ -683,6 +732,165 @@ mod tests {
                 && stage.execution_batch_id.is_none()
                 && stage.updated_at_ms == 5
         }));
+    }
+
+    /// A child refused at durable admission was never attached, so the
+    /// current stage has no batch id and is still `pending`. Failing "every
+    /// stage sharing the batch" matched nothing (`= NULL`), only the JOB went
+    /// failed, and Resume — which resets `failed` stages — re-queued the
+    /// identical refusal with every stage still reading PENDING (#1672). The
+    /// current stage itself is what failed, batch or no batch.
+    #[test]
+    fn a_stage_refused_before_attachment_is_marked_failed_and_resumable() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut job = job("workflow", MeshWorkflowJobState::Queued, 1);
+        job.stage_count = 4;
+        let stage = |stage_index, kind, state| MeshWorkflowStageRow {
+            job_id: job.id.clone(),
+            stage_index,
+            kind,
+            state,
+            execution_batch_id: None,
+            artifacts: Vec::new(),
+            error: None,
+            updated_at_ms: 1,
+        };
+        let mut matting = stage(
+            0,
+            MeshWorkflowStageKind::Matting,
+            MeshWorkflowStageState::Completed,
+        );
+        matting.execution_batch_id = Some("matting-batch".into());
+        let stages = vec![
+            matting,
+            stage(
+                1,
+                MeshWorkflowStageKind::Shape,
+                MeshWorkflowStageState::Pending,
+            ),
+            stage(
+                2,
+                MeshWorkflowStageKind::Paint,
+                MeshWorkflowStageState::Pending,
+            ),
+            stage(
+                3,
+                MeshWorkflowStageKind::Finalize,
+                MeshWorkflowStageState::Pending,
+            ),
+        ];
+        insert_job_with_stages(&db, &job, &stages).unwrap();
+        assert!(claim_job(&db, &job.id, 2).unwrap());
+        assert!(set_current_stage(&db, &job.id, 1, 3).unwrap());
+
+        assert!(fail_stage_and_job(&db, &job.id, 1, "refused at the door", 4).unwrap());
+        let failed = stages_for_job(&db, &job.id).unwrap();
+        assert_eq!(failed[0].state, MeshWorkflowStageState::Completed);
+        assert_eq!(failed[1].state, MeshWorkflowStageState::Failed);
+        assert_eq!(failed[1].error.as_deref(), Some("refused at the door"));
+        assert_eq!(failed[2].state, MeshWorkflowStageState::Pending);
+        assert_eq!(failed[3].state, MeshWorkflowStageState::Pending);
+        assert_eq!(
+            get_job(&db, &job.id).unwrap().unwrap().state,
+            MeshWorkflowJobState::Failed
+        );
+
+        assert!(resume_job(&db, &job.id, 5).unwrap());
+        let retried = stages_for_job(&db, &job.id).unwrap();
+        assert_eq!(retried[0].state, MeshWorkflowStageState::Completed);
+        assert_eq!(retried[1].state, MeshWorkflowStageState::Pending);
+        assert!(retried[1].error.is_none());
+    }
+
+    /// Shape and paint share one child. The runner reports shape complete
+    /// from the child's live progress; the batch's artifact then settles both
+    /// rows, and a paint failure takes the live-completed shape back to
+    /// pending on resume so the retry does not wait on a dead batch.
+    #[test]
+    fn a_live_completed_shape_settles_with_its_batch_and_retries_with_it() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut job = job("workflow", MeshWorkflowJobState::Queued, 1);
+        job.stage_count = 3;
+        let stage = |stage_index, kind| MeshWorkflowStageRow {
+            job_id: job.id.clone(),
+            stage_index,
+            kind,
+            state: MeshWorkflowStageState::Pending,
+            execution_batch_id: None,
+            artifacts: Vec::new(),
+            error: None,
+            updated_at_ms: 1,
+        };
+        let stages = vec![
+            stage(0, MeshWorkflowStageKind::Shape),
+            stage(1, MeshWorkflowStageKind::Paint),
+            stage(2, MeshWorkflowStageKind::Finalize),
+        ];
+        insert_job_with_stages(&db, &job, &stages).unwrap();
+        assert!(claim_job(&db, &job.id, 2).unwrap());
+        assert!(attach_stage_executions(&db, &job.id, &[0, 1], "mesh-batch", 3).unwrap());
+
+        // Not before it is attached, and not twice.
+        assert!(complete_stage_live(&db, &job.id, 0, 4).unwrap());
+        assert!(!complete_stage_live(&db, &job.id, 0, 5).unwrap());
+        assert!(!complete_stage_live(&db, &job.id, 2, 5).unwrap());
+        let live = stages_for_job(&db, &job.id).unwrap();
+        assert_eq!(live[0].state, MeshWorkflowStageState::Completed);
+        assert_eq!(live[0].execution_batch_id.as_deref(), Some("mesh-batch"));
+        assert!(live[0].artifacts.is_empty());
+        assert_eq!(live[1].state, MeshWorkflowStageState::Running);
+
+        // The batch settles both rows with the one artifact.
+        let artifact = MeshWorkflowArtifact {
+            role: "final_glb".into(),
+            relative_path: "stages/001/final.glb".into(),
+            media_type: "model/gltf-binary".into(),
+            sha256: "a".repeat(64),
+            byte_length: 1,
+        };
+        assert!(complete_stage_execution(
+            &db,
+            &job.id,
+            "mesh-batch",
+            std::slice::from_ref(&artifact),
+            6
+        )
+        .unwrap());
+        let settled = stages_for_job(&db, &job.id).unwrap();
+        assert!(settled[..2].iter().all(|stage| {
+            stage.state == MeshWorkflowStageState::Completed
+                && stage.artifacts == vec![artifact.clone()]
+        }));
+
+        // The failure branch: a fresh job whose paint fails after shape was
+        // reported done.
+        let mut retry = MeshWorkflowJobRow {
+            id: "retry".into(),
+            ..job.clone()
+        };
+        retry.stage_count = 3;
+        let stages = stages
+            .iter()
+            .map(|stage| MeshWorkflowStageRow {
+                job_id: retry.id.clone(),
+                ..stage.clone()
+            })
+            .collect::<Vec<_>>();
+        insert_job_with_stages(&db, &retry, &stages).unwrap();
+        assert!(claim_job(&db, &retry.id, 2).unwrap());
+        assert!(attach_stage_executions(&db, &retry.id, &[0, 1], "retry-batch", 3).unwrap());
+        assert!(complete_stage_live(&db, &retry.id, 0, 4).unwrap());
+        assert!(set_current_stage(&db, &retry.id, 1, 4).unwrap());
+        assert!(fail_stage_and_job(&db, &retry.id, 1, "paint failed", 5).unwrap());
+        let failed = stages_for_job(&db, &retry.id).unwrap();
+        assert_eq!(failed[0].state, MeshWorkflowStageState::Completed);
+        assert_eq!(failed[1].state, MeshWorkflowStageState::Failed);
+        assert!(resume_job(&db, &retry.id, 6).unwrap());
+        let reset = stages_for_job(&db, &retry.id).unwrap();
+        assert!(reset[..2].iter().all(|stage| {
+            stage.state == MeshWorkflowStageState::Pending && stage.execution_batch_id.is_none()
+        }));
+        assert_eq!(reset[2].state, MeshWorkflowStageState::Pending);
     }
 
     #[test]
