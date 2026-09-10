@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 
 const { saveGalleryMedia, apiJsonTo } = vi.hoisted(() => ({
@@ -57,7 +57,7 @@ beforeEach(() => {
     directory: "/Users/test/Downloads",
   });
   apiJsonTo.mockResolvedValue({
-    formats: ["gif", "apng"],
+    formats: ["gif", "apng", "webp"],
     gif_playback: ["loop", "bounce"],
     gif_repeat: ["forever", "once"],
   });
@@ -401,6 +401,64 @@ describe("Lightbox save action", () => {
 
     expect(useToastStore().items.at(-1)?.message).toBe("Saved print-0001.gif");
   });
+});
+
+describe("Lightbox export filenames", () => {
+  it.each(["obj", "stl", "ply"])("preserves the original mesh identity for %s", async (format) => {
+    const filename = "chair__hunyuan3d__s18446744073709551615.glb";
+    const wrapper = mountLightbox(
+      {
+        ...item,
+        filename,
+        format: "glb",
+        metadata: { ...item.metadata, seed: Number("18446744073709551615") },
+      },
+      false,
+      { mesh: true, meshExportFormats: [format] },
+    );
+    await wrapper.get(`[data-test='mesh-export-${format}']`).trigger("click");
+    await vi.waitFor(() => expect(saveGalleryMedia).toHaveBeenCalledOnce());
+    expect(saveGalleryMedia.mock.calls[0]!.slice(1, 3)).toEqual([
+      filename,
+      filename.replace(/\.glb$/, `.${format}`),
+    ]);
+    wrapper.unmount();
+  });
+
+  it.each(
+    [false, true].flatMap((mesh) => ["gif", "apng", "webp"].map((format) => ({ mesh, format }))),
+  )(
+    "preserves the original animation identity (mesh=$mesh, format=$format)",
+    async ({ mesh, format }) => {
+      const filename = `chair__hunyuan3d__s18446744073709551615.${mesh ? "glb" : "mp4"}`;
+      const wrapper = mountLightbox(
+        {
+          ...item,
+          filename,
+          format: mesh ? "glb" : "mp4",
+          metadata: { ...item.metadata, seed: Number("18446744073709551615") },
+        },
+        !mesh,
+        {
+          mesh,
+          meshExportFormats: ["gif", "apng", "webp"],
+          target: { baseUrl: "http://hal", apiKey: "secret" },
+        },
+      );
+      await wrapper
+        .get(`[data-test='${mesh ? "mesh-export-animation" : "export-video"}']`)
+        .trigger("click");
+      await flushPromises();
+      await wrapper.get(`input[name="export-format"][value="${format}"]`).setValue();
+      await wrapper.get("[data-test='video-export-dialog'] form").trigger("submit");
+      await vi.waitFor(() => expect(saveGalleryMedia).toHaveBeenCalledOnce());
+      expect(saveGalleryMedia.mock.calls[0]!.slice(1, 3)).toEqual([
+        filename,
+        `chair__hunyuan3d__s18446744073709551615.${format === "apng" ? "png" : format}`,
+      ]);
+      wrapper.unmount();
+    },
+  );
 });
 
 describe("Lightbox organization", () => {
