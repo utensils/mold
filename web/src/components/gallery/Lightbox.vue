@@ -400,8 +400,8 @@ function resolveMedia() {
       streamBlocked.value = true;
       streamMessage.value =
         err instanceof MediaUpgradeRequiredError
-          ? "Connect a newer Mold host to stream this clip."
-          : "Couldn't reach the host that holds this print.";
+          ? "Connect a newer Mold machine to stream this clip."
+          : "Couldn't reach the machine that holds this print.";
     });
 }
 
