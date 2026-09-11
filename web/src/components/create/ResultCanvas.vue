@@ -573,6 +573,21 @@ watch(
   background: color-mix(in srgb, var(--mold-bg-crust) 84%, transparent);
 }
 
+/* Docked over a phone-width picture the filename and caption covered half of
+ * it (four lines at 44px touch height); the actions alone stay, in one row,
+ * and the print's facts remain a tap away in My images. */
+@media (max-width: 639px) {
+  .canvas__actions--docked .canvas__filename,
+  .canvas__actions--docked .canvas__caption,
+  .canvas__actions--docked .canvas__actions-spacer {
+    display: none;
+  }
+  .canvas__actions--docked {
+    gap: 6px;
+    justify-content: flex-end;
+  }
+}
+
 .canvas__actions-spacer {
   flex: 1;
 }
