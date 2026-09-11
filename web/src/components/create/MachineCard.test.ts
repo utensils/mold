@@ -55,6 +55,16 @@ describe("MachineCard", () => {
     expect(
       factory({ status: "connecting" }).findComponent(StatusDot).props("state"),
     ).toBe("unknown");
+    // A ready machine whose last poll went unanswered is unknown, not down —
+    // the page's phone row and the Machines card both say `reconnecting…`.
+    const stale = factory({ status: "reconnecting" });
+    expect(stale.findComponent(StatusDot).props("state")).toBe("unknown");
+    expect(stale.get("[data-test='machine-card-state']").text()).toBe(
+      "reconnecting…",
+    );
+    expect(factory().find("[data-test='machine-card-state']").exists()).toBe(
+      false,
+    );
     expect(
       factory({ status: "error" }).findComponent(StatusDot).props("state"),
     ).toBe("offline");

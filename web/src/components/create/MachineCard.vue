@@ -19,7 +19,7 @@ import { formatGb } from "../machines/machineTelemetry";
 const props = withDefaults(
   defineProps<{
     name: string;
-    status: "ready" | "connecting" | "error" | "offline";
+    status: "ready" | "connecting" | "reconnecting" | "error" | "offline";
     /** The card's one sentence. */
     sentence?: string;
     /** GPU memory in bytes; the meter needs both to mean anything. */
@@ -43,7 +43,9 @@ const props = withDefaults(
 /** A machine still being reached is neither up nor down: it is unknown. */
 const dotState = computed<"online" | "offline" | "unknown">(() => {
   if (props.status === "ready") return "online";
-  if (props.status === "connecting") return "unknown";
+  if (props.status === "connecting" || props.status === "reconnecting") {
+    return "unknown";
+  }
   return "offline";
 });
 
@@ -71,6 +73,12 @@ const memoryPercent = computed(() =>
       <span class="machine__name" data-test="machine-card-name">{{
         name
       }}</span>
+      <span
+        v-if="status === 'reconnecting'"
+        class="machine__state"
+        data-test="machine-card-state"
+        >reconnecting…</span
+      >
       <RouterLink
         class="machine__change"
         data-test="machine-card-change"
@@ -115,6 +123,12 @@ const memoryPercent = computed(() =>
   border: var(--mold-bw) solid var(--mold-border);
   border-radius: var(--mold-radius-2);
   background: var(--mold-panel);
+}
+
+.machine__state {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 
 .machine__head {

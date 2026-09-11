@@ -864,7 +864,9 @@ const quickConflictMessage = computed(() =>
 async function generateExpandedAnyway(): Promise<void> {
   if (!quickPrepared.value) return;
   composerError.value = null;
-  await onSubmit(true);
+  const batchSize = pendingVariationBatch.value;
+  pendingVariationBatch.value = null;
+  await onSubmit(true, batchSize);
 }
 
 async function reexpandCurrentPrompt(): Promise<void> {
@@ -1865,6 +1867,7 @@ function onNewPrint() {
   variations.value = [];
   preparedBatch.value = null;
   quickPrepared.value = null;
+  pendingVariationBatch.value = null;
   prevPrompt.value = null;
   prevOriginalPrompt.value = null;
   prevStyle.value = null;
@@ -2392,11 +2395,12 @@ function downloadResult(): void {
  * action on a finished print.
  */
 const VARIATION_BATCH = 4;
-const batchOverride = ref<number | null>(null);
+/** A Make 4 that stopped at the stale-expansion question keeps its count
+ * for the answer; it never outlives that one decision. */
+const pendingVariationBatch = ref<number | null>(null);
 function makeVariations(): void {
-  if (!canMakeVariations.value) return;
-  batchOverride.value = VARIATION_BATCH;
-  void onSubmit();
+  if (!canMakeVariations.value || submitInFlight.value) return;
+  void onSubmit(false, VARIATION_BATCH);
 }
 
 /**
@@ -3248,10 +3252,11 @@ function requestCopyCount(request: GenerateRequestWire): number {
 
 /** Make 4 variations rides ONE submission. The persisted `batchSize` is the
  * user's own choice and an action on a finished print never rewrites it. */
-function withBatchOverride(request: GenerateRequestWire): GenerateRequestWire {
-  return batchOverride.value === null
-    ? request
-    : { ...request, batch_size: batchOverride.value };
+function withBatchOverride(
+  request: GenerateRequestWire,
+  batchSize: number | null,
+): GenerateRequestWire {
+  return batchSize === null ? request : { ...request, batch_size: batchSize };
 }
 
 /** False when the machine refused the print — nothing was queued, so the
@@ -3304,7 +3309,10 @@ const submitInFlight = ref(false);
 const placementStatus = ref<string | null>(null);
 let submitController: AbortController | null = null;
 let submitAttempt = 0;
-async function onSubmit(allowStaleQuick = false) {
+async function onSubmit(
+  allowStaleQuick = false,
+  batchSize: number | null = null,
+) {
   if (submitInFlight.value) return;
   clearSelectedQueueRender();
   const attempt = ++submitAttempt;
@@ -3317,9 +3325,9 @@ async function onSubmit(allowStaleQuick = false) {
       controller.signal,
       () => attempt === submitAttempt && !controller.signal.aborted,
       allowStaleQuick,
+      batchSize,
     );
   } finally {
-    batchOverride.value = null;
     if (attempt === submitAttempt) {
       submitController = null;
       submitInFlight.value = false;
@@ -3341,6 +3349,7 @@ async function onSubmitInner(
   signal: AbortSignal,
   isCurrent: () => boolean,
   allowStaleQuick = false,
+  batchSize: number | null = null,
 ) {
   if (ordinarySubmitBlocked.value) return;
   // The route is settled first, and before source preprocessing, for two
@@ -3351,6 +3360,7 @@ async function onSubmitInner(
   if (quick) {
     const stale = quickStaleReasons(quick);
     if (stale.length && !allowStaleQuick) {
+      pendingVariationBatch.value = batchSize;
       return;
     }
   }
@@ -3388,7 +3398,10 @@ async function onSubmitInner(
     }
     if (!isCurrent()) return;
   }
-  const currentRequest = withBatchOverride(form.toRequest(currentModel.value));
+  const currentRequest = withBatchOverride(
+    form.toRequest(currentModel.value),
+    batchSize,
+  );
   if (h3Cropped) {
     currentRequest.references = minimaxH3ReferenceProjection(h3Cropped);
   }
@@ -3479,7 +3492,7 @@ async function onSubmitInner(
   );
   if (!isCurrent()) return;
   if (preparedSource === false) return;
-  let req = withBatchOverride(form.toRequest(currentModel.value));
+  let req = withBatchOverride(form.toRequest(currentModel.value), batchSize);
   const finalizedCopies = requestCopyCount(req);
   if (quick) req.original_prompt = quick.originalPrompt;
   if (quick?.promptTransform) req.prompt_transform = quick.promptTransform;
@@ -3631,6 +3644,7 @@ async function onSubmitInner(
   if (!submitRequestCopies(req, decision, route)) return;
   clearRetainedSourceReuseIntent();
   quickPrepared.value = null;
+  pendingVariationBatch.value = null;
   // Push to history immediately so ↑ recalls it before the server round-trips.
   composerCardRef.value?.record(req.prompt);
   recordPromptHistoryCache(
@@ -3951,6 +3965,7 @@ function releaseQuickExpansion() {
   prevOriginalPrompt.value = null;
   prevStyle.value = null;
   quickPrepared.value = null;
+  pendingVariationBatch.value = null;
 }
 
 function undoExpand() {

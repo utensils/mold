@@ -1538,6 +1538,51 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.batchSize).toBe(1);
   });
 
+  it("never lets a refused Make 4 leak into the next plain Generate", async () => {
+    // Review finding: the count lived in a page-level ref that `onSubmit`'s
+    // early return (another submission still planning) never cleared, so the
+    // NEXT ordinary Generate queued four prints nobody asked for. The count
+    // rides the call now.
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [finishedCanvasJob()];
+    const planned = await placementPreviewMock.getMockImplementation()!();
+    let release: (value: Record<string, unknown>) => void = () => {};
+    placementPreviewMock.mockImplementationOnce(
+      () =>
+        new Promise<Record<string, unknown>>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const wrapper = mount(CreatePage, {
+      global: { stubs: actionBarStubs() },
+    });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = entry.metadata.model;
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.batchSize = 1;
+    await nextTick();
+
+    // A plain Generate is still planning…
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await nextTick();
+    // …when Make 4 variations is clicked and refused by the in-flight guard.
+    await wrapper.get("[data-test='canvas-make-variations']").trigger("click");
+    release(planned);
+    await flushPromises();
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    expect(submitMock.mock.calls[0]?.[0].batch_count ?? 1).toBe(1);
+
+    submitMock.mockClear();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    expect(submitMock.mock.calls[0]?.[0].batch_count ?? 1).toBe(1);
+  });
+
   it("offers no variations for a clip, or on a recipe that renders one at a time", async () => {
     streamJobsRef.value = [
       finishedCanvasJob({ format: "mp4", video_frames: 81 }),
