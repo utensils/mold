@@ -8,12 +8,18 @@ import { hexColours, legacyUses, literalStyles, measure } from "./tokenRatchet";
  * `bun run ratchet:web` after a migration pass; never raise a number by hand.
  */
 
-function over(actual: Record<string, number>, frozen: Record<string, number>): string[] {
+function over(
+  actual: Record<string, number>,
+  frozen: Record<string, number>,
+): string[] {
   return Object.entries(actual)
     .filter(([file, count]) => count > (frozen[file] ?? 0))
     .map(([file, count]) => `${file}: ${count} > ${frozen[file] ?? 0}`);
 }
-function cleared(actual: Record<string, number>, frozen: Record<string, number>): string[] {
+function cleared(
+  actual: Record<string, number>,
+  frozen: Record<string, number>,
+): string[] {
   return Object.keys(frozen).filter((file) => !actual[file]);
 }
 
@@ -28,10 +34,9 @@ const LEGACY_FROZEN: Record<string, number> = {
   "src/components/create/advanced/UpscaleSection.vue": 17,
   "src/components/create/AdvancedDrawer.vue": 58,
   "src/components/create/ColdStartGuide.vue": 25,
-  "src/components/create/ComposerCard.vue": 18,
+  "src/components/create/ComposerCard.vue": 15,
   "src/components/create/ControlsAside.vue": 33,
   "src/components/create/CreateStylePicker.vue": 17,
-  "src/components/create/EstimateBadge.vue": 4,
   "src/components/create/FileUnderGroup.vue": 57,
   "src/components/create/HostRoutingPicker.vue": 20,
   "src/components/create/IdentityPanel.vue": 5,
@@ -61,7 +66,6 @@ const LEGACY_FROZEN: Record<string, number> = {
   "src/components/PlacementPanel.vue": 2,
   "src/components/RemixModal.vue": 16,
   "src/components/shell/AppNav.vue": 43,
-  "src/components/shell/ConfirmDialog.vue": 24,
   "src/components/shell/DownloadsBody.vue": 31,
   "src/components/shell/DownloadsPopover.vue": 19,
   "src/components/shell/NowDevelopingPopover.vue": 12,
@@ -83,7 +87,7 @@ const LITERAL_FROZEN: Record<string, number> = {
   "src/components/create/advanced/UpscaleSection.vue": 4,
   "src/components/create/AdvancedDrawer.vue": 17,
   "src/components/create/ColdStartGuide.vue": 9,
-  "src/components/create/ComposerCard.vue": 7,
+  "src/components/create/ComposerCard.vue": 6,
   "src/components/create/ControlsAside.vue": 9,
   "src/components/create/CreateStylePicker.vue": 5,
   "src/components/create/FileUnderGroup.vue": 18,
@@ -108,9 +112,7 @@ const LITERAL_FROZEN: Record<string, number> = {
   "src/components/MaskEditorModal.vue": 5,
   "src/components/models/InstalledModelRow.vue": 1,
   "src/components/models/ModelInstallTargetDialog.vue": 5,
-  "src/components/ReferenceCropModal.vue": 1,
   "src/components/shell/AppNav.vue": 3,
-  "src/components/shell/ConfirmDialog.vue": 7,
   "src/components/shell/NowDevelopingPopover.vue": 2,
   "src/pages/HostDetailPage.vue": 6,
   "src/pages/LibraryPage.vue": 16,
@@ -126,19 +128,33 @@ const HEX_FROZEN: Record<string, number> = {
 
 describe("the guards recognise what they refuse (positive controls)", () => {
   it("legacy vocabulary", () => {
-    expect(legacyUses("color: var(--rebate); background: var(--bath);")).toBe(2);
-    expect(legacyUses('<div class="bg-bench text-ink-3 rounded-card">')).toBe(3);
+    expect(legacyUses("color: var(--rebate); background: var(--bath);")).toBe(
+      2,
+    );
+    expect(legacyUses('<div class="bg-bench text-ink-3 rounded-card">')).toBe(
+      3,
+    );
     expect(legacyUses("color: var(--mold-text);")).toBe(0);
     expect(legacyUses("font-display: swap;")).toBe(0);
   });
   it("literal radii and font sizes", () => {
-    expect(literalStyles("  border-radius: 9px;\n  font-size: 13.5px;")).toBe(2);
-    expect(literalStyles("  border-radius: var(--mold-radius-2);\n  padding: 2px;")).toBe(0);
-    expect(literalStyles("  border-radius: 3px; /* literal: QR quiet zone */")).toBe(0);
+    expect(literalStyles("  border-radius: 9px;\n  font-size: 13.5px;")).toBe(
+      2,
+    );
+    expect(
+      literalStyles("  border-radius: var(--mold-radius-2);\n  padding: 2px;"),
+    ).toBe(0);
+    expect(
+      literalStyles("  border-radius: 3px; /* literal: QR quiet zone */"),
+    ).toBe(0);
   });
   it("hex colours", () => {
-    expect(hexColours("  color: #fff;\n  background: rgba(0,0,0,0.5);")).toBe(1);
-    expect(hexColours("  /* see (#1224) */\n  color: var(--mold-text);")).toBe(0);
+    expect(hexColours("  color: #fff;\n  background: rgba(0,0,0,0.5);")).toBe(
+      1,
+    );
+    expect(hexColours("  /* see (#1224) */\n  color: var(--mold-text);")).toBe(
+      0,
+    );
   });
 });
 

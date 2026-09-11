@@ -38,11 +38,13 @@ export const LEGACY_PATTERNS = [
   ),
 ];
 
-export const LITERAL_STYLE = /\b(border-radius|font-size)\s*:\s*[^;{}]*\b\d+(?:\.\d+)?px/;
+export const LITERAL_STYLE =
+  /\b(border-radius|font-size)\s*:\s*[^;{}]*\b\d+(?:\.\d+)?px/;
 
 /** A hex colour in a style declaration. Issue refs in comments (`#1224`) are
  *  four decimal digits and never a colour; `#fff`/`#0B0B12` are. */
-export const HEX_COLOUR = /(?<![\w&])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![\w-])/;
+export const HEX_COLOUR =
+  /(?<![\w&])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![\w-])/;
 
 export function* walk(dir: string): Generator<string> {
   for (const entry of readdirSync(dir)) {
@@ -106,4 +108,3 @@ export function measure(): {
   }
   return { legacy, literal, hex };
 }
-

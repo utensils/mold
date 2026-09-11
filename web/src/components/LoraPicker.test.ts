@@ -101,7 +101,9 @@ describe("LoraPicker — multi-LoRA stack", () => {
   it("clicking + Add a look appends a row keyed to the first available LoRA", async () => {
     const w = mountPicker([]);
     await flushPromises();
-    const add = w.findAll("button").find((b) => b.text().includes("Add a look"));
+    const add = w
+      .findAll("button")
+      .find((b) => b.text().includes("Add a look"));
     expect(add).toBeDefined();
     await add!.trigger("click");
     const last = w.emitted("update:modelValue")?.at(-1)?.[0] as LoraSelection[];
@@ -119,7 +121,9 @@ describe("LoraPicker — multi-LoRA stack", () => {
       },
     ]);
     await flushPromises();
-    const add = w.findAll("button").find((b) => b.text().includes("Add a look"));
+    const add = w
+      .findAll("button")
+      .find((b) => b.text().includes("Add a look"));
     await add!.trigger("click");
     const last = w.emitted("update:modelValue")?.at(-1)?.[0] as LoraSelection[];
     expect(last).toHaveLength(2);

@@ -51,7 +51,9 @@ describe("lexicon — Styles", () => {
     expect(modelsPage).toContain(`"${STYLES_WORDS.ready}"`);
     expect(modelsPage).toContain(`"${STYLES_WORDS.browse}"`);
     for (const retired of RETIRED_STYLES_LABELS) {
-      expect(modelsPage, retired).not.toMatch(new RegExp(`label: "${retired}"`));
+      expect(modelsPage, retired).not.toMatch(
+        new RegExp(`label: "${retired}"`),
+      );
     }
     expect(catalogCard).toContain(`"${STYLES_WORDS.get}"`);
     expect(catalogCard).toContain(STYLES_WORDS.readyBadge);
@@ -84,14 +86,22 @@ describe("lexicon — New image controls", () => {
     expect(controlsAside).toContain(`label="${CONTROL_WORDS.isoThreshold}"`);
     expect(controlsAside).toContain(CONTROL_WORDS.resetToStyleDefaults);
     expect(controlsAside).toContain('aria-label="Seed number"');
-    expect(hostRoutingPicker).toContain(`aria-label="${CONTROL_WORDS.whereItRuns}"`);
+    expect(hostRoutingPicker).toContain(
+      `aria-label="${CONTROL_WORDS.whereItRuns}"`,
+    );
     expect(advancedDrawer).toContain(`title="${CONTROL_WORDS.loras}"`);
     expect(loraPicker).toContain(CONTROL_WORDS.loras);
     expect(composerCard).toContain(`"${CONTROL_WORDS.expand}"`);
   });
 
   it("never brings a pre-lexicon label back", () => {
-    const sources = [controlsAside, advancedDrawer, hostRoutingPicker, composerCard, loraPicker];
+    const sources = [
+      controlsAside,
+      advancedDrawer,
+      hostRoutingPicker,
+      composerCard,
+      loraPicker,
+    ];
     for (const source of sources) {
       for (const retired of RETIRED_CONTROL_LABELS) {
         expect(source, retired).not.toContain(`"${retired}"`);
@@ -120,8 +130,18 @@ describe("lexicon — a print's facts", () => {
     ]) {
       expect(lightbox, row).toContain(`<span class="lb__rowk">${row}</span`);
     }
-    for (const retired of ["Model", "Dimensions", "Steps", "Guidance", "Seed", "LoRA", "Host"]) {
-      expect(lightbox, retired).not.toContain(`<span class="lb__rowk">${retired}</span`);
+    for (const retired of [
+      "Model",
+      "Dimensions",
+      "Steps",
+      "Guidance",
+      "Seed",
+      "LoRA",
+      "Host",
+    ]) {
+      expect(lightbox, retired).not.toContain(
+        `<span class="lb__rowk">${retired}</span`,
+      );
     }
     expect(lightbox).not.toContain("CFG {{");
   });
