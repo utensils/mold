@@ -209,7 +209,7 @@ const notifications = useNotifications();
     >
       <router-link to="/queue"
         ><span aria-live="polite">{{ liveSummary }}</span
-        ><span>View Queue →</span></router-link
+        ><span>Open the queue →</span></router-link
       >
     </div>
     <router-view />
