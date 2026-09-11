@@ -5230,12 +5230,6 @@ onBeforeUnmount(() => {
             <span class="font-display text-[15px] font-semibold text-rebate"
               >Recent</span
             >
-            <router-link
-              to="/library"
-              class="font-mono text-[11px] text-ink-3 underline"
-              data-test="recent-see-all"
-              >See all in My images</router-link
-            >
           </div>
           <RecentGrid
             :entries="galleryEntries"

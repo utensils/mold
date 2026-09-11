@@ -43,13 +43,38 @@ describe("RecentGrid", () => {
     expect(img.attributes("src")).toBe("/api/gallery/thumbnail/a.png");
   });
 
-  it("caps the grid at `limit` and links the overflow to the gallery", () => {
+  it("caps the grid at `limit` and links the overflow to My images", () => {
     const entries = Array.from({ length: 30 }, (_, i) => entry(`p${i}.png`));
     const w = mountGrid(entries, 12);
     expect(w.findAll("[data-test='recent-tile']")).toHaveLength(12);
     const more = w.find("[data-test='recent-view-all']");
     expect(more.exists()).toBe(true);
-    expect(more.text()).toContain("30");
+    expect(more.text()).toBe("See all 30 in My images");
+    expect(more.text()).not.toMatch(/gallery/i);
+  });
+
+  it("caps to whole rows by the column count the layout resolved", async () => {
+    // Seen on hal9000 at 1440px: with the cap drawn as zero-height implicit
+    // rows, every hidden row still contributed its gap, so a strip of the
+    // third row showed under the second. The cap is a slice sized from the
+    // grid's own resolved columns, so nothing past two rows is in the DOM.
+    const columns = vi.spyOn(window, "getComputedStyle").mockImplementation(
+      () =>
+        ({
+          gridTemplateColumns: "130px 130px 130px 130px 130px",
+        }) as CSSStyleDeclaration,
+    );
+    const entries = Array.from({ length: 50 }, (_, i) => entry(`p${i}.png`));
+    const w = mount(RecentGrid, {
+      props: { entries, limit: 50, maxRows: 2 },
+      global: { stubs },
+    });
+    await w.vm.$nextTick();
+    expect(w.findAll("[data-test='recent-tile']")).toHaveLength(10);
+    expect(w.get("[data-test='recent-view-all']").text()).toBe(
+      "See all 50 in My images",
+    );
+    columns.mockRestore();
   });
 
   it("fills large web workspaces when given the desktop history limit", () => {

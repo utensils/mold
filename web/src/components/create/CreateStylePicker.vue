@@ -255,6 +255,9 @@ function browse() {
 .style-menu {
   max-height: 22rem;
   overflow-y: auto;
-  min-width: 18rem;
+  /* Sized like desktop's picker menu rather than to its longest catalog
+     sentence, which stretched the panel across the whole viewport. */
+  width: 30rem;
+  max-width: calc(100vw - 32px);
 }
 </style>

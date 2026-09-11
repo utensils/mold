@@ -9,7 +9,7 @@
  * thumbnails, a single non-overlapping video badge — long enough to fill a
  * large Create workspace, with a "view all" link into the gallery for the rest.
  */
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { RouterLink } from "vue-router";
 import MediaTile from "@ui/components/MediaTile.vue";
 import Icon from "@ui/components/Icon.vue";
@@ -44,14 +44,34 @@ const emit = defineEmits<{
   ];
 }>();
 
-const shown = computed(() => props.entries.slice(0, props.limit));
-/** The row cap is CSS, not a slice: the column count is a media query, so the
- * number of tiles that make two rows is only known to the layout. */
-const rowCapStyle = computed(() =>
-  props.maxRows && props.maxRows > 0
-    ? { "--recent-max-rows": String(props.maxRows) }
-    : undefined,
-);
+/** Columns the grid resolved at this width, read back from the layout so the
+ * row cap is a slice (nothing past it in the DOM) rather than a clip. */
+const gridEl = ref<HTMLElement | null>(null);
+const columns = ref(0);
+function measureColumns(): void {
+  const el = gridEl.value;
+  if (!el) return;
+  const tracks = getComputedStyle(el).gridTemplateColumns;
+  const count = tracks ? tracks.trim().split(/\s+/).filter(Boolean).length : 0;
+  if (count > 0) columns.value = count;
+}
+let observer: ResizeObserver | null = null;
+onMounted(() => {
+  measureColumns();
+  if (typeof ResizeObserver !== "undefined" && gridEl.value) {
+    observer = new ResizeObserver(measureColumns);
+    observer.observe(gridEl.value);
+  }
+});
+onBeforeUnmount(() => observer?.disconnect());
+
+const cap = computed(() => {
+  if (props.maxRows && props.maxRows > 0 && columns.value > 0) {
+    return Math.min(props.limit, columns.value * props.maxRows);
+  }
+  return props.limit;
+});
+const shown = computed(() => props.entries.slice(0, cap.value));
 const overflow = computed(() =>
   Math.max(0, props.entries.length - shown.value.length),
 );
@@ -80,8 +100,6 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
 <template>
   <div
     class="recent"
-    :class="{ 'recent--capped': maxRows !== null }"
-    :style="rowCapStyle"
     data-test="recent-grid"
     :data-max-rows="maxRows ?? undefined"
   >
@@ -92,7 +110,7 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
     >
       no prints yet — your generations land here.
     </div>
-    <div v-else class="recent__grid">
+    <div v-else ref="gridEl" class="recent__grid">
       <MediaTile
         v-for="item in shown"
         :key="item.filename"
@@ -137,8 +155,7 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
       class="recent__more"
       data-test="recent-view-all"
     >
-      view all {{ entries.length }} in gallery
-      <Icon name="chevron-right" :size="13" />
+      See all {{ entries.length }} in My images
     </RouterLink>
   </div>
 </template>
@@ -150,13 +167,6 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
   gap: 10px;
 }
 
-/* Two rows and no more. `grid-auto-rows: 0` collapses everything past the
- * capped rows; the "See all in My images" link is how the rest is reached. */
-.recent--capped .recent__grid {
-  grid-template-rows: repeat(var(--recent-max-rows, 2), auto);
-  grid-auto-rows: 0;
-  overflow: clip;
-}
 @media (min-width: 480px) {
   .recent__grid {
     grid-template-columns: repeat(3, 1fr);

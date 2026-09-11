@@ -68,7 +68,7 @@ const LEGACY_FROZEN: Record<string, number> = {
   "src/components/shell/DownloadsBody.vue": 31,
   "src/components/shell/DownloadsPopover.vue": 19,
   "src/components/shell/NowDevelopingPopover.vue": 10,
-  "src/pages/CreatePage.vue": 44,
+  "src/pages/CreatePage.vue": 43,
   "src/pages/HostDetailPage.vue": 66,
   "src/pages/LibraryPage.vue": 109,
   "src/pages/MachinesPage.vue": 16,
