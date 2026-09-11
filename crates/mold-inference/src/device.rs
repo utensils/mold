@@ -2498,6 +2498,35 @@ pub fn available_system_memory_bytes() -> Option<u64> {
     None
 }
 
+/// Host RAM a new allocation can have, on every platform mold runs on.
+///
+/// **Not the same question as [`available_system_memory_bytes`], which is
+/// macOS-only on purpose.** That one is the unified-memory probe: its callers
+/// treat the answer as a GPU budget, and several of them sit on fallback paths
+/// whose comments say "macOS unified memory" while the code is not
+/// cfg-gated — teaching it to answer on Linux would hand a discrete-GPU host a
+/// unified-memory preflight and could refuse jobs that admit today. So the
+/// HOST question gets its own name.
+///
+/// This is the reader the residency budgets want, and its absence was the
+/// wave-2 defect: `total_system_ram_bytes` read `/proc/meminfo` on Linux while
+/// the available figure did not, so `decide_text_encoder_residency` compared a
+/// real requirement against a hard-coded `0` and answered `StreamFromMmap` on
+/// every Linux host. With Metal and CPU returning early, no platform was left
+/// on which a park could happen, and `MOLD_KEEP_TE_RAM=1` could not override
+/// it either — measured as zero park lines and an 8.3 s re-stream per encode
+/// on a host with 985 GB free.
+pub fn available_host_ram_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        available_system_memory_bytes()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::flux::pinned::available_system_ram_bytes()
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn used_system_swap_bytes() -> Option<u64> {
     None
@@ -2511,13 +2540,18 @@ pub fn used_system_swap_bytes() -> Option<u64> {
 /// Default off. Two things keep it that way rather than letting mold decide
 /// per host:
 ///
-/// * A park is a multi-gigabyte **host** allocation, and the only probes
-///   available here (`/proc/meminfo`, the macOS VM statistics) describe the
-///   machine, not this process's cgroup. Inside a memory-capped container —
-///   which is how mold ships (the GHCR matrix, Lambda/RunPod provisioning) —
-///   `MemAvailable` reports the host's free RAM, so a probe-driven default
-///   would engage against a limit it cannot see and get the process
-///   OOM-killed. Nothing in the tree reads `memory.max`.
+/// * A park is a multi-gigabyte **host** allocation. `/proc/meminfo` and the
+///   macOS VM statistics describe the MACHINE, not this process's cgroup, and
+///   inside a memory-capped container — which is how mold ships (the GHCR
+///   matrix, Lambda/RunPod provisioning) — `MemAvailable` reports the host's
+///   free RAM, so a probe-driven default would engage against a limit it
+///   cannot see and get the process OOM-killed. That objection is now
+///   ANSWERED rather than standing:
+///   [`crate::flux::pinned::available_system_ram_bytes`] clamps the host
+///   reading by `memory.max`/`memory.current` (cgroup v2, falling back to
+///   v1), so the probe describes the process's own ceiling. `Auto` may
+///   therefore decide, and does so against a budget that also keeps a
+///   `max(15 % of total, 8 GiB)` floor.
 /// * `MOLD_KEEP_TE_RAM` is an [`crate::runtime_env::ENGINE_SHAPING_VARIABLES`]
 ///   member precisely because memory residency must be frozen at admission.
 ///   A live host probe would let two runs with byte-identical frozen

@@ -68,21 +68,128 @@ pub fn prefetch_enabled_from_env() -> bool {
     }
 }
 
+/// Parse one `/proc/meminfo` field, in bytes.
+///
+/// Pure so the platform reader is testable without a `/proc`: every fixture in
+/// this module's tests is real `/proc/meminfo` text.
+///
+/// `field` includes its colon (`"MemTotal:"`), because the colon is what makes
+/// the match exact — without it `"Mem"` would match `MemTotal`, `MemFree` and
+/// `MemAvailable` alike, and the whole point of this function is which of the
+/// three a caller asked for. The kernel reports these in kB meaning KiB.
+fn parse_meminfo_field_bytes(text: &str, field: &str) -> Option<u64> {
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix(field) {
+            let kib: u64 = rest.split_ascii_whitespace().next()?.parse().ok()?;
+            return Some(kib.saturating_mul(1024));
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn meminfo_field_bytes(field: &str) -> Option<u64> {
+    parse_meminfo_field_bytes(&std::fs::read_to_string("/proc/meminfo").ok()?, field)
+}
+
+/// Headroom left inside this process's memory cgroup, given its limit and
+/// current charge.
+///
+/// Pure, so the container arithmetic is testable on a host that is not in one.
+/// `None` means "no limit applies" — either the controller is absent or the
+/// limit is `max`/unset — and the caller then trusts the host reading.
+fn cgroup_headroom_bytes(limit: Option<u64>, current: Option<u64>) -> Option<u64> {
+    let limit = limit?;
+    // `memory.max` is `max` on an uncapped cgroup, which the parser already
+    // turns into `None`; a limit at or above the machine's own RAM is the
+    // same statement written numerically, and clamping to it would be a
+    // no-op that costs a syscall.
+    let current = current.unwrap_or(0);
+    Some(limit.saturating_sub(current))
+}
+
+/// Parse a cgroup memory file that holds a single number, or the literal
+/// `max` (cgroup v2) / a sentinel at or above `PAGE_COUNTER_MAX` (cgroup v1,
+/// which writes `9223372036854771712` for "unlimited").
+fn parse_cgroup_bytes(text: &str) -> Option<u64> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed == "max" {
+        return None;
+    }
+    let value: u64 = trimmed.parse().ok()?;
+    // cgroup v1 spells "unlimited" as a number near u64::MAX rounded down to a
+    // page multiple. Anything in that range is not a real cap.
+    const V1_UNLIMITED_FLOOR: u64 = 1 << 62;
+    (value < V1_UNLIMITED_FLOOR).then_some(value)
+}
+
+/// This process's memory-cgroup headroom, or `None` when it is not capped.
+///
+/// cgroup v2 first (`/sys/fs/cgroup/memory.{max,current}`), then v1
+/// (`memory/memory.{limit_in_bytes,usage_in_bytes}`). Both are read relative
+/// to the cgroup ROOT mount rather than resolved through `/proc/self/cgroup`:
+/// inside a container the namespace root IS the limited cgroup, which is the
+/// case this exists for, and a partial read is `None` rather than a guess.
+#[cfg(target_os = "linux")]
+fn process_cgroup_headroom_bytes() -> Option<u64> {
+    let read = |path: &str| std::fs::read_to_string(path).ok();
+    let v2 = cgroup_headroom_bytes(
+        read("/sys/fs/cgroup/memory.max").and_then(|t| parse_cgroup_bytes(&t)),
+        read("/sys/fs/cgroup/memory.current").and_then(|t| parse_cgroup_bytes(&t)),
+    );
+    if v2.is_some() {
+        return v2;
+    }
+    cgroup_headroom_bytes(
+        read("/sys/fs/cgroup/memory/memory.limit_in_bytes").and_then(|t| parse_cgroup_bytes(&t)),
+        read("/sys/fs/cgroup/memory/memory.usage_in_bytes").and_then(|t| parse_cgroup_bytes(&t)),
+    )
+}
+
+/// Host RAM the kernel believes a new allocation can have, in bytes.
+///
+/// **`MemAvailable`, not `MemFree`.** `MemFree` is only the untouched pages;
+/// on any host that has read a checkpoint it is a small number next to the
+/// page cache, and a residency decision reading it would refuse to park on a
+/// 1.5 TB machine with 940 GB genuinely available. `MemAvailable` is the
+/// kernel's own estimate of what is obtainable without swapping, which is the
+/// question `decide_text_encoder_residency` is asking.
+///
+/// Falls back to `MemFree` on a kernel too old to publish `MemAvailable`
+/// (pre-3.14). That is strictly conservative — `MemFree <= MemAvailable`
+/// always — so the park simply engages less often rather than engaging against
+/// memory that is not there.
+///
+/// `None` off Linux and on a `/proc` that cannot be read; every caller treats
+/// an unmeasurable host as "do not park", which is the pre-campaign behaviour.
+#[cfg(target_os = "linux")]
+pub fn available_system_ram_bytes() -> Option<u64> {
+    let host = meminfo_field_bytes("MemAvailable:").or_else(|| meminfo_field_bytes("MemFree:"))?;
+    // CLAMPED BY THE CGROUP, and this is the whole reason the park could not
+    // simply be switched on. `/proc/meminfo` describes the MACHINE, not this
+    // process's limit: inside a memory-capped container — which is how mold
+    // ships (the GHCR matrix, Lambda/RunPod provisioning) — `MemAvailable`
+    // reports the host's free RAM, and a probe-driven park would reserve
+    // against a ceiling it cannot see and get the process OOM-killed. Reading
+    // `memory.max`/`memory.current` is what closes that, so the standing
+    // objection recorded on `keep_te_in_ram` no longer applies.
+    Some(match process_cgroup_headroom_bytes() {
+        Some(headroom) => host.min(headroom),
+        None => host,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn available_system_ram_bytes() -> Option<u64> {
+    None
+}
+
 /// Total system RAM in bytes. Linux: `/proc/meminfo` `MemTotal`. macOS: not
 /// implemented (returns `None` so the caller falls back to a default — pinning
 /// is CUDA-only and macOS uses Metal). Other unixes: `None`.
 #[cfg(target_os = "linux")]
 pub fn total_system_ram_bytes() -> Option<u64> {
-    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-    for line in meminfo.lines() {
-        if let Some(rest) = line.strip_prefix("MemTotal:") {
-            let mut it = rest.split_ascii_whitespace();
-            let val: u64 = it.next()?.parse().ok()?;
-            // /proc/meminfo reports "kB" (KiB). Convert to bytes.
-            return Some(val.saturating_mul(1024));
-        }
-    }
-    None
+    meminfo_field_bytes("MemTotal:")
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -357,6 +464,150 @@ fn cpu_tensor_byte_view(tensor: &Tensor) -> Result<Option<(*const u8, usize)>> {
 mod tests {
     use super::*;
     use candle_core::{DType, Device, Tensor};
+
+    /// Real `/proc/meminfo` text from plato — the 1.5 TB host whose park the
+    /// wave-2 UAT found could never fire. `MemFree` and `MemAvailable` differ
+    /// by 890 GB here, which is the entire point of the field choice.
+    const PLATO_MEMINFO: &str = "\
+MemTotal:       1584079540 kB
+MemFree:        50758932 kB
+MemAvailable:   985694784 kB
+Buffers:          123456 kB
+Cached:         892340112 kB
+SwapCached:            0 kB
+Active:         402118400 kB
+";
+
+    /// The field choice is the defect. `MemFree` on a host that has read a
+    /// checkpoint is a small number beside the page cache, and reading it
+    /// would refuse to park on a machine with 985 GB genuinely available.
+    #[test]
+    fn the_meminfo_reader_takes_mem_available_not_mem_free() {
+        let available = parse_meminfo_field_bytes(PLATO_MEMINFO, "MemAvailable:")
+            .expect("MemAvailable is present");
+        let free =
+            parse_meminfo_field_bytes(PLATO_MEMINFO, "MemFree:").expect("MemFree is present");
+        let total =
+            parse_meminfo_field_bytes(PLATO_MEMINFO, "MemTotal:").expect("MemTotal is present");
+
+        assert_eq!(available, 985_694_784 * 1024, "kB in /proc/meminfo is KiB");
+        assert_eq!(free, 50_758_932 * 1024);
+        assert_eq!(total, 1_584_079_540 * 1024);
+        assert!(
+            available > free * 19,
+            "the fixture must keep the two far enough apart that confusing them is visible"
+        );
+
+        // The colon is what makes the match exact: without it, a prefix test
+        // for "Mem" would answer MemTotal for all three.
+        assert_ne!(
+            parse_meminfo_field_bytes(PLATO_MEMINFO, "MemTotal:"),
+            parse_meminfo_field_bytes(PLATO_MEMINFO, "MemFree:")
+        );
+    }
+
+    /// An absent field is `None`, never a zero — a caller cannot tell a host
+    /// with no memory from a host it could not measure, so the two must not
+    /// share a value.
+    #[test]
+    fn an_absent_meminfo_field_is_none_and_a_malformed_one_is_too() {
+        assert_eq!(parse_meminfo_field_bytes(PLATO_MEMINFO, "Shmem:"), None);
+        assert_eq!(parse_meminfo_field_bytes("", "MemTotal:"), None);
+        assert_eq!(
+            parse_meminfo_field_bytes("MemTotal:       not-a-number kB\n", "MemTotal:"),
+            None
+        );
+        assert_eq!(parse_meminfo_field_bytes("MemTotal:\n", "MemTotal:"), None);
+    }
+
+    /// The container question the park's opt-in default was standing on:
+    /// `/proc/meminfo` describes the MACHINE, so a park driven by it alone
+    /// reserves against a ceiling it cannot see and gets OOM-killed.
+    #[test]
+    fn a_capped_cgroup_bounds_the_available_reading() {
+        // 16 GiB limit, 4 GiB already charged, on a host advertising 985 GB
+        // available: the answer is the cgroup's 12 GiB, not the host's.
+        assert_eq!(
+            cgroup_headroom_bytes(Some(16 * 1024 * 1024 * 1024), Some(4 * 1024 * 1024 * 1024)),
+            Some(12 * 1024 * 1024 * 1024)
+        );
+        // A cgroup already over its limit has no headroom, not a negative one.
+        assert_eq!(
+            cgroup_headroom_bytes(Some(4 * 1024 * 1024 * 1024), Some(9 * 1024 * 1024 * 1024)),
+            Some(0)
+        );
+        // No limit means the host reading stands.
+        assert_eq!(cgroup_headroom_bytes(None, Some(4)), None);
+        // An unreadable current charge is treated as zero rather than
+        // discarding a limit we did read.
+        assert_eq!(cgroup_headroom_bytes(Some(100), None), Some(100));
+    }
+
+    /// Both cgroup spellings of "unlimited", and the shapes a partial read
+    /// produces.
+    #[test]
+    fn cgroup_limit_parsing_knows_both_spellings_of_unlimited() {
+        // cgroup v2.
+        assert_eq!(parse_cgroup_bytes("max\n"), None);
+        assert_eq!(parse_cgroup_bytes("17179869184\n"), Some(17_179_869_184));
+        // cgroup v1's sentinel for "no limit".
+        assert_eq!(parse_cgroup_bytes("9223372036854771712\n"), None);
+        // Junk and emptiness are "unknown", never zero — a zero would read as
+        // a cgroup with no memory at all and refuse every park.
+        assert_eq!(parse_cgroup_bytes(""), None);
+        assert_eq!(parse_cgroup_bytes("  \n"), None);
+        assert_eq!(parse_cgroup_bytes("not-a-number"), None);
+    }
+
+    /// A pre-3.14 kernel publishes no `MemAvailable`; the reader falls back to
+    /// `MemFree`, which is strictly smaller, so the park engages less often
+    /// rather than against memory that is not there.
+    #[test]
+    fn a_kernel_without_mem_available_falls_back_to_the_conservative_field() {
+        const ANCIENT: &str = "MemTotal:       16000000 kB\nMemFree:         2000000 kB\n";
+        assert_eq!(parse_meminfo_field_bytes(ANCIENT, "MemAvailable:"), None);
+        assert_eq!(
+            parse_meminfo_field_bytes(ANCIENT, "MemFree:"),
+            Some(2_000_000 * 1024)
+        );
+    }
+
+    /// The platform reader itself, on the platform the defect was found on.
+    ///
+    /// `residency_matrix_over_host_ram_and_gpu_count` passes on any host
+    /// because it feeds the inputs struct directly; nothing exercised the
+    /// reader, which is how a `None`-on-Linux arm shipped and made every park
+    /// decision unreachable.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_host_reports_a_real_available_figure() {
+        let total = total_system_ram_bytes().expect("Linux reads MemTotal from /proc/meminfo");
+        let available =
+            available_system_ram_bytes().expect("Linux must read MemAvailable, not answer None");
+
+        assert!(total > 0);
+        assert!(available > 0, "a running host has memory available");
+        assert!(
+            available <= total,
+            "available {available} exceeds total {total}"
+        );
+
+        // And the accessor the residency budgets actually consult answers at
+        // all — the seam the defect sat in, where it returned `None`.
+        //
+        // Compared for PRESENCE and bounds, never for equality: this is a
+        // second independent `/proc/meminfo` sample and `MemAvailable` moves
+        // between two reads on a busy machine. Asserting the two numbers
+        // match made this test fail under the full parallel suite while
+        // passing alone.
+        let via_device = crate::device::available_host_ram_bytes()
+            .expect("the host-RAM accessor must not answer None on Linux");
+        assert!(via_device > 0);
+        assert!(
+            via_device <= total,
+            "accessor reported {via_device} against a {total}-byte machine"
+        );
+    }
 
     #[test]
     fn try_pin_to_host_no_op_on_cpu_tensor() {

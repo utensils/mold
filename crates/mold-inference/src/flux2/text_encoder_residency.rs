@@ -417,7 +417,7 @@ pub fn qwen3_park_residency(
         encoder_bytes,
         transformer_bytes,
         host_total_bytes: crate::flux::pinned::total_system_ram_bytes().unwrap_or(0),
-        host_available_bytes: crate::device::available_system_memory_bytes().unwrap_or(0),
+        host_available_bytes: crate::device::available_host_ram_bytes().unwrap_or(0),
         pinned_cap_bytes: crate::flux::pinned::pinned_cap_bytes(),
         keep_te_ram: crate::device::keep_te_ram_mode(),
         device: device_class,
