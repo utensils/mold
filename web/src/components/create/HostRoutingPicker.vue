@@ -155,7 +155,7 @@ onBeforeUnmount(() => {
         v-if="open"
         class="hostpick__menu"
         role="menu"
-        aria-label="Generation host"
+        aria-label="Where it runs"
         data-test="host-menu"
       >
         <div class="hostpick__kicker">run on</div>

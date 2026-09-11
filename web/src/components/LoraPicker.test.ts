@@ -87,10 +87,14 @@ describe("LoraPicker — multi-LoRA stack", () => {
     const w = mountPicker([]);
     await flushPromises();
     // Old behaviour rendered nothing (a blank drawer section). The picker now
-    // explains the empty state and points at Models rather than going dark.
+    // explains the empty state and points at Styles rather than going dark,
+    // in the words the rest of the app uses for the same thing.
     const empty = w.find("[data-test='lora-hint-empty']");
     expect(empty.exists()).toBe(true);
-    expect(empty.text().toLowerCase()).toContain("no loras installed");
+    expect(empty.text().toLowerCase()).toContain(
+      "no add-on looks on this machine yet",
+    );
+    expect(empty.text().toLowerCase()).not.toContain("installed");
     expect(w.findAll("[data-test='lora-row']")).toHaveLength(0);
   });
 

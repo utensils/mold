@@ -174,12 +174,24 @@ describe("CatalogCard (discover)", () => {
     expect(blank.find("[data-test=card-description]").exists()).toBe(false);
   });
 
-  it("Pull button emits pull", async () => {
+  it("Get it emits pull, with the download total the user will spend", async () => {
     const w = mount(CatalogCard, { props: { entry: baseEntry } });
     const pull = w.find("[data-test=pull-btn]");
-    expect(pull.text()).toContain("Pull");
+    // The verb and the number come from the one shared catalog label, so the
+    // card says what desktop says for the same row.
+    expect(pull.text()).toContain("Get it · 6.0 GB");
+    expect(pull.text()).not.toContain("Pull");
     await pull.trigger("click");
     expect(w.emitted("pull")).toBeTruthy();
+  });
+
+  it("says Getting it… while the download is running", () => {
+    const w = mount(CatalogCard, {
+      props: { entry: baseEntry, pulling: true },
+    });
+    const pull = w.find("[data-test=pull-btn]");
+    expect(pull.text()).toBe("Getting it…");
+    expect((pull.element as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("Details button emits open", async () => {
@@ -194,7 +206,7 @@ describe("CatalogCard (discover)", () => {
     expect(w.emitted("open")).toBeTruthy();
   });
 
-  it("disables Pull with an unsupported tooltip", () => {
+  it("disables the acquisition button with an unsupported tooltip", () => {
     const entry: CatalogEntryWire = { ...baseEntry, supported: false };
     const w = mount(CatalogCard, { props: { entry } });
     const pull = w.find("[data-test=pull-btn]");
@@ -202,19 +214,23 @@ describe("CatalogCard (discover)", () => {
     expect(pull.attributes("title")).toMatch(/unsupported/i);
   });
 
-  it("labels Pull as Repair and shows an installed badge when installed", () => {
+  it("says Repair and badges the row ready when it is already here", () => {
     const entry: CatalogEntryWire = { ...baseEntry, installed: true };
     const w = mount(CatalogCard, { props: { entry } });
     expect(w.find("[data-test=pull-btn]").text()).toContain("Repair");
-    expect(w.text()).toMatch(/installed/i);
-  });
-
-  it("does not show an installed badge when not installed", () => {
-    const w = mount(CatalogCard, { props: { entry: baseEntry } });
+    expect(w.get("[data-test=catalog-ready]").text()).toBe("● ready");
+    expect(w.get("[data-test=catalog-ready]").attributes("title")).toBe(
+      "Already on this machine",
+    );
     expect(w.text()).not.toMatch(/installed/i);
   });
 
-  it("still offers a Pull when a connected machine lacks an installed model", () => {
+  it("shows no ready badge when the style is not here", () => {
+    const w = mount(CatalogCard, { props: { entry: baseEntry } });
+    expect(w.find("[data-test=catalog-ready]").exists()).toBe(false);
+  });
+
+  it("still offers Get it when a connected machine lacks an installed style", () => {
     // Installed here, absent there: collapsing that into one boolean is what
     // hid the install action for the machine that does not have it.
     mockHosts.value = [host("origin"), host("studio")];
@@ -222,10 +238,10 @@ describe("CatalogCard (discover)", () => {
     const entry: CatalogEntryWire = { ...baseEntry, installed: true };
     const w = mount(CatalogCard, { props: { entry } });
 
-    expect(w.find("[data-test=pull-btn]").text()).toContain("Pull");
+    expect(w.find("[data-test=pull-btn]").text()).toContain("Get it");
     expect(w.find("[data-test=pull-btn]").text()).not.toContain("Repair");
-    // The origin still owns it, so the "installed" tag is still accurate.
-    expect(w.text()).toMatch(/installed/i);
+    // The origin still owns it, so the ready badge is still accurate.
+    expect(w.find("[data-test=catalog-ready]").exists()).toBe(true);
   });
 
   it("degrades to Repair once every reachable machine owns it", () => {

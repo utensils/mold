@@ -104,7 +104,7 @@ const summary = computed(() => {
         }}
       </p>
       <RouterLink to="/models" class="up__link" data-test="upscale-browse">
-        Pull one from Models
+        Get one from Styles
       </RouterLink>
     </div>
 

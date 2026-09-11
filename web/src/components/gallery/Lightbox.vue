@@ -942,32 +942,33 @@ async function performVideoExport(options: VideoExportOptions) {
 
           <div class="lb__rows">
             <div class="lb__row">
-              <span class="lb__rowk">Model</span><span>{{ modelLabel }}</span>
+              <span class="lb__rowk">Style</span><span>{{ modelLabel }}</span>
             </div>
             <div class="lb__row">
-              <span class="lb__rowk">Seed</span
+              <span class="lb__rowk">Repeat this look</span
               ><button
                 v-if="seed != null"
                 data-test="copy-seed"
                 class="lb__rowcopy"
                 @click="copyText(String(seed))"
               >
-                {{ seed }}
+                seed {{ seed }}
               </button>
               <span v-else>—</span>
             </div>
             <div class="lb__row">
-              <span class="lb__rowk">Dimensions</span
+              <span class="lb__rowk">Size</span
               ><span>{{ dimensions || "—" }}</span>
             </div>
             <div class="lb__row">
-              <span class="lb__rowk">Host</span><span>{{ hostLabel }}</span>
+              <span class="lb__rowk">Made on</span><span>{{ hostLabel }}</span>
             </div>
             <div class="lb__row">
-              <span class="lb__rowk">Steps</span><span>{{ steps ?? "—" }}</span>
+              <span class="lb__rowk">Detail</span
+              ><span>{{ steps != null ? `${steps} passes` : "—" }}</span>
             </div>
             <div class="lb__row">
-              <span class="lb__rowk">Guidance</span
+              <span class="lb__rowk">Stick to my words</span
               ><span>{{ guidance ?? "—" }}</span>
             </div>
             <div v-if="pipeline" class="lb__row" data-test="lightbox-pipeline">
@@ -978,7 +979,8 @@ async function performVideoExport(options: VideoExportOptions) {
               ><span>{{ scheduler }}</span>
             </div>
             <div v-if="loraLabel" class="lb__row">
-              <span class="lb__rowk">LoRA</span><span>{{ loraLabel }}</span>
+              <span class="lb__rowk">Add-on look</span
+              ><span>{{ loraLabel }}</span>
             </div>
             <div
               v-if="identityLabel"
@@ -1337,8 +1339,10 @@ async function performVideoExport(options: VideoExportOptions) {
             </button>
             <span v-if="dimensions" class="lb__chip">{{ dimensions }}</span>
             <span class="lb__chip">{{ hostLabel }}</span>
-            <span class="lb__chip">{{ steps ?? "—" }} steps</span>
-            <span class="lb__chip">CFG {{ guidance ?? "—" }}</span>
+            <span class="lb__chip">{{ steps ?? "—" }} passes</span>
+            <span class="lb__chip"
+              >sticks to your words {{ guidance ?? "—" }}</span
+            >
             <span
               v-if="pipeline"
               class="lb__chip"

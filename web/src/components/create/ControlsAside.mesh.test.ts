@@ -238,7 +238,7 @@ describe("ControlsAside 3-D mesh", () => {
     const wrapper = mountMesh();
     const slider = wrapper
       .findAllComponents(SliderRow)
-      .find((c) => c.props("label") === "Iso threshold");
+      .find((c) => c.props("label") === "How tight to the photo");
     expect(slider).toBeTruthy();
     expect(slider!.props("min")).toBe(0);
     expect(slider!.props("max")).toBe(1);
@@ -350,7 +350,7 @@ describe("ControlsAside 3-D mesh", () => {
     );
     const slider = wrapper
       .findAllComponents(SliderRow)
-      .find((c) => c.props("label") === "Iso threshold")!;
+      .find((c) => c.props("label") === "How tight to the photo")!;
     expect(slider.props("disabled")).toBe(true);
   });
 });

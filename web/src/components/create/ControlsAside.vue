@@ -373,8 +373,8 @@ function lockLastSeed() {
         type="button"
         class="controls__reset"
         data-test="settings-reset"
-        aria-label="Reset settings to model defaults"
-        title="Reset settings to model defaults"
+        aria-label="Reset to the style's defaults"
+        title="Reset to the style's defaults"
         @click="emit('reset-settings')"
       >
         ↺ Reset
@@ -449,13 +449,13 @@ function lockLastSeed() {
         wrap
         :model-value="octreeValue"
         :options="octreeOptions"
-        label="Octree detail"
+        label="Surface detail"
         @update:model-value="patchMesh({ octreeResolution: $event })"
       />
       <SliderRow
         v-if="thresholdControl"
         class="controls__mesh-slider"
-        label="Iso threshold"
+        label="How tight to the photo"
         :model-value="thresholdValue"
         :min="thresholdControl.min"
         :max="thresholdControl.max"
@@ -589,7 +589,7 @@ function lockLastSeed() {
 
     <div class="controls__group">
       <SliderRow
-        label="Prompt strength"
+        label="Stick to my words"
         :model-value="capabilities.fixedGuidance ?? modelValue.guidance"
         :min="activeRecipe?.guidance.min ?? 0"
         :max="activeRecipe?.guidance.max ?? 100"
@@ -642,7 +642,7 @@ function lockLastSeed() {
         data-test="controls-seed"
         type="number"
         min="0"
-        placeholder="Seed"
+        aria-label="Seed number"
         :value="modelValue.seed ?? ''"
         @input="setSeed(Number(($event.target as HTMLInputElement).value))"
       />

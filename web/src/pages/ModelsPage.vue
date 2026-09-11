@@ -1,14 +1,21 @@
 <script setup lang="ts">
 import { workspaceLabel } from "../lib/workspaces";
 /*
- * Models workspace (spec §03/§06, prototype WEB MODELS lines 1582-1616). One
- * header with an Installed | Discover segmented control. Installed lists the
- * models on disk as tappable rows with a local search + G5 empty states;
- * Discover keeps the full live-catalog behaviour (filters, infinite scroll)
- * restyled as pull cards. Both open the shared model detail drawer.
+ * Styles workspace (spec §03/§06, prototype WEB MODELS lines 1582-1616). One
+ * header with a Ready to use | Browse more segmented control. Ready to use
+ * lists the styles on this machine as tappable rows with a local search, the
+ * three kind chips and G5 empty states; Browse more keeps the full
+ * live-catalog behaviour (filters, infinite scroll). Both open the shared
+ * detail drawer.
+ *
+ * The kind chips name and partition exactly what the composer's own toolbar
+ * does — `@studio/lib/outputKind` is the one authority — so a style filters
+ * under the kind it is offered under and a person learns the three words once.
+ * They ride `?type=`, which is also the query Browse more reads as its
+ * catalog modality, so one link serves both shelves.
  */
 import { computed, onMounted, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import SegmentedControl, {
   type SegmentOption,
 } from "@ui/components/SegmentedControl.vue";
@@ -24,11 +31,18 @@ import ModelDetailDrawer from "../components/models/ModelDetailDrawer.vue";
 import ModelInstallTargetDialog from "../components/models/ModelInstallTargetDialog.vue";
 import { toast } from "../lib/toasts";
 import { modelDisplayName } from "@studio/lib/modelDisplay";
+import { styleDisplayName } from "@studio/lib/styleLabel";
+import {
+  modelsForOutputKind,
+  OUTPUT_KIND_LABEL,
+  type OutputKind,
+} from "../composables/useCreateOutputKind";
 import type { CatalogKind, ModelInfoExtended } from "../types";
 
 const cat = useCatalog();
 const installTargets = useModelInstallTargets();
 const route = useRoute();
+const router = useRouter();
 watch(
   () => route.query.tab,
   (tab) => {
@@ -64,31 +78,75 @@ watch(
 );
 
 const tabOptions: SegmentOption<ModelsTab>[] = [
-  { value: "installed", label: "Installed" },
-  { value: "discover", label: "Discover" },
+  { value: "installed", label: "Ready to use" },
+  { value: "discover", label: "Browse more" },
 ];
+
+/* `?type=` carries `mediaTypeFromQuery`'s own values, which is what
+ * `OUTPUT_KIND_BROWSE_TARGET` links to from the composer. "All" is the absence
+ * of the key rather than a fourth value, so a bare /models is unfiltered. */
+const KIND_QUERY: Readonly<Record<OutputKind, string>> = {
+  still: "image",
+  clip: "video",
+  mesh: "mesh",
+};
+type KindChoice = OutputKind | "all";
+const kindOptions: SegmentOption<KindChoice>[] = [
+  { value: "all", label: "All" },
+  { value: "still", label: OUTPUT_KIND_LABEL.still },
+  { value: "clip", label: OUTPUT_KIND_LABEL.clip },
+  { value: "mesh", label: OUTPUT_KIND_LABEL.mesh },
+];
+const activeKind = computed<KindChoice>(() => {
+  const type = route.query.type;
+  const match = (Object.keys(KIND_QUERY) as OutputKind[]).find(
+    (kind) => KIND_QUERY[kind] === type,
+  );
+  return match ?? "all";
+});
+function setKind(value: string | number) {
+  const query = { ...route.query };
+  if (value === "all") delete query.type;
+  else query.type = KIND_QUERY[value as OutputKind];
+  void router.push({ query });
+}
 
 const installedQuery = ref("");
 
-const filteredInstalled = computed(() => {
+/* Search first, then the kind: a chosen kind narrows what the search found,
+ * so clearing the search never resurrects a style of another kind. */
+const searchedInstalled = computed(() => {
   const q = installedQuery.value.trim().toLowerCase();
   if (!q) return cat.installed.value;
   return cat.installed.value.filter((m) =>
-    [modelDisplayName(m), m.name, m.family, m.description ?? ""].some((value) =>
-      value.toLowerCase().includes(q),
-    ),
+    [
+      modelDisplayName(m),
+      styleDisplayName(m),
+      m.name,
+      m.family,
+      m.description ?? "",
+    ].some((value) => value.toLowerCase().includes(q)),
   );
 });
+const filteredInstalled = computed(() =>
+  activeKind.value === "all"
+    ? searchedInstalled.value
+    : modelsForOutputKind(searchedInstalled.value, activeKind.value),
+);
 
-function clearInstalledSearch() {
+/* The no-match state is reachable from the search, from a kind chip, or from
+ * both, so its one action drops every narrowing rather than only the one the
+ * user happens to remember setting. */
+function showAllInstalled() {
   installedQuery.value = "";
+  if (activeKind.value !== "all") setKind("all");
 }
 
 /** Send an already-installed model to a connected machine that lacks it. */
 async function installElsewhere(model: ModelInfoExtended) {
   const choice = await installTargets.chooseInstallTarget({
     modelId: model.name,
-    displayName: modelDisplayName(model),
+    displayName: styleDisplayName(model),
     ownedByOrigin: true,
   });
   if (choice.kind === "cancelled") return;
@@ -133,13 +191,23 @@ onMounted(() => {
           v-model="installedQuery"
           type="search"
           class="search__input"
-          placeholder="Search installed styles…"
-          aria-label="Search installed styles"
+          placeholder="Search your styles…"
+          aria-label="Search your styles"
           autocomplete="off"
           spellcheck="false"
           data-test="installed-search"
         />
       </label>
+
+      <SegmentedControl
+        class="models__kinds"
+        data-test="installed-kinds"
+        wrap
+        :model-value="activeKind"
+        :options="kindOptions"
+        label="Kind of style"
+        @update:model-value="setKind"
+      />
 
       <div
         v-if="cat.installedError.value"
@@ -178,8 +246,8 @@ onMounted(() => {
       >
         <EmptyStateBlock
           icon="models"
-          headline="No styles installed yet."
-          guidance="Browse styles to download one to this server."
+          headline="No styles on this machine yet."
+          guidance="Browse styles to get one onto this machine."
         >
           <template #action>
             <button
@@ -201,19 +269,21 @@ onMounted(() => {
         class="empty"
         data-test="installed-no-match"
       >
+        <!-- Reached by a search that found nothing AND by a kind chip this
+             machine holds no style for; the sentence answers both. -->
         <EmptyStateBlock
           icon="search"
-          headline="Nothing installed matches."
-          guidance="No installed style matches your search."
+          headline="Nothing here matches."
+          guidance="No style on this machine matches what you asked for."
         >
           <template #action>
             <button
               type="button"
               class="empty__cta"
               data-test="clear-search"
-              @click="clearInstalledSearch"
+              @click="showAllInstalled"
             >
-              Clear search
+              Show all styles
             </button>
           </template>
         </EmptyStateBlock>
@@ -277,6 +347,10 @@ onMounted(() => {
 
 .models__tabs {
   flex: 0 0 auto;
+}
+
+.models__kinds {
+  margin-bottom: 16px;
 }
 
 /* ── Local search ─────────────────────────────────────────────────── */

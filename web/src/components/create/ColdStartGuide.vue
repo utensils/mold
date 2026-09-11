@@ -98,7 +98,7 @@ async function pull(model: string) {
           :data-test="`starter-pull-${s.model}`"
           @click="pull(s.model)"
         >
-          Pull
+          Get it
         </button>
       </div>
     </div>
