@@ -230,12 +230,15 @@ fn linear_to_device(linear: &Linear, device: &candle_core::Device) -> Result<Lin
     Ok(Linear::new(weight, bias))
 }
 
+/// Move a `LayerNorm` to `device`, materializing a zero bias for a bias-less
+/// one so the moved copy reaches the same fused kernel `layer_norm` builds for.
 fn layer_norm_to_device(norm: &LayerNorm, device: &candle_core::Device) -> Result<LayerNorm> {
     let weight = norm.weight().to_device(device)?;
-    match norm.bias() {
-        Some(bias) => Ok(LayerNorm::new(weight, bias.to_device(device)?, 1e-6)),
-        None => Ok(LayerNorm::new_no_bias(weight, 1e-6)),
-    }
+    let bias = match norm.bias() {
+        Some(bias) => bias.to_device(device)?,
+        None => Tensor::zeros(weight.shape(), weight.dtype(), device)?,
+    };
+    Ok(LayerNorm::new(weight, bias, 1e-6))
 }
 
 fn rms_norm_to_device(norm: &RmsNorm, device: &candle_core::Device) -> Result<RmsNorm> {
@@ -483,9 +486,16 @@ impl Flux2Config {
 // Utility functions
 // ---------------------------------------------------------------------------
 
+/// FLUX.2's affine-less LayerNorm, built so it reaches candle's fused kernel.
+///
+/// `LayerNorm::forward` takes `ops::layer_norm` only when a bias is present
+/// (`candle-nn/src/layer_norm.rs:116-122`); `new_no_bias` therefore always
+/// falls to the ten-op sum/div/sqrt sequence. An explicit zero bias is the
+/// same affine — upstream's `elementwise_affine=False` — and one fused launch.
 fn layer_norm(dim: usize, vb: &VarBuilder) -> Result<LayerNorm> {
     let ws = Tensor::ones(dim, vb.dtype(), vb.device())?;
-    Ok(LayerNorm::new_no_bias(ws, 1e-6))
+    let bs = Tensor::zeros(dim, vb.dtype(), vb.device())?;
+    Ok(LayerNorm::new(ws, bs, 1e-6))
 }
 
 pub(crate) fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
@@ -525,11 +535,15 @@ pub(crate) fn rope(pos: &Tensor, dim: usize, theta: usize) -> Result<Tensor> {
 
 pub(crate) fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
     let output_dtype = x.dtype();
+    let x = &x.to_dtype(DType::F32)?;
+    // One fused launch over contiguous memory when the layout allows; the
+    // broadcast form below is the fallback and the definition.
+    if let Some(out) = crate::flux_rope::fused_interleaved_rope(x, freq_cis)? {
+        return out.to_dtype(output_dtype);
+    }
     let dims = x.dims();
     let (b_sz, n_head, seq_len, n_embd) = x.dims4()?;
-    let x = x
-        .to_dtype(DType::F32)?
-        .reshape((b_sz, n_head, seq_len, n_embd / 2, 2))?;
+    let x = x.reshape((b_sz, n_head, seq_len, n_embd / 2, 2))?;
     let x0 = x.narrow(D::Minus1, 0, 1)?;
     let x1 = x.narrow(D::Minus1, 1, 1)?;
     let fr0 = freq_cis.get_on_dim(D::Minus1, 0)?;
@@ -807,16 +821,22 @@ impl DoubleAttention {
 
     fn qkv(&self, xs: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
         let (b, l, _) = xs.dims3()?;
+        // Normalize BEFORE the transpose. The reshape of a projection output
+        // is contiguous, which is what candle's fused RMSNorm kernel requires
+        // (`candle-nn/src/layer_norm.rs:202-210`); the transposed view took
+        // the ~9-kernel strided fallback for every one of these. RMSNorm
+        // normalizes the LAST dim, `head_dim` in both layouts, so the
+        // arithmetic is BFL's own (`flux2/model.py:752-755`).
         let q = xs
             .apply(&self.to_q)?
             .reshape((b, l, self.num_heads, ()))?
-            .transpose(1, 2)?
-            .apply(&self.norm_q)?;
+            .apply(&self.norm_q)?
+            .transpose(1, 2)?;
         let k = xs
             .apply(&self.to_k)?
             .reshape((b, l, self.num_heads, ()))?
-            .transpose(1, 2)?
-            .apply(&self.norm_k)?;
+            .apply(&self.norm_k)?
+            .transpose(1, 2)?;
         let v = xs
             .apply(&self.to_v)?
             .reshape((b, l, self.num_heads, ()))?
@@ -1002,8 +1022,19 @@ impl SingleStreamBlock {
         let qkv = x_mod.narrow(D::Minus1, 0, 3 * self.h_sz)?;
         let (b, l, _) = qkv.dims3()?;
         let qkv = qkv.reshape((b, l, 3, self.num_heads, ()))?;
-        let q = qkv.i((.., .., 0))?.transpose(1, 2)?.apply(&self.norm_q)?;
-        let k = qkv.i((.., .., 1))?.transpose(1, 2)?.apply(&self.norm_k)?;
+        // Norm before transpose — see `DoubleAttention::qkv`. `i(.., .., n)`
+        // on the packed QKV is a narrow, so one `contiguous()` buys the fused
+        // kernel.
+        let q = qkv
+            .i((.., .., 0))?
+            .contiguous()?
+            .apply(&self.norm_q)?
+            .transpose(1, 2)?;
+        let k = qkv
+            .i((.., .., 1))?
+            .contiguous()?
+            .apply(&self.norm_k)?
+            .transpose(1, 2)?;
         let v = qkv.i((.., .., 2))?.transpose(1, 2)?;
         let mlp_portion = x_mod.narrow(D::Minus1, 3 * self.h_sz, self.mlp_sz * 2)?;
         let attn = attention(&q, &k, &v, pe)?;

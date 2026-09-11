@@ -281,8 +281,22 @@ impl QDoubleStreamBlock {
         let (b, l, _) = xs.dims3()?;
         let qkv = qkv_proj.forward(xs)?;
         let qkv = qkv.reshape((b, l, 3, self.num_heads, ()))?;
-        let q = qkv.i((.., .., 0))?.transpose(1, 2)?.apply(q_norm)?;
-        let k = qkv.i((.., .., 1))?.transpose(1, 2)?.apply(k_norm)?;
+        // Normalize BEFORE the transpose: `i(.., .., n)` on the packed QKV is
+        // a narrow, so one `contiguous()` buys candle's fused RMSNorm kernel
+        // (`candle-nn/src/layer_norm.rs:202-210`), where the transposed view
+        // took the ~9-kernel strided fallback. RMSNorm normalizes the LAST
+        // dim — `head_dim` in both layouts — so the arithmetic is unchanged
+        // and is BFL's own (`flux2/model.py:752-755`).
+        let q = qkv
+            .i((.., .., 0))?
+            .contiguous()?
+            .apply(q_norm)?
+            .transpose(1, 2)?;
+        let k = qkv
+            .i((.., .., 1))?
+            .contiguous()?
+            .apply(k_norm)?
+            .transpose(1, 2)?;
         let v = qkv.i((.., .., 2))?.transpose(1, 2)?;
         Ok((q, k, v))
     }
@@ -411,8 +425,17 @@ impl QSingleStreamBlock {
         let qkv = x_mod.narrow(D::Minus1, 0, 3 * self.h_sz)?;
         let (b, l, _) = qkv.dims3()?;
         let qkv = qkv.reshape((b, l, 3, self.num_heads, ()))?;
-        let q = qkv.i((.., .., 0))?.transpose(1, 2)?.apply(&self.norm_q)?;
-        let k = qkv.i((.., .., 1))?.transpose(1, 2)?.apply(&self.norm_k)?;
+        // Norm before transpose — see `qkv_split`.
+        let q = qkv
+            .i((.., .., 0))?
+            .contiguous()?
+            .apply(&self.norm_q)?
+            .transpose(1, 2)?;
+        let k = qkv
+            .i((.., .., 1))?
+            .contiguous()?
+            .apply(&self.norm_k)?
+            .transpose(1, 2)?;
         let v = qkv.i((.., .., 2))?.transpose(1, 2)?;
         let mlp_portion = x_mod.narrow(D::Minus1, 3 * self.h_sz, self.mlp_sz * 2)?;
         let attn = attention(&q, &k, &v, pe)?;

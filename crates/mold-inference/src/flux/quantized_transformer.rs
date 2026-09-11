@@ -103,7 +103,18 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
     )?)
 }
 
+/// BFL applies the rotary embedding in F32 and casts the result back
+/// (`flux/math.py:20-21`, `:32`). The positions reach `EmbedNd` in F32 too
+/// (see `forward_with_hook`), so `freq_cis` is F32 and this is the one place
+/// the working dtype is widened.
 fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
+    let output_dtype = x.dtype();
+    let x = &x.to_dtype(DType::F32)?;
+    // One fused launch over contiguous memory when the layout allows; the
+    // broadcast form below is the fallback and the definition.
+    if let Some(out) = crate::flux_rope::fused_interleaved_rope(x, freq_cis)? {
+        return Ok(out.to_dtype(output_dtype)?);
+    }
     let dims = x.dims();
     let (b_sz, n_head, seq_len, n_embd) = x.dims4()?;
     let x = x.reshape((b_sz, n_head, seq_len, n_embd / 2, 2))?;
@@ -111,7 +122,9 @@ fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
     let x1 = x.narrow(D::Minus1, 1, 1)?;
     let fr0 = freq_cis.get_on_dim(D::Minus1, 0)?;
     let fr1 = freq_cis.get_on_dim(D::Minus1, 1)?;
-    Ok((fr0.broadcast_mul(&x0)? + fr1.broadcast_mul(&x1)?)?.reshape(dims.to_vec())?)
+    Ok((fr0.broadcast_mul(&x0)? + fr1.broadcast_mul(&x1)?)?
+        .reshape(dims.to_vec())?
+        .to_dtype(output_dtype)?)
 }
 
 fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe: &Tensor) -> Result<Tensor> {
@@ -343,11 +356,24 @@ impl SelfAttention {
         let qkv = self.qkv.forward(xs)?;
         let (b, l, _khd) = qkv.dims3()?;
         let qkv = qkv.reshape((b, l, 3, self.num_heads, ()))?;
-        let q = qkv.i((.., .., 0))?.transpose(1, 2)?;
-        let k = qkv.i((.., .., 1))?.transpose(1, 2)?;
+        // Normalize BEFORE the transpose. `i(.., .., n)` on the packed QKV is
+        // a narrow, so one `contiguous()` buys candle's fused RMSNorm kernel
+        // (`candle-nn/src/layer_norm.rs:202-210` takes it only for a
+        // contiguous input); the transposed view took the ~9-kernel strided
+        // fallback. RMSNorm normalizes the LAST dim, which is `head_dim` in
+        // both layouts, so this is the same arithmetic BFL performs on its own
+        // `K B H L D` rearrangement (`flux2/model.py:752-755`).
+        let q = qkv
+            .i((.., .., 0))?
+            .contiguous()?
+            .apply(&self.query_norm)?
+            .transpose(1, 2)?;
+        let k = qkv
+            .i((.., .., 1))?
+            .contiguous()?
+            .apply(&self.key_norm)?
+            .transpose(1, 2)?;
         let v = qkv.i((.., .., 2))?.transpose(1, 2)?;
-        let q = q.apply(&self.query_norm)?;
-        let k = k.apply(&self.key_norm)?;
         Ok((q, k, v))
     }
     fn rebind_lora(&mut self, registry: Option<&LoraRegistry>, base_key: &str) {
@@ -614,12 +640,19 @@ impl SingleBlock {
         let qkv = x_mod.narrow(D::Minus1, 0, 3 * self.h_sz)?;
         let (b, l, _khd) = qkv.dims3()?;
         let qkv = qkv.reshape((b, l, 3, self.num_heads, ()))?;
-        let q = qkv.i((.., .., 0))?.transpose(1, 2)?;
-        let k = qkv.i((.., .., 1))?.transpose(1, 2)?;
+        // Norm before transpose — see `SelfAttention::qkv_split`.
+        let q = qkv
+            .i((.., .., 0))?
+            .contiguous()?
+            .apply(&self.query_norm)?
+            .transpose(1, 2)?;
+        let k = qkv
+            .i((.., .., 1))?
+            .contiguous()?
+            .apply(&self.key_norm)?
+            .transpose(1, 2)?;
         let v = qkv.i((.., .., 2))?.transpose(1, 2)?;
         let mlp = x_mod.narrow(D::Minus1, 3 * self.h_sz, self.mlp_sz)?;
-        let q = q.apply(&self.query_norm)?;
-        let k = k.apply(&self.key_norm)?;
         let attn = attention(&q, &k, &v, pe)?;
         let output_in = Tensor::cat(&[attn, mlp.gelu()?], 2)?;
         let output = self.linear2.forward(&output_in)?;
@@ -858,6 +891,12 @@ impl QuantizedFluxTransformer {
 
         let pe = {
             let ids = Tensor::cat(&[txt_ids, img_ids], 1)?;
+            // Upstream's `rope` runs on float positions and returns `.float()`
+            // (`flux/math.py:16-25`) — and FLUX.2 already does the same
+            // (`flux2/transformer.rs::rope`). The fork's `EmbedNd` follows the
+            // dtype it is handed, so a half working dtype would otherwise
+            // compute every `cos`/`sin` in eight mantissa bits.
+            let ids = ids.to_dtype(DType::F32)?;
             ids.apply(&self.pe_embedder)?
         };
 
@@ -1440,6 +1479,110 @@ mod tests {
 
         // Suppress "unused" so the registry stays in scope during the assert.
         drop(LoraRegistry::default());
+    }
+
+    /// Reordering the QK RMSNorm ahead of the transpose is a layout change,
+    /// not an arithmetic one.
+    ///
+    /// RMSNorm reduces over the LAST dim, and `head_dim` is last in both the
+    /// packed `B L H D` layout and the transposed `B H L D` one, so the two
+    /// orders compute the same numbers. The reorder exists only because
+    /// candle takes its fused kernel exclusively for a contiguous input
+    /// (`candle-nn/src/layer_norm.rs:202-210`), and a narrow-then-transpose
+    /// view is never contiguous — which is what sent every one of these
+    /// through the strided ten-op fallback.
+    #[test]
+    fn rms_norm_before_transpose_equals_after() {
+        let device = Device::Cpu;
+        let (b, l, heads, head_dim) = (1usize, 6usize, 3usize, 4usize);
+        // A packed QKV exactly as `qkv_split` sees it.
+        let qkv = Tensor::arange(0f32, (b * l * 3 * heads * head_dim) as f32, &device)
+            .unwrap()
+            .reshape((b, l, 3, heads, head_dim))
+            .unwrap()
+            .affine(0.013, -0.7)
+            .unwrap();
+        let scale = Tensor::arange(1f32, (head_dim + 1) as f32, &device)
+            .unwrap()
+            .affine(0.25, 0.5)
+            .unwrap();
+        let norm = RmsNorm::new(scale, 1e-6);
+
+        let after = qkv
+            .i((.., .., 0))
+            .unwrap()
+            .transpose(1, 2)
+            .unwrap()
+            .apply(&norm)
+            .unwrap();
+        let before = qkv
+            .i((.., .., 0))
+            .unwrap()
+            .contiguous()
+            .unwrap()
+            .apply(&norm)
+            .unwrap()
+            .transpose(1, 2)
+            .unwrap();
+
+        assert_eq!(before.dims(), after.dims());
+        let diff = max_abs_diff(&before.contiguous().unwrap(), &after.contiguous().unwrap());
+        assert!(
+            diff < 1e-6,
+            "normalizing before the transpose moved the values by {diff}"
+        );
+    }
+
+    /// BFL's interleaved rope layout is candle's `rope_i` contract.
+    ///
+    /// `math.py:19-32` reshapes the head dim into `(-1, 1, 2)` pairs and
+    /// combines them with `freqs_cis`, whose `(i, j)` matrix is
+    /// `[[cos, -sin], [sin, cos]]` (`math.py:22`). Taking column `j = 0` out
+    /// of it gives `cos = pe[.., 0, 0]` and `sin = pe[.., 1, 0]`, which is
+    /// exactly `y0 = x0*cos - x1*sin`, `y1 = x0*sin + x1*cos` — the rule
+    /// `candle-nn/src/rotary_emb.rs:6-10` documents and `rope_i` implements
+    /// (`:262-288`). This pins the correspondence so the fused kernel can be
+    /// reached from an F32 copy without re-deriving the layout by hand.
+    #[test]
+    fn rope_i_on_f32_matches_apply_rope() {
+        let device = Device::Cpu;
+        let (b, heads, seq, head_dim) = (1usize, 2usize, 5usize, 8usize);
+        let angles = Tensor::arange(0f32, (b * seq * head_dim / 2) as f32, &device)
+            .unwrap()
+            .affine(0.37, -1.1)
+            .unwrap()
+            .reshape((b, seq, head_dim / 2))
+            .unwrap();
+        let cos = angles.cos().unwrap();
+        let sin = angles.sin().unwrap();
+        // `[[cos, -sin], [sin, cos]]`, stacked exactly as candle's `rope`
+        // builds FLUX's positional embedding.
+        let pe = Tensor::stack(
+            &[&cos, &sin.neg().unwrap(), &sin, &cos],
+            candle_core::D::Minus1,
+        )
+        .unwrap()
+        .reshape((b, seq, head_dim / 2, 2, 2))
+        .unwrap();
+
+        let x = Tensor::arange(0f32, (b * heads * seq * head_dim) as f32, &device)
+            .unwrap()
+            .affine(0.011, -0.4)
+            .unwrap()
+            .reshape((b, heads, seq, head_dim))
+            .unwrap();
+
+        let want = apply_rope(&x, &pe).unwrap();
+        let got = candle_nn::rotary_emb::rope_i(
+            &x.contiguous().unwrap(),
+            &cos.squeeze(0).unwrap().contiguous().unwrap(),
+            &sin.squeeze(0).unwrap().contiguous().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(got.dims(), want.dims());
+        let diff = max_abs_diff(&got, &want.contiguous().unwrap());
+        assert!(diff < 1e-6, "rope_i diverged from apply_rope by {diff}");
     }
 
     fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
