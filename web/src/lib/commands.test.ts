@@ -103,7 +103,7 @@ describe("web catalog commands", () => {
     const rows = catalogCommands([entry], { ...ctx, installModel });
     expect(rows[0]).toMatchObject({
       id: "install-hf:org/qwen",
-      section: "Install",
+      section: "Get it",
       label: "Install Qwen Image",
     });
     rows[0]!.run();

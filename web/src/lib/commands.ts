@@ -151,7 +151,7 @@ export function catalogCommands(
     installedNames: options.installedNames ?? [],
   }).map((cmd) => ({
     id: cmd.id,
-    section: "Install",
+    section: "Get it",
     label: cmd.label,
     hint: cmd.hint,
     keywords: cmd.keywords,

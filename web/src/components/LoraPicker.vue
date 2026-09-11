@@ -160,7 +160,7 @@ function addAnother() {
         class="lp__add"
         @click="addAnother"
       >
-        + Add LoRA
+        + Add a look
       </button>
     </div>
 
@@ -169,8 +169,8 @@ function addAnother() {
       v-model="search"
       type="search"
       class="lp__search"
-      placeholder="Search LoRAs"
-      aria-label="Search LoRAs"
+      placeholder="Search add-on looks"
+      aria-label="Search add-on looks"
     />
 
     <div
@@ -201,7 +201,7 @@ function addAnother() {
           <button
             type="button"
             class="lp__icon-btn"
-            aria-label="Move LoRA up"
+            aria-label="Move this look up"
             :disabled="index === 0"
             @click="moveAt(index, index - 1)"
           >
@@ -210,7 +210,7 @@ function addAnother() {
           <button
             type="button"
             class="lp__icon-btn"
-            aria-label="Move LoRA down"
+            aria-label="Move this look down"
             :disabled="index === modelValue.length - 1"
             @click="moveAt(index, index + 1)"
           >
@@ -219,7 +219,7 @@ function addAnother() {
           <button
             type="button"
             class="lp__icon-btn lp__icon-btn--danger"
-            aria-label="Remove this LoRA"
+            aria-label="Remove this look"
             @click="removeAt(index)"
           >
             <Icon name="close" :size="14" />
@@ -266,7 +266,7 @@ function addAnother() {
       class="lp__hint"
       data-test="lora-hint-select"
     >
-      no lora selected — <span class="lp__accent">+ Add LoRA</span> to stack
+      no look chosen — <span class="lp__accent">+ Add a look</span> to stack
       one.
     </p>
     <p
