@@ -107,9 +107,131 @@ pub struct DownloadRecipeWire {
     pub needs_token: Option<bool>,
 }
 
+/// Query for `GET /api/catalog/search`.
+///
+/// Every field is optional because the server owns each default (page 1,
+/// page size 20, `downloads` sort, NSFW included) and a client that repeated
+/// them here would be a second authority on what an omitted parameter means.
+/// `sort` stays a `String` rather than an enum so a value this build has
+/// never heard of still reaches the host, which answers 422 with the list it
+/// accepts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogSearchQuery {
+    pub q: Option<String>,
+    pub family: Option<String>,
+    pub kind: Option<String>,
+    pub source: Option<String>,
+    pub sort: Option<String>,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub include_nsfw: Option<bool>,
+}
+
+impl CatalogSearchQuery {
+    /// The query parameters to put on the wire, omitting every field the
+    /// caller left unset so the host applies its own defaults.
+    pub fn query_pairs(&self) -> Vec<(&'static str, String)> {
+        let mut pairs: Vec<(&'static str, String)> = Vec::new();
+        let mut push_text = |key: &'static str, value: &Option<String>| {
+            if let Some(text) = value.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                pairs.push((key, text.to_string()));
+            }
+        };
+        push_text("q", &self.q);
+        push_text("family", &self.family);
+        push_text("kind", &self.kind);
+        push_text("source", &self.source);
+        push_text("sort", &self.sort);
+        if let Some(page) = self.page {
+            pairs.push(("page", page.to_string()));
+        }
+        if let Some(page_size) = self.page_size {
+            pairs.push(("page_size", page_size.to_string()));
+        }
+        if let Some(include_nsfw) = self.include_nsfw {
+            pairs.push(("include_nsfw", include_nsfw.to_string()));
+        }
+        pairs
+    }
+}
+
+/// One live catalog hit.
+///
+/// `GET /api/catalog/search` and `GET /api/catalog/installed` are
+/// wire-uniform by construction (see [`InstalledCatalogEntry`]'s own note),
+/// so one struct deserializes both rather than two that can drift apart.
+pub type CatalogSearchEntry = InstalledCatalogEntry;
+
+/// One page of `GET /api/catalog/search`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CatalogSearchPage {
+    #[serde(default)]
+    pub entries: Vec<CatalogSearchEntry>,
+    #[serde(default)]
+    pub page: i64,
+    #[serde(default)]
+    pub page_size: i64,
+    #[serde(default)]
+    pub total: i64,
+    /// Provider-scoped failures from a merged search. The healthy provider's
+    /// rows are still in `entries`, so these are warnings to report beside
+    /// the results rather than an error that replaces them.
+    #[serde(default)]
+    pub provider_errors: Vec<CatalogProviderErrorWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogProviderErrorWire {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub retry_after_seconds: Option<u64>,
+}
+
+/// `GET /api/catalog/families` — the static taxonomy, with no per-family
+/// counts. Present so a client can offer `--family` values without guessing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CatalogFamiliesResponse {
+    #[serde(default)]
+    pub families: Vec<CatalogFamilyWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogFamilyWire {
+    pub family: String,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::InstalledCatalogEntry;
+    use super::{CatalogSearchQuery, InstalledCatalogEntry};
+
+    #[test]
+    fn a_search_query_puts_only_the_fields_the_caller_set_on_the_wire() {
+        assert!(CatalogSearchQuery::default().query_pairs().is_empty());
+
+        let pairs = CatalogSearchQuery {
+            q: Some("  flux  ".into()),
+            family: Some(String::new()),
+            sort: Some("recent".into()),
+            page: Some(2),
+            include_nsfw: Some(false),
+            ..CatalogSearchQuery::default()
+        }
+        .query_pairs();
+        assert_eq!(
+            pairs,
+            vec![
+                ("q", "flux".to_string()),
+                ("sort", "recent".to_string()),
+                ("page", "2".to_string()),
+                ("include_nsfw", "false".to_string()),
+            ]
+        );
+    }
 
     #[test]
     fn installed_catalog_entry_round_trips_unknown_nsfw_as_null() {

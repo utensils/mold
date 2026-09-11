@@ -1,13 +1,19 @@
+use crate::catalog_wire::{CatalogFamiliesResponse, CatalogSearchPage, CatalogSearchQuery};
 use crate::chain::{ChainProgressEvent, ChainRequest};
 use crate::chain_job::{
     AmendRequest, AmendResponse, ChainJobDetail, ChainJobListing, ChainJobSummary,
     CreateChainJobResponse, GcOutcome, RetakeRequest,
 };
 use crate::error::MoldError;
+use crate::mesh_workflow::{
+    CreateMeshWorkflowRequest, CreateMeshWorkflowResponse, MeshWorkflowEvent,
+    MeshWorkflowJobDetail, MeshWorkflowJobListing, MeshWorkflowJobState, MeshWorkflowOutcome,
+};
 use crate::queue_progress::QueueJobProgress;
 use crate::types::{
     AudioData, Collection, CollectionCreateRequest, CollectionDetail, CollectionItemsRequest,
-    CollectionUpdateRequest, DeviceState, EmptyTrashResult, ExpandRequest, ExpandResponse,
+    CollectionUpdateRequest, CreateDownloadBody, CreateDownloadResponse, DeviceState,
+    DownloadEvent, DownloadsListing, EmptyTrashResult, ExpandRequest, ExpandResponse,
     GalleryBulkMutationRequest, GalleryBulkMutationResult, GalleryImage, GalleryOrganizeRequest,
     GalleryPatchRequest, GenerateRequest, GenerateResponse, GenerationBatchAdmissionRequest,
     GenerationBatchStatus, GenerationBatchStatusRequest, GenerationBatchStatusResponse,
@@ -1125,6 +1131,331 @@ impl MoldClient {
             .await?
             .json::<GcOutcome>()
             .await?)
+    }
+
+    // ── Durable mesh workflows (`/api/mesh-workflows`) ──────────────────
+    //
+    // Shaped exactly like the chain-job block above: a durable job with a
+    // listing, a detail, an event stream, and lifecycle verbs. A mesh
+    // workflow lives on ONE machine, so every one of these is remote-only by
+    // construction — there is no local fallback to fall back TO.
+
+    /// Create a durable 3-D workflow (`POST /api/mesh-workflows`, 202).
+    pub async fn create_mesh_workflow(
+        &self,
+        req: &CreateMeshWorkflowRequest,
+    ) -> Result<CreateMeshWorkflowResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/mesh-workflows", self.base_url))
+            .json(req)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<CreateMeshWorkflowResponse>()
+            .await?)
+    }
+
+    pub async fn list_mesh_workflows(&self) -> Result<MeshWorkflowJobListing> {
+        let resp = self
+            .client
+            .get(format!("{}/api/mesh-workflows", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<MeshWorkflowJobListing>()
+            .await?)
+    }
+
+    pub async fn get_mesh_workflow(&self, id: &str) -> Result<MeshWorkflowJobDetail> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/mesh-workflows/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<MeshWorkflowJobDetail>()
+            .await?)
+    }
+
+    /// Resume a paused or failed workflow (202, no body).
+    pub async fn resume_mesh_workflow(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/mesh-workflows/{}/resume",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// Cancel a running or queued workflow (202, no body).
+    pub async fn cancel_mesh_workflow(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/mesh-workflows/{}/cancel",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// Delete a SETTLED workflow and its retained artifacts (204). The
+    /// server's own refusal wording for an unsettled job is preserved.
+    pub async fn delete_mesh_workflow(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/mesh-workflows/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// Follow one durable mesh workflow to settlement, forwarding every
+    /// [`MeshWorkflowEvent`] to `events_tx`.
+    ///
+    /// The stream opens with a snapshot, so a caller that attaches after some
+    /// stages have already run still learns the stage graph and where the job
+    /// is. A stream that ends without a terminal frame means the state
+    /// changed while nobody was subscribed, so the final answer is asked for
+    /// rather than guessed — the same rule
+    /// [`Self::stream_chain_job_events`] follows.
+    pub async fn stream_mesh_workflow_events(
+        &self,
+        id: &str,
+        events_tx: tokio::sync::mpsc::UnboundedSender<MeshWorkflowEvent>,
+    ) -> Result<MeshWorkflowOutcome> {
+        let mut resp = self
+            .client
+            .get(format!(
+                "{}/api/mesh-workflows/{}/events",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        if resp.status().is_client_error() || resp.status().is_server_error() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ServerResponseError { status, body }.into());
+        }
+
+        let mut outcome = MeshWorkflowOutcome {
+            state: MeshWorkflowJobState::Running,
+            error: None,
+            output_filename: None,
+        };
+        let mut buffer = String::new();
+        while let Some(chunk) = resp.chunk().await? {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(event_text) = next_sse_event(&mut buffer) {
+                let (_, data) = parse_sse_event(&event_text);
+                let Ok(event) = serde_json::from_str::<MeshWorkflowEvent>(&data) else {
+                    continue;
+                };
+                match &event {
+                    MeshWorkflowEvent::Snapshot { job } => {
+                        outcome.state = job.summary.state;
+                        outcome.error.clone_from(&job.summary.error);
+                        outcome
+                            .output_filename
+                            .clone_from(&job.summary.output_filename);
+                    }
+                    MeshWorkflowEvent::StateChanged { state, error } => {
+                        outcome.state = *state;
+                        if error.is_some() {
+                            outcome.error.clone_from(error);
+                        }
+                    }
+                    _ => {}
+                }
+                let settled = outcome.state.is_settled();
+                let _ = events_tx.send(event);
+                if settled {
+                    // Only the snapshot carries the published filename, so a
+                    // run that settles mid-stream has to be asked for it.
+                    if outcome.output_filename.is_none() {
+                        if let Ok(detail) = self.get_mesh_workflow(id).await {
+                            outcome
+                                .output_filename
+                                .clone_from(&detail.summary.output_filename);
+                            if outcome.error.is_none() {
+                                outcome.error.clone_from(&detail.summary.error);
+                            }
+                        }
+                    }
+                    return Ok(outcome);
+                }
+            }
+        }
+        if let Ok(detail) = self.get_mesh_workflow(id).await {
+            outcome.state = detail.summary.state;
+            outcome.error.clone_from(&detail.summary.error);
+            outcome
+                .output_filename
+                .clone_from(&detail.summary.output_filename);
+        }
+        Ok(outcome)
+    }
+
+    // ── Catalog (`/api/catalog`) ────────────────────────────────────────
+    //
+    // The host holds the stored Hugging Face and Civitai credentials, so a
+    // search asked of it sees repositories an unauthenticated in-process
+    // query cannot. That is why every catalog-reading surface asks the
+    // server first and only falls back locally when none answers.
+
+    /// Live catalog search (`GET /api/catalog/search`).
+    ///
+    /// A merged search whose one provider failed still answers 200 with the
+    /// healthy provider's rows and a `provider_errors` entry, so a caller
+    /// reports those beside the results rather than treating them as failure.
+    pub async fn search_catalog(&self, query: &CatalogSearchQuery) -> Result<CatalogSearchPage> {
+        let resp = self
+            .client
+            .get(format!("{}/api/catalog/search", self.base_url))
+            .query(&query.query_pairs())
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<CatalogSearchPage>()
+            .await?)
+    }
+
+    /// The host's family taxonomy (`GET /api/catalog/families`).
+    pub async fn catalog_families(&self) -> Result<Vec<String>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/catalog/families", self.base_url))
+            .send()
+            .await?;
+        let listing = error_for_status_with_body(resp)
+            .await?
+            .json::<CatalogFamiliesResponse>()
+            .await?;
+        Ok(listing
+            .families
+            .into_iter()
+            .map(|family| family.family)
+            .collect())
+    }
+
+    // ── Download queue (`/api/downloads`) ───────────────────────────────
+
+    pub async fn list_downloads(&self) -> Result<DownloadsListing> {
+        let resp = self
+            .client
+            .get(format!("{}/api/downloads", self.base_url))
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(resp)
+            .await?
+            .json::<DownloadsListing>()
+            .await?)
+    }
+
+    /// Enqueue a download on the host (`POST /api/downloads`).
+    ///
+    /// A model already active or queued answers 409 carrying the SAME body as
+    /// the 200 — the id of the job that is already doing the work — so this
+    /// reports it as [`DownloadEnqueue::already_present`] rather than an
+    /// error. Asking twice for the same download is not a mistake.
+    pub async fn create_download(
+        &self,
+        model: &str,
+        accept_licenses: &[crate::types::LicenseAcceptance],
+    ) -> Result<DownloadEnqueue> {
+        let body = CreateDownloadBody {
+            model: model.to_string(),
+            accept_licenses: accept_licenses.to_vec(),
+        };
+        let resp = self
+            .client
+            .post(format!("{}/api/downloads", self.base_url))
+            .json(&body)
+            .send()
+            .await?;
+        let already_present = resp.status() == StatusCode::CONFLICT;
+        let resp = if already_present {
+            resp
+        } else {
+            error_for_status_with_body(resp).await?
+        };
+        Ok(DownloadEnqueue {
+            response: resp.json::<CreateDownloadResponse>().await?,
+            already_present,
+        })
+    }
+
+    /// Cancel one queued or active download (`DELETE /api/downloads/:id`).
+    pub async fn cancel_download(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/downloads/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
+    /// Follow the download queue (`GET /api/downloads/stream`), forwarding
+    /// every [`DownloadEvent`] to `events_tx` until the stream ends.
+    ///
+    /// The server subscribes before it snapshots, so the first frame is
+    /// always a full `Snapshot` and no delta is missed between the two.
+    pub async fn stream_downloads(
+        &self,
+        events_tx: tokio::sync::mpsc::UnboundedSender<DownloadEvent>,
+    ) -> Result<()> {
+        let mut resp = self
+            .client
+            .get(format!("{}/api/downloads/stream", self.base_url))
+            .send()
+            .await?;
+        if resp.status().is_client_error() || resp.status().is_server_error() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ServerResponseError { status, body }.into());
+        }
+        let mut buffer = String::new();
+        while let Some(chunk) = resp.chunk().await? {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(event_text) = next_sse_event(&mut buffer) {
+                let (_, data) = parse_sse_event(&event_text);
+                let Ok(event) = serde_json::from_str::<DownloadEvent>(&data) else {
+                    continue;
+                };
+                if events_tx.send(event).is_err() {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Ask the server to pull (download) a model. Blocks until the download
@@ -3186,6 +3517,17 @@ fn encode_path_segment(raw: &str) -> String {
         }
     }
     out
+}
+
+/// What `POST /api/downloads` answered.
+///
+/// A 409 is not a failure here: it carries the same body as the 200, naming
+/// the download that is ALREADY doing the work. Callers report that rather
+/// than enqueueing a duplicate.
+#[derive(Debug, Clone)]
+pub struct DownloadEnqueue {
+    pub response: CreateDownloadResponse,
+    pub already_present: bool,
 }
 
 /// Error indicating a model was not found on the server (404 with body).
@@ -6024,5 +6366,529 @@ mod tests {
             .unwrap_err();
         assert!(super::is_missing_endpoint_error(&error));
         assert!(error.to_string().contains("405 Method Not Allowed"));
+    }
+
+    // ── Durable mesh workflows ──────────────────────────────────────────
+
+    fn mesh_workflow_summary_json(state: &str) -> serde_json::Value {
+        serde_json::json!({
+            "contract_version": 1,
+            "id": "mw-1",
+            "state": state,
+            "mode": "mesh_roundtrip",
+            "stage_count": 2,
+            "current_stage": 0,
+            "created_at_ms": 1_700_000_000_000i64,
+            "updated_at_ms": 1_700_000_000_000i64,
+        })
+    }
+
+    fn mesh_roundtrip_request() -> CreateMeshWorkflowRequest {
+        let mut request = crate::test_support::minimal_generate_request("hunyuan3d-2.1:fp16");
+        request.prompt.clear();
+        request.width = 0;
+        request.height = 0;
+        request.seed = None;
+        request.output_format = Some(crate::types::OutputFormat::Glb);
+        request.mesh = Some(crate::types::MeshRequestOptions {
+            texture: Some(false),
+            ..Default::default()
+        });
+        request.references = Some(vec![crate::types::GenerationReference::Mesh {
+            media: crate::types::GenerationReferenceAuthority::Inline {
+                data: b"glTF".to_vec(),
+            },
+            provenance: crate::types::GenerationReferenceProvenance::default(),
+            mime_type: "model/gltf-binary".into(),
+            format: crate::types::MeshReferenceFormat::Glb,
+            byte_length: 4,
+            coordinates: crate::types::MeshReferenceCoordinates {
+                up_axis: crate::types::MeshUpAxis::Y,
+                meters_per_unit: 1.0,
+            },
+        }]);
+        CreateMeshWorkflowRequest::MeshRoundtrip {
+            roundtrip_request: Box::new(request),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_mesh_workflow_posts_the_tagged_request_and_reads_its_warnings() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/mesh-workflows"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "job_id": "mw-1",
+                "request_warnings": ["target_faces was clamped"]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let created = MoldClient::new(&server.uri())
+            .create_mesh_workflow(&mesh_roundtrip_request())
+            .await
+            .unwrap();
+        assert_eq!(created.job_id, "mw-1");
+        assert_eq!(created.request_warnings, vec!["target_faces was clamped"]);
+
+        // The body carries the workflow's own `mode` tag, which is what the
+        // server matches on to know which request field to read.
+        let body = &server.received_requests().await.unwrap()[0];
+        let sent: serde_json::Value = serde_json::from_slice(&body.body).unwrap();
+        assert_eq!(sent["mode"], "mesh_roundtrip");
+        assert!(sent["roundtrip_request"].is_object());
+    }
+
+    #[tokio::test]
+    async fn mesh_workflow_lifecycle_verbs_encode_the_id_and_surface_refusals() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/mesh-workflows"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jobs": [mesh_workflow_summary_json("running")]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/mesh-workflows/mw%2F1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "contract_version": 1,
+                "id": "mw/1",
+                "state": "completed",
+                "mode": "mesh_roundtrip",
+                "stage_count": 2,
+                "current_stage": 2,
+                "output_filename": "mold-h3-1.glb",
+                "created_at_ms": 1i64,
+                "updated_at_ms": 2i64,
+                "request": serde_json::to_value(mesh_roundtrip_request()).unwrap(),
+                "stages": [
+                    { "index": 0, "kind": "shape", "state": "completed", "artifacts": [] },
+                    { "index": 1, "kind": "finalize", "state": "completed", "artifacts": [] }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/mesh-workflows/mw-1/resume"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/mesh-workflows/mw-1/cancel"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/mesh-workflows/mw-1"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string("cancel or wait for the mesh workflow before deleting it"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        assert_eq!(client.list_mesh_workflows().await.unwrap().jobs.len(), 1);
+
+        // A path segment is percent-encoded, so an id with a slash reads one
+        // workflow rather than routing to some other endpoint.
+        let detail = client.get_mesh_workflow("mw/1").await.unwrap();
+        assert_eq!(
+            detail.summary.output_filename.as_deref(),
+            Some("mold-h3-1.glb")
+        );
+        assert_eq!(detail.stages.len(), 2);
+
+        client.resume_mesh_workflow("mw-1").await.unwrap();
+        client.cancel_mesh_workflow("mw-1").await.unwrap();
+
+        // Delete is settled-only, and the server's own wording is what the
+        // user needs to read.
+        let refusal = client.delete_mesh_workflow("mw-1").await.unwrap_err();
+        assert!(refusal
+            .to_string()
+            .contains("cancel or wait for the mesh workflow"));
+    }
+
+    #[tokio::test]
+    async fn following_a_mesh_workflow_forwards_every_frame_and_ends_at_settlement() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let snapshot = serde_json::json!({
+            "event": "snapshot",
+            "job": {
+                "contract_version": 1,
+                "id": "mw-1",
+                "state": "running",
+                "mode": "mesh_roundtrip",
+                "stage_count": 2,
+                "current_stage": 0,
+                "created_at_ms": 1i64,
+                "updated_at_ms": 1i64,
+                "request": serde_json::to_value(mesh_roundtrip_request()).unwrap(),
+                "stages": []
+            }
+        });
+        let body = format!(
+            "data: {}\n\ndata: {}\n\ndata: {}\n\n",
+            snapshot,
+            serde_json::json!({"event": "stage_started", "stage_index": 0, "kind": "shape"}),
+            serde_json::json!({"event": "state_changed", "state": "completed"}),
+        );
+        Mock::given(method("GET"))
+            .and(path("/api/mesh-workflows/mw-1/events"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+        // Settlement arrives as a state change, which carries no filename —
+        // so the follower asks for it rather than reporting a finished run
+        // with nothing to open.
+        Mock::given(method("GET"))
+            .and(path("/api/mesh-workflows/mw-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "contract_version": 1,
+                "id": "mw-1",
+                "state": "completed",
+                "mode": "mesh_roundtrip",
+                "stage_count": 2,
+                "current_stage": 2,
+                "output_filename": "mold-h3-2.glb",
+                "created_at_ms": 1i64,
+                "updated_at_ms": 3i64,
+                "request": serde_json::to_value(mesh_roundtrip_request()).unwrap(),
+                "stages": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = MoldClient::new(&server.uri())
+            .stream_mesh_workflow_events("mw-1", tx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.state, MeshWorkflowJobState::Completed);
+        assert_eq!(outcome.output_filename.as_deref(), Some("mold-h3-2.glb"));
+
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.push(match event {
+                MeshWorkflowEvent::Snapshot { .. } => "snapshot",
+                MeshWorkflowEvent::StageStarted { .. } => "stage_started",
+                MeshWorkflowEvent::StateChanged { .. } => "state_changed",
+                _ => "other",
+            });
+        }
+        assert_eq!(seen, ["snapshot", "stage_started", "state_changed"]);
+    }
+
+    #[tokio::test]
+    async fn a_mesh_workflow_that_settled_before_we_attached_needs_no_second_read() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let snapshot = serde_json::json!({
+            "event": "snapshot",
+            "job": {
+                "contract_version": 1,
+                "id": "mw-1",
+                "state": "completed",
+                "mode": "mesh_roundtrip",
+                "stage_count": 2,
+                "current_stage": 2,
+                "output_filename": "mold-h3-3.glb",
+                "created_at_ms": 1i64,
+                "updated_at_ms": 2i64,
+                "request": serde_json::to_value(mesh_roundtrip_request()).unwrap(),
+                "stages": []
+            }
+        });
+        Mock::given(method("GET"))
+            .and(path("/api/mesh-workflows/mw-1/events"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("data: {snapshot}\n\n")),
+            )
+            .mount(&server)
+            .await;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = MoldClient::new(&server.uri())
+            .stream_mesh_workflow_events("mw-1", tx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.state, MeshWorkflowJobState::Completed);
+        assert_eq!(outcome.output_filename.as_deref(), Some("mold-h3-3.glb"));
+        // One request: the snapshot already answered everything.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    // ── Catalog ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn search_catalog_forwards_the_query_and_keeps_provider_errors_beside_the_rows() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/catalog/search"))
+            .and(query_param("q", "flux"))
+            .and(query_param("sort", "recent"))
+            .and(query_param("page_size", "5"))
+            .and(query_param("include_nsfw", "false"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": "hf:black-forest-labs/FLUX.1-dev",
+                    "name": "FLUX.1 [dev]",
+                    "family": "flux",
+                    "kind": "checkpoint",
+                    "size_bytes": 23_800_000_000u64,
+                    "download_count": 1234,
+                    "installed": false
+                }],
+                "page": 1,
+                "page_size": 5,
+                "total": 1,
+                "provider_errors": [
+                    { "source": "civitai", "message": "rate limited", "retry_after_seconds": 30 }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let page = MoldClient::new(&server.uri())
+            .search_catalog(&CatalogSearchQuery {
+                q: Some("flux".into()),
+                sort: Some("recent".into()),
+                page_size: Some(5),
+                include_nsfw: Some(false),
+                ..CatalogSearchQuery::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.entries[0].id, "hf:black-forest-labs/FLUX.1-dev");
+        assert_eq!(page.entries[0].family, "flux");
+        // A failed provider is a warning, not a failure: the healthy
+        // provider's rows are still here.
+        assert_eq!(page.provider_errors.len(), 1);
+        assert_eq!(page.provider_errors[0].source, "civitai");
+        assert_eq!(page.provider_errors[0].retry_after_seconds, Some(30));
+    }
+
+    #[tokio::test]
+    async fn search_catalog_surfaces_the_hosts_refusal_of_an_unknown_sort() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/catalog/search"))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .set_body_string("unknown sort 'oldest'; expected downloads, recent, rating"),
+            )
+            .mount(&server)
+            .await;
+        let error = MoldClient::new(&server.uri())
+            .search_catalog(&CatalogSearchQuery {
+                sort: Some("oldest".into()),
+                ..CatalogSearchQuery::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("downloads, recent, rating"));
+    }
+
+    #[tokio::test]
+    async fn catalog_families_reads_the_hosts_taxonomy() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/catalog/families"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "families": [{ "family": "flux" }, { "family": "sdxl" }]
+            })))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            MoldClient::new(&server.uri())
+                .catalog_families()
+                .await
+                .unwrap(),
+            vec!["flux".to_string(), "sdxl".to_string()]
+        );
+    }
+
+    // ── Download queue ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_download_reads_a_conflict_as_the_job_already_doing_the_work() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/downloads"))
+            .and(body_json(serde_json::json!({ "model": "flux-dev:q4" })))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "id": "dl-7", "position": 2
+            })))
+            .mount(&server)
+            .await;
+
+        let enqueued = MoldClient::new(&server.uri())
+            .create_download("flux-dev:q4", &[])
+            .await
+            .unwrap();
+        assert!(enqueued.already_present);
+        assert_eq!(enqueued.response.id, "dl-7");
+        assert_eq!(enqueued.response.position, 2);
+    }
+
+    #[tokio::test]
+    async fn create_download_sends_accepted_licenses_and_surfaces_an_unknown_model() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/downloads"))
+            .and(body_json(serde_json::json!({
+                "model": "pulid-flux",
+                "accept_licenses": [{
+                    "id": "insightface-antelopev2",
+                    "url": "https://example.invalid/terms.md",
+                    "sha256": "abc"
+                }]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "dl-1", "position": 0
+            })))
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        let accepted = crate::types::LicenseAcceptance {
+            id: "insightface-antelopev2".into(),
+            url: "https://example.invalid/terms.md".into(),
+            sha256: "abc".into(),
+        };
+        let enqueued = client
+            .create_download("pulid-flux", std::slice::from_ref(&accepted))
+            .await
+            .unwrap();
+        assert!(!enqueued.already_present);
+        assert_eq!(enqueued.response.id, "dl-1");
+
+        let unknown = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/downloads"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "unknown model 'nope'. Run 'mold list' to see available models."
+            })))
+            .mount(&unknown)
+            .await;
+        let error = MoldClient::new(&unknown.uri())
+            .create_download("nope", &[])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown model 'nope'"));
+    }
+
+    #[tokio::test]
+    async fn listing_and_cancelling_downloads_reads_the_queue_and_encodes_the_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/downloads"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "active_jobs": [{
+                    "id": "dl-1",
+                    "model": "flux-dev:q4",
+                    "status": "active",
+                    "files_done": 1,
+                    "files_total": 3,
+                    "bytes_done": 100,
+                    "bytes_total": 300
+                }],
+                "queued": [],
+                "history": []
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/downloads/dl%3A1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let listing = client.list_downloads().await.unwrap();
+        assert_eq!(listing.active_jobs.len(), 1);
+        assert_eq!(listing.active_jobs[0].model, "flux-dev:q4");
+        client.cancel_download("dl:1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn following_downloads_forwards_the_opening_snapshot_and_every_delta() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = format!(
+            "event: download\ndata: {}\n\nevent: download\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "snapshot",
+                "listing": { "active_jobs": [], "queued": [], "history": [] }
+            }),
+            serde_json::json!({
+                "type": "progress", "id": "dl-1", "files_done": 1, "bytes_done": 42
+            }),
+        );
+        Mock::given(method("GET"))
+            .and(path("/api/downloads/stream"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        MoldClient::new(&server.uri())
+            .stream_downloads(tx)
+            .await
+            .unwrap();
+        assert!(matches!(rx.try_recv(), Ok(DownloadEvent::Snapshot { .. })));
+        match rx.try_recv() {
+            Ok(DownloadEvent::Progress { id, bytes_done, .. }) => {
+                assert_eq!(id, "dl-1");
+                assert_eq!(bytes_done, 42);
+            }
+            other => panic!("expected a progress frame, got {other:?}"),
+        }
     }
 }

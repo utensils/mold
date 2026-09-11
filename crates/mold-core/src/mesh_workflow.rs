@@ -396,6 +396,21 @@ pub enum MeshWorkflowEvent {
     },
 }
 
+/// How following a durable mesh workflow ended.
+///
+/// Not a wire type: the event stream carries no terminal summary, so a
+/// client that followed a workflow to settlement assembles this from the
+/// snapshot it opened with, the state changes it saw, and — when the run
+/// settled mid-stream without republishing its filename — one final read of
+/// the job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshWorkflowOutcome {
+    pub state: MeshWorkflowJobState,
+    pub error: Option<String>,
+    /// The stitched print the run published, present only once it completed.
+    pub output_filename: Option<String>,
+}
+
 /// Portable workflow record. During local execution SQLite is the
 /// transactional authority and refreshes this manifest after every committed
 /// stage transition.

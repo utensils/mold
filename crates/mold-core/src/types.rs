@@ -13208,6 +13208,33 @@ pub enum ServerEvent {
     },
 }
 
+/// Body of `POST /api/downloads`.
+///
+/// `model` is a MANIFEST name. A `cv:`/`hf:` catalog id belongs to
+/// `POST /api/catalog/{id}/download` and is refused here, so a client routes
+/// on the id shape rather than on which surface it is calling from.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CreateDownloadBody {
+    pub model: String,
+    /// Third-party licenses the user has accepted, each carrying the exact
+    /// terms they were shown, recorded in this server's Mold data root before
+    /// the pull starts.
+    ///
+    /// Additive: absent means "accept nothing", which is what every existing
+    /// client sends and leaves their behaviour unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accept_licenses: Vec<LicenseAcceptance>,
+}
+
+/// Answer to `POST /api/downloads`, carried by BOTH the 200 that enqueued a
+/// new job and the 409 that found the model already queued or transferring —
+/// the id in each case is the job to watch.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CreateDownloadResponse {
+    pub id: String,
+    pub position: usize,
+}
+
 /// Listing returned from `GET /api/downloads`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadsListing {
