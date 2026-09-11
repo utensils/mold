@@ -222,16 +222,11 @@ watch(
       @keydown="onKeydown"
     />
 
-    <div class="composer__actions">
-      <span class="composer__summary" data-test="composer-summary">{{
-        summaryLine
-      }}</span>
-      <span
-        v-if="transformBlockedReason"
-        class="composer__summary"
-        data-test="composer-transform-blocked"
-        >{{ transformBlockedReason }}</span
-      >
+    <div class="composer__chips" data-test="composer-chips">
+      <slot name="style" />
+      <slot name="shape" />
+      <slot name="count" />
+      <span class="composer__spacer" />
       <button
         v-if="expanded"
         type="button"
@@ -242,9 +237,18 @@ watch(
         <Icon name="sparkle" :size="12" />
         expanded · undo
       </button>
-      <slot name="style" />
-      <slot name="shape" />
-      <slot name="count" />
+      <span
+        v-if="transformBlockedReason"
+        class="composer__summary"
+        data-test="composer-transform-blocked"
+        >{{ transformBlockedReason }}</span
+      >
+      <span class="composer__summary" data-test="composer-summary">{{
+        summaryLine
+      }}</span>
+    </div>
+
+    <div class="composer__actions" data-test="composer-actions">
       <span class="composer__spacer" />
       <button
         type="button"
@@ -348,11 +352,19 @@ watch(
   flex: 1;
 }
 
+.composer__chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
 .composer__actions {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-top: 12px;
+  margin-top: 10px;
   flex-wrap: wrap;
 }
 

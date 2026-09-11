@@ -276,6 +276,30 @@ describe("ComposerCard action row", () => {
     expect(order[0]).toBeGreaterThan(-1);
   });
 
+  it("keeps the three chips on their own row, with the summary at its end", () => {
+    // Measured on plato at 1440px: with the summary leading the one action
+    // row, the style chip pushed Shape and Make onto a second line and
+    // Generate onto a third. The chips are one row; the transforms and
+    // Generate are the next.
+    const wrapper = factory({
+      slots: {
+        style: "<span data-test='slot-style'>Photoreal</span>",
+        shape: "<span data-test='slot-shape'>Square · 1024</span>",
+        count: "<span data-test='slot-count'>Make 4</span>",
+      },
+    });
+    const chips = wrapper.get("[data-test='composer-chips']");
+    for (const probe of ["slot-style", "slot-shape", "slot-count"]) {
+      expect(chips.find(`[data-test='${probe}']`).exists()).toBe(true);
+    }
+    expect(chips.find("[data-test='composer-summary']").exists()).toBe(true);
+    expect(chips.find("[data-test='composer-submit']").exists()).toBe(false);
+    const actions = wrapper.get("[data-test='composer-actions']");
+    expect(actions.find("[data-test='composer-expand']").exists()).toBe(true);
+    expect(actions.find("[data-test='composer-submit']").exists()).toBe(true);
+    expect(actions.find("[data-test='slot-style']").exists()).toBe(false);
+  });
+
   it("renders none of the three when the page fills none of them", () => {
     const wrapper = factory();
     expect(wrapper.find("[data-test='slot-style']").exists()).toBe(false);

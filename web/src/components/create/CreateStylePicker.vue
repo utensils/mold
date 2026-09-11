@@ -221,6 +221,10 @@ function browse() {
 }
 .style-chip__label {
   min-width: 0;
+  /* A catalog display name can run to a sentence ("FLUX.1 Schnell Q8 — fast
+   * 4-step, general purpose"); the chip keeps the words that name it and the
+   * menu row carries the rest. */
+  max-width: 22ch;
   overflow: hidden;
   text-overflow: ellipsis;
 }
