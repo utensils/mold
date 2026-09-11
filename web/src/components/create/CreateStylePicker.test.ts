@@ -101,6 +101,20 @@ describe("CreateStylePicker chip", () => {
     expect(menu()?.getAttribute("role")).toBe("listbox");
     wrapper.unmount();
   });
+
+  it("sits in the composer's chip row as one chip, not a card with a head", () => {
+    // The mock's composer row is `Photoreal flux-dev:q4 ▼` beside the shape
+    // and count chips: no kicker, no second Browse link (the menu's own
+    // footer is the doorway), and nothing wider than its words.
+    const wrapper = mountPicker();
+    expect(wrapper.find('[data-test="browse-styles"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toMatch(/Browse more/);
+    const chip = wrapper.get('[data-test="style-chip"]');
+    expect(chip.attributes("title")).toBe("Style");
+    expect(chip.classes()).toContain("style-chip");
+    expect(chip.find("svg").exists()).toBe(false);
+    wrapper.unmount();
+  });
 });
 
 describe("CreateStylePicker menu", () => {
@@ -287,9 +301,6 @@ describe("CreateStylePicker menu", () => {
 
   it("sends Browse more to the output kind's own Styles filter", async () => {
     const wrapper = mountPicker({ browseTo: "/models?type=video" });
-    expect(
-      wrapper.get('[data-test="browse-styles"]').attributes("href") ?? "",
-    ).toBeDefined();
     await open(wrapper);
     (
       document.body.querySelector('[data-test="browse-catalog"]') as HTMLElement

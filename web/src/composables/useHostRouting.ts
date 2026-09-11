@@ -444,6 +444,7 @@ function gpuFrom(
     backend: info.backend ?? null,
     name: info.name,
     vramTotalMb: info.vram_total_mb,
+    vramUsedMb: info.vram_used_mb,
   };
 }
 
@@ -476,6 +477,10 @@ function gpuFromStatus(
         strongest.memory.total_bytes === null
           ? null
           : strongest.memory.total_bytes / 1024 ** 2,
+      vramUsedMb:
+        strongest.memory.used_bytes === null
+          ? null
+          : strongest.memory.used_bytes / 1024 ** 2,
     };
   }
   const legacy = status.gpu_info as GpuInfoWithBackend | null | undefined;
@@ -492,6 +497,7 @@ function gpuFromStatus(
     backend: legacy?.backend ?? null,
     name: strongest.name,
     vramTotalMb: strongest.vram_total_bytes / 1024 ** 2,
+    vramUsedMb: strongest.vram_used_bytes / 1024 ** 2,
   };
 }
 

@@ -2034,6 +2034,15 @@ const machineStatus = computed<
 const MACHINE_SENTENCE =
   "This tab is talking to a machine on your network. Close the tab and it keeps working.";
 const machineQueueDepth = computed(() => machineHost.value?.queueDepth ?? null);
+/** Bytes for the card's meter, from the routing poll's strongest GPU. */
+const machineMemoryUsed = computed(() => {
+  const mb = machineHost.value?.gpu?.vramUsedMb;
+  return typeof mb === "number" ? mb * 1024 ** 2 : null;
+});
+const machineMemoryTotal = computed(() => {
+  const mb = machineHost.value?.gpu?.vramTotalMb;
+  return typeof mb === "number" ? mb * 1024 ** 2 : null;
+});
 
 // ── The rail's disclosure values ──────────────────────────────────────
 const sourceDisclosureValue = computed(() => {
@@ -5252,6 +5261,8 @@ onBeforeUnmount(() => {
           :status="machineStatus"
           :sentence="MACHINE_SENTENCE"
           :queue="machineQueueDepth"
+          :used="machineMemoryUsed"
+          :total="machineMemoryTotal"
           :multi-host="routing.multiHost.value"
         >
           <template #picker>

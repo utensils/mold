@@ -668,6 +668,39 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.find("[data-test='controls-host']").exists()).toBe(false);
   });
 
+  it("meters the routed machine's memory from the routing poll", async () => {
+    // The card draws its 5px meter from the same `/api/status` the routers
+    // already read; no second request, and nothing when the host cannot say.
+    hostStatusMock.mockImplementation(async () => ({
+      version: "test",
+      models_loaded: [],
+      busy: false,
+      uptime_secs: 1,
+      queue_depth: 2,
+      gpu_info: {
+        backend: "cuda",
+        name: "NVIDIA L40S",
+        vram_total_mb: 46_080,
+        vram_used_mb: 11_520,
+      },
+    }));
+    hostModelsMock.mockResolvedValue([modelWithRecipe("sdxl:fp16", "sdxl")]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const card = wrapper.get("[data-test='machine-card']");
+    expect(card.get("[data-test='machine-card-memory']").text()).toBe(
+      "12.1 / 48.3 GB",
+    );
+    expect(card.get("[data-test='machine-card-queue']").text()).toBe("queue 2");
+    hostStatusMock.mockImplementation(async () => ({
+      version: "test",
+      models_loaded: [],
+      busy: false,
+      uptime_secs: 1,
+      queue_depth: 0,
+    }));
+  });
+
   it("applies settings selected from recovered Now developing work", async () => {
     promptHistoryApiMock.mockImplementation(async (...args: unknown[]) =>
       args[1] === "/api/queue/remote-print/preview"
