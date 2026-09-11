@@ -20,7 +20,6 @@ import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import Chip from "@ui/components/Chip.vue";
-import LoraPicker from "../LoraPicker.vue";
 import PlacementPanel from "../PlacementPanel.vue";
 import ExtendVideoControls from "./advanced/ExtendVideoControls.vue";
 import Ltx2VideoControls from "./advanced/Ltx2VideoControls.vue";
@@ -30,7 +29,6 @@ import UpscaleSection from "./advanced/UpscaleSection.vue";
 import type {
   DevicePlacement,
   GenerateFormState,
-  LoraSelection,
   ModelInfoExtended,
   OutputFormat,
   Scheduler,
@@ -70,7 +68,6 @@ import {
   videoFrameGridLabel,
   videoFrameStep,
 } from "@studio/lib/videoDuration";
-import { cameraMotionLoraPath } from "@studio/lib/cameraMotion";
 import {
   isMinimaxH3Identity,
   MINIMAX_H3_MAX_FRAMES,
@@ -122,7 +119,6 @@ const emit = defineEmits<{
   "open-end-frame-picker": [];
   "clear-end-frame": [];
   "open-mask": [];
-  "append-prompt": [phrase: string];
   "canvas-intent": [intent: CanvasIntent];
 }>();
 const host = ref<HTMLElement | { $el?: unknown } | null>(null);
@@ -337,17 +333,7 @@ const seedModes = [
   { value: "increment", label: "Increment" },
 ] as const;
 
-// ── LoRA / placement passthrough ──────────────────────────────────────
-function setLoras(loras: LoraSelection[]) {
-  const cameraPath = cameraMotionLoraPath(props.modelValue.cameraControl);
-  patch({
-    loras,
-    cameraControl:
-      cameraPath && !loras.some((lora) => lora.path === cameraPath)
-        ? null
-        : props.modelValue.cameraControl,
-  });
-}
+// ── Placement passthrough ─────────────────────────────────────────────
 function setPlacement(placement: DevicePlacement | null) {
   patch({ placement });
 }
@@ -631,25 +617,12 @@ function resetAdvanced() {
         </div>
       </AccordionSection>
 
-      <AccordionSection
-        v-if="caps.supportsLora"
-        icon="layers"
-        title="Add-on looks"
-        :summary="`${modelValue.loras.length} active`"
-        :open="true"
-        :header-interactive="false"
-        data-test="section-lora"
-      >
-        <LoraPicker
-          :family="family"
-          :model-value="modelValue.loras"
-          @update:model-value="setLoras"
-          @append-prompt="emit('append-prompt', $event)"
-        />
-      </AccordionSection>
+      <!-- No LoRA section: the rail's own "Add-on looks" disclosure row is
+           the single door, and it already shows the active count. A copy here
+           gave the stack two doors and counted it twice on one screen. -->
 
-      <!-- Identity sits beside the LoRA stack because admission refuses the
-           two together; the photo itself is primary form. -->
+      <!-- Identity sits where the LoRA stack used to, because admission
+           refuses the two together; the photo itself is primary form. -->
       <AccordionSection
         v-if="showIdentity"
         icon="image"

@@ -541,7 +541,10 @@ describe("ControlsAside", () => {
     expect(strength?.props("step")).toBe(0.1);
   });
 
-  it("shows a per-model duration slider for one-shot video", async () => {
+  it("draws no duration slider — the Video section under More settings owns it", () => {
+    // Two sliders bound to `frames` used to sit in the same More settings
+    // sheet: this secondary group's and AdvancedDrawer's `section-video`.
+    // AdvancedDrawer keeps it, next to the frames, FPS and GIF knobs.
     const wrapper = mount(ControlsAside, {
       props: {
         group: "secondary" as const,
@@ -555,19 +558,29 @@ describe("ControlsAside", () => {
           max_runtime_seconds: 20,
           max_frames_absolute: 604,
           frame_step: 8,
+          supports_duration_prediction: true,
         } as never,
       },
     });
-    const duration = wrapper.getComponent(VideoDurationSlider);
-    expect(duration.text()).toContain("4.0s");
-    expect(
-      duration.findAll(".ms-slider__mark b").map((mark) => mark.text()),
-    ).toEqual(["1×", "2×", "3×", "4×", "5×", "6×"]);
-    duration.vm.$emit("update:frames", 241);
-    await wrapper.vm.$nextTick();
-    expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({
-      frames: 241,
+    expect(wrapper.findComponent(VideoDurationSlider).exists()).toBe(false);
+    expect(wrapper.find("[data-test='predict-duration-control']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("draws nothing at all for a video recipe with no mesh or audio group", () => {
+    // wan is video-capable and offers no audio control, so with the duration
+    // slider gone the secondary slice has nothing left to say — and an aside
+    // with only its chrome reads as a broken control.
+    const wrapper = mount(ControlsAside, {
+      props: {
+        group: "secondary" as const,
+        modelValue: baseForm({ model: "wan22-t2v-a14b:q5", modelFamily: "wan" }),
+        family: "wan",
+        model: { name: "wan22-t2v-a14b:q5", family: "wan" } as never,
+      },
     });
+    expect(wrapper.find("[data-test='controls-aside']").exists()).toBe(false);
   });
 
   it("applies the projected dims when a shape is picked", async () => {
@@ -856,13 +869,16 @@ describe("ControlsAside", () => {
     expect(wrapper.findComponent(VideoDurationSlider).exists()).toBe(false);
   });
 
-  it("moves the clip and 3-D groups under More settings", () => {
+  it("moves the audio and 3-D groups under More settings", () => {
     const secondary = factory(
       { frames: 97, model: "ltx-2-19b-distilled:fp8" },
       "ltx2",
       "secondary",
     );
-    expect(secondary.findComponent(VideoDurationSlider).exists()).toBe(true);
+    expect(secondary.find("[data-test='generate-audio-control']").exists()).toBe(
+      true,
+    );
+    expect(secondary.findComponent(VideoDurationSlider).exists()).toBe(false);
     expect(secondary.findComponent(ShapePicker).exists()).toBe(false);
     expect(
       secondary.findAllComponents(SliderRow).map((row) => row.props("label")),

@@ -347,12 +347,14 @@ describe("ComposerCard action row", () => {
 
   /*
    * Where the composer sits is the PAGE's decision — sticky inside the wide
-   * column, fixed to the bottom of a narrow one — so the card exposes the two
-   * classes and hard-codes neither position itself.
+   * column, fixed to the bottom of a narrow one — so the page owns BOTH
+   * rules and the card hard-codes no position. The card once carried a
+   * second copy of each with different z-indexes; both scoped rules landed
+   * on the same element at equal specificity, so bundle order decided.
    */
-  it("offers the page a sticky and a docked position without taking one", () => {
-    expect(composerSource).toContain(".composer--sticky");
-    expect(composerSource).toContain(".composer--docked");
+  it("takes no position of its own and defines neither of the page's classes", () => {
+    expect(composerSource).not.toContain(".composer--sticky");
+    expect(composerSource).not.toContain(".composer--docked");
     const base = composerSource.match(/\n\.composer \{[^}]*\}/)?.[0] ?? "";
     expect(base).not.toContain("position:");
   });

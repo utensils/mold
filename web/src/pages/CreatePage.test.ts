@@ -4,6 +4,7 @@ import { defineComponent, nextTick, type Component } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import CreatePage from "./CreatePage.vue";
 import createPageSource from "./CreatePage.vue?raw";
+import { saveGenerationTemplate } from "../lib/generationTemplates";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -2107,6 +2108,41 @@ describe("CreatePage layout and behavior", () => {
     expect(submitMock.mock.calls[0]?.[0]).toMatchObject({
       title: "Valid again",
     });
+  });
+
+  it("puts back a restored title on Escape, not an empty string", async () => {
+    // Review finding: the revert value was only captured on blur, so a title
+    // restored from a saved draft (never blurred) reverted to "" — and that
+    // empty string persisted. The value is captured when the field is
+    // entered.
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.title = "Smurf 04";
+    await nextTick();
+    const title = wrapper.get("[data-test='print-title']");
+    await title.trigger("focus");
+    await title.setValue("Smurf 04 draft");
+    await title.trigger("keydown", { key: "Escape" });
+    expect(form.state.value.title).toBe("Smurf 04");
+  });
+
+  it("counts the saved starters on first paint and after the sheet closes", async () => {
+    // Review finding: the row read 0 until someone opened it, and stayed
+    // stale after a save or delete inside the sheet.
+    saveGenerationTemplate("one", useGenerateForm().state.value);
+    saveGenerationTemplate("two", useGenerateForm().state.value);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const row = wrapper.get("[data-test='disclosure-starters']");
+    expect(row.text()).toContain("2");
+    await row.trigger("click");
+    saveGenerationTemplate("three", useGenerateForm().state.value);
+    await wrapper.get(".ms-drawer").trigger("keydown.escape");
+    await nextTick();
+    expect(wrapper.get("[data-test='disclosure-starters']").text()).toContain(
+      "3",
+    );
   });
 
   it("blocks a submit for an invalid title that never went through the field", async () => {
@@ -4488,6 +4524,28 @@ describe("CreatePage host routing", () => {
       (m) => m.name,
     );
     expect(names.sort()).toEqual(["flux2-klein:q4", "z-image:bf16"]);
+  });
+
+  it("names the machine Auto would actually route to, not the first registered one", async () => {
+    // Review finding: under Auto / Most capable no host id matches the target
+    // and the card fell through to `hosts[0]`, so its name, meter and queue
+    // described a machine that may not render the print. The form's style is
+    // only on Studio here, so Auto resolves there.
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    localStorage.setItem("mold.web.generateTarget.v1", AUTO_TARGET_ID);
+    hostModelsMock.mockImplementation(async (host: { id: string }) =>
+      host.id === ORIGIN_HOST_ID ? [flux] : [zimage],
+    );
+    const form = useGenerateForm();
+    form.state.value.model = zimage.name;
+    form.state.value.modelFamily = "zimage";
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.get("[data-test='machine-card-name']").text()).toBe(
+      "Studio",
+    );
+    void studio;
   });
 
   it("shows only the pinned machine's models", async () => {

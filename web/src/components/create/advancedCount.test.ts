@@ -6,7 +6,6 @@ function params(
 ): AdvancedCountParams {
   return {
     negativePrompt: "",
-    loraCount: 0,
     upscaleOn: false,
     scheduler: null,
     customSize: false,
@@ -25,8 +24,18 @@ describe("advancedActiveCount", () => {
     expect(advancedActiveCount(params({ negativePrompt: "   " }))).toBe(0);
   });
 
-  it("counts each active LoRA", () => {
-    expect(advancedActiveCount(params({ loraCount: 3 }))).toBe(3);
+  it("never counts LoRAs — Add-on looks is their one home", () => {
+    // The Create rail's "Add-on looks" disclosure row carries the active LoRA
+    // count. Counting them here too made two LoRAs read "2" on that row AND
+    // "2" on More settings — the same double-door source images and ControlNet
+    // already went through when they moved to the primary form.
+    expect(
+      advancedActiveCount({
+        ...params(),
+        // @ts-expect-error loraCount left the contract with the LoRA section.
+        loraCount: 3,
+      }),
+    ).toBe(0);
   });
 
   it("counts a non-default scheduler but not the default", () => {
@@ -63,7 +72,6 @@ describe("advancedActiveCount", () => {
       advancedActiveCount(
         params({
           negativePrompt: "low quality",
-          loraCount: 2,
           upscaleOn: true,
           scheduler: "uni-pc",
           customSize: true,
@@ -73,6 +81,6 @@ describe("advancedActiveCount", () => {
           identity: 2,
         }),
       ),
-    ).toBe(12);
+    ).toBe(10);
   });
 });

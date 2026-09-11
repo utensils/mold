@@ -312,28 +312,6 @@ watch(
   padding: 16px 18px;
 }
 
-/* Applied by the page, never by the card. The wide column's composer stays
- * on screen as the advisories and Recent scroll under it; the narrow one is
- * docked to the bottom of the viewport and the page pads for its height. */
-.composer--sticky {
-  position: sticky;
-  bottom: 0;
-  z-index: 1;
-  box-shadow: 0 -10px 24px -18px rgba(0, 0, 0, 0.8);
-}
-
-.composer--docked {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 2;
-  border-radius: 0;
-  border-left: 0;
-  border-right: 0;
-  border-bottom: 0;
-}
-
 .composer__prompt {
   width: 100%;
   box-sizing: border-box;

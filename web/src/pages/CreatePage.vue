@@ -409,8 +409,13 @@ type RailSheet =
   | "fileUnder"
   | "advanced";
 const railSheet = ref<RailSheet | null>(null);
-/** Saved recipes, counted for the Starters row and refreshed when it opens. */
+/** Saved recipes, counted for the Starters row: read on mount and again
+ * whenever the sheet that edits them closes. */
 const starterCount = ref(0);
+function refreshStarterCount() {
+  starterCount.value = loadGenerationTemplates().length;
+}
+onMounted(refreshStarterCount);
 /** True while the open body was reached from the rail body, so it offers Back
  * instead of only Close. */
 const railSheetFromAll = ref(false);
@@ -430,13 +435,15 @@ const railSheetTitle = computed(() =>
 function openRailSheet(key: RailSheet) {
   railSheetFromAll.value = railSheet.value === "all";
   railSheet.value = key;
-  if (key === "starters") starterCount.value = loadGenerationTemplates().length;
+  if (key === "starters") refreshStarterCount();
 }
 function closeRailSheet() {
+  if (railSheet.value === "starters") refreshStarterCount();
   railSheet.value = null;
   railSheetFromAll.value = false;
 }
 function backToRail() {
+  if (railSheet.value === "starters") refreshStarterCount();
   railSheet.value = "all";
   railSheetFromAll.value = false;
 }
@@ -455,14 +462,20 @@ const composerError = ref<string | null>(null);
  * (a restored draft can carry one without an input event) so Generate can
  * never fire while silently dropping the title (codex review). */
 const titleError = ref("");
-/** The last committed title, so Escape can put it back. A commit is Enter or
- * a blur; every keystroke still validates so Generate is never blocked by a
- * title the field is no longer showing. */
+/** The title the field showed when it was entered, so Escape can put it
+ * back. Captured on focus rather than on blur: a title restored from a saved
+ * draft, or written by Reuse settings, never blurs, and a blur-only capture
+ * reverted it to "" (review). Enter and blur commit; every keystroke still
+ * validates so Generate is never blocked by a title the field is no longer
+ * showing. */
 let committedTitle = "";
 function onTitleInput(value: string) {
   form.state.value.title = value;
   const result = validatePrintTitle(value);
   titleError.value = result.ok ? "" : result.reason;
+}
+function enterTitle() {
+  committedTitle = form.state.value.title ?? "";
 }
 function commitTitle() {
   if (!titleError.value) committedTitle = form.state.value.title ?? "";
@@ -2019,10 +2032,22 @@ function selectQuality(steps: number) {
 }
 
 // ── The rail's machine card ───────────────────────────────────────────
+/** The machine the card describes: the pinned one, else the one Auto or
+ * Most capable would route THIS style to (the same answer submit gets), else
+ * the origin. Under automatic routing no host id matches the target, and
+ * falling through to the first registered host named a machine that might
+ * not render the print at all (review). */
 const machineHost = computed(() => {
   const id = routing.targetId.value;
-  const pinned = routing.hosts.value.find((host) => host.id === id) ?? null;
-  return pinned ?? routing.hosts.value[0] ?? null;
+  const hosts = routing.hosts.value;
+  const pinned = hosts.find((host) => host.id === id) ?? null;
+  if (pinned) return pinned;
+  const routed = routing.resolve(form.state.value.model || null);
+  return (
+    (routed ? hosts.find((host) => host.id === routed.hostId) : null) ??
+    hosts[0] ??
+    null
+  );
 });
 const machineName = computed(() => machineHost.value?.label ?? "this server");
 const machineStatus = computed<
@@ -4955,6 +4980,7 @@ onBeforeUnmount(() => {
           class="create-title__input"
           data-test="print-title"
           @input="onTitleInput(($event.target as HTMLInputElement).value)"
+          @focus="enterTitle"
           @blur="commitTitle"
           @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
           @keydown.escape="revertTitle"
@@ -5372,7 +5398,7 @@ onBeforeUnmount(() => {
           <DisclosureRow
             label="Starters"
             note="Saved recipes you can drop in"
-            :value="String(starterCount)"
+            :value="starterCount ? String(starterCount) : 'None'"
             test-id="disclosure-starters"
             @open="openRailSheet('starters')"
           />

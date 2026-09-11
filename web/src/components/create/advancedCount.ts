@@ -2,7 +2,9 @@
  * Advanced "N on" count — the badge on the Advanced entry and section header.
  * A pure sum of the currently-active advanced fields so the badge, the section
  * header, and any tests all agree. Source images and ControlNet moved to the
- * primary form (SourceMediaPanel) and no longer count here.
+ * primary form (SourceMediaPanel) and no longer count here; LoRAs went the
+ * same way to the rail's "Add-on looks" disclosure row, which shows their
+ * count itself, so counting them here read them twice on the same screen.
  * Capability gating is the caller's job: pass a flag only for a field the
  * current family actually exposes.
  */
@@ -16,8 +18,6 @@ export interface AdvancedCountParams {
   negativePrompt: string;
   /** The model's advertised default negative ("" when none). */
   negativePromptDefault?: string;
-  /** Number of active LoRA adapters (each counts). */
-  loraCount: number;
   /** Upscale-after-generate is enabled. */
   upscaleOn: boolean;
   /** Selected scheduler (counts when set and not "default"). */
@@ -31,7 +31,7 @@ export interface AdvancedCountParams {
    * GIF preview toggle. Counts once. Optional for the same reason. */
   videoSuite?: boolean;
   /** How many wan recipe controls (flow shift, distill strengths) are set.
-   * Each counts, matching how LoRA rows do. Optional for the same reason. */
+   * Each counts on its own. Optional for the same reason. */
   wanRecipe?: number;
   /** `identityActiveCount` — the two identity knobs that are actually set.
    * The identity photo itself is primary-form media and never counts, the
@@ -48,7 +48,6 @@ export function advancedActiveCount(p: AdvancedCountParams): number {
     ) !== undefined
       ? 1
       : 0) +
-    Math.max(0, p.loraCount) +
     (p.upscaleOn ? 1 : 0) +
     (p.scheduler && p.scheduler !== "default" ? 1 : 0) +
     (p.customSize ? 1 : 0) +
