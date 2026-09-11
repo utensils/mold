@@ -16,6 +16,12 @@ defineProps<{
   lockedReason?: string | undefined;
   /** Changing this only takes effect after an engine restart. */
   needsEngineRestart?: boolean | undefined;
+  /**
+   * Changing this only takes effect after the whole APP restarts — the value
+   * is frozen per process by `runtime_env`, and the desktop engine is a thread
+   * inside this process, so restarting the engine cannot pick it up.
+   */
+  needsAppRestart?: boolean | undefined;
   /** Show the reset-to-default affordance. */
   resettable?: boolean | undefined;
 }>();
@@ -37,7 +43,8 @@ defineEmits<{ (e: "reset"): void }>();
         >
           {{ provenance(source).glyph }} {{ provenance(source).label.toUpperCase() }}
         </span>
-        <span v-if="needsEngineRestart" class="font-mono text-micro text-sapphire"
+        <span v-if="needsAppRestart" class="font-mono text-micro text-sapphire">RESTART APP</span>
+        <span v-else-if="needsEngineRestart" class="font-mono text-micro text-sapphire"
           >RESTART ENGINE</span
         >
       </div>

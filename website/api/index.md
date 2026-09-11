@@ -191,10 +191,32 @@ would silently drop and render without.
 
 `gallery` describes what this host's Library can do: `can_delete` (always
 true), `trash: { enabled, retention_days }`, `organize`, `bulk_mutations`,
-`media_version`, `conditional_get`, and `row_events`. `trash.enabled` and
-`organize` are false whenever the metadata DB is disabled (`MOLD_DB_DISABLE=1`)
-or gallery output is off, and a client that sees them false must hide every
-organization control and keep the hard-delete wording.
+`media_version`, `conditional_get`, `row_events`, and `persists_outputs`.
+`trash.enabled` and `organize` are false whenever the metadata DB is disabled
+(`MOLD_DB_DISABLE=1`) or gallery output is off, and a client that sees them
+false must hide every organization control and keep the hard-delete wording.
+
+`gallery.persists_outputs` says a saved print's bytes read back from
+`GET /api/gallery/image/{filename}` exactly as they were written. It is
+`false` when the output directory is disabled — there is nothing to read back
+— and **absent means an older server**, never a refusal. It is the gate on
+asking for the leaner completion payload below; a client that cannot see the
+field keeps taking the inline base64, which every server has always sent.
+
+#### `X-Mold-SSE-Payload: metadata-only`
+
+A request header on the streaming generation endpoints. It trades the base64
+copy of the whole render carried inside the SSE `complete` frame for one HTTP
+GET of the file the server just wrote, which for a video or a large still is
+most of the bytes on the wire. Send it only when `gallery.persists_outputs` is
+true.
+
+The server answers a `complete` event with an empty `image` and the saved
+`filename` for the client to fetch. **If the save did not happen, the server
+falls back to the full inline payload rather than failing** — the render is
+finished either way, and the header is a transport preference, not a
+contract about what the render is worth. So a client must branch on what
+actually arrived rather than assuming the frame is empty.
 
 `durable_media` is present only while restart-safe encrypted request media is
 actually live (`protocol_version`, `encrypted_at_rest`, `generate_request_media`,

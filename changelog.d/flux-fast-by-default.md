@@ -62,6 +62,12 @@
   print recorded none. Every LoRA-capable family was affected, FLUX.1 and
   FLUX.2 included; a LoRA beside an image, mask or video source always worked,
   and `--local` was never affected.
+- **A `--lora` render now requires the encrypted request-media store.** This is
+  the other side of the fix above: because the adapter is sealed like any other
+  request authority, a host whose durable media store is unavailable answers
+  `503 DURABLE_MEDIA_UNAVAILABLE` for a LoRA render instead of quietly
+  rendering without the adapter. Correct, and a visible behaviour change on a
+  degraded store — the render is refused rather than silently wrong.
 - **FLUX.2's FP8 tiers stop re-widening every weight on every forward.** An FP8
   layer cast its whole one-byte-per-parameter slab up to the working dtype on
   every call, so the tier chosen to save VRAM was paying full BF16 bandwidth

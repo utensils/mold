@@ -237,3 +237,40 @@ describe("matchesSearch", () => {
     expect(matchesSearch("  ", item)).toBe(true);
   });
 });
+
+describe("process-frozen engine knobs", () => {
+  const ALL_SCHEMAS = [...ENGINE_KEY_SCHEMAS, ...ENV_KNOB_SCHEMAS];
+  // `crates/mold-inference/src/runtime_env.rs` freezes these in a `OnceLock`
+  // on first use — per PROCESS. The desktop build runs the engine as a thread
+  // inside the Tauri process and applies settings with `set_var` into that
+  // same process, so restarting the ENGINE cannot pick any of them up. A row
+  // promising "RESTART ENGINE" for one of them is simply false.
+  const PROCESS_FROZEN = [
+    "env.MOLD_KEEP_TE_RAM",
+    "env.MOLD_ATTN",
+    "env.MOLD_CONV",
+    "env.MOLD_FLUX_KEEP_TRANSFORMER",
+    "env.MOLD_FLUX2_QMATMUL",
+    "env.MOLD_FLUX2_FP8_CACHE",
+    "env.MOLD_VAE_TILED",
+    "env.MOLD_OFFLOAD",
+    "env.MOLD_RESERVE_VRAM_MB",
+  ];
+
+  it("tells the user to restart the app, not the engine", () => {
+    for (const key of PROCESS_FROZEN) {
+      const schema = ALL_SCHEMAS.find((entry) => entry.key === key);
+      expect(schema, `${key} must be in the schema`).toBeDefined();
+      expect(schema?.needsAppRestart, `${key} is process-frozen`).toBe(true);
+    }
+  });
+
+  it("does not claim an app restart for a knob the server re-reads live", () => {
+    // These are read with a plain `env::var` at the point of use, so an
+    // engine restart really is enough.
+    for (const key of ["env.MOLD_STEP_PREVIEW", "env.MOLD_PNG_ENCODING", "env.MOLD_QUEUE_SIZE"]) {
+      const schema = ALL_SCHEMAS.find((entry) => entry.key === key);
+      expect(schema?.needsAppRestart ?? false, `${key} is not frozen`).toBe(false);
+    }
+  });
+});
