@@ -11347,6 +11347,17 @@ pub struct GalleryCapabilities {
     /// update in place instead of polling the complete library.
     #[serde(default, skip_serializing_if = "is_false")]
     pub row_events: bool,
+    /// A saved print's bytes are readable back from
+    /// `GET /api/gallery/image/{filename}` exactly as they were written.
+    ///
+    /// Absent means an OLDER SERVER, never a refusal: a client that cannot
+    /// see this field keeps taking the completion's inline base64. It is the
+    /// gate on asking for `X-Mold-SSE-Payload: metadata-only`, which trades a
+    /// base64 copy of the whole render inside the SSE frame for one HTTP GET
+    /// of the file the server just wrote. `false` when the output directory
+    /// is disabled — there is nothing to read back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persists_outputs: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -13745,6 +13756,7 @@ mod server_event_tests {
             media_version: true,
             conditional_get: true,
             row_events: true,
+            persists_outputs: Some(true),
         };
         let wire = serde_json::to_value(&full).unwrap();
         assert_eq!(
@@ -13756,7 +13768,8 @@ mod server_event_tests {
                 "bulk_mutations": true,
                 "media_version": true,
                 "conditional_get": true,
-                "row_events": true
+                "row_events": true,
+                "persists_outputs": true
             })
         );
         let back: GalleryCapabilities = serde_json::from_value(wire).unwrap();

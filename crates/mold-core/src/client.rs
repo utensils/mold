@@ -54,6 +54,10 @@ pub struct MoldClient {
     base_url: String,
     client: Client,
     api_key_configured: bool,
+    /// Memoized `gallery.persists_outputs`. The outer `Option` is "not asked
+    /// yet"; the inner one is the server's own answer, where `None` means an
+    /// older server.
+    gallery_persists_outputs: std::sync::Arc<std::sync::Mutex<Option<Option<bool>>>>,
 }
 
 fn require_direct_singleton(req: &GenerateRequest) -> Result<()> {
@@ -121,6 +125,7 @@ impl MoldClient {
             base_url: normalize_host(base_url),
             client,
             api_key_configured,
+            gallery_persists_outputs: Default::default(),
         }
     }
 
@@ -131,6 +136,7 @@ impl MoldClient {
             base_url: normalize_host(base_url),
             client,
             api_key_configured,
+            gallery_persists_outputs: Default::default(),
         }
     }
 
@@ -143,6 +149,7 @@ impl MoldClient {
             base_url: normalize_host(&base_url),
             client,
             api_key_configured,
+            gallery_persists_outputs: Default::default(),
         }
     }
 
@@ -604,12 +611,19 @@ impl MoldClient {
     ) -> Result<GenerateResponse> {
         require_direct_singleton(req)?;
         let wire_req = crate::prompt_text::protect_generate_request_for_wire(req);
-        let mut resp = self
+        // A completion carries the whole render base64-encoded inside one SSE
+        // frame — the server encodes it, the client decodes it, and the same
+        // bytes are already on disk in the host's gallery. Where the server
+        // says it persists outputs, ask for the metadata and fetch the file.
+        let payload = completion_payload_for(req, self.gallery_persists_outputs().await);
+        let mut request = self
             .client
             .post(format!("{}/api/generate/stream", self.base_url))
-            .json(&wire_req)
-            .send()
-            .await?;
+            .json(&wire_req);
+        if payload == CompletionPayload::MetadataOnly {
+            request = request.header(SSE_PAYLOAD_HEADER, SSE_PAYLOAD_METADATA_ONLY);
+        }
+        let mut resp = request.send().await?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             let body = resp.text().await.unwrap_or_default();
@@ -680,9 +694,18 @@ impl MoldClient {
                             &request_warnings,
                             &complete.request_warnings,
                         );
-                        let payload =
-                            base64::engine::general_purpose::STANDARD.decode(&complete.image)?;
                         let b64 = base64::engine::general_purpose::STANDARD;
+                        let payload = match complete.filename.as_deref() {
+                            // `metadata-only` was honoured: the bytes are the
+                            // file the server just wrote. An older server that
+                            // ignored the header still sends them inline, and
+                            // a newer one that answered a full payload for any
+                            // other reason is taken at its word too.
+                            Some(filename) if complete.image.is_empty() => {
+                                self.get_gallery_image(filename).await?
+                            }
+                            _ => b64.decode(&complete.image)?,
+                        };
                         // Use server-provided model name (source of truth);
                         // fall back to request model for backwards compat with
                         // older servers that don't include it.
@@ -1705,6 +1728,32 @@ impl MoldClient {
     /// Alias used by clients that preflight optional administrative actions.
     pub async fn capabilities(&self) -> Result<crate::ServerCapabilities> {
         self.server_capabilities().await
+    }
+
+    /// Whether this host says a saved print reads back from the gallery,
+    /// memoized for the life of the client.
+    ///
+    /// `None` is the honest answer for an older server AND for a host whose
+    /// capabilities could not be read at all — either way the caller keeps
+    /// taking the inline payload, which every server has always sent.
+    async fn gallery_persists_outputs(&self) -> Option<bool> {
+        if let Some(known) = *self
+            .gallery_persists_outputs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+        {
+            return known;
+        }
+        let answer = self
+            .server_capabilities()
+            .await
+            .ok()
+            .and_then(|capabilities| capabilities.gallery.persists_outputs);
+        *self
+            .gallery_persists_outputs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(answer);
+        answer
     }
 
     /// Durably admit one ordered set of independently executing singleton
@@ -3416,6 +3465,44 @@ fn parse_audio_headers(headers: &reqwest::header::HeaderMap) -> Option<AudioMeta
     })
 }
 
+const SSE_PAYLOAD_HEADER: &str = "X-Mold-SSE-Payload";
+const SSE_PAYLOAD_METADATA_ONLY: &str = "metadata-only";
+
+/// What a streaming completion should carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletionPayload {
+    /// The render, base64-encoded inside the SSE frame.
+    Full,
+    /// Just the metadata and the saved filename; the client fetches the file.
+    MetadataOnly,
+}
+
+/// Whether this request's completion can be reduced to metadata plus a
+/// filename. Pure, so the contract is testable without a server.
+///
+/// Three things must hold. The print must be going into the gallery at all —
+/// `save_to_gallery: false` leaves nothing to fetch. The server must say it
+/// persists outputs; ABSENCE means an older server, never a refusal, and
+/// falls back to the inline payload. And the render must be a still raster:
+/// a clip, an audio print and a mesh each carry a second artifact in the
+/// completion (a thumbnail, a waveform tile, a poster, a GIF preview) that
+/// `GET /api/gallery/image/{filename}` does not serve, so reducing those
+/// would lose data rather than move it.
+pub(crate) fn completion_payload_for(
+    req: &GenerateRequest,
+    persists_outputs: Option<bool>,
+) -> CompletionPayload {
+    let still = matches!(
+        req.output_format,
+        None | Some(OutputFormat::Png) | Some(OutputFormat::Jpeg) | Some(OutputFormat::Webp)
+    );
+    if req.saves_to_gallery() && persists_outputs == Some(true) && still {
+        CompletionPayload::MetadataOnly
+    } else {
+        CompletionPayload::Full
+    }
+}
+
 /// The longest frame delimiter, `\r\n\r\n`. A delimiter can straddle a chunk
 /// boundary, so a resumed scan must back up by one byte less than this.
 const SSE_DELIMITER_MAX_LEN: usize = 4;
@@ -4876,6 +4963,192 @@ mod tests {
         assert_eq!(data, "{\"a\":1}\n{\"b\":2}");
     }
 
+    fn still_request() -> GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "flux-dev:q8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "guidance": 3.5,
+            "batch_size": 1
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn completion_payload_asks_for_metadata_only_when_the_print_is_fetchable() {
+        let req = still_request();
+        assert_eq!(
+            completion_payload_for(&req, Some(true)),
+            CompletionPayload::MetadataOnly
+        );
+        // An older server does not advertise the field. Absence is never a
+        // refusal, but it is also not a promise — take the inline bytes.
+        assert_eq!(
+            completion_payload_for(&req, None),
+            CompletionPayload::Full,
+            "an older server keeps the inline payload"
+        );
+        assert_eq!(
+            completion_payload_for(&req, Some(false)),
+            CompletionPayload::Full
+        );
+
+        // Nothing is saved, so there is nothing to fetch.
+        let mut unsaved = still_request();
+        unsaved.save_to_gallery = Some(false);
+        assert_eq!(
+            completion_payload_for(&unsaved, Some(true)),
+            CompletionPayload::Full
+        );
+
+        // A clip, an audio print and a mesh each carry a second artifact in
+        // the completion that the gallery route does not serve.
+        for format in [
+            OutputFormat::Mp4,
+            OutputFormat::Gif,
+            OutputFormat::Apng,
+            OutputFormat::Wav,
+            OutputFormat::Glb,
+        ] {
+            let mut other = still_request();
+            other.output_format = Some(format);
+            assert_eq!(
+                completion_payload_for(&other, Some(true)),
+                CompletionPayload::Full,
+                "{format} completions keep their inline payload"
+            );
+        }
+        for format in [OutputFormat::Png, OutputFormat::Jpeg, OutputFormat::Webp] {
+            let mut still = still_request();
+            still.output_format = Some(format);
+            assert_eq!(
+                completion_payload_for(&still, Some(true)),
+                CompletionPayload::MetadataOnly
+            );
+        }
+    }
+
+    /// End to end against a host that honours the header: the frame carries
+    /// no bytes, and the client reads them back off the gallery route.
+    #[tokio::test]
+    async fn a_metadata_only_completion_fetches_the_saved_print() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "generation_profile_v1": true,
+                "licenses": true,
+                "gallery": {"can_delete": true, "persists_outputs": true},
+                "catalog": {"available": false, "families": []},
+                "model_access": {"catalog_ids": false},
+                "events": {"available": false}
+            })))
+            .mount(&server)
+            .await;
+        let frame = format!(
+            "event: complete\ndata: {}\n\n",
+            serde_json::json!({
+                "image": "",
+                "format": "png",
+                "width": 8,
+                "height": 8,
+                "seed_used": 42,
+                "generation_time_ms": 10,
+                "model": "flux-dev:q8",
+                "filename": "mold-flux-1.png"
+            })
+        );
+        Mock::given(method("POST"))
+            .and(path("/api/generate/stream"))
+            .and(wiremock::matchers::header(
+                "x-mold-sse-payload",
+                "metadata-only",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(frame))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/image/mold-flux-1.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"the saved print".to_vec()))
+            .mount(&server)
+            .await;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let response = MoldClient::new(&server.uri())
+            .generate_stream(&still_request(), tx)
+            .await
+            .expect("a metadata-only completion must still produce a print");
+        assert_eq!(response.images.len(), 1);
+        assert_eq!(response.images[0].data, b"the saved print");
+        assert_eq!(response.seed_used, 42);
+    }
+
+    /// A host that does not advertise the capability is never asked for
+    /// metadata only, and its inline payload is decoded exactly as before.
+    #[tokio::test]
+    async fn an_older_host_keeps_the_inline_payload() {
+        use base64::Engine as _;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "generation_profile_v1": true,
+                "licenses": true,
+                "gallery": {"can_delete": true},
+                "catalog": {"available": false, "families": []},
+                "model_access": {"catalog_ids": false},
+                "events": {"available": false}
+            })))
+            .mount(&server)
+            .await;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"inline bytes");
+        let frame = format!(
+            "event: complete\ndata: {}\n\n",
+            serde_json::json!({
+                "image": encoded,
+                "format": "png",
+                "width": 8,
+                "height": 8,
+                "seed_used": 7,
+                "generation_time_ms": 10,
+                "model": "flux-dev:q8",
+                "filename": "mold-flux-1.png"
+            })
+        );
+        Mock::given(method("POST"))
+            .and(path("/api/generate/stream"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(frame))
+            .mount(&server)
+            .await;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let response = MoldClient::new(&server.uri())
+            .generate_stream(&still_request(), tx)
+            .await
+            .expect("an older host still streams a print");
+        assert_eq!(response.images[0].data, b"inline bytes");
+        // The header was never sent: the POST mock above matched without it,
+        // and a request carrying it would have been the only POST the server
+        // saw, so assert directly on what arrived.
+        let requests = server.received_requests().await.unwrap();
+        let post = requests
+            .iter()
+            .find(|request| request.url.path() == "/api/generate/stream")
+            .expect("the stream request");
+        assert!(
+            post.headers.get("x-mold-sse-payload").is_none(),
+            "an older host must not be asked for a metadata-only completion"
+        );
+    }
+
     #[test]
     fn the_frame_parser_supports_crlf_delimiters() {
         let mut parser = SseFrameParser::new();
@@ -5264,36 +5537,56 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            let mut request = Vec::new();
-            let mut buf = [0u8; 1024];
-            while let Ok(read) = socket.read(&mut buf).await {
-                if read == 0 {
+            // The client asks this host one question before it streams —
+            // whether a saved print reads back from the gallery — so the
+            // fixture serves connections in a loop rather than once. A 404
+            // is an honest answer for a host that predates the capability,
+            // which is what these advisory tests are about.
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
                     return;
+                };
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                let mut closed = false;
+                while let Ok(read) = socket.read(&mut buf).await {
+                    if read == 0 {
+                        closed = true;
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..read]);
+                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
                 }
-                request.extend_from_slice(&buf[..read]);
-                if request.windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
+                if closed {
+                    continue;
                 }
-            }
-            let advisories = header_warnings
-                .iter()
-                .map(|warning| format!("x-mold-request-warning: {warning}\r\n"))
-                .collect::<String>();
-            let body = format!("event: complete\ndata: {complete}\n\n");
-            let _ = socket
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n{advisories}\
-                         Content-Length: {}\r\n\r\n{body}",
-                        body.len()
+                if String::from_utf8_lossy(&request).starts_with("GET /api/capabilities") {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                    let _ = socket.flush().await;
+                    continue;
+                }
+                let advisories = header_warnings
+                    .iter()
+                    .map(|warning| format!("x-mold-request-warning: {warning}\r\n"))
+                    .collect::<String>();
+                let body = format!("event: complete\ndata: {complete}\n\n");
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n{advisories}\
+                             Content-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
                     )
-                    .as_bytes(),
-                )
-                .await;
-            let _ = socket.flush().await;
+                    .await;
+                let _ = socket.flush().await;
+                return;
+            }
         });
         base
     }
@@ -5465,34 +5758,52 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            let mut request = Vec::new();
-            let mut buf = [0u8; 1024];
-            while let Ok(read) = socket.read(&mut buf).await {
-                if read == 0 {
-                    break;
+            // The client asks whether a saved print reads back from the
+            // gallery before it streams; a host that predates the capability
+            // answers 404, which is what this fixture is.
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                let mut closed = false;
+                while let Ok(read) = socket.read(&mut buf).await {
+                    if read == 0 {
+                        closed = true;
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..read]);
+                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
                 }
-                request.extend_from_slice(&buf[..read]);
-                if request.windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
+                if closed {
+                    continue;
                 }
-            }
-            let body = format!(
-                "event: progress\ndata: {{\"type\":\"queued\",\"position\":0,\"id\":\"{job_id}\"}}\n\nevent: error\ndata: {frame}\n\n"
-            );
-            let _ = socket
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
-                        body.len()
+                if String::from_utf8_lossy(&request).starts_with("GET /api/capabilities") {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                    let _ = socket.flush().await;
+                    continue;
+                }
+                let body = format!(
+                    "event: progress\ndata: {{\"type\":\"queued\",\"position\":0,\"id\":\"{job_id}\"}}\n\nevent: error\ndata: {frame}\n\n"
+                );
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
                     )
-                    .as_bytes(),
-                )
-                .await;
-            let _ = socket.flush().await;
-            let _ = socket.shutdown().await;
+                    .await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+                return;
+            }
         });
         base
     }

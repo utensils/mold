@@ -8042,6 +8042,10 @@ async fn server_capabilities(
         media_version: true,
         conditional_get: true,
         row_events: true,
+        // A print is readable back byte-for-byte from
+        // `GET /api/gallery/image/:filename` whenever there is an output
+        // directory to write it to.
+        persists_outputs: Some(!state.is_output_disabled(&config)),
     };
     Json(mold_core::ServerCapabilities {
         generation_profile_v1: true,

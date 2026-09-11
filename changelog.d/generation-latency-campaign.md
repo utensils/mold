@@ -17,3 +17,14 @@
   changes; `MOLD_PNG_ENCODING=balanced` restores the smaller files. The
   post-generation `malloc_trim(0)` (another ~0.8 s) also moved after the print
   is saved and the completion is sent.
+- **The CLI no longer carries a finished render back as base64.** A streaming
+  completion encoded the whole picture into the SSE frame, which the client
+  then decoded — while the identical bytes sat in the host's gallery. Where a
+  server advertises the new `gallery.persists_outputs` capability and the print
+  is being saved, `mold run` asks for `X-Mold-SSE-Payload: metadata-only` and
+  fetches the file instead. Older servers, hosts with the output directory
+  disabled, and clips, audio and meshes (whose completions carry a thumbnail or
+  poster the gallery route does not serve) keep the inline payload exactly as
+  before. The client's SSE reader also stopped rescanning its whole buffer on
+  every chunk, and stopped turning a multi-byte character split across a chunk
+  boundary into replacement characters.
