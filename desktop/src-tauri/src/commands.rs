@@ -86,6 +86,10 @@ pub const ENGINE_ENV_KEYS: &[&str] = &[
     "MOLD_OFFLOAD",
     "MOLD_ATTN",
     "MOLD_PNG_ENCODING",
+    "MOLD_CONV",
+    "MOLD_FLUX_KEEP_TRANSFORMER",
+    "MOLD_FLUX2_QMATMUL",
+    "MOLD_FLUX2_FP8_CACHE",
     "MOLD_QUEUE_SIZE",
 ];
 

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   ENGINE_KEY_SCHEMAS,
@@ -9,6 +10,8 @@ import {
   sectionMatchesSearch,
   SECTIONS,
 } from "./settingsSchema";
+
+const COMMANDS_RS = "../../src-tauri/src/commands.rs";
 
 describe("settings schema", () => {
   it("routes curated keys to their sections", () => {
@@ -61,10 +64,59 @@ describe("settings schema", () => {
 
   it("every env knob names a real MOLD_ variable and needs a restart", () => {
     for (const knob of ENV_KNOB_SCHEMAS) {
-      expect(knob.key).toMatch(/^env\.MOLD_[A-Z_]+$/);
+      // MOLD_FLUX2_* carry a digit, so the name is not letters-and-underscores.
+      expect(knob.key).toMatch(/^env\.MOLD_[A-Z0-9_]+$/);
       expect(knob.needsEngineRestart).toBe(true);
       expect(knob.section).toBe("performance");
     }
+  });
+
+  // A knob the Performance section offers but `apply_engine_environment` never
+  // copies into the engine's process is a control that silently does nothing.
+  // Read the Rust rather than restating its list here: a list maintained by
+  // hand in two languages is exactly the drift this test exists to catch.
+  it("every env knob is on the Tauri side's ENGINE_ENV_KEYS allowlist", () => {
+    // The path goes through a variable because Vite rewrites a literal first
+    // argument to `new URL(..., import.meta.url)` into an asset URL, which
+    // readFileSync then refuses as "must be of scheme file".
+    const commandsPath = COMMANDS_RS;
+    const commands = readFileSync(new URL(commandsPath, import.meta.url), "utf8");
+    const block = commands.match(/pub const ENGINE_ENV_KEYS: &\[&str\] = &\[([\s\S]*?)\];/);
+    expect(block, "ENGINE_ENV_KEYS not found in commands.rs").not.toBeNull();
+    const allowlisted = new Set([...block![1].matchAll(/"([A-Z0-9_]+)"/g)].map((m) => m[1]));
+    expect(allowlisted.size).toBeGreaterThan(0);
+    for (const knob of ENV_KNOB_SCHEMAS) {
+      expect(allowlisted, knob.key).toContain(knob.key.replace(/^env\./, ""));
+    }
+  });
+
+  // The per-family defaults are the campaign's whole point: a user reading
+  // "Automatic" has to be told it is not one answer for every model.
+  it("names the per-family default on the two backend knobs", () => {
+    for (const key of ["env.MOLD_ATTN", "env.MOLD_CONV"]) {
+      const knob = schemaFor(key)!;
+      expect(knob.options?.[0]?.value, key).toBe("");
+      expect(knob.options?.[0]?.label, key).toMatch(/per family/i);
+      expect(knob.help, key).toMatch(/FLUX/);
+      expect(knob.help, key).toMatch(/Wan|video/i);
+    }
+  });
+
+  // `1` is an accepted value that resolves identically to unset — the budget
+  // overrides an explicit keep on a card that cannot afford it (#276). Offering
+  // it as "force on" would be a promise the engine does not keep.
+  it("does not promise that keeping the FLUX transformer overrides the budget", () => {
+    const knob = schemaFor("env.MOLD_FLUX_KEEP_TRANSFORMER")!;
+    expect(knob.options?.map((o) => o.value)).toEqual(["", "1", "0"]);
+    expect(knob.options?.find((o) => o.value === "1")?.label).toContain("same as automatic");
+    expect(knob.options?.find((o) => o.value === "0")?.label).toMatch(/drop/i);
+  });
+
+  it("offers MOLD_KEEP_TE_RAM as the tri-state it became", () => {
+    const knob = schemaFor("env.MOLD_KEEP_TE_RAM")!;
+    expect(knob.options?.map((o) => o.value)).toEqual(["", "1", "0"]);
+    expect(knob.options?.[0]?.label).toMatch(/^Automatic/);
+    expect(knob.help).toMatch(/8 GB/);
   });
 
   it("select editors always carry options", () => {
