@@ -92,6 +92,65 @@ enum ExpandSafePoint {
     BeforeDecode,
 }
 
+#[derive(Clone, Copy)]
+struct DecoderSpecialTokens {
+    eos: Option<u32>,
+    start_think: Option<u32>,
+    end_think: Option<u32>,
+}
+
+/// Decode one autoregressive response from a prefilled prompt.
+///
+/// Qwen returns the next-token logits for the final position in each forward.
+/// The prompt prefill therefore supplies the first sample directly; subsequent
+/// samples forward only the previously sampled token at its absolute position.
+fn decode_autoregressive<Forward, Sample, Checkpoint>(
+    prompt_tokens: &[u32],
+    max_new_tokens: usize,
+    special_tokens: DecoderSpecialTokens,
+    mut forward: Forward,
+    mut sample: Sample,
+    mut checkpoint: Checkpoint,
+) -> Result<Vec<u32>>
+where
+    Forward: FnMut(&[u32], usize) -> Result<Tensor>,
+    Sample: FnMut(&Tensor) -> Result<u32>,
+    Checkpoint: FnMut() -> Result<()>,
+{
+    let mut logits = forward(prompt_tokens, 0)?;
+    let mut generated_tokens = Vec::new();
+    let mut previous_token = None;
+    let mut in_thinking = false;
+
+    for generated_offset in 0..max_new_tokens {
+        checkpoint()?;
+        if let Some(token) = previous_token {
+            logits = forward(&[token], prompt_tokens.len() + generated_offset - 1)?;
+        }
+
+        let next_token = sample(&logits)?;
+        if special_tokens.eos == Some(next_token) {
+            break;
+        }
+
+        if special_tokens.start_think == Some(next_token) {
+            in_thinking = true;
+        }
+        if special_tokens.end_think == Some(next_token) {
+            in_thinking = false;
+            previous_token = Some(next_token);
+            continue;
+        }
+
+        if !in_thinking {
+            generated_tokens.push(next_token);
+        }
+        previous_token = Some(next_token);
+    }
+
+    Ok(generated_tokens)
+}
+
 fn expansion_checkpoint(progress: &ProgressReporter, _safe_point: ExpandSafePoint) -> Result<()> {
     progress.checkpoint().map_err(anyhow::Error::from)
 }
@@ -595,65 +654,30 @@ impl LocalExpander {
 
         // Generate tokens autoregressively
         let gen_start = std::time::Instant::now();
-        let mut all_tokens: Vec<u32> = input_ids.to_vec();
-        let mut generated_tokens: Vec<u32> = Vec::new();
-
         // Get stop tokens
-        let eos_token = tokenizer
-            .token_to_id("<|im_end|>")
-            .or_else(|| tokenizer.token_to_id("<|endoftext|>"));
-        let start_think_token = tokenizer.token_to_id("<think>");
-        let end_think_token = tokenizer.token_to_id("</think>");
+        let special_tokens = DecoderSpecialTokens {
+            eos: tokenizer
+                .token_to_id("<|im_end|>")
+                .or_else(|| tokenizer.token_to_id("<|endoftext|>")),
+            start_think: tokenizer.token_to_id("<think>"),
+            end_think: tokenizer.token_to_id("</think>"),
+        };
 
         let max_new_tokens = config.max_tokens as usize;
-        let mut in_thinking = false;
 
         // Process the prompt through the model first
         expansion_checkpoint(&self.progress, ExpandSafePoint::BeforePromptForward)?;
-        let prompt_offset = {
-            let input = Tensor::new(input_ids, &device)?.unsqueeze(0)?;
-            let _logits = model.forward(&input, 0)?;
-            input_ids.len()
-        };
-
-        // Generate new tokens one at a time
-        let mut last_token = *input_ids.last().unwrap_or(&0);
-        for generated_offset in 0..max_new_tokens {
-            expansion_checkpoint(&self.progress, ExpandSafePoint::TokenIteration)?;
-            let input = Tensor::new(&[last_token], &device)?.unsqueeze(0)?;
-            let logits = model.forward(&input, prompt_offset + generated_offset)?;
-
-            // Sample next token
-            let next_token = sample_token(&logits, config.temperature, config.top_p)?;
-
-            // Check for stop conditions
-            if let Some(eos) = eos_token {
-                if next_token == eos {
-                    break;
-                }
-            }
-
-            // Track thinking mode — skip <think>...</think> tokens from output
-            if let Some(st) = start_think_token {
-                if next_token == st {
-                    in_thinking = true;
-                }
-            }
-            if let Some(et) = end_think_token {
-                if next_token == et {
-                    in_thinking = false;
-                    all_tokens.push(next_token);
-                    last_token = next_token;
-                    continue; // Don't include </think> in generated_tokens
-                }
-            }
-
-            all_tokens.push(next_token);
-            if !in_thinking {
-                generated_tokens.push(next_token);
-            }
-            last_token = next_token;
-        }
+        let generated_tokens = decode_autoregressive(
+            input_ids,
+            max_new_tokens,
+            special_tokens,
+            |tokens, offset| {
+                let input = Tensor::new(tokens, &device)?.unsqueeze(0)?;
+                model.forward(&input, offset).map_err(anyhow::Error::from)
+            },
+            |logits| sample_token(logits, config.temperature, config.top_p),
+            || expansion_checkpoint(&self.progress, ExpandSafePoint::TokenIteration),
+        )?;
 
         // Report generation speed
         let gen_elapsed = gen_start.elapsed().as_secs_f64();
@@ -873,6 +897,231 @@ fn find_tokenizer_in_dir(dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod decoder_tests {
+    use super::*;
+    use crate::progress::InferenceCancelled;
+    use std::cell::{Cell, RefCell};
+
+    fn no_special_tokens() -> DecoderSpecialTokens {
+        DecoderSpecialTokens {
+            eos: None,
+            start_think: None,
+            end_think: None,
+        }
+    }
+
+    fn token_logits(token: u32) -> Result<Tensor> {
+        Ok(Tensor::new(token, &Device::Cpu)?)
+    }
+
+    fn sample_sentinel(logits: &Tensor) -> Result<u32> {
+        Ok(logits.to_scalar::<u32>()?)
+    }
+
+    #[test]
+    fn decoder_samples_prefill_logits_then_forwards_generated_tokens_at_next_positions() {
+        let prompt = [4, 5, 6];
+        let forwards = RefCell::new(Vec::new());
+        let generated = decode_autoregressive(
+            &prompt,
+            3,
+            no_special_tokens(),
+            |tokens, offset| {
+                forwards.borrow_mut().push((tokens.to_vec(), offset));
+                match tokens {
+                    [4, 5, 6] => token_logits(11),
+                    [11] => token_logits(12),
+                    [12] => token_logits(13),
+                    _ => anyhow::bail!("unexpected decoder input {tokens:?} at {offset}"),
+                }
+            },
+            sample_sentinel,
+            || Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(generated, vec![11, 12, 13]);
+        assert_eq!(
+            *forwards.borrow(),
+            vec![(prompt.to_vec(), 0), (vec![11], 3), (vec![12], 4)]
+        );
+        assert!(
+            forwards
+                .borrow()
+                .iter()
+                .all(|(tokens, _)| tokens.as_slice() != [6]),
+            "the prompt tail must not be forwarded a second time"
+        );
+    }
+
+    #[test]
+    fn eos_consumes_one_iteration_without_emission_or_an_incremental_forward() {
+        let forwards = Cell::new(0);
+        let samples = Cell::new(0);
+        let generated = decode_autoregressive(
+            &[1, 2],
+            5,
+            DecoderSpecialTokens {
+                eos: Some(99),
+                ..no_special_tokens()
+            },
+            |tokens, offset| {
+                assert_eq!((tokens, offset), (&[1, 2][..], 0));
+                forwards.set(forwards.get() + 1);
+                token_logits(99)
+            },
+            |logits| {
+                samples.set(samples.get() + 1);
+                sample_sentinel(logits)
+            },
+            || Ok(()),
+        )
+        .unwrap();
+
+        assert!(generated.is_empty());
+        assert_eq!(forwards.get(), 1);
+        assert_eq!(samples.get(), 1);
+    }
+
+    #[test]
+    fn thinking_tokens_are_hidden_but_still_consume_the_token_budget() {
+        let samples = [90, 91, 92, 93, 94];
+        let next_sample = Cell::new(0);
+        let forwards = RefCell::new(Vec::new());
+        let generated = decode_autoregressive(
+            &[7, 8],
+            4,
+            DecoderSpecialTokens {
+                eos: None,
+                start_think: Some(90),
+                end_think: Some(92),
+            },
+            |tokens, offset| {
+                forwards.borrow_mut().push((tokens.to_vec(), offset));
+                token_logits(0)
+            },
+            |_| {
+                let index = next_sample.get();
+                next_sample.set(index + 1);
+                Ok(samples[index])
+            },
+            || Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(generated, vec![93]);
+        assert_eq!(next_sample.get(), 4);
+        assert_eq!(
+            *forwards.borrow(),
+            vec![(vec![7, 8], 0), (vec![90], 2), (vec![91], 3), (vec![92], 4),]
+        );
+    }
+
+    #[test]
+    fn zero_token_budget_still_prefills_without_sampling() {
+        let forwards = Cell::new(0);
+        let samples = Cell::new(0);
+        let generated = decode_autoregressive(
+            &[1],
+            0,
+            no_special_tokens(),
+            |tokens, offset| {
+                assert_eq!((tokens, offset), (&[1][..], 0));
+                forwards.set(forwards.get() + 1);
+                token_logits(10)
+            },
+            |_| {
+                samples.set(samples.get() + 1);
+                Ok(10)
+            },
+            || Ok(()),
+        )
+        .unwrap();
+
+        assert!(generated.is_empty());
+        assert_eq!(forwards.get(), 1);
+        assert_eq!(samples.get(), 0);
+    }
+
+    #[test]
+    fn cancellation_precedes_sampling_and_each_incremental_forward() {
+        for cancel_at in [1, 2] {
+            let checkpoints = Cell::new(0);
+            let forwards = Cell::new(0);
+            let samples = Cell::new(0);
+            let error = decode_autoregressive(
+                &[1, 2],
+                3,
+                no_special_tokens(),
+                |_, _| {
+                    forwards.set(forwards.get() + 1);
+                    token_logits(10)
+                },
+                |_| {
+                    samples.set(samples.get() + 1);
+                    Ok(10)
+                },
+                || {
+                    let call = checkpoints.get() + 1;
+                    checkpoints.set(call);
+                    if call == cancel_at {
+                        return Err(InferenceCancelled.into());
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.downcast_ref::<InferenceCancelled>(),
+                Some(&InferenceCancelled)
+            );
+            assert_eq!(forwards.get(), 1, "cancel checkpoint {cancel_at}");
+            assert_eq!(
+                samples.get(),
+                cancel_at - 1,
+                "cancel checkpoint {cancel_at}"
+            );
+        }
+    }
+
+    #[test]
+    fn forward_and_sampler_errors_stop_the_decoder_immediately() {
+        let samples_after_forward_error = Cell::new(0);
+        let forward_error = decode_autoregressive(
+            &[1],
+            2,
+            no_special_tokens(),
+            |_, _| anyhow::bail!("forward failed"),
+            |_| {
+                samples_after_forward_error.set(samples_after_forward_error.get() + 1);
+                Ok(1)
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(forward_error.to_string(), "forward failed");
+        assert_eq!(samples_after_forward_error.get(), 0);
+
+        let forwards = Cell::new(0);
+        let sampler_error = decode_autoregressive(
+            &[1],
+            2,
+            no_special_tokens(),
+            |_, _| {
+                forwards.set(forwards.get() + 1);
+                token_logits(1)
+            },
+            |_| anyhow::bail!("sample failed"),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(sampler_error.to_string(), "sample failed");
+        assert_eq!(forwards.get(), 1);
+    }
 }
 
 #[cfg(test)]
