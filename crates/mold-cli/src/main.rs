@@ -7,6 +7,7 @@ mod metadata_db;
 mod output;
 mod procinfo;
 mod skill;
+mod source_fit;
 #[cfg(test)]
 mod test_support;
 mod theme;
@@ -1367,6 +1368,15 @@ enum Commands {
     ///
     /// First positional arg is treated as MODEL if it matches a known model name.
     /// Remaining args are the prompt.
+    ///
+    /// Fit policy: by default a --image source decides the canvas — the
+    /// picture is fitted to the model's bounds and the render takes its
+    /// shape. Pass --fit to do the opposite and resample the picture onto the
+    /// canvas you asked for (--width/--height, else the model's default):
+    /// crop-fill keeps proportions and trims the edges, pad-fit keeps the
+    /// whole picture and adds black borders, lanczos-resize stretches it. The
+    /// policy is recorded beside the print, so reusing it in Mold Studio
+    /// restores the same crop.
     #[command(after_long_help = "\
 Examples:
   mold run \"a cat on a skateboard\"
@@ -1846,6 +1856,20 @@ Examples:
         /// source preservation (1.0 pins the opening frame).
         #[arg(long, help_heading = "img2img")]
         strength: Option<f64>,
+
+        /// How a source image whose shape differs from the canvas is mapped
+        /// onto it: `crop-fill` keeps proportions and trims the edges,
+        /// `pad-fit` keeps the whole picture and adds black borders,
+        /// `lanczos-resize` stretches it. Without --fit the canvas is derived
+        /// from the picture instead. Requires --image.
+        #[arg(
+            long,
+            value_name = "crop-fill|pad-fit|lanczos-resize",
+            requires = "image",
+            help_heading = "img2img",
+            value_parser = source_fit::parse_source_fit_mode
+        )]
+        fit: Option<source_fit::SourceFitMode>,
 
         /// Mask image for inpainting (file path; white = repaint, black = preserve)
         #[arg(long, requires = "image", help_heading = "img2img", value_hint = ValueHint::FilePath)]
@@ -2924,6 +2948,7 @@ async fn run() -> anyhow::Result<()> {
             lora_scale,
             image,
             strength,
+            fit,
             mask,
             id_image,
             id_weight,
@@ -3121,6 +3146,7 @@ async fn run() -> anyhow::Result<()> {
                 lora_scale,
                 image,
                 strength,
+                fit,
                 mask,
                 commands::identity::IdentityArgs {
                     id_images: id_image,
@@ -4579,6 +4605,56 @@ mod tests {
             Commands::Run { image, .. } => assert_eq!(image, vec!["input.jpg"]),
             _ => panic!("expected Run"),
         }
+    }
+
+    /// `--fit` parses to the three honoured policies and refuses the two
+    /// browser-only ones with their reason rather than clap's "invalid
+    /// value" list.
+    #[test]
+    fn run_fit_parses_the_three_terminal_policies() {
+        for (raw, expected) in [
+            ("crop-fill", source_fit::SourceFitMode::CropFill),
+            ("pad-fit", source_fit::SourceFitMode::PadFit),
+            ("lanczos-resize", source_fit::SourceFitMode::LanczosResize),
+        ] {
+            let cli = parse(&["run", "model", "test", "-i", "in.png", "--fit", raw]);
+            match cli.command {
+                Commands::Run { fit, .. } => assert_eq!(fit, Some(expected)),
+                _ => panic!("expected Run"),
+            }
+        }
+
+        let cli = parse(&["run", "model", "test", "-i", "in.png"]);
+        match cli.command {
+            Commands::Run { fit, .. } => assert_eq!(fit, None),
+            _ => panic!("expected Run"),
+        }
+
+        let refusal = try_parse(&[
+            "run",
+            "model",
+            "test",
+            "-i",
+            "in.png",
+            "--fit",
+            "pad-repaint",
+        ])
+        .err()
+        .expect("a refused policy is a parse error")
+        .to_string();
+        assert!(refusal.contains("pad-repaint"), "{refusal}");
+        assert!(refusal.contains("--fit pad-fit"), "{refusal}");
+    }
+
+    /// `--fit` is a source-image policy, so clap refuses it on a run with no
+    /// picture instead of composing a request that would ignore it.
+    #[test]
+    fn run_fit_requires_an_image_at_parse_time() {
+        let error = try_parse(&["run", "model", "test", "--fit", "crop-fill"])
+            .err()
+            .expect("--fit without --image is a parse error")
+            .to_string();
+        assert!(error.contains("--image"), "{error}");
     }
 
     #[test]
