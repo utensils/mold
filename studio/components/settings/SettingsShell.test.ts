@@ -101,6 +101,16 @@ describe("SettingsShell navigation", () => {
     ).toBe("true");
   });
 
+  /* The frame is the shell's, not each caller's: a body that had to draw its
+   * own label and panel is how web and desktop came to look different in the
+   * first place. */
+  it("frames each section with its own label and summary", () => {
+    const wrapper = mountShell();
+    const cloud = wrapper.get("[data-test='section-cloud']");
+    expect(cloud.text()).toContain("Cloud GPUs");
+    expect(cloud.text()).toContain("Rented machines, their keys");
+  });
+
   it("jumping mounts that body and moves the highlight", async () => {
     const wrapper = mountShell();
     expect(wrapper.find("[data-test='body-advanced']").exists()).toBe(false);

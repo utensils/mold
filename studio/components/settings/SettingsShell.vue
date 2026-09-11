@@ -24,6 +24,7 @@ import {
   type SectionId,
   type SectionInfo,
 } from "../../lib/settingsSchema";
+import SettingsSection from "./SettingsSection.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -214,11 +215,13 @@ defineExpose({ active, jump, query });
         :data-test="`section-${section.id}`"
         class="ms-settings-content__section"
       >
-        <slot
-          name="section"
-          :section="section"
-          :mounted="bodyMounted(section.id)"
-        />
+        <SettingsSection :label="section.label" :summary="section.summary">
+          <slot
+            name="section"
+            :section="section"
+            :mounted="bodyMounted(section.id)"
+          />
+        </SettingsSection>
       </section>
 
       <p

@@ -167,12 +167,14 @@ export function canResetConfig(key: string): boolean {
   return DB_FLAT_KEYS.includes(key);
 }
 
-/** What the engine answers for a stored cloud key: not the key, a marker.
- *  `config_keys.rs:517,541` — rendering it as a value would put `<set>` in the
- *  field and let someone save that string as the credential. */
-export const SECRET_PRESENT_SENTINEL = "<set>";
-
-/** Whether a config row holds a credential, without ever holding the value. */
+/**
+ * Whether a config row holds a credential — never what it holds.
+ *
+ * The engine answers a stored cloud key with the literal string `"<set>"`
+ * (`config_keys.rs:517,541`), not the key. So presence is the only question a
+ * client may ask: rendering the value would put `<set>` in the field and let
+ * someone save that string as the credential.
+ */
 export function secretValuePresent(value: ConfigValue): boolean {
   return typeof value === "string" && value.trim().length > 0;
 }
