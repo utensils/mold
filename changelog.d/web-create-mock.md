@@ -2,10 +2,12 @@
   sticks to the bottom of the column, so Generate never scrolls away on a long
   page, and it carries the style, shape and Make controls beside the words they
   apply to ([#1700](https://github.com/utensils/mold/issues/1700)).
-- **A finished picture has its own actions.** Download, Copy link and Make 4
-  variations sit over the result. Copy link yields an address that opens that
-  exact print in My images, which is something the desktop app has nothing to
-  copy ([#1700](https://github.com/utensils/mold/issues/1700)).
+- **A finished picture stays on the canvas, with its own actions.** The
+  browser used to drop a finished print back to the empty canvas a moment
+  after it rendered; it now stays until the next one runs, and Download, Copy
+  link and Make 4 variations sit over it. Copy link yields an address that
+  opens that exact print in My images, which is something the desktop app has
+  nothing to copy ([#1700](https://github.com/utensils/mold/issues/1700)).
 - **The settings column says which machine the tab is talking to, first.** The
   machine card leads the column with a way to change it, followed by a
   Draft / Good / Best quality ladder built from the style's own recommended
