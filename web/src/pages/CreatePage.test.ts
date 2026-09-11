@@ -741,7 +741,6 @@ describe("CreatePage layout and behavior", () => {
       : wrapper.get("[data-test='cold-start-stub']").element;
     const markers = [
       "phone-create-title",
-      "prompt-style-stub",
       "style-picker-stub",
       "controls-stub",
       "composer-submit",
@@ -4644,7 +4643,7 @@ function pageStubs() {
         "transformBlockedReason",
       ],
       template:
-        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="transformBlockedReason" data-test="page-transform-blocked">{{ transformBlockedReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-remix" @click="$emit(\'remix\')">remix</button><button v-if="expanded" data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
+        '<div><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="transformBlockedReason" data-test="page-transform-blocked">{{ transformBlockedReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-remix" @click="$emit(\'remix\')">remix</button><button v-if="expanded" data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
       // The page calls these through its template ref on submit / new-print;
       // a stub without them throws an unhandled TypeError mid-run.
       methods: { record: vi.fn(), focus: vi.fn() },

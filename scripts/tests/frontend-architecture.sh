@@ -101,7 +101,20 @@ for duplicate in \
   web/src/components/ReferenceCropModal.vue \
   desktop/src/components/generate/ReferenceCropModal.vue \
   web/src/components/shell/ConfirmDialog.vue \
-  desktop/src/components/shell/ConfirmDialog.vue; do
+  desktop/src/components/shell/ConfirmDialog.vue \
+  desktop/src/mobile/MobileStyleChips.vue \
+  web/src/components/ConfigSettingsPanel.vue \
+  web/src/lib/settingsConfig.ts \
+  desktop/src/components/settings/SettingRow.vue \
+  desktop/src/components/settings/ToggleControl.vue \
+  desktop/src/components/settings/SelectControl.vue \
+  desktop/src/components/settings/NumberControl.vue \
+  desktop/src/components/settings/TextControl.vue \
+  desktop/src/components/settings/SliderControl.vue \
+  desktop/src/components/settings/PathControl.vue \
+  desktop/src/components/settings/SecretControl.vue \
+  desktop/src/components/settings/ConfigSettingRow.vue \
+  desktop/src/components/settings/ConfigRowItem.vue; do
   test ! -e "$duplicate" || fail "$duplicate duplicates studio domain logic"
 done
 

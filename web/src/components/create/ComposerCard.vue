@@ -1,18 +1,18 @@
 <script setup lang="ts">
 /*
- * Composer card (Mold Studio Create) — the prompt bed. Autogrow textarea,
- * a collapsible Style row (tapping the active preset deselects it), a mono
- * summary line with an inline "expanded · undo" affordance, and the Expand /
- * Generate action row. Generate carries the ⌘↵ keycap; ⌘↵ / Ctrl+↵ inside the
- * textarea submits. The card never rewrites the prompt for style — the active
- * preset is applied at request time by `useGenerateForm.promptWithStyle`.
+ * Composer card (Mold Studio Create) — the prompt bed. Autogrow textarea, a
+ * mono summary line with an inline "expanded · undo" affordance, and the
+ * Write-more / Generate action row. Generate carries the ⌘↵ keycap; ⌘↵ /
+ * Ctrl+↵ inside the textarea submits.
+ *
+ * There is no prompt-preset strip: Style is the style the picture is made
+ * with, and a second "Photoreal" on the same screen meaning a phrase appended
+ * to the prompt is two different things wearing one word.
  */
 import { computed, nextTick, ref, watch } from "vue";
-import Chip from "@ui/components/Chip.vue";
 import Icon from "@ui/components/Icon.vue";
 import Keycap from "@ui/components/Keycap.vue";
 import ActionBlocker from "@ui/components/ActionBlocker.vue";
-import { STYLE_PRESETS, stylePresetById } from "../../lib/stylePresets";
 import {
   PromptCycler,
   caretOnFirstLine,
@@ -25,8 +25,6 @@ const props = withDefaults(
   defineProps<{
     /** Prompt text (v-model). */
     prompt: string;
-    /** Active style preset id (v-model:stylePreset). */
-    stylePreset: string | null;
     /** Aspect label for the summary line (e.g. "1:1" or "Custom"). */
     aspectLabel: string;
     width: number;
@@ -76,7 +74,6 @@ const emit = defineEmits<{
   /** Tagged with how the text arrived: a ↑/↓ recall replaces the whole
    * prompt and releases any quick expansion, where typing keeps it. */
   "update:prompt": [value: string, source: PromptAuthoringSource];
-  "update:stylePreset": [value: string | null];
   submit: [];
   cancel: [];
   expand: [];
@@ -85,10 +82,6 @@ const emit = defineEmits<{
 }>();
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
-const stylesOpen = ref(false);
-
-const activePreset = computed(() => stylePresetById(props.stylePreset));
-const styleLabel = computed(() => activePreset.value?.name ?? "None");
 
 const summaryLine = computed(() => {
   // A canvasless recipe (a 3-D mesh) renders at no pixel size at all, so the
@@ -110,7 +103,7 @@ const promptFieldPlaceholder = computed(
 );
 
 const expandLabel = computed(() =>
-  props.batchSize > 1 ? `Expand to ${props.batchSize}` : "Expand prompt",
+  props.batchSize > 1 ? `Write ${props.batchSize} for me` : "Write more for me",
 );
 const generateDisabled = computed(
   () => !props.cancellable && (props.busy || Boolean(props.disabledReason)),
@@ -171,11 +164,6 @@ function submitOrCancel() {
   else emit("submit");
 }
 
-function pickStyle(id: string) {
-  // Tapping the active preset deselects it (→ null); otherwise select it.
-  emit("update:stylePreset", props.stylePreset === id ? null : id);
-}
-
 // Let the parent focus the prompt bed (⌘K "New print" starts here) and push a
 // just-submitted prompt to the front of history for instant ↑ recall.
 defineExpose({
@@ -214,36 +202,9 @@ watch(
       @keydown="onKeydown"
     />
 
-    <div class="composer__style">
-      <button
-        type="button"
-        class="composer__style-head"
-        :aria-expanded="stylesOpen"
-        data-test="style-toggle"
-        @click="stylesOpen = !stylesOpen"
-      >
-        <span class="composer__kicker">Style</span>
-        <Chip :active="!!activePreset" tabindex="-1" data-test="style-active">{{
-          styleLabel
-        }}</Chip>
-        <span class="composer__spacer" />
-        <Icon :name="stylesOpen ? 'chevron-up' : 'chevron-down'" :size="15" />
-      </button>
-      <div v-if="stylesOpen" class="composer__chips" data-test="style-chips">
-        <Chip
-          v-for="preset in STYLE_PRESETS"
-          :key="preset.id"
-          :active="stylePreset === preset.id"
-          :data-test="`style-chip-${preset.id}`"
-          @click="pickStyle(preset.id)"
-          >{{ preset.name }}</Chip
-        >
-      </div>
-    </div>
-
     <!-- Phone-only insertion point: Create owns model/shape controls, but the
-         prototype places them between Style and the action row. Desktop leaves
-         this slot empty and keeps its separate inspector column. -->
+         prototype places them above the action row. Desktop leaves this slot
+         empty and keeps its separate inspector column. -->
     <slot name="mobile-controls" />
 
     <div class="composer__actions">
@@ -342,40 +303,8 @@ watch(
   outline: none;
 }
 
-.composer__style {
-  padding-top: 4px;
-}
-
-.composer__style-head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  border: 0;
-  background: transparent;
-  color: var(--ink-2);
-  padding: 4px 0;
-  text-align: left;
-  cursor: pointer;
-}
-
-.composer__kicker {
-  font-family: var(--f-mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-
 .composer__spacer {
   flex: 1;
-}
-
-.composer__chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  margin-top: 9px;
 }
 
 .composer__actions {

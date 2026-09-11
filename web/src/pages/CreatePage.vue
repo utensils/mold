@@ -4682,7 +4682,6 @@ onBeforeUnmount(() => {
         <ComposerCard
           ref="composerCardRef"
           :prompt="form.state.value.prompt"
-          v-model:style-preset="form.state.value.stylePreset"
           :aspect-label="aspectLabel"
           :width="form.state.value.width"
           :height="form.state.value.height"
