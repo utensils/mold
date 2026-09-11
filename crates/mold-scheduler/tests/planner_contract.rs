@@ -401,6 +401,50 @@ fn warm_wait_is_beneficial_bounded_and_expires_without_sleeping() {
     assert_eq!(expired.immediate_leases[0].device_id.as_str(), "cold");
 }
 
+/// An IDLE warm device must win outright — there is nothing to wait for.
+///
+/// Both existing warm tests use a BUSY warm device, which is the case the
+/// warm-WAIT logic was written for. When the warm device is free the deadline
+/// collapses: `deadline = min(started_at + warm_wait_max_ms, warm_ready_at)`
+/// and `warm_ready_at` is `now` for an idle device, so the `now_ms < deadline`
+/// gate is `now < now` and the preference never engages. Placement then falls
+/// through to the generic sort, whose first key is host RAM — effectively
+/// round-robin between two equal devices.
+///
+/// Measured on plato: the SAME flux2-dev request went to gpu 0 and then to
+/// gpu 1, so the second one re-encoded its prompt (8.3 s) and reloaded a
+/// 35 GB transformer (6.2 s) on a worker whose twin was holding both. That is
+/// WP4's headline win — "a repeated prompt skips the reload" — lost to
+/// placement.
+#[test]
+fn an_idle_warm_device_is_preferred_without_any_waiting() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![
+                // `cold` sorts first by device id, which is what the generic
+                // ordering falls back to once warmth is ignored.
+                device("cold"),
+                DeviceSnapshot::idle("warm", 24 * GIB).with_warm("exec"),
+            ],
+            vec![work(
+                "job",
+                0,
+                vec![candidate("cold", 1), candidate("warm", 1)],
+            )],
+            8,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(
+        plan.immediate_leases[0].device_id.as_str(),
+        "warm",
+        "an idle warm device finishes sooner and must be chosen immediately"
+    );
+    assert!(
+        plan.warm_waits.is_empty(),
+        "nothing is being waited for: the device is already free"
+    );
+}
 #[test]
 fn warm_wait_never_holds_when_cold_now_finishes_first() {
     let plan = Planner::default()

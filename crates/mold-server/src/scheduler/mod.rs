@@ -12311,6 +12311,59 @@ mod tests {
         );
     }
 
+    /// The mechanism behind wave-2's round-robin AND its 18-minute wedge:
+    /// both are the retained transformer reading as zero reclaimable bytes.
+    ///
+    /// `measured_cache_bytes` is `ModelCache::active_vram_bytes()`, which for
+    /// a retaining FLUX.2 engine was 0. So a worker holding 35 GB of weights
+    /// advertised only its raw free VRAM:
+    ///
+    /// * the SAME request could not be placed back on it — 11 GB against a
+    ///   37 GB plan is infeasible, so the warm device was filtered out before
+    ///   warmth was ever consulted and the job went to a cold worker that
+    ///   re-encoded the prompt and reloaded 35 GB;
+    /// * and once both workers were in that state, no device was schedulable
+    ///   at all.
+    ///
+    /// With the retained bytes credited, the warm worker is feasible again —
+    /// and `an_idle_warm_device_is_preferred_without_any_waiting` (scheduler
+    /// planner contract) shows the planner then chooses it.
+    #[test]
+    fn a_retained_transformer_restores_the_warm_workers_schedulable_capacity() {
+        const GIB: u64 = 1 << 30;
+        const RETAINED: u64 = 35 * GIB;
+        const PLAN_NEEDS: u64 = 37 * GIB;
+        // An L40S holding a retained flux2-dev transformer.
+        let sampled_free = 46 * GIB - RETAINED;
+
+        // Before: the cache reported nothing, so the card looked full.
+        let blind = schedulable_available_vram_bytes(
+            sampled_free,
+            reclaimable_model_cache_bytes(0, None),
+            None,
+            false,
+            46 * GIB,
+        );
+        assert!(
+            blind < PLAN_NEEDS,
+            "this is the wedge: {blind} bytes advertised against a {PLAN_NEEDS}-byte plan"
+        );
+
+        // After: the retained transformer is first-party reclaimable evidence.
+        let credited = schedulable_available_vram_bytes(
+            sampled_free,
+            reclaimable_model_cache_bytes(RETAINED, None),
+            None,
+            false,
+            46 * GIB,
+        );
+        assert!(
+            credited >= PLAN_NEEDS,
+            "a worker holding this model's own weights must be schedulable for it"
+        );
+        assert_eq!(credited, 46 * GIB, "and the credit is bounded by the card");
+    }
+
     #[test]
     fn warm_and_cold_resident_capacity_is_safe_while_idle_or_busy() {
         const GIB: u64 = 1 << 30;
