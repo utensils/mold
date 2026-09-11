@@ -92,7 +92,7 @@ const active = computed(() => Boolean(props.thumbnailUrl) || props.progress !== 
     >
     <div class="mobile-generation-job-copy">
       <p>{{ displayTitle }}</p>
-      <span v-if="title.trim()">{{ subtitle }}</span>
+      <span v-if="title.trim() && subtitle.trim()">{{ subtitle }}</span>
       <ProgressBar
         v-if="progress !== null"
         class="mobile-generation-job-meter"

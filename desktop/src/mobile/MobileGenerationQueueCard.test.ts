@@ -97,4 +97,14 @@ describe("MobileGenerationQueueCard", () => {
     expect(view.classes()).toContain("mobile-generation-job--warning");
     expect(view.get("[data-test='mobile-generation-status']").text()).toBe("HELD");
   });
+
+  it("says a machine's own work once, not twice", () => {
+    // A shared fleet row has no prompt, so its title IS the model. Repeating
+    // it as the subtitle made every such row read "flux2-dev:q4 flux2-dev:q4".
+    const view = mount(MobileGenerationQueueCard, {
+      props: { title: "FLUX.2 dev", subtitle: "", status: "DENOISING", progress: 30 },
+    });
+    expect(view.get(".mobile-generation-job-copy p").text()).toBe("FLUX.2 dev");
+    expect(view.find(".mobile-generation-job-copy > span").exists()).toBe(false);
+  });
 });

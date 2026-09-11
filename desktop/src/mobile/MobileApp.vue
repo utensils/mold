@@ -13793,7 +13793,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     <MobileGenerationQueueCard
                       :row-test-id="`fleet-job-${entry.shared.key}`"
                       :title="sharedQueueTitle(entry.shared)"
-                      :subtitle="`${modelLabel(entry.shared.model ?? '')} · ${entry.shared.hostLabel}`"
+                      subtitle=""
                       :status="sharedQueueStatus(entry.shared)"
                       :aria-label="sharedQueueTitle(entry.shared)"
                       :progress="sharedQueueProgress(entry.shared)"
