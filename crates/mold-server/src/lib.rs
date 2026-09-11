@@ -11,7 +11,7 @@ pub(crate) mod dir_sync;
 mod durable_admission_authority;
 mod durable_disposition;
 mod durable_generation_settlement;
-mod gallery_authority;
+pub mod gallery_authority;
 mod gallery_source_media;
 mod generation_assets;
 #[allow(dead_code)]
@@ -357,6 +357,17 @@ pub async fn run_server(
     let mut config = Config::load_or_default();
     config.models_dir = models_dir.to_string_lossy().into_owned();
     let model_name = config.resolved_default_model();
+
+    // Writing storage version 3 is a decision about a SHARED resource: the
+    // `$MOLD_HOME` may be published to by other binaries, and a mold older
+    // than 0.29 cannot read a v3 store at all. Installed here, before
+    // anything opens a gallery, so a request can never see a different answer
+    // from the startup recovery that prepared the store.
+    let authority_log = config.gallery.effective_authority_log();
+    gallery_authority::set_authority_log_requested(authority_log);
+    if authority_log {
+        info!("gallery archive authority: writing storage version 3 (gallery.authority_log)");
+    }
 
     // ── Discover and initialize GPU workers ────────────────────────────────
     let shared_pool = std::sync::Arc::new(std::sync::Mutex::new(

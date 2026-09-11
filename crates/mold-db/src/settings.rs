@@ -89,6 +89,7 @@ pub const CHAIN_JOBS_ARTIFACT_TTL_DEFAULT: i64 = 7;
 // sweeper reads it fresh from here on every pass.
 pub const GALLERY_TRASH_RETENTION_DAYS: &str =
     mold_core::config_keys::GALLERY_TRASH_RETENTION_DAYS_KEY;
+pub const GALLERY_AUTHORITY_LOG: &str = mold_core::config_keys::GALLERY_AUTHORITY_LOG_KEY;
 /// Days a trashed print is retained before purge; `0` keeps it forever.
 pub const GALLERY_TRASH_RETENTION_DEFAULT: i64 = 30;
 

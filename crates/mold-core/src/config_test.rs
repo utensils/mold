@@ -3006,6 +3006,7 @@ qwen3_variant = "iq4"
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let settings = GallerySettings {
             trash_retention_days: 30,
+            authority_log: false,
         };
 
         std::env::remove_var(GallerySettings::TRASH_RETENTION_DAYS_ENV);

@@ -852,6 +852,18 @@ pub struct GallerySettings {
     /// Default 30. Env override: `MOLD_GALLERY_TRASH_RETENTION_DAYS`.
     #[serde(default = "default_trash_retention_days")]
     pub trash_retention_days: u32,
+    /// Write the gallery archive authority's append-only delta log
+    /// (storage version 3) instead of a whole-snapshot checkpoint per commit.
+    ///
+    /// **Opt-in, and it changes the on-disk format of a shared home.** A mold
+    /// older than 0.29 reads only version 2 and refuses to publish against a
+    /// v3 store — so enable it only when every binary that shares this
+    /// `$MOLD_HOME` is new enough, and downgrade with
+    /// `mold system gallery-authority downgrade` before rolling one back.
+    /// Reading v3 needs no switch: a build that finds one always understands
+    /// it. Env override: `MOLD_GALLERY_AUTHORITY_LOG`.
+    #[serde(default)]
+    pub authority_log: bool,
 }
 
 const fn default_trash_retention_days() -> u32 {
@@ -862,6 +874,7 @@ impl Default for GallerySettings {
     fn default() -> Self {
         Self {
             trash_retention_days: default_trash_retention_days(),
+            authority_log: false,
         }
     }
 }
@@ -869,6 +882,31 @@ impl Default for GallerySettings {
 impl GallerySettings {
     /// Name of the env var that overrides `trash_retention_days`.
     pub const TRASH_RETENTION_DAYS_ENV: &'static str = "MOLD_GALLERY_TRASH_RETENTION_DAYS";
+    /// Name of the env var that overrides `authority_log`.
+    pub const AUTHORITY_LOG_ENV: &'static str = "MOLD_GALLERY_AUTHORITY_LOG";
+
+    /// Whether this process may WRITE the version-3 delta log.
+    ///
+    /// Default false. The switch exists because the format is shared state:
+    /// one new binary starting against a home an older one also publishes to
+    /// would upgrade the store and lock the older one out of publication
+    /// entirely. Reading v3 is unconditional.
+    pub fn effective_authority_log(&self) -> bool {
+        match std::env::var(Self::AUTHORITY_LOG_ENV) {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                _ => {
+                    eprintln!(
+                        "warning: invalid {} value '{value}' — using config/default",
+                        Self::AUTHORITY_LOG_ENV
+                    );
+                    self.authority_log
+                }
+            },
+            Err(_) => self.authority_log,
+        }
+    }
 
     /// Effective retention in days: the `MOLD_GALLERY_TRASH_RETENTION_DAYS`
     /// env var when it holds a valid value in `0..=3650`, else the stored

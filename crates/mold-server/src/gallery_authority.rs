@@ -15,7 +15,23 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Where a version-2 store lives. Unchanged, and an older mold reads only
+/// this name.
 const AUTHORITY_DIR: &str = "gallery-authority-v2";
+/// Where a version-3 store lives.
+///
+/// A separate directory, not a rewrite in place. Version 3 bytes written into
+/// the `-v2` directory is exactly what took production down: every older mold
+/// sharing the `$MOLD_HOME` refused publication, and there was no v2 copy left
+/// to roll back to because the backup had been rewritten at v3 too. With two
+/// directories the v2 store is frozen intact at the moment of the upgrade, so
+/// a rollback needs no repair at all.
+///
+/// The cost is stated rather than hidden: while BOTH a new mold (writing v3)
+/// and an old one (writing v2) publish to one home, the two indexes diverge.
+/// That is why writing v3 is opt-in and the documentation says to enable it
+/// only when every binary sharing the home is new enough.
+const AUTHORITY_DIR_V3: &str = "gallery-authority-v3";
 const CHECKPOINT_FILE: &str = "checkpoint.json";
 const PREVIOUS_CHECKPOINT_FILE: &str = "checkpoint.previous.json";
 const BACKUP_CHECKPOINT_FILE: &str = "checkpoint.backup.json";
@@ -37,6 +53,29 @@ const MUTATION_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 fn supported_storage_version(version: u32) -> bool {
     version == STORAGE_VERSION || version == LEGACY_STORAGE_VERSION
+}
+
+/// What to tell an operator whose store this build cannot read.
+///
+/// A version ABOVE what we understand is the shared-home case: some newer
+/// mold upgraded the format under a binary that publishes to the same
+/// `$MOLD_HOME`. That is recoverable, and the sentence says how. Anything
+/// else is a corrupt or foreign file.
+fn unsupported_version_message(kind: &str, version: u32, path: &Path) -> String {
+    if version > STORAGE_VERSION {
+        format!(
+            "gallery authority {kind} version {version} is newer than this build supports \
+             ({STORAGE_VERSION}) in {}; this gallery was written by a newer mold. Run \
+             `mold system gallery-authority downgrade` with that newer build, or upgrade this \
+             one.",
+            path.display()
+        )
+    } else {
+        format!(
+            "unsupported gallery authority {kind} version {version} in {}",
+            path.display()
+        )
+    }
 }
 
 /// The mutation kinds a single print's publication walks. These are the
@@ -63,6 +102,14 @@ struct AuthoritySnapshot {
     legacy_evidence_epochs: std::collections::BTreeMap<String, u64>,
 }
 
+/// The serde shape of the checksummed envelope.
+///
+/// Production assembles those bytes by hand in `serialize_envelope`, so this
+/// survives as the independent definition that
+/// `the_prebuilt_envelope_matches_the_serde_one` pins the hand-built one
+/// against — a drift here fails that test instead of silently writing a
+/// checkpoint no reader accepts.
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 struct ChecksummedSnapshot {
     version: u32,
@@ -111,9 +158,28 @@ pub(crate) fn authority_dir_name() -> &'static str {
     AUTHORITY_DIR
 }
 
+/// The directory this root's authority ACTUALLY occupies.
+///
+/// A v3 store wins once it has a marker; until then everything reads and
+/// writes the v2 directory. Resolved rather than configured, so a store that
+/// an earlier build upgraded IN PLACE — v3 bytes under the `-v2` name, the
+/// production incident's shape — is still found, read, and downgradable.
 fn authority_dir(root: &Path) -> PathBuf {
+    let v3 = authority_dir_v3(root);
+    if v3.join(MARKER_FILE).is_file() {
+        return v3;
+    }
+    legacy_authority_dir(root)
+}
+
+fn legacy_authority_dir(root: &Path) -> PathBuf {
     root.join(crate::batch_transaction::TRANSACTION_DIR)
         .join(AUTHORITY_DIR)
+}
+
+fn authority_dir_v3(root: &Path) -> PathBuf {
+    root.join(crate::batch_transaction::TRANSACTION_DIR)
+        .join(AUTHORITY_DIR_V3)
 }
 
 fn checkpoint_path(root: &Path) -> PathBuf {
@@ -141,6 +207,7 @@ fn digest_json<T: Serialize>(value: &T) -> anyhow::Result<String> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+#[cfg(test)]
 fn wrap_snapshot(snapshot: AuthoritySnapshot) -> anyhow::Result<ChecksummedSnapshot> {
     Ok(ChecksummedSnapshot {
         version: STORAGE_VERSION,
@@ -164,10 +231,17 @@ fn wrap_snapshot(snapshot: AuthoritySnapshot) -> anyhow::Result<ChecksummedSnaps
 /// second serialization that merely ought to match.
 /// `the_prebuilt_envelope_matches_the_serde_one` pins the two together.
 fn serialize_envelope(snapshot: &AuthoritySnapshot) -> anyhow::Result<(Vec<u8>, String)> {
+    serialize_envelope_at(snapshot, snapshot.version)
+}
+
+fn serialize_envelope_at(
+    snapshot: &AuthoritySnapshot,
+    storage_version: u32,
+) -> anyhow::Result<(Vec<u8>, String)> {
     let payload = serde_json::to_vec(snapshot)?;
     let digest = format!("{:x}", Sha256::digest(&payload));
     let prefix =
-        format!(r#"{{"version":{STORAGE_VERSION},"payload_sha256":"{digest}","snapshot":"#);
+        format!(r#"{{"version":{storage_version},"payload_sha256":"{digest}","snapshot":"#);
     let mut bytes = Vec::with_capacity(prefix.len() + payload.len() + 2);
     bytes.extend_from_slice(prefix.as_bytes());
     bytes.extend_from_slice(&payload);
@@ -181,8 +255,8 @@ fn validate_envelope(
 ) -> anyhow::Result<AuthoritySnapshot> {
     ensure!(
         supported_storage_version(envelope.version),
-        "unsupported gallery authority checkpoint version in {}",
-        path.display()
+        "{}",
+        unsupported_version_message("checkpoint", envelope.version, path)
     );
     ensure!(
         format!("{:x}", Sha256::digest(envelope.snapshot.get().as_bytes()))
@@ -194,8 +268,8 @@ fn validate_envelope(
         .with_context(|| format!("reading gallery authority snapshot in {}", path.display()))?;
     ensure!(
         supported_storage_version(snapshot.version),
-        "unsupported gallery authority checkpoint version in {}",
-        path.display()
+        "{}",
+        unsupported_version_message("checkpoint", snapshot.version, path)
     );
     Ok(snapshot)
 }
@@ -277,8 +351,8 @@ fn read_marker(root: &Path) -> anyhow::Result<Option<MutationMarker>> {
         Ok(marker) => {
             ensure!(
                 supported_storage_version(marker.version),
-                "unsupported gallery authority generation marker in {}",
-                path.display()
+                "{}",
+                unsupported_version_message("generation marker", marker.version, &path)
             );
             Ok(Some(marker))
         }
@@ -672,12 +746,20 @@ fn truncate_mutation_log(root: &Path, good_bytes: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Roots whose startup recovery completed in this process.
+/// Roots this process may write version 3 to.
 ///
-/// Only those may write v3: a commit from a process that has not recovered
-/// cannot know whether the log's tail is intact, and appending after a torn
-/// record would bury the tear under valid-looking bytes. Everything else keeps
-/// writing v2, which every build reads.
+/// TWO conditions, and both are load-bearing.
+///
+/// The operator must have asked for it (`gallery.authority_log` /
+/// `MOLD_GALLERY_AUTHORITY_LOG`), because the format is shared state: one new
+/// binary starting against a `$MOLD_HOME` an older one also publishes to
+/// upgraded the store and locked that older binary out of publication
+/// entirely with "unsupported gallery authority generation marker". Reading
+/// v3 is unconditional; only writing it is a decision.
+///
+/// And this process must have recovered the root itself — a commit that has
+/// not resolved the log's tail could append after a torn record and bury the
+/// tear under valid-looking bytes.
 fn v3_enabled_roots() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
     static ROOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
         std::sync::OnceLock::new();
@@ -691,6 +773,25 @@ fn enable_v3_writing(root: &Path) {
         .insert(root.to_path_buf());
 }
 
+/// Whether the operator has opted this PROCESS in to writing version 3.
+///
+/// Resolved once, from the config the server loaded, so a request cannot see
+/// a different answer from the startup recovery that prepared the store.
+/// Absent means off — every surface that never sets it (the forced-local CLI,
+/// the TUI, a test) writes v2.
+static AUTHORITY_LOG_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Install the resolved `gallery.authority_log` decision. Called once, from
+/// server startup, before any gallery is opened.
+pub(crate) fn set_authority_log_requested(requested: bool) {
+    AUTHORITY_LOG_REQUESTED.store(requested, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn authority_log_requested() -> bool {
+    AUTHORITY_LOG_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn v3_writing_enabled(root: &Path) -> bool {
     v3_enabled_roots()
         .lock()
@@ -698,12 +799,16 @@ fn v3_writing_enabled(root: &Path) -> bool {
         .contains(root)
 }
 
-#[cfg(test)]
-fn disable_v3_writing_for_test(root: &Path) {
+fn disable_v3_writing(root: &Path) {
     v3_enabled_roots()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .remove(root);
+}
+
+#[cfg(test)]
+fn disable_v3_writing_for_test(root: &Path) {
+    disable_v3_writing(root);
 }
 
 fn sync_dir(path: &Path) -> anyhow::Result<()> {
@@ -789,11 +894,23 @@ fn write_checkpoint_envelope(
             "gallery authority checkpoint generation regressed from {existing} to {generation}"
         );
         if roll_previous && existing < generation {
-            // The bytes currently at `current` ARE the previous checkpoint;
+            // The bytes currently at `current` ARE the previous checkpoint, so
             // copying the file avoids re-serializing an index we no longer
-            // hold in that shape.
-            let bytes = fs::read(&current)?;
-            atomic_write_bytes(&previous_checkpoint_path(root), &bytes)?;
+            // hold in that shape — but only after they are read back as a
+            // VALID checkpoint. `existing` can be a caller's fallback zero
+            // when `current` failed to parse, and a raw copy then wrote
+            // corruption into the last forensic copy, leaving two of three
+            // checkpoints holding the same damage.
+            match read_checkpoint_at(&current) {
+                Ok(_) => {
+                    let bytes = fs::read(&current)?;
+                    atomic_write_bytes(&previous_checkpoint_path(root), &bytes)?;
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "not rolling an unreadable gallery authority checkpoint into `previous`"
+                ),
+            }
         }
     }
     atomic_write_bytes(&current, envelope)
@@ -821,7 +938,7 @@ fn remove_wal(root: &Path) -> anyhow::Result<()> {
     }
 }
 
-fn recover_storage(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
+fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<AuthoritySnapshot>> {
     let checkpoint = read_checkpoint(root)?;
     let marker = read_marker(root)?;
     let wal = match read_checkpoint_at(&wal_path(root)) {
@@ -911,24 +1028,42 @@ fn recover_storage(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
             delta.apply(snapshot);
             snapshot.generation = generation;
         }
-        if dropped > 0 {
-            tracing::warn!(
-                records = dropped,
-                "discarding an unresolved gallery authority mutation log tail"
-            );
-            truncate_mutation_log(root, good_bytes)?;
-        }
         // The marker is advisory under v3, but it must not name a generation
         // the store cannot reach: that means bytes are missing rather than
-        // merely unacknowledged.
+        // merely unacknowledged. This is asked BEFORE anything is truncated —
+        // a torn tail is the end of an interrupted append and is safe to drop,
+        // but corruption in the MIDDLE of a log leaves intact records after it
+        // that are still on disk and still repairable by hand. Deleting them
+        // first turned a recoverable store into a permanently failing one.
         if marker
             .as_ref()
             .is_some_and(|marker| marker.pending.is_none())
             && snapshot.generation < committed_generation
         {
             anyhow::bail!(
-                "gallery authority checkpoint generation does not match its stable marker"
+                "gallery authority mutation log stops at generation {} but its marker names {} \
+                 — {} record(s) after the break are intact and still on disk. This is mid-log \
+                 corruption, not a torn tail; the log has NOT been truncated.",
+                snapshot.generation,
+                committed_generation,
+                dropped
             );
+        }
+        if dropped > 0 {
+            // With no marker there is nothing to check the replay against, so
+            // "the tail is torn" is an assumption rather than a finding.
+            // Truncating on it silently resurrects deleted prints and loses
+            // published ones.
+            ensure!(
+                marker.is_some(),
+                "gallery authority mutation log has {dropped} unresolvable record(s) and no \
+                 generation marker to check the replay against; refusing to truncate."
+            );
+            tracing::warn!(
+                records = dropped,
+                "discarding an unresolved gallery authority mutation log tail"
+            );
+            truncate_mutation_log(root, good_bytes)?;
         }
     }
 
@@ -937,28 +1072,261 @@ fn recover_storage(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
     // the v2 -> v3 upgrade — the checkpoint is rewritten at the current
     // storage version, read once and never again.
     if let Some(snapshot) = current.as_ref() {
+        // Compaction rewrites the checkpoint AT THIS BUILD'S write version,
+        // so it is also the v2 -> v3 upgrade. That makes it a decision, not
+        // housekeeping: a default build must not upgrade a store just by
+        // opening it. It compacts only when the log actually needs folding
+        // in, or when the operator has asked for v3.
+        let storage_version = if authority_log {
+            STORAGE_VERSION
+        } else {
+            LEGACY_STORAGE_VERSION
+        };
+        let existing_version = read_checkpoint_at(&checkpoint_path(root))
+            .map(|existing| existing.version)
+            .ok();
         let needs_compaction = replayed > 0
             || discarded > 0
-            || marker.is_none()
-            || read_checkpoint_at(&checkpoint_path(root))
-                .map(|existing| existing.version != STORAGE_VERSION)
-                .unwrap_or(true);
+            || existing_version.is_none()
+            || (authority_log && existing_version != Some(STORAGE_VERSION));
         if needs_compaction {
             let checkpoint_generation = read_checkpoint_at(&checkpoint_path(root))
                 .map(|existing| existing.generation)
                 .unwrap_or(0);
-            compact_mutation_log(root, snapshot, checkpoint_generation)?;
+            if authority_log && existing_version == Some(LEGACY_STORAGE_VERSION) {
+                // The UPGRADE, and it is the whole reason the switch exists.
+                // It writes a NEW store in the v3 directory and does not touch
+                // the v2 one, so a rollback finds its store exactly as it left
+                // it. A default build never reaches this line.
+                upgrade_store_to_v3(root, snapshot)?;
+            } else {
+                compact_mutation_log_at(root, snapshot, checkpoint_generation, storage_version)?;
+            }
         }
         write_marker(
             root,
             &MutationMarker {
-                version: STORAGE_VERSION,
+                version: storage_version,
                 committed_generation: snapshot.generation,
                 pending: None,
             },
         )?;
     }
     Ok(current)
+}
+
+/// What a downgrade did, for the operator and for a test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DowngradeOutcome {
+    /// The generation the store now reports, after replaying the log.
+    pub generation: u64,
+    /// How many delta records were folded into the checkpoint.
+    pub replayed_records: usize,
+    /// Whether the store was already version 2 (the command is idempotent).
+    pub already_legacy: bool,
+}
+
+/// Rewrite a version-3 gallery archive authority as version 2.
+///
+/// This exists because the storage format is SHARED state. A `$MOLD_HOME` can
+/// be published to by more than one binary — a production service and a
+/// scratch server, or a release and the rollback you are about to perform —
+/// and a mold older than 0.29 reads version 2 only. It refuses publication
+/// outright against a v3 store, so upgrading one is a decision that has to be
+/// reversible.
+///
+/// The sequence is the one recovery already trusts: take the bookkeeping
+/// flock so no writer can be mid-commit, replay the delta log onto the
+/// checkpoint, then write the checkpoint, its backup and the marker at
+/// version 2 before removing the log. The verification at the end is not
+/// ceremony — it reads the result back through the ordinary loader and
+/// refuses to report success on a store it could not load.
+///
+/// It refuses rather than guesses in the two cases where the store is not
+/// quiescent: a pending v2 mutation, and a torn or non-contiguous log tail.
+/// Both are resolved by letting a mold that understands v3 recover the store
+/// once, which is what `mold serve` does at startup.
+pub fn downgrade_to_legacy_storage(root: &Path) -> anyhow::Result<DowngradeOutcome> {
+    let guard = crate::batch_transaction::acquire_gallery_bookkeeping_lock(root)?;
+    let root = guard.canonical_root();
+
+    let marker = read_marker(root)?;
+    let Some(snapshot) = read_checkpoint(root)? else {
+        anyhow::bail!(
+            "no gallery archive authority in {} — there is nothing to downgrade",
+            authority_dir(root).display()
+        );
+    };
+    if let Some(marker) = marker.as_ref() {
+        ensure!(
+            marker.pending.is_none(),
+            "a gallery authority mutation is still pending in {}. Start `mold serve` once with a \
+             build that understands this store so recovery can resolve it, stop it, then \
+             downgrade.",
+            authority_dir(root).display()
+        );
+    }
+    ensure!(
+        !wal_path(root).try_exists()?,
+        "an unresolved gallery authority WAL is present in {}. Start `mold serve` once with a \
+         build that understands this store so recovery can resolve it, stop it, then downgrade.",
+        authority_dir(root).display()
+    );
+
+    let mut snapshot = snapshot;
+    let MutationLogScan {
+        records, discarded, ..
+    } = read_mutation_log(root, snapshot.generation)?;
+    ensure!(
+        discarded == 0,
+        "the gallery authority mutation log in {} has a torn or non-contiguous tail ({discarded} \
+         record(s)). Start `mold serve` once with a build that understands this store so recovery \
+         can truncate it, stop it, then downgrade.",
+        authority_dir(root).display()
+    );
+    let replayed_records = records.len();
+    for (generation, delta) in records {
+        delta.apply(&mut snapshot);
+        snapshot.generation = generation;
+    }
+    let already_legacy = replayed_records == 0
+        && snapshot.version == LEGACY_STORAGE_VERSION
+        && marker
+            .as_ref()
+            .is_some_and(|marker| marker.version == LEGACY_STORAGE_VERSION)
+        && !mutation_log_path(root).exists();
+    let generation = snapshot.generation;
+
+    // The replayed store is written into the VERSION-2 directory, whichever
+    // one it currently occupies. Two shapes reach here and both must land
+    // somewhere an older mold looks: a store an earlier build upgraded in
+    // place (v3 bytes under the `-v2` name, the production incident), and a
+    // proper v3 store in its own directory.
+    let target = legacy_authority_dir(root);
+    fs::create_dir_all(&target)?;
+    let mut legacy = snapshot.clone();
+    legacy.version = LEGACY_STORAGE_VERSION;
+    let (envelope, _) = serialize_envelope_at(&legacy, LEGACY_STORAGE_VERSION)?;
+    // Checkpoint and backup first, then the marker, then the log: the same
+    // order recovery reads them in, so an interruption anywhere leaves a
+    // store a v3-capable build still recovers.
+    atomic_write_bytes(&target.join(CHECKPOINT_FILE), &envelope)?;
+    atomic_write_bytes(&target.join(BACKUP_CHECKPOINT_FILE), &envelope)?;
+    atomic_write_bytes(&target.join(PREVIOUS_CHECKPOINT_FILE), &envelope)?;
+    atomic_write_json(
+        &target.join(MARKER_FILE),
+        &MutationMarker {
+            version: LEGACY_STORAGE_VERSION,
+            committed_generation: generation,
+            pending: None,
+        },
+    )?;
+    // Neutralize every delta log. One left beside a v2 checkpoint is either
+    // replayed by a later v3 process against the wrong generation, or
+    // discarded with a warning that reads like corruption after a normal
+    // boot. The v3 DIRECTORY goes too — `authority_dir` resolves a store by
+    // its marker, so leaving that marker behind would make the next start
+    // pick the store this command was asked to retire.
+    for stale in [mutation_log_path(root), target.join(MUTATION_LOG_FILE)] {
+        match fs::remove_file(&stale) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let retired_v3 = authority_dir_v3(root);
+    if retired_v3.is_dir() && retired_v3 != target {
+        let parked = retired_v3.with_file_name(format!(
+            "{AUTHORITY_DIR_V3}.downgraded-{}",
+            mold_core::time::now_epoch_ms_u64()
+        ));
+        // Renamed rather than deleted: it is the only copy of the authority
+        // between the last compaction and now, and this command has just
+        // written its contents into the v2 store from a replay it performed
+        // in memory. Keeping it costs a directory and buys a way back.
+        fs::rename(&retired_v3, &parked)?;
+        tracing::info!(
+            parked = %parked.display(),
+            "parked the version-3 gallery authority beside the downgraded store"
+        );
+    }
+    sync_dir(&target)?;
+    // This process must not keep believing it may append to a log that is
+    // gone, or that its cached tail describes the checkpoint it just rewrote.
+    disable_v3_writing(root);
+    forget_authority_tail(root);
+
+    // Read it back the way the old binary will.
+    let verified = load_existing_read_only(root, &guard)?
+        .context("the downgraded gallery authority did not load back")?;
+    ensure!(
+        verified.generation == generation,
+        "the downgraded gallery authority reports generation {} rather than {generation}",
+        verified.generation
+    );
+    let stored_version = read_checkpoint_at(&target.join(CHECKPOINT_FILE))?.version;
+    ensure!(
+        stored_version == LEGACY_STORAGE_VERSION,
+        "the downgraded gallery authority checkpoint is still version {stored_version}"
+    );
+    forget_authority_tail(root);
+
+    Ok(DowngradeOutcome {
+        generation,
+        replayed_records,
+        already_legacy,
+    })
+}
+
+/// A read-only description of the store's on-disk format, for an operator
+/// deciding whether a downgrade is needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AuthorityStorageStatus {
+    pub present: bool,
+    pub checkpoint_version: Option<u32>,
+    pub marker_version: Option<u32>,
+    pub generation: Option<u64>,
+    pub log_records: usize,
+    pub log_bytes: u64,
+    pub pending_mutation: bool,
+    pub torn_log_tail: bool,
+}
+
+/// Describe the store without touching it.
+pub fn storage_status(root: &Path) -> anyhow::Result<AuthorityStorageStatus> {
+    let guard = crate::batch_transaction::acquire_gallery_bookkeeping_lock(root)?;
+    let root = guard.canonical_root();
+    if !authority_dir(root).is_dir() {
+        return Ok(AuthorityStorageStatus {
+            present: false,
+            checkpoint_version: None,
+            marker_version: None,
+            generation: None,
+            log_records: 0,
+            log_bytes: 0,
+            pending_mutation: false,
+            torn_log_tail: false,
+        });
+    }
+    let marker = read_marker(root).ok().flatten();
+    let checkpoint = read_checkpoint_at(&checkpoint_path(root)).ok();
+    let scan = checkpoint
+        .as_ref()
+        .map(|snapshot| read_mutation_log(root, snapshot.generation))
+        .transpose()?;
+    Ok(AuthorityStorageStatus {
+        present: true,
+        checkpoint_version: checkpoint.as_ref().map(|snapshot| snapshot.version),
+        marker_version: marker.as_ref().map(|marker| marker.version),
+        generation: marker
+            .as_ref()
+            .map(|marker| marker.committed_generation)
+            .or_else(|| checkpoint.as_ref().map(|snapshot| snapshot.generation)),
+        log_records: scan.as_ref().map(|scan| scan.records.len()).unwrap_or(0),
+        log_bytes: mutation_log_bytes(root),
+        pending_mutation: marker.is_some_and(|marker| marker.pending.is_some()),
+        torn_log_tail: scan.map(|scan| scan.discarded > 0).unwrap_or(false),
+    })
 }
 
 pub(crate) fn read_generation(
@@ -1048,9 +1416,18 @@ pub(crate) fn load_or_initialize(
     guard: &GalleryBookkeepingGuard,
     legacy: impl FnOnce() -> anyhow::Result<CommittedArchiveIndex>,
 ) -> anyhow::Result<LoadedAuthority> {
+    load_or_initialize_with_authority_log(root, guard, authority_log_requested(), legacy)
+}
+
+pub(crate) fn load_or_initialize_with_authority_log(
+    root: &Path,
+    guard: &GalleryBookkeepingGuard,
+    authority_log: bool,
+    legacy: impl FnOnce() -> anyhow::Result<CommittedArchiveIndex>,
+) -> anyhow::Result<LoadedAuthority> {
     guard.ensure_root(root)?;
     let root = guard.canonical_root();
-    let mut snapshot = match recover_storage(root)? {
+    let mut snapshot = match recover_storage(root, authority_log)? {
         Some(snapshot) => snapshot,
         None => {
             let mut index = legacy()?;
@@ -1060,26 +1437,46 @@ pub(crate) fn load_or_initialize(
                     .into_iter()
                     .map(|path| (path, 0))
                     .collect();
+            // A brand-new store is created at the version this process
+            // WRITES, not at the newest this build understands: a default
+            // build must leave a home an older mold can still publish to.
+            let storage_version = if authority_log {
+                STORAGE_VERSION
+            } else {
+                LEGACY_STORAGE_VERSION
+            };
             let snapshot = AuthoritySnapshot {
-                version: STORAGE_VERSION,
+                version: storage_version,
                 generation: 0,
                 index,
                 legacy_evidence_epochs,
             };
-            write_checkpoint(root, &snapshot)?;
-            atomic_write_json(
-                &previous_checkpoint_path(root),
-                &wrap_snapshot(snapshot.clone())?,
-            )?;
-            backup_checkpoint(root, &snapshot)?;
-            write_marker(
-                root,
-                &MutationMarker {
-                    version: STORAGE_VERSION,
-                    committed_generation: 0,
-                    pending: None,
-                },
-            )?;
+            let (envelope, _) = serialize_envelope_at(&snapshot, storage_version)?;
+            if storage_version == STORAGE_VERSION {
+                // A fresh v3 store goes in the v3 DIRECTORY, for the same
+                // reason the upgrade does. The path helpers resolve by
+                // marker, and a home with no store yet has none, so writing
+                // through them would put version-3 bytes under the `-v2`
+                // name — the production incident's shape, reached this time
+                // on a home that never had a v2 store at all. An older mold
+                // sharing it would then find a version it cannot read at the
+                // only path it looks, and refuse to publish, instead of
+                // initializing the v2 store beside it that the two-directory
+                // design promises.
+                write_fresh_store_v3(root, &snapshot, &envelope)?;
+            } else {
+                write_checkpoint_envelope(root, 0, &envelope, None, true)?;
+                atomic_write_bytes(&previous_checkpoint_path(root), &envelope)?;
+                atomic_write_bytes(&backup_checkpoint_path(root), &envelope)?;
+                write_marker(
+                    root,
+                    &MutationMarker {
+                        version: storage_version,
+                        committed_generation: 0,
+                        pending: None,
+                    },
+                )?;
+            }
             snapshot
         }
     };
@@ -1117,9 +1514,13 @@ pub(crate) fn load_or_initialize(
             Vec::new(),
         )?;
     }
-    // Recovery has run for this root, so this process may now write v3: it
-    // knows the log's tail is intact because it is the one that resolved it.
-    enable_v3_writing(root);
+    // Recovery has run for this root, so this process KNOWS the log's tail is
+    // intact — but it writes v3 only if the operator asked for it.
+    if authority_log {
+        enable_v3_writing(root);
+    } else {
+        disable_v3_writing(root);
+    }
     Ok(LoadedAuthority {
         generation: snapshot.generation,
         index: snapshot.index,
@@ -1242,8 +1643,9 @@ pub(crate) fn commit_snapshot(
     let current = match cached_commit_tail(root, expected_generation)? {
         Some(tail) => tail,
         None => {
-            let snapshot =
-                recover_storage(root)?.context("gallery authority checkpoint is missing")?;
+            let snapshot = recover_storage(root, v3_writing_enabled(root))
+                .context("gallery authority recovery")?
+                .context("gallery authority checkpoint is missing")?;
             // Recovery just compacted, so the checkpoint IS the tail and the
             // log is empty.
             AuthorityTail::from_recovered(&snapshot, snapshot.generation, (0, 0))
@@ -1298,10 +1700,18 @@ pub(crate) fn commit_snapshot(
     // print v3 exists to remove, so the delta path must never touch it —
     // building it "once, for whoever needs it" is what made the first v3
     // measurement only 16 % faster than v2.
+    // The version this commit WRITES. It stamps the snapshot's own field as
+    // well as the envelope's: an older mold checks BOTH, so a payload saying
+    // 3 inside a v2 envelope still locks it out.
+    let write_version = if v3_writing_enabled(root) {
+        STORAGE_VERSION
+    } else {
+        LEGACY_STORAGE_VERSION
+    };
     let build_snapshot =
         |index: &CommittedArchiveIndex, legacy: &std::collections::BTreeMap<String, u64>| {
             AuthoritySnapshot {
-                version: STORAGE_VERSION,
+                version: write_version,
                 generation,
                 index: index.clone(),
                 legacy_evidence_epochs: legacy.clone(),
@@ -1386,7 +1796,7 @@ pub(crate) fn commit_snapshot(
         // v2: the pending-marker + whole-snapshot WAL protocol, still what a
         // process writes until its startup recovery has run for this root.
         let snapshot = build_snapshot(index, &tail.legacy_evidence_epochs);
-        let (envelope, snapshot_sha256) = serialize_envelope(&snapshot)?;
+        let (envelope, snapshot_sha256) = serialize_envelope_at(&snapshot, write_version)?;
         guard.ensure_root(root)?;
         write_marker(
             root,
@@ -1424,7 +1834,20 @@ pub(crate) fn commit_snapshot(
         remove_wal(root)?;
         guard.ensure_root(root)?;
         atomic_write_bytes(&backup_checkpoint_path(root), &envelope)?;
+        // This checkpoint holds everything the log did, so leaving the log
+        // behind would strand records the next replay reads as
+        // non-contiguous — a hard "startup recovery is required", or a WARN
+        // about discarding a tail, after a perfectly normal boot. A v2 writer
+        // entering a v3 store (a rollback, or the switch turned off) leaves it
+        // consistently v2. Reachable without recovery: the publication gate's
+        // process cache can be installed by `load_existing_read_only`, which
+        // never enables v3.
+        if mutation_log_path(root).exists() {
+            truncate_mutation_log(root, 0)?;
+        }
         tail.checkpoint_generation = generation;
+        tail.log_records = 0;
+        tail.log_bytes = 0;
     }
     crate::batch_transaction::remove_legacy_gallery_evidence(root, &collect_legacy)?;
     // The next commit diffs against this one — names and epochs only, never
@@ -1440,18 +1863,111 @@ pub(crate) fn commit_snapshot(
 /// lands durably FIRST, then the log is dropped. A crash between them replays
 /// records the checkpoint already contains, which the contiguity check
 /// discards as non-contiguous — it never loses one.
+/// Write a fresh version-3 store into its OWN directory, leaving the version-2
+/// store exactly as it stands.
+///
+/// This is the one-way half of the format change and it happens only when
+/// `gallery.authority_log` is on. Writing the v3 bytes over the v2 store in
+/// place — what an earlier build did on first start, with no switch at all —
+/// took production down: every older mold sharing the `$MOLD_HOME` refused to
+/// publish, and the backup had been rewritten at v3 too, so there was nothing
+/// left to roll back to.
+///
+/// The marker is written LAST. `authority_dir` resolves a store by the
+/// presence of that file, so until it lands the v2 store is still the live
+/// one, and an interruption anywhere before it leaves a half-written v3
+/// directory nothing reads.
+fn upgrade_store_to_v3(root: &Path, snapshot: &AuthoritySnapshot) -> anyhow::Result<()> {
+    let dir = authority_dir_v3(root);
+    fs::create_dir_all(&dir)?;
+    sync_dir(
+        dir.parent()
+            .context("gallery authority directory has no parent")?,
+    )?;
+    sync_dir(&dir)?;
+    let mut snapshot = snapshot.clone();
+    snapshot.version = STORAGE_VERSION;
+    let (envelope, _) = serialize_envelope_at(&snapshot, STORAGE_VERSION)?;
+    atomic_write_bytes(&dir.join(CHECKPOINT_FILE), &envelope)?;
+    atomic_write_bytes(&dir.join(BACKUP_CHECKPOINT_FILE), &envelope)?;
+    atomic_write_bytes(&dir.join(PREVIOUS_CHECKPOINT_FILE), &envelope)?;
+    atomic_write_json(
+        &dir.join(MARKER_FILE),
+        &MutationMarker {
+            version: STORAGE_VERSION,
+            committed_generation: snapshot.generation,
+            pending: None,
+        },
+    )?;
+    tracing::warn!(
+        directory = %dir.display(),
+        generation = snapshot.generation,
+        "upgraded the gallery archive authority to storage version 3; the version-2 store is \
+         retained beside it. A mold older than 0.29 will keep publishing to the version-2 store \
+         and the two will diverge — run `mold system gallery-authority downgrade` before rolling \
+         one back."
+    );
+    Ok(())
+}
+
+/// Lay down a brand-new version-3 store in the version-3 directory.
+///
+/// Marker LAST, exactly as `upgrade_store_to_v3` does: `authority_dir`
+/// resolves a store by that file, so until it lands nothing reads the
+/// half-written directory.
+fn write_fresh_store_v3(
+    root: &Path,
+    snapshot: &AuthoritySnapshot,
+    envelope: &[u8],
+) -> anyhow::Result<()> {
+    let dir = authority_dir_v3(root);
+    fs::create_dir_all(&dir)?;
+    sync_dir(
+        dir.parent()
+            .context("gallery authority directory has no parent")?,
+    )?;
+    atomic_write_bytes(&dir.join(CHECKPOINT_FILE), envelope)?;
+    atomic_write_bytes(&dir.join(BACKUP_CHECKPOINT_FILE), envelope)?;
+    atomic_write_bytes(&dir.join(PREVIOUS_CHECKPOINT_FILE), envelope)?;
+    atomic_write_json(
+        &dir.join(MARKER_FILE),
+        &MutationMarker {
+            version: STORAGE_VERSION,
+            committed_generation: snapshot.generation,
+            pending: None,
+        },
+    )?;
+    sync_dir(&dir)?;
+    Ok(())
+}
+
 fn compact_mutation_log(
     root: &Path,
     snapshot: &AuthoritySnapshot,
     existing_checkpoint_generation: u64,
 ) -> anyhow::Result<()> {
-    // A snapshot recovered from a v2 store still carries its own version
-    // field; the checkpoint compaction writes is this binary's, which is what
-    // makes the upgrade happen exactly once.
+    compact_mutation_log_at(
+        root,
+        snapshot,
+        existing_checkpoint_generation,
+        STORAGE_VERSION,
+    )
+}
+
+fn compact_mutation_log_at(
+    root: &Path,
+    snapshot: &AuthoritySnapshot,
+    existing_checkpoint_generation: u64,
+    storage_version: u32,
+) -> anyhow::Result<()> {
+    // A snapshot recovered from one version still carries that version in its
+    // own field; the checkpoint compaction writes is the one the caller asked
+    // for, which is what makes an upgrade — or a downgrade — happen exactly
+    // once.
     let mut snapshot = snapshot.clone();
-    snapshot.version = STORAGE_VERSION;
+    snapshot.version = storage_version;
     let snapshot = &snapshot;
-    let (envelope, _) = serialize_envelope(snapshot)?;
+    let (envelope, _) = serialize_envelope_at(snapshot, storage_version)?;
     write_checkpoint_envelope(
         root,
         snapshot.generation,
@@ -1623,11 +2139,18 @@ mod tests {
     /// Stand in for another process's checkpoint: writes the bytes with no
     /// generation-regression check, so a test can move the authority in
     /// either direction.
+    /// Stand in for another process's checkpoint: writes the bytes with no
+    /// generation-regression check, so a test can move the authority in
+    /// either direction.
+    ///
+    /// It deliberately does NOT drop this process's cached tail — dropping it
+    /// made every caller run cold, so `cached_commit_tail` returned `None` at
+    /// its first lookup and the fast path's on-disk guards were never
+    /// exercised by the test named for them.
     fn write_checkpoint_for_test(root: &Path, snapshot: &AuthoritySnapshot) {
         let (envelope, _) = serialize_envelope(snapshot).unwrap();
         fs::create_dir_all(authority_dir(root)).unwrap();
         atomic_write_bytes(&checkpoint_path(root), &envelope).unwrap();
-        forget_authority_tail(&fs::canonicalize(root).unwrap());
     }
 
     #[test]
@@ -1948,6 +2471,453 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// The regression that made this switch exist.
+    ///
+    /// On a shared `$MOLD_HOME` a new build started, upgraded the store to
+    /// version 3, and the production 0.28.0 service beside it — a v2 reader —
+    /// failed every publication with "unsupported gallery authority
+    /// generation marker" until the store was downgraded. So writing v3 is
+    /// opt-in, and a default build leaves a v2 store alone.
+    #[test]
+    fn v3_writing_is_off_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial =
+            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
+                .unwrap();
+        let mut index = initial.index;
+        let generation = publish(dir.path(), &guard, &mut index, initial.generation, "p.png");
+
+        assert!(
+            !mutation_log_path(dir.path()).exists(),
+            "a default build writes no delta log"
+        );
+        let marker = read_marker(dir.path()).unwrap().unwrap();
+        assert_eq!(marker.version, LEGACY_STORAGE_VERSION);
+        assert_eq!(marker.committed_generation, generation);
+        let checkpoint_bytes = fs::read(checkpoint_path(dir.path())).unwrap();
+        let envelope: serde_json::Value = serde_json::from_slice(&checkpoint_bytes).unwrap();
+        assert_eq!(envelope["version"], LEGACY_STORAGE_VERSION);
+        assert_eq!(envelope["snapshot"]["version"], LEGACY_STORAGE_VERSION);
+        assert_eq!(
+            read_checkpoint_at(&checkpoint_path(dir.path()))
+                .unwrap()
+                .generation,
+            generation,
+            "v2 still writes a whole checkpoint per commit"
+        );
+    }
+
+    /// Turning the switch on is what enables the log — and a default build
+    /// still READS what it wrote.
+    #[test]
+    fn the_authority_log_switch_turns_v3_writing_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
+        let mut index = initial.index;
+        let generation = publish(dir.path(), &guard, &mut index, initial.generation, "p.png");
+        assert!(mutation_log_path(dir.path()).exists());
+        assert_eq!(
+            read_marker(dir.path()).unwrap().unwrap().version,
+            STORAGE_VERSION
+        );
+
+        // A DEFAULT build opening the same store reads it, and then keeps
+        // writing v2 into it rather than extending the log.
+        forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
+        let reopened = load_or_initialize(dir.path(), &guard, || unreachable!()).unwrap();
+        assert_eq!(reopened.generation, generation);
+        assert!(reopened.index.quarantined_names.contains("p.png"));
+        let mut index = reopened.index;
+        let next = publish(dir.path(), &guard, &mut index, reopened.generation, "q.png");
+        assert_eq!(
+            read_marker(dir.path()).unwrap().unwrap().version,
+            LEGACY_STORAGE_VERSION,
+            "a default build writes v2 back"
+        );
+        assert!(
+            !mutation_log_path(dir.path()).exists(),
+            "and drops the log its checkpoint now supersedes"
+        );
+        forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
+        let final_read = load_or_initialize(dir.path(), &guard, || unreachable!()).unwrap();
+        assert_eq!(final_read.generation, next);
+        assert!(final_read.index.quarantined_names.contains("p.png"));
+        assert!(final_read.index.quarantined_names.contains("q.png"));
+    }
+
+    /// A store written by a NEWER mold must say what to do about it, not just
+    /// that the number is wrong. (The already-released 0.28.0 message cannot
+    /// be changed; this is the one every future build prints.)
+    #[test]
+    fn an_unreadable_store_version_names_the_downgrade_command() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(authority_dir(dir.path())).unwrap();
+        write_marker(
+            dir.path(),
+            &MutationMarker {
+                version: STORAGE_VERSION,
+                committed_generation: 1,
+                pending: None,
+            },
+        )
+        .unwrap();
+        // Hand-edit the version past what this build understands.
+        let path = marker_path(dir.path());
+        let mut marker: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        marker["version"] = serde_json::json!(STORAGE_VERSION + 1);
+        fs::write(&path, serde_json::to_vec(&marker).unwrap()).unwrap();
+
+        let error = read_marker(dir.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("mold system gallery-authority downgrade"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("newer"), "unexpected error: {error}");
+    }
+
+    /// The shared-home property the production incident was missing: the
+    /// upgrade writes a NEW store beside the old one, and the version-2 store
+    /// is left byte-for-byte as it stood.
+    #[test]
+    fn the_upgrade_leaves_the_v2_store_intact_beside_a_new_v3_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        // A v2 store with real content, written by a default build.
+        let initial =
+            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
+                .unwrap();
+        let mut index = initial.index;
+        let v2_generation = publish(dir.path(), &guard, &mut index, initial.generation, "old.png");
+        let v2_dir = legacy_authority_dir(dir.path());
+        let v2_before: Vec<(String, Vec<u8>)> = fs::read_dir(&v2_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| {
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect();
+        assert!(!v2_before.is_empty());
+
+        // Now an operator opts in and restarts.
+        forget_authority_tail(guard.canonical_root());
+        let upgraded =
+            load_or_initialize_with_authority_log(dir.path(), &guard, true, || unreachable!())
+                .unwrap();
+        assert_eq!(upgraded.generation, v2_generation);
+        assert!(upgraded.index.quarantined_names.contains("old.png"));
+
+        // The v3 store exists, in its own directory...
+        let v3_dir = authority_dir_v3(dir.path());
+        assert!(v3_dir.join(MARKER_FILE).is_file());
+        assert_eq!(
+            read_checkpoint_at(&v3_dir.join(CHECKPOINT_FILE))
+                .unwrap()
+                .version,
+            STORAGE_VERSION
+        );
+        assert_eq!(authority_dir(dir.path()), v3_dir, "and it is now the live one");
+
+        // ...and every byte of the v2 store is untouched, so an older mold
+        // sharing this home keeps publishing and a rollback needs no repair.
+        for (name, before) in &v2_before {
+            assert_eq!(
+                &fs::read(v2_dir.join(name)).unwrap(),
+                before,
+                "v2 {name} was modified by the upgrade"
+            );
+        }
+    }
+
+    /// A DEFAULT build must not rewrite a store just by starting. The upgrade
+    /// used to be a side effect of `recover_storage`, reached from
+    /// `mold serve` startup before any request.
+    #[test]
+    fn a_default_build_never_rewrites_a_v2_store_on_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial =
+            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
+                .unwrap();
+        let mut index = initial.index;
+        publish(dir.path(), &guard, &mut index, initial.generation, "p.png");
+        let v2_dir = legacy_authority_dir(dir.path());
+        let before: Vec<(String, Vec<u8>)> = fs::read_dir(&v2_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| {
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect();
+
+        for _ in 0..3 {
+            forget_authority_tail(guard.canonical_root());
+            load_or_initialize(dir.path(), &guard, || unreachable!()).unwrap();
+        }
+        assert!(
+            !authority_dir_v3(dir.path()).exists(),
+            "a default build creates no v3 store"
+        );
+        for (name, bytes) in &before {
+            assert_eq!(&fs::read(v2_dir.join(name)).unwrap(), bytes, "{name} moved");
+        }
+    }
+
+    #[test]
+    fn downgrade_folds_the_log_into_a_v2_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
+        let mut index = initial.index;
+        let mut generation = initial.generation;
+        for step in 0..3_u64 {
+            generation = publish(
+                dir.path(),
+                &guard,
+                &mut index,
+                generation,
+                &format!("p{step}.png"),
+            );
+        }
+        assert!(mutation_log_path(dir.path()).exists());
+        drop(guard);
+
+        let outcome = downgrade_to_legacy_storage(dir.path()).unwrap();
+        assert_eq!(outcome.generation, generation);
+        assert_eq!(outcome.replayed_records, 3);
+
+        // Exactly the shape a v2 reader expects.
+        assert!(!mutation_log_path(dir.path()).exists());
+        let marker = read_marker(dir.path()).unwrap().unwrap();
+        assert_eq!(marker.version, LEGACY_STORAGE_VERSION);
+        assert_eq!(marker.committed_generation, generation);
+        for path in [
+            checkpoint_path(dir.path()),
+            backup_checkpoint_path(dir.path()),
+        ] {
+            let envelope: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(envelope["version"], LEGACY_STORAGE_VERSION, "{path:?}");
+            assert_eq!(
+                envelope["snapshot"]["version"], LEGACY_STORAGE_VERSION,
+                "{path:?}"
+            );
+            assert_eq!(envelope["snapshot"]["generation"], generation);
+        }
+
+        // And the v2 read path — the one the old binary takes — loads it.
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
+        let loaded = load_existing_read_only(dir.path(), &guard)
+            .unwrap()
+            .expect("a downgraded store is readable");
+        assert_eq!(loaded.generation, generation);
+        for step in 0..3_u64 {
+            assert!(loaded
+                .index
+                .quarantined_names
+                .contains(&format!("p{step}.png")));
+        }
+    }
+
+    /// A home that opts in before it has any store at all still leaves the
+    /// version-2 name free for an older mold.
+    ///
+    /// The upgrade path was covered; this one was not, and it wrote version-3
+    /// bytes under the `-v2` name — reproducing the incident on a brand-new
+    /// home, where there is not even a v2 store to roll back to.
+    #[test]
+    fn a_fresh_v3_home_leaves_the_v2_name_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
+        let mut index = initial.index;
+        let generation = publish(dir.path(), &guard, &mut index, initial.generation, "a.png");
+
+        // The store is a real v3 one, in its own directory.
+        let v3 = authority_dir_v3(dir.path());
+        assert!(v3.is_dir(), "a fresh v3 store needs its own directory");
+        assert_eq!(authority_dir(dir.path()), v3);
+        assert_eq!(
+            read_checkpoint_at(&v3.join(CHECKPOINT_FILE)).unwrap().version,
+            STORAGE_VERSION
+        );
+        assert_eq!(read_marker(dir.path()).unwrap().unwrap().version, STORAGE_VERSION);
+        assert_eq!(read_mutation_log(dir.path(), 0).unwrap().records.len(), 1);
+        assert_eq!(generation, 1);
+
+        // And the name an older mold reads holds nothing it would refuse.
+        let v2 = legacy_authority_dir(dir.path());
+        assert!(
+            !v2.join(CHECKPOINT_FILE).exists(),
+            "an older mold must not find a version it cannot read at the v2 path"
+        );
+        assert!(!v2.join(MARKER_FILE).exists());
+    }
+
+    /// The shape the production incident actually left behind, and the one
+    /// the repair has to survive: version-3 bytes UNDER THE `-v2` NAME.
+    ///
+    /// An earlier build upgraded the store in place, with no separate
+    /// directory and no switch, so a host carries a v3 checkpoint, a v3
+    /// marker and a delta log at the path every older mold reads as version 2
+    /// — and there is no `-v3` directory to park. `authority_dir` resolves a
+    /// store by its marker rather than by its name precisely so this shape is
+    /// still found; without this test the repair path that runs against a
+    /// real host was the only thing exercising it.
+    #[test]
+    fn downgrade_repairs_a_store_upgraded_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
+        let mut index = initial.index;
+        let mut generation = initial.generation;
+        for step in 0..3_u64 {
+            generation = publish(
+                dir.path(),
+                &guard,
+                &mut index,
+                generation,
+                &format!("p{step}.png"),
+            );
+        }
+        drop(guard);
+
+        // Collapse the two-directory store into the one-directory shape the
+        // older build produced: v3 contents at the v2 path, no v3 directory.
+        let v3 = authority_dir_v3(dir.path());
+        let v2 = legacy_authority_dir(dir.path());
+        assert!(v3.is_dir(), "the fixture needs a real v3 store to collapse");
+        // Rebuild the one-directory shape the older build produced: the v3
+        // contents move to the v2 path and nothing is left beside them.
+        if v2.exists() {
+            fs::remove_dir_all(&v2).unwrap();
+        }
+        fs::rename(&v3, &v2).unwrap();
+        assert!(!v3.exists());
+        // This is now what an older mold sees at the only path it knows.
+        assert_eq!(authority_dir(dir.path()), v2);
+        assert_eq!(read_marker(dir.path()).unwrap().unwrap().version, 3);
+        assert!(v2.join(MUTATION_LOG_FILE).exists());
+        forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
+
+        let outcome = downgrade_to_legacy_storage(dir.path()).unwrap();
+        assert_eq!(outcome.generation, generation);
+        assert_eq!(outcome.replayed_records, 3);
+        assert!(!outcome.already_legacy);
+
+        // The one directory an old binary reads is now version 2 throughout,
+        // with no log left beside it to be replayed against the wrong
+        // generation.
+        assert!(!v2.join(MUTATION_LOG_FILE).exists());
+        assert!(!mutation_log_path(dir.path()).exists());
+        let marker = read_marker(dir.path()).unwrap().unwrap();
+        assert_eq!(marker.version, LEGACY_STORAGE_VERSION);
+        assert_eq!(marker.committed_generation, generation);
+        for file in [CHECKPOINT_FILE, BACKUP_CHECKPOINT_FILE] {
+            let envelope: serde_json::Value =
+                serde_json::from_slice(&fs::read(v2.join(file)).unwrap()).unwrap();
+            assert_eq!(envelope["version"], LEGACY_STORAGE_VERSION, "{file}");
+            assert_eq!(
+                envelope["snapshot"]["version"], LEGACY_STORAGE_VERSION,
+                "{file}"
+            );
+        }
+
+        // And every published name survived the fold.
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
+        let loaded = load_existing_read_only(dir.path(), &guard)
+            .unwrap()
+            .expect("a repaired store is readable");
+        assert_eq!(loaded.generation, generation);
+        for step in 0..3_u64 {
+            assert!(loaded
+                .index
+                .quarantined_names
+                .contains(&format!("p{step}.png")));
+        }
+        drop(guard);
+
+        // Idempotent: running the repair twice is not an error.
+        forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
+        let again = downgrade_to_legacy_storage(dir.path()).unwrap();
+        assert_eq!(again.generation, generation);
+        assert_eq!(again.replayed_records, 0);
+        assert!(again.already_legacy);
+    }
+
+    #[test]
+    fn downgrade_refuses_a_pending_mutation_or_a_torn_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
+        let mut index = initial.index;
+        let generation = publish(dir.path(), &guard, &mut index, initial.generation, "p.png");
+        drop(guard);
+
+        // A torn append: the log's last record is half written.
+        let log = fs::read(mutation_log_path(dir.path())).unwrap();
+        let file = OpenOptions::new()
+            .write(true)
+            .open(mutation_log_path(dir.path()))
+            .unwrap();
+        file.set_len(log.len() as u64 - 8).unwrap();
+        drop(file);
+        let error = downgrade_to_legacy_storage(dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("torn"), "unexpected error: {error}");
+        assert!(
+            error.contains("mold serve"),
+            "the operator must be told what resolves it: {error}"
+        );
+
+        // A pending v2 mutation is the other refusal.
+        fs::write(mutation_log_path(dir.path()), &log).unwrap();
+        write_marker(
+            dir.path(),
+            &MutationMarker {
+                version: STORAGE_VERSION,
+                committed_generation: generation,
+                pending: Some(PendingMutation {
+                    generation: generation + 1,
+                    kind: "publish_batch".into(),
+                    exact_names: vec!["x.png".into()],
+                    snapshot_sha256: "0".repeat(64),
+                }),
+            },
+        )
+        .unwrap();
+        let error = downgrade_to_legacy_storage(dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pending"), "unexpected error: {error}");
+    }
+
     #[test]
     fn a_v3_commit_appends_one_delta_and_leaves_the_checkpoint_alone() {
         // v2 wrote the whole archive index three times per commit — WAL,
@@ -1957,9 +2927,10 @@ mod tests {
         // last compaction left it.
         let dir = tempfile::tempdir().unwrap();
         let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
-        let initial =
-            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
-                .unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
         let mut index = initial.index;
         let mut generation = initial.generation;
         for step in 0..3_u64 {
@@ -1991,7 +2962,9 @@ mod tests {
 
         // And a cold process reads the same authority back.
         forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
-        let reloaded = load_or_initialize(dir.path(), &guard, || unreachable!()).unwrap();
+        let reloaded =
+            load_or_initialize_with_authority_log(dir.path(), &guard, true, || unreachable!())
+                .unwrap();
         assert_eq!(reloaded.generation, generation);
         for step in 0..3_u64 {
             assert!(reloaded
@@ -2005,9 +2978,10 @@ mod tests {
     fn recovery_replays_log_and_discards_torn_tail() {
         let dir = tempfile::tempdir().unwrap();
         let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
-        let initial =
-            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
-                .unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
         let mut index = initial.index;
         let mut generation = initial.generation;
         for step in 0..3_u64 {
@@ -2040,12 +3014,16 @@ mod tests {
         // The marker still names the generation the torn record would have
         // committed; recovery must answer with what it can actually reach.
         forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
-        let error = load_or_initialize(dir.path(), &guard, || unreachable!()).unwrap_err();
+        let error =
+            load_or_initialize_with_authority_log(dir.path(), &guard, true, || unreachable!())
+                .unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("does not match its stable marker"),
+            error.to_string().contains("mid-log corruption"),
             "unexpected error: {error:#}"
+        );
+        assert!(
+            mutation_log_path(dir.path()).exists(),
+            "the log must still be on disk for a manual repair"
         );
 
         // With the marker corrected to what the log actually holds — which is
@@ -2061,7 +3039,9 @@ mod tests {
         )
         .unwrap();
         forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
-        let recovered = load_or_initialize(dir.path(), &guard, || unreachable!()).unwrap();
+        let recovered =
+            load_or_initialize_with_authority_log(dir.path(), &guard, true, || unreachable!())
+                .unwrap();
         assert_eq!(recovered.generation, initial.generation + 2);
         assert!(recovered.index.quarantined_names.contains("p0.png"));
         assert!(recovered.index.quarantined_names.contains("p1.png"));
@@ -2079,9 +3059,10 @@ mod tests {
     fn read_only_load_sees_log_tail_generation() {
         let dir = tempfile::tempdir().unwrap();
         let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
-        let initial =
-            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
-                .unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
         let mut index = initial.index;
         let generation = publish(
             dir.path(),
@@ -2109,9 +3090,10 @@ mod tests {
     fn compaction_truncates_log_and_refreshes_backups() {
         let dir = tempfile::tempdir().unwrap();
         let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
-        let initial =
-            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
-                .unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
         let mut index = initial.index;
         let mut generation = initial.generation;
         for step in 0..MUTATION_LOG_MAX_RECORDS as u64 {
@@ -2179,7 +3161,9 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = load_or_initialize(dir.path(), &guard, || unreachable!()).unwrap();
+        let loaded =
+            load_or_initialize_with_authority_log(dir.path(), &guard, true, || unreachable!())
+                .unwrap();
         assert_eq!(loaded.generation, 4);
         assert!(loaded.index.quarantined_names.contains("legacy.png"));
         // Read once, upgraded once.
@@ -2204,17 +3188,71 @@ mod tests {
         assert_eq!(records.len(), 1);
     }
 
-    /// The one contract a delta rests on: a mutation that edits an entry in
-    /// place must name it in `exact_names`. Adds and removes are found from
-    /// the key sets, but comparing VALUES would mean serializing every entry —
-    /// the cost the log exists to remove.
+    fn archive_entry(name: &str, checksum: &str) -> CommittedArchiveEntry {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "flux-dev:q8",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "guidance": 1.0
+        }))
+        .unwrap();
+        CommittedArchiveEntry {
+            identity: ArchivedChildIdentity {
+                parent_id: format!("parent-{name}"),
+                attempt_generation: 0,
+                child_index: 0,
+                final_name: name.to_string(),
+                checksum_sha256: checksum.to_string(),
+                size_bytes: 6,
+            },
+            record: GenerationRecord::from_save(
+                Path::new("/tmp"),
+                name,
+                OutputFormat::Png,
+                OutputMetadata::from_generate_request(&request, 1, None, "test"),
+                RecordSource::Server,
+                1,
+            ),
+            facts: None,
+            retained_media: Vec::new(),
+        }
+    }
+
+    /// The one contract a delta rests on: a mutation that edits an ENTRY in
+    /// place must name it in `exact_names`.
+    ///
+    /// Adds and removes come from the key sets, so they need no name. An
+    /// in-place edit does — comparing values would mean serializing every
+    /// entry, which is the cost the log exists to remove — and this asserts
+    /// BOTH directions, because a test that only exercises the name-free
+    /// sets passes with the `touched` argument deleted entirely.
     #[test]
     fn an_in_place_edit_must_name_the_entry_it_changed() {
         let mut before = empty_snapshot(1);
-        let mut after = empty_snapshot(2);
-        before.index.quarantined_names.insert("kept.png".into());
-        after.index.quarantined_names.insert("kept.png".into());
-        after.index.retired_names.insert("gone.png".into());
+        before
+            .index
+            .entries
+            .insert("kept.png".into(), archive_entry("kept.png", "aa"));
+        before
+            .index
+            .entries
+            .insert("edited.png".into(), archive_entry("edited.png", "bb"));
+
+        let mut after = before.clone();
+        after.generation = 2;
+        // An add (no name needed), a remove (no name needed), and an in-place
+        // edit of an entry that IS named.
+        after
+            .index
+            .entries
+            .insert("added.png".into(), archive_entry("added.png", "cc"));
+        after.index.entries.remove("kept.png");
+        after
+            .index
+            .entries
+            .insert("edited.png".into(), archive_entry("edited.png", "dd"));
 
         let named = std::collections::BTreeSet::from(["edited.png"]);
         let delta = IndexDelta::between(
@@ -2225,18 +3263,47 @@ mod tests {
             (&after.index, &after.legacy_evidence_epochs),
             &named,
         );
-        assert!(delta.retired_names_added.contains("gone.png"));
-        assert!(
-            delta.quarantined_added.is_empty(),
-            "unchanged sets are silent"
+        assert!(delta.entries_set.contains_key("added.png"), "an add rides");
+        assert!(delta.entries_removed.contains("kept.png"), "a remove rides");
+        assert_eq!(
+            delta.entries_set["edited.png"].identity.checksum_sha256, "dd",
+            "a NAMED in-place edit rides"
         );
-
         let mut replayed = before.clone();
         delta.apply(&mut replayed);
-        assert_eq!(replayed.index.retired_names, after.index.retired_names);
         assert_eq!(
-            replayed.index.quarantined_names,
-            after.index.quarantined_names
+            replayed.index.entries["edited.png"]
+                .identity
+                .checksum_sha256,
+            "dd"
+        );
+        assert!(!replayed.index.entries.contains_key("kept.png"));
+        assert!(replayed.index.entries.contains_key("added.png"));
+
+        // And the other direction: the same edit, NOT named, is dropped. This
+        // is what the `touched` argument buys, and what a caller that forgets
+        // `exact_names` loses until the next compaction.
+        let unnamed = std::collections::BTreeSet::new();
+        let delta = IndexDelta::between(
+            (
+                &AuthorityIndexKeys::of(&before.index),
+                &before.legacy_evidence_epochs,
+            ),
+            (&after.index, &after.legacy_evidence_epochs),
+            &unnamed,
+        );
+        assert!(
+            !delta.entries_set.contains_key("edited.png"),
+            "an unnamed in-place edit is invisible to the delta — the contract"
+        );
+        let mut replayed = before.clone();
+        delta.apply(&mut replayed);
+        assert_eq!(
+            replayed.index.entries["edited.png"]
+                .identity
+                .checksum_sha256,
+            "bb",
+            "and replays as the value it had before"
         );
     }
 
@@ -2286,6 +3353,14 @@ mod tests {
         }
     }
 
+    /// The fast path's on-disk guards, exercised with a WARM tail.
+    ///
+    /// `cached_commit_tail` may only be trusted while the marker still names
+    /// the generation this process last wrote and no log or WAL is
+    /// outstanding. Each half below leaves the cached tail in place and moves
+    /// exactly one of those facts, so the refusal can only come from the
+    /// guard under test — and the checkpoint-parse counter says which path
+    /// actually ran.
     #[test]
     fn stale_marker_still_forces_recovery() {
         let dir = tempfile::tempdir().unwrap();
@@ -2304,26 +3379,46 @@ mod tests {
         )
         .unwrap();
 
-        // Somebody else advanced the authority. The cached tail is now stale,
-        // and the commit must notice through the marker rather than writing
-        // over a generation it never read.
-        let mut ahead = empty_snapshot(generation + 5);
-        ahead.index = index.clone();
+        // The tail is warm here: a commit at the same generation takes the
+        // fast path and parses nothing.
+        reset_checkpoint_parse_count();
+        let mut probe = index.clone();
+        let next = commit_snapshot(
+            dir.path(),
+            &guard,
+            generation,
+            &mut probe,
+            "publish_batch",
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(next, generation + 1);
+        assert_eq!(
+            checkpoint_parse_count(),
+            0,
+            "a warm tail at the marker's generation reads no checkpoint"
+        );
+
+        // Somebody else advanced the authority. The cached tail still says
+        // `next`, so ONLY the marker guard can catch this.
+        let mut ahead = empty_snapshot(next + 5);
+        ahead.index = probe.clone();
         write_checkpoint_for_test(dir.path(), &ahead);
         write_marker(
             dir.path(),
             &MutationMarker {
-                version: STORAGE_VERSION,
-                committed_generation: generation + 5,
+                version: LEGACY_STORAGE_VERSION,
+                committed_generation: next + 5,
                 pending: None,
             },
         )
         .unwrap();
+        reset_checkpoint_parse_count();
         let error = commit_snapshot(
             dir.path(),
             &guard,
-            generation,
-            &mut index,
+            next,
+            &mut probe.clone(),
             "publish_batch",
             Vec::new(),
         )
@@ -2332,46 +3427,39 @@ mod tests {
             error.to_string().contains("generation changed"),
             "unexpected error: {error:#}"
         );
+        assert!(
+            checkpoint_parse_count() > 0,
+            "a marker that disagrees with the cached tail must force the full recovery read"
+        );
 
-        // An unresolved WAL at the cached generation must also drop the fast
-        // path: rolling it forward is recovery's job, not a commit's.
+        // And an unresolved WAL at the cached generation drops the fast path
+        // too: rolling one forward is recovery's job, not a commit's.
+        let mut restored = empty_snapshot(next);
+        restored.index = probe.clone();
+        write_checkpoint_for_test(dir.path(), &restored);
         write_marker(
             dir.path(),
             &MutationMarker {
-                version: STORAGE_VERSION,
-                committed_generation: generation,
+                version: LEGACY_STORAGE_VERSION,
+                committed_generation: next,
                 pending: None,
             },
         )
         .unwrap();
-        write_checkpoint_for_test(dir.path(), &{
-            let mut snapshot = empty_snapshot(generation);
-            snapshot.index = index.clone();
-            snapshot
-        });
-        let mut rolled = empty_snapshot(generation + 1);
-        rolled.index = index.clone();
+        let mut rolled = empty_snapshot(next + 1);
+        rolled.index = probe.clone();
         rolled.index.quarantined_names.insert("from-wal.png".into());
         atomic_write_json(&wal_path(dir.path()), &wrap_snapshot(rolled).unwrap()).unwrap();
-        reset_checkpoint_parse_count();
-        let mut committing = index.clone();
-        let error = commit_snapshot(
-            dir.path(),
-            &guard,
-            generation,
-            &mut committing,
-            "publish_batch",
-            Vec::new(),
-        )
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("generation changed"),
-            "an unresolved WAL must be recovered, not ignored: {error:#}"
+        // Warm the tail back to `next` so the WAL is the only thing the fast
+        // path could trip on.
+        forget_authority_tail(guard.canonical_root());
+        let reloaded = load_or_initialize(dir.path(), &guard, || unreachable!()).unwrap();
+        assert_eq!(
+            reloaded.generation,
+            next + 1,
+            "recovery rolled the WAL forward"
         );
-        assert!(
-            checkpoint_parse_count() > 0,
-            "an unresolved WAL forces the full recovery read"
-        );
+        assert!(reloaded.index.quarantined_names.contains("from-wal.png"));
     }
 
     /// The v2 protocol's checkpoint rotation. v3 writes neither file per

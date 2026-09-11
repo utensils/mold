@@ -10,6 +10,37 @@ pub enum SystemAction {
         #[command(subcommand)]
         action: MetalMemoryAction,
     },
+    /// Inspect or downgrade this machine's gallery archive authority storage
+    GalleryAuthority {
+        #[command(subcommand)]
+        action: GalleryAuthorityAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GalleryAuthorityAction {
+    /// Show the store's on-disk format and whether a downgrade is needed
+    Status {
+        /// Gallery directory; defaults to this machine's configured output dir
+        #[arg(long, value_name = "PATH")]
+        output_dir: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rewrite a version-3 store as version 2 so an older mold can publish
+    ///
+    /// Storage version 3 is opt-in (`gallery.authority_log`) because a mold
+    /// older than 0.29 reads only version 2 and refuses to publish against a
+    /// v3 store. Run this with the NEWER build, while no server is writing,
+    /// before rolling one back or before starting an older binary against a
+    /// shared $MOLD_HOME.
+    Downgrade {
+        /// Gallery directory; defaults to this machine's configured output dir
+        #[arg(long, value_name = "PATH")]
+        output_dir: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -36,12 +67,113 @@ pub enum MetalMemoryAction {
 }
 
 pub fn run(action: &SystemAction) -> Result<()> {
-    let SystemAction::MetalMemory { action } = action;
     match action {
-        MetalMemoryAction::Status { json } => status(*json),
-        MetalMemoryAction::Set { mib, persist } => change(*mib, *persist),
-        MetalMemoryAction::Reset { persist } => change(0, *persist),
+        SystemAction::MetalMemory { action } => match action {
+            MetalMemoryAction::Status { json } => status(*json),
+            MetalMemoryAction::Set { mib, persist } => change(*mib, *persist),
+            MetalMemoryAction::Reset { persist } => change(0, *persist),
+        },
+        SystemAction::GalleryAuthority { action } => match action {
+            GalleryAuthorityAction::Status { output_dir, json } => {
+                gallery_authority_status(output_dir.as_deref(), *json)
+            }
+            GalleryAuthorityAction::Downgrade { output_dir, json } => {
+                gallery_authority_downgrade(output_dir.as_deref(), *json)
+            }
+        },
     }
+}
+
+/// Resolve the gallery this machine publishes to.
+///
+/// `mold system` routes before config/DB startup and always targets THIS
+/// machine — the store is a directory, not a server — so the config is loaded
+/// here rather than inherited.
+fn resolve_output_dir(explicit: Option<&std::path::Path>) -> Result<std::path::PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(path.to_path_buf());
+    }
+    let config = mold_core::Config::load_or_default();
+    let dir = config.effective_output_dir();
+    anyhow::ensure!(
+        !dir.as_os_str().is_empty(),
+        "this machine has no gallery output directory configured; pass --output-dir"
+    );
+    Ok(dir)
+}
+
+fn gallery_authority_status(output_dir: Option<&std::path::Path>, json: bool) -> Result<()> {
+    let dir = resolve_output_dir(output_dir)?;
+    let status = mold_server::gallery_authority::storage_status(&dir)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+    if !status.present {
+        println!("No gallery archive authority in {}", dir.display());
+        return Ok(());
+    }
+    println!("Gallery archive authority in {}", dir.display());
+    println!(
+        "  storage version: checkpoint {}, marker {}",
+        status
+            .checkpoint_version
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unreadable".into()),
+        status
+            .marker_version
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "absent".into()),
+    );
+    println!(
+        "  generation: {}",
+        status
+            .generation
+            .map(|g| g.to_string())
+            .unwrap_or_else(|| "unknown".into())
+    );
+    println!(
+        "  mutation log: {} record(s), {} bytes",
+        status.log_records, status.log_bytes
+    );
+    if status.pending_mutation {
+        println!("  pending mutation: yes — start `mold serve` once to resolve it");
+    }
+    if status.torn_log_tail {
+        println!("  torn log tail: yes — start `mold serve` once to resolve it");
+    }
+    if status.marker_version == Some(3) || status.checkpoint_version == Some(3) {
+        println!(
+            "  a mold older than 0.29 cannot publish against this store; \
+             run `mold system gallery-authority downgrade` before rolling one back"
+        );
+    }
+    Ok(())
+}
+
+fn gallery_authority_downgrade(output_dir: Option<&std::path::Path>, json: bool) -> Result<()> {
+    let dir = resolve_output_dir(output_dir)?;
+    let outcome = mold_server::gallery_authority::downgrade_to_legacy_storage(&dir)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+        return Ok(());
+    }
+    if outcome.already_legacy {
+        println!(
+            "{} already holds a version-2 gallery archive authority at generation {}",
+            dir.display(),
+            outcome.generation
+        );
+        return Ok(());
+    }
+    println!(
+        "Downgraded the gallery archive authority in {} to storage version 2 at generation {} \
+         ({} delta record(s) folded in). Verified by reading it back.",
+        dir.display(),
+        outcome.generation,
+        outcome.replayed_records
+    );
+    Ok(())
 }
 
 fn status(json: bool) -> Result<()> {

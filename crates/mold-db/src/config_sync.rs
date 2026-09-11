@@ -244,9 +244,10 @@ pub fn hydrate_queue_from_db(
     }
 }
 
-/// Persist the gallery slice (`gallery.trash_retention_days`) into
-/// `settings`. Out-of-range values are rejected here too so a direct caller
-/// cannot store what `mold_core::config_keys::set_value` would refuse.
+/// Persist the gallery slice (`gallery.trash_retention_days`,
+/// `gallery.authority_log`) into `settings`. Out-of-range values are rejected
+/// here too so a direct caller cannot store what
+/// `mold_core::config_keys::set_value` would refuse.
 pub fn save_gallery_to_db(db: &MetadataDb, gallery: GallerySettings) -> Result<()> {
     anyhow::ensure!(
         gallery.trash_retention_days <= mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS,
@@ -254,9 +255,14 @@ pub fn save_gallery_to_db(db: &MetadataDb, gallery: GallerySettings) -> Result<(
         keys::GALLERY_TRASH_RETENTION_DAYS,
         mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS
     );
-    Settings::new(db).set_int(
+    let settings = Settings::new(db);
+    settings.set_int(
         keys::GALLERY_TRASH_RETENTION_DAYS,
         i64::from(gallery.trash_retention_days),
+    )?;
+    settings.set_int(
+        keys::GALLERY_AUTHORITY_LOG,
+        i64::from(gallery.authority_log),
     )
 }
 
@@ -265,8 +271,13 @@ pub fn save_gallery_to_db(db: &MetadataDb, gallery: GallerySettings) -> Result<(
 /// every config load. Returns true if a row applied.
 pub fn hydrate_gallery_from_db(db: &MetadataDb, gallery: &mut GallerySettings) -> Result<bool> {
     let s = Settings::new(db);
+    let mut applied = false;
+    if let Some(value) = s.get_int(keys::GALLERY_AUTHORITY_LOG)? {
+        gallery.authority_log = value != 0;
+        applied = true;
+    }
     let Some(value) = s.get_int(keys::GALLERY_TRASH_RETENTION_DAYS)? else {
-        return Ok(false);
+        return Ok(applied);
     };
     match u32::try_from(value) {
         Ok(days) if days <= mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS => {
@@ -279,7 +290,7 @@ pub fn hydrate_gallery_from_db(db: &MetadataDb, gallery: &mut GallerySettings) -
                 keys::GALLERY_TRASH_RETENTION_DAYS,
                 mold_core::config::GALLERY_TRASH_RETENTION_MAX_DAYS
             );
-            Ok(false)
+            Ok(applied)
         }
     }
 }
@@ -923,6 +934,7 @@ mod tests {
             &db,
             GallerySettings {
                 trash_retention_days: 0,
+                authority_log: false,
             },
         )
         .unwrap();
@@ -933,6 +945,7 @@ mod tests {
             &db,
             GallerySettings {
                 trash_retention_days: 3651,
+                authority_log: false,
             },
         )
         .unwrap_err();

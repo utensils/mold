@@ -28,6 +28,12 @@ pub enum ValueType {
 /// purges it. `0` keeps trashed prints forever. Profile-scoped DB key.
 pub const GALLERY_TRASH_RETENTION_DAYS_KEY: &str = "gallery.trash_retention_days";
 pub const GALLERY_TRASH_RETENTION_DAYS_ENV: &str = "MOLD_GALLERY_TRASH_RETENTION_DAYS";
+/// Whether the gallery archive authority writes its version-3 delta log.
+/// Opt-in: a v3 store cannot be published to by a mold older than 0.29, so
+/// this is only safe once every binary sharing the home is new enough.
+/// Profile-scoped DB key, default false.
+pub const GALLERY_AUTHORITY_LOG_KEY: &str = "gallery.authority_log";
+pub const GALLERY_AUTHORITY_LOG_ENV: &str = "MOLD_GALLERY_AUTHORITY_LOG";
 /// Days a held durable queue row is kept before the sweeper purges it, and
 /// days a fully settled batch summary is kept after its last child settled.
 /// `0` keeps both forever. Profile-scoped DB key.
@@ -196,6 +202,12 @@ pub const ALL_KEYS: &[ConfigKeyInfo] = &[
         key: GALLERY_TRASH_RETENTION_DAYS_KEY,
         value_type: ValueType::U32,
         env_var: Some(GALLERY_TRASH_RETENTION_DAYS_ENV),
+        section: "Gallery",
+    },
+    ConfigKeyInfo {
+        key: GALLERY_AUTHORITY_LOG_KEY,
+        value_type: ValueType::Bool,
+        env_var: Some(GALLERY_AUTHORITY_LOG_ENV),
         section: "Gallery",
     },
     // Queue
@@ -500,6 +512,7 @@ pub fn get_static_value(config: &Config, key: &str) -> Result<ConfigValue> {
         "scheduler.warm_wait_max_ms" => ConfigValue::U32(config.scheduler.warm_wait_max_ms),
         // Gallery
         GALLERY_TRASH_RETENTION_DAYS_KEY => ConfigValue::U32(config.gallery.trash_retention_days),
+        GALLERY_AUTHORITY_LOG_KEY => ConfigValue::Bool(config.gallery.authority_log),
         // Queue
         QUEUE_HELD_RETENTION_DAYS_KEY => ConfigValue::U32(config.queue.held_retention_days),
         // Generate
@@ -687,6 +700,9 @@ fn set_static_value(config: &mut Config, key: &str, raw: &str) -> Result<()> {
             config.gallery.trash_retention_days =
                 parse_u32(raw, 0, crate::config::GALLERY_TRASH_RETENTION_MAX_DAYS, key)
                     .map_err(|error| anyhow!("{error} Use 0 to keep trashed prints forever."))?;
+        }
+        GALLERY_AUTHORITY_LOG_KEY => {
+            config.gallery.authority_log = parse_bool(raw, key)?;
         }
         // Queue
         QUEUE_HELD_RETENTION_DAYS_KEY => {
