@@ -2041,18 +2041,24 @@ pub enum Flux2CfgBatching {
     /// Every weight is read once for both branches, which on a bandwidth-bound
     /// tier is most of the step.
     Batched,
-    /// Two batch-1 forwards. The historical path, and the fallback whenever the
-    /// prompts differ in length or the card cannot hold the doubled
-    /// activations.
+    /// Two batch-1 forwards. The historical path, and the fallback whenever
+    /// the card cannot hold the doubled activations — or, defensively, if the
+    /// two branches ever arrive at different lengths.
     Sequential,
 }
 
 impl Flux2CfgBatching {
     /// The sentence the progress stream publishes for this choice.
+    ///
+    /// `Sequential` no longer names a cause: since every Klein prompt is
+    /// padded to a fixed 512 rows, the length gate is unreachable in practice
+    /// and the only reason a real render takes two forwards is the VRAM
+    /// budget — which the line would have been reporting as "prompts differ in
+    /// length", a sentence that was never true again.
     pub(crate) fn progress_note(self) -> &'static str {
         match self {
             Self::Batched => "one batched forward per step",
-            Self::Sequential => "two forwards per step (prompts differ in length)",
+            Self::Sequential => "two forwards per step",
         }
     }
 }
@@ -2080,12 +2086,19 @@ pub fn flux2_cfg_batching(
 /// The resolved batching for a guided render: the token-length gate, then the
 /// budget.
 ///
-/// The length gate is not a budget question and cannot be folded into one.
-/// `sampling.rs` does not pad the encoder output to a fixed width, so a
+/// The length gate is not a budget question and cannot be folded into one: a
 /// negative prompt of a different length produces a different `txt` sequence
 /// and the two branches cannot be concatenated on the batch axis at all —
 /// upstream's `cat([txt_empty, txt_prompt])` (`flux2/sampling.py:368`) assumes
-/// a padded encoder that mold does not have.
+/// a padded encoder.
+///
+/// mold now HAS that padded encoder: every Klein prompt is truncated and
+/// right-padded to `FLUX2_KLEIN_MAX_LENGTH` rows before it leaves
+/// `encoders::qwen3`, so both branches are 512 long and the gate passes for
+/// every real render. It stays as a structural guard rather than being
+/// deleted — the concatenation below is only valid when it holds, and a
+/// future conditioning path (a cached embedding from another contract, an
+/// encoder that declines to pad) must fall back rather than fail mid-step.
 pub fn flux2_cfg_batching_for(
     positive_txt_tokens: usize,
     negative_txt_tokens: usize,

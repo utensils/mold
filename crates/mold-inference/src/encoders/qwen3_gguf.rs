@@ -431,10 +431,16 @@ impl GgufQwen3Encoder {
     /// Run forward pass and collect hidden states from specific layers.
     /// Returns outputs stacked and reshaped: (B, seq_len, num_layers * hidden_size).
     /// Used by Flux.2 Klein which needs layers 9, 18, 27 stacked to 7680-dim.
+    ///
+    /// `attention` names the real (non-pad) positions of a fixed-width
+    /// prompt. When present the causal mask additionally excludes the padded
+    /// KEYS, which is the mask BFL hands the Qwen3 language model
+    /// (`flux2/text_encoder.py:408-416`).
     pub fn forward_with_layers(
         &mut self,
         input_ids: &Tensor,
         layer_indices: &[usize],
+        attention: Option<&[bool]>,
     ) -> Result<Tensor> {
         if layer_indices.is_empty() {
             anyhow::bail!("layer_indices must not be empty");
@@ -450,7 +456,18 @@ impl GgufQwen3Encoder {
         let (_batch, seq_len) = input_ids.dims2()?;
         let mut xs = self.embedding.forward(input_ids)?;
         let (cos, sin) = compute_rope(seq_len, xs.device())?;
-        let mask = causal_mask(seq_len, xs.dtype(), xs.device())?;
+        let mask = match attention {
+            Some(attention) => {
+                if attention.len() != seq_len {
+                    anyhow::bail!(
+                        "Qwen3 attention mask covers {} positions but the input has {seq_len}",
+                        attention.len()
+                    );
+                }
+                super::qwen3::causal_padding_mask(attention, xs.dtype(), xs.device())?
+            }
+            None => causal_mask(seq_len, xs.dtype(), xs.device())?,
+        };
 
         let n_run = max_layer + 1;
         let mut collected: Vec<Tensor> = Vec::with_capacity(layer_indices.len());

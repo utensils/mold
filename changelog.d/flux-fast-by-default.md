@@ -79,6 +79,21 @@
   VAE's mid-block attention no longer materialises a full 16384x16384 score
   matrix during decode — the spike that used to push a loaded card into the
   much slower tiled-decode recovery.
+- **Every FLUX.2 render's conditioning now matches Black Forest Labs.** Two
+  things were wrong and both changed the picture. Text tokens were all given
+  position zero, so the transformer could not tell the first word of a prompt
+  from the last; they now carry a running index on their own axis, which is
+  what BFL, diffusers and ComfyUI all do. And a FLUX.2 [klein] prompt was
+  handed to the transformer at whatever length it happened to tokenize to,
+  where upstream truncates and pads it to a fixed 512 rows and masks the
+  padding out of the language model — mold's FLUX.2 [dev] path already did
+  this, and now both tiers agree. **Klein and dev renders change**: the same
+  seed and settings produce a different, better-conditioned picture than the
+  same command did before this release. Prompt adherence improves most on long
+  prompts, where the missing positions cost the most. A side effect is that
+  every undistilled [klein] base render now takes the fast batched
+  classifier-free-guidance path, since both branches are the same length by
+  construction — the progress line reads "one batched forward per step".
 - **FLUX.1 computes its rotary embedding in float32, as upstream does.** It
   previously built one in whatever dtype the render used, so a half-precision
   render computed every sine and cosine of every token position with eight bits

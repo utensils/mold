@@ -191,10 +191,10 @@ above 1.0 adds an unconditional branch; `--guidance 1` skips it entirely. Where
 the card has room, both branches ride in ONE batch-2 forward per step, so each
 weight is read once for the pair and a guided render costs far less than two
 separate ones — on a bandwidth-bound quantized tier, closer to 1.2x a distilled
-render than 2x. mold falls back to two sequential forwards when the negative
-prompt tokenizes to a different length than the positive one (the two cannot be
-concatenated) or when the doubled activations would not fit beside the weights.
-The progress line says which ran.
+render than 2x. Both prompts are padded to the same fixed 512 tokens, so the
+only thing that can send a render back to two sequential forwards is the
+doubled activations not fitting beside the weights on this card. The progress
+line says which ran.
 
 - **Developer**: [Black Forest Labs](https://blackforestlabs.ai/)
 - **License**: Apache 2.0 (4B), Non-Commercial (9B)
@@ -326,6 +326,12 @@ modulation transformer (BF16 or GGUF), and a BN-VAE decoder. Klein-4B uses
 Qwen3-4B (hidden_size=2560), Klein-9B uses Qwen3-8B (hidden_size=4096). GGUF
 variants keep weights quantized in VRAM with on-the-fly dequantization per
 matmul, minimizing memory usage.
+
+Every Klein prompt is truncated and padded to a fixed 512 tokens before it
+reaches the transformer, and every text token carries its own running position
+— both are Black Forest Labs' own conditioning contract, which mold did not
+follow before 0.29, so a Klein or dev render made with an earlier version will
+not reproduce from the same seed and settings.
 
 ## Speed
 

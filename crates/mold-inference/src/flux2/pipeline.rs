@@ -42,6 +42,28 @@ use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
 // ---------------------------------------------------------------------------
+// Prompt conditioning cache
+// ---------------------------------------------------------------------------
+
+/// The epoch of the FLUX.2 conditioning CONTRACT, folded into the prompt cache
+/// key.
+///
+/// Bump it whenever the shape or the values of a cached conditioning tensor
+/// stop being interchangeable with the previous build's. Epoch 2 is the
+/// padding fix: a [klein] embedding is now 512 rows wide whatever the prompt
+/// says, so a tensor cached under epoch 1 is a different tensor entirely, not
+/// a smaller one. The cache is an in-process LRU and cannot outlive the binary
+/// that filled it, so this is documentation of the contract rather than a
+/// migration — but it is the key's job to say so, and a future on-disk cache
+/// inherits the guarantee for free.
+const FLUX2_CONDITIONING_EPOCH: u32 = 2;
+
+/// The prompt cache key for one FLUX.2 conditioning tensor.
+fn flux2_prompt_cache_key(prompt: &str) -> String {
+    format!("v{FLUX2_CONDITIONING_EPOCH}:{}", prompt_text_key(prompt))
+}
+
+// ---------------------------------------------------------------------------
 // Loaded state
 // ---------------------------------------------------------------------------
 
@@ -575,7 +597,12 @@ impl Flux2Engine {
     ) -> Result<Option<Vec<Tensor>>> {
         let mut hits = Vec::with_capacity(prompts.len());
         for prompt in prompts {
-            match restore_cached_tensor(prompt_cache, &prompt_text_key(prompt), device, dtype)? {
+            match restore_cached_tensor(
+                prompt_cache,
+                &flux2_prompt_cache_key(prompt),
+                device,
+                dtype,
+            )? {
                 Some(tensor) => hits.push(tensor),
                 None => return Ok(None),
             }
@@ -1260,12 +1287,18 @@ impl Flux2Engine {
         target_device: &Device,
         target_dtype: DType,
     ) -> Result<Tensor> {
-        // Extract hidden states from layers 9, 18, 27 and stack to (B, seq, 7680)
+        // Extract hidden states from layers 9, 18, 27 and stack to (B, seq, 7680).
+        //
+        // Every Klein tier — 4B, 9B and the undistilled base — conditions on a
+        // FIXED 512 rows: the prompt is truncated and right-padded, the pad
+        // keys are masked out of the language model, and all 512 rows reach
+        // the transformer (BFL `flux2/text_encoder.py:28,397-419`).
         let (stacked, _token_count) = encoder.encode_with_layers(
             prompt,
             target_device,
             target_dtype,
             &Self::QWEN3_HIDDEN_LAYERS,
+            Some(encoders::qwen3::FLUX2_KLEIN_MAX_LENGTH),
         )?;
         Ok(stacked)
     }
@@ -1291,7 +1324,7 @@ impl Flux2Engine {
         } else {
             "Encoding negative prompt (Qwen3)"
         };
-        let cache_key = prompt_text_key(prompt);
+        let cache_key = flux2_prompt_cache_key(prompt);
         let (txt_emb, cache_hit) = get_or_insert_cached_tensor(
             prompt_cache,
             cache_key,
@@ -1717,7 +1750,7 @@ impl Flux2Engine {
                     self.prompt_cache
                         .lock()
                         .unwrap()
-                        .insert(prompt_text_key(prompt), cached);
+                        .insert(flux2_prompt_cache_key(prompt), cached);
                     encoded.push(txt_emb);
                 }
                 self.base.progress.phase_done(
@@ -3414,7 +3447,7 @@ mod tests {
         let cfg = engine.resolve_config().unwrap();
         let txt_emb = Tensor::zeros((1, 1, cfg.context_in_dim), DType::F32, &Device::Cpu).unwrap();
         engine.prompt_cache.lock().unwrap().insert(
-            prompt_text_key("a cat"),
+            flux2_prompt_cache_key("a cat"),
             CachedTensor::from_tensor(&txt_emb).unwrap(),
         );
         let req = GenerateRequest {

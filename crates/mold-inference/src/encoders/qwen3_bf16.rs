@@ -376,10 +376,16 @@ impl Bf16Qwen3Encoder {
     /// Run forward pass and collect hidden states from specific layers.
     /// Returns (B, seq_len, num_layers * hidden_size).
     /// Used by Flux.2 Klein which stacks layers 9, 18, 27 → 7680-dim embeddings.
+    ///
+    /// `attention` names the real (non-pad) positions of a fixed-width
+    /// prompt. When present the causal mask additionally excludes the padded
+    /// KEYS, which is the mask BFL hands the Qwen3 language model
+    /// (`flux2/text_encoder.py:408-416`).
     pub fn forward_with_layers(
         &self,
         input_ids: &Tensor,
         layer_indices: &[usize],
+        attention: Option<&[bool]>,
     ) -> Result<Tensor> {
         if layer_indices.is_empty() {
             anyhow::bail!("layer_indices must not be empty");
@@ -395,10 +401,22 @@ impl Bf16Qwen3Encoder {
         let (b, l) = input_ids.dims2()?;
         let mut hidden_states = self.embed_tokens.forward(input_ids)?;
 
-        let mask = if l == 1 {
-            None
-        } else {
-            Some(self.causal_mask(b, l)?)
+        let mask = match attention {
+            Some(attention) => {
+                if attention.len() != l {
+                    anyhow::bail!(
+                        "Qwen3 attention mask covers {} positions but the input has {l}",
+                        attention.len()
+                    );
+                }
+                Some(super::qwen3::causal_padding_mask(
+                    attention,
+                    self.dtype,
+                    &self.device,
+                )?)
+            }
+            None if l == 1 => None,
+            None => Some(self.causal_mask(b, l)?),
         };
 
         let n_run = max_layer + 1;
