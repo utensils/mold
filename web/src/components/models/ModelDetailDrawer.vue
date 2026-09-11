@@ -29,6 +29,7 @@ import type {
   ModelInfoExtended,
 } from "../../types";
 import { formatGB } from "../../util/format";
+import { catalogPullLabel } from "@studio/lib/catalogLabel";
 
 const cat = useCatalog();
 // Pull can land on any reachable machine, so a Discover row's runtime answer
@@ -381,6 +382,25 @@ const installPlan = computed(() => {
   return installTargets.planFor(m?.name ?? "", true);
 });
 const isRepair = computed(() => installPlan.value.label === "Repair");
+/*
+ * The acquisition button says the lexicon's verb and the number the user will
+ * actually spend, through the one shared catalog label. The SIZE/FETCH totals
+ * are the drawer's own — it reads the download recipe, which is more exact
+ * than the entry's `size_bytes` — so only the wording is shared.
+ */
+const pullLabel = computed(() =>
+  catalogPullLabel(
+    {
+      weightsBytes: modelWeightsBytes.value,
+      fetchBytes: footprintBytes.value,
+      differs:
+        modelWeightsBytes.value != null &&
+        footprintBytes.value != null &&
+        footprintBytes.value !== modelWeightsBytes.value,
+    },
+    "Get it",
+  ),
+);
 /** The Installed segment's cross-machine install; hidden when nobody lacks it. */
 const canInstallElsewhere = computed(
   () => isInstalled.value && installPlan.value.canInstall,
@@ -785,7 +805,7 @@ function onRetry() {
             @click="handleInstallElsewhere"
           >
             <Icon name="download" :size="14" />
-            Install on another machine
+            Get it on another machine
           </button>
         </template>
 
@@ -809,7 +829,7 @@ function onRetry() {
             @click="handlePull"
           >
             <Icon v-if="!isRepair" name="download" :size="15" />
-            {{ isRepair ? "Repair" : "Pull" }}
+            {{ isRepair ? "Repair" : pullLabel }}
           </button>
         </template>
       </div>

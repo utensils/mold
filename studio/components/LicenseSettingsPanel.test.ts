@@ -169,6 +169,23 @@ describe("LicenseSettingsPanel", () => {
     );
   });
 
+  /* A style is a style everywhere a person can see one, licence terms
+   * included — the panel may not be the last place that says "model". */
+  it("says styles, and names the machine the answers belong to", async () => {
+    fetchLicenseListing.mockResolvedValue({ licenses: [] });
+    const wrapper = mount(LicenseSettingsPanel, {
+      props: {
+        target: { baseUrl: "http://plato:7680", apiKey: null },
+        hostLabel: "plato",
+      },
+    });
+    await flushPromises();
+    const lede = wrapper.get(".license-settings__lede").text();
+    expect(lede).toContain("Some styles need you to accept their terms");
+    expect(lede).toContain("plato");
+    expect(lede).not.toContain("model");
+  });
+
   it("shows the machine the answers belong to in the slot the surface fills", async () => {
     fetchLicenseListing.mockResolvedValue({ licenses: [] });
     const wrapper = mount(LicenseSettingsPanel, {

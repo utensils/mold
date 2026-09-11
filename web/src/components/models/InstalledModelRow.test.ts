@@ -59,13 +59,17 @@ describe("InstalledModelRow", () => {
     expect(w.text()).toContain("12.3 GB");
   });
 
-  it("shows the inferred model type", () => {
+  /* Every row on this shelf is a style, so a "Checkpoint" badge on all of
+   * them is noise that makes the rows that ARE something else harder to
+   * spot. Only the exceptions carry a badge now. */
+  it("badges only the rows that are not ordinary styles", () => {
     const checkpoint = mount(InstalledModelRow, {
       props: { model: makeModel() },
     });
-    expect(checkpoint.get("[data-test=model-kind-badge]").text()).toBe(
-      "Checkpoint",
+    expect(checkpoint.find("[data-test=model-kind-badge]").exists()).toBe(
+      false,
     );
+    expect(checkpoint.text()).not.toContain("Checkpoint");
 
     const upscaler = mount(InstalledModelRow, {
       props: { model: makeModel({ family: "upscaler" }) },
@@ -73,6 +77,23 @@ describe("InstalledModelRow", () => {
     expect(upscaler.get("[data-test=model-kind-badge]").text()).toBe(
       "Upscaler",
     );
+  });
+
+  /* The friendly name is what a person looks for; the runnable id is the
+   * mono truth under it, never the row's headline. */
+  it("leads with the style's friendly name and keeps the id in mono below", () => {
+    const w = mount(InstalledModelRow, {
+      props: {
+        model: makeModel({
+          name: "cv:8001",
+          description: "Dreamy Photoreal",
+        }),
+      },
+    });
+    expect(w.get("[data-test=installed-row-name]").text()).toBe(
+      "Dreamy Photoreal",
+    );
+    expect(w.get("[data-test=installed-row-id]").text()).toBe("cv:8001");
   });
 
   it("honors additive kind and NSFW metadata from newer servers", () => {

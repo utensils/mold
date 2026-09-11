@@ -146,7 +146,7 @@ describe("ControlsAside", () => {
     });
     const guidance = wrapper
       .findAllComponents(SliderRow)
-      .find((row) => row.props("label") === "Prompt strength")!;
+      .find((row) => row.props("label") === "Stick to my words")!;
     expect(guidance.props("disabled")).toBe(true);
     expect(guidance.props("modelValue")).toBe(1);
     // The sentence is the profile's own note, never rail copy.
@@ -163,7 +163,7 @@ describe("ControlsAside", () => {
     expect(
       wrapper
         .findAllComponents(SliderRow)
-        .find((row) => row.props("label") === "Prompt strength")!
+        .find((row) => row.props("label") === "Stick to my words")!
         .props("disabled"),
     ).toBe(false);
     expect(wrapper.find("[data-test='fixed-guidance-hint']").exists()).toBe(
@@ -523,7 +523,7 @@ describe("ControlsAside", () => {
     const wrapper = factory({}, "sdxl");
     const strength = wrapper
       .findAllComponents(SliderRow)
-      .find((row) => row.props("label") === "Prompt strength");
+      .find((row) => row.props("label") === "Stick to my words");
     expect(strength?.props("min")).toBe(0);
     expect(strength?.props("max")).toBe(100);
     expect(strength?.props("step")).toBe(0.1);
@@ -735,7 +735,7 @@ describe("ControlsAside", () => {
     const wrapper = factory();
     const reset = wrapper.get("[data-test='settings-reset']");
     expect(reset.attributes("aria-label")).toBe(
-      "Reset settings to model defaults",
+      "Reset to the style's defaults",
     );
     await reset.trigger("click");
     expect(wrapper.emitted("reset-settings")).toHaveLength(1);
@@ -880,7 +880,7 @@ describe("ControlsAside", () => {
       .findAllComponents(SliderRow)
       .map((row) => row.props("label"));
     expect(labels).toContain("Detail");
-    expect(labels).toContain("Prompt strength");
+    expect(labels).toContain("Stick to my words");
     expect(wrapper.find("[data-test='seed-seg']").exists()).toBe(true);
   });
 });

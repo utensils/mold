@@ -5,6 +5,7 @@ import {
   outputKindForModel,
   OUTPUT_KIND_BROWSE_TARGET,
   OUTPUT_KIND_EMPTY,
+  OUTPUT_KIND_MISSING,
   OUTPUT_KIND_LABEL,
   OUTPUT_KIND_PLACEHOLDER,
   OUTPUT_KIND_SECTION_LABEL,
@@ -85,6 +86,7 @@ describe("the section's words", () => {
       OUTPUT_KIND_PLACEHOLDER,
       OUTPUT_KIND_SECTION_LABEL,
       OUTPUT_KIND_EMPTY,
+      OUTPUT_KIND_MISSING,
       OUTPUT_KIND_BROWSE_TARGET,
     ]) {
       expect(Object.keys(table).sort()).toEqual([...KINDS].sort());
@@ -103,6 +105,21 @@ describe("the section's words", () => {
     expect(OUTPUT_KIND_SECTION_LABEL.mesh).toBe("3-D object styles");
     expect(OUTPUT_KIND_EMPTY.clip).toBe(
       "No short clip styles on this machine.",
+    );
+  });
+
+  /* The sentence a door says when the user asked for a kind nothing on any
+   * reachable machine can make. It is the same three words' table, so the
+   * door and the empty section cannot drift apart. */
+  it("tells a door with nothing to open onto what to get", () => {
+    expect(OUTPUT_KIND_MISSING.clip).toBe(
+      "Get a short clip style ready on a machine first.",
+    );
+    expect(OUTPUT_KIND_MISSING.still).toBe(
+      "Get a still picture style ready on a machine first.",
+    );
+    expect(OUTPUT_KIND_MISSING.mesh).toBe(
+      "Get a 3-D object style ready on a machine first.",
     );
   });
 

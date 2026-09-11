@@ -1,4 +1,5 @@
 import { mount } from "@vue/test-utils";
+import { nextTick } from "vue";
 import { createPinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AppNav from "./AppNav.vue";
@@ -78,8 +79,9 @@ vi.mock("../../lib/notifications", () => ({
   markGalleryVisited: markGalleryVisitedMock,
 }));
 
-function mountNav() {
+function mountNav(attach = false) {
   return mount(AppNav, {
+    ...(attach ? { attachTo: document.body } : {}),
     global: {
       // The notifications bell reads its Pinia store.
       plugins: [createPinia()],
@@ -163,6 +165,70 @@ describe("AppNav", () => {
       name: "library",
       query: { q: "misty forest" },
     });
+  });
+
+  /* The header searches your own pictures, not the words you typed to make
+   * them, and says so. The mono `/` beside it is the shortcut that focuses
+   * it — the same hint the desktop app gives. */
+  it("asks to search your images, with the / shortcut shown beside it", () => {
+    const wrapper = mountNav();
+    const input = wrapper.get('input[type="search"]');
+    expect(input.attributes("placeholder")).toBe("Search your images…");
+    expect(input.attributes("aria-label")).toBe("Search your images");
+    expect(wrapper.get('[data-test="search-shortcut"]').text()).toBe("/");
+  });
+
+  it("focuses the search field on a bare slash", async () => {
+    const wrapper = mountNav(true);
+    const input = wrapper.get('input[type="search"]')
+      .element as HTMLInputElement;
+    expect(document.activeElement).not.toBe(input);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "/" }));
+    await nextTick();
+    expect(document.activeElement).toBe(input);
+    wrapper.unmount();
+  });
+
+  it("leaves a slash alone while you are typing somewhere else", async () => {
+    const wrapper = mountNav(true);
+    const input = wrapper.get('input[type="search"]')
+      .element as HTMLInputElement;
+    const textarea = document.createElement("textarea");
+    document.body.append(textarea);
+    textarea.focus();
+
+    textarea.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "/", bubbles: true }),
+    );
+    await nextTick();
+    expect(document.activeElement).toBe(textarea);
+    expect(document.activeElement).not.toBe(input);
+
+    textarea.remove();
+    wrapper.unmount();
+  });
+
+  it("leaves a slash alone when it is part of a chord", async () => {
+    const wrapper = mountNav(true);
+    const input = wrapper.get('input[type="search"]')
+      .element as HTMLInputElement;
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "/", metaKey: true }),
+    );
+    await nextTick();
+    expect(document.activeElement).not.toBe(input);
+    wrapper.unmount();
+  });
+
+  it("sets the wordmark in lowercase mono, the way the mock does", () => {
+    const wrapper = mountNav();
+    const words = wrapper.findAll(".brand__word");
+    expect(words.length).toBeGreaterThan(0);
+    for (const word of words) {
+      expect(word.text()).toBe("mold");
+      expect(word.classes()).toContain("brand-gradient");
+    }
   });
 
   it("opens the downloads drawer via the shared window event", async () => {

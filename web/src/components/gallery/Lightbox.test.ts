@@ -113,6 +113,48 @@ describe("Lightbox (desktop two-pane)", () => {
     expect(writeText).toHaveBeenNthCalledWith(2, "4242");
   });
 
+  /* The metadata rows are how a print explains itself, so they say the
+   * binding lexicon's words — the same ones the inspector that made it uses
+   * and the same ones the desktop lightbox already says. */
+  it("names how a print was made in the binding lexicon", () => {
+    const wrapper = mountWide({
+      item: {
+        ...item,
+        metadata: {
+          ...item.metadata,
+          loras: [{ path: "cinematic.safetensors", scale: 0.75 }],
+        },
+      },
+    });
+    const text = wrapper.text();
+    for (const said of [
+      "Style",
+      "Size",
+      "Detail",
+      "20 passes",
+      "Stick to my words",
+      "Repeat this look",
+      "seed 4242",
+      "Add-on look",
+      "Made on",
+    ]) {
+      expect(text, said).toContain(said);
+    }
+    for (const retired of [
+      "Dimensions",
+      "Guidance",
+      "CFG ",
+      "20 steps",
+      ">Host<",
+      ">Seed<",
+      ">Model<",
+      ">Steps<",
+      ">LoRA<",
+    ]) {
+      expect(wrapper.html(), retired).not.toContain(retired);
+    }
+  });
+
   it("shows the recorded runtime pipeline for an LTX video", () => {
     const wrapper = mountWide({
       item: {

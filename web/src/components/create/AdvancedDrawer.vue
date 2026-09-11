@@ -634,8 +634,8 @@ function resetAdvanced() {
       <AccordionSection
         v-if="caps.supportsLora"
         icon="layers"
-        title="LoRA stack"
-        :summary="`${modelValue.loras.length} active · style adapters`"
+        title="Add-on looks"
+        :summary="`${modelValue.loras.length} active`"
         :open="true"
         :header-interactive="false"
         data-test="section-lora"
@@ -784,11 +784,21 @@ function resetAdvanced() {
           </p>
         </div>
         <div class="adv__field">
-          <label class="adv__label">Seed</label>
+          <!-- The seed in plain words, with the number itself as the mono
+               truth beside the label — the inspector's shape on every shell. -->
+          <div class="adv__seedhead">
+            <span class="adv__label adv__label--inline">Repeat this look</span>
+            <span
+              v-if="modelValue.seed != null"
+              class="adv__seedtruth"
+              data-test="output-seed-readout"
+              >seed {{ modelValue.seed }}</span
+            >
+          </div>
           <SegmentedControl
             :model-value="modelValue.seedMode"
             :options="seedModes"
-            label="Seed mode"
+            label="Repeat this look"
             @update:model-value="patch({ seedMode: $event })"
           />
         </div>
@@ -798,7 +808,7 @@ function resetAdvanced() {
           data-test="output-seed"
           type="number"
           min="0"
-          placeholder="Seed"
+          aria-label="Seed number"
           :value="modelValue.seed ?? ''"
           @input="
             patch({
@@ -1012,6 +1022,23 @@ function resetAdvanced() {
   font-size: 12px;
   color: var(--ink-2);
   font-weight: 600;
+  margin-bottom: 8px;
+}
+.adv__seedhead {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.adv__label--inline {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.adv__seedtruth {
+  flex: 0 0 auto;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--ink-3);
   margin-bottom: 8px;
 }
 .adv__select,

@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /*
- * Cold start (spec §08 G10). When this machine has no installed models the
+ * Cold start (spec §08 G10). When this machine has no styles on it yet the
  * develop bed can't do anything useful, so the empty canvas becomes a guide:
  * one line of what's happening plus a few one-tap starter pulls that get a
  * first print within three steps. A starter that is downloading shows its
- * inline progress in place of its Pull button; when it lands the canvas
+ * inline progress in place of its Get it button; when it lands the canvas
  * returns to the normal empty state (the parent stops rendering this).
  */
 import { computed } from "vue";
@@ -98,7 +98,7 @@ async function pull(model: string) {
           :data-test="`starter-pull-${s.model}`"
           @click="pull(s.model)"
         >
-          Pull
+          Get it
         </button>
       </div>
     </div>

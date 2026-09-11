@@ -152,7 +152,7 @@ function addAnother() {
   <section class="lp" data-test="lora-picker">
     <div class="lp__head">
       <label class="lp__kicker">
-        LoRA{{ modelValue.length > 1 ? ` stack (${modelValue.length})` : "" }}
+        Add-on looks{{ modelValue.length > 1 ? ` (${modelValue.length})` : "" }}
       </label>
       <button
         v-if="canAddMore"
@@ -274,7 +274,7 @@ function addAnother() {
       class="lp__hint"
       data-test="lora-hint-empty"
     >
-      no loras installed for this model. pull one from
+      no add-on looks on this machine yet. get one from
       <RouterLink to="/models" class="lp__accent">Styles</RouterLink> and it
       shows up here.
     </p>

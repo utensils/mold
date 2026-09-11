@@ -80,11 +80,34 @@ export function modelsForOutputKind<M extends SectionModel>(
   return models.filter((model) => outputKindForModel(model) === kind);
 }
 
+/**
+ * Each kind as a NOUN inside a sentence — the label lowercased, except that
+ * "3-D" keeps its capitals wherever it appears. One table, because every
+ * sentence below needs the same word and a second `.toLowerCase()` at a call
+ * site is how "3-d object" reached the screen.
+ */
+const OUTPUT_KIND_NOUN: Readonly<Record<OutputKind, string>> = {
+  still: OUTPUT_KIND_LABEL.still.toLowerCase(),
+  clip: OUTPUT_KIND_LABEL.clip.toLowerCase(),
+  mesh: OUTPUT_KIND_LABEL.mesh,
+};
+
 /** The menu's mono kicker — what this section holds, in the binding lexicon. */
 export const OUTPUT_KIND_SECTION_LABEL: Readonly<Record<OutputKind, string>> = {
-  still: `${OUTPUT_KIND_LABEL.still.toLowerCase()} styles`,
-  clip: `${OUTPUT_KIND_LABEL.clip.toLowerCase()} styles`,
-  mesh: `${OUTPUT_KIND_LABEL.mesh} styles`,
+  still: `${OUTPUT_KIND_NOUN.still} styles`,
+  clip: `${OUTPUT_KIND_NOUN.clip} styles`,
+  mesh: `${OUTPUT_KIND_NOUN.mesh} styles`,
+};
+
+/**
+ * What a door says when the user asks for a kind no reachable machine can
+ * make. The kind's own words again, so the door, the empty section and the
+ * Styles filter all name the thing identically.
+ */
+export const OUTPUT_KIND_MISSING: Readonly<Record<OutputKind, string>> = {
+  still: `Get a ${OUTPUT_KIND_NOUN.still} style ready on a machine first.`,
+  clip: `Get a ${OUTPUT_KIND_NOUN.clip} style ready on a machine first.`,
+  mesh: `Get a ${OUTPUT_KIND_NOUN.mesh} style ready on a machine first.`,
 };
 
 /** The menu's sentence when the section holds nothing on any machine. */

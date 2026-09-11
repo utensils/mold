@@ -2,7 +2,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { computed, effectScope, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
-import { useCreateOutputKind } from "./useCreateOutputKind";
+import {
+  OUTPUT_KIND_MISSING,
+  useCreateOutputKind,
+} from "./useCreateOutputKind";
 import { useGenerateForm, __testing__ } from "./useGenerateForm";
 import type { ModelInfoExtended } from "../types";
 
@@ -84,7 +87,10 @@ describe("web output doors", () => {
     output.selectKind("mesh");
     await nextTick();
     expect(form.toRequest()).toEqual(before);
-    expect(output.notice.value).toContain("3-d object");
+    // The sentence is the shared table's, so "3-D" keeps its capitals here
+    // the way it does everywhere else the kind is named.
+    expect(output.notice.value).toBe(OUTPUT_KIND_MISSING.mesh);
+    expect(output.notice.value).toContain("3-D object");
     expect(output.browseTo.value).toBe("/models?type=mesh");
     output.selectKind("still");
     expect(output.notice.value).toBe("");

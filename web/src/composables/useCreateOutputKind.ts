@@ -5,15 +5,25 @@ import {
   outputKindFor,
   outputKindForModel,
   OUTPUT_KIND_LABEL,
+  OUTPUT_KIND_MISSING,
   OUTPUT_KIND_TITLE,
   OUTPUT_KIND_BROWSE_TARGET,
   type OutputKind,
 } from "@studio/lib/outputKind";
+export * from "@studio/lib/outputKind";
 import { isModelRuntimeUnavailable } from "@studio/lib/modelRuntimeAvailability";
 import type { ModelInfoExtended } from "../types";
 import type { UseGenerateForm } from "./useGenerateForm";
 
-/** Three doors into one form. Media parking and request policy stay in the form. */
+/**
+ * Three doors into one form. Media parking and request policy stay in the form.
+ *
+ * The three kinds' vocabulary — the labels, the titles, the partition, the
+ * Browse-more targets and the "nothing to open onto" sentence — is
+ * `@studio/lib/outputKind`'s and is re-exported above, the same shape desktop's
+ * shim has. Nothing here re-derives a word or a partition; what is left is the
+ * web form's own wiring.
+ */
 export function useCreateOutputKind(
   form: UseGenerateForm,
   models: Ref<ModelInfoExtended[]>,
@@ -59,7 +69,7 @@ export function useCreateOutputKind(
     );
     if (!selected) {
       requestedKind.value = value;
-      notice.value = `Get a ${OUTPUT_KIND_LABEL[value].toLowerCase()} style ready on a machine first.`;
+      notice.value = OUTPUT_KIND_MISSING[value];
       return;
     }
     selectStyle(selected);

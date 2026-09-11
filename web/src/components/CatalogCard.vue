@@ -8,6 +8,7 @@
 import { computed, ref } from "vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
+import { catalogPullLabel, catalogSizeInfo } from "@studio/lib/catalogLabel";
 import Icon from "@ui/components/Icon.vue";
 import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 import { RUNTIME_UNAVAILABLE_BADGE } from "@studio/lib/modelRuntimeAvailability";
@@ -25,12 +26,16 @@ const props = withDefaults(
      *  `@studio/lib/modelRuntimeAvailability`. `null` means runnable or
      *  unknown; the card never derives it from the family (#1276). */
     runtimeNotice?: ModelRuntimeNotice | null;
+    /** True while a download for this row is running, so the button says so
+     *  instead of inviting a second one. */
+    pulling?: boolean;
   }>(),
   {
     layout: "grid",
     selectable: true,
     checked: false,
     runtimeNotice: null,
+    pulling: false,
   },
 );
 const emit = defineEmits<{
@@ -136,9 +141,21 @@ const installTargets = useModelInstallTargets();
 const installPlan = computed(() =>
   installTargets.planFor(props.entry.id, props.entry.installed),
 );
-const pullLabel = computed(() =>
-  supported.value ? installPlan.value.label : "Unsupported",
-);
+/*
+ * The verb is the lexicon's and the number is the honest FETCH total, both
+ * from `@studio/lib/catalogLabel` — the same call desktop's catalog card
+ * makes, so one row cannot read "Pull" here and "Get it · 6.0 GB" there. A
+ * repair keeps its own word: those files already exist.
+ */
+const sizeInfo = computed(() => catalogSizeInfo(props.entry));
+const pullLabel = computed(() => {
+  if (!supported.value) return "Unsupported";
+  if (props.pulling) return "Getting it…";
+  return catalogPullLabel(
+    sizeInfo.value,
+    installPlan.value.label === "Repair" ? "Repair" : "Get it",
+  );
+});
 </script>
 
 <template>
@@ -216,9 +233,10 @@ const pullLabel = computed(() =>
       <span
         v-if="props.entry.installed"
         class="card__installed"
-        title="Already on disk"
+        data-test="catalog-ready"
+        title="Already on this machine"
       >
-        installed
+        ● ready
       </span>
       <button
         type="button"
@@ -273,11 +291,11 @@ const pullLabel = computed(() =>
       class="card__pull"
       data-test="pull-btn"
       :aria-label="`${pullLabel} ${accessibleName}`"
-      :disabled="!supported"
+      :disabled="!supported || props.pulling"
       :title="supported ? undefined : 'Unsupported catalog package'"
       @click="emit('pull')"
     >
-      <Icon v-if="supported" name="download" :size="13" />
+      <Icon v-if="supported && !props.pulling" name="download" :size="13" />
       {{ pullLabel }}
     </button>
   </article>

@@ -12,7 +12,9 @@ import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import Tooltip from "@ui/components/Tooltip.vue";
 import type { ModelInfoExtended } from "../../types";
-import { modelDisplayName } from "@studio/lib/modelDisplay";
+import { styleDisplayName } from "@studio/lib/styleLabel";
+import { modelKindValue } from "@studio/lib/modelMetadata";
+import { catalogPullLabel, catalogSizeInfo } from "@studio/lib/catalogLabel";
 import { useModelInstallTargets } from "../../composables/useModelInstallTargets";
 import { formatGB } from "../../util/format";
 
@@ -33,8 +35,27 @@ const installHint = computed(() => {
     .filter((t) => t.action === "install")
     .map((t) => t.host.label)
     .join(", ");
-  return `Install ${modelDisplayName(props.model)} on ${machines}`;
+  return `Get ${styleDisplayName(props.model)} on ${machines}`;
 });
+
+/** The friendly name leads; the runnable id stays below it in mono. */
+const displayName = computed(() => styleDisplayName(props.model));
+/** Every row on this shelf is a style, so "Checkpoint" says nothing. Only a
+ *  row that is something else — a LoRA, a VAE, an upscaler — earns a badge. */
+const badgeKind = computed(() => {
+  const kind = modelKindValue({
+    kind: props.model.kind,
+    family: props.model.family,
+  });
+  return kind === "checkpoint" ? null : kind;
+});
+/** What sending this style to another machine will cost in bytes. */
+const getLabel = computed(() =>
+  catalogPullLabel(
+    catalogSizeInfo({ size_bytes: props.model.size_gb * 1_000_000_000 }),
+    "Get it",
+  ),
+);
 </script>
 
 <template>
@@ -50,10 +71,12 @@ const installHint = computed(() => {
       </span>
       <span class="row__body">
         <span class="row__head">
-          <span class="row__name">{{ modelDisplayName(props.model) }}</span>
+          <span class="row__name" data-test="installed-row-name">{{
+            displayName
+          }}</span>
           <ModelMetadataBadges
-            :kind="props.model.kind"
-            :family="props.model.family"
+            :kind="badgeKind"
+            :family="null"
             :nsfw="props.model.nsfw ?? false"
             :show-modality="false"
           />
@@ -67,8 +90,9 @@ const installHint = computed(() => {
           </BadgePill>
         </span>
         <span
-          v-if="modelDisplayName(props.model) !== props.model.name"
+          v-if="displayName !== props.model.name"
           class="row__id"
+          data-test="installed-row-id"
           >{{ props.model.name }}</span
         >
         <span class="row__meta">
@@ -87,7 +111,7 @@ const installHint = computed(() => {
         @click="emit('install')"
       >
         <Icon name="download" :size="14" />
-        Install
+        {{ getLabel }}
       </button>
     </Tooltip>
   </div>

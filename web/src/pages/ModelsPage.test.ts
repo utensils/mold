@@ -44,8 +44,10 @@ const routeQuery = ref<Record<string, unknown>>({});
 vi.mock("../composables/useCatalog", () => ({
   useCatalog: () => mock,
 }));
+const mockPush = vi.fn();
 vi.mock("vue-router", () => ({
   useRoute: () => ({ query: routeQuery.value }),
+  useRouter: () => ({ push: mockPush }),
 }));
 
 /* Multi-host install targeting; single-host by default so nothing changes. */
@@ -185,7 +187,7 @@ describe("ModelsPage — Models workspace", () => {
     const options = w.findAll("[data-test=install-target-option]");
     expect(options).toHaveLength(2);
     expect(options[0].attributes("data-host")).toBe(remote.id);
-    expect(options[0].text()).toContain("Install");
+    expect(options[0].text()).toContain("Get it");
 
     await options[0].trigger("click");
     await flushPromises();
@@ -201,17 +203,95 @@ describe("ModelsPage — Models workspace", () => {
     expect(w.find("[data-test=install-target-host]").exists()).toBe(false);
   });
 
-  it("switches to Discover via the segmented control", async () => {
+  it("names the two shelves Ready to use and Browse more", () => {
+    const w = mountPage();
+    const labels = w
+      .find("[data-test=models-tabs]")
+      .findAll("button")
+      .map((b) => b.text());
+    expect(labels).toEqual(["Ready to use", "Browse more"]);
+  });
+
+  it("switches to Browse more via the segmented control", async () => {
     mock.installed.value = [makeModel()];
     const w = mountPage();
     const discoverBtn = w
       .find("[data-test=models-tabs]")
       .findAll("button")
-      .find((b) => b.text() === "Discover");
+      .find((b) => b.text() === "Browse more");
     expect(discoverBtn).toBeDefined();
     await discoverBtn!.trigger("click");
     expect(mock.setTab).toHaveBeenCalledWith("discover");
     expect(w.find("[data-test=discover-tab]").exists()).toBe(true);
+  });
+
+  /* The three kinds are named the same here as in the composer's own
+   * toolbar, and a style filters under exactly the kind it is offered under:
+   * one partition, `@studio/lib/outputKind`'s. */
+  describe("the kind chips on Ready to use", () => {
+    const flux = makeModel({ name: "flux-schnell:q8", family: "flux" });
+    const wan = makeModel({ name: "wan22-t2v-a14b:q8", family: "wan" });
+    const h3 = makeModel({ name: "hunyuan3d-2.1:fp16", family: "hunyuan3d" });
+
+    it("offers All and the three kinds, in the binding lexicon", () => {
+      mock.installed.value = [flux, wan, h3];
+      const w = mountPage();
+      const labels = w
+        .find("[data-test=installed-kinds]")
+        .findAll("button")
+        .map((b) => b.text());
+      expect(labels).toEqual([
+        "All",
+        "Still picture",
+        "Short clip",
+        "3-D object",
+      ]);
+    });
+
+    it("shows every style with no kind chosen", () => {
+      mock.installed.value = [flux, wan, h3];
+      const w = mountPage();
+      expect(w.findAllComponents(InstalledModelRow)).toHaveLength(3);
+    });
+
+    it("shows only clip styles under ?type=video", () => {
+      routeQuery.value = { type: "video" };
+      mock.installed.value = [flux, wan, h3];
+      const w = mountPage();
+      const rows = w.findAllComponents(InstalledModelRow);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].props("model")).toEqual(wan);
+    });
+
+    it("shows only 3-D styles under ?type=mesh", () => {
+      routeQuery.value = { type: "mesh" };
+      mock.installed.value = [flux, wan, h3];
+      const w = mountPage();
+      const rows = w.findAllComponents(InstalledModelRow);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].props("model")).toEqual(h3);
+    });
+
+    it("routes a chosen kind through the query, so the link can be shared", async () => {
+      mock.installed.value = [flux, wan, h3];
+      const w = mountPage();
+      const chips = w.find("[data-test=installed-kinds]").findAll("button");
+      await chips.find((b) => b.text() === "Short clip")!.trigger("click");
+      expect(mockPush).toHaveBeenCalledWith({
+        query: { type: "video" },
+      });
+      await chips.find((b) => b.text() === "All")!.trigger("click");
+      expect(mockPush).toHaveBeenLastCalledWith({ query: {} });
+    });
+
+    it("says so when the chosen kind holds nothing on this machine", () => {
+      routeQuery.value = { type: "mesh" };
+      mock.installed.value = [flux];
+      const w = mountPage();
+      expect(w.get("[data-test=installed-no-match]").text()).toContain(
+        "Nothing here matches.",
+      );
+    });
   });
 
   it("filters installed rows by a local search over name and family", async () => {
@@ -265,12 +345,25 @@ describe("ModelsPage — Models workspace", () => {
     expect(w.find('[data-test="installed-error"]').exists()).toBe(true);
   });
 
-  it("shows the nothing-installed empty state with a Discover CTA", async () => {
+  it("shows the nothing-here-yet empty state with a Browse more CTA", async () => {
     mock.installed.value = [];
     const w = mountPage();
-    expect(w.find("[data-test=installed-empty]").exists()).toBe(true);
+    const empty = w.get("[data-test=installed-empty]");
+    expect(empty.text()).toContain("No styles on this machine yet.");
     await w.find("[data-test=discover-cta]").trigger("click");
     expect(mock.setTab).toHaveBeenCalledWith("discover");
+  });
+
+  it("asks for your styles, and says nothing matches in plain words", async () => {
+    mock.installed.value = [makeModel()];
+    const w = mountPage();
+    const search = w.get("[data-test=installed-search]");
+    expect(search.attributes("placeholder")).toBe("Search your styles…");
+    expect(search.attributes("aria-label")).toBe("Search your styles");
+    await search.setValue("zzz");
+    expect(w.get("[data-test=installed-no-match]").text()).toContain(
+      "Nothing here matches.",
+    );
   });
 
   it("renders the discover tab when the active tab is discover", () => {

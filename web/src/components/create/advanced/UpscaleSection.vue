@@ -100,11 +100,11 @@ const summary = computed(() => {
         {{
           failed
             ? "could not read this server's model list."
-            : "no upscalers installed on this server."
+            : "no upscalers on this machine yet."
         }}
       </p>
       <RouterLink to="/models" class="up__link" data-test="upscale-browse">
-        Pull one from Models
+        Get one from Styles
       </RouterLink>
     </div>
 

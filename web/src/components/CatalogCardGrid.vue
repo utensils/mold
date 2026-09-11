@@ -5,6 +5,7 @@ import {
   planBatchInstallTargets,
 } from "@studio/lib/modelBatchInstall";
 import { useCatalog } from "../composables/useCatalog";
+import { useDownloads } from "../composables/useDownloads";
 import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 import { toast } from "../lib/toasts";
 import type { CatalogEntryWire } from "../types";
@@ -15,6 +16,23 @@ import { useHostRouting } from "../composables/useHostRouting";
 const cat = useCatalog();
 const routing = useHostRouting();
 const installTargets = useModelInstallTargets();
+const downloads = useDownloads();
+
+/*
+ * Which catalog rows have a download in flight, from the downloads tray's own
+ * state. The job wire carries the catalog id it was started for, so the card
+ * can say "Getting it…" instead of inviting a second pull for the same bytes.
+ */
+const pullingIds = computed(() => {
+  const ids = new Set<string>();
+  for (const job of [
+    ...(downloads.activeJobs?.value ?? []),
+    ...(downloads.queued?.value ?? []),
+  ]) {
+    if (job.catalog_id) ids.add(job.catalog_id);
+  }
+  return ids;
+});
 const sentinel = ref<HTMLElement | null>(null);
 const selected = ref(new Map<string, CatalogEntryWire>());
 const selectedTargetId = ref("");
@@ -334,6 +352,7 @@ async function startBatch(): Promise<void> {
           :selectable="!batchStarting && selectable(entry)"
           :checked="selected.has(entry.id)"
           :runtime-notice="runtimeNoticeFor(entry.id)"
+          :pulling="pullingIds.has(entry.id)"
           @open="openCard(entry.id)"
           @pull="pullCard(entry)"
           @toggle-select="toggleSelection(entry, $event)"
