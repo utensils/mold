@@ -114,7 +114,8 @@ for duplicate in \
   desktop/src/components/settings/PathControl.vue \
   desktop/src/components/settings/SecretControl.vue \
   desktop/src/components/settings/ConfigSettingRow.vue \
-  desktop/src/components/settings/ConfigRowItem.vue; do
+  desktop/src/components/settings/ConfigRowItem.vue \
+  web/src/components/machines/StatusDot.vue; do
   test ! -e "$duplicate" || fail "$duplicate duplicates studio domain logic"
 done
 
