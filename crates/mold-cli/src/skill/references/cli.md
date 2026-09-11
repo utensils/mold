@@ -95,6 +95,26 @@ everything else: `--image`/`--strength`, `--mask`, ControlNet and a LoRA all
 stay live in the same pass, and batches work because the encoded picture
 applies to every image in the batch.
 
+## Fitting a source image to the canvas
+
+By default a `--image` source decides the canvas: mold fits the picture to the
+model's bounds and renders at its shape, so `--width`/`--height` have no effect.
+`--fit` reverses that — the canvas is what was asked for (or the model's
+default) and the PICTURE is resampled onto it. `crop-fill` keeps proportions and
+trims the edges, `pad-fit` keeps the whole picture and adds black borders, and
+`lanczos-resize` stretches it. The policy rides the request as provenance, so
+reusing the print in Mold Studio restores the same crop.
+
+```bash
+mold run flux-dev:q4 "A lighthouse at dusk" --image wide.png --fit crop-fill --width 1024 --height 1024
+mold run sdxl-base:fp16 "A cabin in snow" --image tall.jpg --fit pad-fit --width 1024 --height 576
+mold run flux-dev:q4 "A lighthouse at dusk" --image wide.png --fit lanczos-resize
+```
+
+`pad-repaint` and `upscale-then-fit` are app-only and refused by name: the
+first needs a generated repaint mask, the second an upscaler pass. For the
+second, run `mold upscale` on the picture first and then `--fit crop-fill`.
+
 ## Local and remote execution
 
 `mold run` first targets `MOLD_HOST` (default `http://localhost:7680`) and can
@@ -406,6 +426,14 @@ mold mcp --host http://localhost:7680
 mold skill list
 ```
 
+Shell completion is installed with `mold completions <shell>`. Model names
+complete from the manifest, and tags, collections, job ids, gallery filenames
+and `--host` complete from what earlier commands saw: `mold library list`,
+`mold library tag list`, `mold library collection list`, `mold jobs list` and
+`mold queue list` each record their answers, so run one of those against a
+machine before expecting `--tag` or `--host` to offer anything. Completion
+never contacts a server.
+
 The MCP server exposes thirteen tools: `generate_image`, `generate_mesh`,
 `export_mesh`, `generate_image_async`, `generation_status`,
 `generation_retry`, `list_gallery`, `get_gallery_image`, `list_models`,
@@ -413,6 +441,13 @@ The MCP server exposes thirteen tools: `generate_image`, `generate_mesh`,
 `generate_mesh` is a ONE-SHOT render, not the durable 3-D workflow. A
 multi-stage workflow is `mold mesh-workflow` at the CLI and
 `/api/mesh-workflows` over HTTP; no MCP tool wraps it.
+
+`generate_image`, `generate_image_async` and `generate_mesh` each take an
+optional `save_to_gallery`. Omit it and the render is filed in the host's
+Library as usual; pass `false` and the host publishes the print and moves it
+straight to that machine's Trash, where it stays recoverable until retention
+sweeps it. `false` is the only value that changes anything — an explicit `true`
+is the default.
 
 Starting, stopping, restarting, or reconfiguring a server changes external
 state. Do so only when requested, and verify health plus the selected host

@@ -159,6 +159,110 @@ async fn library_list_json_is_pure_and_uses_the_same_filtered_page() {
     assert_eq!(json["items"][0]["filename"], "newer.png");
 }
 
+/// A listing teaches the shell what it saw.
+///
+/// Tags, collections, gallery filenames and the machines you talk to all live
+/// on a server, and a completer cannot ask one — so the commands that already
+/// fetch them write `$MOLD_HOME/completion-cache.json`, and the completers
+/// read that. This drives the real binary, so dropping the refresh call in
+/// `commands::library` fails it.
+#[tokio::test]
+async fn library_list_teaches_the_shell_what_it_just_listed() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/gallery"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            library_row("older.png", 1, &["owl"]),
+            library_row("newer.png", 2, &["owl", "night"])
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/gallery/collections"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "id": "c1",
+                "name": "Winter Scenes",
+                "slug": "winter-scenes",
+                "count": 2,
+                "created_at": 1,
+                "updated_at": 2
+            }])),
+        )
+        .mount(&server)
+        .await;
+
+    let cache_path = env.home.join("completion-cache.json");
+    assert!(
+        !cache_path.exists(),
+        "a fresh Mold home carries no completion cache"
+    );
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["library", "list"])
+        .assert()
+        .success();
+
+    let cache: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cache_path).expect("the listing writes the cache"))
+            .expect("the cache is JSON");
+    let strings = |key: &str| -> Vec<String> {
+        cache[key]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .map(|value| value.as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    let filenames = strings("filenames");
+    assert!(
+        filenames.contains(&"newer.png".to_string()),
+        "{filenames:?}"
+    );
+    assert!(
+        filenames.contains(&"older.png".to_string()),
+        "{filenames:?}"
+    );
+    let tags = strings("tags");
+    assert!(tags.contains(&"night".to_string()), "{tags:?}");
+    assert!(tags.contains(&"owl".to_string()), "{tags:?}");
+    let collections = strings("collections");
+    assert!(
+        collections.contains(&"Winter Scenes".to_string()),
+        "{collections:?}"
+    );
+    assert!(
+        collections.contains(&"winter-scenes".to_string()),
+        "a NAME-OR-SLUG positional takes either: {collections:?}"
+    );
+    assert_eq!(
+        strings("hosts"),
+        vec![server.uri().trim_end_matches('/').to_string()],
+        "the machine that answered is the one worth completing"
+    );
+}
+
+/// A command that never reaches a server leaves no cache behind, so Tab on a
+/// machine that has only ever failed to connect completes nothing.
+#[tokio::test]
+async fn a_refused_listing_records_no_machine() {
+    let env = TestEnv::new();
+    env.cmd()
+        .env("MOLD_HOST", "http://127.0.0.1:1")
+        .args(["library", "list"])
+        .assert()
+        .failure();
+    assert!(
+        !env.home.join("completion-cache.json").exists(),
+        "an unreachable machine is not a completion candidate"
+    );
+}
+
 #[tokio::test]
 async fn library_tag_add_uses_replay_safe_bulk_mutation_when_advertised() {
     use wiremock::matchers::{method, path};
@@ -999,6 +1103,124 @@ async fn run_extend_sends_the_familys_own_carryover_overlap() {
         serde_json::json!(mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
         "the same seam resolves LTX-2's 17 from the resolved family"
     );
+}
+
+/// `mold run --fit` sends the CANVAS the user asked for and the picture
+/// resampled onto it, plus the provenance the apps record.
+///
+/// Without `--fit` a source image decides the canvas, so this is the one flag
+/// that reverses that rule. Driving the real binary against a mock host pins
+/// all three halves at once: the request's `width`/`height`, the decoded
+/// `source_image` dimensions, and the `source_fit` object
+/// `parseSourceFitPolicy` reads back.
+#[tokio::test]
+async fn run_fit_resamples_the_source_onto_the_requested_canvas() {
+    use base64::Engine as _;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let source = env.home.join("wide.png");
+    let mut wide = image::RgbaImage::new(64, 16);
+    for (x, _y, pixel) in wide.enumerate_pixels_mut() {
+        *pixel = image::Rgba([if x < 32 { 255 } else { 0 }, 0, 0, 255]);
+    }
+    wide.save(&source).unwrap();
+
+    let server = MockServer::start().await;
+    // Refuse the render: the request body is the whole subject, and a 422 is
+    // a hard error so nothing falls back to local inference.
+    Mock::given(method("POST"))
+        .and(path("/api/generate/stream"))
+        .respond_with(
+            ResponseTemplate::new(422).set_body_json(serde_json::json!({"error": "mock refusal"})),
+        )
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .args(["run", "flux-dev:q4", "a cat", "--image"])
+        .arg(&source)
+        .args([
+            "--fit",
+            "crop-fill",
+            "--width",
+            "128",
+            "--height",
+            "128",
+            "--host",
+            &server.uri(),
+            "--output",
+            "out.png",
+        ])
+        .assert()
+        .failure();
+
+    let sent: Vec<serde_json::Value> = server
+        .received_requests()
+        .await
+        .expect("the mock server records requests")
+        .iter()
+        .filter(|request| request.url.path() == "/api/generate/stream")
+        .map(|request| serde_json::from_slice(&request.body).expect("the CLI posts JSON"))
+        .collect();
+    assert_eq!(sent.len(), 1, "one generate request");
+    assert_eq!(sent[0]["width"], serde_json::json!(128));
+    assert_eq!(sent[0]["height"], serde_json::json!(128));
+    assert_eq!(
+        sent[0]["source_fit"],
+        serde_json::json!({ "mode": "crop-fill" }),
+        "the policy rides the request as the apps record it"
+    );
+    let encoded = sent[0]["source_image"]
+        .as_str()
+        .expect("the source image rides as base64");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("base64 body");
+    let fitted = image::load_from_memory(&bytes).expect("a decodable image");
+    assert_eq!(
+        (fitted.width(), fitted.height()),
+        (128, 128),
+        "the fitted source is exactly the requested canvas"
+    );
+}
+
+/// The two browser-only policies are refused by name, with the reason and the
+/// nearest thing the terminal can do.
+#[test]
+fn run_fit_refuses_the_policies_that_need_a_mask_or_an_upscaler() {
+    let env = TestEnv::new();
+    let source = env.home.join("tiny.png");
+    image::RgbaImage::new(4, 4).save(&source).unwrap();
+
+    env.cmd()
+        .args(["run", "flux-dev:q4", "a cat", "--image"])
+        .arg(&source)
+        .args(["--fit", "pad-repaint"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pad-repaint").and(predicate::str::contains("pad-fit")));
+
+    env.cmd()
+        .args(["run", "flux-dev:q4", "a cat", "--image"])
+        .arg(&source)
+        .args(["--fit", "upscale-then-fit"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("mold upscale"));
+}
+
+/// `--fit` without a picture is a clap-level refusal, so no model is resolved
+/// and no request is composed.
+#[test]
+fn run_fit_requires_an_image() {
+    let env = TestEnv::new();
+    env.cmd()
+        .args(["run", "flux-dev:q4", "a cat", "--fit", "crop-fill"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--image"));
 }
 
 // ── mold pull (error paths) ───────────────────────────────────────────────

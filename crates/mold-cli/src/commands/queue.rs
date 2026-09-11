@@ -108,6 +108,12 @@ async fn fetch_listing(
         .list_queue_all()
         .await
         .with_context(|| format!("could not read the queue on {}", client.host()))?;
+    // Teach the shell the ids this listing just showed, before `--held`
+    // narrows it: `queue show`, `cancel`, `retry` and `send` all take one,
+    // and a completer cannot ask the server (see `crate::completion_cache`).
+    crate::completion_cache::record_reached_host(client.host(), |cache| {
+        cache.record_job_ids(listing.entries.iter().map(|entry| entry.id.clone()));
+    });
     narrow_to_held(&mut listing, held_only);
     Ok(listing)
 }

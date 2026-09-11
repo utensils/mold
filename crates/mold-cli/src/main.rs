@@ -1,5 +1,12 @@
+// The MCP tool catalogue is one `json!` literal per tool inside one array
+// (`commands::mcp::builtin_tool_definitions`), and `json_internal!` recurses
+// once per token, so the default 128-deep limit is reached by the schemas
+// themselves rather than by anything pathological.
+#![recursion_limit = "512"]
+
 mod catalog_bridge;
 mod commands;
+mod completion_cache;
 mod control;
 mod errors;
 mod fs_util;
@@ -7,6 +14,7 @@ mod metadata_db;
 mod output;
 mod procinfo;
 mod skill;
+mod source_fit;
 #[cfg(test)]
 mod test_support;
 mod theme;
@@ -526,6 +534,12 @@ Examples:
         /// Keep the pod running after generation (otherwise left warm)
         #[arg(long)]
         keep: bool,
+        /// Keep this render out of the pod's Library: the print is published
+        /// there and moved straight to that machine's Trash, so it stays
+        /// recoverable until retention sweeps it. The image is still written
+        /// to --output-dir on this machine.
+        #[arg(long)]
+        no_save: bool,
         /// Seed
         #[arg(long)]
         seed: Option<u64>,
@@ -713,7 +727,7 @@ Examples:
   MOLD_HOST=plato mold server status       Same, from the environment")]
     Status {
         /// Report on this server instead of the local managed daemon
-        #[arg(long, env = "MOLD_HOST", help_heading = "Server")]
+        #[arg(long, env = "MOLD_HOST", help_heading = "Server", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
     /// Discover mold servers advertised on the local network via mDNS
@@ -769,7 +783,7 @@ Examples:
   mold jobs show job-abc123 --script > edited.toml")]
     Show {
         /// Sequence job id as shown by `mold jobs list`
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         /// Print the raw `ChainJobDetail` document as JSON
         #[arg(long, conflicts_with = "script")]
@@ -780,9 +794,13 @@ Examples:
         script: bool,
     },
     Resume {
+        /// Sequence job id as shown by `mold jobs list`
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
     },
     Retake {
+        /// Sequence job id as shown by `mold jobs list`
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         #[arg(long)]
         stage: u32,
@@ -809,7 +827,7 @@ Examples:
   mold jobs amend job-abc123 --script edited.toml --fps 30 --no-audio")]
     Amend {
         /// Sequence job id as shown by `mold jobs list`
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         /// Edited `mold.chain.v1` TOML script carrying the full stage list
         #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
@@ -840,9 +858,13 @@ Examples:
         dry_run: bool,
     },
     Cancel {
+        /// Sequence job id as shown by `mold jobs list`
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
     },
     Delete {
+        /// Sequence job id as shown by `mold jobs list`
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         #[arg(long)]
         yes: bool,
@@ -876,7 +898,7 @@ pub enum QueueAction {
     /// Show one job in full, with its plan entry and batch progress
     Show {
         /// Job id as shown by `mold queue list`
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_id: String,
         /// Print the raw server documents as JSON
         #[arg(long)]
@@ -885,7 +907,7 @@ pub enum QueueAction {
     /// Cancel jobs by id, the whole waiting queue, or one batch
     Cancel {
         /// Job ids as shown by `mold queue list`
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_ids: Vec<String>,
         /// Cancel every still-queued job; running work is left alone
         #[arg(long, conflicts_with_all = ["job_ids", "batch"])]
@@ -903,7 +925,7 @@ pub enum QueueAction {
     /// repair is refused by name rather than skipped.
     Retry {
         /// Job ids as shown by `mold queue list --held`
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_ids: Vec<String>,
         /// Retry every retryable hold
         #[arg(long, conflicts_with = "job_ids")]
@@ -911,7 +933,7 @@ pub enum QueueAction {
     },
     /// Send a held job to another running Mold server, preserving its request
     Send {
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_id: String,
         /// Destination URL (source remains MOLD_HOST)
         #[arg(long, value_name = "HOST")]
@@ -923,7 +945,7 @@ pub enum QueueAction {
     /// Move one queued job to a new place in line
     Move {
         /// Job id as shown by `mold queue list`
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_id: String,
         /// New 0-based position; a value past the tail is clamped by the host
         #[arg(long, value_name = "POSITION")]
@@ -931,12 +953,12 @@ pub enum QueueAction {
     },
     /// Pause one waiting job, or omit JOB-ID to hold host-wide dispatch
     Pause {
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_id: Option<String>,
     },
     /// Resume one paused job, or omit JOB-ID to resume host-wide dispatch
     Resume {
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_id: Option<String>,
     },
     /// Run the held-row and settled-batch retention sweeps now
@@ -953,7 +975,7 @@ enum VideoUpscaleAction {
         model: String,
         #[arg(long, env = "MOLD_UPSCALE_TILE_SIZE")]
         tile_size: Option<u32>,
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
         /// Follow the job through terminal publication
         #[arg(long)]
@@ -961,31 +983,31 @@ enum VideoUpscaleAction {
     },
     /// List durable Framewise upscale jobs
     List {
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
     /// Print one job as JSON
     Status {
         id: String,
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
     /// Pause after the current frame boundary
     Pause {
         id: String,
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
     /// Resume from the last completed frame checkpoint
     Resume {
         id: String,
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
     /// Cancel without replacing or publishing source media
     Cancel {
         id: String,
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
 }
@@ -1005,7 +1027,7 @@ pub enum TrashAction {
     /// Restore trashed prints to the live gallery
     Restore {
         /// Gallery filenames as shown by `mold trash list`
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
     },
     /// Permanently delete the named prints, bypassing the trash
@@ -1021,7 +1043,7 @@ Examples:
     Delete {
         /// Gallery filenames as shown by `mold trash list` or
         /// `mold library list`
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
         /// Skip the confirmation prompt
         #[arg(long, short = 'y')]
@@ -1050,28 +1072,28 @@ pub enum LibraryTagAction {
     },
     /// Add one or more tags to existing prints
     Add {
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
-        #[arg(long = "tag", required = true, value_name = "TAG", value_parser = tag_parser)]
+        #[arg(long = "tag", required = true, value_name = "TAG", value_parser = tag_parser, add = ArgValueCandidates::new(completion_cache::complete_tag))]
         tags: Vec<String>,
     },
     /// Remove one or more tags from existing prints
     Remove {
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
-        #[arg(long = "tag", required = true, value_name = "TAG", value_parser = tag_parser)]
+        #[arg(long = "tag", required = true, value_name = "TAG", value_parser = tag_parser, add = ArgValueCandidates::new(completion_cache::complete_tag))]
         tags: Vec<String>,
     },
     /// Rename a tag everywhere it is used
     Rename {
-        #[arg(value_name = "OLD", value_parser = tag_parser)]
+        #[arg(value_name = "OLD", value_parser = tag_parser, add = ArgValueCandidates::new(completion_cache::complete_tag))]
         old: String,
         #[arg(value_name = "NEW", value_parser = tag_parser)]
         new: String,
     },
     /// Delete a tag and detach it from every print
     Delete {
-        #[arg(value_name = "TAG", value_parser = tag_parser)]
+        #[arg(value_name = "TAG", value_parser = tag_parser, add = ArgValueCandidates::new(completion_cache::complete_tag))]
         tag: String,
         #[arg(long, short = 'y')]
         yes: bool,
@@ -1087,7 +1109,7 @@ pub enum LibraryCollectionAction {
     },
     /// Show one collection and its ordered member filenames
     Show {
-        #[arg(value_name = "NAME-OR-SLUG")]
+        #[arg(value_name = "NAME-OR-SLUG", add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: String,
         #[arg(long)]
         json: bool,
@@ -1101,7 +1123,7 @@ pub enum LibraryCollectionAction {
     },
     /// Update a collection's name, description, cover, or visibility
     Update {
-        #[arg(value_name = "NAME-OR-SLUG")]
+        #[arg(value_name = "NAME-OR-SLUG", add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: String,
         #[arg(long, value_name = "TEXT", value_parser = collection_name_parser)]
         name: Option<String>,
@@ -1109,7 +1131,7 @@ pub enum LibraryCollectionAction {
         description: Option<String>,
         #[arg(long, conflicts_with = "description")]
         clear_description: bool,
-        #[arg(long, value_name = "FILENAME", conflicts_with = "clear_cover")]
+        #[arg(long, value_name = "FILENAME", conflicts_with = "clear_cover", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         cover: Option<String>,
         #[arg(long, conflicts_with = "cover")]
         clear_cover: bool,
@@ -1120,23 +1142,23 @@ pub enum LibraryCollectionAction {
     },
     /// Delete a collection without deleting its prints
     Delete {
-        #[arg(value_name = "NAME-OR-SLUG")]
+        #[arg(value_name = "NAME-OR-SLUG", add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: String,
         #[arg(long, short = 'y')]
         yes: bool,
     },
     /// Add existing prints to a collection
     Add {
-        #[arg(value_name = "NAME-OR-SLUG")]
+        #[arg(value_name = "NAME-OR-SLUG", add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: String,
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
     },
     /// Remove existing prints from a collection
     Remove {
-        #[arg(value_name = "NAME-OR-SLUG")]
+        #[arg(value_name = "NAME-OR-SLUG", add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: String,
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
     },
 }
@@ -1147,9 +1169,9 @@ pub enum LibraryAction {
     List {
         #[arg(long, value_name = "TEXT")]
         query: Option<String>,
-        #[arg(long = "tag", value_name = "TAG", value_parser = tag_parser)]
+        #[arg(long = "tag", value_name = "TAG", value_parser = tag_parser, add = ArgValueCandidates::new(completion_cache::complete_tag))]
         tags: Vec<String>,
-        #[arg(long, value_name = "NAME-OR-SLUG")]
+        #[arg(long, value_name = "NAME-OR-SLUG", add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: Option<String>,
         #[arg(long)]
         favorite: bool,
@@ -1166,7 +1188,7 @@ pub enum LibraryAction {
     },
     /// Show one print's metadata and optionally preview it inline
     Show {
-        #[arg(value_name = "FILENAME")]
+        #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filename: String,
         #[arg(long, conflicts_with = "preview")]
         json: bool,
@@ -1175,14 +1197,14 @@ pub enum LibraryAction {
     },
     /// Open the protocol-aware terminal Library grid
     Grid {
-        #[arg(long, value_name = "URL", conflicts_with = "local")]
+        #[arg(long, value_name = "URL", conflicts_with = "local", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
         #[arg(long, conflicts_with = "host")]
         local: bool,
     },
     /// Set or clear one existing print's title
     Title {
-        #[arg(value_name = "FILENAME")]
+        #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filename: String,
         #[arg(value_name = "TEXT", required_unless_present = "clear", conflicts_with = "clear", value_parser = print_title_parser)]
         title: Option<String>,
@@ -1191,12 +1213,12 @@ pub enum LibraryAction {
     },
     /// Mark existing prints as favorites
     Favorite {
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
     },
     /// Remove the favorite mark from existing prints
     Unfavorite {
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
     },
     /// Manage tags on existing prints
@@ -1223,7 +1245,7 @@ Examples:
   mold library source-media cat.png --member 6f1c... --output - | viu -")]
     SourceMedia {
         /// Gallery filename as shown by `mold library list`
-        #[arg(value_name = "FILENAME")]
+        #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filename: String,
         /// Download this member instead of listing. The id comes from the
         /// listing and is opaque — never a path on the host.
@@ -1239,7 +1261,7 @@ Examples:
     },
     /// Move live prints into the recoverable gallery trash
     Trash {
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
     },
     /// Export one stored 3-D print as OBJ, an OBJ+PBR ZIP, STL, PLY, or a turntable GIF/APNG/WebP
@@ -1268,7 +1290,7 @@ Examples:
   mold library export chair.glb --format gif --playback bounce --repeat once
   mold library export chair.glb --format webp --frames 72 --fps 24 --max-dimension 768")]
     Export {
-        #[arg(value_name = "FILENAME")]
+        #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filename: String,
         /// Container: glb, obj, zip, stl, ply, or a gif/apng/webp turntable.
         /// glb downloads the stored file unchanged; zip packages OBJ + MTL +
@@ -1618,6 +1640,15 @@ enum Commands {
     ///
     /// First positional arg is treated as MODEL if it matches a known model name.
     /// Remaining args are the prompt.
+    ///
+    /// Fit policy: by default a --image source decides the canvas — the
+    /// picture is fitted to the model's bounds and the render takes its
+    /// shape. Pass --fit to do the opposite and resample the picture onto the
+    /// canvas you asked for (--width/--height, else the model's default):
+    /// crop-fill keeps proportions and trims the edges, pad-fit keeps the
+    /// whole picture and adds black borders, lanczos-resize stretches it. The
+    /// policy is recorded beside the print, so reusing it in Mold Studio
+    /// restores the same crop.
     #[command(after_long_help = "\
 Examples:
   mold run \"a cat on a skateboard\"
@@ -1657,12 +1688,12 @@ Examples:
 
         /// File the print under a tag. Repeatable, up to 20 tags
         /// (1-64 characters each). Tags are matched case-insensitively.
-        #[arg(long = "tag", help_heading = "Output", value_name = "TAG", value_parser = tag_parser)]
+        #[arg(long = "tag", help_heading = "Output", value_name = "TAG", value_parser = tag_parser, add = ArgValueCandidates::new(completion_cache::complete_tag))]
         tags: Vec<String>,
 
         /// File the print into a collection, creating it if it does not
         /// exist yet. Collections merge across machines by name.
-        #[arg(long, help_heading = "Output", value_name = "NAME", value_parser = collection_name_parser)]
+        #[arg(long, help_heading = "Output", value_name = "NAME", value_parser = collection_name_parser, add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: Option<String>,
 
         /// Do not add the title as a tag, whatever
@@ -1942,7 +1973,7 @@ Examples:
         camera_control: Option<String>,
 
         /// Server URL to connect to
-        #[arg(long, env = "MOLD_HOST", help_heading = "Server")]
+        #[arg(long, env = "MOLD_HOST", help_heading = "Server", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
 
         /// Skip server and run inference locally (requires GPU features)
@@ -2097,6 +2128,20 @@ Examples:
         /// source preservation (1.0 pins the opening frame).
         #[arg(long, help_heading = "img2img")]
         strength: Option<f64>,
+
+        /// How a source image whose shape differs from the canvas is mapped
+        /// onto it: `crop-fill` keeps proportions and trims the edges,
+        /// `pad-fit` keeps the whole picture and adds black borders,
+        /// `lanczos-resize` stretches it. Without --fit the canvas is derived
+        /// from the picture instead. Requires --image.
+        #[arg(
+            long,
+            value_name = "crop-fill|pad-fit|lanczos-resize",
+            requires = "image",
+            help_heading = "img2img",
+            value_parser = source_fit::parse_source_fit_mode
+        )]
+        fit: Option<source_fit::SourceFitMode>,
 
         /// Mask image for inpainting (file path; white = repaint, black = preserve)
         #[arg(long, requires = "image", help_heading = "img2img", value_hint = ValueHint::FilePath)]
@@ -2254,7 +2299,7 @@ and whose args are [\"mcp\", \"--host\", \"http://localhost:7680\"]. Run
 `mold serve` separately before calling generation tools.")]
     Mcp {
         /// Server URL to connect to
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
 
@@ -2883,7 +2928,7 @@ Examples:
     #[cfg(feature = "tui")]
     Tui {
         /// Server URL override
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
 
         /// Force local inference (no server connection)
@@ -2941,7 +2986,7 @@ Examples:
         tile_size: Option<u32>,
 
         /// Server URL to connect to
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
 
         /// Skip server and run inference locally
@@ -3271,6 +3316,7 @@ async fn run() -> anyhow::Result<()> {
             lora_scale,
             image,
             strength,
+            fit,
             mask,
             id_image,
             id_weight,
@@ -3468,6 +3514,7 @@ async fn run() -> anyhow::Result<()> {
                 lora_scale,
                 image,
                 strength,
+                fit,
                 mask,
                 commands::identity::IdentityArgs {
                     id_images: id_image,
@@ -3869,6 +3916,7 @@ async fn run() -> anyhow::Result<()> {
                 model,
                 output_dir,
                 keep,
+                no_save,
                 seed,
                 steps,
                 width,
@@ -3904,6 +3952,7 @@ async fn run() -> anyhow::Result<()> {
                     height,
                     create,
                     wait_ready_timeout_secs: wait_timeout,
+                    no_save,
                 };
                 commands::runpod::run_run(opts).await?
             }
@@ -4913,6 +4962,38 @@ mod tests {
         );
     }
 
+    /// `mold runpod run --no-save` reads the same way and says the same
+    /// thing: the pod files the print and trashes it there, while the image
+    /// still lands in `--output-dir` on this machine.
+    #[test]
+    fn runpod_run_no_save_flag() {
+        match parse(&["runpod", "run", "a cat"]).command {
+            Commands::Runpod {
+                action: RunpodAction::Run { no_save, .. },
+            } => assert!(!no_save),
+            _ => panic!("expected runpod run"),
+        }
+        match parse(&["runpod", "run", "a cat", "--no-save"]).command {
+            Commands::Runpod {
+                action: RunpodAction::Run { no_save, .. },
+            } => assert!(no_save),
+            _ => panic!("expected runpod run --no-save"),
+        }
+        let help = on_large_stack(|| {
+            <Cli as clap::CommandFactory>::command()
+                .find_subcommand_mut("runpod")
+                .expect("runpod subcommand")
+                .find_subcommand_mut("run")
+                .expect("runpod run subcommand")
+                .render_long_help()
+                .to_string()
+        });
+        assert!(
+            help.contains("Trash") || help.contains("recoverable"),
+            "the help must say the print is recoverable: {help}"
+        );
+    }
+
     #[test]
     fn run_no_metadata_flag() {
         let cli = parse(&["run", "model", "test", "--no-metadata"]);
@@ -4965,6 +5046,56 @@ mod tests {
             Commands::Run { image, .. } => assert_eq!(image, vec!["input.jpg"]),
             _ => panic!("expected Run"),
         }
+    }
+
+    /// `--fit` parses to the three honoured policies and refuses the two
+    /// browser-only ones with their reason rather than clap's "invalid
+    /// value" list.
+    #[test]
+    fn run_fit_parses_the_three_terminal_policies() {
+        for (raw, expected) in [
+            ("crop-fill", source_fit::SourceFitMode::CropFill),
+            ("pad-fit", source_fit::SourceFitMode::PadFit),
+            ("lanczos-resize", source_fit::SourceFitMode::LanczosResize),
+        ] {
+            let cli = parse(&["run", "model", "test", "-i", "in.png", "--fit", raw]);
+            match cli.command {
+                Commands::Run { fit, .. } => assert_eq!(fit, Some(expected)),
+                _ => panic!("expected Run"),
+            }
+        }
+
+        let cli = parse(&["run", "model", "test", "-i", "in.png"]);
+        match cli.command {
+            Commands::Run { fit, .. } => assert_eq!(fit, None),
+            _ => panic!("expected Run"),
+        }
+
+        let refusal = try_parse(&[
+            "run",
+            "model",
+            "test",
+            "-i",
+            "in.png",
+            "--fit",
+            "pad-repaint",
+        ])
+        .err()
+        .expect("a refused policy is a parse error")
+        .to_string();
+        assert!(refusal.contains("pad-repaint"), "{refusal}");
+        assert!(refusal.contains("--fit pad-fit"), "{refusal}");
+    }
+
+    /// `--fit` is a source-image policy, so clap refuses it on a run with no
+    /// picture instead of composing a request that would ignore it.
+    #[test]
+    fn run_fit_requires_an_image_at_parse_time() {
+        let error = try_parse(&["run", "model", "test", "--fit", "crop-fill"])
+            .err()
+            .expect("--fit without --image is a parse error")
+            .to_string();
+        assert!(error.contains("--image"), "{error}");
     }
 
     #[test]

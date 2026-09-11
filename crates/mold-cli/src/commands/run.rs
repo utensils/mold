@@ -1178,6 +1178,7 @@ pub async fn run(
     lora_scale: f64,
     image: Vec<String>,
     strength: Option<f64>,
+    fit: Option<crate::source_fit::SourceFitMode>,
     mask: Option<String>,
     identity: crate::commands::identity::IdentityArgs,
     control: Option<String>,
@@ -1957,6 +1958,7 @@ pub async fn run(
             } else {
                 None
             },
+            source_fit: fit,
             references: if named_view_references.is_empty() {
                 h3_authoring.references
             } else {

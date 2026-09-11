@@ -79,6 +79,7 @@ prompt expansion for that run.
 | `--distill-strength <SPEC>`                                                                  | Wan Lightning distill strength: `high=X,low=Y` or one number for both experts                                                                                                                                                                       |
 | `-i, --image <PATH>`                                                                         | Source image; repeat for `qwen-image-edit` and FLUX.2 [dev]; `-` is stdin for single-image families                                                                                                                                                 |
 | `--strength <FLOAT>`, `--mask <PATH>`                                                        | img2img/inpainting controls                                                                                                                                                                                                                         |
+| `--fit <MODE>`                                                                               | Resample the `--image` source onto the requested canvas instead of taking its shape: `crop-fill` trims the edges, `pad-fit` adds black borders, `lanczos-resize` stretches. Requires `--image`; the policy is recorded on the print                 |
 | `--control <PATH>`, `--control-model <NAME>`, `--control-scale <FLOAT>`                      | SD1.5 ControlNet controls                                                                                                                                                                                                                           |
 | `-n, --negative-prompt <TEXT>`, `--no-negative`                                              | CFG-family negative prompt controls                                                                                                                                                                                                                 |
 | `--lora <PATH>`, `--lora-scale <FLOAT>`                                                      | LoRA adapter path and scale; `--lora` is repeatable; suffix `@high`/`@low` binds an adapter to one Wan 2.2 A14B expert                                                                                                                              |
@@ -111,6 +112,20 @@ prompt expansion for that run.
 | `--id-start-step <N>`                                                                        | First denoise step identity is applied from (default `0`)                                                                                                                                                                                           |
 | `--true-cfg <SCALE>`                                                                         | True classifier-free guidance scale, `1.0`–`10.0` (default `1.0` = off); FLUX only                                                                                                                                                                  |
 | `--cfg-start-step <N>`                                                                       | First denoise step the true-CFG negative branch runs at (default `1`); requires `--true-cfg`                                                                                                                                                        |
+
+Without `--fit`, a `--image` source decides the canvas: mold fits the picture
+to the model's bounds and renders at its shape, so `--width`/`--height` are
+ignored. `--fit` reverses that — the canvas is `--width`/`--height` (or the
+model's default) and the picture is resampled onto it with Lanczos3, padding
+with black where a mode needs it. Mold Studio's `pad-repaint` and
+`upscale-then-fit` are refused by name here: the first needs a generated
+repaint mask, the second a separate upscaler pass (run `mold upscale` first,
+then `--fit crop-fill`).
+
+```bash
+mold run flux-dev:q4 "A lighthouse at dusk" --image wide.png --fit crop-fill --width 1024 --height 1024
+mold run sdxl-base:fp16 "A cabin in snow" --image tall.jpg --fit pad-fit --width 1024 --height 576
+```
 
 For video, the `--output` extension outranks the family's container default:
 `mold run <video-model> "…" -o clip.gif` writes a real GIF even where the family
@@ -785,6 +800,7 @@ mold runpod run "a cat on a skateboard"
 mold runpod create --gpu 5090
 mold runpod network-volume create --name models --size 100 --dc US-KS-2
 mold runpod run "a cat" --network-volume <volume-id>
+mold runpod run "a cat" --no-save
 mold runpod connect <pod-id>
 mold runpod delete <pod-id>
 ```
@@ -792,6 +808,11 @@ mold runpod delete <pod-id>
 Common subcommands are `doctor`, `gpus`, `datacenters`, `network-volume`,
 `list`, `get`, `create`, `start`, `stop`, `delete`, `connect`, `logs` (RunPod
 console handoff), `usage`, and `run`.
+
+`mold runpod run --no-save` keeps the render out of the POD's Library: the pod
+publishes the print and moves it straight to that machine's Trash. The image
+still lands in `--output-dir` on this machine, which is the point of the
+command.
 See [mold runpod CLI](/deployment/runpod-cli).
 
 ## `mold lambda`
@@ -940,6 +961,15 @@ mold completions powershell
 Dynamic completion includes command and flag names, known and installed model
 IDs where appropriate, upscaler IDs, config keys, RunPod resources, completion
 shell names, and locally visible stable GPU IDs for `gpu enable|disable`.
+
+Tags, collections, sequence and queue job ids, gallery filenames and `--host`
+complete from a small cache at `$MOLD_HOME/completion-cache.json`, because a
+completer cannot contact a server. `mold library list`, `mold library tag
+list`, `mold library collection list`, `mold jobs list` and `mold queue list`
+each record what they saw, along with the machine that answered — so run one
+of those against a machine before expecting `--tag` or `--host` to offer
+anything. The cache is a hint, never an authority: a tag that has since been
+renamed still completes, and the server then says it does not exist.
 
 Common setup:
 
