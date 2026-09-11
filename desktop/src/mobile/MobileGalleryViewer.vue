@@ -69,6 +69,16 @@ import {
   type MobileCollectionCard,
   type MobileGalleryImage,
 } from "./libraryOrganization";
+import {
+  beginViewerImageZoom,
+  constrainViewerImageZoom,
+  createViewerImageZoom,
+  endViewerImageZoom,
+  moveViewerImageZoom,
+  resetViewerImageZoom,
+  viewerImageIsZoomed,
+  type ViewerImageZoomMetrics,
+} from "./imageViewerZoom";
 
 const props = withDefaults(
   defineProps<{
@@ -635,10 +645,128 @@ let activeMedia: MediaLoad | null = null;
 let gesturePointerId: number | null = null;
 let gestureStartX = 0;
 let gestureStartY = 0;
+const imageViewport = ref<HTMLElement | null>(null);
+const viewerImage = ref<HTMLImageElement | null>(null);
+const imageZoom = createViewerImageZoom();
+const imageZoomScale = ref(imageZoom.scale);
+const imageZoomX = ref(imageZoom.x);
+const imageZoomY = ref(imageZoom.y);
+const imageZoomActive = ref(false);
+const imageZoomed = computed(() => imageZoomScale.value > 1.001);
+const imageZoomStyle = computed(() => ({
+  transform: `translate3d(${imageZoomX.value}px, ${imageZoomY.value}px, 0) scale(${imageZoomScale.value})`,
+}));
 
 const SWIPE_DISTANCE = 48;
 const HORIZONTAL_INTENT_RATIO = 1.25;
 const VIDEO_CONTROL_STRIP_HEIGHT = 64;
+
+function syncImageZoom(): void {
+  imageZoomScale.value = imageZoom.scale;
+  imageZoomX.value = imageZoom.x;
+  imageZoomY.value = imageZoom.y;
+}
+
+function resetImageZoom(): void {
+  resetViewerImageZoom(imageZoom);
+  imageZoomActive.value = false;
+  syncImageZoom();
+}
+
+/** Measure the contained bitmap, not its full-width object-fit element. */
+function imageZoomMetrics(): ViewerImageZoomMetrics {
+  const viewport = imageViewport.value;
+  const bounds = viewport?.getBoundingClientRect();
+  const viewportWidth = bounds?.width || viewport?.clientWidth || 1;
+  const viewportHeight = bounds?.height || viewport?.clientHeight || 1;
+  const naturalWidth =
+    viewerImage.value?.naturalWidth || props.item.metadata.width || viewportWidth;
+  const naturalHeight =
+    viewerImage.value?.naturalHeight || props.item.metadata.height || viewportHeight;
+  const fit = Math.min(viewportWidth / naturalWidth, viewportHeight / naturalHeight);
+  return {
+    left: bounds?.left ?? 0,
+    top: bounds?.top ?? 0,
+    viewportWidth,
+    viewportHeight,
+    mediaWidth: naturalWidth * fit,
+    mediaHeight: naturalHeight * fit,
+  };
+}
+
+function constrainImageZoomToViewport(): void {
+  if (!viewerImageIsZoomed(imageZoom)) return;
+  if (constrainViewerImageZoom(imageZoom, imageZoomMetrics())) syncImageZoom();
+}
+
+function beginImageGesture(event: PointerEvent): boolean {
+  if (
+    video.value ||
+    audio.value ||
+    mesh.value ||
+    event.pointerType === "mouse" ||
+    isSwipeBlockingControl(event.target)
+  ) {
+    return false;
+  }
+  const result = beginViewerImageZoom(imageZoom, event);
+  if (!result.tracked) return result.consumed;
+  try {
+    imageViewport.value?.setPointerCapture?.(event.pointerId);
+  } catch {
+    // Window capture below keeps the gesture alive on older WebViews.
+  }
+  imageZoomActive.value = imageZoom.points.size > 1 || viewerImageIsZoomed(imageZoom);
+  if (result.consumed && event.cancelable) event.preventDefault();
+  return result.consumed;
+}
+
+function trackImageGesture(event: PointerEvent): boolean {
+  const result = moveViewerImageZoom(imageZoom, event, imageZoomMetrics());
+  if (!result.tracked) return false;
+  imageZoomActive.value = result.consumed;
+  if (result.changed) syncImageZoom();
+  if (result.consumed && event.cancelable) event.preventDefault();
+  return result.consumed;
+}
+
+function finishImageGesture(event: PointerEvent): boolean {
+  const result = endViewerImageZoom(imageZoom, event.pointerId);
+  if (!result.tracked) return false;
+  imageZoomActive.value = imageZoom.points.size > 0 && result.consumed;
+  if (result.consumed && event.cancelable) event.preventDefault();
+  return result.consumed;
+}
+
+function beginViewerGesture(event: PointerEvent): void {
+  if (beginImageGesture(event)) {
+    cancelSwipe();
+    return;
+  }
+  beginSwipe(event);
+}
+
+function trackViewerGesture(event: PointerEvent): void {
+  if (trackImageGesture(event)) {
+    cancelSwipe();
+    return;
+  }
+  trackSwipe(event);
+}
+
+function finishViewerGesture(event: PointerEvent): void {
+  if (finishImageGesture(event)) {
+    cancelSwipe();
+    return;
+  }
+  finishSwipe(event);
+}
+
+function cancelViewerGesture(event?: PointerEvent): void {
+  if (event) finishImageGesture(event);
+  else resetImageZoom();
+  cancelSwipe(event);
+}
 
 interface MediaLoad {
   path: string;
@@ -873,6 +1001,7 @@ watch(
   () => {
     collapseSheet();
     resetSheetDrag();
+    resetImageZoom();
     // The next print's details start at the top, not at this one's offset.
     if (sheetBody.value) sheetBody.value.scrollTop = 0;
     actionStatus.value = "";
@@ -1174,9 +1303,11 @@ onMounted(() => {
   // window capture boundary so image -> video -> image navigation cannot be
   // stranded by a media element, while the excluded control strip still gets
   // ordinary taps and scrubbing gestures.
-  window.addEventListener("pointermove", trackSwipe, { capture: true, passive: false });
-  window.addEventListener("pointerup", finishSwipe, true);
-  window.addEventListener("pointercancel", cancelSwipe, true);
+  window.addEventListener("pointermove", trackViewerGesture, { capture: true, passive: false });
+  window.addEventListener("pointerup", finishViewerGesture, true);
+  window.addEventListener("pointercancel", cancelViewerGesture, true);
+  window.addEventListener("resize", constrainImageZoomToViewport);
+  window.visualViewport?.addEventListener("resize", constrainImageZoomToViewport);
   restoreFocusElement = document.activeElement as HTMLElement | null;
   try {
     dialog.value?.showModal();
@@ -1189,10 +1320,12 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   mounted = false;
-  window.removeEventListener("pointermove", trackSwipe, true);
-  window.removeEventListener("pointerup", finishSwipe, true);
-  window.removeEventListener("pointercancel", cancelSwipe, true);
-  cancelSwipe();
+  window.removeEventListener("pointermove", trackViewerGesture, true);
+  window.removeEventListener("pointerup", finishViewerGesture, true);
+  window.removeEventListener("pointercancel", cancelViewerGesture, true);
+  window.removeEventListener("resize", constrainImageZoomToViewport);
+  window.visualViewport?.removeEventListener("resize", constrainImageZoomToViewport);
+  cancelViewerGesture();
   loadEpoch += 1;
   if (dialog.value?.open && typeof dialog.value.close === "function") dialog.value.close();
   evictLoad(activeMedia);
@@ -1244,14 +1377,46 @@ onBeforeUnmount(() => {
 
     <div
       class="gallery-viewer-stage"
+      :class="{ 'is-image-zoomed': imageZoomed }"
       data-test="gallery-viewer-stage"
-      @pointerdown.capture="beginSwipe"
-      @pointermove="trackSwipe"
-      @pointerup="finishSwipe"
-      @pointercancel="cancelSwipe"
+      @pointerdown.capture="beginViewerGesture"
     >
+      <div
+        v-if="!video && !audio && !mesh"
+        ref="imageViewport"
+        class="gallery-viewer-image-viewport"
+        data-test="gallery-viewer-image-viewport"
+      >
+        <div
+          class="gallery-viewer-image-transform"
+          :class="{ 'is-gesturing': imageZoomActive }"
+          :style="imageZoomStyle"
+          data-test="gallery-viewer-image-transform"
+        >
+          <img
+            v-if="!mediaUrl"
+            class="gallery-viewer-placeholder"
+            :src="thumbnailUrl"
+            alt=""
+            aria-hidden="true"
+            draggable="false"
+          />
+          <img
+            v-else
+            :key="mediaLoadKey"
+            ref="viewerImage"
+            class="gallery-viewer-media"
+            :src="mediaUrl"
+            :alt="item.metadata.prompt || item.filename"
+            data-test="gallery-viewer-image"
+            draggable="false"
+            @load="mediaReady"
+            @error="mediaFailed"
+          />
+        </div>
+      </div>
       <img
-        v-if="!mediaUrl"
+        v-else-if="!mediaUrl"
         class="gallery-viewer-placeholder"
         :src="thumbnailUrl"
         alt=""
@@ -1298,17 +1463,6 @@ onBeforeUnmount(() => {
         preload="metadata"
         data-test="gallery-viewer-video"
         @loadedmetadata="mediaReady"
-        @error="mediaFailed"
-      />
-      <img
-        v-else
-        :key="mediaLoadKey"
-        class="gallery-viewer-media"
-        :src="mediaUrl"
-        :alt="item.metadata.prompt || item.filename"
-        data-test="gallery-viewer-image"
-        draggable="false"
-        @load="mediaReady"
         @error="mediaFailed"
       />
       <span v-if="upscaled" data-test="upscaled-badge" class="gallery-upscaled-badge">

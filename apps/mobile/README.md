@@ -250,8 +250,11 @@ pushed screen opened from the header.
   every kind and only its actions differ, so a 3-D print's export controls
   can no longer push its own model off the screen. A drag that starts on the
   sheet moves the sheet and never pages the gallery; a drag on the media
-  still pages it, and a drag on a mesh still orbits the model. The viewer
-  shows uncropped images, streams videos with native controls, plays
+  still pages it, and a drag on a mesh still orbits the model. A still image
+  owns a two-finger pinch that scales around the fingers up to 5×; while
+  zoomed, one finger pans within the image bounds instead of paging, and
+  returning to 1× restores the gallery swipe. Moving to another print resets
+  the zoom. The viewer shows uncropped images, streams videos with native controls, plays
   audio-only prints (LTX-2 text-to-audio) as a waveform tile above a native
   transport, renders Hunyuan3D meshes in an orbitable WebGL viewer over the
   saved poster (`@studio/components/MeshViewer.vue`, shared with desktop and
@@ -487,7 +490,8 @@ horizontal scrollers, action rows, dialogs, and the full-screen Library viewer
 retain their own gesture authority. Pulling down at the top
 refreshes Images, Styles, Machines, and Machine Detail; Make and Settings
 stay on their existing live polling/streaming paths so an in-progress form is
-never disrupted. The Library viewer keeps its scoped horizontal swipe gesture,
+never disrupted. The Library viewer keeps its scoped horizontal swipe gesture
+at 1× and gives zoomed stills their own bounded pinch/pan gesture,
 and the Library grid keeps a scoped two-finger pinch (`touch-action: pan-y`)
 that resizes thumbnails while one-finger scrolling is unaffected.
 

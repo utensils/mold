@@ -550,6 +550,21 @@ describe("mobile gallery viewer", () => {
     expect(media?.[1]).toMatch(/max-width:\s*100%\s*;/);
   });
 
+  it("keeps still-image pinch zoom inside a dedicated clipped touch surface", () => {
+    const viewport = css.match(/\.gallery-viewer-image-viewport\s*\{([^}]*)\}/s);
+    const transforms = [
+      ...css.matchAll(/(?:^|\n)\.gallery-viewer-image-transform\s*\{([^}]*)\}/gs),
+    ];
+    const transform = transforms.at(-1);
+    const zoomedNav = css.match(
+      /\.gallery-viewer-stage\.is-image-zoomed \.gallery-viewer-nav\s*\{([^}]*)\}/s,
+    );
+    expect(viewport?.[1]).toMatch(/overflow:\s*hidden\s*;/);
+    expect(viewport?.[1]).toMatch(/touch-action:\s*none\s*;/);
+    expect(transform?.[1]).toMatch(/transform-origin:\s*center\s*;/);
+    expect(zoomedNav?.[1]).toMatch(/pointer-events:\s*none\s*;/);
+  });
+
   /**
    * The media is the page: the stage is the whole dialog, the header floats
    * over its top edge, and the details sheet is parked below the bottom one

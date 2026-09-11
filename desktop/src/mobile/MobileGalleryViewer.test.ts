@@ -837,6 +837,34 @@ describe("MobileGalleryViewer", () => {
     expect(view.emitted("next")).toHaveLength(1);
   });
 
+  it("leaves the complete native touch sequence with viewer controls", async () => {
+    const view = mountViewer(image, { position: 2, total: 4 });
+    await flushPromises();
+    const viewport = view.get("[data-test='gallery-viewer-image-viewport']");
+    const capture = vi.fn();
+    viewport.element.setPointerCapture = capture;
+    const previous = view.get("[data-test='gallery-viewer-previous']");
+
+    await previous.trigger("pointerdown", {
+      pointerId: 31,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 24,
+      clientY: 240,
+    });
+    await previous.trigger("pointerup", {
+      pointerId: 31,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 24,
+      clientY: 240,
+    });
+    await previous.trigger("click");
+
+    expect(capture).not.toHaveBeenCalled();
+    expect(view.emitted("previous")).toHaveLength(1);
+  });
+
   /// Dragging a mesh is how you ROTATE it. The stage arms its swipe on
   /// `pointerdown.capture`, so it fires before the mesh viewer's own handler
   /// and a child cannot stop it — orbiting a model sideways navigated the
@@ -927,6 +955,100 @@ describe("MobileGalleryViewer", () => {
     });
     expect(view.emitted("previous")).toHaveLength(1);
     expect(view.emitted("next")).toHaveLength(1);
+  });
+
+  it("pinch-zooms and pans still images without paging, then resets for the next print", async () => {
+    const view = mountViewer(image, { position: 2, total: 4 });
+    await flushPromises();
+    const viewport = view.get("[data-test='gallery-viewer-image-viewport']");
+    const viewportBounds = {
+      top: 60,
+      bottom: 460,
+      left: 0,
+      right: 400,
+      width: 400,
+      height: 400,
+      x: 0,
+      y: 60,
+      toJSON: () => ({}),
+    };
+    vi.spyOn(viewport.element, "getBoundingClientRect").mockImplementation(() => viewportBounds);
+
+    await viewport.trigger("pointerdown", {
+      pointerId: 41,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 150,
+      clientY: 260,
+    });
+    await viewport.trigger("pointerdown", {
+      pointerId: 42,
+      pointerType: "touch",
+      isPrimary: false,
+      clientX: 250,
+      clientY: 260,
+    });
+    window.dispatchEvent(
+      new PointerEvent("pointermove", {
+        pointerId: 42,
+        pointerType: "touch",
+        isPrimary: false,
+        clientX: 350,
+        clientY: 260,
+      }),
+    );
+    await flushPromises();
+
+    expect(view.get("[data-test='gallery-viewer-image-transform']").attributes("style")).toContain(
+      "scale(2)",
+    );
+    expect(view.get("[data-test='gallery-viewer-stage']").classes()).toContain("is-image-zoomed");
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 42,
+        pointerType: "touch",
+        isPrimary: false,
+        clientX: 350,
+        clientY: 260,
+      }),
+    );
+    window.dispatchEvent(
+      new PointerEvent("pointermove", {
+        pointerId: 41,
+        pointerType: "touch",
+        isPrimary: true,
+        clientX: 80,
+        clientY: 300,
+      }),
+    );
+    window.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 41,
+        pointerType: "touch",
+        isPrimary: true,
+        clientX: 80,
+        clientY: 300,
+      }),
+    );
+    expect(view.emitted("previous")).toBeUndefined();
+    expect(view.emitted("next")).toBeUndefined();
+
+    viewportBounds.width = 800;
+    viewportBounds.right = 800;
+    window.dispatchEvent(new Event("resize"));
+    await flushPromises();
+    expect(view.get("[data-test='gallery-viewer-image-transform']").attributes("style")).toContain(
+      "translate3d(0px,",
+    );
+
+    await view.setProps({ item: { ...image, filename: "print two.png" } });
+    await flushPromises();
+    expect(view.get("[data-test='gallery-viewer-image-transform']").attributes("style")).toContain(
+      "scale(1)",
+    );
+    expect(view.get("[data-test='gallery-viewer-stage']").classes()).not.toContain(
+      "is-image-zoomed",
+    );
   });
 
   it("supports keyboard navigation without stealing keys from video controls", async () => {
