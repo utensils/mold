@@ -427,12 +427,14 @@ mold skill list
 ```
 
 Shell completion is installed with `mold completions <shell>`. Model names
-complete from the manifest, and tags, collections, job ids, gallery filenames
-and `--host` complete from what earlier commands saw: `mold library list`,
-`mold library tag list`, `mold library collection list`, `mold jobs list` and
-`mold queue list` each record their answers, so run one of those against a
-machine before expecting `--tag` or `--host` to offer anything. Completion
-never contacts a server.
+complete from the manifest, and tags, collections, sequence and queue job ids,
+download ids, 3-D workflow ids, gallery filenames and `--host` complete from
+what earlier commands saw: `mold library list`, `mold library tag list`,
+`mold library collection list`, `mold jobs list`, `mold queue list`,
+`mold downloads list` (or `watch`) and `mold mesh-workflow list` each record
+their answers, and `mold search` records the machine. Run one of those against
+a machine before expecting `--tag`, `--host` or an id to offer anything.
+Completion never contacts a server.
 
 The MCP server exposes thirteen tools: `generate_image`, `generate_mesh`,
 `export_mesh`, `generate_image_async`, `generation_status`,

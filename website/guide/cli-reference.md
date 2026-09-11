@@ -962,14 +962,17 @@ Dynamic completion includes command and flag names, known and installed model
 IDs where appropriate, upscaler IDs, config keys, RunPod resources, completion
 shell names, and locally visible stable GPU IDs for `gpu enable|disable`.
 
-Tags, collections, sequence and queue job ids, gallery filenames and `--host`
-complete from a small cache at `$MOLD_HOME/completion-cache.json`, because a
-completer cannot contact a server. `mold library list`, `mold library tag
-list`, `mold library collection list`, `mold jobs list` and `mold queue list`
-each record what they saw, along with the machine that answered — so run one
-of those against a machine before expecting `--tag` or `--host` to offer
-anything. The cache is a hint, never an authority: a tag that has since been
-renamed still completes, and the server then says it does not exist.
+Tags, collections, sequence and queue job ids, download ids, 3-D workflow ids,
+gallery filenames and `--host` complete from a small cache at
+`$MOLD_HOME/completion-cache.json`, because a completer cannot contact a
+server. `mold library list`, `mold library tag list`, `mold library collection
+list`, `mold jobs list`, `mold queue list`, `mold downloads list` (and `mold
+downloads watch`, from its opening snapshot) and `mold mesh-workflow list` each
+record what they saw, along with the machine that answered; `mold search`
+records the machine alone. Run one of those against a machine before expecting
+`--tag`, `--host` or an id to offer anything. The cache is a hint, never an
+authority: a tag that has since been renamed still completes, and the server
+then says it does not exist.
 
 Common setup:
 

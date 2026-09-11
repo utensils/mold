@@ -73,8 +73,17 @@ pub async fn run(args: SearchArgs) -> Result<()> {
     let client = MoldClient::from_env();
     let query = args.to_query();
     let page = match client.search_catalog(&query).await {
-        Ok(page) => page,
+        Ok(page) => {
+            // A search proves the machine answered, so it becomes a `--host`
+            // completion candidate. There are no ids to record: a catalog
+            // entry is installed by name through `mold pull`, which completes
+            // from the manifest.
+            crate::completion_cache::record_reached_host(client.host(), |_| {});
+            page
+        }
         Err(error) => match classify_server_error(&error) {
+            // The local fallback answered from this process, not from a
+            // machine, so nothing is recorded.
             ServerAvailability::FallbackLocal => search_locally(&args).await?,
             ServerAvailability::SurfaceError => return Err(error),
         },

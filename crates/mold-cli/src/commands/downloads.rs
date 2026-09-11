@@ -113,12 +113,33 @@ async fn cancel(client: &MoldClient, id: &str) -> Result<()> {
 
 async fn list(client: &MoldClient, json: bool) -> Result<()> {
     let listing = client.list_downloads().await?;
+    record_ids_for_completion(client.host(), &listing);
     if json {
         println!("{}", serde_json::to_string_pretty(&listing)?);
         return Ok(());
     }
     print_listing(&listing, client.host());
     Ok(())
+}
+
+/// Teach the shell the ids this listing just showed, so `downloads cancel`
+/// completes.
+///
+/// A completer cannot ask a server (see `crate::completion_cache`), so the
+/// command that already fetched the queue records what it saw — including the
+/// machine that answered, which is only a completion candidate because the
+/// request succeeded.
+fn record_ids_for_completion(host: &str, listing: &DownloadsListing) {
+    crate::completion_cache::record_reached_host(host, |cache| {
+        cache.record_download_ids(
+            listing
+                .active_jobs
+                .iter()
+                .chain(listing.queued.iter())
+                .chain(listing.history.iter())
+                .map(|job| job.id.clone()),
+        );
+    });
 }
 
 /// Every row the listing knows about, in the order they matter: what is
@@ -208,6 +229,14 @@ async fn watch(client: &MoldClient, json: bool) -> Result<()> {
     let printer = tokio::spawn(async move {
         let mut rates = DownloadRates::default();
         while let Some(event) = rx.recv().await {
+            // The server subscribes before it snapshots, so the first frame
+            // is always a full listing — the same rows `downloads list`
+            // shows, and the same ids `downloads cancel` completes from.
+            // Recorded above the `--json` branch, because a watcher piping
+            // JSON still just learned what is on that machine.
+            if let DownloadEvent::Snapshot { listing } = &event {
+                record_ids_for_completion(&host, listing);
+            }
             if json {
                 if let Ok(line) = serde_json::to_string(&event) {
                     println!("{line}");

@@ -715,6 +715,13 @@ async fn lease_mesh_upload(
 
 async fn list(client: &MoldClient, json: bool) -> Result<()> {
     let listing = client.list_mesh_workflows().await?;
+    // Teach the shell the ids this listing just showed: every other verb here
+    // takes one, and a completer cannot ask a server (see
+    // `crate::completion_cache`). The machine is recorded with them, because
+    // a workflow lives on ONE host and the request just succeeded.
+    crate::completion_cache::record_reached_host(client.host(), |cache| {
+        cache.record_workflow_ids(listing.jobs.iter().map(|job| job.id.clone()));
+    });
     if json {
         println!("{}", serde_json::to_string_pretty(&listing)?);
         return Ok(());

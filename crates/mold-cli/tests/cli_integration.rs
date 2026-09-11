@@ -208,17 +208,8 @@ async fn library_list_teaches_the_shell_what_it_just_listed() {
         .assert()
         .success();
 
-    let cache: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&cache_path).expect("the listing writes the cache"))
-            .expect("the cache is JSON");
-    let strings = |key: &str| -> Vec<String> {
-        cache[key]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .map(|value| value.as_str().unwrap_or_default().to_string())
-            .collect()
-    };
+    let cache = read_completion_cache(&env);
+    let strings = |key: &str| cache_strings(&cache, key);
     let filenames = strings("filenames");
     assert!(
         filenames.contains(&"newer.png".to_string()),
@@ -245,6 +236,24 @@ async fn library_list_teaches_the_shell_what_it_just_listed() {
         vec![server.uri().trim_end_matches('/').to_string()],
         "the machine that answered is the one worth completing"
     );
+}
+
+/// The completion cache one command just wrote, as JSON.
+fn read_completion_cache(env: &TestEnv) -> serde_json::Value {
+    let path = env.home.join("completion-cache.json");
+    serde_json::from_slice(&std::fs::read(&path).expect("the command writes the cache"))
+        .expect("the cache is JSON")
+}
+
+/// One list out of the cache document.
+fn cache_strings(cache: &serde_json::Value, key: &str) -> Vec<String> {
+    cache[key]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_string())
+        .collect()
 }
 
 /// A command that never reaches a server leaves no cache behind, so Tab on a
@@ -1958,6 +1967,106 @@ async fn downloads_list_shows_active_queued_and_finished_rows() {
         .stdout(predicate::str::contains("50%"))
         .stdout(predicate::str::contains("transformer.gguf"))
         .stdout(predicate::str::contains("dl-2"));
+}
+
+/// The download listing teaches the shell its ids, so `mold downloads cancel
+/// <TAB>` offers what `mold downloads list` just showed.
+///
+/// A completer cannot ask a server, so the commands that already fetched the
+/// data write `$MOLD_HOME/completion-cache.json`. Driving the real binary
+/// means dropping the refresh call fails this.
+#[tokio::test(flavor = "multi_thread")]
+async fn downloads_list_teaches_the_shell_its_ids() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/downloads"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "active_jobs": [{
+                "id": "dl-active",
+                "model": "flux-dev:q4",
+                "status": "active",
+                "files_done": 1,
+                "files_total": 4,
+                "bytes_done": 500,
+                "bytes_total": 1000
+            }],
+            "queued": [{
+                "id": "dl-queued",
+                "model": "sdxl-turbo:fp16",
+                "status": "queued",
+                "files_done": 0,
+                "files_total": 0,
+                "bytes_done": 0,
+                "bytes_total": 0
+            }],
+            "history": [{
+                "id": "dl-done",
+                "model": "z-image:q8",
+                "status": "completed",
+                "files_done": 2,
+                "files_total": 2,
+                "bytes_done": 10,
+                "bytes_total": 10
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["downloads", "list"])
+        .assert()
+        .success();
+
+    let cache = read_completion_cache(&env);
+    let ids = cache_strings(&cache, "download_ids");
+    for id in ["dl-active", "dl-queued", "dl-done"] {
+        assert!(ids.contains(&id.to_string()), "{ids:?}");
+    }
+    assert_eq!(
+        cache_strings(&cache, "hosts"),
+        vec![server.uri().trim_end_matches('/').to_string()]
+    );
+}
+
+/// The workflow listing teaches the shell its ids, so every other
+/// `mold mesh-workflow` verb completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_workflow_list_teaches_the_shell_its_ids() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/mesh-workflows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jobs": [
+                mesh_workflow_summary("mw-1", "completed"),
+                mesh_workflow_summary("mw-2", "running")
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["mesh-workflow", "list"])
+        .assert()
+        .success();
+
+    let cache = read_completion_cache(&env);
+    let ids = cache_strings(&cache, "workflow_ids");
+    assert!(ids.contains(&"mw-1".to_string()), "{ids:?}");
+    assert!(ids.contains(&"mw-2".to_string()), "{ids:?}");
+    assert_eq!(
+        cache_strings(&cache, "hosts"),
+        vec![server.uri().trim_end_matches('/').to_string()]
+    );
 }
 
 /// A 409 names the download already doing the work rather than failing.

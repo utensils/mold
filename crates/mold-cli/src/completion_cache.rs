@@ -103,16 +103,12 @@ impl CompletionCache {
         Self::merge(&mut self.filenames, values);
     }
 
-    /// Recorded by the download verbs. Declared here with the rest so the
-    /// document's shape is one decision rather than one per command.
-    #[allow(dead_code)]
+    /// Recorded by `mold downloads list` and by `watch`'s opening snapshot.
     pub fn record_download_ids(&mut self, values: impl IntoIterator<Item = String>) {
         Self::merge(&mut self.download_ids, values);
     }
 
-    /// Recorded by the durable 3-D workflow verbs. See
-    /// [`CompletionCache::record_download_ids`].
-    #[allow(dead_code)]
+    /// Recorded by `mold mesh-workflow list`.
     pub fn record_workflow_ids(&mut self, values: impl IntoIterator<Item = String>) {
         Self::merge(&mut self.workflow_ids, values);
     }
@@ -211,10 +207,26 @@ pub fn complete_filename() -> Vec<CompletionCandidate> {
     candidates(|cache| &cache.filenames)
 }
 
+pub fn complete_download_id() -> Vec<CompletionCandidate> {
+    candidates(|cache| &cache.download_ids)
+}
+
+pub fn complete_workflow_id() -> Vec<CompletionCandidate> {
+    candidates(|cache| &cache.workflow_ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
+
+    /// What a completer would offer, as plain strings.
+    fn offered(completer: fn() -> Vec<CompletionCandidate>) -> Vec<String> {
+        completer()
+            .iter()
+            .map(|candidate| candidate.get_value().to_string_lossy().into_owned())
+            .collect()
+    }
 
     /// Point `$MOLD_HOME` at a fresh directory for the body of one test.
     fn with_home<T>(body: impl FnOnce(&std::path::Path) -> T) -> T {
@@ -255,11 +267,12 @@ mod tests {
             assert_eq!(loaded.download_ids, vec!["dl-1".to_string()]);
             assert_eq!(loaded.workflow_ids, vec!["wf-1".to_string()]);
 
-            let offered: Vec<String> = complete_tag()
-                .iter()
-                .map(|candidate| candidate.get_value().to_string_lossy().into_owned())
-                .collect();
-            assert_eq!(offered, vec!["cat".to_string(), "village".to_string()]);
+            assert_eq!(
+                offered(complete_tag),
+                vec!["cat".to_string(), "village".to_string()]
+            );
+            assert_eq!(offered(complete_download_id), vec!["dl-1".to_string()]);
+            assert_eq!(offered(complete_workflow_id), vec!["wf-1".to_string()]);
         });
     }
 
@@ -312,6 +325,8 @@ mod tests {
             assert!(complete_collection().is_empty());
             assert!(complete_job_id().is_empty());
             assert!(complete_filename().is_empty());
+            assert!(complete_download_id().is_empty());
+            assert!(complete_workflow_id().is_empty());
             assert!(
                 !home.join(CACHE_FILE).exists(),
                 "completing must not create the cache"

@@ -1511,7 +1511,7 @@ Examples:
   mold mesh-workflow show WORKFLOW-ID --json")]
     Show {
         /// Workflow id as shown by `mold mesh-workflow list`
-        #[arg(value_name = "ID")]
+        #[arg(value_name = "ID", add = ArgValueCandidates::new(completion_cache::complete_workflow_id))]
         id: String,
         #[arg(long)]
         json: bool,
@@ -1521,7 +1521,8 @@ Examples:
 Examples:
   mold mesh-workflow events WORKFLOW-ID")]
     Events {
-        #[arg(value_name = "ID")]
+        /// Workflow id as shown by `mold mesh-workflow list`
+        #[arg(value_name = "ID", add = ArgValueCandidates::new(completion_cache::complete_workflow_id))]
         id: String,
     },
     /// Resume a paused or failed workflow from its first unfinished stage
@@ -1529,7 +1530,8 @@ Examples:
 Examples:
   mold mesh-workflow resume WORKFLOW-ID")]
     Resume {
-        #[arg(value_name = "ID")]
+        /// Workflow id as shown by `mold mesh-workflow list`
+        #[arg(value_name = "ID", add = ArgValueCandidates::new(completion_cache::complete_workflow_id))]
         id: String,
     },
     /// Cancel a queued or running workflow
@@ -1537,7 +1539,8 @@ Examples:
 Examples:
   mold mesh-workflow cancel WORKFLOW-ID")]
     Cancel {
-        #[arg(value_name = "ID")]
+        /// Workflow id as shown by `mold mesh-workflow list`
+        #[arg(value_name = "ID", add = ArgValueCandidates::new(completion_cache::complete_workflow_id))]
         id: String,
     },
     /// Delete a settled workflow and the artifacts it retained
@@ -1545,7 +1548,8 @@ Examples:
 Examples:
   mold mesh-workflow delete WORKFLOW-ID")]
     Delete {
-        #[arg(value_name = "ID")]
+        /// Workflow id as shown by `mold mesh-workflow list`
+        #[arg(value_name = "ID", add = ArgValueCandidates::new(completion_cache::complete_workflow_id))]
         id: String,
     },
 }
@@ -1605,7 +1609,7 @@ Examples:
   mold downloads cancel DOWNLOAD-ID")]
     Cancel {
         /// Download id as shown by `mold downloads list`
-        #[arg(value_name = "ID")]
+        #[arg(value_name = "ID", add = ArgValueCandidates::new(completion_cache::complete_download_id))]
         id: String,
     },
     /// Follow the download queue until you stop it
