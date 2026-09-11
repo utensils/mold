@@ -1928,22 +1928,70 @@ impl TransformerResidency {
 /// `memory_preflight` folds `active_vram_bytes` into `available_bytes`;
 /// otherwise the transformer is charged twice and every warm render drops.
 ///
-/// A zero or unknown budget answers [`TransformerResidency::Keep`]: an
-/// unmeasurable card is not evidence of pressure, and refusing residency on a
-/// failed probe would make every CPU and Metal render take the drop path for
-/// nothing.
+/// The reading is TYPED, because "the probe failed" and "there is no VRAM to
+/// probe" are different answers and collapsing them into one `0` sentinel is
+/// how a failed CUDA `mem_get_info` came to mean "keep 24 GB of weights
+/// resident". See [`UsableFreeVram`].
 pub fn still_transformer_residency(
     budget: &StillTransformerBudget,
-    usable_free_bytes: u64,
+    usable_free: UsableFreeVram,
 ) -> TransformerResidency {
-    if usable_free_bytes == 0 {
-        return TransformerResidency::Keep;
-    }
+    let usable_free_bytes = match usable_free {
+        // An accelerator whose reading failed is the #276 case, not a quiet
+        // one: fail CLOSED, the way the Metal memory policy already does for
+        // a failed supported probe. The whole budget is the shortfall.
+        UsableFreeVram::Unmeasurable => {
+            return TransformerResidency::Drop {
+                shortfall_bytes: budget.required_bytes(),
+            };
+        }
+        // A CPU render competes for no VRAM at all, so there is nothing a
+        // drop would free and nothing to drop for.
+        UsableFreeVram::NotApplicable => return TransformerResidency::Keep,
+        UsableFreeVram::Measured(bytes) => bytes,
+    };
     match budget.required_bytes().checked_sub(usable_free_bytes) {
         Some(shortfall) if shortfall > 0 => TransformerResidency::Drop {
             shortfall_bytes: shortfall,
         },
         _ => TransformerResidency::Keep,
+    }
+}
+
+/// What a residency decision knows about the card's free VRAM.
+///
+/// Three states, not an `Option<u64>` and certainly not a `0` sentinel: the
+/// difference between a failed probe and a device with no VRAM decides
+/// whether the safe answer is to drop or to keep, and they are opposite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsableFreeVram {
+    /// A real reserve-adjusted reading, with any resident bytes this render
+    /// loaded already added back.
+    Measured(u64),
+    /// The device has VRAM and the probe failed — CUDA `CudaContext::new` or
+    /// `mem_get_info` returning an error, or a failed Metal supported probe.
+    Unmeasurable,
+    /// There is no VRAM to measure: a CPU render.
+    NotApplicable,
+}
+
+/// The card's usable free VRAM for a residency decision, with `resident_bytes`
+/// added back.
+///
+/// ONE place performs the probe and the add-back, so the convention that
+/// `usable_free` is "the card as if nothing this render loaded were on it"
+/// cannot drift between the four call sites that ask it.
+pub fn usable_free_for_residency(
+    device: &candle_core::Device,
+    ordinal: usize,
+    resident_bytes: u64,
+) -> UsableFreeVram {
+    if device.is_cpu() {
+        return UsableFreeVram::NotApplicable;
+    }
+    match usable_free_vram_bytes(ordinal) {
+        Some(free) => UsableFreeVram::Measured(free.saturating_add(resident_bytes)),
+        None => UsableFreeVram::Unmeasurable,
     }
 }
 
@@ -5495,7 +5543,7 @@ mod tests {
             vae_decode_peak_bytes: flux_vae_decode_peak_bytes(width, height, 2),
             runtime_headroom_bytes: STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
         };
-        still_transformer_residency(&budget, usable_free_bytes)
+        still_transformer_residency(&budget, UsableFreeVram::Measured(usable_free_bytes))
     }
 
     /// The plan's 24 GB matrix, plus the 46 GB rows that show the same
@@ -5636,10 +5684,16 @@ mod tests {
         assert!(answer.shortfall_bytes() > 10 * RESIDENCY_GB);
     }
 
-    /// An unmeasurable card is not evidence of pressure.
+    /// A card MEASURED at zero free is the most pressured reading there is.
+    ///
+    /// This test used to assert the opposite, on the reasoning that "an
+    /// unmeasurable card is not evidence of pressure". That conflated a
+    /// measurement of zero with the absence of a measurement, and the absence
+    /// now has its own variant — see
+    /// `an_unmeasurable_accelerator_drops_and_only_a_cpu_keeps`.
     #[test]
-    fn an_unmeasurable_card_keeps_the_transformer() {
-        assert!(residency_for(
+    fn a_card_measured_at_zero_free_drops_the_transformer() {
+        assert!(!residency_for(
             33_000_000_000,
             2048,
             2048,
@@ -5648,6 +5702,64 @@ mod tests {
             0
         )
         .keeps());
+    }
+
+    /// A GPU whose probe FAILED must drop, not keep.
+    ///
+    /// "An unmeasurable card is not evidence of pressure" is right for a CPU
+    /// render and wrong for an accelerator whose reading failed: that is the
+    /// #276 OOM the budget exists to prevent, it inverts the Metal memory
+    /// policy CLAUDE.md documents ("failed supported probes block admission"),
+    /// and it breaks the campaign's own rule that every residency decision
+    /// falls back to TODAY'S behaviour — which was to drop.
+    ///
+    /// The three readings are distinct on purpose. Collapsing "the probe
+    /// failed" and "there is no VRAM to probe" into one `0` sentinel is
+    /// exactly how a failed CUDA `mem_get_info` came to mean "keep 24 GB of
+    /// weights resident".
+    #[test]
+    fn an_unmeasurable_accelerator_drops_and_only_a_cpu_keeps() {
+        let budget = StillTransformerBudget {
+            transformer_bytes: 23_800_000_000,
+            activation_bytes: 500_000_000,
+            vae_decode_peak_bytes: 2_700_000_000,
+            runtime_headroom_bytes: STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+        };
+
+        let failed = still_transformer_residency(&budget, UsableFreeVram::Unmeasurable);
+        assert!(
+            !failed.keeps(),
+            "a failed accelerator probe must fail CLOSED"
+        );
+        assert_eq!(
+            failed.shortfall_bytes(),
+            budget.required_bytes(),
+            "with no reading at all the whole budget is the shortfall"
+        );
+
+        assert!(
+            still_transformer_residency(&budget, UsableFreeVram::NotApplicable).keeps(),
+            "a CPU render has no VRAM to compete for, so there is nothing to drop for"
+        );
+
+        // A real measurement still decides on the arithmetic.
+        assert!(still_transformer_residency(
+            &budget,
+            UsableFreeVram::Measured(45 * 1024 * 1024 * 1024)
+        )
+        .keeps());
+        assert!(!still_transformer_residency(
+            &budget,
+            UsableFreeVram::Measured(8 * 1024 * 1024 * 1024)
+        )
+        .keeps());
+
+        // And a measured ZERO is a card with nothing free, which is the most
+        // pressured reading there is — never a keep.
+        assert!(
+            !still_transformer_residency(&budget, UsableFreeVram::Measured(0)).keeps(),
+            "a card measured at zero free is pressure, not an unknown"
+        );
     }
 
     /// Flash materializes no score matrix, so it is charged none — the same

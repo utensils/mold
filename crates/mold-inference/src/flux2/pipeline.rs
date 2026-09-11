@@ -2173,12 +2173,8 @@ impl Flux2Engine {
         // Sampled with the transformer still resident, so its bytes are added
         // back: the budget is defined against the card as if nothing this
         // render loaded were on it.
-        let free_now = crate::device::free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-        let usable_free = if free_now == 0 {
-            0
-        } else {
-            free_now.saturating_add(xformer_size)
-        };
+        let usable_free =
+            crate::device::usable_free_for_residency(&device, self.base.gpu_ordinal, xformer_size);
         let residency = crate::device::still_transformer_residency(&budget, usable_free);
         if residency.keeps() {
             self.retained_transformer = Some(RetainedFlux2Transformer {
@@ -2659,11 +2655,11 @@ impl Flux2Engine {
         drop(state);
         drop(txt_emb);
         let free_before_vae = crate::device::free_vram_bytes(gpu_ordinal_for_budget).unwrap_or(0);
-        let usable_free = if free_before_vae == 0 {
-            0
-        } else {
-            free_before_vae.saturating_add(transformer_bytes)
-        };
+        let usable_free = crate::device::usable_free_for_residency(
+            &loaded.device,
+            gpu_ordinal_for_budget,
+            transformer_bytes,
+        );
         let residency = crate::device::still_transformer_residency(&eager_budget, usable_free);
         if residency.keeps() {
             tracing::info!(

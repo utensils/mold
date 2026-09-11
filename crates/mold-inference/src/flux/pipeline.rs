@@ -3458,11 +3458,11 @@ impl FluxEngine {
             runtime_headroom_bytes: crate::device::STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
         };
         let free_before_vae = crate::device::free_vram_bytes(gpu_ordinal).unwrap_or(0);
-        let usable_free = if free_before_vae == 0 {
-            0
-        } else {
-            free_before_vae.saturating_add(transformer_bytes)
-        };
+        let usable_free = crate::device::usable_free_for_residency(
+            &loaded.device,
+            gpu_ordinal,
+            transformer_bytes,
+        );
         let decision = resolve_flux_keep_transformer(
             crate::runtime_env::value("MOLD_FLUX_KEEP_TRANSFORMER").as_deref(),
             crate::device::still_transformer_residency(&budget, usable_free),
@@ -3476,7 +3476,7 @@ impl FluxEngine {
                 ResidencyDecision::DropForHeadroom => tracing::info!(
                     free_mb = free_before_vae / 1024 / 1024,
                     required_mb = budget.required_bytes() / 1024 / 1024,
-                    usable_mb = usable_free / 1024 / 1024,
+                    usable = ?usable_free,
                     "Transformer dropped before VAE decode: the residency budget does not fit \
                      this card at this resolution"
                 ),
