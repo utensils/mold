@@ -11,6 +11,7 @@
 import ConfigSettingRow from "@studio/components/settings/ConfigSettingRow.vue";
 import type { ConfigValue } from "@studio/api/config";
 import { ipc } from "../../lib/ipc";
+import { schemaFor } from "@studio/lib/settingsSchema";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
 
@@ -24,16 +25,20 @@ const props = defineProps<{
 const config = useSettingsConfigStore();
 const toasts = useToastStore();
 
+/** A row saves as it changes; only a failure is worth a toast, and it names
+ *  the row in the words on screen, never the engine key. */
+function labelFor(key: string): string {
+  return schemaFor(key)?.label ?? key;
+}
+
 async function save(key: string, value: ConfigValue) {
   const error = await config.save(key, value);
-  if (error) toasts.push(error, "error");
-  else toasts.push(`Saved ${key}`);
+  if (error) toasts.push(`${labelFor(key)} was not saved: ${error}`, "error");
 }
 
 async function reset(key: string) {
   const error = await config.reset(key);
-  if (error) toasts.push(error, "error");
-  else toasts.push(`Reset ${key}`);
+  if (error) toasts.push(`${labelFor(key)} was not reset: ${error}`, "error");
 }
 </script>
 

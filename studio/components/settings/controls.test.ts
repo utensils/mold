@@ -8,6 +8,7 @@ import SelectControl from "./SelectControl.vue";
 import SliderControl from "./SliderControl.vue";
 import TextControl from "./TextControl.vue";
 import ToggleControl from "./ToggleControl.vue";
+import toggleSource from "./ToggleControl.vue?raw";
 
 /*
  * The kit's controls are shared by web and desktop, so their contract is the
@@ -16,6 +17,23 @@ import ToggleControl from "./ToggleControl.vue";
  * `bg-accent`, `bg-fg-dim`), which do not exist on web at all and could not
  * survive the move; the behaviour they stood for is pinned here instead.
  */
+
+describe("ToggleControl's look, pinned at the source", () => {
+  // Desktop's original asserted these through Tailwind class names; the kit
+  // has none, so the rules are read off the component's own stylesheet.
+  const source = toggleSource;
+  it("takes the theme's radii — the pill is banned in every theme", () => {
+    expect(source).toMatch(/border-radius:\s*var\(--mold-radius-2\)/);
+    expect(source).toMatch(/border-radius:\s*var\(--mold-radius-1\)/);
+    expect(source).not.toMatch(/border-radius:\s*\d+px/);
+    expect(source).not.toMatch(/999/);
+  });
+  it("dims the knob while off and inks it against the accent while on", () => {
+    expect(source).toMatch(/background:\s*var\(--mold-text-dim\)/);
+    expect(source).toMatch(/background:\s*var\(--mold-blue\)/);
+    expect(source).toMatch(/background:\s*var\(--mold-on-accent\)/);
+  });
+});
 
 describe("ToggleControl", () => {
   const make = (modelValue: boolean, disabled = false) =>

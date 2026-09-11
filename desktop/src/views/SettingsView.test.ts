@@ -31,6 +31,7 @@ vi.mock("@studio/components/PairingAccessPanel.vue", () => stub("stub-pairing"))
 vi.mock("@studio/components/LicenseSettingsPanel.vue", () => stub("stub-licenses"));
 
 import SettingsView from "./SettingsView.vue";
+import SettingsShell from "@studio/components/settings/SettingsShell.vue";
 import { sectionsForSurface } from "@studio/lib/settingsSchema";
 import { useSettingsConfigStore } from "../stores/settingsConfig";
 
@@ -108,6 +109,16 @@ describe("SettingsView on the shared shell", () => {
     expect(
       wrapper.get("[data-test='section-updates']").find("[data-test='stub-about']").exists(),
     ).toBe(true);
+  });
+
+  it("owns its scroll, so the scroll-spy observes the column that moves", async () => {
+    // The desktop pane is a fixed height with its own scroller; with the
+    // default `scroll="page"` the observer root and the sections would move
+    // together and the nav highlight would never change. No unit test can see
+    // that (there is no layout here), which is why the prop itself is pinned.
+    const wrapper = await mountView();
+    expect(wrapper.findComponent(SettingsShell).props("scroll")).toBe("content");
+    expect(wrapper.findComponent(SettingsShell).props("layout")).toBe("scroll");
   });
 
   it("renders no section the desktop shell does not declare", async () => {

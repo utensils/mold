@@ -36,6 +36,7 @@ import {
   sectionMatchesSearch,
   type SectionId,
   type SectionInfo,
+  type SettingsSurface,
 } from "../../lib/settingsSchema";
 import SettingsSection from "./SettingsSection.vue";
 
@@ -50,6 +51,9 @@ const props = withDefaults(
     layout?: "scroll" | "pane";
     /** Who scrolls: the page (a browser window) or this column (a fixed pane). */
     scroll?: "page" | "content";
+    /** The surface rendering the sections, so search matches only rows it
+     *  actually draws (web renders no env knobs). */
+    surface?: SettingsSurface;
   }>(),
   {
     rawKeysBySection: () => ({}),
@@ -75,7 +79,12 @@ const matchingSections = computed(() =>
   props.sections.filter(
     (section) =>
       !searching.value ||
-      sectionMatchesSearch(query.value, section, props.rawKeysBySection),
+      sectionMatchesSearch(
+        query.value,
+        section,
+        props.rawKeysBySection,
+        props.surface,
+      ),
   ),
 );
 
@@ -161,13 +170,28 @@ function jump(id: SectionId) {
   active.value = id;
   // The scroll needs something to land on, so the body comes first.
   reach(id);
-  // A pane swaps; there is no scroll to settle.
-  if (paned.value) return;
+  if (paned.value) {
+    // A pane swaps: the search that stacked every match is over, and the new
+    // section starts at the top — a reader coming from a long pane would
+    // otherwise be left clamped at the bottom of a short one.
+    query.value = "";
+    scrollPaneToTop();
+    return;
+  }
   // A smooth scroll passes other sections on its way; hold the pick until it
   // lands, or the highlight races down the nav.
   if (settling) clearTimeout(settling);
   settling = setTimeout(() => (settling = null), 800);
   sectionEls.get(id)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+}
+
+function scrollPaneToTop() {
+  if (props.scroll === "content") {
+    if (contentEl.value) contentEl.value.scrollTop = 0;
+    return;
+  }
+  const top = contentEl.value?.getBoundingClientRect().top ?? 0;
+  if (typeof window !== "undefined" && top < 0) window.scrollTo({ top: 0 });
 }
 
 onMounted(() => {

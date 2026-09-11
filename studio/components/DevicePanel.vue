@@ -228,10 +228,7 @@ onBeforeUnmount(() => {
 <template>
   <section
     class="device-panel"
-    :class="{
-      'device-panel--compact': compact,
-      'device-panel--planned': plan !== null,
-    }"
+    :class="{ 'device-panel--compact': compact }"
     :data-device-count="devices.length"
     :data-lane-count="laneCount"
     data-test="device-panel"
@@ -497,11 +494,6 @@ onBeforeUnmount(() => {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
   align-items: stretch;
   gap: 10px;
-}
-/* The lane below a card holds the plan's queue; without a plan the card is
- * its readings, and a 226px box around three lines reads as broken. */
-.device-panel--planned .device-card {
-  min-height: 226px;
 }
 .device-panel--compact .device-panel__grid {
   grid-template-columns: minmax(0, 1fr);

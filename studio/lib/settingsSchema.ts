@@ -338,27 +338,28 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     label: "How FLUX reads your words",
     help: "The size of its T5 text encoder. Smaller trades a little fidelity for graphics memory.",
     editor: "select",
-    options: [
-      { value: "auto", label: "auto" },
-      { value: "fp16", label: "fp16" },
-      { value: "q8_0", label: "q8_0" },
-      { value: "q5_k_m", label: "q5_k_m" },
-      { value: "q4_k_m", label: "q4_k_m" },
-    ],
+    // The engine's own ladder (`validate_enum` in config_keys.rs); the
+    // contract test refuses an option the setter would 422.
+    options: ["auto", "fp16", "q8", "q6", "q5", "q4", "q3"].map((value) => ({
+      value,
+      label: value,
+    })),
   },
   {
+    // The engine registers this key but has no getter or setter for it yet (#778),
+    // so no machine reports it and the row never draws; the schema keeps it so
+    // the registry contract holds.
     key: "umt5_variant",
     section: "generation",
     label: "How Wan reads your words",
     help: "The size of its UMT5 text encoder. Smaller trades a little fidelity for graphics memory.",
     editor: "select",
-    options: [
-      { value: "auto", label: "auto" },
-      { value: "fp16", label: "fp16" },
-      { value: "q8_0", label: "q8_0" },
-      { value: "q5_k_m", label: "q5_k_m" },
-      { value: "q4_k_m", label: "q4_k_m" },
-    ],
+    // The engine's own ladder (`validate_enum` in config_keys.rs); the
+    // contract test refuses an option the setter would 422.
+    options: ["auto", "fp16", "q8", "q6", "q5", "q4", "q3"].map((value) => ({
+      value,
+      label: value,
+    })),
   },
   {
     key: "qwen3_variant",
@@ -366,13 +367,10 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     label: "How Flux.2 and Z-Image read your words",
     help: "The size of their Qwen3 text encoder. Smaller trades a little fidelity for graphics memory.",
     editor: "select",
-    options: [
-      { value: "auto", label: "auto" },
-      { value: "bf16", label: "bf16" },
-      { value: "q8_0", label: "q8_0" },
-      { value: "q5_k_m", label: "q5_k_m" },
-      { value: "q4_k_m", label: "q4_k_m" },
-    ],
+    options: ["auto", "bf16", "q8", "q6", "iq4", "q3"].map((value) => ({
+      value,
+      label: value,
+    })),
   },
   {
     key: "gallery.trash_retention_days",
@@ -524,7 +522,7 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     key: "logging.dir",
     section: "updates",
     label: "Log folder",
-    help: "Where log files are written. Empty uses the Mold home.",
+    help: "Where log files are written. Empty means `logs/` inside the Mold home.",
     editor: "path",
     needsEngineRestart: true,
   },
@@ -631,7 +629,8 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     section: "cloud",
     label: "Lambda SSH key file",
     help: "Where that key lives on this machine.",
-    editor: "path",
+    // A FILE, and the injected picker chooses folders: typed until there is a file picker.
+    editor: "text",
   },
   {
     key: "lambda.filesystem_prefix",
@@ -688,7 +687,7 @@ export const ENV_KNOB_SCHEMAS: KeySchema[] = [
     key: "env.MOLD_KEEP_TE_RAM",
     section: "performance",
     label: "Park text encoders in RAM",
-    help: "Keep text encoders on CPU between requests instead of reloading from disk — FP16/BF16 everywhere, plus Qwen-Image's quantized GGUF encoder. Costs several GB of host RAM per parked encoder. No effect on Metal (unified memory).",
+    help: "Keep text encoders on CPU between requests instead of reloading from disk — FP16/BF16 everywhere, plus Qwen-Image's quantized GGUF encoder. Costs several GB of the machine's RAM per parked encoder. No effect on Metal (unified memory).",
     editor: "select",
     options: [
       { value: "", label: "Off (default)" },
@@ -862,10 +861,17 @@ export function matchesSearch(query: string, item: Searchable): boolean {
 }
 
 /** Curated schemas that live in a given accordion section. */
-export function schemasForSection(sectionId: SectionId): KeySchema[] {
-  return [...ENGINE_KEY_SCHEMAS, ...ENV_KNOB_SCHEMAS].filter(
-    (s) => s.section === sectionId,
-  );
+export function schemasForSection(
+  sectionId: SectionId,
+  surface?: SettingsSurface,
+): KeySchema[] {
+  // The env knobs configure the desktop's embedded engine; a browser has no
+  // engine of its own and never draws them.
+  const pool =
+    surface === "web"
+      ? ENGINE_KEY_SCHEMAS
+      : [...ENGINE_KEY_SCHEMAS, ...ENV_KNOB_SCHEMAS];
+  return pool.filter((s) => s.section === sectionId);
 }
 
 /**
@@ -882,14 +888,18 @@ export function sectionMatchesSearch(
   query: string,
   section: SectionInfo,
   rawKeysBySection: Partial<Record<SectionId, string[]>> = {},
+  surface?: SettingsSurface,
 ): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
   if (section.label.toLowerCase().includes(q)) return true;
   if (section.summary.toLowerCase().includes(q)) return true;
-  if (section.keywords?.some((keyword) => keyword.includes(q))) return true;
+  if (section.keywords?.some((keyword) => keyword.toLowerCase().includes(q)))
+    return true;
   if (
-    schemasForSection(section.id).some((schema) => matchesSearch(query, schema))
+    schemasForSection(section.id, surface).some((schema) =>
+      matchesSearch(query, schema),
+    )
   )
     return true;
   if (

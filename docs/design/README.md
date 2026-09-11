@@ -256,10 +256,13 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
   connected remote's gallery is polled, so the toolbar keeps one explicit way to
   ask every machine again.
 
-- **Web Settings folds the jump nav into a chip strip below 900px.** A browser page
-  has no fixed second pane, so the 200px nav column becomes a horizontally scrolling
-  strip of section chips above the page; search, scroll-spy and `?section=` behave
-  the same. The desktop keeps the column.
+- **Web Settings is panes, not one scroll.** The desktop's fixed pane holds every
+  section open on its own scroller with the nav as a scroll-spy; a browser page
+  scrolls the window, and fifteen open sections measured seven screens. So the web
+  shell runs `layout="pane"`: the nav opens one section at a time, `?section=` is the
+  address of the one showing (written back on every pick), and a search stacks every
+  matching section. Below 900px the nav folds into a horizontally scrolling strip of
+  section chips on both surfaces.
 - **Per-style defaults are one collapsed row per style.** The mock shows eight curated
   rows and no raw key list; a machine reports `models.<style>.<field>` for every tuned
   style (104 rows on a thirteen-style box), so the section shows one disclosure per

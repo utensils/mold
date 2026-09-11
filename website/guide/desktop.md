@@ -320,10 +320,14 @@ the phone keep Create / Library / Models until their own redesign.
   **Machines**, **Styles & disk**, **Style licences**, **My images & trash**,
   **Saving pictures & clips**, **Phone pairing**, **Speed & memory**,
   **Accounts & tokens**, **Cloud GPUs**, **Per-style defaults**, **Profiles**,
-  **Advanced**, and **Updates & about**. The web studio renders the same
-  sections from the same schema, minus Saving pictures & clips.
-  Typing in the search field narrows the nav and the page together, and nothing
-  is hidden behind an accordion. Look holds the five themes and the **Light or dark
+  **Advanced**, and **Updates & about**. Typing in the search field narrows
+  the nav and the page together, and no section hides behind an accordion —
+  only Per-style defaults folds, one disclosure per style, because a machine
+  reports eight rows for every style it has tuned. The web studio renders the
+  same sections from the same schema (minus Saving pictures & clips) as
+  panes: a browser page scrolls the window, so its nav opens one section at a
+  time, `?section=` addresses the one showing, and a search stacks every
+  section that matches. Look holds the five themes and the **Light or dark
   system appearance** toggle; Machines keeps this device, its API key, and the
   Mold home, with connecting and forgetting other machines living in the
   Machines workspace; **Styles & disk** holds where styles are kept, where

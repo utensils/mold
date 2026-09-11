@@ -73,10 +73,11 @@ defineEmits<{ (e: "reset"): void }>();
   box-sizing: border-box;
   min-height: var(--mold-row-h-table, 52px);
   padding: var(--mold-sp-2) var(--mold-sp-3);
-  border-bottom: var(--mold-bw) solid var(--mold-border);
 }
-.ms-setting-row:last-child {
-  border-bottom: none;
+/* Hairlines sit BETWEEN rows, so a panel that ends with something other than
+ * a row (a meter, an empty-state sentence) never leaves a stray rule. */
+.ms-setting-row + .ms-setting-row {
+  border-top: var(--mold-bw) solid var(--mold-border);
 }
 .ms-setting-row__text {
   display: flex;

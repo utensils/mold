@@ -132,18 +132,20 @@ const configError = ref("");
 const configLoaded = ref(false);
 let configSequence = 0;
 
-async function loadConfig() {
+async function loadConfig(): Promise<boolean> {
   const sequence = ++configSequence;
   try {
     const rows = await listConfig(originTarget.value);
-    if (sequence !== configSequence) return;
+    if (sequence !== configSequence) return false;
     // `tui.*` belongs to the terminal app, not to a graphical surface.
     configRows.value = rows.filter((row) => !row.key.startsWith("tui."));
     configError.value = "";
     configLoaded.value = true;
+    return true;
   } catch (error) {
-    if (sequence !== configSequence) return;
+    if (sequence !== configSequence) return false;
     configError.value = errorMessage(error);
+    return false;
   }
 }
 
@@ -229,17 +231,26 @@ async function loadProfiles() {
   }
 }
 
-async function changeProfile(name: string) {
-  if (switchingProfile.value || !name) return;
+/** Switch (or create) a profile; true only when its rows are on screen. */
+async function changeProfile(name: string): Promise<boolean> {
+  if (switchingProfile.value || !name) return false;
   switchingProfile.value = true;
   try {
     await switchProfile(originTarget.value, name);
     activeProfile.value = name;
-    await loadConfig();
+    // The previous profile's rows must never sit under the new profile's
+    // name: withdraw them before the read, and keep them withdrawn if it fails.
+    configRows.value = [];
+    configLoaded.value = false;
+    const loaded = await loadConfig();
     await loadProfiles();
-    toast("success", `Profile switched to ${name}`);
+    if (loaded) toast("success", `Profile switched to ${name}`);
+    else
+      toast("error", `Profile ${name} could not be read: ${configError.value}`);
+    return loaded;
   } catch (error) {
     toast("error", `Profile was not switched: ${errorMessage(error)}`);
+    return false;
   } finally {
     switchingProfile.value = false;
   }
@@ -253,8 +264,8 @@ function selectProfile(name: string) {
 async function createProfile() {
   const name = profileName.value.trim();
   if (!name) return;
-  await changeProfile(name);
-  profileName.value = "";
+  // A failed creation keeps the typed name; retyping it is the wrong price.
+  if (await changeProfile(name)) profileName.value = "";
 }
 
 // ── Installed styles (the Style-to-start-with options) ────────────────────
@@ -526,6 +537,7 @@ onBeforeUnmount(() => {
       :sections="WEB_SECTIONS"
       :raw-keys-by-section="rawKeysBySection"
       layout="pane"
+      surface="web"
       @update:active="onActiveSection"
     >
       <template #section="{ section, mounted }">
@@ -982,7 +994,9 @@ onBeforeUnmount(() => {
             @reset="resetConfigKey"
           />
           <SettingRow label="Processing" help="Where pictures are made.">
-            <span class="settings-value">local + your hosts</span>
+            <span class="settings-value"
+              >this machine + the machines you add</span
+            >
           </SettingRow>
           <SettingRow label="Core contributors">
             <span class="settings-people">James Brink · Jeffrey Dilley</span>

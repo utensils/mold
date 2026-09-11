@@ -203,15 +203,13 @@ describe("the curated schemas", () => {
     expect(schemaFor("lambda.api_key")?.editor).toBe("secret");
   });
 
-  it("picks a folder for every path key", () => {
-    for (const key of [
-      "models_dir",
-      "output_dir",
-      "logging.dir",
-      "lambda.ssh_private_key_path",
-    ]) {
+  it("picks a folder for every folder key, and types a file path", () => {
+    for (const key of ["models_dir", "output_dir", "logging.dir"]) {
       expect(schemaFor(key)?.editor, key).toBe("path");
     }
+    // The injected picker chooses FOLDERS; a private key is a file, and a
+    // folder chooser with no way to type would make it unsettable.
+    expect(schemaFor("lambda.ssh_private_key_path")?.editor).toBe("text");
   });
 
   it("asks for an engine restart only where the value is read at boot", () => {

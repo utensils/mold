@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
+  ENGINE_KEY_SCHEMAS,
   PER_STYLE_FIELDS,
   SECTIONS,
   schemaFor,
@@ -123,5 +124,55 @@ describe("PER_STYLE_FIELDS", () => {
   it("is MODEL_FIELDS, in the engine's own order", () => {
     expect(MODEL_FIELDS.length).toBeGreaterThanOrEqual(8);
     expect([...PER_STYLE_FIELDS]).toEqual(MODEL_FIELDS);
+  });
+});
+
+/**
+ * A select's options must be values the setter accepts. The setter arm for a
+ * key that validates an enum reads `"<key>" => { … validate_enum(v, &[…], key)`;
+ * the option list is parsed out of that arm so an option the engine would 422
+ * cannot ship. Keys whose setter validates no enum (a model name, a retention
+ * ladder) are the schema's own to choose.
+ */
+function engineEnumFor(key: string): string[] | null {
+  const arm = source.indexOf(`"${key}" => {`);
+  if (arm < 0) return null;
+  const next = source.indexOf('\n        "', arm + 1);
+  const body = source.slice(arm, next < 0 ? undefined : next);
+  const match = body.match(/validate_enum\(\s*\w+,\s*&\[([^\]]*)\]/);
+  if (!match) return null;
+  return [...match[1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+}
+
+describe("every select option is a value the engine accepts", () => {
+  it("reads t5_variant's ladder (positive control)", () => {
+    expect(engineEnumFor("t5_variant")).toEqual([
+      "auto",
+      "fp16",
+      "q8",
+      "q6",
+      "q5",
+      "q4",
+      "q3",
+    ]);
+  });
+
+  it("offers nothing the setter would refuse", () => {
+    const checked: string[] = [];
+    for (const schema of ENGINE_KEY_SCHEMAS) {
+      if (schema.editor !== "select" || !schema.options) continue;
+      const accepted = engineEnumFor(schema.key);
+      if (!accepted) continue;
+      checked.push(schema.key);
+      for (const option of schema.options) {
+        expect(
+          accepted,
+          `${schema.key} offers "${option.value}", which validate_enum in config_keys.rs refuses`,
+        ).toContain(option.value);
+      }
+    }
+    expect(checked).toEqual(
+      expect.arrayContaining(["t5_variant", "qwen3_variant", "logging.level"]),
+    );
   });
 });

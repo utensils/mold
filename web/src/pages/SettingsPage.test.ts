@@ -164,6 +164,7 @@ describe("SettingsPage", () => {
     statusRef.value = null;
     routeState.query = {};
     pushMock.mockClear();
+    replaceMock.mockClear();
     subscribeToDeviceSnapshots.mockClear();
     resetNotifications();
     localStorage.clear();
@@ -419,6 +420,117 @@ describe("SettingsPage", () => {
     }
   });
 
+  it("does not leave the old profile editable when the switched profile cannot load", async () => {
+    const rowsFetch = configRespondingFetch([
+      { key: "default_steps", value: 20, source: "db" },
+    ]);
+    globalThis.fetch = vi.fn(async (input, init) =>
+      String(input).includes("/api/config/profiles")
+        ? ({
+            ok: true,
+            json: async () => ({
+              profiles: ["default", "quality"],
+              active: "default",
+            }),
+          } as Response)
+        : rowsFetch(input, init),
+    ) as typeof fetch;
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await openSection(wrapper, "generation");
+    expect(
+      wrapper
+        .find('[data-test="section-generation"] input[type="number"]')
+        .exists(),
+    ).toBe(true);
+
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input, init) =>
+      String(input).endsWith("/api/config") && !init?.method
+        ? ({ ok: false, status: 503, json: async () => ({}) } as Response)
+        : original(input, init),
+    ) as typeof fetch;
+    await openSection(wrapper, "profiles");
+    await wrapper.get('[data-test="profile-select"]').setValue("quality");
+    await flushPromises();
+
+    // The 503 profile's rows are withdrawn, not the previous profile's shown
+    // under the new name.
+    expect(wrapper.find('[role="alert"]').exists()).toBe(true);
+    await openSection(wrapper, "generation");
+    expect(
+      wrapper
+        .find('[data-test="section-generation"] input[type="number"]')
+        .exists(),
+    ).toBe(false);
+    expect(pushMock).not.toHaveBeenCalled();
+  });
+
+  it("retains a profile name when creation fails", async () => {
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await openSection(wrapper, "profiles");
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input, init) =>
+      String(input).endsWith("/api/config/profile") && init?.method
+        ? ({ ok: false, status: 503, json: async () => ({}) } as Response)
+        : original(input, init),
+    ) as typeof fetch;
+    await wrapper
+      .get('[data-test="profile-name"]')
+      .setValue("unfinished profile");
+    await wrapper.get('[data-test="profile-create"]').trigger("click");
+    await flushPromises();
+    expect(
+      (wrapper.get('[data-test="profile-name"]').element as HTMLInputElement)
+        .value,
+    ).toBe("unfinished profile");
+  });
+
+  it("withdraws the device list when a refresh fails, rather than showing a stale one", async () => {
+    let failDevices = false;
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/devices")) {
+        if (failDevices) throw new Error("machine offline");
+        return {
+          ok: true,
+          json: async () => ({ devices: [deviceWire()], plan_version: 1 }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => {
+          if (url.endsWith("/profiles"))
+            return { profiles: ["default"], active: "default" };
+          if (url.endsWith("/api/models")) return [];
+          if (url.endsWith("/api/catalog/credentials"))
+            return {
+              hf: { configured: false, source: null, masked: null },
+              civitai: { configured: false, source: null, masked: null },
+            };
+          if (url.endsWith("/api/capabilities"))
+            return {
+              devices: { lifecycle: true },
+              dispatch: { v2_authoritative: true },
+            };
+          return { entries: [] };
+        },
+      } as Response;
+    }) as typeof fetch;
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await openSection(wrapper, "hosts");
+    expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(1);
+
+    failDevices = true;
+    const [, , refresh] = subscribeToDeviceSnapshots.mock.calls[0]!;
+    refresh();
+    await flushPromises();
+    expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(0);
+    wrapper.unmount();
+  });
+
   it("saves a curated engine key through the shared config client", async () => {
     const rows: ConfigRow[] = [
       { key: "default_steps", value: 20, source: "db" },
@@ -588,7 +700,7 @@ describe("SettingsPage", () => {
 
     expect(wrapper.get("h1").text()).toBe("Settings");
     expect(wrapper.get('[data-test="about-version"]').text()).toBe("9.9.9");
-    expect(wrapper.text()).toContain("local + your hosts");
+    expect(wrapper.text()).toContain("this machine + the machines you add");
     expect(wrapper.text()).toContain("Core contributors");
     expect(wrapper.text()).toContain("James Brink");
     expect(wrapper.text()).toContain("Jeffrey Dilley");

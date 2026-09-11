@@ -30,7 +30,7 @@ function commit(event: Event) {
 <template>
   <div class="ms-path">
     <template v-if="pick">
-      <span class="ms-path__value" :title="props.modelValue" dir="rtl">
+      <span class="ms-path__value" :title="props.modelValue">
         {{ props.modelValue || "—" }}
       </span>
       <button

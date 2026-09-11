@@ -331,6 +331,33 @@ describe("SettingsShell pane layout", () => {
     wrapper.unmount();
   });
 
+  it("clears a search when a pane is picked, so the click visibly changes the page", async () => {
+    const wrapper = mountPane();
+    await wrapper.get("[data-test='settings-search']").setValue("trash");
+    await wrapper.get("[data-test='settings-nav-library']").trigger("click");
+    expect(
+      (wrapper.get("[data-test='settings-search']").element as HTMLInputElement)
+        .value,
+    ).toBe("");
+    expect(
+      wrapper
+        .findAll("[data-test^='section-']")
+        .map((el) => el.attributes("data-test")),
+    ).toEqual(["section-library"]);
+    wrapper.unmount();
+  });
+
+  it("starts the new pane at the top when the window had scrolled past it", async () => {
+    const scrollTo = vi.fn();
+    vi.stubGlobal("scrollTo", scrollTo);
+    const wrapper = mountPane();
+    const content = wrapper.get(".ms-settings-content").element;
+    content.getBoundingClientRect = () => ({ top: -900 }) as DOMRect;
+    await wrapper.get("[data-test='settings-nav-advanced']").trigger("click");
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0 });
+    wrapper.unmount();
+  });
+
   it("creates no scroll-spy — there is nothing to spy on", () => {
     observers.length = 0;
     const wrapper = mountPane();
