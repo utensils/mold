@@ -1416,6 +1416,9 @@ textarea.control {
   border-bottom: 1px solid var(--mold-border);
 }
 
+/* A disclosure line is a sentence about the picture you attached, so it takes
+   the same plain sans as every other row label. The mono utility face is for
+   the technical truth beside it, never for the words. */
 .mobile-native-disclosure > summary,
 .mobile-disclosure-button {
   box-sizing: border-box;
@@ -1427,8 +1430,9 @@ textarea.control {
   padding: 4px 2px;
   background: transparent;
   color: var(--mold-text);
-  font-family: var(--font-utility);
-  font-size: var(--text-data);
+  font-family: var(--font-body);
+  font-size: var(--text-body-lg);
+  letter-spacing: 0;
   text-align: left;
 }
 
@@ -1459,6 +1463,7 @@ textarea.control {
   min-width: 0;
   overflow: hidden;
   color: var(--mold-text-dim);
+  font-family: var(--font-body);
   font-size: var(--text-caption);
   font-weight: 400;
   text-overflow: ellipsis;

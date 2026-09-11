@@ -885,6 +885,25 @@ describe("iOS type vocabulary", () => {
     expect(legends?.[1]).toMatch(/text-transform:\s*uppercase/);
   });
 
+  it("says a disclosure line in the same plain sans as every other row label", () => {
+    // The type pass that made `.field > span` sans reached the form rows and
+    // stopped; the source-media disclosure kept the mono utility face, so the
+    // one sentence on Make that is plain words read as a machine token.
+    const summary = css.match(
+      /\.mobile-native-disclosure > summary,\s*\n\.mobile-disclosure-button\s*\{([^}]*)\}/s,
+    );
+    expect(summary?.[1]).toMatch(/font-family:\s*var\(--font-body\)/);
+    expect(summary?.[1]).toMatch(/font-size:\s*var\(--text-body-lg\)/);
+    expect(summary?.[1]).not.toMatch(/font-family:\s*var\(--font-utility\)/);
+
+    // Its trailing filename summary is the same sans, one step down.
+    const detail = css.match(
+      /\.mobile-native-disclosure > summary small,\s*\n\.mobile-disclosure-summary\s*\{([^}]*)\}/s,
+    );
+    expect(detail?.[1]).toMatch(/font-family:\s*var\(--font-body\)/);
+    expect(detail?.[1]).toMatch(/font-size:\s*var\(--text-caption\)/);
+  });
+
   it("makes every Back control a 15px sans accent label with a chevron", () => {
     const back = css.match(/\.mobile-back-button\s*\{([^}]*)\}/s);
     const close = css.match(/\.gallery-viewer-close\s*\{([^}]*)\}/s);
