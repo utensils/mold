@@ -1537,9 +1537,7 @@ onBeforeUnmount(() => {
               {{ catalogSizeLabel(catalogSizeInfo(entry)) }}
             </span>
             <!-- On the Ready-to-use shelf the shelf itself says "installed". -->
-            <span
-              v-if="entry.installed && source !== 'installed'"
-              class="mobile-catalog-installed"
+            <span v-if="entry.installed && source !== 'installed'" class="mobile-catalog-installed"
               >Installed</span
             >
             <!-- Downloadable, not runnable on the machine that would hold it.

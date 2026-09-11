@@ -419,8 +419,13 @@ top, never from a control, past 96px of damped travel.
   catalog source, model kind, family, sort and NSFW controls live in
   `MobileCatalogFilterSheet.vue`, opened by a **Filters · n** chip beside the
   search that counts what it is standing in for; Reset clears all six at once.
-  Results are 64px grouped rows with a 44px preview, the name in sans, what it
-  is in plain words beneath, and the weight in mono beside the Pull action.
+  Results are 64px grouped rows with a 44px preview. The name is the SHARED
+  `styleDisplayName` — the same plain words StyleMenu gives a style, never the
+  id — with the runnable id in mono beside `family · weight`, the machines that
+  have it stacked in mono, and a chevron. The Ready-to-use shelf drops the kind
+  badge and the per-row "Installed" chip, because the shelf already says both;
+  Browse more keeps them and the Pull action. Media type is one horizontally
+  scrolling strip: four equal tiles wrapped to a second row at 393pt.
 - **Machines** lists each saved machine as a card: a status dot, its name in
   mono, the health chip, a **making images here** badge when work is pinned
   to it, the same plain hardware sentence the desktop says
@@ -904,9 +909,13 @@ contracts. A running print's row carries the live latent preview Make is
 painting at 64px, a 7px progress meter, and a mono line naming which one of a
 batch it is and the machine making it; a waiting print has no pixels yet and
 stands its place in line in a 44px glyph square instead; a held one takes the
-warning tone. Every part is optional, so a shared fleet row — which has a phase
-and a count but no preview — keeps the plain shape it always had. Finished
-work leads with up to three square thumbnails. Opening details preserves the draft; restoring settings is explicit.
+warning tone. A machine's OWN live work is drawn by the same card: it has a
+phase and a count but no latent preview, so the thumbnail is simply absent and
+everything else reads identically — the Queue exists to compare this phone's
+work with the fleet's, and a plain text row beside a card with a meter made the
+fleet's work look like a lesser kind of job. Its pause/resume/cancel control is
+the shared swipe tray rather than a second gesture. Finished work leads with up
+to three square thumbnails. Opening details preserves the draft; restoring settings is explicit.
 Full queue records remain in memory. Finished shows at most 20 recent jobs
 known to this phone, not a durable fleet history; saved results remain in
 My images. Offline work is labeled as last known and cannot be changed until

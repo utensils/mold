@@ -1118,7 +1118,7 @@ describe("MobileApp generation lifecycle", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await flushPromises();
-    const activity = wrapper.get("[data-test='shared-live-activity']");
+    const activity = wrapper.get("[data-test='mobile-fleet-job']");
     expect(activity.text()).toContain("Studio");
     expect(activity.text()).toContain("flux-dev:q4");
     expect(localStorage.getItem("mold.mobile.live-activity.v1")).not.toContain(target.apiKey);
@@ -1230,7 +1230,7 @@ describe("MobileApp generation lifecycle", () => {
       wrapper = mountMobileApp();
       await flushPromises();
       await wrapper
-        .get("[data-test='live-activity-select-studio-id:generation:foreign-running']")
+        .get("[data-row-test='fleet-job-studio-id:generation:foreign-running']")
         .trigger("click");
       await flushPromises();
       expect(wrapper.get("[data-test='queue-detail-prompt']").text()).toBe(
@@ -1295,21 +1295,8 @@ describe("MobileApp generation lifecycle", () => {
     });
     wrapper = mountMobileApp();
     await flushPromises();
-    const row = wrapper.get(".live-activity-row");
-    const touch = (type: string, x: number, ended = false) => {
-      const event = new Event(type, { bubbles: true, cancelable: true });
-      const point = { clientX: x, clientY: 100 };
-      Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
-      Object.defineProperty(event, "changedTouches", { value: [point] });
-      return event;
-    };
-    row.element.dispatchEvent(touch("touchstart", 260));
-    row.element.dispatchEvent(touch("touchmove", 160));
-    row.element.dispatchEvent(touch("touchend", 160, true));
-    await flushPromises();
-
-    expect(row.classes()).toContain("live-activity-row--actions-open");
-    await row.get("[data-test='mobile-fleet-queue-control']").trigger("click");
+    const row = wrapper.get("[data-test='mobile-fleet-job']");
+    await row.get("[data-test='swipe-action-fleet-pause']").trigger("click");
     await flushPromises();
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/foreign-queued/pause", {
       method: "POST",
@@ -1345,20 +1332,8 @@ describe("MobileApp generation lifecycle", () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
-    const row = wrapper.get(".live-activity-row");
-    const touch = (type: string, x: number, ended = false) => {
-      const event = new Event(type, { bubbles: true, cancelable: true });
-      const point = { clientX: x, clientY: 100 };
-      Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
-      Object.defineProperty(event, "changedTouches", { value: [point] });
-      return event;
-    };
-    row.element.dispatchEvent(touch("touchstart", 260));
-    row.element.dispatchEvent(touch("touchmove", 160));
-    row.element.dispatchEvent(touch("touchend", 160, true));
-    await flushPromises();
-
-    const control = row.get("[data-test='mobile-fleet-queue-control']");
+    const row = wrapper.get("[data-test='mobile-fleet-job']");
+    const control = row.get("[data-test='swipe-action-fleet-resume']");
     expect(control.text()).toBe("Resume");
     await control.trigger("click");
     await flushPromises();
@@ -1398,20 +1373,8 @@ describe("MobileApp generation lifecycle", () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
-    const row = wrapper.get(".live-activity-row");
-    const touch = (type: string, x: number, ended = false) => {
-      const event = new Event(type, { bubbles: true, cancelable: true });
-      const point = { clientX: x, clientY: 100 };
-      Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
-      Object.defineProperty(event, "changedTouches", { value: [point] });
-      return event;
-    };
-    row.element.dispatchEvent(touch("touchstart", 260));
-    row.element.dispatchEvent(touch("touchmove", 160));
-    row.element.dispatchEvent(touch("touchend", 160, true));
-    await flushPromises();
-
-    const control = row.get("[data-test='mobile-fleet-queue-control']");
+    const row = wrapper.get("[data-test='mobile-fleet-job']");
+    const control = row.get("[data-test='swipe-action-fleet-pause']");
     expect(control.text()).toBe("Cancel");
     await control.trigger("click");
     await flushPromises();
@@ -1488,8 +1451,9 @@ describe("MobileApp generation lifecycle", () => {
     await flushPromises();
 
     await fieldControl("Prompt").setValue("My unsent draft");
-    const row = wrapper.get("[data-test='live-activity-select-studio-id:generation:foreign-job']");
-    expect(row.element.tagName).toBe("BUTTON");
+    const row = wrapper.get("[data-row-test='fleet-job-studio-id:generation:foreign-job']");
+    // The shared row is the same activatable card the local rows use.
+    expect(row.attributes("role")).toBe("button");
     await row.trigger("click");
     await flushPromises();
     expect(fieldControl("Prompt").element).toHaveProperty("value", "My unsent draft");
@@ -1570,7 +1534,7 @@ describe("MobileApp generation lifecycle", () => {
 
     const before = currentStyleId();
     const autoChainRow = wrapper.get(
-      "[data-test='live-activity-select-studio-id:generation:foreign-auto-chain']",
+      "[data-row-test='fleet-job-studio-id:generation:foreign-auto-chain']",
     );
     await autoChainRow.trigger("click");
     await flushPromises();
@@ -1621,7 +1585,7 @@ describe("MobileApp generation lifecycle", () => {
     const queueReads = apiJsonTo.mock.calls.filter(([, path]) => path === "/api/queue").length;
 
     await wrapper
-      .get("[data-test='live-activity-select-studio-id:generation:colliding-job-id']")
+      .get("[data-row-test='fleet-job-studio-id:generation:colliding-job-id']")
       .trigger("click");
     await flushPromises();
     await wrapper
@@ -7574,6 +7538,65 @@ describe("MobileApp foreground resume", () => {
 
     expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
     expect(wrapper.get("video.result-media").attributes("src")).toContain("media_token=new");
+  });
+});
+
+describe("MobileApp queue rows", () => {
+  it("draws a machine's own work the same way as this phone's", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/activity")
+        return Promise.resolve({
+          instance_id: status.instance_id,
+          observed_at_unix_ms: 10,
+          items: [
+            {
+              id: "foreign-running",
+              kind: "generation",
+              phase: "denoising",
+              model: model.name,
+              created_at_unix_ms: 2,
+              updated_at_unix_ms: 9,
+              current: 16,
+              total: 32,
+              can_cancel: true,
+            },
+            {
+              id: "foreign-queued",
+              kind: "generation",
+              phase: "queued",
+              model: model.name,
+              created_at_unix_ms: 1,
+              updated_at_unix_ms: 9,
+              position: 2,
+              can_cancel: true,
+            },
+          ],
+        });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-queue']").trigger("click");
+    await flushPromises();
+
+    // Being made and Waiting must read the same whether the work is this
+    // phone's or the machine's — a plain text row beside a card with a meter
+    // made the machine's own work look like a lesser kind of job.
+    const cards = wrapper.findAll("[data-test='mobile-generation-queue-card']");
+    expect(cards).toHaveLength(2);
+    const running = cards[0]!;
+    expect(running.get("[role='progressbar']").attributes("aria-valuenow")).toBe("50");
+    expect(running.get("[data-test='mobile-generation-job-meta']").text()).toBe("Studio");
+    // A machine's own row has no latent preview to show.
+    expect(running.find("[data-test='mobile-generation-job-thumb']").exists()).toBe(false);
+
+    const queued = cards[1]!;
+    expect(queued.get("[data-test='mobile-generation-job-position']").text()).toBe("2");
+    expect(wrapper.find(".live-activity-row").exists()).toBe(false);
   });
 });
 

@@ -33,6 +33,8 @@ const props = withDefaults(
     /** Place in line, for a row with no pixels yet. */
     position?: string | null;
     tone?: "neutral" | "warning";
+    /** Identifies THIS row, where the card's own data-test names the kind. */
+    rowTestId?: string | null;
   }>(),
   {
     detail: null,
@@ -42,6 +44,7 @@ const props = withDefaults(
     meta: null,
     position: null,
     tone: "neutral",
+    rowTestId: null,
   },
 );
 
@@ -68,6 +71,7 @@ const active = computed(() => Boolean(props.thumbnailUrl) || props.progress !== 
     tabindex="0"
     :aria-label="[ariaLabel?.trim() || displayTitle, status, detail].filter(Boolean).join('. ')"
     data-test="mobile-generation-queue-card"
+    :data-row-test="rowTestId ?? undefined"
     @click="emit('activate')"
     @keydown.enter.prevent="emit('activate')"
     @keydown.space.prevent="emit('activate')"

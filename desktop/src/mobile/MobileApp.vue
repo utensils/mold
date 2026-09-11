@@ -199,7 +199,6 @@ import {
   type QueueJobProgress,
 } from "@studio/api/generationSelection";
 import { firstLastFrameRestoreNotice } from "@studio/lib/sourceImageCapability";
-import LiveActivityList from "@ui/components/LiveActivityList.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import ActionBlocker from "@ui/components/ActionBlocker.vue";
 import LicenseAcceptanceDialog from "@studio/components/LicenseAcceptanceDialog.vue";
@@ -3205,6 +3204,41 @@ function inspectQueueEntry(key: string): void {
   queueDetailError.value = "";
   queueDetailKey.value = key;
 }
+/**
+ * A machine's own live work, said in the same shape as this phone's prints.
+ * `/api/activity` carries no thumbnail, so a shared row never has one — every
+ * other part of the card is optional and simply absent.
+ */
+function sharedQueueTitle(row: FleetActiveWork): string {
+  return modelLabel(row.model ?? "") || row.hostLabel;
+}
+
+function sharedQueueStatus(row: FleetActiveWork): string {
+  return activeWorkPhaseLabel(row).toLocaleUpperCase();
+}
+
+function sharedQueueProgress(row: FleetActiveWork): number | null {
+  if (row.total == null || !row.total || row.current == null) return null;
+  return Math.max(0, Math.min(100, Math.round((row.current / row.total) * 100)));
+}
+
+/** Place in line for a row with nothing to show yet. */
+function sharedQueuePosition(row: FleetActiveWork): string | null {
+  if (sharedQueueProgress(row) !== null) return null;
+  return row.position ? String(row.position) : null;
+}
+
+/** Pause, Resume, or a chain's Cancel — whatever this machine will accept. */
+function sharedQueueRowActions(row: FleetActiveWork): { id: string; label: string }[] {
+  if (!canPauseFleetActivity(row)) return [];
+  return [
+    {
+      id: fleetQueueResumeNeeded(row) ? "fleet-resume" : "fleet-pause",
+      label: fleetQueueControlLabel(row),
+    },
+  ];
+}
+
 function inspectSharedQueueEntry(row: FleetActiveWork): void {
   inspectQueueEntry(`shared:${row.key}`);
 }
@@ -13744,26 +13778,31 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                     />
                   </SwipeActionRow>
                 </div>
-                <LiveActivityList
-                  v-else
-                  :rows="[entry.shared]"
-                  interactive
-                  swipe-actions
-                  :can-swipe="canPauseFleetActivity"
-                  @select="inspectSharedQueueEntry"
-                >
-                  <template #actions="{ row }">
-                    <button
-                      type="button"
-                      data-test="mobile-fleet-queue-control"
-                      :disabled="queueControlHostIds.has(row.hostId)"
-                      :aria-label="`${fleetQueueControlLabel(row)} job on ${row.hostLabel}`"
-                      @click.stop="setFleetJobPaused(row, !fleetQueueResumeNeeded(row))"
-                    >
-                      {{ fleetQueueControlLabel(row) }}
-                    </button>
-                  </template>
-                </LiveActivityList>
+                <!-- A machine's own work is drawn exactly like this phone's.
+                     It rendered as a plain text row beside a card with a
+                     meter, which made the fleet's work read as a lesser kind
+                     of job on the one screen that exists to compare them. -->
+                <div v-else class="mobile-generation-row">
+                  <SwipeActionRow
+                    :actions="sharedQueueRowActions(entry.shared)"
+                    :label="sharedQueueTitle(entry.shared)"
+                    :disabled="queueControlHostIds.has(entry.shared.hostId)"
+                    data-test="mobile-fleet-job"
+                    @act="setFleetJobPaused(entry.shared, !fleetQueueResumeNeeded(entry.shared))"
+                  >
+                    <MobileGenerationQueueCard
+                      :row-test-id="`fleet-job-${entry.shared.key}`"
+                      :title="sharedQueueTitle(entry.shared)"
+                      :subtitle="`${modelLabel(entry.shared.model ?? '')} · ${entry.shared.hostLabel}`"
+                      :status="sharedQueueStatus(entry.shared)"
+                      :aria-label="sharedQueueTitle(entry.shared)"
+                      :progress="sharedQueueProgress(entry.shared)"
+                      :meta="entry.shared.hostLabel"
+                      :position="sharedQueuePosition(entry.shared)"
+                      @activate="inspectSharedQueueEntry(entry.shared)"
+                    />
+                  </SwipeActionRow>
+                </div>
               </template>
             </section>
           </div>
