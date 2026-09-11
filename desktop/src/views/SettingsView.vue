@@ -77,7 +77,9 @@ const advancedKeys = computed(() => config.advancedRows.map((row) => row.key));
 /** While searching, only the matching sections show; otherwise all of them. */
 const visibleSections = computed(() =>
   SECTIONS.filter(
-    (section) => !searching.value || sectionMatchesSearch(query.value, section, advancedKeys.value),
+    (section) =>
+      !searching.value ||
+      sectionMatchesSearch(query.value, section, { advanced: advancedKeys.value }),
   ),
 );
 
