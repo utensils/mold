@@ -2,7 +2,7 @@
 /*
  * Controls aside (Mold Studio Create) — the right rail. width/height stay the
  * persisted source of truth (see `useGenerateForm`); Shape and Resolution are
- * PROJECTIONS of those pixels. Detail (steps) and Prompt strength (guidance)
+ * PROJECTIONS of those pixels. Detail (passes) and Stick to my words (guidance)
  * are direct sliders, Seed exposes Random/Fixed (increment stays reachable in
  * Advanced → Output & seed), Batch is a stepper, and the Advanced button
  * surfaces the "N on" badge and opens the drawer.

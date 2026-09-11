@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Generation host picker (spec §08 multi-host) — the web twin of the desktop
+ * Where-it-runs picker (spec §08 multi-host) — the web twin of the desktop
  * Create header's host chip. With more than one machine registered the chip
  * opens a routing menu: Auto (model-aware least busy), Most capable (strongest
  * GPU), or a sticky explicit host. With only this server it collapses to an
