@@ -55,7 +55,20 @@ instead.
 ## Current product surface
 
 The primary tabs are Make, Queue, Images, Styles, and Machines. Settings is a
-pushed screen opened from the header.
+pushed screen, opened from the sliders control that Make and Queue carry.
+
+Every screen states its own name in a 28px title with the ONE action that
+screen offers beside it: Make and Queue open Settings, Images enters Select,
+Styles jumps to the Browse more shelf, and Machines opens the Add-a-machine
+sheet. There is no wordmark bar. Make additionally pins its routing chip (a
+status dot, the machine or policy work lands on, and a mono line saying what
+that machine is doing) and the Picture / Short clip / 3-D object control inside
+the header, so neither answer scrolls away as the form grows.
+
+Every bottom sheet — Style, More settings, Library, Filters, Add a machine —
+drags down to dismiss through one implementation,
+`desktop/src/mobile/useSheetDismiss.ts`: one finger, from a body already at its
+top, never from a control, past 96px of damped travel.
 
 - **Make** puts the canvas first: the develop bed, the status line and the
   finished result form one block directly beneath what you are making, and
@@ -399,10 +412,26 @@ pushed screen opened from the header.
   format/popularity and type-aware weights, and routes pull/load/unload/remove
   actions to the owning or selected host. Detail-sheet variant chips select an exact manifest
   `base:tag` target before pulling. Pull actions progress through `Connecting...`, `Starting...`,
-  `Queued`, and `Pulling N%`; active downloads can be cancelled.
-- **Machines** starts with native QR scanning for the recommended pairing path,
+  `Queued`, and `Pulling N%`; active downloads can be cancelled and their
+  banner pins above the list in the warning tone.
+- **Styles** keeps only the **Ready to use | Browse more** shelf, the search
+  field and the media-type row in the scroll. The machine being browsed, the
+  catalog source, model kind, family, sort and NSFW controls live in
+  `MobileCatalogFilterSheet.vue`, opened by a **Filters · n** chip beside the
+  search that counts what it is standing in for; Reset clears all six at once.
+  Results are 64px grouped rows with a 44px preview, the name in sans, what it
+  is in plain words beneath, and the weight in mono beside the Pull action.
+- **Machines** lists each saved machine as a card: a status dot, its name in
+  mono, the health chip, a **making pictures here** badge when work is pinned
+  to it, the same plain hardware sentence the desktop says
+  (`desktop/src/lib/machineSentence.ts`, "RTX 4090 · CUDA · on your network ·
+  up 6 days"), a VRAM meter, and its memory and waiting count in mono. Adding
+  one opens `MobileAddMachineSheet.vue` from the header `+`; an empty fleet
+  shows an invitation rather than springing a form open. The sheet starts with
+  native QR scanning for the recommended pairing path,
   then retains Bonjour discovery, manual IP/hostname/HTTPS entry, and Tailscale
-  MagicDNS as fallbacks. Desktop and web Settings mint a random, one-use,
+  MagicDNS as fallbacks. Settings carries a second door onto the same scanner
+  (`MobilePairScanCard.vue`), because that is where a fresh install looks. Desktop and web Settings mint a random, one-use,
   two-minute ticket containing the reachable host address but never the durable
   API key. iPhone and Android redeem it against the exact instance before host
   dedupe and secure credential storage. Android owns its CameraX session in the
@@ -871,15 +900,20 @@ is optional. Generate stays above the software keyboard.
 
 Queue combines this phone’s work with live work from connected machines.
 Being made, Waiting, and Needs attention use the existing lifecycle and wait
-contracts. Opening details preserves the draft; restoring settings is explicit.
+contracts. A running print's row carries the live latent preview Make is
+painting at 64px, a 7px progress meter, and a mono line naming which one of a
+batch it is and the machine making it; a waiting print has no pixels yet and
+stands its place in line in a 44px glyph square instead; a held one takes the
+warning tone. Every part is optional, so a shared fleet row — which has a phase
+and a count but no preview — keeps the plain shape it always had. Finished
+work leads with up to three square thumbnails. Opening details preserves the draft; restoring settings is explicit.
 Full queue records remain in memory. Finished shows at most 20 recent jobs
 known to this phone, not a durable fleet history; saved results remain in
 My images. Offline work is labeled as last known and cannot be changed until
 its machine reconnects.
 
-Saved machines appear before Add a machine, which contains pairing, nearby
-discovery and manual address entry. The connection controls start expanded on
-first setup. My images searches filenames, titles, prompts, styles, tags, and
+Saved machines appear above the Add-a-machine sheet, which contains pairing,
+nearby discovery and manual address entry and opens only when asked for. My images searches filenames, titles, prompts, styles, tags, and
 collection names across the loaded library, including prints beyond the visible
 thumbnail window. Native and physical-device acceptance remain tracked in
 [issue #1628](https://github.com/utensils/mold/issues/1628). Scene authoring is
