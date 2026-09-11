@@ -397,6 +397,11 @@ impl Qwen3Encoder {
     pub fn drop_weights(&mut self) {
         self.model = None;
         self.parked_tensors = None;
+        // The GGUF park too. Nothing else in this file ever cleared it, so a
+        // "do not park" decision left the quantized tensors in host RAM and
+        // `is_parked()` kept answering true for an encoder the caller had
+        // just asked to release.
+        self.parked_gguf = None;
     }
 
     /// Reload model weights (e.g. for the next generation after being dropped).
@@ -528,6 +533,54 @@ impl Qwen3Encoder {
 mod tests {
     use super::*;
     use candle_core::IndexOp;
+
+    /// `drop_weights` releases BOTH park slots.
+    ///
+    /// The GGUF one was never cleared, so a "do not park" decision — the
+    /// residency budget answering `StreamFromMmap` on a host that has since
+    /// lost its memory — left the quantized tensors in host RAM, and
+    /// `is_parked()` then lied about an encoder the caller had just released.
+    #[test]
+    fn dropping_weights_releases_the_gguf_park_too() {
+        use candle_core::quantized::{GgmlDType, QTensor};
+
+        let mut encoder = Qwen3Encoder {
+            model: None,
+            tokenizer: Arc::new(tokenizers::Tokenizer::new(
+                tokenizers::models::bpe::BPE::default(),
+            )),
+            device: Device::Cpu,
+            on_gpu: false,
+            is_quantized: true,
+            encoder_paths: Vec::new(),
+            dtype: DType::F32,
+            bf16_config: Qwen3BF16Config::qwen3_4b(),
+            parked_tensors: None,
+            parked_gguf: None,
+        };
+        assert!(!encoder.is_parked());
+        assert_eq!(encoder.parked_bytes(), 0);
+
+        let dense = Tensor::from_vec(vec![0.5f32; 64], (1, 64), &Device::Cpu).unwrap();
+        let quantized = Arc::new(QTensor::quantize(&dense, GgmlDType::Q8_0).unwrap());
+        let mut tensors = HashMap::new();
+        tensors.insert("token_embd.weight".to_string(), quantized);
+        encoder.parked_gguf = Some((tensors, HashMap::new()));
+
+        assert!(encoder.is_parked(), "the fixture is parked");
+        assert!(encoder.parked_bytes() > 0);
+
+        encoder.drop_weights();
+        assert!(
+            !encoder.is_parked(),
+            "a released encoder must not report itself parked"
+        );
+        assert_eq!(
+            encoder.parked_bytes(),
+            0,
+            "and its host bytes must actually be gone"
+        );
+    }
 
     /// FLUX.2 [klein] conditions on a FIXED 512 rows, whatever the prompt says.
     ///

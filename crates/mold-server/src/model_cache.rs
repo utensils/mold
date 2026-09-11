@@ -378,13 +378,26 @@ impl ModelCache {
         drained
     }
 
-    /// VRAM footprint of the currently GPU-resident model (0 if none loaded).
+    /// VRAM footprint of every GPU-resident entry (0 if none).
+    ///
+    /// SUMS rather than picking the first. "At most one engine is
+    /// GPU-resident" stopped being true when an engine gained a retained
+    /// transformer: `restore` forces `Gpu` on one, `insert` sets it for any
+    /// loaded engine without demoting the incumbent, and a `HashMap`'s `find`
+    /// then answers in iteration order — which could report a 0-byte husk
+    /// while a 35 GB holder sat beside it. Under-crediting is exactly what
+    /// wedged the queue, so the credit is the total.
     pub fn active_vram_bytes(&self) -> u64 {
-        self.entries
+        let resident: u64 = self
+            .entries
             .values()
-            .find(|e| e.residency == ModelResidency::Gpu)
-            .map(|e| e.vram_bytes)
-            .unwrap_or(self.in_flight_active_vram_bytes)
+            .filter(|entry| entry.residency == ModelResidency::Gpu)
+            .map(|entry| entry.vram_bytes)
+            .sum();
+        if resident == 0 {
+            return self.in_flight_active_vram_bytes;
+        }
+        resident.saturating_add(self.in_flight_active_vram_bytes)
     }
 
     /// The currently GPU-loaded model name.
@@ -664,14 +677,22 @@ impl ModelCache {
     /// 2. `entries.len() == lru_order.len()` (LRU mirrors entries 1:1).
     #[cfg(debug_assertions)]
     fn debug_check_invariants(&self) {
-        let gpu_count = self
+        // "At most one engine is GPU-resident" still holds for entries that
+        // hold their weights the classic way — one eagerly-loaded model at a
+        // time. An engine RETAINING a transformer is the case that made
+        // several legitimate (it keeps weights across renders by design), so
+        // it is excluded from the count rather than the rule being dropped.
+        let eager_gpu_count = self
             .entries
             .values()
-            .filter(|e| e.residency == ModelResidency::Gpu)
+            .filter(|e| {
+                e.residency == ModelResidency::Gpu && e.engine.resident_vram_bytes().is_none()
+            })
             .count();
         debug_assert!(
-            gpu_count <= 1,
-            "ModelCache invariant violated: {gpu_count} engines have residency=Gpu (must be ≤1)"
+            eager_gpu_count <= 1,
+            "ModelCache invariant violated: {eager_gpu_count} eagerly-loaded engines have \
+             residency=Gpu (must be ≤1)"
         );
         debug_assert_eq!(
             self.entries.len(),
@@ -1004,10 +1025,14 @@ mod tests {
         fn model_name(&self) -> &str {
             &self.name
         }
-        /// True the way `EngineBase::is_loaded` is true for a Sequential
-        /// strategy: the engine is usable, even though `load()` did nothing.
+        /// Faithful to `Flux2Engine::is_loaded`, which is
+        /// `base.is_loaded() || retained.is_some()`. A sequential [dev]
+        /// engine has `base.loaded == None`, so once its retained slot is
+        /// reclaimed it reports NOT loaded — which is what drives the
+        /// `Parked` demotion in `restore` and in the reclaim. Returning
+        /// `true` unconditionally left that branch untested.
         fn is_loaded(&self) -> bool {
-            true
+            self.retained > 0
         }
         fn load(&mut self) -> Result<()> {
             Ok(())
@@ -1050,6 +1075,71 @@ mod tests {
             "the retained transformer must be visible to admission, not worth zero"
         );
         assert_eq!(cache.active_model(), Some("flux2-dev:q8"));
+    }
+
+    /// Two retaining engines are REACHABLE, and the credit must be their sum.
+    ///
+    /// `restore` forces `Gpu` on a retaining engine and `insert` sets it for
+    /// any `is_loaded()` engine without demoting the incumbent, so with
+    /// `MOLD_MAX_CACHED_MODELS >= 2` two `Gpu` entries exist — a debug-build
+    /// panic on the old `<= 1` invariant, and in release a `HashMap`-ordered
+    /// `find` that could report either one. Reporting the 0-byte husk while a
+    /// 35 GB holder sat beside it is the same under-credit that wedged the
+    /// queue in the first place.
+    #[test]
+    fn two_retaining_engines_are_credited_together() {
+        const FIRST: u64 = 35 << 30;
+        const SECOND: u64 = 18 << 30;
+        let mut cache = ModelCache::new(4);
+
+        cache.insert(Box::new(RetainingEngine::new("flux2-dev:q8", FIRST)), 0);
+        let taken = cache.take("flux2-dev:q8").expect("resident");
+        cache.restore(taken);
+        cache.insert(
+            Box::new(RetainingEngine::new("flux2-klein:bf16", SECOND)),
+            0,
+        );
+        let taken = cache.take("flux2-klein:bf16").expect("resident");
+        cache.restore(taken);
+
+        assert_eq!(
+            cache.active_vram_bytes(),
+            FIRST + SECOND,
+            "both retained transformers are on the card, so both are reclaimable credit"
+        );
+
+        // And reclaim walks them one at a time, least-recently-used first,
+        // so a blocked request takes only as much as it needs.
+        let (first_name, freed) = cache
+            .release_retained_residency_except(None)
+            .expect("the LRU retaining engine is reclaimable");
+        assert_eq!(first_name, "flux2-dev:q8");
+        assert_eq!(freed, FIRST);
+        assert_eq!(cache.active_vram_bytes(), SECOND);
+
+        let (second_name, freed) = cache
+            .release_retained_residency_except(None)
+            .expect("the other one is too");
+        assert_eq!(second_name, "flux2-klein:bf16");
+        assert_eq!(freed, SECOND);
+        assert_eq!(cache.active_vram_bytes(), 0);
+    }
+
+    /// An ordinary eager engine beside a retaining one is still counted, and
+    /// the classic "one eagerly-loaded engine" rule still holds for entries
+    /// that retain nothing.
+    #[test]
+    fn an_eager_engine_and_a_retaining_one_are_summed() {
+        const RETAINED: u64 = 35 << 30;
+        const EAGER: u64 = 8 << 30;
+        let mut cache = ModelCache::new(4);
+
+        cache.insert(Box::new(MockEngine::new("sdxl")), EAGER);
+        cache.insert(Box::new(RetainingEngine::new("flux2-dev:q8", RETAINED)), 0);
+        let taken = cache.take("flux2-dev:q8").expect("resident");
+        cache.restore(taken);
+
+        assert_eq!(cache.active_vram_bytes(), EAGER + RETAINED);
     }
 
     /// And it is RECLAIMABLE without destroying the engine.
