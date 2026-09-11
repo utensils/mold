@@ -643,13 +643,13 @@ describe("CreatePage layout and behavior", () => {
     await flushPromises();
     const rail = wrapper.get("[data-test='create-rail']");
     const first = rail.element.firstElementChild as HTMLElement;
-    expect(first.getAttribute("data-test")).toBe("create-machine-card");
+    expect(first.getAttribute("data-test")).toBe("machine-card");
     const order = [
-      "create-machine-card",
+      "machine-card",
       "quality-ladder",
       "controls-reset",
       "controls-stub",
-      "create-disclosures",
+      "disclosure-list",
     ].map((test) => wrapper.get(`[data-test='${test}']`).element);
     for (let index = 1; index < order.length; index += 1) {
       expect(
@@ -657,13 +657,15 @@ describe("CreatePage layout and behavior", () => {
           Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
     }
-    // The routing picker left the bottom of the settings list for the card.
-    expect(
-      wrapper
-        .get("[data-test='create-machine-card']")
-        .findComponent({ name: "HostRoutingPicker" })
-        .exists(),
-    ).toBe(true);
+    // The routing picker left the bottom of the settings list: with only this
+    // server registered the card's Change link is the one doorway to Machines,
+    // and no picker row repeats it.
+    const card = wrapper.get("[data-test='machine-card']");
+    expect(card.get("[data-test='machine-card-change']").text()).toBe("Change");
+    expect(card.findComponent({ name: "HostRoutingPicker" }).exists()).toBe(
+      false,
+    );
+    expect(wrapper.find("[data-test='controls-host']").exists()).toBe(false);
   });
 
   it("applies settings selected from recovered Now developing work", async () => {
@@ -962,9 +964,7 @@ describe("CreatePage layout and behavior", () => {
     await wrapper.get("[data-test='phone-open-rail']").trigger("click");
     expect(wrapper.findAll("[data-test='create-rail-sheet']")).toHaveLength(1);
     expect(wrapper.find("[data-test='controls-stub']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='create-disclosures']").exists()).toBe(
-      true,
-    );
+    expect(wrapper.find("[data-test='disclosure-list']").exists()).toBe(true);
 
     // A row inside the sheet swaps the SAME sheet's body; it never opens a
     // second one.
@@ -972,9 +972,7 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.findAll("[data-test='create-rail-sheet']")).toHaveLength(1);
     expect(wrapper.find("[data-test='rail-sheet-back']").exists()).toBe(true);
     await wrapper.get("[data-test='rail-sheet-back']").trigger("click");
-    expect(wrapper.find("[data-test='create-disclosures']").exists()).toBe(
-      true,
-    );
+    expect(wrapper.find("[data-test='disclosure-list']").exists()).toBe(true);
     wrapper.unmount();
     vi.unstubAllGlobals();
     vi.stubGlobal("prompt", vi.fn());

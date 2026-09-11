@@ -32,6 +32,7 @@ const emit = defineEmits<{ select: [steps: number] }>();
   <div
     v-if="presets.length"
     class="quality"
+    data-test="quality-ladder"
     role="radiogroup"
     aria-label="Quality"
   >

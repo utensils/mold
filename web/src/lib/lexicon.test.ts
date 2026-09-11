@@ -92,7 +92,7 @@ describe("lexicon — New image controls", () => {
     expect(controlsAside).toContain('aria-label="Seed number"');
     expect(controlsAside).toContain("passes`");
     expect(controlsAside).not.toContain("steps`");
-    expect(makeChip).toContain(">Make<");
+    expect(makeChip).toMatch(/Make \{\{/);
     expect(makeChip).not.toContain(">Batch<");
     expect(controlsAside).not.toContain(">Batch<");
     expect(hostRoutingPicker).toContain(
