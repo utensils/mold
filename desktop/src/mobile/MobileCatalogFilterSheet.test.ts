@@ -1,4 +1,4 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import MobileCatalogFilterSheet from "./MobileCatalogFilterSheet.vue";
 import type { MobileHost } from "./hosts";
@@ -16,6 +16,7 @@ function host(id: string, name: string, online = true): MobileHost {
 
 function sheet(props: Record<string, unknown> = {}) {
   return mount(MobileCatalogFilterSheet, {
+    attachTo: document.body,
     props: {
       open: true,
       hosts: [host("studio", "Studio"), host("plato", "plato")],
@@ -103,5 +104,30 @@ describe("MobileCatalogFilterSheet", () => {
 
     await wrapper.get("[data-test='mobile-catalog-filters-reset']").trigger("click");
     expect(wrapper.emitted("reset")).toHaveLength(1);
+  });
+  it("takes focus on open, traps Tab, and returns focus after Escape", async () => {
+    const trigger = document.createElement("button");
+    document.body.append(trigger);
+    trigger.focus();
+    const wrapper = sheet({ open: false });
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-catalog-filters']").attributes("inert")).toBeDefined();
+
+    await wrapper.setProps({ open: true });
+    await flushPromises();
+    // aria-modal over a background that is not inert is kept by this alone.
+    expect(document.activeElement).toBe(wrapper.get(".mobile-sheet-panel").element);
+
+    // The first Tab always arrives with the panel focused.
+    await wrapper.get("[data-test='mobile-catalog-filters']").trigger("keydown", { key: "Tab" });
+    expect(wrapper.get(".mobile-sheet-panel").element.contains(document.activeElement)).toBe(true);
+
+    await wrapper.get("[data-test='mobile-catalog-filters']").trigger("keydown", { key: "Escape" });
+    expect(wrapper.emitted("close")).toHaveLength(1);
+
+    await wrapper.setProps({ open: false });
+    expect(document.activeElement).toBe(trigger);
+    wrapper.unmount();
+    trigger.remove();
   });
 });

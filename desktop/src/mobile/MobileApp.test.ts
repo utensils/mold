@@ -7543,7 +7543,89 @@ describe("MobileApp foreground resume", () => {
   });
 });
 
+describe("MobileApp connection failures", () => {
+  it("explains a failed save inside the sheet the user is looking at", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.reject(new Error("connection refused"));
+      return Promise.resolve(null);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-add-machine-open']").trigger("click");
+    await wrapper
+      .get(".mobile-host-form input[autocomplete='url']")
+      .setValue("http://unreachable.invalid:7680");
+    await wrapper.get(".mobile-host-form").trigger("submit");
+    await flushPromises();
+
+    // The sheet is a fixed overlay with a scrim; an error rendered behind it
+    // is an error nobody reads.
+    const sheet = wrapper.get("[data-test='mobile-add-machine']");
+    expect(sheet.classes()).toContain("is-open");
+    const alert = sheet.get("[data-test='mobile-add-machine-error']");
+    expect(alert.attributes("role")).toBe("alert");
+    expect(alert.text()).toContain("connection refused");
+  });
+
+  it("explains a failed pairing scan on the screen the scan was started from", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-pair-scan']").trigger("click");
+    await flushPromises();
+
+    // Camera permission is denied in this environment, which is exactly one of
+    // the failures that used to land on a tab the user was not on.
+    expect(wrapper.get("[data-test='mobile-pair-scan-error']").text()).toBeTruthy();
+  });
+});
+
 describe("MobileApp queue rows", () => {
+  it("never stands a place in line against work that is already being made", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/activity")
+        return Promise.resolve({
+          instance_id: status.instance_id,
+          observed_at_unix_ms: 10,
+          items: [
+            {
+              // Running, but before the engine reports any step: prompt
+              // encoding, model loading, anything early.
+              id: "foreign-encoding",
+              kind: "generation",
+              phase: "running",
+              stage: "Encoding prompt",
+              model: model.name,
+              created_at_unix_ms: 2,
+              updated_at_unix_ms: 9,
+              position: 3,
+              can_cancel: true,
+            },
+          ],
+        });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-queue']").trigger("click");
+    await flushPromises();
+
+    const card = wrapper.get("[data-test='mobile-generation-queue-card']");
+    expect(card.text()).toContain("Encoding prompt");
+    // Saying "3rd in line" under a heading that says Being made is a
+    // contradiction the reader has to resolve.
+    expect(card.find("[data-test='mobile-generation-job-position']").exists()).toBe(false);
+  });
+
   it("draws a machine's own work the same way as this phone's", async () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/status") return Promise.resolve(status);
@@ -7652,9 +7734,9 @@ describe("MobileApp per-screen titles", () => {
     await wrapper.get("[data-test='mobile-tab-queue']").trigger("click");
     await flushPromises();
     // Neither belongs to a screen that makes nothing.
-    expect(wrapper.get(".mobile-header").find("[data-test='mobile-output-kind']").exists()).toBe(
-      false,
-    );
+    const queueHeader = wrapper.get(".mobile-header");
+    expect(queueHeader.find("[data-test='mobile-output-kind']").exists()).toBe(false);
+    expect(queueHeader.find(".host-chip").exists()).toBe(false);
   });
 
   it("enters Select from the Images header", async () => {
@@ -11146,16 +11228,21 @@ describe("MobileApp host and catalog coordination", () => {
     await wrapper.get("[data-test='host-detail-catalog']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.get("select[aria-label='Catalog host']").element).toHaveProperty(
+    expect(wrapper.get(".mobile-catalog-host-picker select").element).toHaveProperty(
       "value",
       "render-id",
     );
     // Browsing another machine's catalog leaves the generation target alone;
     // with two machines reachable that target is the Auto policy, which is
-    // what the header chip names.
-    expect(wrapper.get(".mobile-header .host-chip").text()).toBe("Auto");
+    // what Make's header chip names. The chip lives on Make only — on the
+    // Machines screen it would say "Remote only" above a list of machines.
+    expect(wrapper.find(".mobile-header .host-chip").exists()).toBe(false);
     expect(localStorage.getItem("mold.mobile.generate-target.v1")).toBeNull();
     expect(wrapper.get("[data-test='mobile-tab-catalog']").attributes("aria-current")).toBe("page");
+
+    await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get(".mobile-header .host-chip").text()).toBe("Auto");
   });
 
   it("keeps the catalog download stream alive off-tab and refreshes Generate models", async () => {

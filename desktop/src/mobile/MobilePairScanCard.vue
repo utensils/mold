@@ -11,7 +11,14 @@
  * The tile holds the literal word QR and nothing else: the phone SCANS the
  * code the desktop shows, so there is no credential here to render or leak.
  */
-const props = withDefaults(defineProps<{ scanning?: boolean }>(), { scanning: false });
+const props = withDefaults(
+  defineProps<{
+    scanning?: boolean;
+    /** Why the last scan failed. Said here, where the scan was started. */
+    error?: string | null;
+  }>(),
+  { scanning: false, error: null },
+);
 
 const emit = defineEmits<{ scan: [] }>();
 </script>
@@ -36,6 +43,13 @@ const emit = defineEmits<{ scan: [] }>();
       >
         Scan pairing code
       </button>
+      <span
+        v-if="props.error"
+        class="mobile-pair-scan-error error-text"
+        role="alert"
+        data-test="mobile-pair-scan-error"
+        >{{ props.error }}</span
+      >
     </div>
   </div>
 </template>

@@ -392,7 +392,7 @@ const filteredInstalled = computed(() => {
   return enrichedInstalledEntries.value
     .filter(
       (entry) =>
-        !q || entry.name.toLowerCase().includes(q) || entryTitle(entry).toLowerCase().includes(q),
+        !q || entry.name.toLowerCase().includes(q) || entryRowName(entry).toLowerCase().includes(q),
     )
     .filter((entry) => matchesCatalogFamily(entry.family, family.value))
     .filter((entry) => !kind.value || entry.kind === kind.value)
@@ -540,11 +540,6 @@ function entryTitle(entry: MobileCatalogEntry): string {
 }
 
 /**
- * The style's name in plain words — the SHARED rule StyleMenu and the desktop
- * picker already use, so one style is not called two different things on two
- * screens. The row keeps `entry.name` beside it in mono when they differ.
- */
-/**
  * What a style you ALREADY have weighs. Only the weights, never the fetch
  * total: nothing is being fetched on this shelf, and the two numbers mean
  * different things.
@@ -554,6 +549,11 @@ function installedWeightLabel(entry: MobileCatalogEntry): string | null {
   return weights != null ? formatGB(weights) : null;
 }
 
+/**
+ * The style's name in plain words — the SHARED rule StyleMenu and the desktop
+ * picker already use, so one style is not called two different things on two
+ * screens. The row keeps `entry.name` beside it in mono when they differ.
+ */
 function entryStyleName(entry: MobileCatalogEntry): string {
   return styleDisplayName({
     name: entry.name,
@@ -563,9 +563,23 @@ function entryStyleName(entry: MobileCatalogEntry): string {
   });
 }
 
+/**
+ * THE name of a row, and the only one. On the Ready-to-use shelf a sidecar
+ * description is a short phrase and naming a style by it is the point; a live
+ * catalog description is up to 1,200 characters of marketing prose, and on the
+ * shelf whose job is recognising an unfamiliar model that is not a name.
+ *
+ * The title, the search filter and the accessible name all read THIS, so what
+ * the row says, what VoiceOver announces and what you can search for can never
+ * drift apart.
+ */
+function entryRowName(entry: MobileCatalogEntry): string {
+  return source.value === "installed" ? entryStyleName(entry) : entryTitle(entry);
+}
+
 function entryAccessibilityLabel(entry: MobileCatalogEntry): string {
   const labels = [
-    entryTitle(entry),
+    entryRowName(entry),
     modelKindLabel(modelKindValue(entry)),
     ...(entry.nsfw ? ["18+ NSFW"] : []),
     "view details",
@@ -1284,12 +1298,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section ref="catalogRoot" class="mobile-catalog" aria-labelledby="mobile-catalog-title">
+  <!-- The screen's own name is in the shell header, which this component
+       cannot reach, so the landmark names itself rather than borrowing the
+       tagline below it. -->
+  <section ref="catalogRoot" class="mobile-catalog" aria-label="Styles">
     <header class="mobile-catalog-header">
-      <!-- The screen's name is in the shell header; this says what it is for. -->
-      <p id="mobile-catalog-title" class="section-note">
-        Find a look for your next picture, clip, or 3-D object
-      </p>
+      <p class="section-note">Find a look for your next picture, clip, or 3-D object</p>
     </header>
 
     <p
@@ -1493,9 +1507,9 @@ onBeforeUnmount(() => {
             <span class="mobile-catalog-card-body">
               <!-- The friendly name leads, the way StyleMenu names a style;
                    the runnable id follows only when it says something else. -->
-              <span class="mobile-catalog-card-title">{{ entryStyleName(entry) }}</span>
+              <span class="mobile-catalog-card-title">{{ entryRowName(entry) }}</span>
               <span
-                v-if="entryStyleName(entry) !== entry.name"
+                v-if="entryRowName(entry) !== entry.name"
                 class="mobile-catalog-card-id"
                 data-test="mobile-catalog-card-id"
                 >{{ entry.name }}</span

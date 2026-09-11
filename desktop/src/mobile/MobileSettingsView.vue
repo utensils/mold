@@ -43,6 +43,8 @@ const props = defineProps<{
   updateChannel?: string;
   /** True while the native camera is already open for a pairing scan. */
   pairingScanning?: boolean;
+  /** Why the last pairing scan started here failed. */
+  pairingError?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -464,7 +466,11 @@ function pickTone(choice: ToneChoice) {
       </button>
       <!-- Pairing used to be reachable only from a disclosure inside the
            Machines tab, which is not where a fresh install looks. -->
-      <MobilePairScanCard :scanning="pairingScanning" @scan="emit('scan-pairing')" />
+      <MobilePairScanCard
+        :scanning="pairingScanning"
+        :error="pairingError ?? null"
+        @scan="emit('scan-pairing')"
+      />
     </section>
 
     <section

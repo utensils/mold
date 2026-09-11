@@ -22,6 +22,7 @@ import { ref, toRef } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 import { useMobileBack } from "./useMobileBack";
 import { useSheetDismiss } from "./useSheetDismiss";
+import { useSheetFocus } from "./useSheetFocus";
 import {
   CATALOG_KIND_OPTIONS,
   type CatalogKindFilter,
@@ -53,11 +54,22 @@ const sort = defineModel<CatalogSortOption>("sort", { required: true });
 const includeNsfw = defineModel<boolean>("includeNsfw", { required: true });
 
 useMobileBack(toRef(props, "open"), () => emit("close"));
-useOverlayStack(toRef(props, "open"), "mobile-catalog-filters");
+const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-catalog-filters");
+const panel = ref<HTMLElement | null>(null);
 const body = ref<HTMLElement | null>(null);
 
 const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
   useSheetDismiss({ body, onDismiss: () => emit("close") });
+
+/* `aria-modal="true"` over a background that is not inert is a promise only
+ * this keeps: focus in on open, Tab held inside, Escape out, focus restored. */
+const { onKeydown } = useSheetFocus({
+  panel,
+  open: () => props.open,
+  isTop,
+  onClose: () => emit("close"),
+  onBeforeClose: resetDrag,
+});
 </script>
 
 <template>
@@ -70,6 +82,7 @@ const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDi
     aria-label="Filters"
     :aria-hidden="open ? undefined : 'true'"
     data-test="mobile-catalog-filters"
+    @keydown="onKeydown"
   >
     <button
       class="mobile-sheet-scrim"
@@ -80,6 +93,7 @@ const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDi
       @click="emit('close')"
     />
     <div
+      ref="panel"
       class="mobile-sheet-panel"
       :class="{ 'is-dragging': dragging }"
       :style="panelStyle"
@@ -121,7 +135,7 @@ const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDi
           <span>Browse on</span>
           <select
             :value="selectedHostId"
-            aria-label="Catalog host"
+            aria-label="Machine"
             @change="emit('select-host', ($event.target as HTMLSelectElement).value)"
           >
             <option v-for="host in hosts" :key="host.id" :value="host.id">

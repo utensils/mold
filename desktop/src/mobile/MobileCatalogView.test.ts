@@ -478,12 +478,9 @@ describe("MobileCatalogView", () => {
     wrapper = mountCatalog(studio.id, [studio]);
     await flushPromises();
 
-    // Found by its runnable id: the shared style-name rule titles a row from
-    // its description, which for H3 is the acquisition sentence, and the id is
-    // on the row beside it in mono.
     const card = wrapper
       .findAll("[data-test='mobile-catalog-card']")
-      .find((candidate) => candidate.text().includes("minimax-h3-ref2va"))!;
+      .find((candidate) => candidate.text().includes("MiniMax H3 Ref2VA"))!;
     expect(card.text()).toContain("Installed");
     await card.get(".mobile-catalog-card-open").trigger("click");
     await flushPromises();
@@ -1630,6 +1627,51 @@ describe("MobileCatalogView", () => {
     expect(card.text()).not.toContain("SIZE");
   });
 
+  it("names a Browse more row by its model name, never by its marketing copy", async () => {
+    // A live catalog description is up to 1,200 characters of prose. On the
+    // shelf whose whole job is recognising a model you have never seen, the
+    // title must be the model's own name.
+    vi.useFakeTimers();
+    const prose =
+      "A photoreal checkpoint trained on 4 million curated portraits for cinematic " +
+      "lighting, shallow depth of field, and skin detail that holds up at 2x upscale.";
+    searchCatalog.mockResolvedValue(
+      searchResponse([entry("Portrait Base", { description: prose })]),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("Portrait Base"))!;
+    expect(card.get(".mobile-catalog-card-title").text()).toBe("Portrait Base");
+    expect(card.text()).not.toContain("cinematic");
+
+    // What the row SAYS is what VoiceOver announces and what search matches.
+    expect(card.get(".mobile-catalog-card-open").attributes("aria-label")).toContain(
+      "Portrait Base",
+    );
+    await wrapper.get("[data-test='mobile-catalog-search']").setValue("Portrait Base");
+    await vi.advanceTimersByTimeAsync(400);
+    await flushPromises();
+    expect(wrapper.text()).toContain("Portrait Base");
+  });
+
+  it("finds a ready-to-use style by the friendly name it shows", async () => {
+    vi.useFakeTimers();
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-catalog-segment-installed']").trigger("click");
+    await flushPromises();
+
+    // The row reads "A test model"; typing that must not empty the list.
+    await wrapper.get("[data-test='mobile-catalog-search']").setValue("A test model");
+    await vi.advanceTimersByTimeAsync(400);
+    await flushPromises();
+    expect(wrapper.findAll("[data-test='mobile-catalog-card']")).toHaveLength(1);
+    expect(wrapper.get(".mobile-catalog-card-title").text()).toBe("A test model");
+  });
+
   it("keeps the kind badge and the Pull action on the Browse more shelf", async () => {
     searchCatalog.mockResolvedValue(searchResponse([entry("Portrait Base", { kind: "lora" })]));
     wrapper = mountCatalog(studio.id, [studio]);
@@ -1818,14 +1860,10 @@ describe("MobileCatalogView", () => {
     await vi.advanceTimersByTimeAsync(400);
     await flushPromises();
 
-    // The row is found by its id: with live metadata merged in, the shared
-    // style-name rule titles it from the catalog description rather than the
-    // legacy display name, which is the enrichment this test is about.
     const cards = wrapper
       .findAll("[data-test='mobile-catalog-card']")
-      .filter((candidate) => candidate.text().includes("cv:4242"));
+      .filter((candidate) => candidate.text().includes("Legacy Adapter"));
     expect(cards).toHaveLength(1);
-    expect(cards[0]!.text()).toContain("Rich metadata from the live catalog.");
     expect(cards[0]!.get("[data-test='model-kind-badge']").text()).toBe("LoRA");
     expect(cards[0]!.get("[data-test='model-nsfw-badge']").text()).toBe("18+ NSFW");
     expect(cards[0]!.text()).toContain("Installed");

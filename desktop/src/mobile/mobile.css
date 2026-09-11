@@ -264,7 +264,10 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   flex: none;
   align-items: center;
   gap: 4px;
-  min-height: 32px;
+  /* The one control that decides where every print goes. It was a 32px chip
+     with an invisible select over it, below the 44pt floor this very screen
+     asserts for its own header action. */
+  min-height: 44px;
   max-width: min(58vw, 240px);
   border: 1px solid var(--mold-border);
   border-radius: var(--mold-radius-2);
@@ -303,6 +306,19 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   border: 0;
   opacity: 0;
   appearance: none;
+}
+
+/* The select is invisible by design, so the CHIP shows the ring a keyboard or
+   Full Keyboard Access would otherwise land on with nothing to see. */
+.mobile-header-routing-chip:has(.mobile-header-routing-select:focus-visible) {
+  outline: 2px solid var(--mold-border-focus);
+  outline-offset: 2px;
+}
+
+/* NIT 14: the header is now where several screens' single action lives. */
+.mobile-header-action:focus-visible {
+  outline: 2px solid var(--mold-border-focus);
+  outline-offset: 2px;
 }
 
 /* What that machine is doing, in the mono half of the row. */
@@ -6315,6 +6331,14 @@ button:disabled {
   display: none;
 }
 .mobile-shell.is-keyboard-open .mobile-create-head {
+  display: none;
+}
+/* While the keyboard is up, the header keeps only the screen's name. The
+   routing chip and the output-kind control answer questions you are not asking
+   mid-sentence, and in portrait — where prompts get written — they were the
+   difference between seeing what you typed and not. */
+.mobile-shell.is-keyboard-open .mobile-header-routing,
+.mobile-shell.is-keyboard-open .mobile-header .mobile-output-kinds {
   display: none;
 }
 .mobile-shell.is-keyboard-open .mobile-create-action {

@@ -757,6 +757,8 @@ const pairing = ref(false);
  *  a fresh install used to land on a form it had no way to fill in yet. */
 const addMachineOpen = ref(false);
 const addMachineSheet = ref<{ focusDiscoveredApiKey: () => void } | null>(null);
+/** Which door the current pairing scan came through. */
+const pairingStartedFromSettings = ref(false);
 const pairingScannerOpen = ref(false);
 let pairingScannerCancelled = false;
 useMobileBack(pairingScannerOpen, () => {
@@ -3027,8 +3029,11 @@ function activityRowMeta(row: ActivityRow): string {
   return [place, row.print.hostLabel].filter(Boolean).join(" · ");
 }
 
-/** A queued row stands its place in line where the picture will be. */
+/** A queued row stands its place in line where the picture will be. Work that
+ *  is already being made never does: "3rd in line" under a heading that says
+ *  Being made is a contradiction the reader has to resolve. */
 function activityRowPosition(row: ActivityRow): string | null {
+  if (activityRowRunning(row)) return null;
   if (activityRowThumbnail(row)) return null;
   if (durableHold(row.print)) return "↓";
   const place = row.queuePosition ?? row.print.queuePosition;
@@ -3236,8 +3241,9 @@ function sharedQueueProgress(row: FleetActiveWork): number | null {
   return Math.max(0, Math.min(100, Math.round((row.current / row.total) * 100)));
 }
 
-/** Place in line for a row with nothing to show yet. */
+/** Place in line for a row that is still waiting to be made. */
 function sharedQueuePosition(row: FleetActiveWork): string | null {
+  if (sharedQueueRunning(row)) return null;
   if (sharedQueueProgress(row) !== null) return null;
   return row.position ? String(row.position) : null;
 }
@@ -3341,10 +3347,10 @@ function revealRestoredMobileGeneration(submitted = false): void {
     if (!scroller) return;
     // Measure from the scroller's own edge: `offsetTop` is relative to the
     // shell, whose header sits above the scroller, and parked the canvas one
-    // header-height under the wordmark.
-    // A restore lands on the heading (top); a submission lands on the canvas,
-    // with the scroller's own inset kept above it so the frame does not hug
-    // the wordmark.
+    // header-height too low.
+    // A restore lands at the top of the scroll; a submission lands on the
+    // canvas, with the scroller's own inset kept above it so the frame does
+    // not hug the header.
     const slot = submitted ? makeCanvasSlot.value : null;
     const top = slot
       ? Math.max(
@@ -4723,6 +4729,22 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
     pairingScannerCancelled = false;
     pairing.value = false;
   }
+}
+
+/** A pairing failure is only Settings' to report when Settings began the scan;
+ *  the Machines tab and the Add-a-machine sheet report their own. */
+const settingsPairingError = computed(() =>
+  settingsOpen.value && pairingStartedFromSettings.value ? hostError.value || null : null,
+);
+
+function scanPairingFromSettings(): Promise<void> {
+  pairingStartedFromSettings.value = true;
+  return scanPairingCode();
+}
+
+function scanPairingFromSheet(): Promise<void> {
+  pairingStartedFromSettings.value = false;
+  return scanPairingCode();
 }
 
 function scanPairingCode(): Promise<void> {
@@ -12013,13 +12035,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           @update:model-value="selectOutputKind"
         />
       </template>
-      <div v-else-if="tab !== 'generate'" class="mobile-header-routing">
-        <div class="host-chip">
-          <span class="status-dot" :class="headerTargetDot" aria-hidden="true" />{{
-            headerTargetLabel
-          }}
-        </div>
-      </div>
     </header>
 
     <p class="sr-only" aria-live="polite" aria-atomic="true">
@@ -12049,10 +12064,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         :app-version="appVersion"
         :host="selectedHost ?? null"
         :update-channel="androidNativeRuntime ? 'GitHub APK' : 'TestFlight'"
-        :pairing-scanning="pairingScannerOpen"
+        :pairing-scanning="pairing"
+        :pairing-error="settingsPairingError"
         @update="updateSettings"
         @manage-hosts="manageHostsFromSettings"
-        @scan-pairing="scanPairingCode"
+        @scan-pairing="scanPairingFromSettings"
       />
       <div
         v-if="pullRefreshAvailable"
@@ -13713,8 +13729,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             :discovering="discovering"
             :discovered="discovered"
             :selected-discovered="selectedDiscovered"
+            :error="hostError"
             @close="addMachineOpen = false"
-            @scan-pairing="scanPairingCode"
+            @scan-pairing="scanPairingFromSheet"
             @discover="discoverHosts"
             @pick-discovered="pickDiscoveredHost"
             @clear-discovered="clearDiscoveredHost"
