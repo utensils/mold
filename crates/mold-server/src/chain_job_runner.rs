@@ -220,6 +220,44 @@ pub struct StageExecution {
     pub device_ordinal: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageExecutionError {
+    Failed(String),
+    SchedulerStopped,
+}
+
+impl StageExecutionError {
+    #[cfg(test)]
+    pub(crate) fn contains(&self, needle: &str) -> bool {
+        match self {
+            Self::Failed(error) => error.contains(needle),
+            Self::SchedulerStopped => {
+                "scheduler coordinator stopped before settling the chain-stage lease"
+                    .contains(needle)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for StageExecutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(error) => f.write_str(error),
+            Self::SchedulerStopped => {
+                f.write_str("scheduler coordinator stopped before settling the chain-stage lease")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StageExecutionError {}
+
+impl From<String> for StageExecutionError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
 /// Fully-owned chain stage payload transported only by a scheduler lease.
 /// The optional plan is chosen from the exact per-device candidates during
 /// grant construction and validated again on the owner thread before CUDA.
@@ -240,7 +278,8 @@ pub struct ScheduledChainStageWork {
     pub on_leased: Option<ChainLeaseCallback>,
     pub execution_plan: Option<crate::execution_plan::ResolvedExecutionPlan>,
     pub expected_model_fingerprint: Option<String>,
-    pub result_tx: Option<tokio::sync::oneshot::Sender<Result<StageExecution, String>>>,
+    pub result_tx:
+        Option<tokio::sync::oneshot::Sender<Result<StageExecution, StageExecutionError>>>,
     #[cfg(test)]
     pub before_second_fence: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -527,6 +566,105 @@ impl ChainJobRunnerHandle {
         self.events
             .publish_then_remove(job_id, ChainJobEvent::StateChanged { state, error });
         self.cancel.unregister(job_id);
+    }
+
+    /// Resolve chain attempts whose scheduler leases outlived the bounded
+    /// owner drain. This runs before the coordinator releases the deferred
+    /// result senders, so durable state never remains `Running` between the
+    /// coordinator exit and the actor observing its closed lease.
+    pub async fn settle_scheduler_drain_deadline(
+        &self,
+        db: &MetadataDb,
+        job_ids: impl IntoIterator<Item = String>,
+        fatal_cuda: bool,
+    ) {
+        let lock_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        for job_id in job_ids {
+            let Ok(_guard) = tokio::time::timeout_at(lock_deadline, self.lock_job(&job_id)).await
+            else {
+                tracing::error!(%job_id, "chain mutation lock exceeded scheduler drain settlement budget");
+                continue;
+            };
+            let result = (|| -> anyhow::Result<()> {
+                let Some(row) = chain_jobs::get_job(db, &job_id)? else {
+                    return Ok(());
+                };
+                if row.state != ChainJobState::Running {
+                    return Ok(());
+                }
+                let mut manifest = ChainJobManifest::read_from_dir(&row.job_dir)?;
+                let now = now_ms_i64();
+                if fatal_cuda {
+                    let error = "CUDA context is fatally poisoned; server restart required";
+                    if let Some(stage_idx) = manifest
+                        .stage_status
+                        .iter()
+                        .find(|stage| stage.state == StageState::Running)
+                        .map(|stage| stage.idx)
+                    {
+                        mark_manifest_stage_failed(
+                            &mut manifest,
+                            &JobDirLayout::new(row.job_dir.clone()),
+                            stage_idx,
+                            error,
+                        )?;
+                        let seed = manifest.stage_status[stage_idx as usize].seed;
+                        chain_jobs::upsert_stage(
+                            db,
+                            &ChainJobStageRow {
+                                job_id: job_id.clone(),
+                                stage_idx,
+                                state: StageState::Failed,
+                                seed,
+                                frames_emitted: None,
+                                generation_time_ms: None,
+                                segment_rel_path: None,
+                                error: Some(error.to_string()),
+                                updated_at_ms: now,
+                            },
+                        )?;
+                    }
+                    if chain_jobs::try_transition(
+                        db,
+                        &job_id,
+                        &[ChainJobState::Running],
+                        ChainJobState::Failed,
+                        Some(error),
+                        now,
+                    )? {
+                        self.publish_settled_state(
+                            &job_id,
+                            ChainJobState::Failed,
+                            Some(error.to_string()),
+                        );
+                    }
+                } else {
+                    reset_running_stages_for_retry(db, &job_id, &row.job_dir, &mut manifest, now)?;
+                    let user_requested = self.cancel.was_user_requested(&job_id);
+                    let target = if user_requested {
+                        ChainJobState::Cancelled
+                    } else {
+                        ChainJobState::Paused
+                    };
+                    let error =
+                        (!user_requested).then_some("server shutdown interrupted chain job");
+                    if chain_jobs::try_transition(
+                        db,
+                        &job_id,
+                        &[ChainJobState::Running],
+                        target,
+                        error,
+                        now,
+                    )? {
+                        self.publish_settled_state(&job_id, target, error.map(str::to_string));
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                tracing::error!(%error, %job_id, "failed to settle chain at scheduler drain deadline");
+            }
+        }
     }
 
     /// SSE attach: MUST be called BEFORE snapshot synthesis (buffered
@@ -992,54 +1130,74 @@ async fn run_v2_loop(
     let mut active = HashSet::new();
     let mut tasks = tokio::task::JoinSet::new();
     let mut task_jobs = HashMap::new();
+    let mut shutting_down = false;
 
     loop {
         while let Ok(cmd) = kick_rx.try_recv() {
-            if !handle_runner_cmd(deps.clone(), cmd).await {
-                return;
+            match cmd {
+                RunnerCmd::Shutdown => shutting_down = true,
+                cmd if !shutting_down => {
+                    if !handle_runner_cmd(deps.clone(), cmd).await {
+                        shutting_down = true;
+                    }
+                }
+                RunnerCmd::Gc { reply } => {
+                    let _ = reply.send(Err("chain job runner is shutting down".to_string()));
+                }
+                RunnerCmd::Kick => {}
             }
         }
 
-        if let Some(db) = deps.db.as_ref() {
-            match chain_jobs::jobs_in_state(db, ChainJobState::Queued) {
-                Ok(jobs) => {
-                    for job in jobs {
-                        if active.contains(&job.id) {
-                            continue;
-                        }
-                        match claim_for_execution_async(&deps, &job).await {
-                            Ok(true) => {
-                                let job_id = job.id.clone();
-                                let start_stage = job.current_stage;
-                                active.insert(job_id.clone());
-                                let deps_for_job = deps.clone();
-                                let tracked_job_id = job_id.clone();
-                                let abort = tasks.spawn(async move {
-                                    let result =
-                                        run_chain_actor(deps_for_job, job, start_stage).await;
-                                    (job_id, result)
-                                });
-                                task_jobs.insert(abort.id(), tracked_job_id);
+        if !shutting_down {
+            if let Some(db) = deps.db.as_ref() {
+                match chain_jobs::jobs_in_state(db, ChainJobState::Queued) {
+                    Ok(jobs) => {
+                        for job in jobs {
+                            if active.contains(&job.id) {
+                                continue;
                             }
-                            Ok(false) => {}
-                            Err(error) => {
-                                tracing::warn!(
-                                    job_id = %job.id,
-                                    "chain job V2 claim failed: {error:#}"
-                                );
+                            match claim_for_execution_async(&deps, &job).await {
+                                Ok(true) => {
+                                    let job_id = job.id.clone();
+                                    let start_stage = job.current_stage;
+                                    active.insert(job_id.clone());
+                                    let deps_for_job = deps.clone();
+                                    let tracked_job_id = job_id.clone();
+                                    let abort = tasks.spawn(async move {
+                                        let result =
+                                            run_chain_actor(deps_for_job, job, start_stage).await;
+                                        (job_id, result)
+                                    });
+                                    task_jobs.insert(abort.id(), tracked_job_id);
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    tracing::warn!(
+                                        job_id = %job.id,
+                                        "chain job V2 claim failed: {error:#}"
+                                    );
+                                }
                             }
                         }
                     }
+                    Err(error) => tracing::warn!("chain-job V2 queued lookup failed: {error:#}"),
                 }
-                Err(error) => tracing::warn!("chain-job V2 queued lookup failed: {error:#}"),
             }
         }
 
+        if shutting_down && tasks.is_empty() {
+            break;
+        }
+
         tokio::select! {
-            maybe_cmd = kick_rx.recv() => {
-                let Some(cmd) = maybe_cmd else { break };
-                if !handle_runner_cmd(deps.clone(), cmd).await {
-                    break;
+            maybe_cmd = kick_rx.recv(), if !shutting_down => {
+                match maybe_cmd {
+                    Some(RunnerCmd::Shutdown) | None => shutting_down = true,
+                    Some(cmd) => {
+                        if !handle_runner_cmd(deps.clone(), cmd).await {
+                            shutting_down = true;
+                        }
+                    }
                 }
             }
             joined = tasks.join_next_with_id(), if !tasks.is_empty() => {
@@ -1062,7 +1220,7 @@ async fn run_v2_loop(
                 // parent ready without a route kick.
                 tokio::task::yield_now().await;
             }
-            _ = daily.tick() => {
+            _ = daily.tick(), if !shutting_down => {
                 if let Err(error) = run_gc_for_runner(deps.clone(), false).await {
                     tracing::warn!("daily chain job GC failed: {error}");
                 }
@@ -1479,6 +1637,18 @@ fn execute_job_inner(
             ) {
                 Ok(execution) => execution,
                 Err(err) => {
+                    // The scheduler remains the deferred-result authority
+                    // while its leases drain. If that bounded drain expires,
+                    // dropping the authority wakes this actor with an error;
+                    // a shutdown cancellation still makes the attempt a
+                    // resumable interruption, never a failed render.
+                    if err.downcast_ref::<StageExecutionError>()
+                        == Some(&StageExecutionError::SchedulerStopped)
+                    {
+                        set_cancelled(db, deps, &job.id)?;
+                        terminal = true;
+                        return Ok(());
+                    }
                     let error = format!("{err:#}");
                     {
                         let _guard = deps.job_locks.blocking_lock(&job.id);
@@ -2929,6 +3099,8 @@ pub struct ProductionStageExecutor {
     config: Arc<tokio::sync::RwLock<mold_core::Config>>,
     scheduled_work: crate::scheduler::ScheduledWorkHandle,
     dispatch_mode: crate::dispatch_mode::DispatchMode,
+    #[cfg(test)]
+    before_scheduled_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl ProductionStageExecutor {
@@ -2943,6 +3115,8 @@ impl ProductionStageExecutor {
             config,
             scheduled_work,
             dispatch_mode,
+            #[cfg(test)]
+            before_scheduled_submit: Mutex::new(None),
         }
     }
 
@@ -3206,7 +3380,7 @@ impl StageExecutor for ProductionStageExecutor {
                 carry: carry.cloned(),
                 motion_tail_frames,
                 progress,
-                cancelled,
+                cancelled: cancelled.clone(),
                 cancellation,
                 on_leased,
                 execution_plan: None,
@@ -3219,14 +3393,40 @@ impl StageExecutor for ProductionStageExecutor {
         .with_preferred_ordinal(preferred_ordinal);
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|_| anyhow!("V2 chain stage submission requires a Tokio runtime"))?;
-        handle
-            .block_on(self.scheduled_work.submit(work))
-            .map_err(anyhow::Error::msg)?;
-        result_rx
-            .blocking_recv()
-            .map_err(|_| anyhow!("scheduled chain stage owner dropped its result"))?
-            .map_err(anyhow::Error::msg)
+        #[cfg(test)]
+        if let Some(before_submit) = self
+            .before_scheduled_submit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            before_submit();
+        }
+        if let Err(error) = handle.block_on(self.scheduled_work.submit(work)) {
+            let fatal_cuda = self
+                .gpu_pool
+                .workers
+                .iter()
+                .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst));
+            if cancelled() && !fatal_cuda {
+                return Err(anyhow::Error::new(StageExecutionError::SchedulerStopped));
+            }
+            return Err(anyhow!(error));
+        }
+        receive_scheduled_stage_result(result_rx)
     }
+}
+
+fn receive_scheduled_stage_result(
+    result_rx: tokio::sync::oneshot::Receiver<Result<StageExecution, StageExecutionError>>,
+) -> anyhow::Result<StageExecution> {
+    result_rx
+        .blocking_recv()
+        // A vanished sender means scheduler authority was released without a
+        // stage verdict. Treat that as the same resumable interruption as the
+        // deferred coordinator completion's Drop path.
+        .map_err(|_| anyhow::Error::new(StageExecutionError::SchedulerStopped))?
+        .map_err(anyhow::Error::new)
 }
 
 pub struct ProductionQueueProbe {
@@ -4440,6 +4640,29 @@ mod tests {
         cancel_on_progress: AtomicBool,
     }
 
+    struct FailingExecutor;
+
+    impl StageExecutor for FailingExecutor {
+        fn freeze_model(
+            &self,
+            model: &str,
+        ) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+            Ok(test_frozen_model(model))
+        }
+
+        fn render_stage(
+            &self,
+            _model: &str,
+            _stage_req: &GenerateRequest,
+            _carry: Option<&ChainTail>,
+            _motion_tail_frames: u32,
+            _progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
+        ) -> anyhow::Result<StageRenderOutcome> {
+            Err(anyhow::Error::new(StageExecutionError::SchedulerStopped))
+        }
+    }
+
     impl StageExecutor for FakeExecutor {
         fn freeze_model(
             &self,
@@ -5520,6 +5743,157 @@ mod tests {
             Some("server shutdown interrupted chain job")
         );
         assert!(job_dir.exists());
+    }
+
+    #[test]
+    fn shutdown_error_from_dropped_scheduler_authority_parks_ephemeral_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55DRAINERROR",
+            &req,
+            ChainJobState::Queued,
+        );
+        let mut manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        manifest.ephemeral = true;
+        manifest.write_atomic(&job_dir).unwrap();
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            Arc::new(FailingExecutor),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.cancel.request_all();
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let parked = chain_jobs::get_job(db, &row.id).unwrap().unwrap();
+        assert_eq!(parked.state, ChainJobState::Paused);
+        assert_eq!(
+            parked.error.as_deref(),
+            Some("server shutdown interrupted chain job")
+        );
+        startup_reconcile(db, dir.path().join("jobs").as_path()).unwrap();
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Paused,
+            "startup reconciliation must preserve the resumable parent"
+        );
+        assert_eq!(
+            startup_gc_sweep(db, dir.path().join("jobs").as_path())
+                .unwrap()
+                .swept_ephemeral_jobs,
+            0,
+            "a shutdown-interrupted one-shot is resumable work, not GC debris"
+        );
+        assert!(job_dir.exists());
+    }
+
+    #[test]
+    fn dropped_scheduled_stage_sender_is_a_typed_shutdown_interruption() {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        drop(result_tx);
+
+        let error = match receive_scheduled_stage_result(result_rx) {
+            Ok(_) => panic!("a dropped sender must interrupt the stage"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.downcast_ref::<StageExecutionError>(),
+            Some(&StageExecutionError::SchedulerStopped)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_between_chain_cancel_check_and_scheduler_submit_is_typed() {
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![].into(),
+        });
+        let (scheduled_tx, scheduled_rx) = tokio::sync::mpsc::channel(1);
+        drop(scheduled_rx);
+        let executor = Arc::new(ProductionStageExecutor::new(
+            pool,
+            Arc::new(tokio::sync::RwLock::new(mold_core::Config::default())),
+            crate::scheduler::ScheduledWorkHandle::new(scheduled_tx),
+            crate::dispatch_mode::DispatchMode::V2,
+        ));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_at_submit = cancelled.clone();
+        *executor.before_scheduled_submit.lock().unwrap() = Some(Box::new(move || {
+            cancel_at_submit.store(true, Ordering::SeqCst);
+        }));
+        let req = request(vec![TransitionMode::Smooth]);
+        let stage_req = build_stage_generate_request(&req.stages[0], &req, 42, 0);
+        let cancelled_probe = cancelled.clone();
+
+        let error = tokio::task::spawn_blocking(move || {
+            executor.render_stage_with_context(
+                "shutdown-submit-race",
+                0,
+                &req.model,
+                &stage_req,
+                None,
+                req.motion_tail_frames,
+                None,
+                None,
+                Some("chain:shutdown-submit-race:stage:0"),
+                None,
+                mold_inference::InferenceCancellationToken::default(),
+                Arc::new(|_, _| ControlFlow::Continue(())),
+                Arc::new(move || cancelled_probe.load(Ordering::SeqCst)),
+            )
+        })
+        .await
+        .unwrap()
+        .err()
+        .expect("closed shutdown ingress must interrupt the stage");
+
+        assert_eq!(
+            error.downcast_ref::<StageExecutionError>(),
+            Some(&StageExecutionError::SchedulerStopped)
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_drain_deadline_settles_running_chain_before_returning() {
+        for fatal_cuda in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = db();
+            let req = request(vec![TransitionMode::Smooth]);
+            let job_id = if fatal_cuda {
+                "01JBR55FATALDEADLINE"
+            } else {
+                "01JBR55SHUTDOWNDEADLINE"
+            };
+            let job_dir = dir.path().join("job");
+            persist_job(&db, &job_dir, job_id, &req, ChainJobState::Running);
+            mark_stage_running(&db, &job_dir, job_id, 0, 42).unwrap();
+            let handle = ChainJobRunnerHandle::inert_for_tests();
+
+            handle
+                .settle_scheduler_drain_deadline(&db, [job_id.to_string()], fatal_cuda)
+                .await;
+
+            let row = chain_jobs::get_job(&db, job_id).unwrap().unwrap();
+            let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+            if fatal_cuda {
+                assert_eq!(row.state, ChainJobState::Failed);
+                assert_eq!(manifest.stage_status[0].state, StageState::Failed);
+            } else {
+                assert_eq!(row.state, ChainJobState::Paused);
+                assert_eq!(manifest.stage_status[0].state, StageState::Pending);
+                assert_eq!(
+                    row.error.as_deref(),
+                    Some("server shutdown interrupted chain job")
+                );
+            }
+        }
     }
 
     #[test]

@@ -1675,6 +1675,9 @@ struct Coordinator {
     plan_invalidations: BTreeMap<String, u8>,
     dispatch_retry_round: u8,
     dispatch_retry_not_before_ms: Option<u64>,
+    /// Once set, the coordinator is a settlement drain: it may answer an
+    /// already-issued lease, but it must never create another one.
+    drain_cause: Option<CoordinatorDrainCause>,
     /// Grace before an idle, unschedulable generation is settled. A field so a
     /// test can collapse it — the monotonic clock is near zero early in a
     /// process, so "pretend the observation is old" cannot be expressed by
@@ -1694,6 +1697,21 @@ struct Coordinator {
 enum PlanningPass {
     Admission,
     Optimize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CoordinatorDrainCause {
+    Shutdown,
+    FatalCuda,
+}
+
+impl CoordinatorDrainCause {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Shutdown => "generation scheduler is shutting down",
+            Self::FatalCuda => "CUDA context is fatally poisoned; server restart required",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1784,6 +1802,7 @@ impl Coordinator {
             plan_invalidations: BTreeMap::new(),
             dispatch_retry_round: 0,
             dispatch_retry_not_before_ms: None,
+            drain_cause: None,
             unschedulable_idle_grace_ms: UNSCHEDULABLE_IDLE_GRACE_MS,
             estimates,
             cpu_utility_tx: None,
@@ -2335,6 +2354,14 @@ impl Coordinator {
                 owner_epoch,
                 worker_generation,
             } => {
+                if self.drain_cause.is_some() {
+                    tracing::debug!(
+                        device_id,
+                        ordinal,
+                        "ignoring GPU readiness during shutdown drain"
+                    );
+                    return;
+                }
                 let is_cpu_utility = device_id == CPU_UTILITY_DEVICE_ID;
                 let was_starting =
                     !is_cpu_utility && self.state.gpu_pool.workers.is_starting(&device_id);
@@ -2523,7 +2550,11 @@ impl Coordinator {
                 self.replan_and_publish_with(PlanningPass::Admission);
             }
             WorkerEvent::FollowupReady { work } => {
-                self.enqueue_owner_work(*work, immediate);
+                if let Some(cause) = self.drain_cause {
+                    self.settle_owner_work_for_drain(work.work, cause);
+                } else {
+                    self.enqueue_owner_work(*work, immediate);
+                }
             }
             WorkerEvent::Rejected {
                 device_id,
@@ -2631,6 +2662,13 @@ impl Coordinator {
                     );
                 }
                 let LeaseGrant { work, retry, .. } = *grant;
+                if let Some(cause) = self.drain_cause {
+                    self.plan_invalidations.remove(&work_id);
+                    self.settle_owner_work_for_drain(work, cause);
+                    self.mutate(immediate);
+                    self.replan_and_publish_with(PlanningPass::Admission);
+                    return;
+                }
                 match work {
                     OwnerWork::Generation(job) => {
                         let (generation_job, prepared_inputs) =
@@ -2888,6 +2926,8 @@ impl Coordinator {
                             "GPU owner completion did not match an authoritative scheduler lease"
                                 .to_string(),
                         );
+                    } else if self.drain_cause == Some(CoordinatorDrainCause::Shutdown) {
+                        completion.finish();
                     } else if let Err(error) = publication.as_ref() {
                         completion.fail(format!(
                             "internal scheduler error: could not publish the authoritative \
@@ -2948,7 +2988,7 @@ impl Coordinator {
                     .gpu_pool
                     .workers
                     .wait_and_reap(&device_id, owner_epoch);
-                if removed {
+                if removed && self.drain_cause.is_none() {
                     if self.state.device_registry.desired_enabled(&device_id) {
                         if let Ok(new_epoch) = self.state.gpu_pool.workers.start(&device_id) {
                             self.state
@@ -6767,6 +6807,36 @@ impl Coordinator {
         self.retain_all_unstarted("CUDA context is fatally poisoned; server restart required");
     }
 
+    fn settle_owner_work_for_drain(&self, work: OwnerWork, cause: CoordinatorDrainCause) {
+        match work {
+            OwnerWork::Generation(job) => {
+                let (job, _) = generation_and_prepared_from_gpu_job(*job);
+                retain_generation(&self.state, job, cause.message().to_string());
+            }
+            work @ OwnerWork::ChainStage(_) if cause == CoordinatorDrainCause::Shutdown => {
+                // Shutdown is an interruption, not a failed render. The typed
+                // cancellation lets the chain actor reset the partial stage
+                // and park the durable parent for explicit resume.
+                work.cancel_queued();
+            }
+            work => {
+                reject_owner_work_preserving_completed_generation(work, cause.message().to_string())
+            }
+        }
+    }
+
+    fn settle_all_unstarted_for_drain(&mut self, cause: CoordinatorDrainCause) {
+        let pending = std::mem::take(&mut self.pending);
+        self.plan_invalidations.clear();
+        for (_, pending) in pending {
+            retain_generation(&self.state, pending.job, cause.message().to_string());
+        }
+        let pending_owner_work = std::mem::take(&mut self.pending_owner_work);
+        for (_, pending) in pending_owner_work {
+            self.settle_owner_work_for_drain(pending.work, cause);
+        }
+    }
+
     fn retain_all_unstarted(&mut self, message: &str) {
         let pending = std::mem::take(&mut self.pending);
         self.plan_invalidations.clear();
@@ -6813,6 +6883,8 @@ pub async fn run_scheduler_coordinator(
     let mut generation_ingress_open = true;
     let mut owner_ingress_open = true;
     let mut resource_stream_open = true;
+    let mut worker_stream_open = true;
+    let mut drain_deadline: Option<tokio::time::Instant> = None;
     // The job id rides beside the task so a reclaim whose job was cancelled
     // or dispatched is aborted rather than left flushing the cache.
     let mut host_reclaim: Option<(
@@ -6835,9 +6907,17 @@ pub async fn run_scheduler_coordinator(
                     }
                 }
             }
-            _ = shutdown.cancelled() => {
+            _ = shutdown.cancelled(), if coordinator.drain_cause.is_none() => {
+                let cause = if fatal_cuda_latched(&coordinator) {
+                    fatal = true;
+                    CoordinatorDrainCause::FatalCuda
+                } else {
+                    CoordinatorDrainCause::Shutdown
+                };
+                coordinator.drain_cause = Some(cause);
                 job_rx.close();
                 owner_work_rx.close();
+                preview_rx.close();
                 while let Ok(job) = job_rx.try_recv() {
                     retain_generation(
                         &coordinator.state,
@@ -6846,25 +6926,56 @@ pub async fn run_scheduler_coordinator(
                     );
                 }
                 while let Ok(work) = owner_work_rx.try_recv() {
-                    work.work
-                        .reject("generation scheduler is shutting down".to_string());
+                    coordinator.settle_owner_work_for_drain(
+                        work.work,
+                        cause,
+                    );
                 }
-                coordinator.retain_all_unstarted("generation scheduler is shutting down");
+                coordinator.settle_all_unstarted_for_drain(cause);
+                if let Some((_, task)) = host_reclaim.take() {
+                    task.abort();
+                }
+                coordinator.stop_preparations().await;
+                for worker in &coordinator.state.gpu_pool.workers {
+                    worker.request_shutdown();
+                }
+                let _ = cpu_utility_tx.try_send(crate::gpu_pool::GpuWorkerCommand::Shutdown);
+                drain_deadline = Some(tokio::time::Instant::now() + scheduler_drain_budget());
+                tracing::info!(
+                    active_leases = coordinator.leases.len(),
+                    ?cause,
+                    "multi-GPU scheduler entered shutdown drain"
+                );
+            }
+            _ = async {
+                tokio::time::sleep_until(drain_deadline.expect("guarded drain deadline")).await;
+            }, if drain_deadline.is_some() => {
+                let cause = effective_drain_cause(&coordinator);
+                fatal |= cause == CoordinatorDrainCause::FatalCuda;
+                tracing::warn!(
+                    active_leases = coordinator.leases.len(),
+                    "scheduler shutdown drain deadline elapsed; releasing remaining lease authority"
+                );
+                let settlement = chain_deadline_settlement_parts(&coordinator);
+                settle_chain_leases_at_deadline(
+                    settlement,
+                    cause,
+                ).await;
                 break;
             }
-            job = job_rx.recv(), if generation_ingress_open => {
+            job = job_rx.recv(), if generation_ingress_open && coordinator.drain_cause.is_none() => {
                 match job {
                     Some(job) => coordinator.enqueue(job, &mut immediate),
                     None => generation_ingress_open = false,
                 }
             }
-            work = owner_work_rx.recv(), if owner_ingress_open => {
+            work = owner_work_rx.recv(), if owner_ingress_open && coordinator.drain_cause.is_none() => {
                 match work {
                     Some(work) => coordinator.enqueue_owner_work(work, &mut immediate),
                     None => owner_ingress_open = false,
                 }
             }
-            preview = preview_rx.recv() => {
+            preview = preview_rx.recv(), if coordinator.drain_cause.is_none() => {
                 if let Some(preview) = preview {
                     match preview {
                         PlacementPreviewQuery::Generation {
@@ -6914,20 +7025,40 @@ pub async fn run_scheduler_coordinator(
                     }
                 }
             }
-            event = worker_rx.recv() => {
-                if let Some(event) = event {
-                    coordinator.handle_worker_event_serialized(event, &mut immediate).await;
+            event = worker_rx.recv(), if worker_stream_open => {
+                match event {
+                    Some(event) => coordinator.handle_worker_event_serialized(event, &mut immediate).await,
+                    None => {
+                        worker_stream_open = false;
+                        if !coordinator.leases.is_empty() {
+                            if let Some(cause) = coordinator.drain_cause {
+                                let cause = if fatal_cuda_latched(&coordinator) {
+                                    fatal = true;
+                                    CoordinatorDrainCause::FatalCuda
+                                } else {
+                                    cause
+                                };
+                                tracing::warn!(
+                                    active_leases = coordinator.leases.len(),
+                                    "scheduler worker event stream closed during drain"
+                                );
+                                let settlement = chain_deadline_settlement_parts(&coordinator);
+                                settle_chain_leases_at_deadline(settlement, cause).await;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
-            event = coordinator.preparation_rx.recv() => {
+            event = coordinator.preparation_rx.recv(), if coordinator.drain_cause.is_none() => {
                 if let Some(event) = event {
                     coordinator.handle_preparation_event(event, &mut immediate);
                 }
             }
-            _ = registry_notify.notified() => {
+            _ = registry_notify.notified(), if coordinator.drain_cause.is_none() => {
                 coordinator.reconcile_external_mutations(&mut immediate);
             }
-            resource = resource_rx.recv(), if resource_stream_open => {
+            resource = resource_rx.recv(), if resource_stream_open && coordinator.drain_cause.is_none() => {
                 match resource {
                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         coordinator.reconcile_resource_capacity(&mut immediate);
@@ -6937,14 +7068,32 @@ pub async fn run_scheduler_coordinator(
                     }
                 }
             }
-            _ = ticker.tick() => {
+            _ = ticker.tick(), if coordinator.drain_cause.is_none() => {
                 coordinator.reconcile_external_mutations(&mut immediate);
             }
-            _ = memory_ticker.tick() => {
+            _ = memory_ticker.tick(), if coordinator.drain_cause.is_none() => {
                 coordinator.collect_host_memory();
                 coordinator.sample_active_lease_high_waters();
                 coordinator.mutate(&mut immediate);
             }
+        }
+        if coordinator.drain_cause == Some(CoordinatorDrainCause::Shutdown)
+            && fatal_cuda_latched(&coordinator)
+        {
+            fatal = true;
+            coordinator.drain_cause = Some(CoordinatorDrainCause::FatalCuda);
+            coordinator.reject_all_unstarted_for_fatal_cuda();
+            coordinator.publish_device_state_if_changed();
+            tracing::error!("scheduler shutdown drain promoted to fatal CUDA drain");
+        }
+        if let Some(cause) = coordinator.drain_cause {
+            // A rejected not-yet-accepted grant can return to a pending set
+            // while draining. Settle it immediately and never run planning.
+            coordinator.settle_all_unstarted_for_drain(cause);
+            if coordinator.leases.is_empty() {
+                break;
+            }
+            continue;
         }
         if !generation_ingress_open
             && !owner_ingress_open
@@ -7033,7 +7182,23 @@ pub async fn run_scheduler_coordinator(
             // a reconnect or shutdown.
             coordinator.publish_device_state_if_changed();
             fatal = true;
-            break;
+            coordinator.drain_cause = Some(CoordinatorDrainCause::FatalCuda);
+            preview_rx.close();
+            if let Some((_, task)) = host_reclaim.take() {
+                task.abort();
+            }
+            coordinator.stop_preparations().await;
+            for worker in &coordinator.state.gpu_pool.workers {
+                worker.request_shutdown();
+            }
+            let _ = cpu_utility_tx.try_send(crate::gpu_pool::GpuWorkerCommand::Shutdown);
+            drain_deadline = Some(tokio::time::Instant::now() + scheduler_drain_budget());
+        }
+        if coordinator.drain_cause.is_some() {
+            if coordinator.leases.is_empty() {
+                break;
+            }
+            continue;
         }
         if immediate {
             let _ = coordinator
@@ -7049,9 +7214,17 @@ pub async fn run_scheduler_coordinator(
         }
     }
     coordinator.stop_preparations().await;
-    let _ = cpu_utility_tx.send(crate::gpu_pool::GpuWorkerCommand::Shutdown);
-    if cpu_utility_handle.join().is_err() {
-        tracing::error!("CPU utility owner panicked during shutdown");
+    let _ = cpu_utility_tx.try_send(crate::gpu_pool::GpuWorkerCommand::Shutdown);
+    match tokio::time::timeout(
+        Duration::from_secs(4),
+        tokio::task::spawn_blocking(move || cpu_utility_handle.join()),
+    )
+    .await
+    {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(_))) => tracing::error!("CPU utility owner panicked during shutdown"),
+        Ok(Err(error)) => tracing::error!(%error, "CPU utility owner join task failed"),
+        Err(_) => tracing::warn!("CPU utility owner exceeded the bounded shutdown join"),
     }
     for worker in &coordinator.state.gpu_pool.workers {
         worker.request_shutdown();
@@ -7060,6 +7233,71 @@ pub async fn run_scheduler_coordinator(
         coordinator.reject_all_unstarted_for_fatal_cuda();
     }
     tracing::info!("multi-GPU scheduler coordinator stopped");
+}
+
+fn scheduler_drain_budget() -> Duration {
+    // Leave a small margin for the owner joins and process-level fallback.
+    Duration::from_secs(
+        crate::resolve_shutdown_abort_secs()
+            .saturating_sub(5)
+            .max(1),
+    )
+}
+
+fn fatal_cuda_latched(coordinator: &Coordinator) -> bool {
+    coordinator
+        .state
+        .gpu_pool
+        .workers
+        .iter()
+        .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+}
+
+fn effective_drain_cause(coordinator: &Coordinator) -> CoordinatorDrainCause {
+    if fatal_cuda_latched(coordinator) {
+        CoordinatorDrainCause::FatalCuda
+    } else {
+        coordinator
+            .drain_cause
+            .unwrap_or(CoordinatorDrainCause::Shutdown)
+    }
+}
+
+type ChainDeadlineSettlement = (
+    Arc<crate::chain_job_runner::ChainJobRunnerHandle>,
+    Arc<Option<mold_db::MetadataDb>>,
+    BTreeSet<String>,
+);
+
+fn chain_deadline_settlement_parts(coordinator: &Coordinator) -> Option<ChainDeadlineSettlement> {
+    let chain_jobs = coordinator.state.chain_jobs.clone()?;
+    if coordinator.state.metadata_db.as_ref().is_none() {
+        return None;
+    }
+    let db = coordinator.state.metadata_db.clone();
+    let job_ids = coordinator
+        .leases
+        .values()
+        .filter_map(|lease| {
+            chain_work_identity(&lease.work_id).map(|(job_id, _)| job_id.to_string())
+        })
+        .collect::<BTreeSet<_>>();
+    Some((chain_jobs, db, job_ids))
+}
+
+async fn settle_chain_leases_at_deadline(
+    settlement: Option<ChainDeadlineSettlement>,
+    cause: CoordinatorDrainCause,
+) {
+    let Some((chain_jobs, db, job_ids)) = settlement else {
+        return;
+    };
+    let Some(db) = db.as_ref().as_ref() else {
+        return;
+    };
+    chain_jobs
+        .settle_scheduler_drain_deadline(db, job_ids, cause == CoordinatorDrainCause::FatalCuda)
+        .await;
 }
 
 fn gpu_job_from_generation(
@@ -13888,6 +14126,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_drain_cancels_unaccepted_chain_stage_with_typed_outcome() {
+        let (worker, worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let (generation, _) = fake_generation("shutdown-chain-template");
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let work_id = "chain:shutdown-parent:attempt:1:stage:0";
+        let work =
+            OwnerWork::ChainStage(Box::new(crate::chain_job_runner::ScheduledChainStageWork {
+                id: work_id.to_string(),
+                model: "ltx2".to_string(),
+                cache_key: "ltx2".to_string(),
+                config: mold_core::Config::default(),
+                stage_req: generation.request,
+                carry: None,
+                motion_tail_frames: 1,
+                progress: Arc::new(|_, _| std::ops::ControlFlow::Continue(())),
+                cancelled: Arc::new(|| true),
+                cancellation: mold_inference::InferenceCancellationToken::default(),
+                on_leased: None,
+                execution_plan: None,
+                expected_model_fingerprint: None,
+                result_tx: Some(result_tx),
+                before_second_fence: None,
+            }));
+        let fence = LeaseFence {
+            work_id: work_id.to_string(),
+            device_id: device_id.clone(),
+            owner_epoch: 1,
+            state_version: 1,
+            plan_version: 1,
+            worker_generation: 1,
+            memory_sample_generation: 1,
+            memory_ledger_sequence: 1,
+        };
+        coordinator.leases.insert(
+            device_id.clone(),
+            ActiveLease {
+                work_id: work_id.to_string(),
+                owner_epoch: 1,
+                plan_version: 1,
+                worker_generation: 1,
+                accepted: false,
+                previous_target: None,
+                estimated_finish_ms: 1,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                started_at: Instant::now(),
+                estimate_key: EstimateKey::default(),
+                vram_high_water_bytes: None,
+                host_incremental_high_water_bytes: None,
+                fallback_reason: None,
+                projection: WorkSnapshot::new(work_id, 0, Vec::new()),
+                assignment_reason: AssignmentReason::Priority,
+            },
+        );
+        worker.in_flight.store(1, Ordering::SeqCst);
+        coordinator.drain_cause = Some(CoordinatorDrainCause::Shutdown);
+
+        let mut immediate = false;
+        coordinator.handle_worker_event(
+            WorkerEvent::Rejected {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+                grant: Box::new(LeaseGrant {
+                    fence,
+                    work,
+                    retry: None,
+                }),
+                reason: LeaseRejection::StaleWorkerGeneration,
+            },
+            &mut immediate,
+        );
+
+        let execution = result_rx.await.unwrap().unwrap();
+        assert!(matches!(
+            execution.outcome,
+            crate::chain_job_runner::StageRenderOutcome::Cancelled
+        ));
+        assert!(coordinator.leases.is_empty());
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id,
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        assert!(coordinator.ready.is_empty());
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_observes_a_fatal_cuda_latch_before_draining() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+
+        // The worker latches fatal before supervision cancels the scheduler.
+        // This is the ordering that previously entered the resumable branch
+        // when shutdown won select! ahead of the Completed event.
+        worker.fatal_cuda_error.store(true, Ordering::SeqCst);
+
+        assert!(fatal_cuda_latched(&coordinator));
+    }
+
+    #[tokio::test]
     async fn chain_plan_invalidation_requeues_same_stage_id_with_backoff_and_open_result() {
         let root = tempfile::tempdir().unwrap();
         let transformer = root.path().join("transformer.safetensors");
@@ -14493,7 +14873,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chain_success_and_error_results_settle_only_after_authoritative_completion() {
+    async fn chain_success_and_error_results_settle_during_shutdown_drain() {
         for successful in [true, false] {
             let (worker, _worker_rx) = test_worker(0);
             let device_id = worker_device_id(&worker);
@@ -14512,6 +14892,7 @@ mod tests {
                 Arc::new(ImmediatePreparer),
                 ample_memory(),
             );
+            coordinator.drain_cause = Some(CoordinatorDrainCause::Shutdown);
             let stage_id = format!("chain:result:{successful}:attempt:1:stage:0");
             coordinator.leases.insert(
                 device_id.clone(),
@@ -14565,7 +14946,9 @@ mod tests {
                     device_ordinal: Some(0),
                 })
             } else {
-                Err("typed stage render failure".to_string())
+                Err(crate::chain_job_runner::StageExecutionError::Failed(
+                    "typed stage render failure".to_string(),
+                ))
             };
             let completion = crate::gpu_worker::DeferredOwnerCompletion::ChainStage {
                 tx: Some(result_tx),
@@ -14602,7 +14985,7 @@ mod tests {
             } else {
                 match settled {
                     Ok(_) => panic!("failed stage must retain its typed error"),
-                    Err(error) => assert_eq!(error, "typed stage render failure"),
+                    Err(error) => assert_eq!(error.to_string(), "typed stage render failure"),
                 }
             }
             assert!(!coordinator.leases.contains_key(&device_id));
