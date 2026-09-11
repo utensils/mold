@@ -127,6 +127,7 @@ import {
   pickMostCapableHost,
   unionModelsByName,
 } from "@studio/lib/hostRouting";
+import { modelAvailabilityTag as sharedModelAvailabilityTag } from "@studio/lib/modelAvailability";
 import { profileConflictMessage, profileHashConflict } from "@studio/lib/profileFleet";
 import {
   MOBILE_AUTO_ROUTING_HINT,
@@ -135,7 +136,6 @@ import {
   loadMobileGenerateTarget,
   mobileGenerateTargetLabel,
   mobileAutoRoutingAvailable,
-  mobileModelAvailabilityTag,
   mobileRoutingHosts,
   resolveMobileGenerateTarget,
   saveMobileGenerateTarget,
@@ -1893,7 +1893,10 @@ function modelHostIds(name: string): string[] {
 }
 function modelAvailabilityTag(name: string): string | null {
   if (!automaticRouting.value) return null;
-  return mobileModelAvailabilityTag(modelHostIds(name), connectedHosts.value);
+  return sharedModelAvailabilityTag(
+    modelHostIds(name),
+    routingHosts.value.map((host) => ({ id: host.id, label: host.name })),
+  );
 }
 const lastUsedStyles = useLastUsedStylesStore();
 const selectedOutputKind = computed(() => outputKindFor(form.family));

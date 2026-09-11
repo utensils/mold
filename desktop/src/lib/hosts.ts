@@ -192,25 +192,6 @@ export function normalizeTargetHost(
 }
 
 /**
- * The model picker's availability tag. Quiet when availability is unknown or
- * the model is on the primary host (the default place a job lands); the
- * host's label when exactly one connected non-primary host has it; a count
- * otherwise.
- */
-export function modelAvailabilityTag(
-  hostIds: readonly string[],
-  hosts: ReadonlyArray<{ id: string; label: string; primary: boolean }>,
-): string | null {
-  if (hostIds.length === 0) return null;
-  const primary = hosts.find((h) => h.primary);
-  if (primary && hostIds.includes(primary.id)) return null;
-  const known = hosts.filter((h) => hostIds.includes(h.id));
-  if (known.length === 0) return null;
-  if (known.length === 1) return known[0]!.label;
-  return `${known.length} hosts`;
-}
-
-/**
  * Which host the status bar should mirror: the host of the most recently
  * submitted still-live job with a routed host id when Create is using Auto or
  * Most capable, else the primary. A concrete sticky selection is resolved by
