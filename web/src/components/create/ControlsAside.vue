@@ -430,7 +430,7 @@ function lockLastSeed() {
         :max="activeRecipe?.steps.max ?? 100"
         :step="activeRecipe?.steps.step ?? 1"
         :disabled="activeRecipe?.steps.mode === 'fixed'"
-        :value-label="`${modelValue.steps} steps`"
+        :value-label="`${modelValue.steps} passes`"
         @update:model-value="patch({ steps: $event })"
       />
       <p v-if="stepsNote" class="controls__hint" data-test="fixed-steps-hint">
@@ -663,7 +663,7 @@ function lockLastSeed() {
 
     <div class="controls__group">
       <div class="controls__batch">
-        <span class="controls__label controls__label--inline">Batch</span>
+        <span class="controls__label controls__label--inline">Make</span>
         <Stepper
           :model-value="batchLocked ? 1 : modelValue.batchSize"
           :min="1"

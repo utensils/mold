@@ -86,6 +86,10 @@ describe("lexicon — New image controls", () => {
     expect(controlsAside).toContain(`label="${CONTROL_WORDS.isoThreshold}"`);
     expect(controlsAside).toContain(CONTROL_WORDS.resetToStyleDefaults);
     expect(controlsAside).toContain('aria-label="Seed number"');
+    expect(controlsAside).toContain("passes`");
+    expect(controlsAside).not.toContain("steps`");
+    expect(controlsAside).toContain(">Make<");
+    expect(controlsAside).not.toContain(">Batch<");
     expect(hostRoutingPicker).toContain(
       `aria-label="${CONTROL_WORDS.whereItRuns}"`,
     );
