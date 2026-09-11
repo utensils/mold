@@ -12,7 +12,8 @@
     "fmt:check": "prettier --check . ../studio",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "ratchet:web": "bun ../scripts/web-token-ratchet.ts"
   },
   "dependencies": {
     "@mold/studio": "workspace:*",
