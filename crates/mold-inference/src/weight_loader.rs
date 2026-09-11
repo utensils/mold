@@ -37,22 +37,6 @@ pub(crate) fn load_gguf_var_builder(
     .map_err(Into::into)
 }
 
-/// [`load_gguf_var_builder`] for the consumers that take
-/// `candle-transformers`' own quantized `VarBuilder`.
-pub(crate) fn load_transformers_gguf_var_builder(
-    path: &Path,
-    device: &Device,
-    component: &str,
-    progress: &ProgressReporter,
-) -> Result<candle_transformers::quantized_var_builder::VarBuilder> {
-    mold_candle::gguf_mmap::transformers_var_builder_from_gguf_mmap(
-        path,
-        device,
-        &mut |done, total| progress.weight_load(component, done, total),
-    )
-    .map_err(Into::into)
-}
-
 /// VarBuilder backend for FP8 safetensors that preserves native dtypes.
 ///
 /// Loads tensors at their on-disk dtype: F8E4M3 weights stay F8E4M3 on GPU,

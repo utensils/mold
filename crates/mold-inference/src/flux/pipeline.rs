@@ -2170,11 +2170,11 @@ impl FluxEngine {
                     &self.base.progress,
                 )?;
                 let vb = crate::weight_loader::load_gguf_var_builder(
-                &transformer_path,
-                &device,
-                "FLUX transformer (GGUF)",
-                &self.base.progress,
-            )?;
+                    &transformer_path,
+                    &device,
+                    "FLUX transformer (GGUF)",
+                    &self.base.progress,
+                )?;
                 build_gguf_transformer(
                     &flux_cfg,
                     vb,
