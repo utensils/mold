@@ -117,7 +117,12 @@ const expandPromptMock = vi.hoisted(() =>
     ),
   })),
 );
-const streamJobsRef = vi.hoisted(() => ({ value: [] as Job[] }));
+// A real ref, so a test can settle or replace a job after mount and watch
+// the canvas follow, the way the live stream does.
+const streamJobsRef = await vi.hoisted(async () => {
+  const { shallowRef } = await import("vue");
+  return shallowRef([] as Job[]);
+});
 const streamCanvasErrorJobIdRef = vi.hoisted(() => ({
   value: null as string | null,
 }));
@@ -832,6 +837,84 @@ describe("CreatePage layout and behavior", () => {
     );
     expect(caption).toContain("Juggernaut XL - Ragnarok");
     expect(caption).not.toContain("cv:1759168");
+  });
+
+  it("keeps the finished print on the canvas after its completion card leaves the stream", async () => {
+    // The stream auto-removes a done job 1.5 s after it settles (that is the
+    // activity strip's rule). Measured on hal9000: the print showed for a
+    // few seconds and the canvas fell back to "Your print develops here",
+    // so Download, Copy link and Make 4 variations were never reachable.
+    // The page pins the last finished job until a newer one runs.
+    const done = {
+      id: "done-2",
+      request: {
+        model: "sdxl:fp16",
+        prompt: "a camera",
+        width: 1024,
+        height: 1024,
+        steps: 25,
+        guidance: 7,
+        batch_size: 1,
+        output_format: "png",
+      },
+      startedAt: 1,
+      controller: new AbortController(),
+      progress: {
+        stage: "complete",
+        step: 25,
+        totalSteps: 25,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: 11_800,
+      },
+      result: {
+        type: "complete",
+        image: "image-bytes",
+        format: "png",
+        seed_used: 42,
+        model: "sdxl:fp16",
+        width: 1024,
+        height: 1024,
+        generation_time_ms: 11_800,
+      },
+      error: null,
+      state: "done",
+      settledAt: Date.now(),
+      chain: null,
+      lastProgressAt: Date.now(),
+      workStarted: true,
+      hostId: null,
+      hostLabel: null,
+      target: null,
+      serverId: "server-2",
+      previewUrl: null,
+      seedVisual: "42",
+    } as Job;
+    hostModelsMock.mockResolvedValue([modelWithRecipe("sdxl:fp16", "sdxl")]);
+    streamJobsRef.value = [done];
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+    expect(canvas.props("mode")).toBe("result");
+
+    streamJobsRef.value = [];
+    await flushPromises();
+    expect(canvas.props("mode")).toBe("result");
+    expect(canvas.props("resultSrc")).toContain("image-bytes");
+
+    // A newer job taking the canvas replaces it.
+    streamJobsRef.value = [
+      {
+        ...done,
+        id: "run-3",
+        startedAt: 2,
+        state: "running",
+        result: null,
+        progress: { ...done.progress, stage: "denoise", step: 3 },
+      } as Job,
+    ];
+    await flushPromises();
+    expect(canvas.props("mode")).toBe("generating");
   });
 
   it("renders a settled failure only while it has live canvas authority", async () => {

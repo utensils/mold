@@ -5,6 +5,7 @@ import {
   onBeforeUnmount,
   onMounted,
   ref,
+  shallowRef,
   watch,
 } from "vue";
 import { useRouter } from "vue-router";
@@ -2111,7 +2112,7 @@ const runningJob = computed(() => {
     ? selected
     : activeCanvasJob(stream.jobs.value);
 });
-const latestDone = computed(() => {
+const liveDone = computed(() => {
   const selected = stream.selectedJob.value;
   if (selected) return selected.state === "done" ? selected : null;
   let best: Job | null = null;
@@ -2125,6 +2126,24 @@ const latestDone = computed(() => {
     }
   }
   return best;
+});
+/** The stream forgets a done job 1.5 s after it settles — that is the
+ * activity strip's rule, not the canvas's. The canvas keeps the last
+ * finished print, with its Download / Copy link / Make 4 variations bar,
+ * until a newer job runs or a newer print finishes. */
+const pinnedDone = shallowRef<Job | null>(null);
+watch(
+  liveDone,
+  (job) => {
+    if (job) pinnedDone.value = job;
+  },
+  { immediate: true },
+);
+const latestDone = computed(() => {
+  const live = liveDone.value;
+  if (live) return live;
+  if (stream.selectedJob.value) return null;
+  return pinnedDone.value;
 });
 
 const latestError = computed(() =>

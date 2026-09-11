@@ -65,10 +65,12 @@ describe("RecentGrid", () => {
         }) as CSSStyleDeclaration,
     );
     const entries = Array.from({ length: 50 }, (_, i) => entry(`p${i}.png`));
+    // Mounted empty, as on a fresh page: the entries arrive after the grid.
     const w = mount(RecentGrid, {
-      props: { entries, limit: 50, maxRows: 2 },
+      props: { entries: [], limit: 50, maxRows: 2 },
       global: { stubs },
     });
+    await w.setProps({ entries });
     await w.vm.$nextTick();
     expect(w.findAll("[data-test='recent-tile']")).toHaveLength(10);
     expect(w.get("[data-test='recent-view-all']").text()).toBe(

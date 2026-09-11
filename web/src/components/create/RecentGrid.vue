@@ -9,7 +9,7 @@
  * thumbnails, a single non-overlapping video badge — long enough to fill a
  * large Create workspace, with a "view all" link into the gallery for the rest.
  */
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 import MediaTile from "@ui/components/MediaTile.vue";
 import Icon from "@ui/components/Icon.vue";
@@ -55,14 +55,23 @@ function measureColumns(): void {
   const count = tracks ? tracks.trim().split(/\s+/).filter(Boolean).length : 0;
   if (count > 0) columns.value = count;
 }
+/* The grid is a v-else branch: on a fresh page the entries arrive after
+ * mount, so the element is watched rather than read once. */
 let observer: ResizeObserver | null = null;
-onMounted(() => {
-  measureColumns();
-  if (typeof ResizeObserver !== "undefined" && gridEl.value) {
-    observer = new ResizeObserver(measureColumns);
-    observer.observe(gridEl.value);
-  }
-});
+watch(
+  gridEl,
+  (el) => {
+    observer?.disconnect();
+    observer = null;
+    if (!el) return;
+    measureColumns();
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(measureColumns);
+      observer.observe(el);
+    }
+  },
+  { flush: "post" },
+);
 onBeforeUnmount(() => observer?.disconnect());
 
 const cap = computed(() => {
