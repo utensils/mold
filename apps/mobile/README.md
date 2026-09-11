@@ -905,11 +905,14 @@ is optional. Generate stays above the software keyboard.
 
 Queue combines this phone’s work with live work from connected machines.
 Being made, Waiting, and Needs attention use the existing lifecycle and wait
-contracts. A running print's row carries the live latent preview Make is
-painting at 64px, a 7px progress meter, and a mono line naming which one of a
-batch it is and the machine making it; a waiting print has no pixels yet and
-stands its place in line in a 44px glyph square instead; a held one takes the
-warning tone. A machine's OWN live work is drawn by the same card: it has a
+contracts. A running print's row carries, in this order: its title, what the
+host says it is doing as a sentence in plain sans (`activeWorkPhaseLabel` as
+returned, never shouted back as a code), a 7px progress meter, and a mono line
+naming which one of a batch it is and the machine making it. The live latent
+preview Make is painting leads the row at 64px when there is one; a waiting print has no pixels yet and
+stands its place in line in a 44px glyph square instead and keeps the mono
+uppercase code (`QUEUED`, `HELD`, `PAUSED`) in the trailing column, which is
+the one place that vocabulary still belongs; a held one takes the warning tone. A machine's OWN live work is drawn by the same card: it has a
 phase and a count but no latent preview, so the thumbnail is simply absent and
 everything else reads identically — the Queue exists to compare this phone's
 work with the fleet's, and a plain text row beside a card with a meter made the
