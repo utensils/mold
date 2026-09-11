@@ -1725,6 +1725,228 @@ pub fn wan_step_cache_bytes_for(
     retained.saturating_add(reduction)
 }
 
+// ── Still transformer residency ──────────────────────────────────────────────
+
+/// Query-chunk width the still families' math attention picks, identical to
+/// [`WAN_ATTENTION_QUERY_CHUNK`] because it is the SAME chunker
+/// (`attention::math_attention_chunk_size`). Named separately so the two
+/// budgets read their own constant rather than one family borrowing the
+/// other's.
+const FLUX_ATTENTION_QUERY_CHUNK: u64 = WAN_ATTENTION_QUERY_CHUNK;
+
+/// Text tokens the joint attention stream carries beside the image tokens.
+///
+/// Both families pad their conditioner unconditionally — FLUX.1's T5 to 512
+/// and FLUX.2's Mistral3 to `encoders::mistral3`'s `MAX_LENGTH` — and both
+/// concatenate the text stream onto the image stream inside the double
+/// blocks, so the score matrix spans the joint length rather than the canvas
+/// alone.
+const FLUX_TEXT_TOKENS: u64 = 512;
+
+/// Bytes the FLUX VAE decode allocates at its peak, per pixel per dtype byte.
+///
+/// Calibrated against the two anchors #276 recorded when the force-drop it
+/// added was written: a 1024² decode peaks at roughly 2–3 GB and a 2048²
+/// decode at 10–12 GB (`flux/pipeline.rs`'s headroom comment). Both families
+/// decode through the same 8x convolutional decoder shape, and the peak is a
+/// single contiguous conv2d workspace, so it scales with output AREA rather
+/// than with the transformer.
+const FLUX_VAE_DECODE_BYTES_PER_PIXEL_PER_DTYPE_BYTE: f64 = 1_300.0;
+
+/// Floor on the VAE decode peak, so a thumbnail-sized render still reserves a
+/// kernel workspace. Mirrors [`activation_bytes`]'s own floor.
+const FLUX_VAE_DECODE_FLOOR_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Slack a resident still transformer must leave beside the tensors the
+/// budget names: cuBLAS/cuDNN scratch, allocator fragmentation, the preview
+/// encoder, and the driver's own context growth.
+///
+/// One GB rather than `estimate_peak_memory`'s 2 GB: that constant covers a
+/// whole load whose component sizes are read from the filesystem, while every
+/// term here is a measured or derived runtime figure.
+pub const STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES: u64 = 1_000_000_000;
+
+/// Image tokens one FLUX-family forward attends over at this canvas.
+///
+/// Both families pack 2x2 patches of the 8x latent, so the grid is the canvas
+/// divided by 16 (BFL `sampling.py`'s `prepare`, and `flux2::sampling`'s
+/// `pack`).
+fn flux_token_count(width: u32, height: u32) -> u64 {
+    let grid_h = (u64::from(height) / 16).max(1);
+    let grid_w = (u64::from(width) / 16).max(1);
+    grid_h.saturating_mul(grid_w)
+}
+
+/// Activation bytes one FLUX-family forward holds, against an explicit
+/// attention backend.
+///
+/// [`activation_bytes`] is an area model fitted when every still ran math
+/// attention with no flash path at all, so it prices ONE render shape. The
+/// flux families now resolve their backend per build
+/// (`attention::AttentionPolicy::FastStill`), and the score matrix — the
+/// single largest per-token term — is materialized by math and not at all by
+/// flash. An estimate blind to that prices a render that is not the one
+/// running, which is the same trap [`wan_activation_budget_bytes_for`] exists
+/// to avoid: here it decides whether the transformer may stay resident, and a
+/// flash build priced as math drops a transformer it had room for on every
+/// single render.
+///
+/// The score term has the same shape as the wan one — score plus softmax,
+/// both `[heads, chunk, joint_tokens]` at the compute dtype — so it is a
+/// per-token cost with the chunk width, not the token count, on the query
+/// axis.
+pub fn flux_activation_budget_bytes_for(
+    width: u32,
+    height: u32,
+    batch: u32,
+    dtype_bytes: u32,
+    family: ActivationFamily,
+    heads: u64,
+    backend: crate::attention::AttentionBackend,
+) -> u64 {
+    let base = activation_bytes(width, height, batch, dtype_bytes, family);
+    let scores = match backend {
+        crate::attention::AttentionBackend::Flash => 0,
+        crate::attention::AttentionBackend::Math => {
+            let joint = flux_token_count(width, height).saturating_add(FLUX_TEXT_TOKENS);
+            let per_token = 2u64
+                .saturating_mul(heads.max(1))
+                .saturating_mul(FLUX_ATTENTION_QUERY_CHUNK)
+                .saturating_mul(u64::from(dtype_bytes.max(1)));
+            joint
+                .saturating_mul(per_token)
+                .saturating_mul(u64::from(batch.max(1)))
+        }
+    };
+    base.saturating_add(scores)
+}
+
+/// The attention backend a FLUX.1 / FLUX.2 render on this process will
+/// actually execute.
+///
+/// Mirrors [`wan_effective_attention_backend`] exactly, including the reason
+/// it asks for the EFFECTIVE answer: a `Flash` request in a build without the
+/// kernels runs as math and would otherwise be priced with no score tile at
+/// all. Device-blind for the same reason — the estimate is computed before a
+/// device is leased.
+pub fn flux_effective_attention_backend() -> crate::attention::AttentionBackend {
+    crate::attention::AttentionBackend::resolve_effective_for(
+        crate::attention::AttentionPolicy::FastStill,
+    )
+}
+
+/// Peak device bytes a FLUX-family VAE decode allocates at this output size.
+///
+/// The decode is one contiguous conv2d workspace chain, so this is an area
+/// model pinned to the two anchors #276 measured — see
+/// [`FLUX_VAE_DECODE_BYTES_PER_PIXEL_PER_DTYPE_BYTE`]. `vae_dtype_bytes` is
+/// the VAE's OWN dtype, which `MOLD_VAE_DTYPE=f32` can lift above the
+/// transformer's.
+pub fn flux_vae_decode_peak_bytes(width: u32, height: u32, vae_dtype_bytes: u32) -> u64 {
+    let area = u64::from(width).saturating_mul(u64::from(height));
+    let raw = (area as f64
+        * f64::from(vae_dtype_bytes.max(1))
+        * FLUX_VAE_DECODE_BYTES_PER_PIXEL_PER_DTYPE_BYTE) as u64;
+    raw.max(FLUX_VAE_DECODE_FLOOR_BYTES)
+}
+
+/// Everything a resident still transformer has to share the card with.
+///
+/// Every field is in bytes and every field is the caller's measurement or the
+/// caller's derivation — this struct carries no policy of its own, which is
+/// what lets the engine and the server's planner answer the same question
+/// from different vantage points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StillTransformerBudget {
+    /// Device bytes the transformer's weights occupy while resident.
+    pub transformer_bytes: u64,
+    /// Denoise-phase workspace, from [`flux_activation_budget_bytes_for`].
+    pub activation_bytes: u64,
+    /// VAE decode workspace, from [`flux_vae_decode_peak_bytes`].
+    pub vae_decode_peak_bytes: u64,
+    /// Allocator and kernel slack — see
+    /// [`STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES`].
+    pub runtime_headroom_bytes: u64,
+}
+
+impl StillTransformerBudget {
+    /// The device bytes a kept transformer commits the render to.
+    ///
+    /// The three workspace terms are SUMMED rather than maxed, and that is
+    /// deliberate. The decision is made once, before the render, and has to
+    /// hold for the denoise phase and the decode phase both; the maximum
+    /// would be the right answer only if freeing the denoise workspace
+    /// reliably handed a single contiguous decode-sized block back to the
+    /// allocator. #276 is the record of what happens when it does not — a
+    /// 24 GB card with a kept Q8 transformer OOM'd on the FIRST conv
+    /// allocation of the decode with the arithmetic apparently in its favour.
+    /// Summing is the conservative reading, and "conservative" here means
+    /// "falls back to today's behaviour", which is this campaign's own rule
+    /// for every residency decision.
+    pub fn required_bytes(&self) -> u64 {
+        self.transformer_bytes
+            .saturating_add(self.activation_bytes)
+            .saturating_add(self.vae_decode_peak_bytes)
+            .saturating_add(self.runtime_headroom_bytes)
+    }
+}
+
+/// Whether a still's transformer may stay GPU-resident across a render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformerResidency {
+    /// The budget fits: keep the weights on the card.
+    Keep,
+    /// The budget does not fit, by `shortfall_bytes`.
+    Drop {
+        /// Bytes by which [`StillTransformerBudget::required_bytes`] overran
+        /// the usable free VRAM. Named in the log line so an operator can see
+        /// how far from residency the card is.
+        shortfall_bytes: u64,
+    },
+}
+
+impl TransformerResidency {
+    /// Whether this answer keeps the transformer resident.
+    pub fn keeps(self) -> bool {
+        matches!(self, Self::Keep)
+    }
+
+    /// Bytes by which the budget overran, or zero when it fits.
+    pub fn shortfall_bytes(self) -> u64 {
+        match self {
+            Self::Keep => 0,
+            Self::Drop { shortfall_bytes } => shortfall_bytes,
+        }
+    }
+}
+
+/// The ONE budgeted residency decision both still families read.
+///
+/// `usable_free_bytes` is what this render may spend on the card **as if
+/// nothing it loaded were already resident**. A caller sampling free VRAM
+/// with the transformer already on the card adds those bytes back, exactly as
+/// `memory_preflight` folds `active_vram_bytes` into `available_bytes`;
+/// otherwise the transformer is charged twice and every warm render drops.
+///
+/// A zero or unknown budget answers [`TransformerResidency::Keep`]: an
+/// unmeasurable card is not evidence of pressure, and refusing residency on a
+/// failed probe would make every CPU and Metal render take the drop path for
+/// nothing.
+pub fn still_transformer_residency(
+    budget: &StillTransformerBudget,
+    usable_free_bytes: u64,
+) -> TransformerResidency {
+    if usable_free_bytes == 0 {
+        return TransformerResidency::Keep;
+    }
+    match budget.required_bytes().checked_sub(usable_free_bytes) {
+        Some(shortfall) if shortfall > 0 => TransformerResidency::Drop {
+            shortfall_bytes: shortfall,
+        },
+        _ => TransformerResidency::Keep,
+    }
+}
+
 /// Map a manifest family slug (e.g. `"flux"`, `"sdxl"`, `"qwen-image"`) to the
 /// activation-budget family. Falls back to [`ActivationFamily::FluxDit`] for
 /// unknown slugs — the FLUX factor is the most common diffusion default and
@@ -5177,6 +5399,307 @@ mod tests {
                 std::env::set_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", v);
             }
         }
+    }
+
+    // ── Still transformer residency ──────────────────────────────────────
+
+    /// Decimal GB, the unit every card is advertised in and the one the
+    /// residency rows below are written in.
+    const RESIDENCY_GB: u64 = 1_000_000_000;
+
+    /// What a card of `total` advertised GB leaves a render, after the
+    /// 400 MB the driver context and the display take off the top. This is
+    /// the figure the campaign's "no regression on 24 GB cards" rule is
+    /// measured against.
+    fn usable_free_for(total_gb: u64) -> u64 {
+        total_gb * RESIDENCY_GB - 400 * 1_000_000
+    }
+
+    fn residency_for(
+        transformer_bytes: u64,
+        width: u32,
+        height: u32,
+        family: ActivationFamily,
+        heads: u64,
+        usable_free_bytes: u64,
+    ) -> TransformerResidency {
+        let budget = StillTransformerBudget {
+            transformer_bytes,
+            activation_bytes: flux_activation_budget_bytes_for(
+                width,
+                height,
+                1,
+                2,
+                family,
+                heads,
+                crate::attention::AttentionBackend::Flash,
+            ),
+            vae_decode_peak_bytes: flux_vae_decode_peak_bytes(width, height, 2),
+            runtime_headroom_bytes: STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+        };
+        still_transformer_residency(&budget, usable_free_bytes)
+    }
+
+    /// The plan's 24 GB matrix, plus the 46 GB rows that show the same
+    /// arithmetic keeping a transformer the bigger card has room for.
+    ///
+    /// Sizes are the shipped checkpoints: FLUX.1 dev Q8_0 ~12.6 GB and BF16
+    /// ~23.8 GB, FLUX.2 dev Q8_0 ~33 GB, Klein-4B Q8 ~4.3 GB and Klein-9B Q8
+    /// ~9.5 GB. Head counts are the architectures': 24 for FLUX.1's 3072-wide
+    /// stream, 48 for FLUX.2 [dev]'s 6144-wide one.
+    #[test]
+    fn the_still_residency_budget_covers_the_24gb_matrix() {
+        const FLUX1_Q8: u64 = 12_600_000_000;
+        const FLUX1_BF16: u64 = 23_800_000_000;
+        const FLUX2_DEV_Q8: u64 = 33_000_000_000;
+        const KLEIN_4B_Q8: u64 = 4_300_000_000;
+        const KLEIN_9B_Q8: u64 = 9_500_000_000;
+
+        let twenty_four = usable_free_for(24);
+        let forty_six = usable_free_for(46);
+
+        // flux-dev Q8 at 1024² keeps on a 24 GB card — the whole point of the
+        // change: today it drops unconditionally.
+        assert!(
+            residency_for(
+                FLUX1_Q8,
+                1024,
+                1024,
+                ActivationFamily::FluxDit,
+                24,
+                twenty_four
+            )
+            .keeps(),
+            "a 12.6 GB Q8 transformer plus a 1024² decode fits 24 GB"
+        );
+        // …and drops at 2048², where the decode workspace alone is ~11 GB.
+        let big = residency_for(
+            FLUX1_Q8,
+            2048,
+            2048,
+            ActivationFamily::FluxDit,
+            24,
+            twenty_four,
+        );
+        assert!(!big.keeps(), "2048² must take the #276 drop path");
+        assert!(
+            big.shortfall_bytes() > 0,
+            "a drop names how far short it is"
+        );
+
+        // flux-dev BF16: drops on 24 GB, resident on 46.
+        assert!(!residency_for(
+            FLUX1_BF16,
+            1024,
+            1024,
+            ActivationFamily::FluxDit,
+            24,
+            twenty_four
+        )
+        .keeps());
+        assert!(residency_for(
+            FLUX1_BF16,
+            1024,
+            1024,
+            ActivationFamily::FluxDit,
+            24,
+            forty_six
+        )
+        .keeps());
+
+        // flux2-dev Q8: never on 24 GB; kept on 46 at 1024² and 1536², and
+        // dropped at 2048² where the decode pushes it over.
+        assert!(!residency_for(
+            FLUX2_DEV_Q8,
+            1024,
+            1024,
+            ActivationFamily::Flux2Dit,
+            48,
+            twenty_four
+        )
+        .keeps());
+        for (width, height) in [(1024, 1024), (1536, 1536)] {
+            assert!(
+                residency_for(
+                    FLUX2_DEV_Q8,
+                    width,
+                    height,
+                    ActivationFamily::Flux2Dit,
+                    48,
+                    forty_six
+                )
+                .keeps(),
+                "flux2-dev Q8 at {width}x{height} fits a 46 GB card"
+            );
+        }
+        assert!(
+            !residency_for(
+                FLUX2_DEV_Q8,
+                2048,
+                2048,
+                ActivationFamily::Flux2Dit,
+                48,
+                forty_six
+            )
+            .keeps(),
+            "a 2048² decode beside a 33 GB transformer does not fit 46 GB"
+        );
+
+        // Klein keeps everywhere, which is the tier people run locally.
+        for transformer in [KLEIN_4B_Q8, KLEIN_9B_Q8] {
+            assert!(
+                residency_for(
+                    transformer,
+                    1024,
+                    1024,
+                    ActivationFamily::Flux2Dit,
+                    32,
+                    twenty_four
+                )
+                .keeps(),
+                "Klein Q8 at {transformer} bytes must stay resident on 24 GB"
+            );
+        }
+    }
+
+    /// A measured card with almost nothing free drops regardless of the
+    /// checkpoint — the 2-LoRA observation #276 was written against.
+    #[test]
+    fn a_card_with_three_gigabytes_free_drops_every_still_transformer() {
+        let answer = residency_for(
+            12_600_000_000,
+            1024,
+            1024,
+            ActivationFamily::FluxDit,
+            24,
+            3 * RESIDENCY_GB,
+        );
+        assert!(!answer.keeps());
+        assert!(answer.shortfall_bytes() > 10 * RESIDENCY_GB);
+    }
+
+    /// An unmeasurable card is not evidence of pressure.
+    #[test]
+    fn an_unmeasurable_card_keeps_the_transformer() {
+        assert!(residency_for(
+            33_000_000_000,
+            2048,
+            2048,
+            ActivationFamily::Flux2Dit,
+            48,
+            0
+        )
+        .keeps());
+    }
+
+    /// Flash materializes no score matrix, so it is charged none — the same
+    /// distinction `wan_activation_budget_bytes_for` draws, and the reason a
+    /// flash build must not be priced as a math one.
+    #[test]
+    fn flux_activation_budget_is_backend_aware() {
+        let math = flux_activation_budget_bytes_for(
+            1024,
+            1024,
+            1,
+            2,
+            ActivationFamily::FluxDit,
+            24,
+            crate::attention::AttentionBackend::Math,
+        );
+        let flash = flux_activation_budget_bytes_for(
+            1024,
+            1024,
+            1,
+            2,
+            ActivationFamily::FluxDit,
+            24,
+            crate::attention::AttentionBackend::Flash,
+        );
+        assert!(math > flash, "math charges the score tile, flash does not");
+        assert_eq!(
+            flash,
+            activation_bytes(1024, 1024, 1, 2, ActivationFamily::FluxDit),
+            "with no score tile the budget is exactly the area model"
+        );
+        // The difference is the score plus softmax tile over the joint
+        // sequence: (64x64 image + 512 text) tokens x 2 x 24 heads x 512
+        // chunk rows x 2 bytes.
+        assert_eq!(math - flash, (4096 + 512) * 2 * 24 * 512 * 2);
+
+        // More heads and a bigger canvas both cost more, and only on math.
+        let wide = flux_activation_budget_bytes_for(
+            2048,
+            2048,
+            1,
+            2,
+            ActivationFamily::FluxDit,
+            24,
+            crate::attention::AttentionBackend::Math,
+        );
+        assert!(wide > math);
+        let many_heads = flux_activation_budget_bytes_for(
+            1024,
+            1024,
+            1,
+            2,
+            ActivationFamily::FluxDit,
+            48,
+            crate::attention::AttentionBackend::Math,
+        );
+        assert!(many_heads > math);
+        assert_eq!(
+            flux_activation_budget_bytes_for(
+                1024,
+                1024,
+                1,
+                2,
+                ActivationFamily::FluxDit,
+                48,
+                crate::attention::AttentionBackend::Flash
+            ),
+            flash,
+            "head count cannot move a flash budget: there is no tile to widen"
+        );
+    }
+
+    /// The decode peak reproduces #276's two measured anchors — 2–3 GB at
+    /// 1024² bf16 and 10–12 GB at 2048² — and scales with area, not with a
+    /// fixed 5 GB magic number.
+    #[test]
+    fn vae_decode_peak_reproduces_the_276_anchors() {
+        let small = flux_vae_decode_peak_bytes(1024, 1024, 2);
+        assert!(
+            (2_000_000_000..=3_000_000_000).contains(&small),
+            "1024² bf16 decode peak was {small}"
+        );
+        let large = flux_vae_decode_peak_bytes(2048, 2048, 2);
+        assert!(
+            (10_000_000_000..=12_000_000_000).contains(&large),
+            "2048² bf16 decode peak was {large}"
+        );
+        assert_eq!(large, small * 4, "the decode is an area model");
+        assert_eq!(
+            flux_vae_decode_peak_bytes(1024, 1024, 4),
+            small * 2,
+            "MOLD_VAE_DTYPE=f32 doubles the workspace"
+        );
+        assert_eq!(
+            flux_vae_decode_peak_bytes(64, 64, 2),
+            FLUX_VAE_DECODE_FLOOR_BYTES,
+            "a tiny canvas still reserves a kernel workspace"
+        );
+    }
+
+    /// The effective backend is the flux families' own policy, resolved the
+    /// same way wan's is — never a hard-coded `Math`.
+    #[test]
+    fn the_flux_effective_backend_is_the_fast_still_policy() {
+        assert_eq!(
+            flux_effective_attention_backend(),
+            crate::attention::AttentionBackend::resolve_effective_for(
+                crate::attention::AttentionPolicy::FastStill
+            )
+        );
     }
 
     // ── keep_te_in_ram ───────────────────────────────────────────────────
