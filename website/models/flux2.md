@@ -89,6 +89,33 @@ hf auth login
 mold pull flux2-dev:bf16
 ```
 
+### The prompt encoder does not need 36 GB of VRAM
+
+The Mistral3 encoder is 36 GB on disk and mold used to plan for all of it,
+which made even an idle 46 GB card look over-subscribed: the encoder was moved
+to the CPU, where it runs at F32, and a cache-miss prompt took **78.8 seconds**
+with the GPU completely idle.
+
+It never needed that much. The encoder streams — it memory-maps the shards and
+builds one decoder layer at a time, holding the running layer and the next one
+— so it runs on the GPU in bf16 at a peak of about **3.6 GB**, and those 36 GB
+of shards stay reclaimable page cache rather than memory anything has to
+reserve. mold now plans for the streamed peak on both sides, so:
+
+- The encoder stays on the GPU on a 24 GB card as well as a 46 GB one, even
+  beside a resident Q8 transformer. It runs before the transformer denoises,
+  so the two phases do not overlap.
+- **Host RAM**: you need room for the working set, not for the file — roughly
+  7 GB if you deliberately pin the encoder to the CPU with
+  `--device-text-encoders cpu`, and effectively nothing beyond page cache
+  otherwise. A 64 GB desktop used to be refused outright.
+- **Disk cache**: the shards are read through the page cache, so the second
+  render of a session is much faster than the first on a machine with enough
+  free RAM to keep them.
+
+Pinning the encoder to the CPU is still honoured; it is just no longer chosen
+for you on a card that had the room all along.
+
 Classic strength-based img2img, masks, ControlNet, LoRA, and batches with
 references are rejected because the checkpoint-native reference protocol does
 not implement those controls. Text-only batches remain supported. This is Dev
