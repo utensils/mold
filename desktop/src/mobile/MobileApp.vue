@@ -2970,10 +2970,15 @@ function fleetQueueControlLabel(row: FleetActiveWork): string {
  * is the shared one — web and desktop resolve the same waiting row the same
  * way and only the casing is local.
  */
+/** True while the host is actually working on this print. */
+function activityRowRunning(row: ActivityRow): boolean {
+  return Boolean(row.live) && row.live!.phase !== "queued" && row.live!.phase !== "paused";
+}
+
 function activityRowStatus(row: ActivityRow): string {
-  if (row.live && row.live.phase !== "queued" && row.live.phase !== "paused") {
-    return activeWorkPhaseLabel(row.live).toLocaleUpperCase();
-  }
+  // A running row says what is happening, in the host's own sentence. Only a
+  // waiting, held or settled row answers with a code.
+  if (activityRowRunning(row)) return activeWorkPhaseLabel(row.live!);
   if (row.print.status !== "queued") return jobStatusCode(row.print);
   if (durableHold(row.print)) return "HELD";
   if (activityRowQueuePaused(row)) return "PAUSED";
@@ -3213,8 +3218,14 @@ function sharedQueueTitle(row: FleetActiveWork): string {
   return modelLabel(row.model ?? "") || row.hostLabel;
 }
 
+/** A machine's own row answers the same way: a sentence while it works. */
+function sharedQueueRunning(row: FleetActiveWork): boolean {
+  return row.phase !== "queued" && row.phase !== "paused";
+}
+
 function sharedQueueStatus(row: FleetActiveWork): string {
-  return activeWorkPhaseLabel(row).toLocaleUpperCase();
+  const label = activeWorkPhaseLabel(row);
+  return sharedQueueRunning(row) ? label : label.toLocaleUpperCase();
 }
 
 function sharedQueueProgress(row: FleetActiveWork): number | null {
@@ -13773,6 +13784,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                       :progress="activityRowProgress(entry.local)"
                       :meta="activityRowMeta(entry.local)"
                       :position="activityRowPosition(entry.local)"
+                      :running="activityRowRunning(entry.local)"
                       :tone="durableHold(entry.local.print) ? 'warning' : 'neutral'"
                       @activate="inspectQueueEntry(entry.key)"
                     />
@@ -13799,6 +13811,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                       :progress="sharedQueueProgress(entry.shared)"
                       :meta="entry.shared.hostLabel"
                       :position="sharedQueuePosition(entry.shared)"
+                      :running="sharedQueueRunning(entry.shared)"
                       @activate="inspectSharedQueueEntry(entry.shared)"
                     />
                   </SwipeActionRow>

@@ -35,6 +35,11 @@ const props = withDefaults(
     tone?: "neutral" | "warning";
     /** Identifies THIS row, where the card's own data-test names the kind. */
     rowTestId?: string | null;
+    /**
+     * True while the host is actually working on this print. A running row
+     * says what it is doing in plain words; every other row says a code.
+     */
+    running?: boolean;
   }>(),
   {
     detail: null,
@@ -45,6 +50,7 @@ const props = withDefaults(
     position: null,
     tone: "neutral",
     rowTestId: null,
+    running: false,
   },
 );
 
@@ -53,7 +59,13 @@ const emit = defineEmits<{
 }>();
 
 const displayTitle = computed(() => props.title.trim() || props.subtitle);
-const detailedStatus = computed(() => props.status.length > 18 || Boolean(props.detail));
+/**
+ * A long CODE has to wrap onto its own row. A running row's sentence already
+ * lives in the copy column, so it never needs the full-width layout.
+ */
+const detailedStatus = computed(
+  () => !props.running && (props.status.length > 18 || Boolean(props.detail)),
+);
 /** A row is "active" once it has pixels or a step count to show. */
 const active = computed(() => Boolean(props.thumbnailUrl) || props.progress !== null);
 </script>
@@ -93,9 +105,19 @@ const active = computed(() => Boolean(props.thumbnailUrl) || props.progress !== 
     <div class="mobile-generation-job-copy">
       <p>{{ displayTitle }}</p>
       <span v-if="title.trim() && subtitle.trim()">{{ subtitle }}</span>
+      <!-- What is happening, in the host's own sentence. The same element
+           carries the uppercase code in the trailing column when the row is
+           not running, so there is only ever one status to read. -->
+      <span
+        v-if="running"
+        class="mobile-generation-job-sentence"
+        data-test="mobile-generation-status"
+        >{{ status }}</span
+      >
       <ProgressBar
         v-if="progress !== null"
         class="mobile-generation-job-meter"
+        data-test="mobile-generation-job-meter"
         :value="progress"
         :height="7"
         :tone="tone === 'warning' ? 'warning' : 'accent'"
@@ -113,7 +135,7 @@ const active = computed(() => Boolean(props.thumbnailUrl) || props.progress !== 
       </p>
     </div>
     <div class="mobile-generation-job-action">
-      <span data-test="mobile-generation-status">{{ status }}</span>
+      <span v-if="!running" data-test="mobile-generation-status">{{ status }}</span>
       <span v-if="cancelling" data-test="mobile-generation-cancelling"> Cancelling… </span>
     </div>
   </div>

@@ -253,6 +253,14 @@ describe("mobile generation status containment", () => {
     // The meter is the shared kit bar at the phone's height, not a second one.
     expect(mobileGenerationQueueCard).toContain(':height="7"');
     expect(mobileGenerationQueueCard).toContain("ProgressBar");
+
+    // What a running print is DOING is a sentence, so it takes plain sans;
+    // mono uppercase stays the code for a waiting, held or settled row.
+    const sentence = css.match(/\.mobile-generation-job-sentence\s*\{([^}]*)\}/s);
+    expect(sentence?.[1]).toMatch(/font-family:\s*var\(--font-body\)/);
+    expect(sentence?.[1]).toMatch(/font-size:\s*var\(--text-caption\)/);
+    expect(sentence?.[1]).toMatch(/color:\s*var\(--mold-text-2\)/);
+    expect(sentence?.[1]).not.toMatch(/text-transform:\s*uppercase/);
   });
 
   it("bounds shared and swipeable activity surfaces before truncating detail", () => {

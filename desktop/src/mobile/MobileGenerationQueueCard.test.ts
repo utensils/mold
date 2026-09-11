@@ -107,4 +107,48 @@ describe("MobileGenerationQueueCard", () => {
     expect(view.get(".mobile-generation-job-copy p").text()).toBe("FLUX.2 dev");
     expect(view.find(".mobile-generation-job-copy > span").exists()).toBe(false);
   });
+
+  it("says what a running print is doing as a sentence, above the meter", () => {
+    const view = mount(MobileGenerationQueueCard, {
+      props: {
+        title: "Neon arcade",
+        subtitle: "",
+        status: "Adding detail · 16/32",
+        running: true,
+        progress: 50,
+        meta: "image 2 of 4 · plato",
+      },
+    });
+
+    // Plain words about what is happening belong in sans, in the sentence the
+    // host actually sent — not shouted back as a machine code.
+    const sentence = view.get("[data-test='mobile-generation-status']");
+    expect(sentence.text()).toBe("Adding detail · 16/32");
+    expect(sentence.classes()).toContain("mobile-generation-job-sentence");
+
+    // Mockup order: title, sentence, meter, mono meta.
+    const copy = view.get(".mobile-generation-job-copy").element;
+    const order = [...copy.children].map(
+      (child) => child.getAttribute("data-test") ?? child.tagName,
+    );
+    expect(order).toEqual([
+      "P",
+      "mobile-generation-status",
+      "mobile-generation-job-meter",
+      "mobile-generation-job-meta",
+    ]);
+    // A running row's long sentence has its own line already.
+    expect(view.classes()).not.toContain("mobile-generation-job--detailed-status");
+  });
+
+  it("keeps the uppercase code for a row that is not running", () => {
+    const view = mount(MobileGenerationQueueCard, {
+      props: { title: "Waiting print", subtitle: "FLUX · plato", status: "QUEUED #1" },
+    });
+
+    const code = view.get("[data-test='mobile-generation-status']");
+    expect(code.text()).toBe("QUEUED #1");
+    // It stays the trailing machine-truth column, not a sentence in the copy.
+    expect(code.element.closest(".mobile-generation-job-action")).not.toBeNull();
+  });
 });

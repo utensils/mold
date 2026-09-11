@@ -1856,10 +1856,12 @@ describe("MobileApp generation queue", () => {
     window.dispatchEvent(new Event("pageshow"));
     await flushPromises();
 
+    // A RUNNING row says what is happening in the host's own sentence; the
+    // uppercase code is reserved for rows that are waiting, held or settled.
     expect(wrapper.get("[data-test='mobile-generation-status']").text()).toBe(
-      "PREPARING · OPENING MINIMAX H3 CHECKPOINTS",
+      "Preparing · Opening MiniMax H3 checkpoints",
     );
-    expect(wrapper.get(".mobile-generation-job").classes()).toContain(
+    expect(wrapper.get(".mobile-generation-job").classes()).not.toContain(
       "mobile-generation-job--detailed-status",
     );
 
@@ -1881,9 +1883,9 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     expect(wrapper.get("[data-test='mobile-generation-status']").text()).toBe(
-      "ENCODING VIDEO · 15/20",
+      "Encoding video · 15/20",
     );
-    expect(wrapper.get(".mobile-generation-job").classes()).toContain(
+    expect(wrapper.get(".mobile-generation-job").classes()).not.toContain(
       "mobile-generation-job--detailed-status",
     );
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe(
