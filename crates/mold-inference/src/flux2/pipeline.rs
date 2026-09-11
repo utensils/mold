@@ -1178,7 +1178,18 @@ impl Flux2Engine {
                 super::text_encoder_residency::MISTRAL3_DEFAULT_LOOKAHEAD,
             );
         }
-        self.text_encoder_paths()
+        // The files the encoder was ACTUALLY built from when one is loaded —
+        // a resolved Q8 GGUF variant is a tenth of the BF16 shards the
+        // manifest lists, and pricing the wrong one would drop a transformer
+        // that had room. The manifest list is the fallback for the cold case,
+        // where over-estimating only means taking today's drop.
+        let paths = self
+            .base
+            .loaded
+            .as_ref()
+            .map(|loaded| loaded.text_encoder.encoder_paths().to_vec())
+            .unwrap_or_else(|| self.text_encoder_paths());
+        paths
             .iter()
             .filter_map(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
             .sum()
