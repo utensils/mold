@@ -27,6 +27,7 @@ use mold_core::generation_profile::MeshWorkflowMode;
 use mold_core::mesh_workflow::{
     validate_create_mesh_workflow, CreateMeshWorkflowRequest, MeshWorkflowEvent,
     MeshWorkflowJobDetail, MeshWorkflowJobState, MeshWorkflowJobSummary, MeshWorkflowStageRecord,
+    MeshWorkflowStageState,
 };
 use mold_core::{
     GenerateRequest, GenerationReference, GenerationReferenceAuthority,
@@ -60,8 +61,8 @@ pub struct CreateArgs {
     pub local: bool,
 }
 
-pub async fn run(action: MeshWorkflowAction) -> Result<()> {
-    let client = MoldClient::from_env();
+pub async fn run(host: Option<&str>, action: MeshWorkflowAction) -> Result<()> {
+    let client = crate::control::client_for_host(host);
     match action {
         MeshWorkflowAction::Create {
             prompt,
@@ -652,6 +653,43 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// nothing is an older one that takes validated inline references. Returns
 /// the session handle so a failed create can release the lease rather than
 /// leaving it to expire.
+/// Refuse a mesh the host's upload limits cannot take, by name and before a
+/// session is opened.
+///
+/// Without this the run gets partway through `PUT /api/generate/reference-upload`
+/// and dies on whatever the server says about a body it refused, with a
+/// half-open lease behind it. `mold_core::reference_upload` checks the same
+/// two numbers for the H3 path and the Studio's `validateCapabilities` checks
+/// them in the browser; this is the third caller of the same rule.
+///
+/// One mesh is the whole session here, so the per-file and per-session limits
+/// are both a bound on the same number — named separately because a host may
+/// set them independently and the user needs to know which one they hit.
+fn refuse_a_mesh_this_host_will_not_accept(
+    capabilities: &mold_core::ReferenceUploadCapabilities,
+    byte_length: u64,
+) -> Result<()> {
+    anyhow::ensure!(
+        byte_length <= capabilities.max_file_bytes,
+        "the mesh is {byte_length} bytes and this machine accepts at most {} per uploaded file",
+        capabilities.max_file_bytes
+    );
+    anyhow::ensure!(
+        byte_length <= capabilities.max_session_bytes,
+        "the mesh is {byte_length} bytes and this machine accepts at most {} per upload session",
+        capabilities.max_session_bytes
+    );
+    Ok(())
+}
+
+/// The supplied mesh's size, read from the filesystem rather than from the
+/// bytes already in memory, so the check happens before anything is loaded.
+fn mesh_byte_length(path: &Path) -> Result<u64> {
+    Ok(std::fs::metadata(path)
+        .with_context(|| format!("could not read {}", path.display()))?
+        .len())
+}
+
 async fn lease_mesh_upload(
     client: &MoldClient,
     request: CreateMeshWorkflowRequest,
@@ -666,6 +704,10 @@ async fn lease_mesh_upload(
     if !capabilities.reference_uploads.available || !client.has_api_key() {
         return Ok((request, None));
     }
+    refuse_a_mesh_this_host_will_not_accept(
+        &capabilities.reference_uploads,
+        mesh_byte_length(path)?,
+    )?;
 
     let (mut inner, rebuild): (
         GenerateRequest,
@@ -795,9 +837,19 @@ async fn list(client: &MoldClient, json: bool) -> Result<()> {
         );
         return Ok(());
     }
-    let id_width = crate::ui::col_width(listing.jobs.iter().map(|job| job.id.len()), 2, 2);
-    let mode_width =
-        crate::ui::col_width(listing.jobs.iter().map(|job| mode_label(job).len()), 4, 2);
+    // CHARACTERS, not bytes, because `{:<N}` pads by `char` count and sizing
+    // a column from `str::len()` over-pads any row with a multi-byte
+    // character in it.
+    let id_width =
+        crate::ui::col_width(listing.jobs.iter().map(|job| job.id.chars().count()), 2, 2);
+    let mode_width = crate::ui::col_width(
+        listing
+            .jobs
+            .iter()
+            .map(|job| mode_label(job).chars().count()),
+        4,
+        2,
+    );
     println!(
         "{:<id_width$} {:<mode_width$} {:<10} {:<9} {}",
         "ID".bold(),
@@ -900,29 +952,42 @@ fn print_stage(stage: &MeshWorkflowStageRecord) {
     }
 }
 
-/// Follow one workflow's event stream, printing a line per stage transition,
-/// and exit non-zero when it settles as failed or cancelled.
+/// Follow one workflow to settlement, printing a line each time a stage
+/// changes state, and exit non-zero when it settles as failed or cancelled.
+///
+/// The lines are DIFFED FROM SNAPSHOTS, not read from stage events, because
+/// `GET /api/mesh-workflows/:id/events` emits nothing else: the server polls
+/// its own record every 500 ms and yields a whole `Snapshot` whenever
+/// `(updated_at_ms, state)` moves (`routes_mesh_workflows.rs`). A snapshot
+/// carries the full `stages` list, so comparing each one against the last is
+/// how a real per-stage line gets rendered; matching on the four
+/// stage-shaped variants instead printed a repeated `running stage 1 of 3`
+/// and nothing else.
 async fn follow_workflow(client: &MoldClient, id: &str) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let printer = tokio::spawn(async move {
+        let mut seen: Vec<MeshWorkflowStageState> = Vec::new();
+        let mut state: Option<MeshWorkflowJobState> = None;
         while let Some(event) = rx.recv().await {
             match event {
                 MeshWorkflowEvent::Snapshot { job } => {
-                    println!(
-                        "{} {} stage {} of {}",
-                        theme::icon_neutral(),
-                        job.summary.state.as_str(),
-                        job.summary.current_stage,
-                        job.summary.stage_count
-                    );
+                    for line in stage_transitions(&mut seen, &job.stages) {
+                        println!("{line}");
+                    }
+                    if state != Some(job.summary.state) {
+                        state = Some(job.summary.state);
+                        if let Some(line) = state_line(job.summary.state, &job.summary.error) {
+                            println!("{line}");
+                        }
+                    }
                 }
+                // The four variants below are forward-compatible with a
+                // push-based event stream. No mold server constructs one
+                // today — every frame is a `Snapshot` — so these are
+                // unreachable against a real host and exist so that a server
+                // which starts emitting them needs no client change.
                 MeshWorkflowEvent::StageStarted { stage_index, kind } => {
-                    println!(
-                        "{} {} {}",
-                        theme::icon_neutral(),
-                        stage_index,
-                        kind.as_str()
-                    );
+                    println!("{} {stage_index} {}", theme::icon_neutral(), kind.as_str());
                 }
                 MeshWorkflowEvent::StageProgress {
                     stage_index,
@@ -931,26 +996,22 @@ async fn follow_workflow(client: &MoldClient, id: &str) -> Result<()> {
                     total,
                 } => {
                     println!(
-                        "  {} {} {current}/{total}",
-                        stage_index,
+                        "  {stage_index} {} {current}/{total}",
                         kind.as_str().dimmed()
                     );
                 }
                 MeshWorkflowEvent::StageCompleted {
                     stage_index, kind, ..
                 } => {
-                    println!(
-                        "{} {} {} done",
-                        theme::icon_ok(),
-                        stage_index,
-                        kind.as_str()
-                    );
+                    println!("{} {stage_index} {} done", theme::icon_ok(), kind.as_str());
                 }
-                MeshWorkflowEvent::StateChanged { state, error } => {
-                    if let Some(error) = error {
-                        println!("{} {} — {error}", theme::icon_fail(), state.as_str());
-                    } else {
-                        println!("{} {}", theme::icon_neutral(), state.as_str());
+                MeshWorkflowEvent::StateChanged {
+                    state: changed,
+                    error,
+                } => {
+                    state = Some(changed);
+                    if let Some(line) = state_line(changed, &error) {
+                        println!("{line}");
                     }
                 }
             }
@@ -976,6 +1037,65 @@ async fn follow_workflow(client: &MoldClient, id: &str) -> Result<()> {
             println!("{} {} — still {}", theme::icon_warn(), id, other.as_str());
             Ok(())
         }
+    }
+}
+
+/// The lines one snapshot owes, given the stage states the last one showed.
+///
+/// `seen` is the running record and is updated in place, so a stage that has
+/// not moved prints nothing however many snapshots repeat it — which is the
+/// whole point, since the server re-sends the entire job every time anything
+/// about it changes. A stage the previous snapshot did not have at all
+/// (the record grows as the runner admits stages) prints its current state,
+/// so attaching late still shows what has happened.
+pub fn stage_transitions(
+    seen: &mut Vec<MeshWorkflowStageState>,
+    stages: &[MeshWorkflowStageRecord],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (index, stage) in stages.iter().enumerate() {
+        if seen.get(index) == Some(&stage.state) {
+            continue;
+        }
+        if index < seen.len() {
+            seen[index] = stage.state;
+        } else {
+            seen.resize(index + 1, stage.state);
+        }
+        lines.push(stage_line(stage));
+    }
+    lines
+}
+
+fn stage_line(stage: &MeshWorkflowStageRecord) -> String {
+    let icon = match stage.state {
+        MeshWorkflowStageState::Completed => theme::icon_ok(),
+        MeshWorkflowStageState::Failed => theme::icon_fail(),
+        _ => theme::icon_neutral(),
+    };
+    let mut line = format!(
+        "{icon} {} {} {}",
+        stage.index,
+        stage.kind.as_str(),
+        stage.state.as_str()
+    );
+    if let Some(error) = &stage.error {
+        line.push_str(&format!(" — {}", error.red()));
+    }
+    line
+}
+
+/// The line a job-level state change owes, or `None` while it is simply
+/// running — that is the state every stage line already implies.
+fn state_line(state: MeshWorkflowJobState, error: &Option<String>) -> Option<String> {
+    match (state, error) {
+        (MeshWorkflowJobState::Running, None) => None,
+        (state, Some(error)) => Some(format!(
+            "{} {} — {error}",
+            theme::icon_fail(),
+            state.as_str()
+        )),
+        (state, None) => Some(format!("{} {}", theme::icon_neutral(), state.as_str())),
     }
 }
 
@@ -1365,6 +1485,129 @@ mod tests {
         }
         // A real id survives, trimmed of whatever a shell handed us.
         assert_eq!(require_workflow_id("  mw-1  ").unwrap(), "mw-1");
+    }
+
+    fn stage(index: u32, kind: &str, state: &str) -> MeshWorkflowStageRecord {
+        MeshWorkflowStageRecord {
+            index,
+            kind: kind.parse().unwrap(),
+            state: state.parse().unwrap(),
+            execution_batch_id: None,
+            artifacts: Vec::new(),
+            error: None,
+        }
+    }
+
+    /// `--follow` renders stage lines by DIFFING snapshots, because a
+    /// snapshot is the only frame a real server sends — and it re-sends the
+    /// whole job every time anything about it moves.
+    #[test]
+    fn following_prints_a_line_only_when_a_stage_actually_moves() {
+        let mut seen = Vec::new();
+
+        // Attaching shows where the job already is.
+        let first = stage_transitions(
+            &mut seen,
+            &[
+                stage(0, "shape", "running"),
+                stage(1, "finalize", "pending"),
+            ],
+        );
+        assert_eq!(first.len(), 2);
+        assert!(first[0].contains("shape"), "{first:?}");
+        assert!(first[0].contains("running"), "{first:?}");
+
+        // An identical snapshot says nothing, however many times it arrives.
+        for _ in 0..3 {
+            assert!(stage_transitions(
+                &mut seen,
+                &[
+                    stage(0, "shape", "running"),
+                    stage(1, "finalize", "pending")
+                ],
+            )
+            .is_empty());
+        }
+
+        // Only the stage that moved prints.
+        let moved = stage_transitions(
+            &mut seen,
+            &[
+                stage(0, "shape", "completed"),
+                stage(1, "finalize", "pending"),
+            ],
+        );
+        assert_eq!(moved.len(), 1);
+        assert!(moved[0].contains("completed"), "{moved:?}");
+
+        // A stage the record did not have yet prints its current state, so
+        // a job whose runner admits stages as it goes still reads correctly.
+        let grown = stage_transitions(
+            &mut seen,
+            &[
+                stage(0, "shape", "completed"),
+                stage(1, "finalize", "pending"),
+                stage(2, "paint", "running"),
+            ],
+        );
+        assert_eq!(grown.len(), 1);
+        assert!(grown[0].contains("paint"), "{grown:?}");
+    }
+
+    /// A failed stage carries its reason onto the line.
+    #[test]
+    fn a_failed_stage_prints_the_reason_the_server_gave() {
+        let mut failed = stage(0, "shape", "failed");
+        failed.error = Some("ran out of memory".into());
+        let lines = stage_transitions(&mut Vec::new(), &[failed]);
+        assert!(lines[0].contains("ran out of memory"), "{lines:?}");
+    }
+
+    /// Plain `running` says nothing: every stage line already implies it.
+    /// Settlement and failure both speak.
+    #[test]
+    fn the_job_state_line_speaks_only_when_it_adds_something() {
+        assert_eq!(state_line(MeshWorkflowJobState::Running, &None), None);
+        assert!(state_line(MeshWorkflowJobState::Completed, &None)
+            .is_some_and(|line| line.contains("completed")));
+        assert!(
+            state_line(MeshWorkflowJobState::Failed, &Some("no runner".into()))
+                .is_some_and(|line| line.contains("no runner"))
+        );
+    }
+
+    /// A mesh past either advertised limit is refused by name before a
+    /// session is opened, the way the H3 upload path and the Studio both do.
+    #[test]
+    fn a_mesh_past_the_hosts_upload_limits_is_refused_by_name() {
+        let capabilities =
+            |max_file_bytes: u64, max_session_bytes: u64| mold_core::ReferenceUploadCapabilities {
+                available: true,
+                protocol_version: 1,
+                requires_api_key: true,
+                session_path: String::new(),
+                upload_path: String::new(),
+                session_handle_header: String::new(),
+                upload_handle_header: String::new(),
+                max_file_bytes,
+                max_session_bytes,
+                max_active_sessions: 4,
+                session_ttl_ms: 0,
+            };
+        assert!(refuse_a_mesh_this_host_will_not_accept(&capabilities(100, 100), 100).is_ok());
+
+        let per_file = refuse_a_mesh_this_host_will_not_accept(&capabilities(50, 1000), 100)
+            .unwrap_err()
+            .to_string();
+        assert!(per_file.contains("per uploaded file"), "{per_file}");
+        assert!(per_file.contains("50"), "{per_file}");
+
+        // Named separately, because a host may set the two independently and
+        // the user needs to know which one they hit.
+        let per_session = refuse_a_mesh_this_host_will_not_accept(&capabilities(1000, 50), 100)
+            .unwrap_err()
+            .to_string();
+        assert!(per_session.contains("per upload session"), "{per_session}");
     }
 
     /// `--local` is refused by name: there is no local form of a durable

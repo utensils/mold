@@ -1484,7 +1484,7 @@ explicit.")]
         #[arg(long, value_name = "N")]
         seed: Option<u64>,
 
-        /// Follow the workflow's stages until it settles.
+        /// Report each stage as it changes state, until the workflow settles.
         #[arg(long)]
         follow: bool,
 
@@ -2526,6 +2526,11 @@ Install a result with `mold pull <id>`.")]
         #[arg(value_name = "QUERY")]
         query: Option<String>,
 
+        /// Talk to this machine instead of the one `MOLD_HOST` names.
+        #[arg(long, env = "MOLD_HOST", value_name = "URL",
+              add = ArgValueCandidates::new(completion_cache::complete_host))]
+        host: Option<String>,
+
         /// Restrict to one model family (see `mold list` for the names in use)
         #[arg(long, value_name = "FAMILY")]
         family: Option<String>,
@@ -2574,6 +2579,15 @@ Talks to the server at MOLD_HOST (MOLD_API_KEY when configured). A download
 queue belongs to one machine, so there is no local fallback: `mold pull`
 is the command that also works without a server.")]
     Downloads {
+        /// Talk to this machine instead of the one `MOLD_HOST` names.
+        ///
+        /// Global, so it reads the same before or after the verb —
+        /// `mold downloads --host plato list` and `mold downloads list --host
+        /// plato` are the same command. Which machine you are talking to is
+        /// not a per-verb choice.
+        #[arg(long, env = "MOLD_HOST", global = true, value_name = "URL",
+              add = ArgValueCandidates::new(completion_cache::complete_host))]
+        host: Option<String>,
         #[command(subcommand)]
         action: DownloadsAction,
     },
@@ -2591,6 +2605,14 @@ stage's output as its own retained artifact, reports stage-by-stage progress,
 and can be resumed after a restart. It is durable on ONE machine, so every
 verb here talks to MOLD_HOST.")]
     MeshWorkflow {
+        /// Talk to this machine instead of the one `MOLD_HOST` names.
+        ///
+        /// Global, so it reads the same before or after the verb. A workflow
+        /// is durable on ONE machine, so this is which machine's workflows
+        /// you are acting on.
+        #[arg(long, env = "MOLD_HOST", global = true, value_name = "URL",
+              add = ArgValueCandidates::new(completion_cache::complete_host))]
+        host: Option<String>,
         #[command(subcommand)]
         action: MeshWorkflowAction,
     },
@@ -3757,6 +3779,7 @@ async fn run() -> anyhow::Result<()> {
         }
         Commands::Search {
             query,
+            host,
             family,
             kind,
             source,
@@ -3769,6 +3792,7 @@ async fn run() -> anyhow::Result<()> {
         } => {
             commands::search::run(commands::search::SearchArgs {
                 query,
+                host,
                 family,
                 kind,
                 source,
@@ -3788,11 +3812,11 @@ async fn run() -> anyhow::Result<()> {
             })
             .await?;
         }
-        Commands::Downloads { action } => {
-            commands::downloads::run(action).await?;
+        Commands::Downloads { host, action } => {
+            commands::downloads::run(host.as_deref(), action).await?;
         }
-        Commands::MeshWorkflow { action } => {
-            commands::mesh_workflow::run(action).await?;
+        Commands::MeshWorkflow { host, action } => {
+            commands::mesh_workflow::run(host.as_deref(), action).await?;
         }
         Commands::Stats { json } => {
             commands::stats::run(json)?;
@@ -4449,6 +4473,39 @@ mod tests {
     /// Parse CLI args from a vector (simulates command-line invocation).
     fn parse(args: &[&str]) -> Cli {
         try_parse(args).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// The three remote families this PR adds take `--host` like every other
+    /// remote verb, so inspecting a second machine does not mean exporting an
+    /// env var. It sits on the PARENT of the two subcommand families, because
+    /// which machine you are talking to is not a per-verb choice.
+    #[test]
+    fn the_new_remote_commands_take_a_host() {
+        match parse(&["search", "flux", "--host", "http://plato:7680"]).command {
+            Commands::Search { host, query, .. } => {
+                assert_eq!(host.as_deref(), Some("http://plato:7680"));
+                assert_eq!(query.as_deref(), Some("flux"));
+            }
+            _ => panic!("expected search"),
+        }
+        match parse(&["downloads", "--host", "http://plato:7680", "list"]).command {
+            Commands::Downloads { host, .. } => {
+                assert_eq!(host.as_deref(), Some("http://plato:7680"))
+            }
+            _ => panic!("expected downloads"),
+        }
+        // Global, so after the verb reads the same as before it.
+        match parse(&["mesh-workflow", "list", "--host", "http://plato:7680"]).command {
+            Commands::MeshWorkflow { host, .. } => {
+                assert_eq!(host.as_deref(), Some("http://plato:7680"))
+            }
+            _ => panic!("expected mesh-workflow"),
+        }
+        // Absent is absent: the client then reads MOLD_HOST as it always did.
+        match parse(&["mesh-workflow", "list"]).command {
+            Commands::MeshWorkflow { host, .. } => assert_eq!(host, None),
+            _ => panic!("expected mesh-workflow"),
+        }
     }
 
     /// Try to parse CLI args, returning the clap error on failure. The full

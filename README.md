@@ -196,8 +196,8 @@ mold jobs list
 
 A 3-D render can be one shot or a durable workflow. A workflow keeps every
 stage — the picture it starts from, its matted and delighted copies, the
-shape, the paint — as its own retained artifact, reports progress stage by
-stage, and resumes after a restart. It lives on the machine that runs it:
+shape, the paint — as its own retained artifact, reports each stage as it
+changes state, and resumes after a restart. It lives on the machine that runs it:
 
 ```bash
 mold mesh-workflow create --prompt "a small ceramic fox" --texture --follow

@@ -18,7 +18,7 @@ use colored::Colorize;
 use mold_core::catalog_wire::{
     CatalogProviderErrorWire, CatalogSearchEntry, CatalogSearchPage, CatalogSearchQuery,
 };
-use mold_core::{classify_server_error, MoldClient, ServerAvailability};
+use mold_core::{classify_server_error, ServerAvailability};
 
 use crate::theme;
 use crate::ui::col_width;
@@ -27,6 +27,8 @@ use crate::{CatalogSortArg, CatalogSourceArg};
 /// `mold search`, resolved from clap.
 pub struct SearchArgs {
     pub query: Option<String>,
+    /// The machine to ask, when one is named instead of `MOLD_HOST`.
+    pub host: Option<String>,
     pub family: Option<String>,
     pub kind: Option<String>,
     pub source: Option<CatalogSourceArg>,
@@ -70,7 +72,7 @@ pub fn sort_wire(sort: CatalogSortArg) -> &'static str {
 }
 
 pub async fn run(args: SearchArgs) -> Result<()> {
-    let client = MoldClient::from_env();
+    let client = crate::control::client_for_host(args.host.as_deref());
     let query = args.to_query();
     let page = match client.search_catalog(&query).await {
         Ok(page) => {
@@ -120,14 +122,33 @@ fn print_page(page: &CatalogSearchPage) {
         println!("{} Nothing matched.", theme::icon_neutral());
         return;
     }
-    let id_width = col_width(page.entries.iter().map(|entry| entry.id.len()), 2, 2);
+    // CHARACTERS, not bytes: `{:<N}` pads by `char` count, so sizing a
+    // column from `str::len()` over-pads any row with a multi-byte character
+    // in it.
+    let id_width = col_width(
+        page.entries.iter().map(|entry| entry.id.chars().count()),
+        2,
+        2,
+    );
     let name_width = col_width(
-        page.entries.iter().map(|entry| display_name(entry).len()),
+        page.entries
+            .iter()
+            .map(|entry| display_name(entry).chars().count()),
         4,
         2,
     );
-    let family_width = col_width(page.entries.iter().map(|entry| entry.family.len()), 6, 2);
-    let kind_width = col_width(page.entries.iter().map(|entry| entry.kind.len()), 4, 2);
+    let family_width = col_width(
+        page.entries
+            .iter()
+            .map(|entry| entry.family.chars().count()),
+        6,
+        2,
+    );
+    let kind_width = col_width(
+        page.entries.iter().map(|entry| entry.kind.chars().count()),
+        4,
+        2,
+    );
 
     println!(
         "{:<id_width$} {:<name_width$} {:<family_width$} {:<kind_width$} {:>8}  {:>10}",
@@ -146,18 +167,18 @@ fn print_page(page: &CatalogSearchPage) {
     );
     for entry in &page.entries {
         // Pad the plain text first; ANSI codes break `{:<N}`.
-        let id = format!("{:<id_width$}", entry.id);
+        let id = pad_to(&entry.id, id_width);
         let id = if entry.installed {
             id.green().to_string()
         } else {
             id
         };
         println!(
-            "{} {:<name_width$} {:<family_width$} {:<kind_width$} {:>8}  {:>10}",
+            "{} {} {} {} {:>8}  {:>10}",
             id,
-            truncate(&display_name(entry), name_width),
-            entry.family,
-            entry.kind,
+            pad_to(&truncate(&display_name(entry), name_width), name_width),
+            pad_to(&entry.family, family_width),
+            pad_to(&entry.kind, kind_width),
             format_size(entry.size_bytes),
             format_count(entry.download_count),
         );
@@ -182,6 +203,19 @@ fn display_name(entry: &CatalogSearchEntry) -> String {
         Some(author) => format!("{} · {author}", entry.name),
         None => entry.name.clone(),
     }
+}
+
+/// Left-pad plain text to a column measured in CHARACTERS.
+///
+/// `{:<N}` already counts `char`s, so this only exists so the width a column
+/// was sized with and the width a cell is padded to are computed the same
+/// way at every call site.
+fn pad_to(text: &str, width: usize) -> String {
+    let mut padded = text.to_string();
+    for _ in text.chars().count()..width {
+        padded.push(' ');
+    }
+    padded
 }
 
 /// Keep a long title inside its column without breaking the row.
@@ -374,6 +408,7 @@ mod tests {
     fn args() -> SearchArgs {
         SearchArgs {
             query: None,
+            host: None,
             family: None,
             kind: None,
             source: None,

@@ -269,8 +269,8 @@ mold mesh-workflow delete WORKFLOW-ID
 ```
 
 A one-shot `mold run` against a 3-D model is a single render. A workflow keeps
-every stage as its own retained artifact, reports progress stage by stage, and
-resumes after a restart from the first unfinished stage. It is durable on one
+every stage as its own retained artifact, reports each stage as it changes
+state, and resumes after a restart from the first unfinished stage. It is durable on one
 machine, so every verb talks to `MOLD_HOST` and there is no local form.
 
 The mode is inferred from what you supply:
@@ -292,7 +292,7 @@ The mode is inferred from what you supply:
 | `--matting auto\|on\|off`, `--delight`                   | Conditioning stages                                                         |
 | `--octree <N>`, `--threshold <T>`, `--target-faces <N>`  | Geometry controls                                                           |
 | `--seed <N>`                                             | Seed used by every stage, so one value reproduces the run                   |
-| `--follow`                                               | Stream the stages until the workflow settles                                |
+| `--follow`                                               | Report each stage as it changes state, until the workflow settles           |
 | `--json`                                                 | Print the accepted job as JSON                                              |
 
 Omit a geometry control and the recipe's own default answers. Omit `--model`
@@ -300,8 +300,9 @@ and the MODE decides, because the modes do not share a checkpoint: a roundtrip
 runs through the 2.1 shape VAE and defaults to that tier, while text-to-3-D and
 texturing default to the small fast one. `delete` is settled-only: cancel or
 wait first. A supplied mesh is a `.glb` or `.obj`, and
-on a server that advertises reference uploads and is reached with an API key
-its bytes stream through an upload lease rather than riding the request.
+it rides the request as base64. On a server that advertises reference uploads
+and is reached with an API key, the CLI takes that server's upload route
+instead and refuses a mesh larger than the limits it advertises.
 
 ## `mold queue`
 

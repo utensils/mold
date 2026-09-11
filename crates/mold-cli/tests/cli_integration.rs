@@ -2385,3 +2385,359 @@ async fn a_roundtrip_on_the_wrong_checkpoint_names_the_flag() {
         .stderr(predicate::str::contains("--model hunyuan3d-2.1:fp16"));
     assert!(server.received_requests().await.unwrap().is_empty());
 }
+
+/// The capabilities block a host that offers reference uploads advertises.
+fn upload_capabilities(available: bool, max_file_bytes: u64) -> serde_json::Value {
+    serde_json::json!({
+        // `gallery` and `catalog` carry no serde default, so a fixture that
+        // omits either fails to parse and the client silently keeps the
+        // inline path.
+        "gallery": { "can_delete": true },
+        "catalog": { "available": false, "families": [], "sort": [] },
+        "reference_uploads": {
+            "available": available,
+            "protocol_version": 1,
+            "requires_api_key": true,
+            "session_path": "/api/generate/reference-upload-sessions",
+            "upload_path": "/api/generate/reference-upload",
+            "session_handle_header": "x-mold-reference-upload-session",
+            "upload_handle_header": "x-mold-reference-upload",
+            "max_file_bytes": max_file_bytes,
+            "max_session_bytes": max_file_bytes,
+            "max_active_sessions": 4,
+            "session_ttl_ms": 600_000
+        }
+    })
+}
+
+/// On a host that offers reference uploads, a supplied mesh takes that route
+/// and the request carries a HANDLE rather than the bytes.
+///
+/// The branch only runs when the host advertises the protocol AND the client
+/// is authenticated, which is why plato — keyless — never entered it and why
+/// this has to be a mock.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_supplied_mesh_takes_the_upload_route_when_the_host_offers_one() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(upload_capabilities(true, 1 << 30)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(models_listing()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/generate/reference-upload-sessions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "instance_id": "instance-1",
+            "expires_at_ms": 4_102_444_800_000u64,
+            "request_scope_sha256": "a".repeat(64),
+            "session_handle": "session-secret",
+            "uploads": [{ "reference": 1, "handle": "slot-secret" }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/generate/reference-upload"))
+        .and(header("x-mold-reference-upload", "slot-secret"))
+        .and(header("content-type", "model/gltf-binary"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "instance_id": "instance-1",
+            "reference": 1,
+            "metadata": {
+                "kind": "mesh",
+                "index": 1,
+                "name": "chair.glb",
+                "sha256": "b".repeat(64),
+                "mime_type": "model/gltf-binary",
+                "mesh_format": "glb",
+                "byte_length": 17,
+                "coordinates": { "up_axis": "y", "meters_per_unit": 1.0 }
+            },
+            "request_scope_sha256": "a".repeat(64),
+            "session_complete": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/mesh-workflows"))
+        .respond_with(
+            ResponseTemplate::new(202).set_body_json(serde_json::json!({ "job_id": "mw-up" })),
+        )
+        .mount(&server)
+        .await;
+
+    let mesh = env.home.join("chair.glb");
+    std::fs::write(&mesh, b"glTF binary bytes").unwrap();
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .env("MOLD_API_KEY", "sekrit")
+        .args(["mesh-workflow", "create", "--mesh"])
+        .arg(&mesh)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mw-up"));
+
+    let posted = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.url.path() == "/api/mesh-workflows")
+        .expect("the workflow was submitted");
+    let body: serde_json::Value = serde_json::from_slice(&posted.body).unwrap();
+    let media = &body["roundtrip_request"]["references"][0]["media"];
+    assert_eq!(media["authority"], "upload");
+    assert_eq!(media["handle"], "slot-secret");
+    // The bytes went up the upload route, so they are not in the request.
+    assert!(media["data"].is_null(), "inline bytes survived: {media}");
+    assert!(
+        !String::from_utf8_lossy(&posted.body).contains("Z2xURiBiaW5hcnkgYnl0ZXM"),
+        "the base64 mesh is still in the body"
+    );
+}
+
+/// A create that fails after the lease is taken releases it, rather than
+/// leaving the host to expire the session on its TTL.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_create_releases_the_upload_session() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(upload_capabilities(true, 1 << 30)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(models_listing()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/generate/reference-upload-sessions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "instance_id": "instance-1",
+            "expires_at_ms": 4_102_444_800_000u64,
+            "request_scope_sha256": "a".repeat(64),
+            "session_handle": "session-secret",
+            "uploads": [{ "reference": 1, "handle": "slot-secret" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/generate/reference-upload"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "instance_id": "instance-1",
+            "reference": 1,
+            "metadata": {
+                "kind": "mesh",
+                "index": 1,
+                "name": "chair.glb",
+                "sha256": "b".repeat(64),
+                "mime_type": "model/gltf-binary",
+                "mesh_format": "glb",
+                "byte_length": 17,
+                "coordinates": { "up_axis": "y", "meters_per_unit": 1.0 }
+            },
+            "request_scope_sha256": "a".repeat(64),
+            "session_complete": true
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/mesh-workflows"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("no mesh runner on this build"))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/generate/reference-upload-sessions"))
+        .and(header("x-mold-reference-upload-session", "session-secret"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mesh = env.home.join("chair.glb");
+    std::fs::write(&mesh, b"glTF binary bytes").unwrap();
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .env("MOLD_API_KEY", "sekrit")
+        .args(["mesh-workflow", "create", "--mesh"])
+        .arg(&mesh)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no mesh runner"));
+    // `.expect(1)` on the DELETE is checked when the server drops.
+}
+
+/// A mesh over the host's advertised upload limit is refused by name, before
+/// a session is opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mesh_over_the_hosts_upload_limit_is_refused_before_a_session_opens() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(upload_capabilities(true, 4)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(models_listing()))
+        .mount(&server)
+        .await;
+
+    let mesh = env.home.join("chair.glb");
+    std::fs::write(&mesh, b"glTF binary bytes").unwrap();
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .env("MOLD_API_KEY", "sekrit")
+        .args(["mesh-workflow", "create", "--mesh"])
+        .arg(&mesh)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("accepts at most 4"));
+
+    let paths: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|request| request.url.path().to_string())
+        .collect();
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path.contains("reference-upload") || path.contains("mesh-workflows")),
+        "a refused mesh opened a session anyway: {paths:?}"
+    );
+}
+
+/// A keyless host keeps the inline path: the protocol needs an identity to
+/// bind a session to, so there is nothing to lease against.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keyless_host_keeps_the_inline_path() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(upload_capabilities(true, 1 << 30)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(models_listing()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/mesh-workflows"))
+        .respond_with(
+            ResponseTemplate::new(202).set_body_json(serde_json::json!({ "job_id": "mw-in" })),
+        )
+        .mount(&server)
+        .await;
+
+    let mesh = env.home.join("chair.glb");
+    std::fs::write(&mesh, b"glTF binary bytes").unwrap();
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["mesh-workflow", "create", "--mesh"])
+        .arg(&mesh)
+        .assert()
+        .success();
+
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.path().contains("reference-upload")),
+        "a keyless host opened an upload session"
+    );
+    let posted = requests
+        .iter()
+        .find(|request| request.url.path() == "/api/mesh-workflows")
+        .expect("submitted");
+    let body: serde_json::Value = serde_json::from_slice(&posted.body).unwrap();
+    assert_eq!(
+        body["roundtrip_request"]["references"][0]["media"]["authority"],
+        "inline"
+    );
+}
+
+/// `--host` names the machine, and beats `MOLD_HOST` when both are set.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_host_flag_wins_over_the_environment() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let named = MockServer::start().await;
+    let ignored = MockServer::start().await;
+    for server in [&named, &ignored] {
+        Mock::given(method("GET"))
+            .and(path("/api/downloads"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "active_jobs": [], "queued": [], "history": []
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/mesh-workflows"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "jobs": [] })),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/catalog/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [], "page": 1, "page_size": 20, "total": 0
+            })))
+            .mount(server)
+            .await;
+    }
+
+    // `--host` is global on the two subcommand families, so it reads the
+    // same before or after the verb; both spellings are exercised.
+    for args in [
+        vec!["downloads".to_string(), "list".to_string()],
+        vec!["mesh-workflow".to_string(), "list".to_string()],
+        vec!["search".to_string(), "flux".to_string()],
+    ] {
+        env.cmd()
+            .env("MOLD_HOST", ignored.uri())
+            .args(&args)
+            .args(["--host", &named.uri()])
+            .assert()
+            .success();
+    }
+    env.cmd()
+        .env("MOLD_HOST", ignored.uri())
+        .args(["mesh-workflow", "--host", &named.uri(), "list"])
+        .assert()
+        .success();
+
+    assert_eq!(named.received_requests().await.unwrap().len(), 4);
+    assert!(
+        ignored.received_requests().await.unwrap().is_empty(),
+        "MOLD_HOST was used even though --host named another machine"
+    );
+}

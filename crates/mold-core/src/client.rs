@@ -1283,9 +1283,11 @@ impl MoldClient {
                     }
                     MeshWorkflowEvent::StateChanged { state, error } => {
                         outcome.state = *state;
-                        if error.is_some() {
-                            outcome.error.clone_from(error);
-                        }
+                        // Assigned unconditionally: a frame that reports no
+                        // error is saying there is none, so a stale one from
+                        // the opening snapshot must not survive a later clean
+                        // settlement.
+                        outcome.error.clone_from(error);
                     }
                     _ => {}
                 }
@@ -6594,6 +6596,126 @@ mod tests {
             });
         }
         assert_eq!(seen, ["snapshot", "stage_started", "state_changed"]);
+    }
+
+    /// The stream a real server sends: SNAPSHOTS and nothing else.
+    ///
+    /// `routes_mesh_workflows.rs` polls its own record and yields a whole
+    /// `MeshWorkflowEvent::Snapshot` whenever `(updated_at_ms, state)` moves;
+    /// nothing in the server crate constructs the four stage-shaped variants.
+    /// So this is the only stream a follower ever actually sees, and its
+    /// stage detail has to come from comparing one snapshot against the last.
+    #[tokio::test]
+    async fn a_snapshot_only_stream_is_what_a_real_server_sends() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let snapshot = |state: &str, shape: &str, output: Option<&str>| {
+            let mut job = serde_json::json!({
+                "contract_version": 1,
+                "id": "mw-1",
+                "state": state,
+                "mode": "mesh_roundtrip",
+                "stage_count": 2,
+                "current_stage": if shape == "pending" { 0 } else { 1 },
+                "created_at_ms": 1i64,
+                "updated_at_ms": 2i64,
+                "request": serde_json::to_value(mesh_roundtrip_request()).unwrap(),
+                "stages": [
+                    { "index": 0, "kind": "shape", "state": shape, "artifacts": [] },
+                    { "index": 1, "kind": "finalize", "state": "pending", "artifacts": [] }
+                ]
+            });
+            if let Some(output) = output {
+                job["output_filename"] = serde_json::json!(output);
+            }
+            serde_json::json!({ "event": "snapshot", "job": job })
+        };
+        let body = format!(
+            "data: {}\n\ndata: {}\n\ndata: {}\n\n",
+            snapshot("running", "pending", None),
+            snapshot("running", "running", None),
+            snapshot("completed", "completed", Some("mold-h3-4.glb")),
+        );
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/mesh-workflows/mw-1/events"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = MoldClient::new(&server.uri())
+            .stream_mesh_workflow_events("mw-1", tx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.state, MeshWorkflowJobState::Completed);
+        // The settling snapshot carries the print, so no second read is made.
+        assert_eq!(outcome.output_filename.as_deref(), Some("mold-h3-4.glb"));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+        let mut frames = 0;
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                matches!(event, MeshWorkflowEvent::Snapshot { .. }),
+                "a real server sends nothing but snapshots"
+            );
+            frames += 1;
+        }
+        assert_eq!(frames, 3);
+    }
+
+    /// A frame that reports no error is saying there is none, so a stale one
+    /// from the opening snapshot cannot survive a clean settlement.
+    #[tokio::test]
+    async fn a_clean_state_change_clears_an_earlier_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Paused, not failed: a settled snapshot ends the follow at the
+        // first frame, so the stale error has to arrive on a job still
+        // running for a later frame to be able to clear it.
+        let mut job = serde_json::json!({
+            "contract_version": 1,
+            "id": "mw-1",
+            "state": "paused",
+            "mode": "mesh_roundtrip",
+            "stage_count": 2,
+            "current_stage": 1,
+            "error": "shape ran out of memory",
+            "created_at_ms": 1i64,
+            "updated_at_ms": 2i64,
+            "request": serde_json::to_value(mesh_roundtrip_request()).unwrap(),
+            "stages": []
+        });
+        job["output_filename"] = serde_json::json!("mold-h3-5.glb");
+        let body = format!(
+            "data: {}\n\ndata: {}\n\n",
+            serde_json::json!({ "event": "snapshot", "job": job }),
+            serde_json::json!({ "event": "state_changed", "state": "completed" }),
+        );
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/mesh-workflows/mw-1/events"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = MoldClient::new(&server.uri())
+            .stream_mesh_workflow_events("mw-1", tx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.state, MeshWorkflowJobState::Completed);
+        assert_eq!(outcome.error, None);
     }
 
     #[tokio::test]

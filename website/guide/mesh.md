@@ -294,7 +294,9 @@ reach. `--seed` applies to every stage, so one value reproduces the whole
 run.
 
 Follow a running workflow with `--follow` on `create`, or attach to one later
-with `mold mesh-workflow events`. `resume` restarts a paused or failed job,
+with `mold mesh-workflow events`. Either prints a line each time a stage
+changes state; the granularity is the server's own polling interval, because
+the event stream sends whole snapshots rather than per-step progress. `resume` restarts a paused or failed job,
 `cancel` stops a running one, and `delete` removes a settled workflow and the
 artifacts it retained — settled only, so cancel or wait first.
 

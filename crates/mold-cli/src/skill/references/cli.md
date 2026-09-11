@@ -242,9 +242,16 @@ finalize — refuses them rather than accepting a control it never reaches.
 `delete` is settled-only — cancel or wait first, and the server says so if you
 do not.
 
-A supplied `--mesh` is a `.glb` or `.obj`. On a host that advertises
-reference uploads and is reached with an API key, its bytes stream through a
-request-bound upload lease instead of riding the request as base64.
+A supplied `--mesh` is a `.glb` or `.obj`, and rides the request as base64.
+On a host that advertises `capabilities.reference_uploads` AND is reached with
+an API key, the CLI takes that host's request-bound upload route instead, and
+refuses by name a mesh larger than the limits that block advertises. A keyless
+host always takes the inline path.
+
+`--follow` prints a line each time a stage changes state. The lines are
+derived from the snapshots `/:id/events` sends — that endpoint emits whole
+snapshots and nothing finer — so the granularity is the server's polling
+interval, not per-step progress.
 
 An omitted `--model` resolves per MODE, because the modes do not share a
 checkpoint: a roundtrip runs through the 2.1 shape VAE and defaults to that
