@@ -180,6 +180,13 @@ pub fn apply_source_fit(
         (target_width, target_height),
         mode,
     );
+    // A source already the target shape is handed back VERBATIM, the same
+    // short-circuit the apps take before touching a canvas
+    // (`desktop/src/lib/sourceFitPreprocess.ts`). Resampling it would be a
+    // no-op in pixels but would still re-encode a JPEG as a larger PNG.
+    if source.width() == target_width && source.height() == target_height {
+        return Ok((bytes.to_vec(), transform));
+    }
     let scaled = image::imageops::resize(
         &source,
         transform.draw_width,
@@ -378,6 +385,10 @@ mod tests {
         ] {
             let (png, _) = apply_source_fit(&source, 8, 8, mode).unwrap();
             assert_eq!(decode(&png), square, "{mode:?}");
+            assert_eq!(
+                png, source,
+                "a matching source is handed back verbatim, never re-encoded"
+            );
         }
     }
 
