@@ -96,6 +96,8 @@ describe("lexicon — New image controls", () => {
     expect(advancedDrawer).toContain(`title="${CONTROL_WORDS.loras}"`);
     expect(loraPicker).toContain(CONTROL_WORDS.loras);
     expect(composerCard).toContain(`"${CONTROL_WORDS.expand}"`);
+    expect(composerCard).toContain("} passes`");
+    expect(composerCard).not.toContain("} steps`");
   });
 
   it("never brings a pre-lexicon label back", () => {

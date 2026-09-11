@@ -90,7 +90,7 @@ const summaryLine = computed(() => {
     props.width > 0 && props.height > 0
       ? `${props.aspectLabel} · ${props.width}×${props.height} · `
       : "";
-  const base = `${canvas}${props.steps} steps`;
+  const base = `${canvas}${props.steps} passes`;
   return props.batchSize > 1 ? `${base} · ×${props.batchSize}` : base;
 });
 

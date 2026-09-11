@@ -143,11 +143,11 @@ describe("ComposerCard", () => {
 
   it("renders the summary line, adding ×N only for a batch", () => {
     expect(factory().get("[data-test='composer-summary']").text()).toBe(
-      "1:1 · 1024×1024 · 28 steps",
+      "1:1 · 1024×1024 · 28 passes",
     );
     const batched = factory({ batchSize: 3 });
     expect(batched.get("[data-test='composer-summary']").text()).toBe(
-      "1:1 · 1024×1024 · 28 steps · ×3",
+      "1:1 · 1024×1024 · 28 passes · ×3",
     );
   });
 
