@@ -177,6 +177,15 @@ gets it back until retention sweeps it. It applies to renders a server
 performs — a local render has no Library, and refuses the flag rather than
 ignoring it.
 
+Pass `--fit` beside `--image` when the source and the canvas disagree. Without
+it the picture decides the canvas; with it the canvas is what you asked for and
+the picture is resampled onto it — `crop-fill` trims the edges, `pad-fit` adds
+black borders, `lanczos-resize` stretches.
+
+```bash
+mold run flux-dev:q4 "a lighthouse at dusk" --image wide.png --fit crop-fill --width 1024 --height 1024
+```
+
 A sequence of several clips is scripted, not composed in an app:
 
 ```bash

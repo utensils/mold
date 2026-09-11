@@ -538,6 +538,9 @@ mold run sdxl-base:fp16 "a lighthouse in a storm" --lora style.safetensors --lor
 mold run sdxl-base:fp16 "anime style" --image photo.png --strength 0.7
 mold run sdxl-base:fp16 "a red bicycle leaning on the wall" --image street.png --mask mask.png
 
+# --fit resamples the source onto the canvas instead of taking its shape
+mold run sdxl-base:fp16 "anime style" --image wide.png --fit crop-fill --width 1024 --height 1024
+
 # No refiner stage exists; upscale the native render instead
 mold upscale portrait.png -o portrait_4x.png
 ```
