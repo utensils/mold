@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useSheetDismiss } from "./useSheetDismiss";
 import { computed, onBeforeUnmount, ref, toRef, watch } from "vue";
 import { useMobileBack } from "./useMobileBack";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
@@ -283,6 +284,13 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
       selected.source.id === entry.source.id && selected.image.filename === entry.image.filename,
   );
 }
+
+const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
+  useSheetDismiss({
+    enabled: () => props.open,
+    close: () => emit("close"),
+    canStart: (target) => Boolean(target.closest("header")),
+  });
 </script>
 
 <template>
@@ -297,10 +305,19 @@ function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
     <button
       type="button"
       class="mobile-image-picker-backdrop"
+      :style="backdropStyle"
       :aria-label="`Close ${title.toLowerCase()} picker`"
       @click="emit('close')"
     />
-    <section class="mobile-image-picker-panel">
+    <section
+      class="mobile-image-picker-panel"
+      :class="{ 'is-dragging': dragging }"
+      :style="panelStyle"
+      @touchstart="beginDismiss"
+      @touchmove="moveDismiss"
+      @touchend="finishDismiss"
+      @touchcancel="resetDrag"
+    >
       <header>
         <div>
           <strong>{{ title }}</strong>
