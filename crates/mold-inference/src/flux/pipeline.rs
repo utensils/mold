@@ -102,6 +102,22 @@ fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool, transformer_is_fp8: boo
 /// first linear. Metal and CPU answer F32 for the reasons in
 /// `crate::quantized_linear::gguf_activation_dtype`, which is the one rule
 /// every GGUF family reads.
+/// The dtype every state tensor of a render is cast to — noise, conditioning,
+/// and therefore what the PuLID adapter and every hook must feed.
+///
+/// A GGUF transformer runs at [`gguf_transformer_dtype`]; a dense one at the
+/// dtype it was loaded with. The eager identity site and
+/// `generate_with_embeddings` both ask THIS function, because when the GGUF
+/// path stopped pinning F32 the identity site kept its own copy of the old
+/// answer and PuLID renders died with "dtype mismatch in ternary op".
+fn render_state_dtype_for(is_quantized: bool, device: &Device, loaded_dtype: DType) -> DType {
+    if is_quantized {
+        gguf_transformer_dtype(device, loaded_dtype)
+    } else {
+        loaded_dtype
+    }
+}
+
 fn gguf_transformer_dtype(device: &Device, requested: DType) -> DType {
     crate::quantized_linear::gguf_activation_dtype(
         crate::quantized_linear::LinearDevice::of(device),
@@ -2618,14 +2634,14 @@ impl FluxEngine {
                 .map(|loaded| {
                     (
                         loaded.device.clone(),
-                        // The quantized transformer's state tensors are F32
-                        // (see `generate_with_embeddings`), so that — not the
-                        // loaded weight dtype — is what the adapter must feed.
-                        if loaded.is_quantized {
-                            DType::F32
-                        } else {
-                            loaded.dtype
-                        },
+                        // The adapter must feed the SAME dtype the render's
+                        // state tensors are cast to, which for a GGUF is the
+                        // working dtype (BF16 on CUDA) and not the F32 the
+                        // quantized path used to pin. One function answers
+                        // both sites so they cannot drift again: a BF16 state
+                        // against F32 adapter norms is "dtype mismatch in
+                        // ternary op" at the first denoise step.
+                        render_state_dtype_for(loaded.is_quantized, &loaded.device, loaded.dtype),
                         loaded.is_schnell,
                     )
                 })
@@ -3166,11 +3182,7 @@ impl FluxEngine {
     ) -> Result<GenerateResponse> {
         // 3. Generate initial noise at the transformer's working dtype — see
         //    the sequential path for why a GGUF no longer pins F32.
-        let noise_dtype = if loaded.is_quantized {
-            gguf_transformer_dtype(&loaded.device, loaded.dtype)
-        } else {
-            loaded.dtype
-        };
+        let noise_dtype = render_state_dtype_for(loaded.is_quantized, &loaded.device, loaded.dtype);
         let latent_h = height / 16 * 2;
         let latent_w = width / 16 * 2;
 
@@ -3478,7 +3490,8 @@ mod tests {
     use super::{
         build_gguf_transformer, effective_loras, flux_rms_norm_scale_aliases, flux_runtime_dtype,
         flux_transformer_var_builder, gguf_transformer_dtype, park_cond_to_cpu,
-        should_use_offload_bypass_registry, FluxTransformer, LoraBypassMode, ProgressReporter,
+        render_state_dtype_for, should_use_offload_bypass_registry, FluxTransformer,
+        LoraBypassMode, ProgressReporter,
     };
     use crate::{InferenceEngine, LoadStrategy};
     use candle_core::{DType, Device, Result, Tensor};
@@ -4053,6 +4066,24 @@ mod tests {
     /// CPU is the case this suite can reach: a BF16 request there resolves to
     /// F32, because candle's CPU `QMatMul` bails on anything but f32/f16 and
     /// the dequant arm it would otherwise take reads f32.
+    #[test]
+    fn render_state_dtype_is_the_gguf_working_dtype_for_quantized_models() {
+        // Off CUDA the GGUF working dtype narrows to F32 (Metal kernels and the
+        // dequantize fallback are f32-only); a dense model keeps its own dtype.
+        assert_eq!(
+            render_state_dtype_for(true, &Device::Cpu, DType::BF16),
+            gguf_transformer_dtype(&Device::Cpu, DType::BF16)
+        );
+        assert_eq!(
+            render_state_dtype_for(false, &Device::Cpu, DType::BF16),
+            DType::BF16
+        );
+        assert_eq!(
+            render_state_dtype_for(false, &Device::Cpu, DType::F16),
+            DType::F16
+        );
+    }
+
     #[test]
     fn gguf_transformer_dtype_narrows_to_f32_off_cuda() {
         assert_eq!(
