@@ -106,7 +106,11 @@ try {
     // Pull the PNG as a file: full-resolution screenshots can exceed the
     // child-process stdout buffer before the app smoke test even starts.
     shell("screencap", "-p", "/sdcard/mold-boot-launcher-anr.png");
-    run("pull", "/sdcard/mold-boot-launcher-anr.png", output + "/boot-launcher-anr.png");
+    run(
+      "pull",
+      "/sdcard/mold-boot-launcher-anr.png",
+      output + "/boot-launcher-anr.png",
+    );
     shell("rm", "-f", "/sdcard/mold-boot-launcher-anr.png");
     shell("am", "force-stop", "com.android.launcher3");
   }
@@ -247,6 +251,17 @@ try {
         "select " + tab,
       );
     }
+    // Machines now uses its one header action for adding a machine. Return to
+    // Queue, whose header deliberately exposes Settings, before exercising the
+    // Settings overlay and native Back contract.
+    await tap(
+      "mobile-tab-queue",
+      () =>
+        evaluate(
+          'document.querySelector(".mobile-tab[aria-current=page]")?.dataset.test === "mobile-tab-queue"',
+        ),
+      "return to queue for settings",
+    );
     await tap(
       "mobile-open-settings",
       () => evaluate('!!document.querySelector(".is-settings-open")'),
@@ -288,9 +303,9 @@ try {
         evaluate(
           '(() => { const tab = document.querySelector(".mobile-tab[aria-current=page]");' +
             ' return !document.querySelector(".is-settings-open") && !!tab &&' +
-            ' tab.dataset.test === "mobile-tab-hosts"; })()',
+            ' tab.dataset.test === "mobile-tab-queue"; })()',
         ),
-      "native Back dismisses settings, and lands on Machines",
+      "native Back dismisses settings, and lands on Queue",
       { timeoutMs, redispatchEvery: BACK_REDISPATCH_EVERY_ATTEMPTS },
     );
     // The depth is deliberately NOT in the condition above: no artifact
@@ -300,7 +315,7 @@ try {
     await recordNavigation("after native Back");
     const metrics = () =>
       evaluate(
-        '({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, font: parseFloat(getComputedStyle(document.querySelector(".mobile-wordmark")).fontSize) })',
+        '({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, font: parseFloat(getComputedStyle(document.querySelector(".mobile-large-title")).fontSize) })',
       );
     shell("settings", "put", "system", "font_scale", "1");
     await sleep(500);
@@ -335,7 +350,7 @@ try {
           normal,
           large,
           navigation: "five destinations",
-          back: "settings dismissed to Machines",
+          back: "settings dismissed to Queue",
         },
         null,
         2,
