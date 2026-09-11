@@ -697,6 +697,69 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   width: 100%;
 }
 
+/* Pair with your desktop. A 64px tile holding the literal word QR — the phone
+   scans the desktop's code, so there is nothing here to render. */
+.mobile-pair-scan-card {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+}
+
+.mobile-pair-scan-glyph {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--mold-border);
+  background: var(--mold-surface, var(--mold-bg-deep));
+  color: var(--mold-text-dim);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+}
+
+.mobile-pair-scan-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.mobile-pair-scan-copy > strong {
+  font-family: var(--font-body);
+  font-size: var(--text-body);
+  font-weight: 600;
+}
+
+.mobile-pair-scan-copy > span {
+  color: var(--mold-text-dim);
+  font-family: var(--font-body);
+  font-size: var(--text-caption);
+  line-height: 1.45;
+}
+
+.mobile-pair-scan-button {
+  align-self: flex-start;
+  min-height: 44px;
+  margin-top: 3px;
+  padding: 0 14px;
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  color: var(--mold-blue);
+  font-family: var(--font-body);
+  font-size: var(--text-body-lg);
+}
+
+.mobile-pair-scan-button:disabled {
+  color: var(--mold-text-dim);
+}
+
 .mobile-settings-about {
   overflow: hidden;
   margin: 0;

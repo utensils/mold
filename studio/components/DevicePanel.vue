@@ -616,9 +616,16 @@ onBeforeUnmount(() => {
   border: var(--mold-bw) solid var(--mold-border);
   border-radius: var(--mold-radius-2);
 }
+/* A phone reaches these with a finger, so every control in the panel takes a
+   finger-sized target — the blocked lane's action included, since that is the
+   one a blocked device asks you to press. */
 @media (max-width: 639px) {
   .device-card__toggle {
     min-height: 44px;
+  }
+  .device-panel__blocked-action {
+    min-height: 44px;
+    padding: 4px 12px;
   }
 }
 </style>

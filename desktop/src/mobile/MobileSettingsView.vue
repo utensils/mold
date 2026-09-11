@@ -10,6 +10,7 @@ import {
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import LicenseSettingsPanel from "@studio/components/LicenseSettingsPanel.vue";
+import MobilePairScanCard from "./MobilePairScanCard.vue";
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { apiJsonTo } from "../lib/api/client";
 import type { ServerCapabilities, ServerStatus } from "../lib/api/types";
@@ -40,11 +41,14 @@ const props = defineProps<{
   appVersion: string;
   host?: MobileHost | null;
   updateChannel?: string;
+  /** True while the native camera is already open for a pairing scan. */
+  pairingScanning?: boolean;
 }>();
 
 const emit = defineEmits<{
   update: [patch: Partial<MobileSettings>];
   "manage-hosts": [];
+  "scan-pairing": [];
 }>();
 
 /**
@@ -458,6 +462,9 @@ function pickTone(choice: ToneChoice) {
       >
         Manage machines
       </button>
+      <!-- Pairing used to be reachable only from a disclosure inside the
+           Machines tab, which is not where a fresh install looks. -->
+      <MobilePairScanCard :scanning="pairingScanning" @scan="emit('scan-pairing')" />
     </section>
 
     <section

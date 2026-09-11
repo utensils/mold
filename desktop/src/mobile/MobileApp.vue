@@ -11779,8 +11779,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         :app-version="appVersion"
         :host="selectedHost ?? null"
         :update-channel="androidNativeRuntime ? 'GitHub APK' : 'TestFlight'"
+        :pairing-scanning="pairingScannerOpen"
         @update="updateSettings"
         @manage-hosts="manageHostsFromSettings"
+        @scan-pairing="scanPairingCode"
       />
       <div
         v-if="pullRefreshAvailable"
