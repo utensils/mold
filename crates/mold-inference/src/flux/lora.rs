@@ -194,6 +194,34 @@ pub(crate) enum LoraDirection {
     Up,
 }
 
+/// Name a LoRA layout mold does not parse, when the file's keys identify one.
+///
+/// An adapter matching none of the supported suffixes used to fail with the
+/// file name and nothing else, which is indistinguishable from a corrupt
+/// download. XLabs-AI's FLUX.1 adapters are the case worth naming: they carry
+/// `double_blocks.N.processor.{proj,qkv}_lora{1,2}.{down,up}.weight`, and
+/// mold's matcher accepts only the diffusers/PEFT, Kohya, OneTrainer and
+/// PEFT-default conventions. Their `.down.weight` is preceded by `proj_lora1`
+/// rather than by `.lora`, so it matches nothing.
+///
+/// This layout has NEVER been supported. Before the LoRA sealing fix such an
+/// adapter was discarded before it reached the parser, so the render
+/// succeeded with no adapter applied at all; now it reaches here and fails.
+/// The failure is the honest answer — a silent no-op is worse — but it is a
+/// user-visible change, so the message says which layout it saw.
+fn unsupported_layout_hint<'a>(keys: impl Iterator<Item = &'a String>) -> String {
+    let xlabs = keys
+        .into_iter()
+        .any(|key| key.contains(".processor.") && key.contains("_lora"));
+    if xlabs {
+        return " \u{2014} these are XLabs-AI `double_blocks.N.processor.*_lora*.{down,up}.weight` \
+keys, a layout mold does not parse. Use a diffusers/PEFT (`lora_A`/`lora_B`) or Kohya \
+(`lora_down`/`lora_up`) export of the same adapter."
+            .to_string();
+    }
+    String::new()
+}
+
 /// Suffixes that mark the down-projection (`A`) tensor. Order matters:
 /// the matcher returns on the first hit, so list more-specific suffixes
 /// (e.g. `.lora_linear_layer.down.weight`) before generic ones
@@ -331,7 +359,11 @@ impl LoraAdapter {
         }
 
         if layers.is_empty() {
-            bail!("no LoRA A/B pairs found in {}", path.display());
+            bail!(
+                "no LoRA A/B pairs found in {}{}",
+                path.display(),
+                unsupported_layout_hint(tensors.keys())
+            );
         }
 
         Ok(Self { layers, rank })
@@ -1207,6 +1239,63 @@ pub(crate) fn strip_tensor_prefix(tensors: HashMap<String, Tensor>) -> HashMap<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mold has never parsed XLabs-AI's FLUX.1 layout, and the refusal now
+    /// says so.
+    ///
+    /// Their keys are `double_blocks.N.processor.{proj,qkv}_lora{1,2}.{down,up}.weight`.
+    /// The `.down.weight` there is preceded by `proj_lora1`, not by `.lora`,
+    /// so it matches none of the four supported conventions — verified
+    /// directly against the classifier below rather than assumed.
+    ///
+    /// Before the LoRA sealing fix such an adapter was dropped before it ever
+    /// reached this parser, so the render succeeded with no adapter applied.
+    /// Now it reaches here and fails, which is the honest answer and a
+    /// user-visible change.
+    #[test]
+    fn an_xlabs_layout_is_unsupported_and_the_refusal_names_it() {
+        const XLABS_KEYS: [&str; 4] = [
+            "double_blocks.0.processor.proj_lora1.down.weight",
+            "double_blocks.0.processor.proj_lora1.up.weight",
+            "double_blocks.0.processor.qkv_lora2.down.weight",
+            "double_blocks.0.processor.qkv_lora2.up.weight",
+        ];
+
+        // The premise: none of these is a LoRA pair tensor to mold.
+        for key in XLABS_KEYS {
+            assert!(
+                classify_lora_key(key).is_none(),
+                "{key} must not classify — mold has never supported this layout"
+            );
+        }
+
+        let owned: Vec<String> = XLABS_KEYS.iter().map(|key| (*key).to_string()).collect();
+        let hint = unsupported_layout_hint(owned.iter());
+        assert!(
+            hint.contains("XLabs"),
+            "the refusal must name the layout it saw, got {hint:?}"
+        );
+        assert!(
+            hint.contains("lora_A") && hint.contains("lora_down"),
+            "and must name the exports that do work, got {hint:?}"
+        );
+
+        // A genuinely empty or unrelated file gets no speculation.
+        assert_eq!(unsupported_layout_hint(std::iter::empty()), "");
+        let unrelated = ["model.diffusion_model.foo.weight".to_string()];
+        assert_eq!(unsupported_layout_hint(unrelated.iter()), "");
+
+        // And the supported conventions still classify, so the hint can never
+        // fire for an adapter that would have loaded.
+        for key in [
+            "transformer.blocks.0.attn.to_q.lora_A.weight",
+            "transformer.blocks.0.attn.to_q.lora_down.weight",
+            "transformer.blocks.0.attn.to_q.lora_linear_layer.down.weight",
+            "transformer.blocks.0.attn.to_q.lora_A.default.weight",
+        ] {
+            assert!(classify_lora_key(key).is_some(), "{key} must still load");
+        }
+    }
 
     #[test]
     fn map_double_block_img_attn_qkv() {

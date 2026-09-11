@@ -156,4 +156,14 @@
   availability arm, so a 23.8 GB `:bf16` tier paid the documented 3-5x
   streaming penalty on a 46 GB GPU with room for the whole thing. It now asks
   the same two-step question its FLUX.2 sibling already asked.
+- **An XLabs-format FLUX.1 LoRA now fails loudly instead of rendering without
+  the adapter.** mold's key matcher accepts the diffusers/PEFT
+  (`lora_A`/`lora_B`), Kohya (`lora_down`/`lora_up`), OneTrainer and
+  PEFT-default conventions, and has never accepted XLabs-AI's
+  `double_blocks.N.processor.*_lora*.{down,up}.weight` layout. Such an adapter
+  used to be discarded before it reached the parser, so the render succeeded
+  with no LoRA applied at any scale; now it reaches the parser and the request
+  fails, naming the layout it saw and pointing at the exports that do load.
+  This is a behaviour change for anyone who was unknowingly rendering without
+  their adapter — use a diffusers/PEFT or Kohya export of the same LoRA.
 
