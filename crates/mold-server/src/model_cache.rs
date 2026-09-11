@@ -921,6 +921,45 @@ mod tests {
         assert_eq!(cache.active_vram_bytes(), 16 << 30);
     }
 
+    /// A FLUX.2 [dev] engine takes the SEQUENTIAL generate path on an Eager
+    /// strategy, and `generate_inner` clears `base.loaded` before it — so
+    /// after #WP4 an engine may hold a 33 GB transformer while the state the
+    /// cache used to read as residency is empty. `restore` reclassifies a
+    /// `Gpu` entry to `Parked` and ZEROES its VRAM credit whenever
+    /// `is_loaded()` is false, which would report the card as free while the
+    /// weights sat on it. `Flux2Engine::is_loaded` therefore answers for the
+    /// retained slot too; this pins the cache side of that contract.
+    #[test]
+    fn a_sequential_engine_holding_a_retained_transformer_keeps_its_vram_credit() {
+        const RETAINED: u64 = 33 << 30;
+        let mut cache = ModelCache::new(1);
+        cache.insert(Box::new(MockEngine::new("flux2-dev:q8")), RETAINED);
+        assert_eq!(cache.active_vram_bytes(), RETAINED);
+
+        // The render's take window: the scheduler must still see the exact
+        // resident footprint while the owner is busy.
+        let engine = cache.take("flux2-dev:q8").expect("resident engine");
+        assert_eq!(cache.active_vram_bytes(), RETAINED);
+
+        // The engine comes back still reporting residency, because its
+        // retained transformer never left the card.
+        cache.restore(engine);
+        assert_eq!(
+            cache.active_vram_bytes(),
+            RETAINED,
+            "a retained transformer is VRAM the next admission may credit as reclaimable"
+        );
+        assert_eq!(cache.active_model(), Some("flux2-dev:q8"));
+
+        // An engine that genuinely released everything is the contrast: its
+        // credit must go, or admission plans against memory nobody holds.
+        let mut engine = cache.take("flux2-dev:q8").expect("resident engine");
+        engine.engine.unload();
+        cache.restore(engine);
+        assert_eq!(cache.active_vram_bytes(), 0);
+        assert_eq!(cache.active_model(), None);
+    }
+
     #[test]
     fn restore_refreshes_idle_ttl_after_inference_take_window() {
         let mut cache = ModelCache::new(1);
