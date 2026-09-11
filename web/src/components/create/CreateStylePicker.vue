@@ -41,6 +41,13 @@ const props = defineProps<{
    * with the way to get it, instead of reading as if it had been dropped.
    */
   missingModel?: string | null;
+  /**
+   * Which machines hold each style, already worded by the page through
+   * `@studio/lib/modelAvailability` — the rule needs a fleet and its
+   * reachability, and neither belongs in a presentational control. Absent (a
+   * single-server browser) renders nothing at all.
+   */
+  availabilityTag?: ((model: ModelInfoExtended) => string | null) | null;
 }>();
 
 const emit = defineEmits<{
@@ -174,6 +181,7 @@ function browse() {
         :missing-model="missingModel ?? null"
         :empty-label="emptyLabel ?? 'No styles ready'"
         :disabled-reason="disabledReason"
+        :availability-tag="availabilityTag ?? null"
         autofocus-filter
         @pick="pick"
         @pick-missing="browse"
