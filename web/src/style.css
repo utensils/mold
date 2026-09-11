@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "../../ui/tokens.css";
+@import "../../ui/mold-desktop.css";
 @import "../../ui/fonts/fonts.css";
 @import "../../ui/kit.css";
 

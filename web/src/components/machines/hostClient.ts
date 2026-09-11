@@ -39,7 +39,7 @@ import {
   type ApiTarget,
 } from "@studio/api/client";
 import type { GalleryView } from "@studio/lib/api/galleryOrganization";
-import type { ConfigValue } from "../../lib/settingsConfig";
+import type { ConfigValue } from "@studio/api/config";
 import {
   listDevices,
   setDeviceEnabled,
