@@ -1272,15 +1272,30 @@ impl Flux2Engine {
                     &encoder_device,
                     encoder_dtype,
                 )?;
-                self.base
-                    .progress
-                    .stage_start("Encoding prompt (streamed Mistral3)");
+                // Name the device and the streamed peak in the stage label:
+                // the whole point of the planner's streaming charge is that
+                // this phase runs on the GPU in bf16 at ~3.6 GB rather than on
+                // the CPU in F32, and a log line that says neither cannot tell
+                // the two apart after the fact.
+                let encoder_label =
+                    format!(
+                    "Encoding prompt (streamed Mistral3, {device}, {peak:.1} GB peak, {dtype:?})",
+                    device = if encoder_device.is_cpu() { "CPU" } else { "GPU" },
+                    peak = super::text_encoder_residency::mistral3_streamed_device_peak_bytes(
+                        encoder_dtype,
+                        super::text_encoder_residency::MISTRAL3_DEFAULT_LOOKAHEAD,
+                    ) as f64
+                        / 1e9,
+                    dtype = encoder_dtype,
+                );
+                self.base.progress.stage_start(&encoder_label);
                 let encode_start = Instant::now();
                 // Dev is guidance-distilled, so `prompts` is always the single
                 // positive prompt here — the loop is over one element.
                 let mut encoded = Vec::with_capacity(prompts.len());
                 for prompt in &prompts {
-                    let (txt_emb, _) = encoder.encode(prompt, &device, gpu_dtype)?;
+                    let (txt_emb, _) =
+                        encoder.encode(prompt, &device, gpu_dtype, &self.base.progress)?;
                     let cached = CachedTensor::from_tensor(&txt_emb)?;
                     self.prompt_cache
                         .lock()
@@ -1290,7 +1305,7 @@ impl Flux2Engine {
                 }
                 self.base.progress.phase_done(
                     crate::ProgressPhase::PromptEncode,
-                    "Encoding prompt (streamed Mistral3)",
+                    &encoder_label,
                     encode_start.elapsed(),
                 );
                 drop(encoder);

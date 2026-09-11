@@ -11,6 +11,7 @@
 //! `src/flux2/text_encoder.py` and `src/flux2/sampling.py` in BFL's `flux2`
 //! reference repository.
 
+use crate::flux2::text_encoder_residency as residency;
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Module, Tensor, D};
 use candle_nn::VarBuilder;
@@ -30,6 +31,11 @@ const RMS_NORM_EPS: f64 = 1e-5;
 const MAX_LENGTH: usize = 512;
 const PAD_TOKEN_ID: u32 = 11;
 const CAPTURE_LAYERS: [usize; 3] = [9, 19, 29];
+
+/// The progress component name for the whole streamed prefix. One label for
+/// the mapping and for every layer it streams, so the bar advances instead of
+/// jumping from 0 % to 100 % once.
+pub(crate) const STREAMED_ENCODER_COMPONENT: &str = "FLUX.2 [dev] Mistral3 encoder";
 
 /// Largest simultaneously resident weight allocation in the streamed encoder:
 /// the 131072 x 5120 token embedding table. Decoder layers are smaller.
@@ -327,6 +333,7 @@ impl Mistral3Encoder {
         prompt: &str,
         target_device: &Device,
         target_dtype: DType,
+        progress: &crate::progress::ProgressReporter,
     ) -> Result<(Tensor, usize)> {
         let formatted = format_prompt(prompt);
         let encoding = self
@@ -344,38 +351,133 @@ impl Mistral3Encoder {
             &self.encoder_paths,
             self.dtype,
             &self.device,
-            "FLUX.2 [dev] Mistral3 encoder",
+            STREAMED_ENCODER_COMPONENT,
             &crate::progress::ProgressReporter::default(),
         )?
         .pp(self.lm_prefix);
 
         let input_ids = Tensor::from_vec(tokens, (1, MAX_LENGTH), &self.device)?;
-        let mut hidden = {
+        let hidden = {
             let embedding = candle_nn::embedding(VOCAB_SIZE, HIDDEN_SIZE, vb.pp("embed_tokens"))?;
             embedding.forward(&input_ids)?
         };
-        self.device.synchronize()?;
 
         let mask = causal_padding_mask(&attention, self.dtype, &self.device)?;
         let rotary = Arc::new(RotaryEmbedding::new(self.dtype, &self.device)?);
-        let mut captured = Vec::with_capacity(CAPTURE_LAYERS.len());
-        for layer_index in 0..=*CAPTURE_LAYERS.last().unwrap() {
-            let layer = DecoderLayer::new(rotary.clone(), vb.pp("layers").pp(layer_index))
-                .with_context(|| format!("loading Mistral3 decoder layer {layer_index}"))?;
-            hidden = layer
-                .forward(&hidden, &mask)
-                .with_context(|| format!("running Mistral3 decoder layer {layer_index}"))?;
-            self.device.synchronize()?;
-            drop(layer);
-            if CAPTURE_LAYERS.contains(&layer_index) {
-                captured.push(hidden.clone());
-            }
-        }
+
+        // The streamed prefix, priced exactly as admission prices it, so the
+        // progress bar and the memory plan describe the same thing.
+        let embed_bytes = residency::mistral3_embed_bytes(self.dtype);
+        let layer_bytes = residency::mistral3_layer_bytes(self.dtype);
+        let prefix_bytes = residency::mistral3_prefix_bytes(self.dtype);
+        let built = std::sync::atomic::AtomicU64::new(0);
+        let layers = vb.pp("layers");
+        let build = |index: usize| -> Result<DecoderLayer> {
+            let layer = DecoderLayer::new(rotary.clone(), layers.pp(index))
+                .with_context(|| format!("loading Mistral3 decoder layer {index}"))?;
+            let done = built.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            progress.weight_load(
+                STREAMED_ENCODER_COMPONENT,
+                embed_bytes.saturating_add(done.saturating_mul(layer_bytes)),
+                prefix_bytes,
+            );
+            Ok(layer)
+        };
+
+        let captured = stream_layers(
+            last_required_layer(),
+            hidden,
+            build,
+            |layer: &DecoderLayer, hidden: &Tensor| layer.forward(hidden, &mask),
+            &CAPTURE_LAYERS,
+        )?;
         let output = Tensor::cat(&captured, D::Minus1)?
             .to_device(target_device)?
             .to_dtype(target_dtype)?;
         Ok((output, token_count))
     }
+}
+
+/// Drive a streamed layer stack with one layer of look-ahead.
+///
+/// `build(k + 1)` runs on a scoped thread while `run` executes layer `k`, so
+/// the host-side work of materializing the next layer — faulting in its
+/// mapped pages, converting its dtype, and issuing its host-to-device copies —
+/// overlaps the layer already on the accelerator instead of following it.
+/// Exactly `MISTRAL3_LOOKAHEAD + 1` layers are ever alive, which is what
+/// [`crate::flux2::text_encoder_residency::mistral3_streamed_device_peak_bytes`]
+/// charges admission.
+///
+/// Three facts make this safe on CUDA, and none of them is an assumption about
+/// timing:
+///
+/// * Candle's `CudaDevice` is `Clone` and every clone shares ONE
+///   `Arc<CudaStream>` (`candle-core/src/cuda_backend/device.rs:59-70`), so
+///   the prefetch's uploads and the forward's launches are issued onto the
+///   same stream and execute in the order the driver receives them.
+/// * Every cudarc entry point binds the context to the calling thread before
+///   touching the driver (`cudarc-0.19.9/src/driver/safe/core.rs:1538` for
+///   `alloc`, `:1612` for `memcpy_htod`), so a second OS thread needs no
+///   setup of its own.
+/// * `CudaSlice::drop` is stream-ordered (`core.rs:800-819`): with async
+///   allocation it issues `cuMemFreeAsync` on the slice's OWN stream, and
+///   without it, it synchronizes that stream first. So releasing layer `k`
+///   after `k + 1`'s uploads have been issued cannot free memory the stream
+///   is still reading.
+///
+/// The two operations touch disjoint allocations — the forward reads layer
+/// `k`'s weights and the state tensor, the prefetch writes fresh
+/// allocations — so the result is bit-identical to the serial loop, which is
+/// what `prefetching_matches_the_serial_stack` pins.
+///
+/// This replaces a `device.synchronize()` after every layer. Those calls
+/// blocked the host on the GPU without ordering anything the stream did not
+/// already order, which is the whole reason there was nothing to overlap.
+fn stream_layers<Layer, State, Build, Run>(
+    last_layer: usize,
+    initial: State,
+    build: Build,
+    mut run: Run,
+    capture: &[usize],
+) -> Result<Vec<State>>
+where
+    Layer: Send,
+    State: Clone,
+    Build: Fn(usize) -> Result<Layer> + Sync,
+    Run: FnMut(&Layer, &State) -> Result<State>,
+{
+    let build = &build;
+    let mut state = initial;
+    let mut captured = Vec::with_capacity(capture.len());
+    let mut current = build(0)?;
+    for index in 0..=last_layer {
+        let (next, output) = std::thread::scope(|scope| -> Result<(Option<Layer>, State)> {
+            let prefetch = (index < last_layer).then(|| scope.spawn(move || build(index + 1)));
+            // Run first: the prefetch is already in flight, and a failure here
+            // must still join the thread before it propagates.
+            let output = run(&current, &state);
+            let next = match prefetch {
+                Some(handle) => Some(handle.join().map_err(|_| {
+                    anyhow::anyhow!("streamed layer {} failed to build", index + 1)
+                })??),
+                None => None,
+            };
+            let output =
+                output.with_context(|| format!("running Mistral3 decoder layer {index}"))?;
+            Ok((next, output))
+        })?;
+        state = output;
+        if capture.contains(&index) {
+            captured.push(state.clone());
+        }
+        // Layer `index` is released HERE, after `index + 1` is already built:
+        // two layers alive at the seam, never three.
+        match next {
+            Some(layer) => current = layer,
+            None => break,
+        }
+    }
+    Ok(captured)
 }
 
 fn causal_padding_mask(attention: &[bool], dtype: DType, device: &Device) -> Result<Tensor> {
@@ -402,6 +504,134 @@ fn causal_padding_mask(attention: &[bool], dtype: DType, device: &Device) -> Res
 mod tests {
     use super::*;
     use candle_core::IndexOp;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A stand-in for a decoder layer that reports its own residency.
+    ///
+    /// A real two-layer Mistral3 fixture is not a test: one layer of this
+    /// geometry is 1.1 GB, and the dimensions are compile-time constants of
+    /// the checkpoint. What `stream_layers` owns is the SCHEDULE — how many
+    /// layers are alive, in what order they run, and whether the answer
+    /// depends on the overlap — and a synthetic layer exercises all three.
+    struct CountedLayer {
+        index: usize,
+        live: Arc<AtomicUsize>,
+    }
+
+    impl CountedLayer {
+        fn build(index: usize, live: &Arc<AtomicUsize>, peak: &Arc<AtomicUsize>) -> Self {
+            let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            Self {
+                index,
+                live: live.clone(),
+            }
+        }
+    }
+
+    impl Drop for CountedLayer {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// An order-sensitive, non-commutative step, so a schedule that ran two
+    /// layers out of order could not produce the same number.
+    fn advance(layer: &CountedLayer, state: &f64) -> Result<f64> {
+        Ok(state.mul_add(1.5, layer.index as f64 + 1.0).sqrt())
+    }
+
+    fn serial(last_layer: usize, capture: &[usize]) -> Vec<f64> {
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut state = 1.0f64;
+        let mut captured = Vec::new();
+        for index in 0..=last_layer {
+            let layer = CountedLayer::build(index, &live, &peak);
+            state = advance(&layer, &state).unwrap();
+            drop(layer);
+            if capture.contains(&index) {
+                captured.push(state);
+            }
+        }
+        captured
+    }
+
+    /// One layer of look-ahead must not change the answer. The prefetch runs
+    /// on another thread and on CUDA shares the forward's stream, so if the
+    /// schedule could perturb the result it would perturb every render.
+    #[test]
+    fn prefetching_matches_the_serial_stack() {
+        for last_layer in [0usize, 1, 2, 29] {
+            let capture: Vec<usize> = (0..=last_layer).filter(|i| i % 3 == 0).collect();
+            let live = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let (build_live, build_peak) = (live.clone(), peak.clone());
+            let got = stream_layers(
+                last_layer,
+                1.0f64,
+                move |index| Ok(CountedLayer::build(index, &build_live, &build_peak)),
+                |layer: &CountedLayer, state: &f64| advance(layer, state),
+                &capture,
+            )
+            .unwrap();
+            assert_eq!(
+                got,
+                serial(last_layer, &capture),
+                "look-ahead changed the result at last_layer={last_layer}"
+            );
+        }
+    }
+
+    /// At most `lookahead + 1` layers are ever alive — exactly what
+    /// `flux2::text_encoder_residency::mistral3_streamed_device_peak_bytes`
+    /// charges admission at `MISTRAL3_DEFAULT_LOOKAHEAD`. A driver that held
+    /// three would silently break the budget the planner admitted on.
+    #[test]
+    fn never_more_than_the_charged_look_ahead_is_resident() {
+        let last_layer = last_required_layer();
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let (build_live, build_peak) = (live.clone(), peak.clone());
+        stream_layers(
+            last_layer,
+            1.0f64,
+            move |index| Ok(CountedLayer::build(index, &build_live, &build_peak)),
+            |layer: &CountedLayer, state: &f64| advance(layer, state),
+            &CAPTURE_LAYERS,
+        )
+        .unwrap();
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            (residency::MISTRAL3_DEFAULT_LOOKAHEAD + 1) as usize,
+            "the streamed encoder holds the running layer and the prefetched one"
+        );
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "every layer is released before the stack returns"
+        );
+    }
+
+    /// A build failure surfaces as an error naming the layer, never a panic
+    /// escaping the scoped thread.
+    #[test]
+    fn a_failed_prefetch_is_reported_not_swallowed() {
+        let error = stream_layers(
+            5,
+            1.0f64,
+            |index| {
+                if index == 3 {
+                    anyhow::bail!("synthetic failure")
+                }
+                Ok(index)
+            },
+            |layer: &usize, state: &f64| Ok(state + *layer as f64),
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("synthetic failure"));
+    }
 
     #[test]
     fn prompt_matches_official_flux2_dev_template_and_removes_image_markers() {
