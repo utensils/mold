@@ -1724,7 +1724,7 @@ impl ZImageEngine {
             if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
                 let park_mode = crate::flux2::text_encoder_residency::qwen3_park_residency(
                     &loaded.device,
-                    &self.base.paths.text_encoder_files,
+                    loaded.text_encoder.encoder_paths(),
                     zimage_transformer_bytes,
                 )
                 .parks();

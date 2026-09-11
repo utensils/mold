@@ -1328,6 +1328,13 @@ impl Flux2Engine {
             return Ok(());
         }
 
+        // An eager load populates `base.loaded` with a transformer of its own,
+        // so the sequential path's retained slot must go first — holding both
+        // is the doubled peak each path exists to bound. `generate_inner`
+        // already clears it before taking the eager branch; this covers the
+        // admin and direct-caller routes that reach `load()` on their own.
+        self.retained_transformer = None;
+
         tracing::info!(model = %self.base.model_name, "loading Flux.2 Klein model components...");
 
         let text_tokenizer_path = self.validate_paths()?;
@@ -2273,9 +2280,6 @@ impl Flux2Engine {
                 .map(|loaded| loaded.dtype)
                 .unwrap_or(DType::BF16),
         );
-        // Resolved before the `loaded` borrow, like the two above: the park
-        // decision needs `self`, and the encode loop needs `&mut loaded`.
-        let encoder_paths_for_park = self.text_encoder_paths();
         let eager_usable_free = {
             let free_now = crate::device::free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             let resident = self
@@ -2402,7 +2406,7 @@ impl Flux2Engine {
                 if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
                     let park_mode = super::text_encoder_residency::qwen3_park_residency(
                         &loaded.device,
-                        &encoder_paths_for_park,
+                        loaded.text_encoder.encoder_paths(),
                         transformer_bytes,
                     )
                     .parks();

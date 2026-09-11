@@ -361,6 +361,15 @@ impl Qwen3Encoder {
         self.reload(progress)
     }
 
+    /// The checkpoint files this encoder was actually built from.
+    ///
+    /// The residency decision needs THESE, not the manifest's BF16 shards: a
+    /// host that resolved a Q8 GGUF variant would otherwise be asked whether
+    /// it can park bytes ten times the size of what it is holding.
+    pub fn encoder_paths(&self) -> &[PathBuf] {
+        &self.encoder_paths
+    }
+
     /// Whether this encoder is currently parked (CPU-resident, GPU-free), on
     /// either the BF16 or the GGUF path.
     pub fn is_parked(&self) -> bool {
