@@ -362,7 +362,9 @@ describe("the downloads chip's words", () => {
 
   it("says Downloads when nothing is on its way", () => {
     const wrapper = mountNav();
-    expect(wrapper.get("[data-test='downloads-chip']").text()).toBe("Downloads");
+    expect(wrapper.get("[data-test='downloads-chip']").text()).toBe(
+      "Downloads",
+    );
     expect(wrapper.get("[data-test='downloads-chip']").classes()).not.toContain(
       "dl-chip--busy",
     );

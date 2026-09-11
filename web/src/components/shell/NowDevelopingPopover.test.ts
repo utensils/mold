@@ -70,8 +70,18 @@ describe("the live-work chip's words", () => {
   // (Being made / Waiting), never a count with a noun nobody says.
   it("says how many are being made and how many wait", () => {
     const making = row();
-    const waiting = { ...row(), id: "job-2", key: "origin/job-2", phase: "queued" };
-    const alsoWaiting = { ...row(), id: "job-3", key: "origin/job-3", phase: "queued" };
+    const waiting = {
+      ...row(),
+      id: "job-2",
+      key: "origin/job-2",
+      phase: "queued",
+    };
+    const alsoWaiting = {
+      ...row(),
+      id: "job-3",
+      key: "origin/job-3",
+      phase: "queued",
+    };
     const wrapper = mount(NowDevelopingPopover, {
       props: { rows: [making, waiting, alsoWaiting] },
       attachTo: document.body,

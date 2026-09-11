@@ -1094,7 +1094,10 @@ async function setCoverFromSelection() {
       collection.hosts.some((h) => h.hostId === c.hostId),
     ) ?? null;
   if (!copy) {
-    toast("error", "That print has no copy on a machine holding this collection.");
+    toast(
+      "error",
+      "That print has no copy on a machine holding this collection.",
+    );
     return;
   }
   const result = await setCollectionCover(
@@ -1214,7 +1217,10 @@ async function downloadSelected() {
       downloadProgress.value = `Downloading ${index + 1} of ${targets.length}…`;
       try {
         const host = hostById(entry.hostId);
-        if (!host) throw new Error("The machine holding that media is no longer connected.");
+        if (!host)
+          throw new Error(
+            "The machine holding that media is no longer connected.",
+          );
         downloadVideoExport(
           await fetchGalleryBlob(host, entry.filename),
           downloadFilename(entry),
