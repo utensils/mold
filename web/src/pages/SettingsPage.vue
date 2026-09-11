@@ -19,7 +19,7 @@ import {
   ref,
   watch,
 } from "vue";
-import { RouterLink, useRoute } from "vue-router";
+import { RouterLink, useRoute, useRouter } from "vue-router";
 import PairingAccessPanel from "@studio/components/PairingAccessPanel.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import LicenseSettingsPanel from "@studio/components/LicenseSettingsPanel.vue";
@@ -91,50 +91,40 @@ function errorMessage(error: unknown): string {
 const shell = ref<{ jump: (id: SectionId) => void } | null>(null);
 
 /**
- * Land a deep link on its section.
- *
- * One jump at mount is not enough here: the shell mounts bodies lazily and
- * the licence, pairing and device panels arrive over the network, so the page
- * keeps growing ABOVE the target while the smooth scroll is still running and
- * the scroll lands hundreds of pixels short (measured on hal9000: `y = 97`
- * for a section that ended up at `y = 3215`). So jump again while the target
- * is still far from the top — and stop the moment the reader takes over,
- * because fighting someone's own scroll is worse than landing short.
+ * A browser page scrolls the window, so the shell runs as PANES here: the nav
+ * is a navigation and one section is on screen at a time. That makes
+ * `?section=` the address of what is showing, in both directions — a deep
+ * link opens its pane, and picking a pane rewrites the address (replace, not
+ * push: the panes are one page to the Back button).
  */
-async function jumpToSection(id: SectionId) {
-  let interrupted = false;
-  const stop = () => (interrupted = true);
-  const events = ["wheel", "touchstart", "keydown"] as const;
-  for (const event of events)
-    window.addEventListener(event, stop, { passive: true, once: true });
-  try {
-    await nextTick();
-    for (let attempt = 0; attempt < 6 && !interrupted; attempt += 1) {
-      shell.value?.jump(id);
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      const top = document
-        .querySelector(`[data-test="section-${id}"]`)
-        ?.getBoundingClientRect().top;
-      if (top !== undefined && Math.abs(top) < 48) return;
-    }
-  } finally {
-    for (const event of events) window.removeEventListener(event, stop);
-  }
+const route = useRoute();
+const router = useRouter();
+
+function sectionFromQuery(section: unknown): SectionId | null {
+  if (typeof section !== "string") return null;
+  // The retired `about` section folded into Updates & about.
+  const id = section === "about" ? "updates" : section;
+  return WEB_SECTIONS.some((candidate) => candidate.id === id)
+    ? (id as SectionId)
+    : null;
 }
 
-// Router-less in tests; the page still renders without a route.
-const route = useRoute();
 watch(
   () => route?.query.section,
-  (section) => {
-    if (typeof section !== "string") return;
-    // The retired `about` section folded into Updates & about.
-    const id = section === "about" ? "updates" : section;
-    if (!WEB_SECTIONS.some((candidate) => candidate.id === id)) return;
-    void jumpToSection(id as SectionId);
+  async (section) => {
+    const id = sectionFromQuery(section);
+    if (!id) return;
+    await nextTick();
+    shell.value?.jump(id);
   },
   { immediate: true },
 );
+
+function onActiveSection(id: SectionId) {
+  if (!route || !router) return;
+  if (route.query.section === id) return;
+  void router.replace({ query: { ...route.query, section: id } });
+}
 
 // ── Engine configuration (this origin) ────────────────────────────────────
 const configRows = ref<ConfigRow[]>([]);
@@ -535,6 +525,8 @@ onBeforeUnmount(() => {
       ref="shell"
       :sections="WEB_SECTIONS"
       :raw-keys-by-section="rawKeysBySection"
+      layout="pane"
+      @update:active="onActiveSection"
     >
       <template #section="{ section, mounted }">
         <template v-if="!mounted" />
@@ -1005,26 +997,6 @@ onBeforeUnmount(() => {
 .settings-page {
   width: 100%;
   box-sizing: border-box;
-}
-
-/*
- * Below 900px the shell folds its two columns into one, but it keeps the
- * `align-items: start` / `align-self: start` that hold its sticky nav beside
- * the page — and in a column flex layout that axis is the HORIZONTAL one, so
- * both children shrink-wrap to max-content and the whole page scrolls
- * sideways (measured: a 1,423px nav and a 997px page at an 880px viewport).
- * Stretching them back to the column width is what lets the chip strip's own
- * `overflow-x` do its job. This belongs in the kit's own media query — see
- * the lane report.
- */
-@media (max-width: 899px) {
-  .settings-page :deep(.ms-settings-shell) {
-    align-items: stretch;
-  }
-  .settings-page :deep(.ms-settings-nav) {
-    align-self: stretch;
-    min-width: 0;
-  }
 }
 
 .settings-body {

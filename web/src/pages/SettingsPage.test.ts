@@ -1,13 +1,5 @@
-import { flushPromises, mount } from "@vue/test-utils";
-import {
-  afterAll,
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reactive } from "vue";
 import SettingsPage from "./SettingsPage.vue";
 import settingsPageSource from "./SettingsPage.vue?raw";
@@ -28,6 +20,7 @@ const statusRef = vi.hoisted(() => ({ value: null as ServerStatus | null }));
 const subscribeToDeviceSnapshots = vi.hoisted(() => vi.fn());
 const routeState = vi.hoisted(() => ({ query: {} as Record<string, string> }));
 const pushMock = vi.hoisted(() => vi.fn());
+const replaceMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../composables/useStatusPoll", () => ({
   useStatusPoll: () => ({ status: statusRef }),
@@ -35,7 +28,7 @@ vi.mock("../composables/useStatusPoll", () => ({
 vi.mock("../lib/deviceEvents", () => ({ subscribeToDeviceSnapshots }));
 vi.mock("vue-router", () => ({
   useRoute: () => reactive(routeState),
-  useRouter: () => ({ push: pushMock }),
+  useRouter: () => ({ push: pushMock, replace: replaceMock }),
   RouterLink: {
     props: { to: { type: [String, Object], required: true } },
     template: '<a :href=\'typeof to === "string" ? to : ""\'><slot /></a>',
@@ -43,25 +36,14 @@ vi.mock("vue-router", () => ({
 }));
 
 /*
- * The shell mounts a section body when the viewport comes near it. happy-dom
- * ships an IntersectionObserver that never fires, so every body would stay
- * unmounted and every assertion below would be about an empty page. Removing
- * the constructor takes the shell's own documented no-observer path — eager
- * bodies — which is the idiom desktop's SettingsView test already uses.
+ * On web the shell runs as PANES: one section is on screen at a time and the
+ * nav is a navigation, so a test that reads a section opens it first — the
+ * way a person does. (There is no scroll-spy to stub; a pane creates none.)
  */
-const realIntersectionObserver = globalThis.IntersectionObserver;
-Object.defineProperty(globalThis, "IntersectionObserver", {
-  value: undefined,
-  writable: true,
-  configurable: true,
-});
-afterAll(() => {
-  Object.defineProperty(globalThis, "IntersectionObserver", {
-    value: realIntersectionObserver,
-    writable: true,
-    configurable: true,
-  });
-});
+async function openSection(wrapper: VueWrapper, id: string) {
+  await wrapper.get(`[data-test="settings-nav-${id}"]`).trigger("click");
+  await flushPromises();
+}
 
 const originalFetch = globalThis.fetch;
 
@@ -302,21 +284,7 @@ describe("SettingsPage", () => {
     expect(wrapper.find('[data-test="no-search-results"]').exists()).toBe(true);
   });
 
-  it("lands on the section named by ?section=", async () => {
-    // The page grows under a deep link while its panels load, so the jump is
-    // retried until the section is at the top — one scroll at mount lands
-    // hundreds of pixels short.
-    const scrollIntoView = vi.fn();
-    const nativeScrollIntoView = Object.getOwnPropertyDescriptor(
-      Element.prototype,
-      "scrollIntoView",
-    );
-    Object.defineProperty(Element.prototype, "scrollIntoView", {
-      value: scrollIntoView,
-      writable: true,
-      configurable: true,
-    });
-    vi.useFakeTimers();
+  it("lands on the section named by ?section=, and only that one", async () => {
     routeState.query = { section: "library" };
     const wrapper = mount(SettingsPage);
     await flushPromises();
@@ -326,22 +294,28 @@ describe("SettingsPage", () => {
         .get('[data-test="settings-nav-library"]')
         .attributes("aria-current"),
     ).toBe("true");
-    expect(scrollIntoView).toHaveBeenCalled();
-    const attempts = scrollIntoView.mock.instances.length;
+    const shown = wrapper
+      .findAll('[data-test^="section-"]')
+      .map((el) => el.attributes("data-test"));
+    expect(shown).toEqual(["section-library"]);
+  });
 
-    await vi.advanceTimersByTimeAsync(400);
-    expect(scrollIntoView.mock.instances.length).toBeGreaterThan(attempts);
+  it("rewrites ?section= when a pane is picked, replacing rather than pushing", async () => {
+    routeState.query = {};
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
+    replaceMock.mockClear();
+
+    await openSection(wrapper, "cloud");
+    expect(replaceMock).toHaveBeenLastCalledWith({
+      query: { section: "cloud" },
+    });
+    expect(pushMock).not.toHaveBeenCalled();
     expect(
-      (scrollIntoView.mock.instances.at(-1) as HTMLElement).dataset.test,
-    ).toBe("section-library");
-    vi.useRealTimers();
-    if (nativeScrollIntoView)
-      Object.defineProperty(
-        Element.prototype,
-        "scrollIntoView",
-        nativeScrollIntoView,
-      );
-    else Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+      wrapper
+        .findAll('[data-test^="section-"]')
+        .map((el) => el.attributes("data-test")),
+    ).toEqual(["section-cloud"]);
   });
 
   it("folds the retired about deep link into Updates & about", async () => {
@@ -360,6 +334,8 @@ describe("SettingsPage", () => {
     localStorage.clear();
     reloadAutoTagTitle();
     const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await openSection(wrapper, "library");
     await flushPromises();
 
     const toggle = wrapper.get('[data-test="config-auto-tag-title"]');
@@ -381,16 +357,28 @@ describe("SettingsPage", () => {
 
     const wrapper = mount(SettingsPage);
     await flushPromises();
-    const html = wrapper.html();
+
+    // Only one pane is on screen — the page never stacks its sections.
+    expect(wrapper.findAll('[data-test^="section-"]')).toHaveLength(1);
 
     // (a) "Server-provided configuration key." can only ever mean a key newer
-    // than this client — here, the one synthetic unknown.
-    expect(html.split("Server-provided configuration key.").length - 1).toBe(1);
+    // than this client — here, the one synthetic unknown, and only in Advanced.
+    for (const id of ["generation", "cloud", "performance", "updates"]) {
+      await openSection(wrapper, id);
+      expect(wrapper.html(), id).not.toContain(
+        "Server-provided configuration key.",
+      );
+    }
+    await openSection(wrapper, "advanced");
+    expect(
+      wrapper.html().split("Server-provided configuration key.").length - 1,
+    ).toBe(1);
     expect(wrapper.get('[data-test="section-advanced"]').text()).toContain(
       "future.option",
     );
 
     // (b) 104 per-style rows are 13 collapsed disclosures, not 104 rows.
+    await openSection(wrapper, "styleDefaults");
     expect(wrapper.findAll('[data-test="per-style-name"]')).toHaveLength(13);
     expect(wrapper.get('[data-test="section-styleDefaults"]').text()).toContain(
       "flux-dev:q4",
@@ -400,14 +388,20 @@ describe("SettingsPage", () => {
     ).toHaveLength(0);
 
     // (c) the duplicate GPU card is gone; Machines owns the one device list.
+    await openSection(wrapper, "hosts");
     expect(
       wrapper.find('[data-test="settings-device-controls"]').exists(),
     ).toBe(false);
+    expect(wrapper.get('[data-test="section-hosts"]').text()).toContain(
+      "Open Machines",
+    );
   });
 
   it("expands one style's overrides to its eight fields", async () => {
     globalThis.fetch = configRespondingFetch(hal9000ConfigRows());
     const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await openSection(wrapper, "styleDefaults");
     await flushPromises();
 
     const disclosure = wrapper.findAll(
@@ -451,6 +445,8 @@ describe("SettingsPage", () => {
 
     const wrapper = mount(SettingsPage);
     await flushPromises();
+    await openSection(wrapper, "generation");
+    await flushPromises();
 
     const steps = wrapper.get(
       '[data-test="section-generation"] input[type="number"]',
@@ -469,6 +465,8 @@ describe("SettingsPage", () => {
   it("offers a machine picker for licences only when more than one is known", async () => {
     const wrapper = mount(SettingsPage);
     await flushPromises();
+    await openSection(wrapper, "licenses");
+    await flushPromises();
     expect(wrapper.find('[data-test="licence-machine"]').exists()).toBe(false);
     wrapper.unmount();
 
@@ -480,6 +478,7 @@ describe("SettingsPage", () => {
     );
     const withPeer = mount(SettingsPage);
     await flushPromises();
+    await openSection(withPeer, "licenses");
     const picker = withPeer.get('[data-test="licence-machine"]');
     expect(picker.findAll("option").map((option) => option.text())).toContain(
       "plato",
@@ -545,6 +544,8 @@ describe("SettingsPage", () => {
 
     const wrapper = mount(SettingsPage);
     await flushPromises();
+    await openSection(wrapper, "hosts");
+    await flushPromises();
     const machines = wrapper.get('[data-test="section-hosts"]');
     expect(machines.text()).toContain("NVIDIA RTX 3090");
     expect(
@@ -582,6 +583,8 @@ describe("SettingsPage", () => {
     };
     const wrapper = mount(SettingsPage);
     await flushPromises();
+    await openSection(wrapper, "updates");
+    await flushPromises();
 
     expect(wrapper.get("h1").text()).toBe("Settings");
     expect(wrapper.get('[data-test="about-version"]').text()).toBe("9.9.9");
@@ -594,6 +597,8 @@ describe("SettingsPage", () => {
 
   it("falls back to an em dash when the server version is unknown", async () => {
     const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await openSection(wrapper, "updates");
     await flushPromises();
     expect(wrapper.get('[data-test="about-version"]').text()).toBe("—");
   });
@@ -653,6 +658,8 @@ describe("SettingsPage", () => {
       } as Response;
     }) as typeof fetch;
     const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await openSection(wrapper, "hosts");
     await vi.waitFor(() =>
       expect(subscribeToDeviceSnapshots).toHaveBeenCalled(),
     );
@@ -693,6 +700,8 @@ describe("SettingsPage", () => {
     }) as typeof fetch;
     const wrapper = mount(SettingsPage);
     await flushPromises();
+    await openSection(wrapper, "accounts");
+    await flushPromises();
     expect(wrapper.get('[data-test="credentials-error"]').text()).toContain(
       "Could not load",
     );
@@ -724,6 +733,8 @@ describe("SettingsPage", () => {
       return fallback(input, init);
     }) as typeof fetch;
     const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await openSection(wrapper, "accounts");
     await flushPromises();
     await wrapper.get("input[name=hf_token]").setValue("hf_fixture");
     await wrapper.get("input[name=civitai_token]").setValue("cv_keep_draft");
@@ -784,6 +795,8 @@ describe("SettingsPage", () => {
     });
     const wrapper = mount(SettingsPage);
     await flushPromises();
+    await openSection(wrapper, "accounts");
+    await flushPromises();
     await wrapper.get("input[name=hf_token]").setValue("hf_secretvalue1234");
     await wrapper.get('[data-test="save-hf"]').trigger("click");
     await flushPromises();
@@ -830,6 +843,8 @@ describe("SettingsPage", () => {
       } as Response;
     });
     const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await openSection(wrapper, "accounts");
     await flushPromises();
     expect(wrapper.get('[data-test="civitai-mask"]').text()).toBe(
       "cv_••••7890",
@@ -878,6 +893,8 @@ describe("SettingsPage", () => {
 
     const wrapper = mount(SettingsPage);
     await flushPromises();
+    await openSection(wrapper, "accounts");
+    await flushPromises();
     expect(wrapper.get('[data-test="hf-source"]').text()).toBe("Environment");
     await wrapper.get('[data-test="replace-hf"]').trigger("click");
     await wrapper.get("input[name=hf_token]").setValue("hf_user_override");
@@ -896,6 +913,8 @@ describe("SettingsPage", () => {
 
   it("keeps the token in the field when the server rejects the save", async () => {
     const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await openSection(wrapper, "accounts");
     await flushPromises();
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       ok: false,
@@ -944,6 +963,8 @@ describe("SettingsPage", () => {
       } as Response;
     });
     const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await openSection(wrapper, "accounts");
     await flushPromises();
 
     await wrapper.get('[data-test="clear-civitai"]').trigger("click");
@@ -998,6 +1019,8 @@ describe("SettingsPage", () => {
     }) as typeof fetch;
 
     const wrapper = mount(SettingsPage);
+    await flushPromises();
+    await openSection(wrapper, "hosts");
     await vi.waitFor(() =>
       expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(2),
     );

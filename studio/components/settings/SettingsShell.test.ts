@@ -255,3 +255,124 @@ describe("SettingsShell layout", () => {
     expect(source).toMatch(/overflow-x:\s*auto/);
   });
 });
+
+describe("SettingsShell pane layout", () => {
+  /*
+   * A browser page scrolls the window, so fifteen always-open sections make a
+   * seven-screen page whatever the nav does — which is the complaint that
+   * started this. In `layout="pane"` the nav is a real navigation: one section
+   * is on screen at a time, a nav click swaps it, and search shows every match
+   * stacked so a word still finds its row wherever it lives.
+   */
+  beforeEach(() =>
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver),
+  );
+  afterEach(() => vi.unstubAllGlobals());
+
+  function mountPane() {
+    return mount(SettingsShell, {
+      props: { sections, layout: "pane" },
+      slots: {
+        section: `<template #section="{ section, mounted }">
+          <div v-if="mounted" :data-test="'body-' + section.id">{{ section.label }} body</div>
+        </template>`,
+      },
+      attachTo: document.body,
+    });
+  }
+
+  it("shows exactly one section, the active one, with its body mounted", () => {
+    const wrapper = mountPane();
+    expect(wrapper.findAll("[data-test^='section-']")).toHaveLength(1);
+    expect(wrapper.find("[data-test='section-app']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='body-app']").exists()).toBe(true);
+    expect(wrapper.findAll("[data-test^='settings-nav-']")).toHaveLength(
+      sections.length,
+    );
+    wrapper.unmount();
+  });
+
+  it("a nav click swaps the pane and reports the active section", async () => {
+    const wrapper = mountPane();
+    await wrapper.get("[data-test='settings-nav-cloud']").trigger("click");
+    expect(wrapper.findAll("[data-test^='section-']")).toHaveLength(1);
+    expect(wrapper.find("[data-test='section-cloud']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='section-app']").exists()).toBe(false);
+    expect(wrapper.emitted("update:active")?.at(-1)).toEqual(["cloud"]);
+    expect(
+      wrapper
+        .get("[data-test='settings-nav-cloud']")
+        .attributes("aria-current"),
+    ).toBe("true");
+    wrapper.unmount();
+  });
+
+  it("jump from outside swaps the pane without waiting on any scroll", async () => {
+    const wrapper = mountPane();
+    (wrapper.vm as unknown as { jump: (id: SectionId) => void }).jump(
+      "library",
+    );
+    await nextTick();
+    expect(wrapper.find("[data-test='section-library']").exists()).toBe(true);
+    expect(wrapper.findAll("[data-test^='section-']")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("search stacks every match, then returns to the one pane when cleared", async () => {
+    const wrapper = mountPane();
+    await wrapper.get("[data-test='settings-search']").setValue("trash");
+    const shown = wrapper
+      .findAll("[data-test^='section-']")
+      .map((el) => el.attributes("data-test"));
+    expect(shown).toContain("section-library");
+    expect(shown.length).toBeGreaterThanOrEqual(1);
+    await wrapper.get("[data-test='settings-search']").setValue("");
+    expect(wrapper.findAll("[data-test^='section-']")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("creates no scroll-spy — there is nothing to spy on", () => {
+    observers.length = 0;
+    const wrapper = mountPane();
+    expect(observers).toHaveLength(0);
+    wrapper.unmount();
+  });
+});
+
+describe("SettingsShell scroll ownership", () => {
+  beforeEach(() =>
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver),
+  );
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("observes against the viewport when the page scrolls, and against its own column when it owns the scroll", () => {
+    observers.length = 0;
+    const page = mount(SettingsShell, {
+      props: { sections },
+      attachTo: document.body,
+    });
+    expect(observers.map((o) => o.options.root ?? null)).toEqual([null, null]);
+    page.unmount();
+
+    observers.length = 0;
+    const own = mount(SettingsShell, {
+      props: { sections, scroll: "content" },
+      attachTo: document.body,
+    });
+    const content = own.get(".ms-settings-content").element;
+    expect(observers.map((o) => o.options.root)).toEqual([content, content]);
+    expect(own.get(".ms-settings-shell").classes()).toContain(
+      "ms-settings-shell--own-scroll",
+    );
+    own.unmount();
+  });
+
+  it("stretches the folded layout so the chip strip, not the page, scrolls sideways", async () => {
+    // In a column flex layout `align-items: start` is the HORIZONTAL axis, so
+    // the nav shrink-wrapped to 1,423px inside an 880px viewport.
+    const source = (await import("./SettingsShell.vue?raw")).default;
+    const folded = source.slice(source.indexOf("@media (max-width: 899px)"));
+    expect(folded).toMatch(/align-items:\s*stretch/);
+    expect(folded).toMatch(/align-self:\s*stretch/);
+  });
+});

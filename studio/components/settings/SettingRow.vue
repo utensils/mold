@@ -70,8 +70,9 @@ defineEmits<{ (e: "reset"): void }>();
   display: flex;
   align-items: center;
   gap: var(--mold-sp-3);
+  box-sizing: border-box;
   min-height: var(--mold-row-h-table, 52px);
-  padding: var(--mold-sp-3) var(--mold-sp-3);
+  padding: var(--mold-sp-2) var(--mold-sp-3);
   border-bottom: var(--mold-bw) solid var(--mold-border);
 }
 .ms-setting-row:last-child {

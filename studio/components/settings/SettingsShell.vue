@@ -7,9 +7,22 @@
  *
  * Ported from `desktop/src/views/SettingsView.vue`, whose two observers, 800ms
  * settling hold and idempotent `bindSection` each answer a bug that actually
- * happened. The layout is the one thing that differs: at 900px and up the nav
- * is a sticky 200px column, and below it folds into a horizontally scrolling
- * chip strip, because a browser page has no fixed second pane.
+ * happened.
+ *
+ * Two layouts, one frame. `layout="scroll"` is the desktop's: every section
+ * open on one scroll, the nav a scroll-spy. `layout="pane"` is the browser's:
+ * a page that scrolls the window cannot hold fifteen open sections without
+ * becoming seven screens long — which is the complaint this kit answers — so
+ * the nav is a real navigation, one section on screen at a time, and search
+ * stacks every match so a word still finds its row wherever it lives.
+ *
+ * `scroll` says who scrolls: the page (a browser window) or the content column
+ * (the desktop's fixed pane). The scroll-spy observes against whichever it is,
+ * because a root that moves with its targets never reports a change.
+ *
+ * At 900px and up the nav is a sticky 200px column; below, it folds into a
+ * horizontally scrolling chip strip, because a browser page has no fixed
+ * second pane.
  */
 import {
   computed,
@@ -32,16 +45,33 @@ const props = withDefaults(
     /** Raw engine rows each section renders, so search can match them. */
     rawKeysBySection?: Partial<Record<SectionId, string[]>>;
     searchPlaceholder?: string;
+    /** `scroll`: every section open on one scroll, the nav a scroll-spy.
+     *  `pane`: one section on screen at a time, the nav a navigation. */
+    layout?: "scroll" | "pane";
+    /** Who scrolls: the page (a browser window) or this column (a fixed pane). */
+    scroll?: "page" | "content";
   }>(),
-  { rawKeysBySection: () => ({}), searchPlaceholder: "Search settings…" },
+  {
+    rawKeysBySection: () => ({}),
+    searchPlaceholder: "Search settings…",
+    layout: "scroll",
+    scroll: "page",
+  },
 );
 const emit = defineEmits<{ (e: "update:active", id: SectionId): void }>();
 
 const query = ref("");
 const searching = computed(() => query.value.trim().length > 0);
 
-/** While searching, only the matching sections show; otherwise all of them. */
-const visibleSections = computed(() =>
+const paned = computed(() => props.layout === "pane");
+
+/** The nav's highlighted section: the one at the top of the page, or the one
+ *  last jumped to while that scroll is still settling — or, in a pane, the
+ *  one on screen. */
+const active = ref<SectionId>(props.sections[0]?.id ?? "app");
+
+/** The sections that match the search; every section when there is none. */
+const matchingSections = computed(() =>
   props.sections.filter(
     (section) =>
       !searching.value ||
@@ -49,9 +79,13 @@ const visibleSections = computed(() =>
   ),
 );
 
-/** The nav's highlighted section: the one at the top of the page, or the one
- *  last jumped to while that scroll is still settling. */
-const active = ref<SectionId>(props.sections[0]?.id ?? "app");
+/** The nav lists every match; the page shows them all on a scroll, and only
+ *  the active one in a pane (a search stacks its matches there too). */
+const visibleSections = computed(() =>
+  paned.value && !searching.value
+    ? matchingSections.value.filter((section) => section.id === active.value)
+    : matchingSections.value,
+);
 const sectionEls = new Map<SectionId, HTMLElement>();
 const contentEl = ref<HTMLElement | null>(null);
 let observer: IntersectionObserver | null = null;
@@ -73,12 +107,17 @@ function reach(id: SectionId) {
 }
 
 /** While searching, the matches ARE the page: the user asked for them by name,
- *  and there is nothing to scroll past. */
+ *  and there is nothing to scroll past. A pane's one section is on screen. */
 function bodyMounted(id: SectionId): boolean {
-  return searching.value || reached.value.includes(id);
+  return (
+    searching.value ||
+    (paned.value && id === active.value) ||
+    reached.value.includes(id)
+  );
 }
 watch(visibleSections, (sections) => {
-  if (searching.value) for (const section of sections) reach(section.id);
+  if (searching.value || paned.value)
+    for (const section of sections) reach(section.id);
 });
 
 /** Vue re-invokes a function `:ref` on EVERY patch of its element, so this must
@@ -122,6 +161,8 @@ function jump(id: SectionId) {
   active.value = id;
   // The scroll needs something to land on, so the body comes first.
   reach(id);
+  // A pane swaps; there is no scroll to settle.
+  if (paned.value) return;
   // A smooth scroll passes other sections on its way; hold the pick until it
   // lands, or the highlight races down the nav.
   if (settling) clearTimeout(settling);
@@ -130,11 +171,16 @@ function jump(id: SectionId) {
 }
 
 onMounted(() => {
+  // A pane shows what it is told to; nothing scrolls into view.
+  if (paned.value) return;
   if (typeof IntersectionObserver === "undefined") {
     // No observer, no scroll signal: an eager page beats an empty one.
     for (const section of props.sections) reach(section.id);
     return;
   }
+  // The root is whoever scrolls. A root that moves with its targets never
+  // reports a change, which is how the highlight froze on a browser page.
+  const root = props.scroll === "content" ? contentEl.value : null;
   // Two observers, two questions. The scroll-spy's band is the top of the page,
   // which is where the nav highlight belongs; a body has to arrive WELL before
   // it is looked at, so it gets its own generous margin.
@@ -147,7 +193,7 @@ onMounted(() => {
         if (id) reach(id);
       }
     },
-    { root: contentEl.value, rootMargin: "400px 0px 800px 0px" },
+    { root, rootMargin: "400px 0px 800px 0px" },
   );
   observer = new IntersectionObserver(
     (entries) => {
@@ -160,7 +206,7 @@ onMounted(() => {
       if (id && visibleSections.value.some((section) => section.id === id))
         active.value = id;
     },
-    { root: contentEl.value, rootMargin: "0px 0px -70% 0px" },
+    { root, rootMargin: "0px 0px -70% 0px" },
   );
   for (const el of sectionEls.values()) {
     observer.observe(el);
@@ -178,7 +224,13 @@ defineExpose({ active, jump, query });
 </script>
 
 <template>
-  <div class="ms-settings-shell">
+  <div
+    class="ms-settings-shell"
+    :class="{
+      'ms-settings-shell--own-scroll': scroll === 'content',
+      'ms-settings-shell--pane': paned,
+    }"
+  >
     <nav class="ms-settings-nav" aria-label="Settings sections">
       <label class="ms-settings-nav__search">
         <input
@@ -192,7 +244,7 @@ defineExpose({ active, jump, query });
       </label>
       <div class="ms-settings-nav__rows">
         <button
-          v-for="section in visibleSections"
+          v-for="section in matchingSections"
           :key="section.id"
           type="button"
           class="ms-settings-nav__row"
@@ -312,6 +364,22 @@ defineExpose({ active, jump, query });
 .ms-settings-content__section {
   scroll-margin-top: var(--mold-sp-4);
 }
+/* The desktop's fixed pane: the column is the scroller, and it must be as tall
+ * as the frame — a column that never overflows never scrolls. */
+.ms-settings-shell--own-scroll {
+  align-items: stretch;
+  min-height: 0;
+  height: 100%;
+}
+.ms-settings-shell--own-scroll .ms-settings-nav {
+  position: static;
+  max-height: none;
+  min-height: 0;
+}
+.ms-settings-shell--own-scroll .ms-settings-content {
+  min-height: 0;
+  overflow-y: auto;
+}
 .ms-settings-content__empty {
   margin: 0;
   color: var(--mold-text-dim);
@@ -322,13 +390,18 @@ defineExpose({ active, jump, query });
  * has no fixed second pane, and a 200px column here would leave the rows too
  * narrow to read their own labels. */
 @media (max-width: 899px) {
+  /* In a column flex layout the align axis is the HORIZONTAL one; `start`
+   * shrink-wraps both children to max-content and the page scrolls sideways. */
   .ms-settings-shell {
     display: flex;
     flex-direction: column;
     gap: var(--mold-sp-4);
+    align-items: stretch;
   }
   .ms-settings-nav {
     position: static;
+    align-self: stretch;
+    min-width: 0;
     max-height: none;
     gap: var(--mold-sp-2);
   }

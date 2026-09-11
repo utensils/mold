@@ -124,9 +124,10 @@ watch(
 
     <SettingsShell
       ref="shell"
-      class="settings-shell min-h-0 flex-1"
+      class="min-h-0 flex-1"
       :sections="sections"
       :raw-keys-by-section="config.rawKeysBySection"
+      scroll="content"
     >
       <template #section="{ section, mounted }">
         <template v-if="!mounted" />
@@ -171,24 +172,3 @@ watch(
     </SettingsShell>
   </div>
 </template>
-
-<style scoped>
-/*
- * The app pane is a fixed height with its own scroller, where a browser page
- * scrolls the window. The shell's scroll-spy observes the content column, so
- * the content column is what has to scroll — a scroller ABOVE it moves the
- * sections and the observer root together and the nav highlight never moves.
- */
-/* `div.` on purpose: the kit's own `.ms-settings-shell { align-items: start }`
- * carries the same specificity as a bare class here, and a tie is decided by
- * whichever stylesheet Vite happens to inject last. The element qualifier
- * settles it. Without stretch the content column is only as tall as its
- * content, and a column that never overflows never scrolls. */
-div.settings-shell {
-  align-items: stretch;
-}
-.settings-shell :deep(.ms-settings-content) {
-  min-height: 0;
-  overflow-y: auto;
-}
-</style>
