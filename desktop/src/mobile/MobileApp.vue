@@ -2955,6 +2955,46 @@ function activityRowStatus(row: ActivityRow): string {
   );
 }
 
+/**
+ * What a queue row can SHOW, rather than only name. Every part is optional and
+ * absent whenever the row cannot answer for it: a shared fleet row has a phase
+ * and a count but no pixels, and a queued row has neither.
+ */
+function activityRowProgress(row: ActivityRow): number | null {
+  const total = row.live?.total ?? row.print.total;
+  const current = row.live?.current ?? row.print.step;
+  if (!total || current == null) return null;
+  return Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+}
+
+/** The live latent preview Make already paints, while the print is running.
+ *  Only the denoising phases have one; a queued row has no pixels yet. */
+function activityRowThumbnail(row: ActivityRow): string | null {
+  const running =
+    row.print.status === "denoising" ||
+    row.print.status === "finishing" ||
+    row.print.status === "loading";
+  return running ? (row.print.previewUrl ?? null) : null;
+}
+
+/** "image 2 of 4 · studio-rack". The batch index rides the prepared request;
+ *  an ordinary sibling carries none, so the machine answers alone. */
+function activityRowMeta(row: ActivityRow): string {
+  const index = row.print.request?.batch_index;
+  const count = row.print.request?.batch_count;
+  const place =
+    index != null && count != null && count > 1 ? `image ${index + 1} of ${count}` : null;
+  return [place, row.print.hostLabel].filter(Boolean).join(" · ");
+}
+
+/** A queued row stands its place in line where the picture will be. */
+function activityRowPosition(row: ActivityRow): string | null {
+  if (activityRowThumbnail(row)) return null;
+  if (durableHold(row.print)) return "↓";
+  const place = row.queuePosition ?? row.print.queuePosition;
+  return place ? String(place) : null;
+}
+
 const sharedMobileActivity = computed(() => {
   const local = new Set(
     allGenerationJobs.value.flatMap((job) =>
@@ -3010,6 +3050,10 @@ const finishedQueueJobs = computed(() =>
     .filter((job) => job.status === "complete" || job.status === "error")
     .sort((a, b) => b.submittedAtUnixMs - a.submittedAtUnixMs)
     .slice(0, 20),
+);
+/** The three most recent finished prints that actually have a picture. */
+const finishedQueueThumbnails = computed(() =>
+  finishedQueueJobs.value.filter((job) => job.status === "complete" && job.resultUrl).slice(0, 3),
 );
 const queueDetailKey = ref<string | null>(null);
 const queueDetailEntry = computed(() =>
@@ -13621,6 +13665,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                       :detail="durableHold(entry.local.print)?.error ?? null"
                       :cancelling="entry.local.print.cancelling === true"
                       :aria-label="queuePrintTitle(entry.local.print)"
+                      :thumbnail-url="activityRowThumbnail(entry.local)"
+                      :progress="activityRowProgress(entry.local)"
+                      :meta="activityRowMeta(entry.local)"
+                      :position="activityRowPosition(entry.local)"
+                      :tone="durableHold(entry.local.print) ? 'warning' : 'neutral'"
                       @activate="inspectQueueEntry(entry.key)"
                     />
                   </SwipeActionRow>
@@ -13658,6 +13707,24 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             Finished <span>{{ finishedQueueJobs.length }}</span>
           </h3>
           <p class="section-note">Recent work from this phone. Saved results stay in My images.</p>
+          <!-- Three pictures, because a finished print is a picture and the
+               list of titles above was the only thing that ever said so. -->
+          <div
+            v-if="finishedQueueThumbnails.length"
+            class="mobile-queue-finished-strip"
+            data-test="mobile-queue-finished-strip"
+          >
+            <button
+              v-for="job in finishedQueueThumbnails"
+              :key="`thumb:${job.clientId}`"
+              type="button"
+              class="mobile-queue-finished-tile"
+              :aria-label="queuePrintTitle(job) || modelLabel(job.model)"
+              @click="inspectQueueEntry(`finished:${job.clientId}`)"
+            >
+              <img :src="job.resultUrl ?? ''" alt="" decoding="async" />
+            </button>
+          </div>
           <button
             v-for="job in finishedQueueJobs"
             :key="job.clientId"

@@ -235,6 +235,26 @@ describe("mobile generation status containment", () => {
     );
   });
 
+  it("shows a running print at 64px with a 7px meter and its mono batch line", () => {
+    const thumb = css.match(/\.mobile-generation-job-thumb\s*\{([^}]*)\}/s);
+    expect(thumb?.[1]).toMatch(/width:\s*64px/);
+    expect(thumb?.[1]).toMatch(/height:\s*64px/);
+
+    // The place-in-line square is a finger target where the picture will be.
+    const position = css.match(/\.mobile-generation-job-position\s*\{([^}]*)\}/s);
+    expect(Number(position?.[1]?.match(/width:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(position?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+
+    // Which one of the batch, and where: technical truth, so mono.
+    const meta = css.match(/\.mobile-generation-job-meta\s*\{([^}]*)\}/s);
+    expect(meta?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+    expect(meta?.[1]).toMatch(/font-size:\s*var\(--text-edge-code\)/);
+
+    // The meter is the shared kit bar at the phone's height, not a second one.
+    expect(mobileGenerationQueueCard).toContain(':height="7"');
+    expect(mobileGenerationQueueCard).toContain("ProgressBar");
+  });
+
   it("bounds shared and swipeable activity surfaces before truncating detail", () => {
     expect(liveActivityComponent).toMatch(
       /\.live-activity-surface\s*\{[^}]*width:\s*100%\s*;[^}]*min-width:\s*0\s*;[^}]*box-sizing:\s*border-box\s*;/s,

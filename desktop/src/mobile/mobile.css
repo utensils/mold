@@ -2512,6 +2512,99 @@ button:disabled {
   gap: 7px;
 }
 
+/* A leading square: the picture as it is being made, or the place in line of
+   a row that has no pixels yet. */
+.mobile-generation-job--leading {
+  grid-template-columns: auto minmax(0, 1fr) minmax(64px, 30%);
+  align-items: start;
+}
+
+.mobile-generation-job--leading.mobile-generation-job--detailed-status {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.mobile-generation-job--active {
+  border-left: 2px solid var(--mold-blue);
+}
+
+.mobile-generation-job--warning {
+  border-left: 2px solid var(--mold-warning);
+}
+
+.mobile-generation-job-thumb {
+  display: block;
+  width: 64px;
+  height: 64px;
+  flex: none;
+  overflow: hidden;
+  border: 1px solid var(--mold-blue);
+  background: var(--mold-bg-deep);
+}
+
+.mobile-generation-job-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 44px, because it sits where a finger expects the row to start. */
+.mobile-generation-job-position {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--mold-border);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text-2);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+}
+
+.mobile-generation-job--warning .mobile-generation-job-position {
+  border-color: var(--mold-warning);
+  color: var(--mold-warning);
+}
+
+.mobile-generation-job-meter {
+  margin-top: 7px;
+}
+
+/* Which one of the batch, and where — the technical truth, so mono. */
+/* Finished today: three square tiles, the same shape the Library uses. */
+.mobile-queue-finished-strip {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+
+.mobile-queue-finished-tile {
+  min-width: 0;
+  flex: 1;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border: 1px solid var(--mold-border);
+  padding: 0;
+  background: var(--mold-bg-deep);
+}
+
+.mobile-queue-finished-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.mobile-generation-job-meta {
+  display: block;
+  overflow: hidden;
+  margin-top: 6px;
+  color: var(--mold-text-dim);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mobile-generation-job-copy {
   min-width: 0;
 }
