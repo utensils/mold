@@ -11265,7 +11265,7 @@ describe("MobileApp machines telemetry", () => {
     expect(telemetry.get(".meter").attributes("aria-valuenow")).toBe("41");
   });
 
-  it("says what a machine is, and which one is making pictures right now", async () => {
+  it("says what a machine is, and which one is making images right now", async () => {
     apiJsonTo
       .mockReset()
       .mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
@@ -11298,7 +11298,7 @@ describe("MobileApp machines telemetry", () => {
     );
     // One machine is pinned, so the card says so rather than making the queue
     // the only place the answer lives.
-    expect(wrapper.get("[data-test='mobile-machine-target']").text()).toBe("making pictures here");
+    expect(wrapper.get("[data-test='mobile-machine-target']").text()).toBe("making images here");
     // The health chip never goes away for it: a pinned machine can still be
     // reconnecting, and that is exactly when you look.
     expect(wrapper.find("[data-test='mobile-host-health']").exists()).toBe(true);

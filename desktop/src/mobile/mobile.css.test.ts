@@ -449,11 +449,8 @@ describe("mobile safe areas", () => {
   });
 
   it("renders catalog filters as balanced equal-width tiles", () => {
-    const containers = css.match(
-      /\.mobile-catalog-media,\s*\.mobile-catalog-sources\s*\{([^}]*)\}/s,
-    );
     const media = [...css.matchAll(/\.mobile-catalog-media\s*\{([^}]*)\}/gs)].find((rule) =>
-      rule[1]?.includes("grid-template-columns"),
+      rule[1]?.includes("overflow-x"),
     );
     const sources = [...css.matchAll(/\.mobile-catalog-sources\s*\{([^}]*)\}/gs)].find((rule) =>
       rule[1]?.includes("grid-template-columns"),
@@ -465,9 +462,16 @@ describe("mobile safe areas", () => {
       /\.mobile-catalog-media button\[aria-pressed="true"\],\s*\.mobile-catalog-sources button\[aria-pressed="true"\]\s*\{([^}]*)\}/s,
     );
 
-    expect(media?.[1]).toMatch(/grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
+    // Four media choices never fit a 393pt row as equal tiles — they wrapped to
+    // a second row and pushed the results down. One strip that scrolls instead.
+    expect(media?.[1]).toMatch(/display:\s*flex/);
+    expect(media?.[1]).toMatch(/flex-wrap:\s*nowrap/);
+    expect(media?.[1]).toMatch(/overflow-x:\s*auto/);
+    expect(media?.[1]).toMatch(/gap:\s*8px/);
+    expect(css).toMatch(/\.mobile-catalog-media button\s*\{[^}]*flex:\s*none/s);
+    // The catalog sources are three and stay three equal tiles in the sheet.
     expect(sources?.[1]).toMatch(/grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
-    expect(containers?.[1]).toMatch(/gap:\s*8px/);
+    expect(sources?.[1]).toMatch(/gap:\s*8px/);
     expect(buttons?.[1]).toMatch(/min-width:\s*0/);
     expect(buttons?.[1]).toMatch(/border:\s*1px solid var\(--mold-border-control\)/);
     expect(buttons?.[1]).toMatch(/background:\s*var\(--mold-bg\)/);

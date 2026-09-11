@@ -478,9 +478,12 @@ describe("MobileCatalogView", () => {
     wrapper = mountCatalog(studio.id, [studio]);
     await flushPromises();
 
+    // Found by its runnable id: the shared style-name rule titles a row from
+    // its description, which for H3 is the acquisition sentence, and the id is
+    // on the row beside it in mono.
     const card = wrapper
       .findAll("[data-test='mobile-catalog-card']")
-      .find((candidate) => candidate.text().includes("MiniMax H3 Ref2VA"))!;
+      .find((candidate) => candidate.text().includes("minimax-h3-ref2va"))!;
     expect(card.text()).toContain("Installed");
     await card.get(".mobile-catalog-card-open").trigger("click");
     await flushPromises();
@@ -1601,6 +1604,45 @@ describe("MobileCatalogView", () => {
     expect(wrapper.get("[data-test='mobile-catalog-filters-open']").text()).toBe("Filters");
   });
 
+  it("says a ready-to-use style in plain words, with the machine that has it", async () => {
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-catalog-segment-installed']").trigger("click");
+    await flushPromises();
+
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("installed:q8"))!;
+
+    // The friendly name leads, the way StyleMenu already names a style; the
+    // runnable id follows in mono because it is the technical truth.
+    expect(card.get(".mobile-catalog-card-title").text()).toBe("A test model");
+    expect(card.get("[data-test='mobile-catalog-card-id']").text()).toBe("installed:q8");
+    // Family and weight are what it IS; the machine is where it lives.
+    expect(card.get(".mobile-catalog-card-meta").text()).toContain("FLUX");
+    expect(card.get(".mobile-catalog-card-meta").text()).toContain("12");
+    expect(card.get(".mobile-catalog-card-hosts").text()).toBe("Studio");
+
+    // On this shelf every row is installed, so saying so on each one is noise,
+    // and the kind badge repeats what the row already reads as.
+    expect(card.find(".mobile-catalog-installed").exists()).toBe(false);
+    expect(card.find("[data-test='model-kind-badge']").exists()).toBe(false);
+    expect(card.text()).not.toContain("SIZE");
+  });
+
+  it("keeps the kind badge and the Pull action on the Browse more shelf", async () => {
+    searchCatalog.mockResolvedValue(searchResponse([entry("Portrait Base", { kind: "lora" })]));
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("Portrait Base"))!;
+    // Browsing, the kind is the thing you are choosing between.
+    expect(card.get("[data-test='model-kind-badge']").text()).toBe("LoRA");
+    expect(card.find(".mobile-catalog-pull").exists()).toBe(true);
+  });
+
   it("labels every card with a friendly model kind and explicitly marks NSFW entries", async () => {
     searchCatalog.mockResolvedValue(
       searchResponse([
@@ -1776,10 +1818,14 @@ describe("MobileCatalogView", () => {
     await vi.advanceTimersByTimeAsync(400);
     await flushPromises();
 
+    // The row is found by its id: with live metadata merged in, the shared
+    // style-name rule titles it from the catalog description rather than the
+    // legacy display name, which is the enrichment this test is about.
     const cards = wrapper
       .findAll("[data-test='mobile-catalog-card']")
-      .filter((candidate) => candidate.text().includes("Legacy Adapter"));
+      .filter((candidate) => candidate.text().includes("cv:4242"));
     expect(cards).toHaveLength(1);
+    expect(cards[0]!.text()).toContain("Rich metadata from the live catalog.");
     expect(cards[0]!.get("[data-test='model-kind-badge']").text()).toBe("LoRA");
     expect(cards[0]!.get("[data-test='model-nsfw-badge']").text()).toBe("18+ NSFW");
     expect(cards[0]!.text()).toContain("Installed");

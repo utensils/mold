@@ -13595,7 +13595,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                   v-if="host.id === selectedHostId && !automaticRouting"
                   tone="accent"
                   data-test="mobile-machine-target"
-                  >making pictures here</BadgePill
+                  >making images here</BadgePill
                 >
                 <span class="mobile-machine-chevron" aria-hidden="true">›</span>
               </span>

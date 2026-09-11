@@ -422,7 +422,7 @@ top, never from a control, past 96px of damped travel.
   Results are 64px grouped rows with a 44px preview, the name in sans, what it
   is in plain words beneath, and the weight in mono beside the Pull action.
 - **Machines** lists each saved machine as a card: a status dot, its name in
-  mono, the health chip, a **making pictures here** badge when work is pinned
+  mono, the health chip, a **making images here** badge when work is pinned
   to it, the same plain hardware sentence the desktop says
   (`desktop/src/lib/machineSentence.ts`, "RTX 4090 · CUDA · on your network ·
   up 6 days"), a VRAM meter, and its memory and waiting count in mono. Adding

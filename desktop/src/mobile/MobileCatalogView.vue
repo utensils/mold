@@ -35,6 +35,7 @@ import {
   type CatalogSource,
 } from "../lib/catalogFilters";
 import { catalogFamily, familyLabel, matchesCatalogFamily } from "@studio/lib/modelFamily";
+import { styleDisplayName } from "@studio/lib/styleLabel";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import {
   modelRuntimeNotice,
@@ -536,6 +537,30 @@ const detailVariants = computed(() => {
 /** Human title for announce/toast text; ids stay `entry.name` in API calls. */
 function entryTitle(entry: MobileCatalogEntry): string {
   return entry.display_name ?? entry.name;
+}
+
+/**
+ * The style's name in plain words — the SHARED rule StyleMenu and the desktop
+ * picker already use, so one style is not called two different things on two
+ * screens. The row keeps `entry.name` beside it in mono when they differ.
+ */
+/**
+ * What a style you ALREADY have weighs. Only the weights, never the fetch
+ * total: nothing is being fetched on this shelf, and the two numbers mean
+ * different things.
+ */
+function installedWeightLabel(entry: MobileCatalogEntry): string | null {
+  const weights = catalogSizeInfo(entry).weightsBytes;
+  return weights != null ? formatGB(weights) : null;
+}
+
+function entryStyleName(entry: MobileCatalogEntry): string {
+  return styleDisplayName({
+    name: entry.name,
+    family: entry.family,
+    description: entry.description ?? null,
+    display_name: entry.display_name ?? null,
+  });
 }
 
 function entryAccessibilityLabel(entry: MobileCatalogEntry): string {
@@ -1345,8 +1370,8 @@ onBeforeUnmount(() => {
           type="search"
           inputmode="search"
           autocomplete="off"
-          aria-label="Search catalog"
-          placeholder="Search models…"
+          aria-label="Search styles"
+          placeholder="Search styles…"
           data-test="mobile-catalog-search"
         />
         <!-- One chip for six controls, and it says how many are set, so the
@@ -1466,30 +1491,57 @@ onBeforeUnmount(() => {
               <span v-else aria-hidden="true">{{ entry.family.slice(0, 3).toUpperCase() }}</span>
             </span>
             <span class="mobile-catalog-card-body">
-              <span class="mobile-catalog-card-title">{{ entry.display_name ?? entry.name }}</span>
+              <!-- The friendly name leads, the way StyleMenu names a style;
+                   the runnable id follows only when it says something else. -->
+              <span class="mobile-catalog-card-title">{{ entryStyleName(entry) }}</span>
+              <span
+                v-if="entryStyleName(entry) !== entry.name"
+                class="mobile-catalog-card-id"
+                data-test="mobile-catalog-card-id"
+                >{{ entry.name }}</span
+              >
+              <!-- Browsing, the kind is what you are choosing between. On the
+                   Ready-to-use shelf every row is a style you already have. -->
               <ModelMetadataBadges
+                v-if="source !== 'installed' || entry.nsfw"
                 class="mobile-catalog-card-badges"
-                :kind="entry.kind"
+                :kind="source === 'installed' ? null : entry.kind"
                 :family="entry.family"
                 :nsfw="entry.nsfw"
                 :show-modality="false"
               />
               <span class="mobile-catalog-card-meta">
-                {{ entry.author ? `${entry.author} · ` : "" }}{{ familyLabel(entry.family) }}
+                {{ entry.author ? `${entry.author} · ` : "" }}{{ familyLabel(entry.family)
+                }}<template v-if="source === 'installed' && installedWeightLabel(entry)">
+                  · {{ installedWeightLabel(entry) }}</template
+                >
                 <template v-if="entry.download_count">
                   · ↓ {{ formatCount(entry.download_count) }}
                 </template>
               </span>
-              <span v-if="entry.hostLabels?.length" class="mobile-catalog-host-labels">
-                <span v-for="label in entry.hostLabels" :key="label">{{ label }}</span>
-              </span>
             </span>
           </button>
           <span class="mobile-catalog-card-actions">
-            <span v-if="entry.size_bytes != null" class="mobile-catalog-card-size">
+            <!-- Which machines have it, stacked, in mono. -->
+            <span
+              v-if="entry.hostLabels?.length"
+              class="mobile-catalog-card-hosts"
+              data-test="mobile-catalog-card-hosts"
+            >
+              <span v-for="label in entry.hostLabels" :key="label">{{ label }}</span>
+            </span>
+            <span
+              v-if="source !== 'installed' && entry.size_bytes != null"
+              class="mobile-catalog-card-size"
+            >
               {{ catalogSizeLabel(catalogSizeInfo(entry)) }}
             </span>
-            <span v-if="entry.installed" class="mobile-catalog-installed">Installed</span>
+            <!-- On the Ready-to-use shelf the shelf itself says "installed". -->
+            <span
+              v-if="entry.installed && source !== 'installed'"
+              class="mobile-catalog-installed"
+              >Installed</span
+            >
             <!-- Downloadable, not runnable on the machine that would hold it.
                  Said before the pull, never as a toast after it. -->
             <span

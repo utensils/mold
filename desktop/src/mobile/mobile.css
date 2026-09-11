@@ -3747,18 +3747,25 @@ button:disabled {
   padding: 9px 12px;
 }
 
-.mobile-catalog-media,
+/* Four media choices never fit a 393pt row as equal tiles: they wrapped onto a
+   second row and pushed the results down the screen. One strip that scrolls,
+   the same answer the kind chips already use. */
+.mobile-catalog-media {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.mobile-catalog-media::-webkit-scrollbar {
+  display: none;
+}
+
 .mobile-catalog-sources {
   display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-}
-
-.mobile-catalog-media {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.mobile-catalog-sources {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
   margin-top: 10px;
 }
 
@@ -3812,7 +3819,10 @@ button:disabled {
 }
 
 .mobile-catalog-media button {
+  flex: none;
   min-height: 44px;
+  padding: 0 14px;
+  white-space: nowrap;
 }
 
 .mobile-catalog-sources button {
@@ -4099,6 +4109,30 @@ button:disabled {
   font-family: var(--font-body);
   font-size: var(--text-caption);
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The runnable id, on the second line beside what the style is. */
+.mobile-catalog-card-id {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--mold-text-dim);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Which machines have it, stacked and right-aligned in mono. */
+.mobile-catalog-card-hosts {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  color: var(--mold-sapphire);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  text-align: right;
   white-space: nowrap;
 }
 
