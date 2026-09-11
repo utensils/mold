@@ -1734,8 +1734,12 @@ fn process_scheduled_chain_stage(
         work_kind = "chain_stage",
         "dispatched job"
     );
-    let memory_watchdog =
-        ChainStageMemoryWatchdog::start(worker.gpu.ordinal, job.model.clone(), job.id.clone());
+    let memory_watchdog = MemoryWatchdog::start(
+        MemoryWatchdogScope::ChainStage,
+        worker.gpu.ordinal,
+        job.model.clone(),
+        Some(job.id.clone()),
+    );
     struct ActiveGuard<'a>(&'a GpuWorker);
     impl Drop for ActiveGuard<'_> {
         fn drop(&mut self) {
@@ -1850,40 +1854,115 @@ pub(crate) fn trim_malloc_arenas() -> Option<u64> {
     Some(rss_pre_trim)
 }
 
-/// Scheduled chain stages bypass `process_job`, so they need their own memory
-/// heartbeat around model readiness and rendering. A channel-backed stop wakes
-/// the thread immediately for short stages instead of making completion wait
-/// for the one-second sampling interval.
-struct ChainStageMemoryWatchdog {
+/// How far RSS must move before the memory watchdog spends another INFO line.
+const WATCHDOG_HEARTBEAT_RSS_DELTA_BYTES: u64 = 256 * 1024 * 1024;
+/// …and how long a flat RSS may stay silent before the watchdog proves it is
+/// still alive anyway.
+const WATCHDOG_HEARTBEAT_MAX_QUIET: Duration = Duration::from_secs(10);
+/// Sampling interval. The watchdog still *samples* every second — only the
+/// logging is throttled, so a runaway allocation is still attributed to the
+/// second it happened in.
+const WATCHDOG_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Is this sample worth a line? A heartbeat exists to attribute RAM growth to
+/// a phase, so a move of a quarter-gigabyte in either direction is news and a
+/// flat RSS is not — but a long quiet stretch still gets one line so the
+/// absence of news stays distinguishable from a dead thread.
+fn watchdog_should_log(last_logged_rss: u64, rss: u64, quiet: Duration) -> bool {
+    rss.abs_diff(last_logged_rss) >= WATCHDOG_HEARTBEAT_RSS_DELTA_BYTES
+        || quiet >= WATCHDOG_HEARTBEAT_MAX_QUIET
+}
+
+/// Which path a [`MemoryWatchdog`] is watching. The two differ only in what
+/// they are called in the log; the sampling, the throttle, the channel-backed
+/// stop and the deferred trim are identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryWatchdogScope {
+    /// A scheduled chain stage, which bypasses `process_job` entirely.
+    ChainStage,
+    /// An ordinary generation inside `process_job_with_sink`.
+    Generation,
+}
+
+impl MemoryWatchdogScope {
+    fn thread_name(self) -> &'static str {
+        match self {
+            Self::ChainStage => "chain-rss-watchdog",
+            Self::Generation => "rss-watchdog",
+        }
+    }
+
+    fn heartbeat_message(self) -> &'static str {
+        match self {
+            Self::ChainStage => "chain stage rss watchdog",
+            Self::Generation => "rss watchdog",
+        }
+    }
+
+    fn delta_message(self) -> &'static str {
+        match self {
+            Self::ChainStage => "chain stage memory delta",
+            Self::Generation => "generation memory delta",
+        }
+    }
+}
+
+/// A memory heartbeat around model readiness and rendering, plus the
+/// before/after delta and the glibc arena trim that follows it.
+///
+/// A channel-backed stop wakes the thread immediately instead of making
+/// completion wait out the one-second sampling interval — an ordinary
+/// generation used to poll an `AtomicBool` behind `thread::sleep(1s)` and so
+/// paid up to a full second of pure latency after every render.
+///
+/// The report — `malloc_trim(0)` and the `rss_after` sample — runs in `Drop`,
+/// deliberately: the trim measured 0.83 s on a 46 GB render, and doing it
+/// before the print was saved put that on the client's wall clock. Callers
+/// `stop()` the heartbeat where the work ends and let the value die after the
+/// completion is queued.
+struct MemoryWatchdog {
     stop: Option<std::sync::mpsc::Sender<()>>,
     handle: Option<std::thread::JoinHandle<()>>,
     rss_before: u64,
     ordinal: usize,
     model: String,
-    work_id: String,
+    work_id: Option<String>,
+    scope: MemoryWatchdogScope,
 }
 
-impl ChainStageMemoryWatchdog {
-    fn start(ordinal: usize, model: String, work_id: String) -> Self {
+impl MemoryWatchdog {
+    fn start(
+        scope: MemoryWatchdogScope,
+        ordinal: usize,
+        model: String,
+        work_id: Option<String>,
+    ) -> Self {
         let rss_before = crate::resources::ram_snapshot_from_system().used_by_mold;
         let (stop, stopped) = std::sync::mpsc::channel();
         let thread_model = model.clone();
-        let thread_work_id = work_id.clone();
+        let thread_work_id = work_id.clone().unwrap_or_default();
         let handle = std::thread::Builder::new()
-            .name(format!("chain-rss-watchdog-{ordinal}"))
+            .name(format!("{}-{ordinal}", scope.thread_name()))
             .spawn(move || {
                 let start = Instant::now();
+                let mut last_logged_rss = rss_before;
+                let mut last_logged_at = start;
                 while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-                    stopped.recv_timeout(Duration::from_secs(1))
+                    stopped.recv_timeout(WATCHDOG_SAMPLE_INTERVAL)
                 {
                     let rss = crate::resources::ram_snapshot_from_system().used_by_mold;
+                    if !watchdog_should_log(last_logged_rss, rss, last_logged_at.elapsed()) {
+                        continue;
+                    }
+                    last_logged_rss = rss;
+                    last_logged_at = Instant::now();
                     tracing::info!(
                         gpu = ordinal,
                         model = %thread_model,
                         work_id = %thread_work_id,
                         elapsed_s = start.elapsed().as_secs(),
                         rss_mb = rss / 1_000_000,
-                        "chain stage rss watchdog"
+                        message = scope.heartbeat_message()
                     );
                 }
             })
@@ -1891,9 +1970,9 @@ impl ChainStageMemoryWatchdog {
                 tracing::warn!(
                     gpu = ordinal,
                     model = %model,
-                    work_id = %work_id,
+                    work_id = %work_id.clone().unwrap_or_default(),
                     %error,
-                    "could not start chain stage RSS watchdog"
+                    "could not start the RSS watchdog"
                 );
             })
             .ok();
@@ -1904,29 +1983,39 @@ impl ChainStageMemoryWatchdog {
             ordinal,
             model,
             work_id,
+            scope,
         }
     }
-}
 
-impl Drop for ChainStageMemoryWatchdog {
-    fn drop(&mut self) {
+    /// Stop the heartbeat thread without reporting. Idempotent, and cheap —
+    /// the thread is parked in `recv_timeout` and wakes on the send.
+    fn stop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+impl Drop for MemoryWatchdog {
+    fn drop(&mut self) {
+        self.stop();
+        let trim_started = Instant::now();
         let rss_pre_trim = trim_malloc_arenas();
+        let trim_ms = trim_started.elapsed().as_millis();
         let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
         tracing::info!(
             gpu = self.ordinal,
             model = %self.model,
-            work_id = %self.work_id,
+            work_id = %self.work_id.clone().unwrap_or_default(),
             rss_before_mb = self.rss_before / 1_000_000,
             rss_after_mb = rss_after / 1_000_000,
             rss_delta_mb = (rss_after as i64 - self.rss_before as i64) / 1_000_000,
             rss_pre_trim_mb = rss_pre_trim.map(|value| value / 1_000_000).unwrap_or(0),
-            "chain stage memory delta"
+            trim_ms,
+            message = self.scope.delta_message()
         );
     }
 }
@@ -4361,40 +4450,21 @@ fn process_job_with_sink(
         forward_generation_progress(progress_tx.as_ref(), event);
     }));
 
-    // RSS sample taken just before inference; the post-inference sample below
-    // logs the per-job delta so RAM growth can be attributed to a specific
-    // generation rather than tracked at process granularity.
-    let rss_before = crate::resources::ram_snapshot_from_system().used_by_mold;
-
-    // Watchdog: log RSS every 1s while inference runs so we can see RAM
-    // growth as it happens. The post-inference summary log can't fire when
-    // a runaway allocation crosses the OOM threshold mid-generation, so we
-    // need a heartbeat to attribute the explosion to a specific phase.
-    let watchdog_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let watchdog_handle = {
-        let stop = watchdog_stop.clone();
-        let model = model_name.clone();
-        std::thread::Builder::new()
-            .name(format!("rss-watchdog-{ordinal}"))
-            .spawn(move || {
-                let start = Instant::now();
-                while !stop.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(1000));
-                    if stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let rss = crate::resources::ram_snapshot_from_system().used_by_mold;
-                    tracing::info!(
-                        gpu = ordinal,
-                        model = %model,
-                        elapsed_s = start.elapsed().as_secs(),
-                        rss_mb = rss / 1_000_000,
-                        "rss watchdog"
-                    );
-                }
-            })
-            .expect("failed to spawn RSS watchdog")
-    };
+    // RSS heartbeat while inference runs, so RAM growth can be attributed to a
+    // phase — the post-inference summary cannot fire when a runaway allocation
+    // crosses the OOM threshold mid-generation.
+    //
+    // The value is deliberately left alive past the completion hand-off: its
+    // `Drop` is where `malloc_trim(0)` and the `rss_after` sample happen, and
+    // the trim measured 0.83 s on a 46 GB render. Running it here, before the
+    // print is saved and the SSE complete is queued, put that straight onto
+    // the client's wall clock.
+    let mut memory_watchdog = MemoryWatchdog::start(
+        MemoryWatchdogScope::Generation,
+        ordinal,
+        model_name.clone(),
+        None,
+    );
 
     // Install the identity this lease resolved above, or clear it.
     //
@@ -4424,22 +4494,9 @@ fn process_job_with_sink(
         }
     }));
 
-    watchdog_stop.store(true, Ordering::SeqCst);
-    let _ = watchdog_handle.join();
-
-    let rss_pre_trim = trim_malloc_arenas();
-
-    let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
-    let rss_delta = rss_after as i64 - rss_before as i64;
-    tracing::info!(
-        gpu = ordinal,
-        model = %model_name,
-        rss_before_mb = rss_before / 1_000_000,
-        rss_after_mb = rss_after / 1_000_000,
-        rss_delta_mb = rss_delta / 1_000_000,
-        rss_pre_trim_mb = rss_pre_trim.map(|v| v / 1_000_000).unwrap_or(0),
-        "generation memory delta"
-    );
+    // The heartbeat's job is over the moment inference returns; the report it
+    // owns waits for this function's tail, after the completion is queued.
+    memory_watchdog.stop();
 
     // A fatal driver error invalidates every CUDA object owned by this
     // context. Never put the triggering engine back into the cache: doing so
@@ -8033,7 +8090,7 @@ mod tests {
         let method = &source[start..end];
         let dispatch = method.find("\"dispatched job\"").expect("dispatch log");
         let watchdog = method
-            .find("ChainStageMemoryWatchdog::start(")
+            .find("MemoryWatchdog::start(")
             .expect("memory watchdog start");
         let render = method
             .find("run_stage_blocking_planned(")
@@ -13318,7 +13375,7 @@ mod tests {
             "one implementation, so the MOLD_MALLOC_TRIM gate cannot drift"
         );
         let start = source
-            .find("impl Drop for ChainStageMemoryWatchdog {")
+            .find("impl Drop for MemoryWatchdog {")
             .expect("chain stage watchdog");
         let end = source[start..]
             .find("\nfn fence_chain_stage_render(")
@@ -13372,6 +13429,84 @@ mod tests {
         assert!(
             !quarantine_arms.contains("release_prepared_and_trim("),
             "a quarantined CUDA context must never have its allocator state touched"
+        );
+    }
+
+    #[test]
+    fn memory_watchdog_stop_latency_is_bounded() {
+        // The ordinary-generation watchdog used to poll an `AtomicBool` behind
+        // a one-second `thread::sleep`, so every render paid up to a full
+        // second between "inference returned" and "the worker moved on". A
+        // channel-backed stop wakes the thread immediately.
+        let mut watchdog =
+            MemoryWatchdog::start(MemoryWatchdogScope::Generation, 0, "test".into(), None);
+        // Land mid-interval: a sleep-polled watchdog would still owe ~950 ms.
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        watchdog.stop();
+        let stop_latency = started.elapsed();
+        assert!(
+            stop_latency < Duration::from_millis(100),
+            "stopping the memory watchdog took {stop_latency:?}"
+        );
+        // Stopping twice is a no-op, not a hang or a double-join panic.
+        watchdog.stop();
+        drop(watchdog);
+    }
+
+    #[test]
+    fn memory_watchdog_heartbeat_is_throttled() {
+        let quiet = Duration::from_secs(1);
+        // A steady RSS inside the quiet window says nothing; the 1 Hz INFO
+        // line was pure log volume on a multi-minute render.
+        assert!(!watchdog_should_log(4 << 30, 4 << 30, quiet));
+        assert!(!watchdog_should_log(
+            4 << 30,
+            (4 << 30) + (255 << 20),
+            quiet
+        ));
+        // A quarter-gigabyte move is worth a line immediately, in either
+        // direction — that is what attributes an allocation to a phase.
+        assert!(watchdog_should_log(4 << 30, (4 << 30) + (256 << 20), quiet));
+        assert!(watchdog_should_log(4 << 30, (4 << 30) - (256 << 20), quiet));
+        // And a quiet watchdog still proves it is alive every ten seconds.
+        assert!(watchdog_should_log(
+            4 << 30,
+            4 << 30,
+            WATCHDOG_HEARTBEAT_MAX_QUIET
+        ));
+    }
+
+    #[test]
+    fn the_generation_memory_report_lands_after_the_completion_is_queued() {
+        // `malloc_trim(0)` measured 0.83 s on a 46 GB render. Doing it before
+        // the print is saved and the SSE complete is queued put that straight
+        // onto the client's wall clock; the watchdog's `Drop` runs it after.
+        let source = include_str!("gpu_worker.rs");
+        let start = source
+            .find("fn process_job_with_sink(")
+            .expect("GPU generation owner");
+        let end = source[start..]
+            .find("\nfn finish_generation_success(")
+            .map(|offset| start + offset)
+            .expect("GPU generation owner boundary");
+        let body = &source[start..end];
+        assert!(
+            !body.contains("trim_malloc_arenas()"),
+            "the ordinary generation path must not trim inline; its watchdog reports on drop"
+        );
+        let watchdog = body
+            .find("MemoryWatchdog::start(")
+            .expect("ordinary generation memory watchdog");
+        let stop = body
+            .find("memory_watchdog.stop()")
+            .expect("channel-backed watchdog stop");
+        let finish = body
+            .find("finish_generation_success(")
+            .expect("completion hand-off");
+        assert!(
+            watchdog < stop && stop < finish,
+            "the heartbeat stops before the completion, and the report follows it"
         );
     }
 
