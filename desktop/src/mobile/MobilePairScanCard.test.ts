@@ -41,4 +41,21 @@ describe("MobilePairScanCard", () => {
     await scan.trigger("click");
     expect(wrapper.emitted("scan")).toBeUndefined();
   });
+
+  it("says why a scan failed, where the scan was started", () => {
+    // Pairing failures used to set an error that only the Machines tab
+    // rendered, so a scan begun in Settings failed in silence.
+    const wrapper = mount(MobilePairScanCard, {
+      props: { error: "That pairing code has expired. Show a new one." },
+    });
+
+    const alert = wrapper.get("[data-test='mobile-pair-scan-error']");
+    expect(alert.attributes("role")).toBe("alert");
+    expect(alert.text()).toBe("That pairing code has expired. Show a new one.");
+  });
+
+  it("says nothing when there is nothing wrong", () => {
+    const wrapper = mount(MobilePairScanCard);
+    expect(wrapper.find("[data-test='mobile-pair-scan-error']").exists()).toBe(false);
+  });
 });

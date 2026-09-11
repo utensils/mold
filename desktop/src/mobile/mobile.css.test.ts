@@ -954,6 +954,20 @@ describe("iOS type vocabulary", () => {
     expect(Number(action?.[1]?.match(/width:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
     expect(Number(action?.[1]?.match(/height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
 
+    // The one control that decides where every print goes is a finger target,
+    // and it is invisible (opacity 0 over the chip), so the CHIP must show the
+    // focus a keyboard or Full Keyboard Access puts on it.
+    const chip = css.match(/\.mobile-header-routing-chip\s*\{([^}]*)\}/s);
+    expect(Number(chip?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    const select = css.match(/\.mobile-header-routing-select\s*\{([^}]*)\}/s);
+    expect(select?.[1]).toMatch(/inset:\s*0/);
+    expect(css).toMatch(
+      /\.mobile-header-routing-chip:has\(\.mobile-header-routing-select:focus-visible\)\s*\{[^}]*outline:/s,
+    );
+
+    // The one action a screen offers shows its own focus too.
+    expect(css).toMatch(/\.mobile-header-action:focus-visible\s*\{[^}]*outline:/s);
+
     // Where the next print lands is pinned above the scroll, not in it.
     const row = css.match(/\.mobile-header-routing\s*\{([^}]*)\}/s);
     expect(row?.[1]).toMatch(/display:\s*flex/);

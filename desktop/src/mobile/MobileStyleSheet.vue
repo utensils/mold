@@ -16,12 +16,13 @@
  * The list is mounted only while the sheet is open — StyleMenu resolves its
  * keyboard cursor on mount, so a parked copy would open on a stale row.
  */
-import { nextTick, onBeforeUnmount, ref, toRef, watch } from "vue";
+import { ref, toRef } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 import StyleMenu from "@studio/components/StyleMenu.vue";
 import type { StyleMenuModel } from "@studio/lib/styleMenu";
 import { useMobileBack } from "./useMobileBack";
 import { useSheetDismiss } from "./useSheetDismiss";
+import { useSheetFocus } from "./useSheetFocus";
 
 const props = withDefaults(
   defineProps<{
@@ -58,68 +59,19 @@ useMobileBack(toRef(props, "open"), () => emit("close"));
 const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-style-sheet");
 const panel = ref<HTMLElement | null>(null);
 const body = ref<HTMLElement | null>(null);
-let restoreFocus: HTMLElement | null = null;
 
 const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
   useSheetDismiss({ body, onDismiss: () => emit("close") });
 
-watch(
-  () => props.open,
-  async (open) => {
-    if (open) {
-      restoreFocus = document.activeElement as HTMLElement | null;
-      // The panel, never the filter field: a sheet that raises the keyboard
-      // hides the very rows it was opened to show.
-      await nextTick();
-      if (props.open && isTop()) panel.value?.focus?.();
-    } else {
-      resetDrag();
-      restoreFocus?.focus?.();
-      restoreFocus = null;
-    }
-  },
-  { immediate: true },
-);
-
-onBeforeUnmount(() => {
-  resetDrag();
-  restoreFocus = null;
+// The panel, never the filter field: a sheet that raises the keyboard hides
+// the very rows it was opened to show.
+const { onKeydown } = useSheetFocus({
+  panel,
+  open: () => props.open,
+  isTop,
+  onClose: () => emit("close"),
+  onBeforeClose: resetDrag,
 });
-
-/**
- * Escape and Tab. The arrow walk and Enter belong to StyleMenu's own root,
- * which is inside this panel, so they never reach here.
- */
-function onKeydown(event: KeyboardEvent): void {
-  if (!props.open || !isTop()) return;
-  if (event.key === "Escape") {
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    emit("close");
-  } else if (event.key === "Tab") {
-    const controls = [
-      ...(panel.value?.querySelectorAll<HTMLElement>(
-        "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex='0']",
-      ) ?? []),
-    ].filter((node) => !node.closest("[inert]") && node.getClientRects().length > 0);
-    const first = controls[0];
-    const last = controls.at(-1);
-    if (
-      !first ||
-      (event.shiftKey &&
-        (document.activeElement === first || document.activeElement === panel.value))
-    ) {
-      event.preventDefault();
-      (last ?? panel.value)?.focus();
-    } else if (
-      !event.shiftKey &&
-      (document.activeElement === last || document.activeElement === panel.value)
-    ) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
-}
 </script>
 
 <template>

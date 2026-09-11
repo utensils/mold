@@ -15,7 +15,8 @@
  */
 import { useMobileBack } from "./useMobileBack";
 import { useSheetDismiss } from "./useSheetDismiss";
-import { ref, toRef, watch, nextTick, onBeforeUnmount } from "vue";
+import { useSheetFocus } from "./useSheetFocus";
+import { ref, toRef } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 
 const props = defineProps<{
@@ -31,60 +32,15 @@ useMobileBack(toRef(props, "open"), () => emit("close"));
 const panel = ref<HTMLElement | null>(null);
 const body = ref<HTMLElement | null>(null);
 const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-more-settings");
-let previousFocus: HTMLElement | null = null;
-
 const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
   useSheetDismiss({ body, onDismiss: () => emit("close") });
 
-watch(
-  () => props.open,
-  async (open) => {
-    if (open) {
-      previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      await nextTick();
-      if (props.open && isTop()) panel.value?.focus();
-    } else {
-      resetDrag();
-      previousFocus?.focus();
-      previousFocus = null;
-    }
-  },
-  { immediate: true },
-);
-
-function onKeydown(event: KeyboardEvent): void {
-  if (!props.open || !isTop()) return;
-  if (event.key === "Escape") {
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    emit("close");
-  } else if (event.key === "Tab") {
-    const controls = [
-      ...(panel.value?.querySelectorAll<HTMLElement>(
-        "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex='0']",
-      ) ?? []),
-    ].filter((node) => !node.closest("[inert]") && node.getClientRects().length > 0);
-    const first = controls[0];
-    const last = controls.at(-1);
-    if (
-      !first ||
-      (event.shiftKey &&
-        (document.activeElement === first || document.activeElement === panel.value))
-    ) {
-      event.preventDefault();
-      (last ?? panel.value)?.focus();
-    } else if (
-      !event.shiftKey &&
-      (document.activeElement === last || document.activeElement === panel.value)
-    ) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
-}
-onBeforeUnmount(() => {
-  resetDrag();
-  previousFocus = null;
+const { onKeydown } = useSheetFocus({
+  panel,
+  open: () => props.open,
+  isTop,
+  onClose: () => emit("close"),
+  onBeforeClose: resetDrag,
 });
 </script>
 

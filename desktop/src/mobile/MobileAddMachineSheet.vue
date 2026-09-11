@@ -16,6 +16,7 @@ import { ref, toRef } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 import { useMobileBack } from "./useMobileBack";
 import { useSheetDismiss } from "./useSheetDismiss";
+import { useSheetFocus } from "./useSheetFocus";
 import type { DiscoveredHost } from "./hosts";
 
 const props = defineProps<{
@@ -27,6 +28,9 @@ const props = defineProps<{
   discovered: readonly DiscoveredHost[];
   /** The discovered machine awaiting its API key, if any. */
   selectedDiscovered: DiscoveredHost | null;
+  /** Why the last attempt failed. Shown HERE: a fixed overlay with a scrim
+   *  would otherwise render its own failure on the screen behind it. */
+  error?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -46,7 +50,8 @@ const address = defineModel<string>("address", { required: true });
 const apiKey = defineModel<string>("apiKey", { required: true });
 
 useMobileBack(toRef(props, "open"), () => emit("close"));
-useOverlayStack(toRef(props, "open"), "mobile-add-machine");
+const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-add-machine");
+const panel = ref<HTMLElement | null>(null);
 const body = ref<HTMLElement | null>(null);
 const discoveredApiKeyInput = ref<HTMLInputElement | null>(null);
 const hostAddressInput = ref<HTMLInputElement | null>(null);
@@ -54,6 +59,16 @@ const hostApiKeyInput = ref<HTMLInputElement | null>(null);
 
 const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
   useSheetDismiss({ body, onDismiss: () => emit("close") });
+
+/* `aria-modal="true"` over a background that is not inert is a promise only
+ * this keeps: focus in on open, Tab held inside, Escape out, focus restored. */
+const { onKeydown } = useSheetFocus({
+  panel,
+  open: () => props.open,
+  isTop,
+  onClose: () => emit("close"),
+  onBeforeClose: resetDrag,
+});
 
 /* MobileApp drives the focus when a discovered machine is chosen, because it
  * is what knows the choice landed. */
@@ -70,6 +85,7 @@ defineExpose({ focusDiscoveredApiKey: () => discoveredApiKeyInput.value?.focus()
     aria-label="Add a machine"
     :aria-hidden="open ? undefined : 'true'"
     data-test="mobile-add-machine"
+    @keydown="onKeydown"
   >
     <button
       class="mobile-sheet-scrim"
@@ -80,6 +96,7 @@ defineExpose({ focusDiscoveredApiKey: () => discoveredApiKeyInput.value?.focus()
       @click="emit('close')"
     />
     <div
+      ref="panel"
       class="mobile-sheet-panel"
       :class="{ 'is-dragging': dragging }"
       :style="panelStyle"
@@ -108,6 +125,14 @@ defineExpose({ focusDiscoveredApiKey: () => discoveredApiKeyInput.value?.focus()
         </div>
       </header>
       <div ref="body" class="mobile-sheet-body mobile-add-machine-body">
+        <p
+          v-if="error"
+          class="status-line error-text"
+          role="alert"
+          data-test="mobile-add-machine-error"
+        >
+          {{ error }}
+        </p>
         <button
           class="primary-button mobile-pair-button"
           type="button"

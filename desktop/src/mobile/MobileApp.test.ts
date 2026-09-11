@@ -7543,6 +7543,48 @@ describe("MobileApp foreground resume", () => {
   });
 });
 
+describe("MobileApp connection failures", () => {
+  it("explains a failed save inside the sheet the user is looking at", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.reject(new Error("connection refused"));
+      return Promise.resolve(null);
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-add-machine-open']").trigger("click");
+    await wrapper
+      .get(".mobile-host-form input[autocomplete='url']")
+      .setValue("http://unreachable.invalid:7680");
+    await wrapper.get(".mobile-host-form").trigger("submit");
+    await flushPromises();
+
+    // The sheet is a fixed overlay with a scrim; an error rendered behind it
+    // is an error nobody reads.
+    const sheet = wrapper.get("[data-test='mobile-add-machine']");
+    expect(sheet.classes()).toContain("is-open");
+    const alert = sheet.get("[data-test='mobile-add-machine-error']");
+    expect(alert.attributes("role")).toBe("alert");
+    expect(alert.text()).toContain("connection refused");
+  });
+
+  it("explains a failed pairing scan on the screen the scan was started from", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-pair-scan']").trigger("click");
+    await flushPromises();
+
+    // Camera permission is denied in this environment, which is exactly one of
+    // the failures that used to land on a tab the user was not on.
+    expect(wrapper.get("[data-test='mobile-pair-scan-error']").text()).toBeTruthy();
+  });
+});
+
 describe("MobileApp queue rows", () => {
   it("draws a machine's own work the same way as this phone's", async () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {

@@ -757,6 +757,8 @@ const pairing = ref(false);
  *  a fresh install used to land on a form it had no way to fill in yet. */
 const addMachineOpen = ref(false);
 const addMachineSheet = ref<{ focusDiscoveredApiKey: () => void } | null>(null);
+/** Which door the current pairing scan came through. */
+const pairingStartedFromSettings = ref(false);
 const pairingScannerOpen = ref(false);
 let pairingScannerCancelled = false;
 useMobileBack(pairingScannerOpen, () => {
@@ -4720,6 +4722,22 @@ async function pairFromCode(code: () => Promise<string>): Promise<void> {
     pairingScannerCancelled = false;
     pairing.value = false;
   }
+}
+
+/** A pairing failure is only Settings' to report when Settings began the scan;
+ *  the Machines tab and the Add-a-machine sheet report their own. */
+const settingsPairingError = computed(() =>
+  settingsOpen.value && pairingStartedFromSettings.value ? hostError.value || null : null,
+);
+
+function scanPairingFromSettings(): Promise<void> {
+  pairingStartedFromSettings.value = true;
+  return scanPairingCode();
+}
+
+function scanPairingFromSheet(): Promise<void> {
+  pairingStartedFromSettings.value = false;
+  return scanPairingCode();
 }
 
 function scanPairingCode(): Promise<void> {
@@ -12046,10 +12064,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         :app-version="appVersion"
         :host="selectedHost ?? null"
         :update-channel="androidNativeRuntime ? 'GitHub APK' : 'TestFlight'"
-        :pairing-scanning="pairingScannerOpen"
+        :pairing-scanning="pairing"
+        :pairing-error="settingsPairingError"
         @update="updateSettings"
         @manage-hosts="manageHostsFromSettings"
-        @scan-pairing="scanPairingCode"
+        @scan-pairing="scanPairingFromSettings"
       />
       <div
         v-if="pullRefreshAvailable"
@@ -13710,8 +13729,9 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             :discovering="discovering"
             :discovered="discovered"
             :selected-discovered="selectedDiscovered"
+            :error="hostError"
             @close="addMachineOpen = false"
-            @scan-pairing="scanPairingCode"
+            @scan-pairing="scanPairingFromSheet"
             @discover="discoverHosts"
             @pick-discovered="pickDiscoveredHost"
             @clear-discovered="clearDiscoveredHost"

@@ -105,4 +105,43 @@ describe("MobileAddMachineSheet", () => {
     expect(wrapper.emitted("connect-discovered")).toHaveLength(1);
     wrapper.unmount();
   });
+
+  it("shows why a machine could not be saved, inside the sheet", async () => {
+    const wrapper = sheet();
+    expect(wrapper.find("[role='alert']").exists()).toBe(false);
+
+    // A fixed overlay with a scrim renders its own failure behind itself
+    // otherwise: the explanation lands on the screen you cannot see.
+    await wrapper.setProps({ error: "Couldn't reach plato. Check the connection." });
+    const alert = wrapper.get("[data-test='mobile-add-machine-error']");
+    expect(alert.attributes("role")).toBe("alert");
+    expect(alert.text()).toBe("Couldn't reach plato. Check the connection.");
+    expect(alert.element.closest(".mobile-sheet-panel")).not.toBeNull();
+    wrapper.unmount();
+  });
+  it("takes focus on open, traps Tab, and returns focus after Escape", async () => {
+    const trigger = document.createElement("button");
+    document.body.append(trigger);
+    trigger.focus();
+    const wrapper = sheet({ open: false });
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-add-machine']").attributes("inert")).toBeDefined();
+
+    await wrapper.setProps({ open: true });
+    await flushPromises();
+    // aria-modal over a background that is not inert is kept by this alone.
+    expect(document.activeElement).toBe(wrapper.get(".mobile-sheet-panel").element);
+
+    // The first Tab always arrives with the panel focused.
+    await wrapper.get("[data-test='mobile-add-machine']").trigger("keydown", { key: "Tab" });
+    expect(wrapper.get(".mobile-sheet-panel").element.contains(document.activeElement)).toBe(true);
+
+    await wrapper.get("[data-test='mobile-add-machine']").trigger("keydown", { key: "Escape" });
+    expect(wrapper.emitted("close")).toHaveLength(1);
+
+    await wrapper.setProps({ open: false });
+    expect(document.activeElement).toBe(trigger);
+    wrapper.unmount();
+    trigger.remove();
+  });
 });
