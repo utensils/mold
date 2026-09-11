@@ -360,6 +360,10 @@ pub struct AppState {
     /// Must never be held across an .await point.
     pub active_generation: Arc<RwLock<Option<ActiveGenerationSnapshot>>>,
     pub config: Arc<tokio::sync::RwLock<Config>>,
+    /// Memoized `/api/models` rows plus the parsed `config.toml` behind them.
+    /// Both are per-request cost: admission and every model listing refresh
+    /// the config, and the catalog walks the whole models directory.
+    pub(crate) model_catalog: Arc<crate::model_manager::ModelCatalogCache>,
     /// Authenticated, quota-bounded private staging for H3 reference media.
     /// Its root derives from the shared `Config::mold_dir()` authority.
     pub reference_uploads: crate::reference_uploads::ReferenceUploadStore,
@@ -708,6 +712,7 @@ impl AppState {
             queue_capacity,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
+            model_catalog: Arc::new(Default::default()),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: false,
@@ -784,6 +789,7 @@ impl AppState {
             queue_capacity,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),
+            model_catalog: Arc::new(Default::default()),
             config: Arc::new(tokio::sync::RwLock::new(config)),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: false,
@@ -871,6 +877,7 @@ impl AppState {
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
+            model_catalog: Arc::new(Default::default()),
             config: Arc::new(tokio::sync::RwLock::new(Self::test_config_with_model(
                 &model_name,
             ))),
@@ -927,6 +934,7 @@ impl AppState {
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
+            model_catalog: Arc::new(Default::default()),
             config: Arc::new(tokio::sync::RwLock::new(Self::test_config_with_model(
                 &model_name,
             ))),
@@ -982,6 +990,7 @@ impl AppState {
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),
+            model_catalog: Arc::new(Default::default()),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: false,

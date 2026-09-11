@@ -662,6 +662,13 @@ impl ModelPaths {
 /// Current config schema version. Increment when adding migrations.
 const CURRENT_CONFIG_VERSION: u32 = 1;
 
+/// What a caller compares to decide whether `config.toml` needs re-parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigFileIdentity {
+    pub len: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     /// Config schema version for migrations. Old configs without this field
@@ -1141,7 +1148,41 @@ impl Config {
         let _ = RUNTIME_MODELS_DIR_OVERRIDE.get_or_init(|| models_dir);
     }
 
+    /// Load the config the way every surface does: parse `config.toml`, run
+    /// migrations, then overlay the DB-backed user preferences.
     pub fn load_or_default() -> Self {
+        let mut cfg = Self::load_file_only();
+        cfg.apply_post_load_overlay();
+        cfg
+    }
+
+    /// The identity of `config.toml` on disk: its length and modification
+    /// time, or `None` when there is no readable file.
+    ///
+    /// A server refreshes its config on every `/api/models` call and on every
+    /// admission, so re-reading and re-parsing a file that has not changed is
+    /// pure per-request cost. This is the cheap question that says whether the
+    /// parse can be skipped. It deliberately says nothing about the DB-backed
+    /// overlay, which another process can change without touching the file —
+    /// [`Config::apply_post_load_overlay`] must still run every time.
+    pub fn config_file_identity() -> Option<ConfigFileIdentity> {
+        let path = Self::config_path()?;
+        let metadata = std::fs::metadata(&path).ok()?;
+        Some(ConfigFileIdentity {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
+
+    /// Apply the installed DB-backed user-preference overlay, if any.
+    pub fn apply_post_load_overlay(&mut self) {
+        if let Some(hook) = POST_LOAD_HOOK.get() {
+            hook(self);
+        }
+    }
+
+    /// Parse `config.toml` and run migrations, WITHOUT the DB overlay.
+    pub fn load_file_only() -> Self {
         let Some(config_path) = Self::config_path() else {
             eprintln!("warning: could not determine home directory — using default config");
             return Config::default();
@@ -1177,11 +1218,6 @@ impl Config {
             if let Err(e) = cfg.save() {
                 eprintln!("warning: failed to save migrated config: {e}");
             }
-        }
-
-        // Post-load hook (DB-backed user-pref overlay, if installed).
-        if let Some(hook) = POST_LOAD_HOOK.get() {
-            hook(&mut cfg);
         }
 
         cfg

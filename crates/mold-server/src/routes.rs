@@ -5819,6 +5819,9 @@ async fn delete_model(
         }
     }
     drop(config);
+    // Files are gone from the models directory; the memoized catalog would
+    // still advertise them as installed.
+    state.model_catalog.invalidate();
 
     // Evict any parked (non-GPU-resident) engine so a later request can't
     // reactivate an engine whose files are gone.
