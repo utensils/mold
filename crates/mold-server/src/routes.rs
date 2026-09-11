@@ -1318,6 +1318,20 @@ pub(crate) struct PreparedGenerationRoute {
     pub(crate) warnings: RequestWarnings,
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
+    /// The built-in LTX-2 IC-LoRA this preparation resolved and prepended
+    /// into `request.loras`, when it resolved one.
+    ///
+    /// Preparation runs AFTER durable admission sealed the request's media
+    /// set, and `loras` is one of the fields the publication scrub wipes — so
+    /// an adapter materialized here is destroyed on its way to the runtime
+    /// unless the feeder is told to carry it across. It is reported rather
+    /// than inferred because only this function knows which entry it added.
+    ///
+    /// Safe to carry where a user's LoRA is not: the path is server-minted,
+    /// resolved from the request's own `ltx2_control` field against this
+    /// host's manifest, and names an installed first-party artifact rather
+    /// than anything the caller supplied.
+    pub(crate) materialized_control_lora: Option<mold_core::LoraWeight>,
 }
 
 /// Name the first request-owned media authority that cannot be replayed from
@@ -1650,6 +1664,7 @@ async fn prepare_generation_inner(
         .extend(resolve_request_filing(state, request).await);
 
     resolve_server_local_media_paths(state, request).await?;
+    let mut materialized_control_lora = None;
     if let Some((adapter, path)) = planned_control {
         // The ordinary attached route may wait for this first-party adapter
         // download. A durable acknowledgement may not: there is no persisted
@@ -1663,7 +1678,8 @@ async fn prepare_generation_inner(
                 adapter.id
             )));
         }
-        materialize_builtin_ltx2_control(state, request, adapter, path).await?;
+        materialized_control_lora =
+            Some(materialize_builtin_ltx2_control(state, request, adapter, path).await?);
     }
     if let Some((preset, _)) = planned_camera_controls
         .iter()
@@ -1731,6 +1747,7 @@ async fn prepare_generation_inner(
         warnings,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
+        materialized_control_lora,
     })
 }
 
@@ -2157,7 +2174,7 @@ async fn materialize_builtin_ltx2_control(
     request: &mut mold_core::GenerateRequest,
     adapter: &'static mold_core::ltx2_control::Ltx2ControlAdapter,
     path: std::path::PathBuf,
-) -> Result<(), ApiError> {
+) -> Result<mold_core::LoraWeight, ApiError> {
     if !control_artifact_is_complete(adapter, &path) {
         let mut events = state.downloads.subscribe();
         let (job_id, _, _) = state
@@ -2199,12 +2216,13 @@ async fn materialize_builtin_ltx2_control(
         )));
     }
 
-    let mut ordered = vec![mold_core::LoraWeight {
+    let materialized = mold_core::LoraWeight {
         path: path.to_string_lossy().into_owned(),
         scale: 1.0,
 
         expert: None,
-    }];
+    };
+    let mut ordered = vec![materialized.clone()];
     if let Some(lora) = request.lora.take() {
         ordered.push(lora);
     }
@@ -2212,7 +2230,7 @@ async fn materialize_builtin_ltx2_control(
         ordered.extend(loras);
     }
     request.loras = Some(ordered);
-    Ok(())
+    Ok(materialized)
 }
 
 /// Which of this adapter's files have not landed and verified.

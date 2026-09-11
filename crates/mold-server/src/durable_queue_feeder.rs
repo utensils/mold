@@ -577,6 +577,33 @@ async fn claimed_row_is_in_runtime_window(
     })
 }
 
+/// Carry a server-materialized control adapter across the publication scrub.
+///
+/// `scrub_request_media` clears `loras` because a caller's adapters are
+/// user-supplied media that the durable media set restores on its own. The
+/// built-in LTX-2 IC-LoRA is neither: preparation resolves it from the
+/// request's own `ltx2_control` field against this host's manifest, AFTER
+/// admission sealed the media set, so nothing restores it and
+/// `execution_plan::effective_lora_requests` — which re-derives only from
+/// `loras`, `lora` and the model default — found an empty stack.
+///
+/// Only the server's own entry is restored. The caller's adapters stay
+/// scrubbed and keep coming back through the sealed set, so this cannot
+/// reintroduce a user path into the published request.
+fn restore_materialized_control_lora(
+    request: &mut mold_core::GenerateRequest,
+    materialized: Option<&mold_core::LoraWeight>,
+) {
+    let Some(materialized) = materialized else {
+        return;
+    };
+    let mut ordered = vec![materialized.clone()];
+    if let Some(existing) = request.loras.take() {
+        ordered.extend(existing);
+    }
+    request.loras = Some(ordered);
+}
+
 async fn register_claimed_runtime(
     state: &AppState,
     row: &mold_db::generation_queue::GenerationQueueRow,
@@ -1192,11 +1219,19 @@ async fn feed_available(
                  request on this build to apply it"
             );
         }
+        // Preparation may have resolved a built-in LTX-2 IC-LoRA into `loras`
+        // — after admission sealed the media set, so the scrub below would
+        // otherwise take the server's own adapter with the caller's.
+        let materialized_control_lora = prepared_route
+            .as_ref()
+            .ok()
+            .and_then(|route| route.materialized_control_lora.clone());
         // Publish only a payload-free copy. Dropping the RAII owner before the
         // staging lease preserves scrub-before-release on success; unwind and
         // cancellation take the same order because locals drop in reverse.
         let mut request = preparation_request.scrubbed_clone();
         drop(preparation_request);
+        restore_materialized_control_lora(&mut request, materialized_control_lora.as_ref());
         drop(preparation_lease);
         let prepared_route = match prepared_route {
             Ok(route) => route,
@@ -1420,6 +1455,82 @@ async fn feed_available(
 
 #[cfg(test)]
 mod tests {
+    /// The IC-LoRA the SERVER resolves must survive publication.
+    ///
+    /// `prepare_generation_inner` prepends the built-in LTX-2 control adapter
+    /// into `request.loras`, and it runs AFTER durable admission sealed the
+    /// media set — so the publication scrub, which exists to wipe
+    /// user-supplied payloads, took the server's own adapter with it.
+    /// `execution_plan::effective_lora_requests` re-derives only from
+    /// `loras`/`lora`/the model default, so the render then ran with no
+    /// control adapter at all, and `lora_would_be_lost_on_publication`
+    /// reported nothing because an IC-LoRA render carries a control image and
+    /// therefore DID seal a set.
+    #[test]
+    fn a_server_materialized_control_lora_survives_the_publication_scrub() {
+        let adapter = mold_core::LoraWeight {
+            path: "/models/ltx2-control/union.safetensors".to_string(),
+            scale: 1.0,
+            expert: None,
+        };
+        let mut prepared: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "ltx2-19b:distilled",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "guidance": 1.0,
+        }))
+        .unwrap();
+        // What preparation leaves behind: the built-in adapter first, the
+        // caller's own stack after it.
+        prepared.loras = Some(vec![
+            adapter.clone(),
+            mold_core::LoraWeight {
+                path: "/loras/style.safetensors".to_string(),
+                scale: 0.8,
+                expert: None,
+            },
+        ]);
+
+        let mut owner = crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(prepared);
+        let mut published = owner.scrubbed_clone();
+        assert!(
+            published.loras.is_none(),
+            "the scrub still wipes the caller's own adapters, which the sealed set restores"
+        );
+
+        super::restore_materialized_control_lora(&mut published, Some(&adapter));
+        let restored = published
+            .loras
+            .as_ref()
+            .expect("the server's own adapter must reach the runtime");
+        assert_eq!(
+            restored.len(),
+            1,
+            "only the server-minted adapter is carried across, never the caller's"
+        );
+        assert_eq!(restored[0].path, adapter.path);
+        assert_eq!(restored[0].scale, 1.0);
+    }
+
+    /// And a render that materialized nothing is left exactly as the scrub
+    /// left it.
+    #[test]
+    fn a_render_with_no_builtin_control_keeps_an_empty_lora_stack() {
+        let mut published: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "flux-dev:q8",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "guidance": 1.0,
+        }))
+        .unwrap();
+        super::restore_materialized_control_lora(&mut published, None);
+        assert!(published.loras.is_none());
+    }
+
     use std::sync::Arc;
     use std::time::Duration;
 
