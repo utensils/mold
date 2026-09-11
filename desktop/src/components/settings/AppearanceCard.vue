@@ -14,7 +14,7 @@ import ThemePicker from "@studio/components/settings/ThemePicker.vue";
 import ToggleControl from "@studio/components/settings/ToggleControl.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import type { ThemeId } from "../../lib/theme";
-import type { AppSettings } from "../../lib/api/types";
+import type { AppSettings } from "../../lib/ipc";
 import { shortcutLabel } from "../../lib/platform";
 
 const prefs = useAppPrefsStore();
