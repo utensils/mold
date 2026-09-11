@@ -16,11 +16,12 @@
  * The list is mounted only while the sheet is open — StyleMenu resolves its
  * keyboard cursor on mount, so a parked copy would open on a stale row.
  */
-import { computed, nextTick, onBeforeUnmount, ref, toRef, watch } from "vue";
+import { nextTick, onBeforeUnmount, ref, toRef, watch } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 import StyleMenu from "@studio/components/StyleMenu.vue";
 import type { StyleMenuModel } from "@studio/lib/styleMenu";
 import { useMobileBack } from "./useMobileBack";
+import { useSheetDismiss } from "./useSheetDismiss";
 
 const props = withDefaults(
   defineProps<{
@@ -57,26 +58,10 @@ useMobileBack(toRef(props, "open"), () => emit("close"));
 const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-style-sheet");
 const panel = ref<HTMLElement | null>(null);
 const body = ref<HTMLElement | null>(null);
-const dragOffset = ref(0);
-const dragging = ref(false);
 let restoreFocus: HTMLElement | null = null;
-let dragTouchId: number | null = null;
-let dragStartX = 0;
-let dragStartY = 0;
 
-const DISMISS_DISTANCE = 96;
-const panelStyle = computed(() => ({
-  transform: dragOffset.value > 0 ? `translateY(${dragOffset.value}px)` : undefined,
-}));
-const backdropStyle = computed(() => ({
-  opacity: dragOffset.value > 0 ? Math.max(0.24, 1 - dragOffset.value / 320) : undefined,
-}));
-
-function resetDrag(): void {
-  dragTouchId = null;
-  dragOffset.value = 0;
-  dragging.value = false;
-}
+const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
+  useSheetDismiss({ body, onDismiss: () => emit("close") });
 
 watch(
   () => props.open,
@@ -100,45 +85,6 @@ onBeforeUnmount(() => {
   resetDrag();
   restoreFocus = null;
 });
-
-function beginDismiss(event: TouchEvent): void {
-  if (
-    event.touches.length !== 1 ||
-    (body.value?.scrollTop ?? 0) > 0 ||
-    (event.target instanceof Element &&
-      Boolean(event.target.closest("input, textarea, select, button, a, [contenteditable='true']")))
-  ) {
-    resetDrag();
-    return;
-  }
-  const touch = event.touches[0];
-  if (!touch) return;
-  dragTouchId = touch.identifier;
-  dragStartX = touch.clientX;
-  dragStartY = touch.clientY;
-}
-
-function moveDismiss(event: TouchEvent): void {
-  if (dragTouchId === null || event.touches.length !== 1) return;
-  const touch = [...event.touches].find((candidate) => candidate.identifier === dragTouchId);
-  if (!touch) return;
-  const deltaX = touch.clientX - dragStartX;
-  const deltaY = touch.clientY - dragStartY;
-  if (deltaY <= 0 || Math.abs(deltaX) >= deltaY) {
-    dragOffset.value = 0;
-    return;
-  }
-  dragging.value = true;
-  dragOffset.value = Math.min(280, deltaY * 0.82);
-  event.preventDefault();
-}
-
-function finishDismiss(): void {
-  if (dragTouchId === null) return;
-  const dismiss = dragOffset.value >= DISMISS_DISTANCE;
-  resetDrag();
-  if (dismiss) emit("close");
-}
 
 /**
  * Escape and Tab. The arrow walk and Enter belong to StyleMenu's own root,

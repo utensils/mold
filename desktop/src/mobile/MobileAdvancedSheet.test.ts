@@ -1,5 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
+import { nextTick } from "vue";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 
 describe("MobileAdvancedSheet", () => {
@@ -87,5 +88,45 @@ describe("MobileAdvancedSheet", () => {
     await wrapper.get("[data-test='mobile-advanced-sheet-scrim']").trigger("click");
     expect(wrapper.emitted("close")).toHaveLength(1);
     wrapper.unmount();
+  });
+
+  it("wraps a forward Tab from the panel itself back to the first control", async () => {
+    // The panel is the focus target on open, so the very first Tab arrives with
+    // the panel focused. Without this the key fell through and iOS moved focus
+    // to browser chrome behind the sheet.
+    const wrapper = mount(MobileAdvancedSheet, {
+      attachTo: document.body,
+      props: { open: true, count: 0 },
+      slots: { default: '<input aria-label="Detail" />' },
+    });
+    await flushPromises();
+    expect(document.activeElement).toBe(wrapper.get(".mobile-sheet-panel").element);
+
+    await wrapper.get("[data-test=mobile-advanced-sheet]").trigger("keydown", { key: "Tab" });
+    expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-advanced-reset']").element);
+    wrapper.unmount();
+  });
+
+  it("leaves focus alone while another sheet stands above it", async () => {
+    const { createOverlayToken, popOverlay, pushOverlay } = await import("@ui/lib/overlayStack");
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const wrapper = mount(MobileAdvancedSheet, {
+      attachTo: document.body,
+      props: { open: false, count: 0 },
+    });
+    outside.focus();
+    void wrapper.setProps({ open: true });
+    await nextTick();
+    // A sheet rising over this one while the focus watch waits its tick for
+    // the panel to render — that tick is the whole window.
+    const above = createOverlayToken("test-sheet-above");
+    pushOverlay(above);
+    await flushPromises();
+    // A sheet opened underneath must not pull focus out of the one on top.
+    expect(document.activeElement).toBe(outside);
+    popOverlay(above);
+    wrapper.unmount();
+    outside.remove();
   });
 });
