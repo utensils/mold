@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import type { ConfigRow } from "../../api/config";
-import { PER_STYLE_FIELDS } from "../../lib/settingsSchema";
+import {
+  PER_STYLE_FIELD_LABELS,
+  PER_STYLE_FIELDS,
+} from "../../lib/settingsSchema";
 import PerStyleDefaultsRow from "./PerStyleDefaultsRow.vue";
 
 /*
@@ -86,11 +89,18 @@ describe("PerStyleDefaultsRow", () => {
     expect(rows.map((el) => el.attributes("data-test"))).toEqual(
       PER_STYLE_FIELDS.map((field) => `per-style-row-${field}`),
     );
-    // Each row is NAMED for the engine field, because that is what
-    // `mold config set models.<style>.<field>` takes.
+    // Each row leads with the inspector's word and keeps the engine field
+    // beneath it, because that is what `mold config set models.<style>.<field>`
+    // takes — plain words first, technical truth second, on the same row.
     for (const [index, field] of PER_STYLE_FIELDS.entries()) {
+      const label = PER_STYLE_FIELD_LABELS[field];
+      expect(label, `${field} has a plain label`).toBeTruthy();
+      expect(rows[index]!.text(), field).toContain(label!);
       expect(rows[index]!.text(), field).toContain(field);
     }
+    expect(
+      wrapper.get("[data-test='per-style-row-default_steps']").text(),
+    ).toContain("Detail");
   });
 
   it("saves and resets by the full key, so the caller needs no parsing", async () => {

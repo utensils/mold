@@ -8,15 +8,21 @@
  * styles have been tuned and by how much; the fields arrive only when a style
  * is opened.
  *
- * The fields are named the way `mold config list` names them, because that is
- * what `mold config set models.<style>.<field>` takes and what a person tuning
- * a single style has already seen.
+ * Each field leads with the plain word the inspector uses (Detail, Width,
+ * Words to avoid…) and carries the engine's own name beneath it in mono,
+ * because that is what `mold config set models.<style>.<field>` takes and what
+ * `mold config list` prints — plain words first, technical truth second, on
+ * the same row.
  */
 import { computed, ref } from "vue";
 import SettingRow from "./SettingRow.vue";
 import NumberControl from "./NumberControl.vue";
 import TextControl from "./TextControl.vue";
-import { PER_STYLE_FIELDS, parsePerStyleKey } from "../../lib/settingsSchema";
+import {
+  PER_STYLE_FIELD_LABELS,
+  PER_STYLE_FIELDS,
+  parsePerStyleKey,
+} from "../../lib/settingsSchema";
 import {
   canResetConfig,
   type ConfigRow,
@@ -68,6 +74,7 @@ const overrideLabel = computed(
 const fields = computed(() =>
   PER_STYLE_FIELDS.map((field) => ({
     field,
+    label: PER_STYLE_FIELD_LABELS[field] ?? field,
     key: `models.${props.style}.${field}`,
     row: byField.value.get(field) ?? null,
     numeric: NUMERIC_FIELDS.has(field),
@@ -110,7 +117,8 @@ function textOf(row: ConfigRow | null): string {
       <SettingRow
         v-for="field in fields"
         :key="field.key"
-        :label="field.field"
+        :label="field.label"
+        :help="field.field"
         :source="field.row?.source"
         :resettable="canResetConfig(field.key)"
         :data-test="`per-style-row-${field.field}`"

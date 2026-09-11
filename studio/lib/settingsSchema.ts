@@ -493,7 +493,7 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     key: "generate.auto_tag_title",
     section: "library",
     label: "Tag command-line prints with their title",
-    help: "`mold run` adds each titled print's own tag. This app's own setting is the switch above.",
+    help: "`mold run` adds each titled print's own tag. Each app keeps its own switch for the prints it makes.",
     editor: "toggle",
   },
   {
@@ -785,6 +785,22 @@ export const PER_STYLE_FIELDS: readonly string[] = [
   "lora",
   "lora_scale",
 ];
+
+/**
+ * The inspector's word for each per-style engine field, so a per-style row
+ * says "Detail" over `default_steps` the way the inspector says Detail over
+ * `28 passes`. An unknown field keeps its engine name.
+ */
+export const PER_STYLE_FIELD_LABELS: Readonly<Record<string, string>> = {
+  default_steps: "Detail",
+  default_guidance: "Stick to my words",
+  default_width: "Width",
+  default_height: "Height",
+  scheduler: "Scheduler",
+  negative_prompt: "Words to avoid",
+  lora: "Add-on look",
+  lora_scale: "Add-on look strength",
+};
 
 export interface PerStyleGroup<R> {
   style: string;
