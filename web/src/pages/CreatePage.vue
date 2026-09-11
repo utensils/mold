@@ -1924,7 +1924,6 @@ const advCount = computed(() =>
     negativePromptDefault: capabilities.value.supportsNegativePrompt
       ? (form.state.value.negativePromptDefault ?? "")
       : "",
-    loraCount: form.state.value.loras.length,
     upscaleOn: form.state.value.upscaleModel.trim() !== "",
     scheduler: capabilities.value.supportsScheduler
       ? form.state.value.scheduler
@@ -5583,7 +5582,6 @@ onBeforeUnmount(() => {
               @open-end-frame-picker="showEndFramePicker = true"
               @clear-end-frame="onClearEndFrame"
               @open-mask="showMask = true"
-              @append-prompt="onAppendPromptPhrase"
               @canvas-intent="setCanvasIntent"
             />
           </template>

@@ -1548,7 +1548,7 @@ describe("CreatePage layout and behavior", () => {
     ]);
     streamJobsRef.value = [finishedCanvasJob({ image: "" })];
     const originalFetch = globalThis.fetch;
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => ({
       ok: true,
       blob: async () => new Blob(["png-bytes"]),
     }));

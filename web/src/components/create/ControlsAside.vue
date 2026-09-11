@@ -7,15 +7,15 @@
  * The rail carries only what a person touches while writing: Shape, Size,
  * Detail (passes) and Stick to my words. `group` says which slice renders —
  * `primary` is the rail itself, `seed` is the Repeat-this-look disclosure, and
- * `secondary` is the mesh / clip / audio groups, which live under More
- * settings now. Make is the composer's own chip and the machine picker is the
+ * `secondary` is the mesh and audio groups, which live under More settings
+ * now. The clip duration slider is NOT here: AdvancedDrawer's Video section
+ * is its one home, beside the frames and FPS it belongs with. Make is the composer's own chip and the machine picker is the
  * rail's Machine card; neither is repeated here.
  */
 import { computed } from "vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
-import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
@@ -204,31 +204,13 @@ const resolutionWarning = computed(() => {
   );
   return finding?.level === "warn" ? finding.message : null;
 });
-const canPredictDuration = computed(
-  () =>
-    props.model?.supports_duration_prediction === true &&
-    props.model.runtime_ready !== false,
-);
-const predictDuration = computed(
-  () => props.modelValue.predictDuration === true,
-);
-function setPredictDuration(value: boolean) {
-  patch({
-    predictDuration: value,
-    frames: value
-      ? null
-      : (props.modelValue.frames ?? props.model?.default_frames ?? 25),
-  });
-}
 const showGenerateAudio = computed(() => capabilities.value.offersAudioControl);
-/** The secondary slice has nothing to say for a plain still, and an aside
- * with only its chrome reads as a broken control. */
+/** The secondary slice has nothing to say for a plain still — nor for a video
+ * recipe with no audio control, now that the duration slider lives in the
+ * drawer's Video section — and an aside with only its chrome reads as a broken
+ * control. */
 const secondaryEmpty = computed(
-  () =>
-    secondary.value &&
-    !meshProfile.value &&
-    !capabilities.value.supportsVideo &&
-    !showGenerateAudio.value,
+  () => secondary.value && !meshProfile.value && !showGenerateAudio.value,
 );
 const generateAudio = computed(() => props.modelValue.enableAudio !== false);
 const audioOutputSupported = computed(
@@ -503,43 +485,6 @@ function lockLastSeed() {
           Neutralizes baked highlights before shape and PBR material generation.
         </p>
       </div>
-    </div>
-
-    <div v-if="secondary && capabilities.supportsVideo" class="controls__group">
-      <div
-        v-if="canPredictDuration"
-        class="controls__toggle"
-        data-test="predict-duration-control"
-      >
-        <span class="controls__label controls__label--inline"
-          >Predict duration</span
-        >
-        <SwitchToggle
-          :model-value="predictDuration"
-          label="Predict duration from prompt"
-          @update:model-value="setPredictDuration"
-        />
-      </div>
-      <VideoDurationSlider
-        v-if="!predictDuration || !canPredictDuration"
-        :frames="modelValue.frames ?? model?.default_frames ?? 25"
-        :fps="modelValue.fps ?? model?.default_fps ?? 24"
-        :model="model"
-        :family="family"
-        :model-name="modelValue.model"
-        :source-image-capability="
-          model?.source_image ?? modelValue.sourceImageCapability
-        "
-        :routing-request="routingRequest"
-        @update:frames="patch({ frames: $event })"
-      />
-      <p
-        v-else-if="canPredictDuration"
-        class="controls__hint"
-        data-test="predicted-duration-hint"
-      >
-        The host will choose 1–20 seconds from the prompt.
-      </p>
     </div>
 
     <div

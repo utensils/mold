@@ -338,6 +338,27 @@ function setPlacement(placement: DevicePlacement | null) {
   patch({ placement });
 }
 
+// Predict duration came here with the duration slider (ControlsAside's
+// secondary group used to draw both, giving every video recipe two sliders
+// bound to `frames` in the same sheet). The toggle has to live beside the
+// slider it hides, or turning it on leaves a stale slider on screen.
+const canPredictDuration = computed(
+  () =>
+    selectedModel.value?.supports_duration_prediction === true &&
+    selectedModel.value.runtime_ready !== false,
+);
+const predictDuration = computed(
+  () => props.modelValue.predictDuration === true,
+);
+function setPredictDuration(value: boolean) {
+  patch({
+    predictDuration: value,
+    frames: value
+      ? null
+      : (props.modelValue.frames ?? selectedModel.value?.default_frames ?? 25),
+  });
+}
+
 const videoContract = computed(
   () => selectedModel.value ?? { family: props.family },
 );
@@ -800,7 +821,19 @@ function resetAdvanced() {
         :header-interactive="false"
         data-test="section-video"
       >
-        <div class="adv__field">
+        <div
+          v-if="canPredictDuration"
+          class="adv__row"
+          data-test="predict-duration-control"
+        >
+          <span class="adv__label">Predict duration</span>
+          <SwitchToggle
+            :model-value="predictDuration"
+            label="Predict duration from prompt"
+            @update:model-value="setPredictDuration"
+          />
+        </div>
+        <div v-if="!predictDuration || !canPredictDuration" class="adv__field">
           <VideoDurationSlider
             :frames="modelValue.frames ?? selectedModel?.default_frames ?? 25"
             :fps="modelValue.fps ?? selectedModel?.default_fps ?? 24"
@@ -815,6 +848,9 @@ function resetAdvanced() {
             @update:frames="patch({ frames: $event })"
           />
         </div>
+        <p v-else class="adv__hint" data-test="predicted-duration-hint">
+          The host will choose 1–20 seconds from the prompt.
+        </p>
         <div class="adv__field">
           <label class="adv__label">Frames ({{ frameGridLabel }})</label>
           <input
