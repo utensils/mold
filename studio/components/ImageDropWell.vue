@@ -54,7 +54,7 @@ const props = withDefaults(
     pickDisabled: false,
     required: false,
     gallery: false,
-    galleryLabel: "Choose from gallery…",
+    galleryLabel: "Choose from My images…",
     alt: "Attached image",
     testId: "image-well",
     touchFriendly: false,

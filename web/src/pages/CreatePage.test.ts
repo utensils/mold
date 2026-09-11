@@ -1114,14 +1114,19 @@ describe("CreatePage layout and behavior", () => {
 
     await wrapper.get("[data-test='disclosure-starters']").trigger("click");
     expect(wrapper.find("[data-test='templates-panel']").exists()).toBe(true);
-    await wrapper.get(".ms-sheet").trigger("keydown.escape");
+    // Wide: a row opens the web's 452px right drawer (Advanced's and the
+    // style detail's surface), never a viewport-filling sheet for three
+    // lines of Starters. Measured on hal9000 at 1440px: every row's sheet
+    // was 1440px wide.
+    expect(wrapper.find(".ms-sheet").exists()).toBe(false);
+    await wrapper.get(".ms-drawer").trigger("keydown.escape");
     await nextTick();
     expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(
       false,
     );
 
     await wrapper.get("[data-test='disclosure-starters']").trigger("click");
-    await wrapper.get(".ms-sheet").trigger("click");
+    await wrapper.get(".ms-drawer").trigger("click");
     await nextTick();
     expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(
       false,
@@ -1179,7 +1184,7 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.findComponent({ name: "AdvancedDrawer" }).exists()).toBe(
       true,
     );
-    await wrapper.get(".ms-sheet").trigger("keydown.escape");
+    await wrapper.get(".ms-drawer").trigger("keydown.escape");
     await nextTick();
     expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(
       false,

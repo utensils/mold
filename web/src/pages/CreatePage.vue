@@ -51,6 +51,7 @@ import HostRoutingPicker from "../components/create/HostRoutingPicker.vue";
 import RailSurface from "../components/create/RailSurface.vue";
 import LoraPicker from "../components/LoraPicker.vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
+import DrawerPanel from "@ui/components/DrawerPanel.vue";
 import StatusDot from "@ui/components/StatusDot.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { defaultUpscaler } from "../components/create/advanced/upscalers";
@@ -5381,14 +5382,22 @@ onBeforeUnmount(() => {
 
     <!-- ONE sheet host for the whole page. `ui/` sheets are absolute-in-frame
          by design, so a scrolling web page needs this fixed viewport host or
-         they render off-screen. `SheetPanel`'s full variant drops `#header`,
-         so the head row is rendered in the body. -->
+         they render off-screen. Wide: the 452px right drawer, the surface
+         Advanced and the style detail already use — a viewport-filling
+         sheet for three lines of Starters is a phone shape. Phone: the one
+         sheet, whose full variant drops `#header`, so the head row is
+         rendered in the body. -->
     <div
       v-if="railSheet && railSheet !== 'all'"
       class="fixed inset-0 z-40"
       data-test="create-rail-sheet"
     >
-      <SheetPanel :open="true" :title="railSheetTitle" @close="closeRailSheet">
+      <component
+        :is="isPhone ? SheetPanel : DrawerPanel"
+        :open="true"
+        :title="railSheetTitle"
+        @close="closeRailSheet"
+      >
         <div class="rail-sheet">
           <button
             v-if="railSheetFromAll"
@@ -5514,7 +5523,7 @@ onBeforeUnmount(() => {
             />
           </template>
         </div>
-      </SheetPanel>
+      </component>
     </div>
     <ExpandModal
       :open="showExpand"

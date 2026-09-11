@@ -67,7 +67,7 @@ async function saveCurrent() {
   const fallback =
     props.modelValue.prompt.trim().slice(0, 48) ||
     props.modelValue.model ||
-    "Untitled template";
+    "Untitled starter";
   saving.value = true;
   error.value = "";
   try {
@@ -81,7 +81,7 @@ async function saveCurrent() {
     error.value =
       cause instanceof Error
         ? cause.message
-        : "Couldn’t save the template media.";
+        : "Couldn’t save the starter’s media.";
   } finally {
     saving.value = false;
   }
@@ -103,12 +103,12 @@ async function loadTemplate(template: GenerationTemplate) {
     );
     if (hydrated.sourceMissing) {
       error.value =
-        "The template loaded, but some saved images are no longer available.";
+        "The starter loaded, but some saved images are no longer available.";
     }
   } catch (cause) {
     if (epoch === loadEpoch) {
       error.value =
-        cause instanceof Error ? cause.message : "Couldn’t load the template.";
+        cause instanceof Error ? cause.message : "Couldn’t load the starter.";
     }
   } finally {
     if (epoch === loadEpoch) loadingId.value = null;
@@ -117,8 +117,8 @@ async function loadTemplate(template: GenerationTemplate) {
 
 async function renameTemplate(template: GenerationTemplate) {
   const next = await requestText({
-    title: "Rename template",
-    label: "Template name",
+    title: "Rename starter",
+    label: "Starter name",
     initial: template.name,
   });
   if (next === null) return;
@@ -139,7 +139,7 @@ async function deleteTemplate(template: GenerationTemplate) {
     data-test="generation-templates"
   >
     <div class="flex items-center justify-between gap-2">
-      <label class="text-xs uppercase text-ink-3">Templates</label>
+      <label class="text-xs uppercase text-ink-3">Starters</label>
       <span class="text-[11px] text-ink-3">
         {{ templates.length }}
       </span>
@@ -150,7 +150,7 @@ async function deleteTemplate(template: GenerationTemplate) {
         v-model="nameDraft"
         type="text"
         class="min-w-0 rounded-lg bg-bench/60 px-2 py-1 text-xs text-rebate placeholder:text-ink-3"
-        placeholder="Template name"
+        placeholder="Starter name"
         data-test="template-name"
       />
       <button
@@ -170,7 +170,7 @@ async function deleteTemplate(template: GenerationTemplate) {
         v-model="search"
         type="search"
         class="min-w-0 rounded-lg bg-bench/60 px-2 py-1 text-xs text-rebate placeholder:text-ink-3"
-        placeholder="Search templates"
+        placeholder="Search starters"
         data-test="template-search"
       />
       <select
@@ -225,7 +225,7 @@ async function deleteTemplate(template: GenerationTemplate) {
         </button>
       </div>
       <p v-if="visibleTemplates.length === 0" class="py-2 text-xs text-ink-3">
-        No templates
+        No starting points yet — Save keeps the settings you have now.
       </p>
     </div>
   </section>
