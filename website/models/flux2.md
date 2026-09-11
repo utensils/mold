@@ -121,11 +121,17 @@ for you on a card that had the room all along.
 Two things now survive a render rather than being rebuilt from disk.
 
 The **transformer** stays GPU-resident when the card has room for it beside
-the VAE decode — a 46 GB card keeps a 33 GB Q8 [dev] transformer at 1024x1024
-and 1536x1536 and drops it at 2048x2048, where the decode workspace pushes the
-total over. It is released before the encoder streams whenever the two would
-not fit together, and reused only when the LoRA stack, the working precision,
-the GPU and the resolved architecture all match.
+the VAE decode. The decision is a measurement taken per render — the resident
+checkpoint, the denoise workspace, the decode workspace and a 1 GB allocator
+margin against the card's usable free VRAM — so it moves with the canvas as
+well as the card. Flux.2 renders are capped at 1.8 megapixels (1328x1328 at
+the square) and the decode wants about 2.7 GB in bf16 at 1024x1024 and about
+4.6 GB at that ceiling, so across everything mold will render: a 46 GB card
+keeps a 33 GB Q8 [dev] transformer resident, a 24 GB card never does, and a
+24 GB card keeps a Q8 Klein tier, 4B or 9B. It is released before the encoder streams
+whenever the two would not fit together, and reused only when the LoRA stack,
+the working precision, the GPU and the resolved architecture all match.
+`MOLD_FLUX_KEEP_TRANSFORMER=0` forces the old drop-every-render behaviour.
 
 The **encoder prefix** stays in host RAM when the machine can afford it, which
 turns a cache-miss prompt into a host-to-device copy per layer instead of a
@@ -336,8 +342,53 @@ not reproduce from the same seed and settings.
 ## Speed
 
 On CUDA, Flux.2 renders through FlashAttention-2 and cuDNN by default wherever
-the artifact compiled them — every shipped Linux CUDA build does — and its GGUF
-tiers run their activations in BF16 rather than F32. `MOLD_ATTN=math` and
-`MOLD_CONV=im2col` render the byte-stable way instead; a print archived before
-mold 0.29 does not re-render byte-for-byte after it under any setting, and
-renders made from 0.29 on are reproducible among themselves.
+the artifact compiled them — every shipped Linux CUDA build does. `MOLD_ATTN=math`
+and `MOLD_CONV=im2col` render the byte-stable way instead; a print archived
+before mold 0.29 does not re-render byte-for-byte after it under any setting,
+and renders made from 0.29 on are reproducible among themselves. Every other
+still family keeps the math/im2col defaults it has always had.
+
+**GGUF tiers run in BF16.** Activations follow the working dtype instead of
+being cast to F32 at the transformer boundary, which halves the bandwidth every
+matmul moves; the weights stay quantized in VRAM exactly as before, and
+position ids stay F32 because the rotary embedding is built from them. The
+transformer also no longer wraps all eighteen of its linear sites in a
+full-tensor NaN compare — about half a second per step spent masking a fault
+that had never been observed, and which would have been the wrong thing to hide
+anyway. `MOLD_FLUX_DEBUG_NONFINITE=1` replaces it with one check per denoise
+step that names the step and fails; `MOLD_FLUX2_QMATMUL=0` restores the
+per-forward dequantization arm if a render comes out wrong.
+
+**FP8 tiers widen their weights once.** An FP8 layer used to rebuild a
+working-dtype copy of its whole slab on every call, so the tier chosen to save
+VRAM paid full BF16 bandwidth for its weights. Where the card has room the
+widening now happens once at load and the packed slab is dropped — the same
+arithmetic in the same order, so the picture does not change. Free VRAM decides,
+measured before the first weight lands; `MOLD_FLUX2_FP8_CACHE=1` or `=0` forces
+it either way.
+
+**A guided Klein Base step is one forward, not two.** Both branches denoise the
+same latent, so they ride one batch-2 forward and every weight is read once for
+the pair — which is what Black Forest Labs' own sampler does. mold falls back
+to two sequential forwards when the negative prompt tokenizes to a different
+length than the positive one, or when the doubled activations would not fit
+beside the weights on this card; the progress line says which ran.
+`--guidance 1` still skips the branch entirely.
+
+**Smaller operations got out of the way.** The Q/K norms and the affine-less
+LayerNorms now hit candle's fused kernels rather than a ten-operation strided
+fallback, the rotary embedding takes candle's fused interleaved kernel where
+the layout allows, the double blocks issue one fused Q/K/V projection per
+stream instead of three, and the VAE's mid-block attention no longer
+materialises a full 16384x16384 score matrix during decode — the spike that
+used to push a loaded card into the much slower tiled-decode recovery.
+
+**Loading is 8-10x faster on a cold checkpoint.** A whole GGUF file is read in
+contiguous batches across eight threads into a reused page-locked staging
+buffer and uploaded from there, with two buffers alternating so one is filling
+while the other is still in flight. Reading it through a memory mapping instead
+is one page fault per 4 KiB on ZFS, which is where `$MOLD_HOME` lives on every
+machine mold is qualified on. Measured with the page cache dropped,
+`flux2-dev-Q8_0` went from 41.7 s to 4.3 s. The weights are byte-identical, so
+renders are too; macOS and CPU keep the mapping, where staging would be a pure
+extra copy.

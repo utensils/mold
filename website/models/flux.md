@@ -112,6 +112,29 @@ The full-precision `:bf16` tier is the one exception on the attention side: it
 runs through upstream Candle's own attention, which has no backend switch, so
 it stays on the math path.
 
+Under that, a step spends much less time in its small operations: the Q/K norms
+and the affine-less LayerNorms now hit candle's fused kernels instead of a
+ten-operation strided fallback, and the rotary embedding takes candle's fused
+interleaved kernel wherever the layout allows. FLUX.1 also builds that rotary
+embedding in float32, as upstream does — it previously used whatever dtype the
+render was in, so a half-precision render computed every sine and cosine of
+every token position with eight bits of mantissa. That one is a correctness
+fix, and it changes the picture.
+
+### Loading a GGUF checkpoint
+
+A whole quantized checkpoint is read in contiguous batches across eight threads
+into a reused page-locked staging buffer, and uploaded to the GPU from there
+with two buffers alternating so one is filling while the other is still in
+flight. It used to be read through a memory mapping, which on ZFS — where
+`$MOLD_HOME` lives on every machine mold is qualified on — is one page fault
+per 4 KiB with no readahead. Measured with the file's page cache dropped,
+`flux1-dev-Q8_0` went from 15.5 s to 1.6 s. The weights are byte-identical, so
+renders are too. macOS and CPU keep the mapping, where staging would be a pure
+extra copy.
+
+## Memory
+
 ### The transformer stays on the card when it fits
 
 mold used to drop the transformer before every VAE decode and rebuild it on
@@ -120,15 +143,50 @@ seconds of disk read per print for a Q8 tier, and with a LoRA stack the
 rebuild peaks at around 95 GB of host RAM.
 
 The decision is now a measurement, taken per render: the resident checkpoint,
-this render's denoise workspace, the VAE decode's workspace and an allocator
-margin against the card's usable free VRAM. A 24 GB card keeps a Q8 tier
-resident at 1024x1024 and drops it at 2048x2048, where the decode alone wants
-around 11 GB; a 46 GB card keeps a BF16 tier. `MOLD_FLUX_KEEP_TRANSFORMER=0`
-forces the old drop if you need the VRAM for something else.
+this render's denoise workspace, the VAE decode's workspace and a 1 GB
+allocator margin, against the card's usable free VRAM. The three workspace
+terms are added rather than maxed, because the answer has to hold for the
+denoise and the decode both.
 
-## VRAM Notes
+The canvas is part of that sum — the decode workspace is about 2.7 GB in bf16
+at 1024x1024 and grows with area — but FLUX renders are capped at 1.8
+megapixels (1328x1328 at the square), so across the whole range mold will
+actually render, the answer comes down to the checkpoint and the card:
 
-- Full BF16 (23 GB) auto-offloads on 24 GB cards; blocks stream CPU↔GPU
+- **24 GB** keeps a Q8 tier (~12.6 GB) resident, and never has room for the
+  BF16 one (~23.8 GB).
+- **46 GB** keeps the BF16 tier resident as well.
+
+`MOLD_FLUX_KEEP_TRANSFORMER=0` forces the old drop if you need the VRAM for
+something else. `=1` is accepted and means the same thing as the default: an
+explicit keep has always had to yield to a card that cannot afford it, and the
+budget is now what expresses that for everyone. The residency mold chose is
+recorded in the print's execution fingerprint, so a render that reloaded and
+one that did not are never filed as the same execution.
+
+### Text encoders
+
+T5 and CLIP are dropped after they encode, so the denoise has the VRAM.
+`MOLD_KEEP_TE_RAM=1` parks them in host RAM between requests instead, which
+turns a cache-miss prompt into a host-to-device copy rather than a re-read from
+disk. That is unchanged for FLUX.1, and it still costs one copy rather than the
+two it used to: parking a 9.79 GB T5 briefly needed 19.6 GB, for a feature
+whose purpose is fitting that encoder in host RAM.
+
+The variable is now tri-state, but the third state is about the other
+families. Unset is `auto`, and `auto` measures the host — it parks only when
+the encoder, the transformer loading beside it, and a `max(15% of RAM, 8 GiB)`
+safety floor all fit in available memory — for the encoders that decision was
+built for: [Flux.2](/models/flux2)'s Mistral3 and Qwen3, and Z-Image's Qwen3.
+FLUX.1's T5 and CLIP keep the old rule, so unset still means "do not park"
+here. `0` never parks anywhere, and Metal never parks at all — there the parked
+copy would sit in the pool the encoder already runs from.
+
+### VRAM notes
+
+- Full BF16 (23 GB) auto-offloads on 24 GB cards; blocks stream CPU↔GPU. The
+  decision asks what the card has free, not only what the file weighs, so a
+  23.8 GB checkpoint no longer streams on a 46 GB GPU that could hold it.
 - GGUF quantized (Q4/Q8) fits without offloading
 - Use `--eager` to keep encoders loaded between generations (faster, more VRAM)
 - T5-XXL encoder auto-selects quantized variant when VRAM is tight

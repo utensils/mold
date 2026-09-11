@@ -14,32 +14,34 @@
   and stopped the host from preparing the next layer. Each layer's weights are
   now loaded one layer ahead, and the render's progress bar advances through the
   encode instead of jumping once.
-- **GGUF checkpoints load from a memory mapping.** Every quantized tensor used
-  to be copied into a fresh host buffer before being uploaded, measured at
-  0.96 GB/s on a 33 GB FLUX.2 checkpoint against 8.3 GB/s for
-  stable-diffusion.cpp reading the same file. FLUX, FLUX.2, SD3, Z-Image,
-  Qwen-Image, Wan, Hunyuan3D and the T5/UMT5/Qwen3 GGUF text encoders now upload
-  straight from the mapping, report real byte progress rather than a tensor-count
-  approximation, and log each file's measured throughput. Weights are unchanged,
-  so renders are bit-identical.
-- **Parking a text encoder in host RAM costs one copy, not two.** `MOLD_KEEP_TE_RAM=1`
-  read the whole checkpoint into an anonymous buffer and then copied every tensor
-  out of it, so parking FLUX's 9.79 GB T5 briefly needed twice that.
-- **A GGUF checkpoint loads 8-10x faster on its first load.** Reading a whole
-  22-35 GB checkpoint through its memory mapping is a page fault per 4 KiB, and
-  on ZFS — which is where `$MOLD_HOME` lives on every qualified machine — the
-  kernel serves those one page at a time out of ZFS's own cache, with no
-  readahead: a 21.76 GB Qwen-Image checkpoint took 5,312,908 major faults and
-  26.5 seconds, 0.82 GB/s, for bytes that were already in RAM. mold now reads
-  the tensor payload in contiguous batches across eight threads into a reused
-  page-locked staging buffer and uploads each tensor from there, with two
-  buffers alternating so one is being read while the other is still in flight
-  to the GPU. Measured on 4x L40S with the file's page cache dropped:
-  `flux1-dev-Q8_0` 15.5 s -> 1.6 s, `qwen-image-Q8_0` 26.5 s -> 3.3 s, and
-  `flux2-dev-Q8_0` 41.7 s -> 4.3 s (0.84 -> 8.1 GB/s); already-cached repeats
-  went 6.6 s -> 2.7 s on the same 35 GB file. Host memory is bounded by the
-  buffer pair rather than the checkpoint, macOS and CPU loading is unchanged,
-  and the weights are byte-identical, so renders are too.
+- **Parking a text encoder in host RAM costs one copy, not two.** Parking read
+  the whole checkpoint into an anonymous buffer and then copied every tensor out
+  of it, so parking FLUX's 9.79 GB T5 briefly needed twice that — for a feature
+  whose whole purpose is fitting that encoder in host RAM. A checkpoint carrying
+  more tensors than the runtime reads no longer materializes the ones it skips.
+- **A GGUF checkpoint loads 8-10x faster.** Every quantized tensor used to be
+  copied into a fresh host buffer before being uploaded, measured at 0.96 GB/s
+  on a 33 GB FLUX.2 checkpoint against 8.3 GB/s for stable-diffusion.cpp
+  reading the same file. Reading the file through a memory mapping instead is
+  no better for a whole checkpoint: that is a page fault per 4 KiB, and on ZFS
+  — which is where `$MOLD_HOME` lives on every qualified machine — the kernel
+  serves those one page at a time out of ZFS's own cache with no readahead, so
+  a 21.76 GB Qwen-Image checkpoint took 5,312,908 major faults and 26.5 seconds
+  for bytes that were already in RAM. mold now reads the tensor payload in
+  contiguous batches across eight threads into a reused page-locked staging
+  buffer and uploads each tensor from there, with two buffers alternating so
+  one is being read while the other is still in flight to the GPU. FLUX,
+  FLUX.2, SD3, Z-Image, Qwen-Image, Wan, Hunyuan3D and the T5/UMT5/Qwen3 GGUF
+  text encoders all take it, and all now report real byte progress rather than
+  a tensor-count approximation and log each file's measured throughput.
+  Measured on 4x L40S with the file's page cache dropped: `flux1-dev-Q8_0`
+  15.5 s -> 1.6 s, `qwen-image-Q8_0` 26.5 s -> 3.3 s, and `flux2-dev-Q8_0`
+  41.7 s -> 4.3 s (0.84 -> 8.1 GB/s); already-cached repeats went 6.6 s ->
+  2.7 s on the same 35 GB file. Host memory is bounded by the buffer pair
+  rather than the checkpoint, a caller reading a FEW tensors out of a file (a
+  LoRA merge, one encoder's weights) still maps it because an untouched page is
+  never faulted at all, macOS and CPU keep the mapping, and the weights are
+  byte-identical, so renders are too.
 - **Text encoders park in host RAM when the machine can afford it, and
   `MOLD_KEEP_TE_RAM` becomes tri-state.** The old rule was a flag plus two
   carve-outs and asked nothing about the host. `auto` (the unset default) now

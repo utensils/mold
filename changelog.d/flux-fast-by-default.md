@@ -119,6 +119,25 @@
   cannot afford it. The resolved residency, the GGUF activation width and the
   FLUX.2 CFG shape are recorded in the execution fingerprint, so a render that
   reloads and one that does not are never filed as the same execution.
+- **A FLUX identity render no longer fails at the first denoise step.** The
+  eager `--id-image` path kept its own copy of the old rule that a quantized
+  FLUX transformer runs its state tensors in F32. Once the GGUF path stopped
+  pinning F32, the PuLID adapter met BF16 activations with an F32 weight and
+  bias and every identity render died with "dtype mismatch in ternary op",
+  while the same request rendered on the previous build. One function now
+  answers what dtype a render's state tensors carry, and both the conditioning
+  cast and the identity site ask it.
+- **The desktop app's Speed & memory settings cover the new knobs.** Attention
+  backend, convolution backend, FLUX transformer residency, the Flux.2
+  quantized fast path and Flux.2 FP8 weight widening join live previews, text
+  encoder parking, tiled VAE decode, block offloading and the queue window, and
+  they say what their automatic setting actually does — the attention and
+  convolution defaults are PER FAMILY, not one answer for every style. Parking
+  text encoders becomes a three-way choice to match the engine. Each row still
+  applies to this device's built-in engine and still needs an engine restart. A
+  test now reads the Tauri side's allowlist so a control the app offers can
+  never be one the engine never receives.
+
 - **A large BF16 FLUX.1 checkpoint no longer streams its blocks on a card that
   can hold it.** The auto-offload decision was a file-size test with no
   availability arm, so a 23.8 GB `:bf16` tier paid the documented 3-5x
