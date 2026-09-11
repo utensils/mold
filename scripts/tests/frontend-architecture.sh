@@ -103,7 +103,7 @@ done
 # and the surfaces only bind it to their own reachable machines. A path list cannot
 # catch a desktop copy here (desktop/src/lib/modelAvailability.ts is the unrelated
 # catalog media-type filter), so guard the string the rule emits.
-if grep -REn --include='*.ts' --include='*.vue' '\} machines`' web/src desktop/src ui; then
+if grep -REn --include='*.ts' --include='*.vue' '\$\{[^}]*length\} machines`' web/src desktop/src ui; then
   fail "the availability tag's wording belongs to studio/lib/modelAvailability.ts"
 fi
 

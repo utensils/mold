@@ -1376,12 +1376,17 @@ const missingModelId = computed(() => {
  * reach right now. A single-machine browser has no fleet to talk about, and an
  * errored machine cannot run the style, so neither is counted.
  */
+const reachableMachines = computed(() =>
+  routing.hosts.value
+    .filter((host) => host.status === "ready")
+    .map((host) => ({ id: host.id, label: host.label })),
+);
 function styleAvailabilityTag(model: { name: string }): string | null {
   if (!routing.multiHost.value) return null;
-  const reachable = routing.hosts.value
-    .filter((host) => host.status === "ready")
-    .map((host) => ({ id: host.id, label: host.label }));
-  return modelAvailabilityTag(routing.modelOwnerIds(model.name), reachable);
+  return modelAvailabilityTag(
+    routing.modelOwnerIds(model.name),
+    reachableMachines.value,
+  );
 }
 
 watch(

@@ -97,12 +97,12 @@ const phantomLabel = computed(() =>
  * still-connecting one cannot run anything, so naming it would send the reader
  * to a machine that will not answer.
  */
+const reachableMachines = computed(() =>
+  hosts.all.filter((h) => h.status === "ready").map((h) => ({ id: h.id, label: h.label })),
+);
 function availabilityTag(m: ModelEntry): string | null {
   if (!hosts.multiHost || !props.showAvailability) return null;
-  const reachable = hosts.all
-    .filter((h) => h.status === "ready")
-    .map((h) => ({ id: h.id, label: h.label }));
-  return modelAvailabilityTag(hostModels.hostsFor(m.name), reachable);
+  return modelAvailabilityTag(hostModels.hostsFor(m.name), reachableMachines.value);
 }
 
 function toggle() {
