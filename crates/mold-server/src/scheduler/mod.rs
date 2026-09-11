@@ -926,11 +926,34 @@ enum PreparationEvent {
     Ready {
         work_id: String,
         prepared: Box<PreparedGeneration>,
+        timings: PreparationTimings,
     },
     Failed {
         work_id: String,
         error: String,
     },
+}
+
+/// Where a preparation's wall clock went.
+///
+/// The measured server timeline spends 2.4 s in "preparing generation
+/// dependencies" on a WARM host, which the work the phase is supposed to do
+/// does not explain — artifact facts are LRU-cached and the dependency probes
+/// are a handful of `stat`s. One `elapsed_ms` could not say whether that was
+/// the preparer, the slot semaphore, or the coordinator's own event loop, so
+/// the line now reports all three separately.
+#[derive(Clone, Copy, Debug, Default)]
+struct PreparationTimings {
+    /// Spawned to holding a preparation slot. Non-zero means the semaphore is
+    /// the bottleneck, not the work.
+    slot_wait_ms: u64,
+    /// Inside `preparer.prepare` — the dependency resolution, the device
+    /// probes, the artifact warm pass.
+    prepare_ms: u64,
+    /// When the task published its `Ready`, so the coordinator can report how
+    /// long the event waited to be handled. A large value here is the
+    /// coordinator's loop (a debounced replan, a long mutate), not preparation.
+    ready_sent_ms: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2204,7 +2227,10 @@ impl Coordinator {
                 // The permit is taken inside the task so a queued preparation
                 // waits here rather than in `Needed`, where the scheduler
                 // would keep re-spawning it.
+                let spawned_ms = monotonic_ms();
                 let _slot = slots.acquire_owned().await;
+                let slot_wait_ms = monotonic_ms().saturating_sub(spawned_ms);
+                let prepare_started_ms = monotonic_ms();
                 let request =
                     crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(request);
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
@@ -2253,6 +2279,11 @@ impl Coordinator {
                     Ok(prepared) => PreparationEvent::Ready {
                         work_id: id,
                         prepared: Box::new(prepared),
+                        timings: PreparationTimings {
+                            slot_wait_ms,
+                            prepare_ms: monotonic_ms().saturating_sub(prepare_started_ms),
+                            ready_sent_ms: monotonic_ms(),
+                        },
                     },
                     Err(error) => PreparationEvent::Failed { work_id: id, error },
                 };
@@ -2278,7 +2309,11 @@ impl Coordinator {
                     self.mutate(immediate);
                 }
             }
-            PreparationEvent::Ready { work_id, prepared } => {
+            PreparationEvent::Ready {
+                work_id,
+                prepared,
+                timings,
+            } => {
                 let Some(pending) = self.pending.get_mut(&work_id) else {
                     return;
                 };
@@ -2292,6 +2327,9 @@ impl Coordinator {
                         .preparation_started_ms
                         .map(|started| monotonic_ms().saturating_sub(started))
                         .unwrap_or_default(),
+                    slot_wait_ms = timings.slot_wait_ms,
+                    prepare_ms = timings.prepare_ms,
+                    ready_latency_ms = monotonic_ms().saturating_sub(timings.ready_sent_ms),
                     "generation dependencies prepared"
                 );
                 pending.preparation_started_ms = None;
@@ -9745,6 +9783,7 @@ mod tests {
 
         coordinator.handle_preparation_event(
             PreparationEvent::Ready {
+                timings: PreparationTimings::default(),
                 work_id: "expanded".to_string(),
                 prepared: Box::new(PreparedGeneration {
                     expanded_prompt: Some("expanded prompt".to_string()),
@@ -16408,6 +16447,7 @@ mod tests {
         };
         coordinator.handle_preparation_event(
             PreparationEvent::Ready {
+                timings: PreparationTimings::default(),
                 work_id: "waiting-h3".to_string(),
                 prepared: Box::new(PreparedGeneration {
                     execution_inputs: Some(deferred),
@@ -16488,6 +16528,7 @@ mod tests {
         };
         coordinator.handle_preparation_event(
             PreparationEvent::Ready {
+                timings: PreparationTimings::default(),
                 work_id: "parked-h3".to_string(),
                 prepared: Box::new(PreparedGeneration {
                     execution_inputs: Some(parked),

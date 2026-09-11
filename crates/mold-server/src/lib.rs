@@ -1208,6 +1208,31 @@ pub async fn run_server(
         let _ = http_shutdown_tx.send(());
     });
 
+    // The first render after a restart otherwise reads every artifact's
+    // equivalence facts inside its own preparation phase, where it is on the
+    // client's wall clock. Warmed once here instead, on a blocking thread,
+    // through the artifact read limiter so a request that arrives meanwhile
+    // is never starved.
+    {
+        let warm_state = state.clone();
+        tokio::spawn(async move {
+            let models_dir = warm_state.config.read().await.resolved_models_dir();
+            let started = std::time::Instant::now();
+            let warmed = tokio::task::spawn_blocking(move || {
+                crate::execution_plan::warm_installed_artifact_facts(&models_dir)
+            })
+            .await
+            .unwrap_or(0);
+            if warmed > 0 {
+                tracing::info!(
+                    artifacts = warmed,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "warmed installed artifact facts"
+                );
+            }
+        });
+    }
+
     #[cfg(unix)]
     {
         let sigterm_state = state.clone();

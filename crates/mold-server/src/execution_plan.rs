@@ -2424,6 +2424,24 @@ pub(crate) fn warm_execution_equivalence_cache(
             .into_values(),
         );
     }
+    // Every fact already cached: nothing to read, and — the part that
+    // matters — no progress publication. Each `publish_preparation_progress`
+    // wakes the coordinator, which advances scheduler state and emits a
+    // queue-plan event; a warm host was spending that on a "Resolving
+    // installed model" stage that renders and completes in the same tick.
+    //
+    // This is a check, never a fire-and-forget skip: a MISS still takes the
+    // full path below. Returning early on a miss would leave the plan with a
+    // random-secret fingerprint, which is a cold reload of the whole engine.
+    if paths.iter().all(|path| {
+        !matches!(
+            artifact_facts_path_with_policy_and_progress(path, true, None).format,
+            ArtifactFormatFact::CacheMiss
+        )
+    }) {
+        warm_family_checkpoint_facts(&family, prepared);
+        return;
+    }
     let total_bytes = paths
         .iter()
         .filter_map(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
@@ -2458,9 +2476,14 @@ pub(crate) fn warm_execution_equivalence_cache(
             total_bytes,
         );
     }
+    warm_family_checkpoint_facts(&family, prepared);
+}
+
+fn warm_family_checkpoint_facts(family: &str, prepared: &PreparedExecutionInputs) {
     // LTX-2 admission needs the checkpoint's per-block weight layout. Reading
     // the safetensors header is blocking work, so it is warmed here (already
     // on the blocking pool) and only ever read from cache by the coordinator.
+    // Both of these carry their own caches, so they run on the hot path too.
     if family == "ltx2" {
         for inputs in prepared.by_device.values() {
             crate::ltx2_admission::warm_checkpoint_facts(&inputs.engine_paths.transformer);
@@ -2473,6 +2496,72 @@ pub(crate) fn warm_execution_equivalence_cache(
             crate::wan_admission::warm_checkpoint_geometry(&inputs.engine_paths);
         }
     }
+}
+
+/// Read one installed artifact's equivalence facts into the process cache.
+///
+/// It goes through the same [`ARTIFACT_MAX_CONCURRENT_READS`] limiter every
+/// other reader uses, so a warm pass cannot starve a live admission of disk
+/// bandwidth, and it is a NO-OP on an already-cached artifact.
+pub(crate) fn warm_artifact_facts(path: &Path) {
+    let _ = artifact_facts_path_with_policy_and_progress(path, false, None);
+}
+
+/// Whether this artifact's facts are already in the process cache.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn artifact_facts_are_cached(path: &Path) -> bool {
+    !matches!(
+        artifact_facts_path_with_policy_and_progress(path, true, None).format,
+        ArtifactFormatFact::CacheMiss
+    )
+}
+
+/// Containers a generation's equivalence facts are ever computed for.
+const WARMABLE_ARTIFACT_EXTENSIONS: &[&str] = &["safetensors", "gguf", "pth", "bin", "onnx"];
+
+/// A bound on the startup pass, so a models directory that has accumulated
+/// thousands of files cannot turn boot into a filesystem sweep.
+const STARTUP_WARM_MAX_ARTIFACTS: usize = 4096;
+
+/// Read every installed artifact's equivalence facts once, at startup.
+///
+/// The first render after a restart otherwise pays this inside the
+/// preparation phase, where it is on the client's wall clock and publishes
+/// progress. The work is a `stat` and a pinned-digest sidecar read per file —
+/// `installed_artifact_identity` records a digest rather than re-hashing the
+/// bytes — so this is cheap; the limiter is what keeps it out of the way of a
+/// request that arrives while it runs.
+///
+/// Returns how many artifacts it warmed.
+pub(crate) fn warm_installed_artifact_facts(models_dir: &Path) -> usize {
+    let mut warmed = 0_usize;
+    for entry in walkdir::WalkDir::new(models_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if warmed >= STARTUP_WARM_MAX_ARTIFACTS {
+            break;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let is_warmable = entry
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                WARMABLE_ARTIFACT_EXTENSIONS
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(extension))
+            });
+        if !is_warmable {
+            continue;
+        }
+        warm_artifact_facts(entry.path());
+        warmed += 1;
+    }
+    warmed
 }
 
 pub fn validate_before_cuda(
@@ -9236,5 +9325,52 @@ mod tests {
                 .unwrap()
         );
         assert!(changed_config.has_frozen_model_config(model));
+    }
+
+    /// A warm pass over facts that are all already cached must publish NO
+    /// progress. Each publication wakes the scheduler coordinator, which
+    /// advances queue state and emits a plan event — on a warm host that was
+    /// a "Resolving installed model" stage that rendered and completed in the
+    /// same tick, per request.
+    #[test]
+    fn warm_pass_is_a_no_op_when_every_fact_is_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("transformer.safetensors");
+        std::fs::write(&artifact, b"weights").unwrap();
+        assert!(
+            !artifact_facts_are_cached(&artifact),
+            "a fresh artifact starts cold"
+        );
+        warm_artifact_facts(&artifact);
+        assert!(
+            artifact_facts_are_cached(&artifact),
+            "warming records the facts"
+        );
+        // And warming again is free — the whole point of the early return.
+        warm_artifact_facts(&artifact);
+        assert!(artifact_facts_are_cached(&artifact));
+    }
+
+    /// The startup pass reads every installed artifact once, so the first
+    /// render after a restart does not pay for it inside its preparation.
+    #[test]
+    fn the_startup_warm_pass_covers_installed_artifacts_and_skips_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("flux/split_files");
+        std::fs::create_dir_all(&nested).unwrap();
+        let weights = nested.join("flux1-dev-Q8_0.gguf");
+        let encoder = nested.join("t5xxl.safetensors");
+        let notes = nested.join("README.md");
+        for path in [&weights, &encoder, &notes] {
+            std::fs::write(path, b"bytes").unwrap();
+        }
+
+        assert_eq!(warm_installed_artifact_facts(dir.path()), 2);
+        assert!(artifact_facts_are_cached(&weights));
+        assert!(artifact_facts_are_cached(&encoder));
+        assert!(
+            !artifact_facts_are_cached(&notes),
+            "a README is not a generation artifact"
+        );
     }
 }
