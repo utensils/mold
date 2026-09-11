@@ -132,7 +132,7 @@ pub(crate) fn discover_telemetry_targets(
         .map(TelemetryTarget::from_discovered)
         .collect();
     #[cfg(feature = "nvml")]
-    if let Ok(source) = NvmlSource::try_new() {
+    if let Some(source) = shared_nvml() {
         for target in &mut targets {
             if let Some(metadata) = source.metadata(target) {
                 target.nvml_uuid = Some(metadata.nvml_uuid.clone());
@@ -252,8 +252,10 @@ pub(crate) mod nvml_source {
     };
     use mold_core::{GpuBackend, GpuSnapshot};
     use nvml_wrapper::enums::device::UsedGpuMemory;
+    use nvml_wrapper::error::NvmlError;
     use nvml_wrapper::Device;
     use nvml_wrapper::Nvml;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     pub(crate) struct NvmlMetadata {
         pub nvml_uuid: String,
@@ -264,18 +266,57 @@ pub(crate) mod nvml_source {
 
     pub(crate) struct NvmlSource {
         nvml: Nvml,
+        /// Set when a call observed an error that invalidates the handle
+        /// itself rather than one device's answer. [`super::shared_nvml`]
+        /// replaces a poisoned handle instead of serving it forever.
+        poisoned: AtomicBool,
     }
 
     impl NvmlSource {
         pub(crate) fn try_new() -> anyhow::Result<Self> {
             let nvml = Nvml::init()?;
-            Ok(Self { nvml })
+            Ok(Self {
+                nvml,
+                poisoned: AtomicBool::new(false),
+            })
+        }
+
+        /// Has this handle seen an error that means the handle is dead?
+        pub(crate) fn is_poisoned(&self) -> bool {
+            self.poisoned.load(Ordering::Relaxed)
+        }
+
+        #[cfg(test)]
+        pub(crate) fn poison_for_test(&self) {
+            self.poisoned.store(true, Ordering::Relaxed);
+        }
+
+        /// Classify an NVML failure. A missing device, an unreadable MIG UUID
+        /// or an absent utilization counter say nothing about the handle; a
+        /// driver reload, an unloaded driver or a lost GPU say the handle is
+        /// finished and the next caller should re-initialize.
+        fn note_error(&self, error: &NvmlError) {
+            if matches!(
+                error,
+                NvmlError::Uninitialized
+                    | NvmlError::DriverNotLoaded
+                    | NvmlError::LibraryNotFound
+                    | NvmlError::FailedToLoadSymbol(_)
+                    | NvmlError::GpuLost
+                    | NvmlError::ResetRequired
+            ) {
+                self.poisoned.store(true, Ordering::Relaxed);
+            }
         }
 
         fn matching_device<'a>(&'a self, target: &TelemetryTarget) -> Option<Device<'a>> {
             for candidate in nvidia_uuid_candidates(target) {
-                let Ok(device) = self.nvml.device_by_uuid(candidate.as_str()) else {
-                    continue;
+                let device = match self.nvml.device_by_uuid(candidate.as_str()) {
+                    Ok(device) => device,
+                    Err(error) => {
+                        self.note_error(&error);
+                        continue;
+                    }
                 };
                 let Ok(actual_uuid) = device.uuid() else {
                     continue;
@@ -317,6 +358,7 @@ pub(crate) mod nvml_source {
                     let mem = match dev.memory_info() {
                         Ok(memory) => memory,
                         Err(error) => {
+                            self.note_error(&error);
                             tracing::debug!(
                                 ordinal = target.logical_ordinal,
                                 err = %error,
@@ -362,6 +404,7 @@ pub(crate) mod nvml_source {
             let count = match self.nvml.device_count() {
                 Ok(c) => c,
                 Err(e) => {
+                    self.note_error(&e);
                     tracing::debug!(err = %e, "NVML device_count failed");
                     return Vec::new();
                 }
@@ -377,6 +420,7 @@ pub(crate) mod nvml_source {
                 let mem = match dev.memory_info() {
                     Ok(m) => m,
                     Err(e) => {
+                        self.note_error(&e);
                         tracing::debug!(ordinal, err = %e, "NVML memory_info failed");
                         continue;
                     }
@@ -415,6 +459,82 @@ pub(crate) mod nvml_source {
 #[cfg(feature = "nvml")]
 pub(crate) use nvml_source::NvmlSource;
 
+/// How long the absent-driver answer is trusted before another `Nvml::init()`
+/// is attempted. Long enough that a keyless host does not dlopen
+/// libnvidia-ml once per telemetry tick, short enough that a driver that
+/// appears after boot is picked up without a restart.
+#[cfg(feature = "nvml")]
+const NVML_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+#[cfg(feature = "nvml")]
+struct SharedNvmlSlot {
+    source: Option<Arc<NvmlSource>>,
+    attempted_at: std::time::Instant,
+}
+
+#[cfg(feature = "nvml")]
+static SHARED_NVML: Mutex<Option<SharedNvmlSlot>> = Mutex::new(None);
+
+/// Counts `Nvml::init()` calls made through [`shared_nvml`]. The pin on
+/// "one handle, not one per caller" — a reuse costs no initialization, and
+/// neither does a memoized absence.
+#[cfg(feature = "nvml")]
+static SHARED_NVML_INIT_ATTEMPTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The process-wide NVML handle.
+///
+/// `Nvml::init()` dlopens libnvidia-ml and enumerates the driver. It was being
+/// paid on every 1 Hz telemetry tick, on every `discover_telemetry_targets`,
+/// and on every hot-cache admission through
+/// [`current_process_vram_bytes`] — i.e. on the per-request critical path.
+/// One handle now serves all of them.
+///
+/// The slot is reset when a call observes an error that kills the handle
+/// (`Uninitialized`, `DriverNotLoaded`, `GpuLost`, `ResetRequired`, a symbol
+/// that failed to load), so a driver reload recovers on the next sample
+/// instead of leaving telemetry permanently dead. An absent driver is
+/// memoized for [`NVML_RETRY_AFTER`].
+#[cfg(feature = "nvml")]
+pub(crate) fn shared_nvml() -> Option<Arc<NvmlSource>> {
+    let mut slot = SHARED_NVML
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(held) = slot.as_ref() {
+        match held.source.as_ref() {
+            Some(source) if !source.is_poisoned() => return Some(source.clone()),
+            Some(_) => {}
+            None if held.attempted_at.elapsed() < NVML_RETRY_AFTER => return None,
+            None => {}
+        }
+    }
+    SHARED_NVML_INIT_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let source = match NvmlSource::try_new() {
+        Ok(source) => Some(Arc::new(source)),
+        Err(error) => {
+            tracing::debug!(%error, "NVML unavailable");
+            None
+        }
+    };
+    *slot = Some(SharedNvmlSlot {
+        source: source.clone(),
+        attempted_at: std::time::Instant::now(),
+    });
+    source
+}
+
+#[cfg(all(test, feature = "nvml"))]
+pub(crate) fn shared_nvml_init_attempts() -> usize {
+    SHARED_NVML_INIT_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(all(test, feature = "nvml"))]
+pub(crate) fn reset_shared_nvml_for_test() {
+    *SHARED_NVML
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = None;
+}
+
 #[cfg(any(feature = "nvml", test))]
 pub(crate) fn nonzero_process_vram(bytes: Option<u64>) -> Option<u64> {
     bytes.filter(|bytes| *bytes > 0)
@@ -437,8 +557,7 @@ pub(crate) fn current_process_vram_bytes(
     }
     let target = TelemetryTarget::from_discovered(gpu);
     nonzero_process_vram(
-        NvmlSource::try_new()
-            .ok()?
+        shared_nvml()?
             .snapshot_visible(std::process::id(), std::slice::from_ref(&target))
             .into_iter()
             .find(|snapshot| snapshot.ordinal == gpu.ordinal)
@@ -906,7 +1025,7 @@ fn collect_gpus(inventory: Option<&[TelemetryTarget]>, ram: &RamSnapshot) -> Vec
     // Linux / other: try NVML first, fall back to nvidia-smi.
     #[cfg(all(not(target_os = "macos"), feature = "nvml"))]
     {
-        if let Ok(src) = NvmlSource::try_new() {
+        if let Some(src) = shared_nvml() {
             let gpus = match inventory {
                 Some(inventory) => src.snapshot_visible(std::process::id(), inventory),
                 None => src.snapshot(std::process::id()),

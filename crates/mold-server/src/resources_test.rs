@@ -457,6 +457,58 @@ fn smi_snapshot_sets_per_process_fields_to_none() {
 
 #[test]
 #[cfg(feature = "nvml")]
+fn shared_nvml_handle_is_reused_and_reset_on_poison() {
+    // `Nvml::init()` dlopens libnvidia-ml and enumerates the driver. It used
+    // to be paid on every telemetry tick and on every hot-cache admission;
+    // one handle now serves all of them. This test never needs a GPU: the
+    // handle-absent branch is the one CI takes, and it is also the branch
+    // that must not re-dlopen on every call.
+    crate::resources::reset_shared_nvml_for_test();
+    let attempts_before = crate::resources::shared_nvml_init_attempts();
+    let Some(first) = crate::resources::shared_nvml() else {
+        assert!(
+            crate::resources::shared_nvml().is_none(),
+            "an absent driver stays absent"
+        );
+        assert_eq!(
+            crate::resources::shared_nvml_init_attempts(),
+            attempts_before + 1,
+            "the negative answer is memoized too — a keyless host must not \
+             dlopen libnvidia-ml once per telemetry tick"
+        );
+        return;
+    };
+    assert_eq!(
+        crate::resources::shared_nvml_init_attempts(),
+        attempts_before + 1
+    );
+    let second = crate::resources::shared_nvml().expect("a live handle stays live");
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "one handle serves every caller"
+    );
+    assert_eq!(
+        crate::resources::shared_nvml_init_attempts(),
+        attempts_before + 1,
+        "reuse costs no initialization"
+    );
+
+    // A driver reload invalidates the handle; the next caller must get a new
+    // one rather than a permanently dead one.
+    first.poison_for_test();
+    let third = crate::resources::shared_nvml().expect("re-initializes after a poisoned handle");
+    assert!(
+        !std::sync::Arc::ptr_eq(&first, &third),
+        "a poisoned handle is replaced, not reused"
+    );
+    assert_eq!(
+        crate::resources::shared_nvml_init_attempts(),
+        attempts_before + 2
+    );
+}
+
+#[test]
+#[cfg(feature = "nvml")]
 fn nvml_source_returns_zero_gpus_when_nvml_init_fails() {
     // On a CI box without NVML, `NvmlSource::try_new()` returns Err — the
     // caller must treat that as "no GPUs" without panicking.
