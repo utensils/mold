@@ -1867,6 +1867,20 @@ pub struct StillTransformerBudget {
     /// Allocator and kernel slack — see
     /// [`STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES`].
     pub runtime_headroom_bytes: u64,
+    /// Device bytes held BESIDE the checkpoint for the whole render: the
+    /// bypass registry's resident LoRA A/B matrices and the PuLID adapter.
+    ///
+    /// #276 is titled "VAE decode OOM under KEEP_TRANSFORMER=1 **+ LoRAs** on
+    /// 24 GB", and the budget charged only `fs::metadata(transformer).len()`
+    /// — the checkpoint file and nothing else. It could not see either
+    /// ingredient the report blamed, so a matrix row asserting `Keep` for
+    /// that configuration was asserting it from a model structurally unable
+    /// to disagree.
+    ///
+    /// Both follow the transformer: `free_gpu_state_before_vae_decode`
+    /// releases the adapter only on a DROP, and the registry lives as long as
+    /// the transformer it is bound to.
+    pub companion_resident_bytes: u64,
 }
 
 impl StillTransformerBudget {
@@ -1885,6 +1899,7 @@ impl StillTransformerBudget {
     /// for every residency decision.
     pub fn required_bytes(&self) -> u64 {
         self.transformer_bytes
+            .saturating_add(self.companion_resident_bytes)
             .saturating_add(self.activation_bytes)
             .saturating_add(self.vae_decode_peak_bytes)
             .saturating_add(self.runtime_headroom_bytes)
@@ -5541,24 +5556,32 @@ mod tests {
     /// while leaving the real ceiling untested.
     const MAX_SQUARE: u32 = 1_328;
 
-    fn residency_for_backend(
+    /// One row of the residency matrix.
+    #[derive(Clone, Copy)]
+    struct MatrixRow {
         transformer_bytes: u64,
+        companion_resident_bytes: u64,
         width: u32,
         height: u32,
         family: ActivationFamily,
         heads: u64,
         usable_free_bytes: u64,
+    }
+
+    fn residency_for_backend(
+        row: MatrixRow,
         backend: crate::attention::AttentionBackend,
     ) -> TransformerResidency {
         let budget = StillTransformerBudget {
-            transformer_bytes,
+            transformer_bytes: row.transformer_bytes,
             activation_bytes: flux_activation_budget_bytes_for(
-                width, height, 1, 2, family, heads, backend,
+                row.width, row.height, 1, 2, row.family, row.heads, backend,
             ),
-            vae_decode_peak_bytes: flux_vae_decode_peak_bytes(width, height, 2),
+            vae_decode_peak_bytes: flux_vae_decode_peak_bytes(row.width, row.height, 2),
             runtime_headroom_bytes: STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+            companion_resident_bytes: row.companion_resident_bytes,
         };
-        still_transformer_residency(&budget, UsableFreeVram::Measured(usable_free_bytes))
+        still_transformer_residency(&budget, UsableFreeVram::Measured(row.usable_free_bytes))
     }
 
     /// Every row, on BOTH attention backends.
@@ -5575,24 +5598,39 @@ mod tests {
         heads: u64,
         usable_free_bytes: u64,
     ) -> TransformerResidency {
-        let flash = residency_for_backend(
+        residency_on_both_backends_with_companions(
             transformer_bytes,
+            0,
             width,
             height,
             family,
             heads,
             usable_free_bytes,
-            crate::attention::AttentionBackend::Flash,
-        );
-        let math = residency_for_backend(
+        )
+    }
+
+    /// The same row, with device bytes held BESIDE the checkpoint — resident
+    /// LoRA A/B matrices and a PuLID adapter.
+    fn residency_on_both_backends_with_companions(
+        transformer_bytes: u64,
+        companion_resident_bytes: u64,
+        width: u32,
+        height: u32,
+        family: ActivationFamily,
+        heads: u64,
+        usable_free_bytes: u64,
+    ) -> TransformerResidency {
+        let row = MatrixRow {
             transformer_bytes,
+            companion_resident_bytes,
             width,
             height,
             family,
             heads,
             usable_free_bytes,
-            crate::attention::AttentionBackend::Math,
-        );
+        };
+        let flash = residency_for_backend(row, crate::attention::AttentionBackend::Flash);
+        let math = residency_for_backend(row, crate::attention::AttentionBackend::Math);
         assert_eq!(
             flash.keeps(),
             math.keeps(),
@@ -5729,6 +5767,154 @@ mod tests {
         }
     }
 
+    /// LoRA delta bytes for ONE rank-`rank` FLUX.1 adapter, at the dtype the
+    /// bypass registry actually stores (`build_lora_registry` places every
+    /// `down`/`up` on the device at the transformer's working dtype, BF16 on
+    /// CUDA).
+    ///
+    /// Derived from FLUX.1 dev's own layer table rather than from a
+    /// remembered file size: 19 double blocks and 38 single blocks at width
+    /// 3072, with `r * (in + out)` elements per adapted linear.
+    ///
+    ///   double, per stream: qkv 3072->9216, proj 3072->3072,
+    ///                       mlp.0 3072->12288, mlp.2 12288->3072
+    ///                       => r * 49_152, and img + txt => r * 98_304
+    ///   single:             linear1 3072->21504, linear2 15360->3072
+    ///                       => r * 43_008
+    ///
+    /// 19 * 98_304 + 38 * 43_008 = 3_502_080 elements per unit of rank.
+    fn flux1_lora_resident_bytes(rank: u64) -> u64 {
+        const ELEMENTS_PER_RANK: u64 = 19 * 98_304 + 38 * 43_008;
+        rank * ELEMENTS_PER_RANK * 2
+    }
+
+    /// #276's two named ingredients, charged.
+    ///
+    /// The ceiling row above asserts `Keep` for what the issue titled "VAE
+    /// decode OOM under KEEP_TRANSFORMER=1 **+ LoRAs** on 24 GB" — from a
+    /// budget whose only weight term was `fs::metadata(transformer).len()`.
+    /// Neither the resident LoRA A/B matrices nor the ~1.7 GB PuLID adapter
+    /// existed in it, so the row was asserting `Keep` from a model
+    /// STRUCTURALLY UNABLE to disagree, which is no assertion at all.
+    ///
+    /// Now it can disagree, and this test pins both directions.
+    #[test]
+    fn the_276_companions_are_charged_against_the_ceiling_row() {
+        const FLUX1_Q8: u64 = 12_600_000_000;
+        /// `docs/architecture/pulid-adapter.md`: ~1.14 GB of fp16 weights,
+        /// 0.8-1.7 GB resident depending on the working dtype. The upper end
+        /// is what a BF16/F32 CUDA render holds, and it is held for the whole
+        /// render: `free_gpu_state_before_vae_decode` releases the adapter
+        /// only on a DROP.
+        const PULID_ADAPTER: u64 = 1_700_000_000;
+
+        let rtx_4090 = usable_free_for_mib(RTX_4090_TOTAL_MIB);
+        let lora = flux1_lora_resident_bytes(256);
+
+        let ceiling = |companions: u64| {
+            residency_on_both_backends_with_companions(
+                FLUX1_Q8,
+                companions,
+                MAX_SQUARE,
+                MAX_SQUARE,
+                ActivationFamily::FluxDit,
+                24,
+                rtx_4090,
+            )
+        };
+
+        // The two-adapter stack the issue reported, with PuLID beside it:
+        // 5.29 GB the budget could not previously see. It still fits, and
+        // that is the honest answer at these sizes — the ceiling row's slack
+        // is 6.33 GB on the math arm, so two rank-256 adapters and an adapter
+        // do not by themselves overrun a nominal 24 GiB card. What changed is
+        // that the budget now SPENDS them: the deviation from "this row must
+        // flip" is arithmetic, not policy, and it is recorded here so the
+        // next person does not have to re-derive it.
+        let reported = 2 * lora + PULID_ADAPTER;
+        assert_eq!(
+            reported, 5_286_129_920,
+            "two rank-256 FLUX.1 adapters plus the PuLID adapter"
+        );
+        assert!(
+            ceiling(reported).keeps(),
+            "5.29 GB of companions still fits the ceiling row's 6.33 GB of slack"
+        );
+
+        // …and a heavier stack DROPS, which is the whole point: mold's LoRA
+        // stack takes several adapters, and four rank-256 ones beside the
+        // PuLID adapter are 8.87 GB. Before companions were charged this was
+        // byte-for-byte the `Keep` above, because the budget's only weight
+        // term was the checkpoint file.
+        let heavy = 4 * lora + PULID_ADAPTER;
+        let dropped = ceiling(heavy);
+        assert!(
+            !dropped.keeps(),
+            "8.87 GB of resident adapters beside a 12.6 GB checkpoint cannot \
+             also hold the ceiling decode on a 24 GiB card"
+        );
+        assert!(
+            dropped.shortfall_bytes() > 0,
+            "a drop names how far short it is"
+        );
+
+        // The pin that makes the two rows above mean something: with the
+        // companion term at zero — the pre-change budget — the heavy stack
+        // KEEPS. The row could not have disagreed.
+        assert!(
+            ceiling(0).keeps(),
+            "the checkpoint-only budget keeps at the ceiling regardless of \
+             what else the render is holding, which is why this row was \
+             asserting nothing"
+        );
+    }
+
+    /// A warm LoRA render reaches the same answer as a cold one.
+    ///
+    /// `usable_free_bytes` is the card "as if nothing this render loaded were
+    /// resident", so a caller sampling free VRAM mid-render adds back
+    /// EVERYTHING it is holding — the checkpoint AND the companions. Adding
+    /// back only the checkpoint charges the adapters twice (once by shrinking
+    /// the reading, once in `required_bytes`) and drops every warm LoRA
+    /// render on a card that can plainly afford it.
+    #[test]
+    fn the_add_back_convention_covers_the_companions_too() {
+        const TOTAL: u64 = 21_000_000_000;
+        const CHECKPOINT: u64 = 12_600_000_000;
+        let companions = 2 * flux1_lora_resident_bytes(256);
+
+        let budget = StillTransformerBudget {
+            transformer_bytes: CHECKPOINT,
+            companion_resident_bytes: companions,
+            activation_bytes: 500_000_000,
+            vae_decode_peak_bytes: 2_700_000_000,
+            runtime_headroom_bytes: STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+        };
+
+        // Cold: nothing of this render's is on the card yet.
+        let cold = still_transformer_residency(&budget, UsableFreeVram::Measured(TOTAL));
+
+        // Warm: the driver reports what is actually free, and the caller adds
+        // back every byte this render put there.
+        let sampled_free = TOTAL - CHECKPOINT - companions;
+        let warm = still_transformer_residency(
+            &budget,
+            UsableFreeVram::Measured(sampled_free + CHECKPOINT + companions),
+        );
+        assert_eq!(cold, warm, "the add-back must reconstruct the cold reading");
+        assert!(cold.keeps());
+
+        // And the bug it prevents: adding back only the checkpoint drops.
+        let double_charged = still_transformer_residency(
+            &budget,
+            UsableFreeVram::Measured(sampled_free + CHECKPOINT),
+        );
+        assert!(
+            !double_charged.keeps(),
+            "charging the adapters twice is what a checkpoint-only add-back does"
+        );
+    }
+
     /// The matrix's shapes are ones a request can actually carry.
     ///
     /// Pins the premise of the rewrite: `MAX_PIXELS` is what makes 1536² and
@@ -5811,6 +5997,7 @@ mod tests {
             activation_bytes: 500_000_000,
             vae_decode_peak_bytes: 2_700_000_000,
             runtime_headroom_bytes: STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+            companion_resident_bytes: 0,
         };
 
         let failed = still_transformer_residency(&budget, UsableFreeVram::Unmeasurable);

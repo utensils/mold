@@ -173,7 +173,12 @@ impl RenderIdentity<'_> {
     }
 
     /// Device bytes still held, across both references.
-    #[cfg(test)]
+    ///
+    /// No longer test-only: the residency budget charges it. The adapter is
+    /// ~1.7 GB on FLUX.1 and `free_gpu_state_before_vae_decode` releases it
+    /// only on a DROP, so on the keep path it is on the card while the VAE
+    /// decode allocates — one of the two ingredients #276 named that the
+    /// checkpoint's file length cannot see.
     pub(crate) fn resident_bytes(&self) -> u64 {
         self.state.resident_bytes()
     }

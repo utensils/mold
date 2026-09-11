@@ -1089,6 +1089,14 @@ struct LoadedFlux {
     transformer_path: PathBuf,
     /// The actual T5 encoder path used (may be a quantized GGUF, not the original FP16 path).
     t5_encoder_path: std::path::PathBuf,
+    /// Device bytes the bypass registry's LoRA adapters hold beside the
+    /// transformer, for as long as the transformer lives.
+    ///
+    /// Recorded at load because the registry is consumed INTO the transformer
+    /// and is not separately reachable at decode time — and the residency
+    /// budget needs it, because #276's OOM was reported with LoRAs attached
+    /// and the budget charged only the checkpoint file.
+    lora_resident_bytes: u64,
 }
 
 /// Fingerprint of a single LoRA adapter (path + scale). Used to detect
@@ -1588,6 +1596,9 @@ impl FluxEngine {
             "loading FLUX transformer on GPU..."
         );
 
+        // The eager load carries no adapters; a LoRA request rebuilds the
+        // transformer below and records what its registry holds.
+        let lora_resident_bytes = 0u64;
         let flux_model = if is_quantized {
             let vb = crate::weight_loader::load_gguf_var_builder(
                 &transformer_path,
@@ -1775,6 +1786,7 @@ impl FluxEngine {
             is_quantized,
             transformer_path,
             t5_encoder_path: resolved_t5_path,
+            lora_resident_bytes,
         });
 
         tracing::info!(model = %self.base.model_name, "all model components loaded successfully");
@@ -2796,6 +2808,11 @@ impl FluxEngine {
                             loaded.dtype,
                             progress,
                         )?;
+                        // These adapters stay on the card for the whole
+                        // render, so the residency budget has to see them.
+                        loaded.lora_resident_bytes = registry
+                            .as_ref()
+                            .map_or(0, |registry| registry.resident_bytes());
                         let vb = crate::weight_loader::load_gguf_var_builder(
                             &transformer_path,
                             &loaded.device,
@@ -3439,8 +3456,16 @@ impl FluxEngine {
         // same convention `memory_preflight` uses with `active_vram_bytes`.
         // Charging them twice would drop every warm render on every card.
         let transformer_bytes = Self::resident_transformer_bytes(loaded);
+        // The two things #276 named that the checkpoint's file length cannot
+        // see: the bypass registry's resident LoRA matrices, and the ~1.7 GB
+        // PuLID adapter that `free_gpu_state_before_vae_decode` releases only
+        // on a drop. Both are on the card while the VAE decode allocates.
+        let companion_resident_bytes = loaded
+            .lora_resident_bytes
+            .saturating_add(identity.resident_bytes());
         let budget = crate::device::StillTransformerBudget {
             transformer_bytes,
+            companion_resident_bytes,
             activation_bytes: crate::device::flux_activation_budget_bytes_for(
                 req.width,
                 req.height,
@@ -3458,10 +3483,14 @@ impl FluxEngine {
             runtime_headroom_bytes: crate::device::STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
         };
         let free_before_vae = crate::device::free_vram_bytes(gpu_ordinal).unwrap_or(0);
+        // The add-back covers the COMPANIONS as well as the checkpoint: the
+        // sample above was taken with the adapters on the card, so charging
+        // them in `required_bytes` while also letting them shrink the reading
+        // counts them twice and drops every warm LoRA render.
         let usable_free = crate::device::usable_free_for_residency(
             &loaded.device,
             gpu_ordinal,
-            transformer_bytes,
+            transformer_bytes.saturating_add(companion_resident_bytes),
         );
         let decision = resolve_flux_keep_transformer(
             crate::runtime_env::value("MOLD_FLUX_KEEP_TRANSFORMER").as_deref(),

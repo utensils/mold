@@ -1292,6 +1292,10 @@ impl Flux2Engine {
                 crate::device::dtype_bytes(vae_dtype),
             ),
             runtime_headroom_bytes: crate::device::STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+            // FLUX.2 has no bypass registry and no identity adapter: [dev]
+            // refuses LoRAs outright and Klein merges them into the weights
+            // the checkpoint term already charges, and PuLID is FLUX.1-only.
+            companion_resident_bytes: 0,
         }
     }
 

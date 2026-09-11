@@ -284,6 +284,27 @@ impl LoraRegistry {
         self.by_key.len()
     }
 
+    /// Device bytes every installed adapter is holding.
+    ///
+    /// The bypass registry keeps the A/B matrices RESIDENT beside the
+    /// transformer for the whole render — it is what "adapters resident on
+    /// Cuda(..)" means in the load line — so they are part of what the VAE
+    /// decode has to fit beside. #276 is titled "VAE decode OOM under
+    /// KEEP_TRANSFORMER=1 **+ LoRAs**", and a residency budget that charged
+    /// only the checkpoint file could not see the ingredient the report
+    /// blamed.
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        self.by_key
+            .values()
+            .flat_map(|stack| stack.iter())
+            .map(|adapter| {
+                let bytes =
+                    |tensor: &Tensor| (tensor.elem_count() * tensor.dtype().size_in_bytes()) as u64;
+                bytes(&adapter.down).saturating_add(bytes(&adapter.up))
+            })
+            .sum()
+    }
+
     /// True when no adapters are installed for any tensor.
     #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
@@ -775,6 +796,64 @@ mod tests {
             &b.to_device(&candle_core::Device::Cpu).unwrap(),
         );
         assert!(max < 1e-2, "bf16 bypass vs merged: {max}");
+    }
+
+    /// The registry reports the device bytes it is holding, summed over
+    /// every adapter in every stack.
+    ///
+    /// `still_transformer_residency` charges this beside the checkpoint, so
+    /// an empty registry must be exactly zero (today's behaviour, unchanged)
+    /// and a two-adapter stack must be the sum of both — not the first, and
+    /// not one key's worth.
+    #[test]
+    fn the_registry_reports_the_device_bytes_its_adapters_hold() {
+        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+        use std::collections::HashMap as HM;
+
+        let device = Device::Cpu;
+        assert_eq!(
+            LoraRegistry::new().resident_bytes(),
+            0,
+            "no adapters is no bytes"
+        );
+
+        let h = 16;
+        let rank = 4;
+        let make = |scale: f64, path_hash: u64| {
+            let a = Tensor::zeros((rank, h), DType::F32, &device).unwrap();
+            let b = Tensor::zeros((h, rank), DType::F32, &device).unwrap();
+            let mut layers = HashMap::new();
+            layers.insert(
+                "transformer.transformer_blocks.0.attn.to_q".to_string(),
+                LoraLayer { a, b, alpha: None },
+            );
+            (LoraAdapter { layers, rank }, scale, path_hash)
+        };
+        let (first, first_scale, first_hash) = make(0.5, 0xAB);
+        let (second, second_scale, second_hash) = make(0.75, 0xCD);
+        let specs = [
+            LoraSpec {
+                adapter: &first,
+                scale: first_scale,
+                path_hash: first_hash,
+            },
+            LoraSpec {
+                adapter: &second,
+                scale: second_scale,
+                path_hash: second_hash,
+            },
+        ];
+        let mut linear_out_dims = HM::new();
+        linear_out_dims.insert("double_blocks.0.img_attn.qkv.weight".to_string(), 3 * h);
+        let registry = build_registry(&specs, &linear_out_dims, &device, DType::F32).unwrap();
+
+        // Two adapters, each an F32 (rank x h) down and an (h x rank) up.
+        let per_adapter = 2 * (rank * h) as u64 * DType::F32.size_in_bytes() as u64;
+        assert_eq!(
+            registry.resident_bytes(),
+            2 * per_adapter,
+            "both adapters in the stack are resident, so both are charged"
+        );
     }
 
     #[test]
