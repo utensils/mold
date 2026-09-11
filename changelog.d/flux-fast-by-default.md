@@ -48,3 +48,39 @@
   print recorded none. Every LoRA-capable family was affected, FLUX.1 and
   FLUX.2 included; a LoRA beside an image, mask or video source always worked,
   and `--local` was never affected.
+- **FLUX.2's FP8 tiers stop re-widening every weight on every forward.** An FP8
+  layer cast its whole one-byte-per-parameter slab up to the working dtype on
+  every call, so the tier chosen to save VRAM was paying full BF16 bandwidth
+  for its weights and allocating a transient full-size copy hundreds of times a
+  step. Where the card has the room the widening now happens ONCE at load and
+  the packed slab is dropped, which is bit-for-bit the same arithmetic — the
+  per-tensor scale still rides the matmul output, exactly where it did. The
+  decision is a measured budget with the card's free VRAM on one side, so a
+  24 GB card widens Klein-4B and leaves a 32 GB dev checkpoint alone;
+  `MOLD_FLUX2_FP8_CACHE=1` or `=0` forces it either way.
+- **An undistilled FLUX.2 [klein] base render guides in one forward per step
+  instead of two.** Both branches denoise the same latent, so they ride one
+  batch-2 forward and every weight is read once for the pair — Black Forest
+  Labs' own sampler does this and mold was following diffusers, which does not.
+  A guided base render is now much closer in cost to an unguided one rather
+  than roughly double. mold falls back to the old two forwards when the
+  negative prompt tokenizes to a different length than the positive one, or
+  when the doubled activations would not fit beside the weights on this card;
+  the progress line says which ran. `--guidance 1` still skips the branch
+  entirely.
+- **FLUX renders spend far less time in norms, rotary embeddings and the VAE's
+  attention.** Candle's fused normalization kernels were being missed
+  everywhere in both families — the Q/K norms ran on a transposed view and the
+  affine-less LayerNorms had no bias, and each miss cost about ten kernel
+  launches and seven passes over the tensor instead of one. The rotary
+  embedding now uses candle's fused interleaved kernel where the layout allows
+  and falls back to the previous arithmetic where it does not. FLUX.2's double
+  blocks issue one fused Q/K/V projection per stream rather than three, and the
+  VAE's mid-block attention no longer materialises a full 16384x16384 score
+  matrix during decode — the spike that used to push a loaded card into the
+  much slower tiled-decode recovery.
+- **FLUX.1 computes its rotary embedding in float32, as upstream does.** It
+  previously built one in whatever dtype the render used, so a half-precision
+  render computed every sine and cosine of every token position with eight bits
+  of mantissa. FLUX.2 was already correct here.
+
