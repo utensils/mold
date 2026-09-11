@@ -924,6 +924,27 @@ describe("iOS type vocabulary", () => {
     expect(detail?.[1]).toMatch(/font-size:\s*var\(--text-caption\)/);
   });
 
+  it("gives every screen its own large title instead of one wordmark", () => {
+    const title = css.match(/\.mobile-large-title\s*\{([^}]*)\}/s);
+    expect(title?.[1]).toMatch(/font-family:\s*var\(--font-display\)/);
+    expect(title?.[1]).toMatch(/font-size:\s*min\(var\(--text-display\), 28px\)/);
+    expect(title?.[1]).toMatch(/font-weight:\s*700/);
+    // The wordmark named the app on all five screens and answered nothing.
+    expect(css).not.toContain(".mobile-wordmark");
+    expect(mobileAppComponent).not.toContain("mobile-wordmark");
+
+    // One 44pt action per screen, beside the title.
+    const action = css.match(/\.mobile-header-action\s*\{([^}]*)\}/s);
+    expect(Number(action?.[1]?.match(/width:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(Number(action?.[1]?.match(/height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+
+    // Where the next print lands is pinned above the scroll, not in it.
+    const row = css.match(/\.mobile-header-routing\s*\{([^}]*)\}/s);
+    expect(row?.[1]).toMatch(/display:\s*flex/);
+    const note = css.match(/\.mobile-header-routing-note\s*\{([^}]*)\}/s);
+    expect(note?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+  });
+
   it("makes every Back control a 15px sans accent label with a chevron", () => {
     const back = css.match(/\.mobile-back-button\s*\{([^}]*)\}/s);
     const close = css.match(/\.gallery-viewer-close\s*\{([^}]*)\}/s);

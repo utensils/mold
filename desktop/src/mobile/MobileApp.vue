@@ -702,7 +702,11 @@ function selectMobileTab(next: MobileTab): void {
 const licenseAcceptance = useLicenseAcceptance();
 const mobileContent = ref<HTMLElement | null>(null);
 const catalogView = ref<
-  (RefreshableMobileView & { browseKind(kind: "all" | "image" | "video" | "mesh"): void }) | null
+  | (RefreshableMobileView & {
+      browseKind(kind: "all" | "image" | "video" | "mesh"): void;
+      browseMore(): void;
+    })
+  | null
 >(null);
 const hostDetailView = ref<RefreshableMobileView | null>(null);
 const createHeading = ref<HTMLElement | null>(null);
@@ -1490,6 +1494,30 @@ const headerTargetLabel = computed(() =>
       ? mobileGenerateTargetLabel(selectedHost.value.id, connectedHosts.value)
       : "Remote only",
 );
+/** The screen you are on, in its own words. Make names what it is making. */
+const MOBILE_TAB_TITLE: Record<MobileTab, string> = {
+  generate: "New image",
+  queue: "Queue",
+  gallery: "My images",
+  catalog: "Styles",
+  hosts: "Machines",
+};
+/** The chip's dot must not claim a machine is ready when it is reconnecting.
+ *  Under an automatic policy no one machine answers, so it stays neutral. */
+const headerTargetDot = computed(() => {
+  if (automaticRouting.value) return "";
+  const host = selectedHost.value;
+  if (!host || host.connected === false) return "";
+  return host.stale ? "is-reconnecting" : host.online ? "is-ready" : "is-error";
+});
+/** The mono half of the routing row: what that machine is doing right now. */
+const headerQueueNote = computed(() => {
+  const hostId = automaticRouting.value ? null : selectedHost.value?.id;
+  const telemetry = hostId ? hostTelemetry[hostId] : null;
+  if (!telemetry) return "";
+  const depth = telemetry.queueDepth ?? 0;
+  return depth ? `${depth} waiting` : "free now";
+});
 const developOnNote = computed(() => {
   if (!automaticRouting.value)
     return `Generate on ${selectedHost.value ? mobileGenerateTargetLabel(selectedHost.value.id, connectedHosts.value) : "this machine"}`;
@@ -1925,6 +1953,11 @@ async function browseOutputStyles(
   await nextTick();
   catalogView.value?.browseKind(kind === "still" ? "image" : kind === "clip" ? "video" : "mesh");
 }
+/** The Styles header's `+`: show the shelf that has more on it. */
+function browseMoreStyles(): void {
+  catalogView.value?.browseMore();
+}
+
 const organizationSummary = computed(() => {
   const fields = fileUnderEnabled.value
     ? buildFileUnderRequestFields(
@@ -11799,11 +11832,25 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       <strong>Settings</strong>
       <span class="mobile-settings-nav-spacer" aria-hidden="true" />
     </header>
+    <!-- Every screen says its own name, and offers the ONE action it has.
+         A wordmark said the app's name on all five and answered nothing. -->
     <header v-else class="mobile-header">
-      <div class="mobile-wordmark">Mold</div>
-      <div class="mobile-header-actions">
-        <div class="host-chip">{{ headerTargetLabel }}</div>
+      <div class="mobile-header-title-row">
+        <h1
+          v-if="tab === 'generate'"
+          ref="createHeading"
+          class="mobile-large-title"
+          tabindex="-1"
+          data-test="mobile-create-heading"
+        >
+          {{ selectedHost ? OUTPUT_KIND_TITLE[selectedOutputKind] : "Connect a machine" }}
+        </h1>
+        <h1 v-else class="mobile-large-title">{{ MOBILE_TAB_TITLE[tab] }}</h1>
+
+        <!-- Make and Queue reach Settings; the other three have an action of
+             their own, and Settings is one tab away. -->
         <button
+          v-if="tab === 'generate' || tab === 'queue'"
           ref="settingsButton"
           class="mobile-settings-button"
           type="button"
@@ -11815,6 +11862,115 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M7 14v6" />
           </svg>
         </button>
+        <div v-else-if="tab === 'gallery'" class="mobile-library-heading-actions">
+          <button
+            v-if="libraryScope === 'trash' && !gallerySelectMode"
+            class="secondary-button mobile-library-select mobile-library-empty-trash"
+            type="button"
+            :class="{ 'is-armed': emptyTrashConfirming }"
+            :disabled="emptyingTrash || trashCount === 0"
+            data-test="mobile-library-empty-trash"
+            @click="emptyTrash"
+            @blur="emptyTrashConfirming = false"
+          >
+            {{ emptyingTrash ? "Emptying…" : emptyTrashConfirming ? "Confirm" : "Empty trash" }}
+          </button>
+          <button
+            v-if="libraryScope === 'collections' && !activeCollection && !gallerySelectMode"
+            class="secondary-button mobile-library-select"
+            type="button"
+            aria-label="New collection"
+            data-test="mobile-library-new-collection"
+            @click="openLibrarySheet({ kind: 'new-collection' })"
+          >
+            <span aria-hidden="true">＋</span>
+          </button>
+          <button
+            v-if="libraryScope !== 'collections' || activeCollection"
+            class="mobile-header-action mobile-header-action--text"
+            type="button"
+            :aria-pressed="gallerySelectMode"
+            data-test="mobile-gallery-select"
+            @click="setGallerySelectMode(!gallerySelectMode)"
+          >
+            {{ gallerySelectMode ? "Done" : "Select" }}
+          </button>
+        </div>
+        <button
+          v-else-if="tab === 'catalog'"
+          type="button"
+          class="mobile-header-action"
+          aria-label="Browse more styles"
+          data-test="mobile-catalog-browse-more"
+          @click="browseMoreStyles"
+        >
+          <span aria-hidden="true">+</span>
+        </button>
+        <button
+          v-else-if="tab === 'hosts' && !hostDetail"
+          type="button"
+          class="mobile-header-action"
+          aria-label="Add a machine"
+          data-test="mobile-add-machine-open"
+          @click="openAddMachine"
+        >
+          <span aria-hidden="true">+</span>
+        </button>
+      </div>
+
+      <!-- Where the next print lands, and what kind it is. Both used to scroll
+           away with the form, so the answer left the screen exactly when the
+           form got long enough to need it. -->
+      <template v-if="tab === 'generate' && selectedHost">
+        <div class="mobile-header-routing">
+          <!-- The chip says where the next print lands; the native picker lies
+               over it, so the chip's own words stay the single answer. -->
+          <div class="mobile-header-routing-chip">
+            <div class="host-chip">
+              <span class="status-dot" :class="headerTargetDot" aria-hidden="true" />{{
+                headerTargetLabel
+              }}
+            </div>
+            <span
+              v-if="connectedHosts.length > 1"
+              class="mobile-header-routing-caret"
+              aria-hidden="true"
+              >▾</span
+            >
+            <select
+              v-if="connectedHosts.length > 1"
+              class="mobile-header-routing-select"
+              :value="generateTarget"
+              aria-label="Machine"
+              data-test="mobile-generate-host"
+              @change="selectGenerateTarget(($event.target as HTMLSelectElement).value)"
+            >
+              <!-- Automatic policies appear only with two or more reachable
+                   machines; with one there is nothing to choose between. -->
+              <option v-if="autoRoutingAvailable" :value="AUTO_TARGET_ID">Auto</option>
+              <option v-if="autoRoutingAvailable" :value="CAPABLE_TARGET_ID">Most capable</option>
+              <option v-for="host in connectedHosts" :key="host.id" :value="host.id">
+                {{ mobileGenerateTargetLabel(host.id, connectedHosts) }}
+              </option>
+            </select>
+          </div>
+          <span class="mobile-header-routing-note">{{ headerQueueNote }}</span>
+        </div>
+        <SegmentedControl
+          class="mobile-output-kinds"
+          :model-value="selectedOutputKind"
+          :options="outputOptions"
+          label="What to make"
+          data-test="mobile-output-kind"
+          @update:model-value="selectOutputKind"
+        />
+      </template>
+      <div v-else-if="tab !== 'generate'" class="mobile-header-routing">
+        <div class="host-chip">
+          <span class="status-dot" :class="headerTargetDot" aria-hidden="true" />{{
+            headerTargetLabel
+          }}
+        </div>
       </div>
     </header>
 
@@ -11898,7 +12054,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         </div>
         <div v-if="!selectedHost" class="empty-state">
           <div>
-            <h1 class="section-title">Connect a machine</h1>
             <p>Connect to a machine running Mold to make your first image.</p>
             <button class="primary-button" type="button" @click="tab = 'hosts'">
               Connect a machine
@@ -11907,14 +12062,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         </div>
         <template v-else>
           <div class="mobile-create-head">
-            <h1
-              ref="createHeading"
-              class="section-title"
-              tabindex="-1"
-              data-test="mobile-create-heading"
-            >
-              {{ OUTPUT_KIND_TITLE[selectedOutputKind] }}
-            </h1>
+            <p class="section-note">{{ developOnNote }}</p>
             <button
               class="mobile-settings-reset"
               type="button"
@@ -11925,29 +12073,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               ↺ Reset
             </button>
           </div>
-          <p class="section-note">{{ developOnNote }}</p>
           <div
             v-show="androidShortLandscape"
             ref="createReadinessSlot"
             data-test="mobile-inline-readiness"
           />
-          <label v-if="connectedHosts.length > 1" class="field">
-            <span>Machine</span>
-            <select
-              class="control"
-              :value="generateTarget"
-              data-test="mobile-generate-host"
-              @change="selectGenerateTarget(($event.target as HTMLSelectElement).value)"
-            >
-              <!-- Automatic policies appear only with two or more reachable
-                   machines; with one there is nothing to choose between. -->
-              <option v-if="autoRoutingAvailable" :value="AUTO_TARGET_ID">Auto</option>
-              <option v-if="autoRoutingAvailable" :value="CAPABLE_TARGET_ID">Most capable</option>
-              <option v-for="host in connectedHosts" :key="host.id" :value="host.id">
-                {{ mobileGenerateTargetLabel(host.id, connectedHosts) }}
-              </option>
-            </select>
-          </label>
           <p
             v-if="autoRoutingAvailable && automaticRouting"
             class="section-note"
@@ -11955,14 +12085,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           >
             {{ routingHint }}
           </p>
-          <SegmentedControl
-            class="mobile-output-kinds"
-            :model-value="selectedOutputKind"
-            :options="outputOptions"
-            label="What to make"
-            data-test="mobile-output-kind"
-            @update:model-value="selectOutputKind"
-          />
           <p v-if="outputKindNotice" class="section-note" role="status">
             {{ outputKindNotice }}
             <button type="button" class="mobile-text-action" @click="browseOutputStyles()">
@@ -12651,56 +12773,17 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       </template>
 
       <template v-else-if="!settingsOpen && tab === 'gallery'">
-        <div class="mobile-library-heading">
-          <div>
-            <h1 class="section-title">My images</h1>
-            <p class="section-note" data-test="mobile-library-note">
-              {{
-                gallerySelectMode
-                  ? `${gallerySelection.size} selected`
-                  : libraryScope === "trash"
-                    ? `${trashCount} in trash · Restore or delete forever from Select`
-                    : libraryScope === "collections"
-                      ? `${libraryCollectionCards.length} collection${libraryCollectionCards.length === 1 ? "" : "s"} across your hosts`
-                      : "Prints from every connected host · Pinch to resize · Tap Select for multiple"
-              }}
-            </p>
-          </div>
-          <div class="mobile-library-heading-actions">
-            <button
-              v-if="libraryScope === 'trash' && !gallerySelectMode"
-              class="secondary-button mobile-library-select mobile-library-empty-trash"
-              type="button"
-              :class="{ 'is-armed': emptyTrashConfirming }"
-              :disabled="emptyingTrash || trashCount === 0"
-              data-test="mobile-library-empty-trash"
-              @click="emptyTrash"
-              @blur="emptyTrashConfirming = false"
-            >
-              {{ emptyingTrash ? "Emptying…" : emptyTrashConfirming ? "Confirm" : "Empty trash" }}
-            </button>
-            <button
-              v-if="libraryScope === 'collections' && !activeCollection && !gallerySelectMode"
-              class="secondary-button mobile-library-select"
-              type="button"
-              aria-label="New collection"
-              data-test="mobile-library-new-collection"
-              @click="openLibrarySheet({ kind: 'new-collection' })"
-            >
-              <span aria-hidden="true">＋</span>
-            </button>
-            <button
-              v-if="libraryScope !== 'collections' || activeCollection"
-              class="secondary-button mobile-library-select"
-              type="button"
-              :aria-pressed="gallerySelectMode"
-              data-test="mobile-gallery-select"
-              @click="setGallerySelectMode(!gallerySelectMode)"
-            >
-              {{ gallerySelectMode ? "Done" : "Select" }}
-            </button>
-          </div>
-        </div>
+        <p class="section-note" data-test="mobile-library-note">
+          {{
+            gallerySelectMode
+              ? `${gallerySelection.size} selected`
+              : libraryScope === "trash"
+                ? `${trashCount} in trash · Restore or delete forever from Select`
+                : libraryScope === "collections"
+                  ? `${libraryCollectionCards.length} collection${libraryCollectionCards.length === 1 ? "" : "s"} across your hosts`
+                  : "Prints from every connected host · Pinch to resize · Tap Select for multiple"
+          }}
+        </p>
         <div
           v-if="libraryScope !== 'collections' || activeCollection"
           class="mobile-library-search"
@@ -13460,18 +13543,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           @status="updateHostStatus"
         />
         <template v-else>
-          <div class="mobile-machines-head">
-            <h1 class="section-title">Machines</h1>
-            <button
-              type="button"
-              class="mobile-header-action"
-              aria-label="Add a machine"
-              data-test="mobile-add-machine-open"
-              @click="openAddMachine"
-            >
-              <span aria-hidden="true">+</span>
-            </button>
-          </div>
           <p class="section-note">LAN discovery, Tailscale MagicDNS, or an address</p>
           <!-- One line each: the Create picker offers these only while two or
                more machines are reachable. -->
@@ -13616,7 +13687,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         />
       </KeepAlive>
       <section v-show="!settingsOpen && tab === 'queue'" data-test="mobile-queue-view">
-        <div class="mobile-create-head"><h1 class="section-title">Queue</h1></div>
         <p class="section-note">Work continues on your machines when you leave this screen.</p>
         <!-- ONE queue: this session's prints and the machines' own live
                work land in the same list (mockup 1c). -->

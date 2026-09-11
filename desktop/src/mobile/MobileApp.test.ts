@@ -7577,11 +7577,90 @@ describe("MobileApp foreground resume", () => {
   });
 });
 
+describe("MobileApp per-screen titles", () => {
+  async function openTab(id: string): Promise<void> {
+    await wrapper!.get(`[data-test='mobile-tab-${id}']`).trigger("click");
+    await flushPromises();
+  }
+
+  it("names the screen you are on, with the one action that screen offers", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const header = () => wrapper!.get(".mobile-header");
+    const title = () => header().get(".mobile-large-title").text();
+    // The wordmark said the app's name on every screen and answered nothing.
+    expect(wrapper.find(".mobile-wordmark").exists()).toBe(false);
+
+    // Make names what it is making, not the app.
+    expect(title()).toMatch(/^New (image|clip|3-D object)$/);
+    expect(header().find("[data-test='mobile-open-settings']").exists()).toBe(true);
+
+    await openTab("queue");
+    expect(title()).toBe("Queue");
+    // Settings must stay reachable from a screen with no action of its own.
+    expect(header().find("[data-test='mobile-open-settings']").exists()).toBe(true);
+
+    await openTab("gallery");
+    expect(title()).toBe("My images");
+    expect(header().get("[data-test='mobile-gallery-select']").text()).toBe("Select");
+
+    await openTab("catalog");
+    expect(title()).toBe("Styles");
+    expect(header().find("[data-test='mobile-catalog-browse-more']").exists()).toBe(true);
+
+    await openTab("hosts");
+    expect(title()).toBe("Machines");
+    expect(header().find("[data-test='mobile-add-machine-open']").exists()).toBe(true);
+  });
+
+  it("pins where the next print lands above the Make scroll, not inside it", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const header = wrapper.get(".mobile-header");
+    // The routing chip and the output-kind control used to scroll away with
+    // the form, so the answer to "where is this going" left the screen.
+    expect(header.find(".host-chip").exists()).toBe(true);
+    expect(header.find("[data-test='mobile-output-kind']").exists()).toBe(true);
+
+    await wrapper.get("[data-test='mobile-tab-queue']").trigger("click");
+    await flushPromises();
+    // Neither belongs to a screen that makes nothing.
+    expect(wrapper.get(".mobile-header").find("[data-test='mobile-output-kind']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("enters Select from the Images header", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openTab("gallery");
+
+    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-gallery-select']").text()).toBe("Done");
+  });
+
+  it("sends the Styles + to the shelf that has more to show", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openTab("catalog");
+
+    await wrapper.get("[data-test='mobile-catalog-segment-installed']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-catalog-browse-more']").trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='mobile-catalog-segment-discover']").attributes("aria-pressed"),
+    ).toBe("true");
+  });
+});
+
 describe("MobileApp settings", () => {
   it("opens as a focused destination and returns to the unchanged primary tab", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
-    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await wrapper.get("[data-test='mobile-tab-queue']").trigger("click");
     await flushPromises();
 
     await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
@@ -7593,7 +7672,7 @@ describe("MobileApp settings", () => {
 
     await wrapper.get("[data-test='mobile-settings-back']").trigger("click");
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+    expect(wrapper.get("[data-test='mobile-tab-queue']").attributes("aria-current")).toBe("page");
     expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-open-settings']").element);
   });
 
@@ -8037,7 +8116,7 @@ describe("MobileApp primary navigation", () => {
     },
   );
 
-  it.each(["hosts", "gallery"])("shows only Settings when opened from %s", async (destination) => {
+  it.each(["generate", "queue"])("shows only Settings when opened from %s", async (destination) => {
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get(`[data-test='mobile-tab-${destination}']`).trigger("click");
@@ -11293,7 +11372,7 @@ describe("MobileApp machines telemetry", () => {
     expect(wrapper.get("[data-test='mobile-host-telemetry'] .host-telemetry-mem").text()).toBe(
       "9.8 / 24.0 GB",
     );
-    expect(wrapper.get(".status-dot").classes()).toContain("is-reconnecting");
+    expect(wrapper.get(".mobile-machine-card .status-dot").classes()).toContain("is-reconnecting");
 
     await vi.advanceTimersByTimeAsync(10_000);
     await flushPromises();
@@ -11527,7 +11606,7 @@ describe("mobile Library pinch-to-resize", () => {
 
     expect(grid.attributes("data-gallery-columns")).toBe("3");
     expect(grid.attributes("style")).toContain("--mobile-gallery-columns: 3");
-    expect(app.get(".mobile-library-heading .section-note").text()).toContain("Pinch to resize");
+    expect(app.get("[data-test='mobile-library-note']").text()).toContain("Pinch to resize");
   });
 
   it("spreading two fingers enlarges the thumbnails and persists the choice", async () => {

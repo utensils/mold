@@ -190,29 +190,131 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   font-size: 0.875rem;
 }
 
+/* Every screen's own title, and the one action it offers. The Make screen
+   also pins the two answers that used to scroll away with the form: where the
+   next print lands, and what kind of thing it is. */
 .mobile-header {
   min-height: 52px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
+  flex-direction: column;
+  gap: 10px;
+  padding: 6px max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left));
   border-bottom: 1px solid var(--mold-border);
   background: var(--mold-bg);
 }
 
-.mobile-header-actions {
+.mobile-header-title-row {
   display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+}
+
+.mobile-large-title {
   min-width: 0;
   flex: 1;
+  overflow: hidden;
+  margin: 0;
+  color: var(--mold-text);
+  font-family: var(--font-display);
+  font-size: min(var(--text-display), 28px);
+  font-weight: 700;
+  letter-spacing: -0.014em;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-large-title:focus-visible {
+  outline: 2px solid var(--mold-border-focus);
+  outline-offset: 2px;
+}
+
+.mobile-header-title-row > .mobile-header-action,
+.mobile-header-title-row > .mobile-settings-button,
+.mobile-library-heading-actions {
+  flex: none;
+  margin-left: auto;
+}
+
+.mobile-header-action--text {
+  width: auto;
+  min-width: 44px;
+  padding: 0 4px;
+  font-size: var(--text-body-lg);
+  font-weight: 500;
+}
+
+/* The routing chip: a status dot and the machine's name, with the native
+   picker lying over it so one tap opens the list. */
+.mobile-header-routing {
+  display: flex;
+  min-width: 0;
   align-items: center;
-  justify-content: flex-end;
   gap: 8px;
 }
 
-.mobile-header-actions .host-chip {
+.mobile-header-routing-chip {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  max-width: min(58vw, 240px);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  padding: 0 11px;
+  background: var(--mold-bg-deep, var(--mold-bg));
+}
+
+.mobile-header-routing-chip .host-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  color: var(--mold-text);
   font-size: min(var(--text-edge-code), 16px);
-  max-width: min(58vw, 220px);
+}
+
+.mobile-header-routing .status-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.mobile-header-routing .status-dot.is-ready {
+  background: var(--mold-success, var(--mold-blue));
+}
+
+.mobile-header-routing-caret {
+  flex: none;
+  color: var(--mold-text-dim);
+}
+
+.mobile-header-routing-select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  opacity: 0;
+  appearance: none;
+}
+
+/* What that machine is doing, in the mono half of the row. */
+.mobile-header-routing-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--mold-text-dim);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-header .mobile-output-kinds {
+  width: 100%;
 }
 
 .mobile-settings-button,
@@ -276,14 +378,6 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 .mobile-settings-nav-spacer {
   width: 44px;
   justify-self: end;
-}
-
-.mobile-wordmark {
-  flex: none;
-  font-family: var(--font-display);
-  font-size: min(var(--text-display), 28px);
-  font-weight: 700;
-  letter-spacing: -0.035em;
 }
 
 .host-chip {

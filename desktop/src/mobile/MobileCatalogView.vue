@@ -811,6 +811,8 @@ defineExpose({
     mediaType.value = value;
     showDiscoverModels();
   },
+  /** The Styles header's one action: everything you have not got yet. */
+  browseMore: showDiscoverModels,
 });
 
 function handleDownloadEvent({
