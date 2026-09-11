@@ -880,11 +880,21 @@ impl ExecutionSemanticConfig {
             // but the field is carried for the whole family: the tier is a
             // NAME test the engine performs, and recording it per tier here
             // would be a second authority for that question.
-            flux2_cfg_batching: (family == "flux2").then_some(
-                // WP9 is what flips this; until it lands every FLUX.2 base
-                // render is two batch-1 forwards per step.
-                SemanticFlux2CfgBatching::Sequential,
-            ),
+            //
+            // KNOWN GAP, not a resolved answer: batched CFG has since landed
+            // (`flux2::transformer::flux2_cfg_batching_for`), and this still
+            // reports `Sequential` unconditionally, so a host that batches
+            // shares an equivalence class with one that does not. Resolving it
+            // truthfully needs two inputs the planner does not have here — the
+            // card's TOTAL VRAM, which the engine's gate is deliberately
+            // charged against and which `DeviceFact` does not carry, and the
+            // batch-2 activation figure. Plumbing total VRAM through
+            // `DeviceFact` is the fix; it touches every construction site, so
+            // it belongs with whoever owns that struct rather than being
+            // guessed at from `available_vram_bytes` (a different number, and
+            // one that moves between planning and execution — exactly what
+            // `flux2_cfg_batching`'s doc comment says it must not depend on).
+            flux2_cfg_batching: (family == "flux2").then_some(SemanticFlux2CfgBatching::Sequential),
             // Only wan has a step cache, so only wan carries the field; every
             // other family's fingerprint is byte-identical to what it was
             // before this existed.
