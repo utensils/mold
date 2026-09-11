@@ -203,6 +203,8 @@ onMounted(() => {
         class="models__kinds"
         data-test="installed-kinds"
         wrap
+        compact
+        variant="neutral"
         :model-value="activeKind"
         :options="kindOptions"
         label="Kind of style"
@@ -319,7 +321,8 @@ onMounted(() => {
 <style scoped>
 .models {
   box-sizing: border-box;
-  max-width: 1400px;
+  /* The same 1120px column the other workspaces centre on. */
+  max-width: 1120px;
   margin: 0 auto;
   padding: 22px 20px 120px;
 }
@@ -350,6 +353,8 @@ onMounted(() => {
 }
 
 .models__kinds {
+  width: max-content;
+  max-width: 100%;
   margin-bottom: 16px;
 }
 

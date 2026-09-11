@@ -282,9 +282,10 @@ function openContextMenu(event: MouseEvent) {
   min-width: 0;
   overflow-wrap: anywhere;
   margin-top: 6px;
-  font-family: var(--f-mono);
+  /* Plain words in sans; the meter's readouts below are the mono truth. */
+  font-family: var(--f-body);
   font-size: 0.875rem;
-  color: var(--ink-3);
+  color: var(--ink-2);
 }
 
 .hc__row {
