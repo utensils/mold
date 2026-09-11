@@ -2165,6 +2165,14 @@ const latestDone = computed(() => {
   if (stream.selectedJob.value) return null;
   return pinnedDone.value;
 });
+/* A kind change is a new subject: a finished still lingering on the New clip
+ * canvas offered Make 4 variations against a clip recipe. */
+watch(
+  () => output.kind.value,
+  () => {
+    pinnedDone.value = null;
+  },
+);
 
 const latestError = computed(() =>
   latestUnresolvedError(

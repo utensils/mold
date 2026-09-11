@@ -1471,7 +1471,7 @@ describe("CreatePage layout and behavior", () => {
       name: "ResultCanvas",
       props: ["mode", "canCopyLink", "canMakeVariations", "resultFilename"],
       template:
-        '<div data-test="result-canvas" :data-can-copy="String(canCopyLink)" :data-can-vary="String(canMakeVariations)">' +
+        '<div data-test="result-canvas" :data-mode="mode" :data-can-copy="String(canCopyLink)" :data-can-vary="String(canMakeVariations)">' +
         '<button data-test="canvas-download" @click="$emit(\'download\')">d</button>' +
         '<button data-test="canvas-copy-link" @click="$emit(\'copy-link\')">c</button>' +
         '<button data-test="canvas-make-variations" @click="$emit(\'make-variations\')">v</button>' +
@@ -1537,6 +1537,33 @@ describe("CreatePage layout and behavior", () => {
       expect(call[0].batch_count).toBe(4);
     }
     expect(form.state.value.batchSize).toBe(1);
+  });
+
+  it("lets a pinned still go when the output kind changes", async () => {
+    // Seen on hal9000: a finished still stayed on the New CLIP canvas after
+    // switching to Short clip, still offering Make 4 variations — which
+    // would have queued four clips of the current form under a still's
+    // action bar. A kind change is a new subject; the pin goes with the old.
+    const still = installedModelRow(entry.metadata.model, "flux");
+    const clip = installedModelRow("wan22-i2v-a14b:q8", "wan");
+    hostModelsMock.mockResolvedValue([still, clip]);
+    streamJobsRef.value = [finishedCanvasJob()];
+    const wrapper = mount(CreatePage, { global: { stubs: actionBarStubs() } });
+    await flushPromises();
+    streamJobsRef.value = [];
+    await flushPromises();
+    const canvas = wrapper.get("[data-test='result-canvas']");
+    expect(canvas.attributes("data-mode")).toBe("result");
+
+    const button = wrapper
+      .get("[data-test='web-output-kind']")
+      .findAll("button")
+      .find((b) => b.text() === "Short clip")!;
+    await button.trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='result-canvas']").attributes("data-mode"),
+    ).toBe("empty");
   });
 
   it("downloads a settled print from its host when the canvas holds no bytes", async () => {
@@ -3274,10 +3301,11 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.originalPrompt = "an earlier generated print";
     await nextTick();
 
-    // Advanced lives behind the More settings row now, so open it first.
-    await wrapper.get("[data-test='disclosure-advanced']").trigger("click");
+    // Add-on looks is the one LoRA door now (More settings has none), so
+    // the trigger phrase comes from the picker inside that row's sheet.
+    await wrapper.get("[data-test='disclosure-loras']").trigger("click");
     wrapper
-      .getComponent({ name: "AdvancedDrawer" })
+      .getComponent({ name: "LoraPicker" })
       .vm.$emit("append-prompt", "cinematic light");
     await nextTick();
 
