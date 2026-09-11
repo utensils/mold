@@ -83,7 +83,7 @@ watch(
 
 const tabOptions = [
   { value: "upload" as const, label: "Upload" },
-  { value: "gallery" as const, label: "From gallery" },
+  { value: "gallery" as const, label: "From My images" },
 ];
 
 // Phone surfaces get the full-screen sheet; everything else the centered modal.

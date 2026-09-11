@@ -39,6 +39,8 @@ export interface RoutableGpu {
   backend: string | null;
   name?: string | null;
   vramTotalMb?: number | null;
+  /** Live memory in use on that same GPU; absent when the host cannot say. */
+  vramUsedMb?: number | null;
 }
 
 /** The slice of a registry host the routers reason over. */

@@ -9,7 +9,7 @@
  * thumbnails, a single non-overlapping video badge — long enough to fill a
  * large Create workspace, with a "view all" link into the gallery for the rest.
  */
-import { computed } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 import MediaTile from "@ui/components/MediaTile.vue";
 import Icon from "@ui/components/Icon.vue";
@@ -21,8 +21,15 @@ const props = withDefaults(
     entries: GalleryImage[];
     /** Cap the number of tiles rendered; the rest live in the gallery. */
     limit?: number;
+    /**
+     * Cap the grid to this many ROWS at the current breakpoint. Recent sits
+     * under the sticky composer on Create, where an uncapped strip is the
+     * whole page below the fold; two rows plus the "see all" link is the
+     * mock's shape. Null means the `limit` alone decides.
+     */
+    maxRows?: number | null;
   }>(),
-  { limit: 18 },
+  { limit: 18, maxRows: null },
 );
 
 const emit = defineEmits<{
@@ -37,7 +44,43 @@ const emit = defineEmits<{
   ];
 }>();
 
-const shown = computed(() => props.entries.slice(0, props.limit));
+/** Columns the grid resolved at this width, read back from the layout so the
+ * row cap is a slice (nothing past it in the DOM) rather than a clip. */
+const gridEl = ref<HTMLElement | null>(null);
+const columns = ref(0);
+function measureColumns(): void {
+  const el = gridEl.value;
+  if (!el) return;
+  const tracks = getComputedStyle(el).gridTemplateColumns;
+  const count = tracks ? tracks.trim().split(/\s+/).filter(Boolean).length : 0;
+  if (count > 0) columns.value = count;
+}
+/* The grid is a v-else branch: on a fresh page the entries arrive after
+ * mount, so the element is watched rather than read once. */
+let observer: ResizeObserver | null = null;
+watch(
+  gridEl,
+  (el) => {
+    observer?.disconnect();
+    observer = null;
+    if (!el) return;
+    measureColumns();
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(measureColumns);
+      observer.observe(el);
+    }
+  },
+  { flush: "post" },
+);
+onBeforeUnmount(() => observer?.disconnect());
+
+const cap = computed(() => {
+  if (props.maxRows && props.maxRows > 0 && columns.value > 0) {
+    return Math.min(props.limit, columns.value * props.maxRows);
+  }
+  return props.limit;
+});
+const shown = computed(() => props.entries.slice(0, cap.value));
 const overflow = computed(() =>
   Math.max(0, props.entries.length - shown.value.length),
 );
@@ -64,7 +107,11 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
 </script>
 
 <template>
-  <div class="recent" data-test="recent-grid">
+  <div
+    class="recent"
+    data-test="recent-grid"
+    :data-max-rows="maxRows ?? undefined"
+  >
     <div
       v-if="shown.length === 0"
       class="recent__empty"
@@ -72,7 +119,7 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
     >
       no prints yet — your generations land here.
     </div>
-    <div v-else class="recent__grid">
+    <div v-else ref="gridEl" class="recent__grid">
       <MediaTile
         v-for="item in shown"
         :key="item.filename"
@@ -117,8 +164,7 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
       class="recent__more"
       data-test="recent-view-all"
     >
-      view all {{ entries.length }} in gallery
-      <Icon name="chevron-right" :size="13" />
+      See all {{ entries.length }} in My images
     </RouterLink>
   </div>
 </template>
@@ -129,6 +175,7 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
   grid-template-columns: repeat(2, 1fr);
   gap: 10px;
 }
+
 @media (min-width: 480px) {
   .recent__grid {
     grid-template-columns: repeat(3, 1fr);

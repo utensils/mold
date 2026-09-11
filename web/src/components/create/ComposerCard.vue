@@ -2,8 +2,18 @@
 /*
  * Composer card (Mold Studio Create) — the prompt bed. Autogrow textarea, a
  * mono summary line with an inline "expanded · undo" affordance, and the
- * Write-more / Generate action row. Generate carries the ⌘↵ keycap; ⌘↵ /
- * Ctrl+↵ inside the textarea submits.
+ * chip + Write-more / Generate action row. Generate carries the ⌘↵ keycap;
+ * ⌘↵ / Ctrl+↵ inside the textarea submits.
+ *
+ * The action row's first three positions are SLOTS — `style`, `shape`,
+ * `count` — because the style picker, the resolved output shape and the batch
+ * count all belong to the form the page owns. The composer decides only where
+ * they sit. Slot content is compiled in the PARENT and never inherits this
+ * component's scoped CSS, so each chip carries its own look.
+ *
+ * Where the composer sits is the page's decision too: `composer--sticky`
+ * parks it at the bottom of the wide column, `composer--docked` fixes it to
+ * the bottom of a narrow one. The card takes neither on its own.
  *
  * There is no prompt-preset strip: Style is the style the picture is made
  * with, and a second "Photoreal" on the same screen meaning a phrase appended
@@ -139,6 +149,16 @@ function onKeydown(event: KeyboardEvent) {
     if (!generateDisabled.value) submitOrCancel();
     return;
   }
+  // ⌘E / Ctrl+E is desktop's shortcut for the same rewrite, and the chip
+  // carries the keycap — so the keycap has to be true here too.
+  if (
+    (event.metaKey || event.ctrlKey) &&
+    (event.key === "e" || event.key === "E")
+  ) {
+    event.preventDefault();
+    if (!transformsDisabled.value) emit("expand");
+    return;
+  }
   const el = event.target as HTMLTextAreaElement;
   if (event.key === "ArrowUp" && caretOnFirstLine(el)) {
     const recalled = cycler.prev(props.prompt);
@@ -202,21 +222,11 @@ watch(
       @keydown="onKeydown"
     />
 
-    <!-- Phone-only insertion point: Create owns model/shape controls, but the
-         prototype places them above the action row. Desktop leaves this slot
-         empty and keeps its separate inspector column. -->
-    <slot name="mobile-controls" />
-
-    <div class="composer__actions">
-      <span class="composer__summary" data-test="composer-summary">{{
-        summaryLine
-      }}</span>
-      <span
-        v-if="transformBlockedReason"
-        class="composer__summary"
-        data-test="composer-transform-blocked"
-        >{{ transformBlockedReason }}</span
-      >
+    <div class="composer__chips" data-test="composer-chips">
+      <slot name="style" />
+      <slot name="shape" />
+      <slot name="count" />
+      <span class="composer__spacer" />
       <button
         v-if="expanded"
         type="button"
@@ -227,6 +237,18 @@ watch(
         <Icon name="sparkle" :size="12" />
         expanded · undo
       </button>
+      <span
+        v-if="transformBlockedReason"
+        class="composer__summary"
+        data-test="composer-transform-blocked"
+        >{{ transformBlockedReason }}</span
+      >
+      <span class="composer__summary" data-test="composer-summary">{{
+        summaryLine
+      }}</span>
+    </div>
+
+    <div class="composer__actions" data-test="composer-actions">
       <span class="composer__spacer" />
       <button
         type="button"
@@ -238,6 +260,7 @@ watch(
       >
         <Icon name="sparkle" :size="15" />
         {{ expandLabel }}
+        <Keycap>⌘E</Keycap>
       </button>
       <button
         type="button"
@@ -307,16 +330,44 @@ watch(
   flex: 1;
 }
 
+.composer__chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
 .composer__actions {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-top: 12px;
+  margin-top: 10px;
   flex-wrap: wrap;
 }
 
 .composer__blocker {
   margin-top: 12px;
+}
+
+/* Docked over a phone-width page every row costs a 44px touch target, so the
+ * summary (the chips already say it) and the keyboard hints (no ⌘ on a
+ * phone) leave, and the two transforms share a row. */
+@media (max-width: 639px) {
+  .composer__summary,
+  .composer__expand :deep(.ms-keycap),
+  .composer__generate :deep(.ms-keycap) {
+    display: none;
+  }
+  .composer__chips,
+  .composer__actions {
+    gap: 8px;
+  }
+  .composer__generate {
+    flex: 1 1 100%;
+    justify-content: center;
+    padding: 0 18px;
+  }
 }
 
 .composer__summary {
@@ -339,6 +390,9 @@ watch(
 }
 
 .composer__expand {
+  /* literal: the mock's 28px chip row — the two prompt transforms stand at
+   * the same height as the Style, Shape and Make chips beside them. */
+  --composer-chip-h: 28px;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -346,7 +400,7 @@ watch(
   background: transparent;
   color: var(--ink-2);
   padding: 0 15px;
-  height: 42px;
+  height: var(--composer-chip-h);
   border-radius: var(--radius-control-lg);
   font-size: 13px;
   font-weight: 600;
@@ -366,7 +420,9 @@ watch(
   background: var(--safelight);
   color: var(--on-accent);
   padding: 0 12px 0 22px;
-  height: 42px;
+  /* The kit has three control heights and the primary action is the tallest
+   * of them; 42px was a fourth height nothing else on the screen used. */
+  height: var(--mold-ctl-lg, 32px);
   border-radius: var(--radius-control-lg);
   font-size: 14px;
   font-weight: 700;

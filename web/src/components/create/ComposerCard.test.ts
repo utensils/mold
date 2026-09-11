@@ -1,11 +1,15 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import ComposerCard from "./ComposerCard.vue";
+import composerSource from "./ComposerCard.vue?raw";
 import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
 
 function factory(
-  props: Partial<InstanceType<typeof ComposerCard>["$props"]> = {},
+  props: Partial<InstanceType<typeof ComposerCard>["$props"]> & {
+    slots?: Record<string, string>;
+  } = {},
 ) {
+  const { slots, ...rest } = props;
   return mount(ComposerCard, {
     props: {
       prompt: "a lighthouse",
@@ -14,8 +18,9 @@ function factory(
       height: 1024,
       steps: 28,
       batchSize: 1,
-      ...props,
+      ...rest,
     },
+    ...(slots ? { slots } : {}),
   });
 }
 
@@ -238,5 +243,119 @@ describe("ComposerCard", () => {
     );
     await wrapper.setProps({ promptOptional: true });
     expect(prompt.attributes("placeholder")).toContain("optional");
+  });
+});
+
+/*
+ * The mock's composer is the whole control surface: one row of chips left of
+ * the prompt transforms, Generate at its right end, and nothing about the
+ * picture anywhere else on a phone. The chips are filled by the page, because
+ * the style picker, the shape resolver and the batch count all belong to the
+ * form the page owns — the composer only decides where they sit.
+ */
+describe("ComposerCard action row", () => {
+  it("renders Style, Shape and Make, in that order, before Write more for me", () => {
+    const wrapper = factory({
+      slots: {
+        style: "<span data-test='slot-style'>Photoreal</span>",
+        shape: "<span data-test='slot-shape'>Square · 1024</span>",
+        count: "<span data-test='slot-count'>Make 4</span>",
+      },
+    });
+    const order = [
+      "[data-test='slot-style']",
+      "[data-test='slot-shape']",
+      "[data-test='slot-count']",
+      "[data-test='composer-expand']",
+      "[data-test='composer-submit']",
+    ].map((probe) => {
+      const el = wrapper.get(probe).element;
+      return [...wrapper.element.querySelectorAll("*")].indexOf(el);
+    });
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(order[0]).toBeGreaterThan(-1);
+  });
+
+  it("keeps the three chips on their own row, with the summary at its end", () => {
+    // Measured on plato at 1440px: with the summary leading the one action
+    // row, the style chip pushed Shape and Make onto a second line and
+    // Generate onto a third. The chips are one row; the transforms and
+    // Generate are the next.
+    const wrapper = factory({
+      slots: {
+        style: "<span data-test='slot-style'>Photoreal</span>",
+        shape: "<span data-test='slot-shape'>Square · 1024</span>",
+        count: "<span data-test='slot-count'>Make 4</span>",
+      },
+    });
+    const chips = wrapper.get("[data-test='composer-chips']");
+    for (const probe of ["slot-style", "slot-shape", "slot-count"]) {
+      expect(chips.find(`[data-test='${probe}']`).exists()).toBe(true);
+    }
+    expect(chips.find("[data-test='composer-summary']").exists()).toBe(true);
+    expect(chips.find("[data-test='composer-submit']").exists()).toBe(false);
+    const actions = wrapper.get("[data-test='composer-actions']");
+    expect(actions.find("[data-test='composer-expand']").exists()).toBe(true);
+    expect(actions.find("[data-test='composer-submit']").exists()).toBe(true);
+    expect(actions.find("[data-test='slot-style']").exists()).toBe(false);
+  });
+
+  it("renders none of the three when the page fills none of them", () => {
+    const wrapper = factory();
+    expect(wrapper.find("[data-test='slot-style']").exists()).toBe(false);
+  });
+
+  /*
+   * The phone used to render the whole settings column INSIDE the composer,
+   * which is why the narrow page was longer than the wide one. The rail is one
+   * sheet now, so the composer has no phone-only well to fill.
+   */
+  it("has no phone-only controls well", () => {
+    const wrapper = factory({
+      slots: { "mobile-controls": "<span data-test='legacy-mobile'>x</span>" },
+    });
+    expect(wrapper.find("[data-test='legacy-mobile']").exists()).toBe(false);
+    expect(composerSource).not.toContain("mobile-controls");
+  });
+
+  /*
+   * The chip carries the keycap, so the keycap has to be true — desktop's
+   * ⌘E reaches the same rewrite from inside the prompt bed.
+   */
+  it("rewrites the prompt on ⌘E, and refuses when the recipe reads no prompt", async () => {
+    const wrapper = factory();
+    const bed = wrapper.get("[data-test='composer-prompt']");
+    await bed.trigger("keydown", { key: "e", metaKey: true });
+    expect(wrapper.emitted("expand")).toHaveLength(1);
+    expect(wrapper.get("[data-test='composer-expand']").text()).toContain("⌘E");
+
+    const blocked = factory({ transformBlockedReason: "No text encoder." });
+    await blocked
+      .get("[data-test='composer-prompt']")
+      .trigger("keydown", { key: "e", ctrlKey: true });
+    expect(blocked.emitted("expand")).toBeUndefined();
+  });
+
+  /*
+   * The kit has three control heights and Generate is the tallest of them.
+   * It was specced at 42px, a fourth height nothing else on the screen uses.
+   */
+  it("stands Generate on the kit's own large control height", () => {
+    expect(composerSource).toContain("height: var(--mold-ctl-lg, 32px)");
+    expect(composerSource).not.toContain("height: 42px");
+  });
+
+  /*
+   * Where the composer sits is the PAGE's decision — sticky inside the wide
+   * column, fixed to the bottom of a narrow one — so the page owns BOTH
+   * rules and the card hard-codes no position. The card once carried a
+   * second copy of each with different z-indexes; both scoped rules landed
+   * on the same element at equal specificity, so bundle order decided.
+   */
+  it("takes no position of its own and defines neither of the page's classes", () => {
+    expect(composerSource).not.toContain(".composer--sticky");
+    expect(composerSource).not.toContain(".composer--docked");
+    const base = composerSource.match(/\n\.composer \{[^}]*\}/)?.[0] ?? "";
+    expect(base).not.toContain("position:");
   });
 });

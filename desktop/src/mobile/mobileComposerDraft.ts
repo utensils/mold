@@ -227,6 +227,10 @@ function parse(raw: string): Envelope | null {
         Object.assign(form, { [key]: value.form[key] });
     }
     form.sourceFit = parseSourceFitPolicy(form.sourceFit)!;
+    // The composer's preset chips are retired: a preset a draft saved before
+    // then would restyle the prompt at submit with nothing on screen to show
+    // or clear it. Never silently change a request.
+    form.stylePreset = "";
     return {
       version: 1,
       revision: value.revision,

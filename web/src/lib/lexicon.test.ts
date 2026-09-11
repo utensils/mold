@@ -18,6 +18,8 @@ import installTargetDialog from "../components/models/ModelInstallTargetDialog.v
 import detailDrawer from "../components/models/ModelDetailDrawer.vue?raw";
 import hostCard from "../components/machines/HostCard.vue?raw";
 import controlsAside from "../components/create/ControlsAside.vue?raw";
+import createPage from "../pages/CreatePage.vue?raw";
+import makeChip from "../components/create/MakeChip.vue?raw";
 import advancedDrawer from "../components/create/AdvancedDrawer.vue?raw";
 import hostRoutingPicker from "../components/create/HostRoutingPicker.vue?raw";
 import composerCard from "../components/create/ComposerCard.vue?raw";
@@ -84,16 +86,23 @@ describe("lexicon — New image controls", () => {
     expect(controlsAside).toContain(`label="${CONTROL_WORDS.guidance}"`);
     expect(controlsAside).toContain(`label="${CONTROL_WORDS.octree}"`);
     expect(controlsAside).toContain(`label="${CONTROL_WORDS.isoThreshold}"`);
-    expect(controlsAside).toContain(CONTROL_WORDS.resetToStyleDefaults);
+    // Reset moved to the rail's own header and Make to the composer's chip;
+    // the words are the same, so the guard follows them rather than lapsing.
+    expect(createPage).toContain(CONTROL_WORDS.resetToStyleDefaults);
     expect(controlsAside).toContain('aria-label="Seed number"');
     expect(controlsAside).toContain("passes`");
     expect(controlsAside).not.toContain("steps`");
-    expect(controlsAside).toContain(">Make<");
+    expect(makeChip).toMatch(/Make \{\{/);
+    expect(makeChip).not.toContain(">Batch<");
     expect(controlsAside).not.toContain(">Batch<");
     expect(hostRoutingPicker).toContain(
       `aria-label="${CONTROL_WORDS.whereItRuns}"`,
     );
-    expect(advancedDrawer).toContain(`title="${CONTROL_WORDS.loras}"`);
+    // "Add-on looks" left the Advanced drawer for the rail's own disclosure
+    // row — the one LoRA door — so the guard follows the word, the same way
+    // Reset and Make were followed above rather than lapsing.
+    expect(advancedDrawer).not.toContain(`title="${CONTROL_WORDS.loras}"`);
+    expect(createPage).toContain(CONTROL_WORDS.loras);
     expect(loraPicker).toContain(CONTROL_WORDS.loras);
     expect(composerCard).toContain(`"${CONTROL_WORDS.expand}"`);
     expect(composerCard).toContain("} passes`");

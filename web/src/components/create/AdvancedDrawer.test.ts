@@ -1,6 +1,8 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AdvancedDrawer from "./AdvancedDrawer.vue";
+import LoraPicker from "../LoraPicker.vue";
+import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import {
   useGenerateForm,
   __testing__,
@@ -67,7 +69,6 @@ function factory(
     global: {
       plugins: [pinia],
       stubs: {
-        LoraPicker: { template: "<div data-test='lora-picker-stub' />" },
         RouterLink: { template: "<a><slot /></a>" },
       },
     },
@@ -156,6 +157,63 @@ describe("AdvancedDrawer video duration", () => {
     expect(wrapper.find("[data-test='video-frames']").exists()).toBe(true);
     expect(wrapper.find("[data-test='video-fps']").exists()).toBe(true);
   });
+
+  // The Video section is the ONE home for the duration slider. ControlsAside's
+  // secondary group drew a second one, so every video recipe showed two
+  // sliders bound to `frames` in the same More settings sheet.
+  it("is the one home for the duration slider on every video family", () => {
+    for (const family of ["ltx2", "ltx-video", "wan"]) {
+      const wrapper = factory(family);
+      expect(wrapper.find("[data-test='section-video']").exists()).toBe(true);
+      expect(wrapper.findAllComponents(VideoDurationSlider)).toHaveLength(1);
+      wrapper.unmount();
+    }
+  });
+
+  it("owns Predict duration, and hides the slider while the host chooses", async () => {
+    const model = {
+      name: "ltx-2-19b-distilled:fp8",
+      family: "ltx2",
+      default_frames: 97,
+      default_fps: 24,
+      supports_duration_prediction: true,
+    } as ModelInfoExtended;
+    const wrapper = factory(
+      "ltx2",
+      { model: model.name, frames: 97 },
+      { models: [model] },
+    );
+    expect(
+      wrapper.find("[data-test='predict-duration-control']").exists(),
+    ).toBe(true);
+    expect(wrapper.findAllComponents(VideoDurationSlider)).toHaveLength(1);
+    await wrapper
+      .get("[data-test='predict-duration-control'] button[role='switch']")
+      .trigger("click");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.predictDuration).toBe(true);
+    expect(next.frames).toBe(null);
+
+    const predicting = factory(
+      "ltx2",
+      { model: model.name, predictDuration: true },
+      { models: [model] },
+    );
+    expect(predicting.findAllComponents(VideoDurationSlider)).toHaveLength(0);
+    expect(
+      predicting.find("[data-test='predicted-duration-hint']").exists(),
+    ).toBe(true);
+  });
+
+  it("offers no Predict duration for a checkpoint that cannot do it", () => {
+    const wrapper = factory("ltx2", { model: "ltx-2-19b-distilled:fp8" });
+    expect(
+      wrapper.find("[data-test='predict-duration-control']").exists(),
+    ).toBe(false);
+    expect(wrapper.findAllComponents(VideoDurationSlider)).toHaveLength(1);
+  });
 });
 
 function sections(family: string, extra: Record<string, unknown> = {}) {
@@ -166,7 +224,6 @@ function sections(family: string, extra: Record<string, unknown> = {}) {
     scheduler: has("scheduler"),
     negative: has("negative"),
     source: has("source"),
-    lora: has("lora"),
     upscale: has("upscale"),
     output: has("output"),
     video: has("video"),
@@ -179,7 +236,6 @@ function sections(family: string, extra: Record<string, unknown> = {}) {
 const SECTION_ORDER = [
   "scheduler",
   "negative",
-  "lora",
   "upscale",
   "output",
   "video",
@@ -202,7 +258,6 @@ describe("AdvancedDrawer section ordering contract", () => {
     expect(sectionIds(factory("sdxl", {}, gpus))).toEqual([
       "scheduler",
       "negative",
-      "lora",
       "upscale",
       "output",
       "placement",
@@ -212,7 +267,6 @@ describe("AdvancedDrawer section ordering contract", () => {
   it("renders video sections in the canonical order", () => {
     expect(sectionIds(factory("ltx2", {}, gpus))).toEqual([
       "negative",
-      "lora",
       "upscale",
       "output",
       "video",
@@ -284,12 +338,11 @@ describe("AdvancedDrawer capability matrix", () => {
     expect(s.video).toBe(false);
   });
 
-  it("flux hides scheduler and negative but keeps lora and output", () => {
+  it("flux hides scheduler and negative but keeps output", () => {
     const s = sections("flux");
     expect(s.scheduler).toBe(false);
     expect(s.negative).toBe(false);
     expect(s.source).toBe(false);
-    expect(s.lora).toBe(true);
     expect(s.output).toBe(true);
   });
 
@@ -338,15 +391,26 @@ describe("AdvancedDrawer always-open sections", () => {
 
   it("shows every available control without aria disclosure state", () => {
     const w = factory("flux");
-    expect(w.find("[data-test='lora-picker-stub']").exists()).toBe(true);
     expect(w.find("[data-test='exact-width']").exists()).toBe(true);
     expect(w.find("[aria-expanded]").exists()).toBe(false);
   });
 
   it("still hides sections unavailable to the selected family", () => {
     const w = factory("sd3.5");
-    expect(w.find("[data-test='section-lora']").exists()).toBe(false);
+    expect(w.find("[data-test='section-video']").exists()).toBe(false);
     expect(w.find("[data-test='cfg-plus']").exists()).toBe(true);
+  });
+
+  it("carries no LoRA door — Add-on looks on the Create rail is the one home", () => {
+    // The rail's "Add-on looks" disclosure row opens the only LoraPicker. A
+    // second copy here gave the same stack two doors and counted it twice:
+    // once on that row and again in the More settings badge.
+    for (const family of ["flux", "sdxl", "sd1.5"]) {
+      const w = factory(family);
+      expect(w.find("[data-test='section-lora']").exists()).toBe(false);
+      expect(w.findAllComponents(LoraPicker)).toHaveLength(0);
+      w.unmount();
+    }
   });
 
   it("records a typed exact size as a manual canvas intent (#1166)", async () => {
@@ -689,7 +753,6 @@ describe("AdvancedDrawer interactions", () => {
       props: { open: true, modelValue: form.state.value, family: "flux" },
       global: {
         stubs: {
-          LoraPicker: { template: "<div />" },
           PlacementPanel: { template: "<div />" },
           RouterLink: { template: "<a><slot /></a>" },
         },
@@ -1005,7 +1068,7 @@ describe("AdvancedDrawer identity group", () => {
     ).toBe("");
     expect(wrapper.emitted("update:modelValue")).toBeUndefined();
     expect(wrapper.get("[data-test='section-identity']").text()).toContain(
-      "Model defaults",
+      "Face reference strength",
     );
   });
 

@@ -347,3 +347,107 @@ describe("ResultCanvas", () => {
     );
   });
 });
+
+/*
+ * The mock docks the print's own actions over the bottom of the picture —
+ * Download, Copy link, Make 4 variations — because a browser's first-class
+ * verb is the link, and a finished result had no way to produce one at all:
+ * the actions lived in a right-click menu and in the Lightbox.
+ */
+describe("ResultCanvas result action bar", () => {
+  function finished(
+    props: Partial<InstanceType<typeof ResultCanvas>["$props"]> = {},
+  ) {
+    return mount(ResultCanvas, {
+      props: {
+        mode: "result",
+        resultSrc: "blob:x",
+        resultFilename: "mold-flux-dev-1775108462891.png",
+        resultCaption: "1024² · 4.0s",
+        ...props,
+      },
+    });
+  }
+
+  it("names the file in mono and keeps the meta on the caption probe", () => {
+    const wrapper = finished();
+    expect(wrapper.get("[data-test='canvas-filename']").text()).toBe(
+      "mold-flux-dev-1775108462891.png",
+    );
+    expect(wrapper.get("[data-test='canvas-caption']").text()).toBe(
+      "1024² · 4.0s",
+    );
+  });
+
+  it("docks the bar only over a finished print", () => {
+    for (const mode of [
+      "empty",
+      "generating",
+      "error",
+      "variations",
+    ] as const) {
+      const wrapper = mount(ResultCanvas, { props: { mode } });
+      expect(wrapper.find("[data-test='canvas-actions']").exists()).toBe(false);
+    }
+    expect(finished().find("[data-test='canvas-actions']").exists()).toBe(true);
+  });
+
+  it("asks the page to download, copy the link and make variations", async () => {
+    const wrapper = finished({ canCopyLink: true, canMakeVariations: true });
+    await wrapper.get("[data-test='canvas-download']").trigger("click");
+    await wrapper.get("[data-test='canvas-copy-link']").trigger("click");
+    await wrapper.get("[data-test='canvas-make-variations']").trigger("click");
+    expect(wrapper.emitted("download")).toHaveLength(1);
+    expect(wrapper.emitted("copy-link")).toHaveLength(1);
+    expect(wrapper.emitted("make-variations")).toHaveLength(1);
+  });
+
+  /*
+   * A link only exists for a print the host can address, and a batch-locked
+   * recipe renders one at a time — so neither is offered on a result that
+   * cannot honour it. Download is offered unless the page says it has
+   * neither the bytes nor a filename to fetch them by (a settled durable
+   * completion carries no inline image; the page fetches from the host).
+   */
+  it("offers only what the print supports", () => {
+    const wrapper = finished();
+    expect(wrapper.find("[data-test='canvas-download']").exists()).toBe(true);
+    expect(
+      finished({ canDownload: false })
+        .find("[data-test='canvas-download']")
+        .exists(),
+    ).toBe(false);
+    expect(wrapper.find("[data-test='canvas-copy-link']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='canvas-make-variations']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("says how many variations it would make", () => {
+    const wrapper = finished({ canMakeVariations: true });
+    expect(wrapper.get("[data-test='canvas-make-variations']").text()).toBe(
+      "Make 4 variations",
+    );
+  });
+
+  /*
+   * A video and an audio print carry their own transport controls along their
+   * bottom edge, so the bar stands under them instead of over them. Taking a
+   * clip's play button away to dock a Download button would be a regression.
+   */
+  it("stands clear of a transport that owns the bottom edge", () => {
+    expect(
+      finished({ resultVideoSrc: "blob:v" })
+        .get("[data-test='canvas-actions']")
+        .classes(),
+    ).not.toContain("canvas__actions--docked");
+    expect(
+      finished({ resultAudioSrc: "blob:a" })
+        .get("[data-test='canvas-actions']")
+        .classes(),
+    ).not.toContain("canvas__actions--docked");
+    expect(finished().get("[data-test='canvas-actions']").classes()).toContain(
+      "canvas__actions--docked",
+    );
+  });
+});
