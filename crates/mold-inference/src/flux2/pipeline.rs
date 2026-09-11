@@ -247,6 +247,55 @@ fn flux2_lora_fingerprint(loras: &[LoraWeight]) -> Vec<(u64, u64)> {
         .collect()
 }
 
+/// Resolve a FLUX.2 architecture from the checkpoint, then from its name.
+///
+/// A free function rather than a method because the SERVER needs the same
+/// answer: `flux2_fp8_checkpoint_bytes` is derived from this config, and the
+/// widen gate compares three copies of it against free VRAM. When the planner
+/// sized that from the FILE instead, a Comfy-Org `fp8mixed` checkpoint — whose
+/// file is materially larger than its parameter count, because its attention
+/// stays BF16 — made the server say `PerForward` and charge nothing where the
+/// engine said `AtLoad` and widened. Two gates reading two different inputs
+/// cannot agree by construction.
+///
+/// The header probe is a few KiB off the front of a safetensors file, not a
+/// read of the checkpoint, so it is safe on the coordinator.
+pub fn resolve_flux2_config(
+    transformer: &std::path::Path,
+    model_name: &str,
+) -> Option<Flux2Config> {
+    let is_safetensors = transformer
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"));
+    if is_safetensors {
+        match super::single_file::detect_hidden_size(transformer) {
+            Ok(Some(6144)) => return Some(Flux2Config::dev()),
+            Ok(Some(4096)) => return Some(Flux2Config::klein_9b()),
+            Ok(Some(3072)) => return Some(Flux2Config::klein()),
+            // Anything else: unknown variant, defer to the name heuristic.
+            _ => {}
+        }
+    }
+    let is_gguf = transformer
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"));
+    let name = model_name.to_lowercase();
+    if name.contains("flux2-dev") || name.contains("flux.2-dev") {
+        Some(Flux2Config::dev())
+    } else if name.contains("9b") {
+        Some(Flux2Config::klein_9b())
+    } else if name.contains("klein") || is_gguf {
+        // Opaque catalog IDs are common for Klein GGUF checkpoints. GGUF
+        // metadata is not available through the safetensors header probe, so
+        // retain the established Klein-4B default for this format.
+        Some(Flux2Config::klein())
+    } else {
+        None
+    }
+}
+
 /// On-disk bytes of the transformer, sharded or not.
 ///
 /// This is the resident figure for both arms: a GGUF stays quantized on the
@@ -465,49 +514,15 @@ impl Flux2Engine {
         if let Some(config) = self.resolved_config.get() {
             return Ok(config.clone());
         }
-        if let Some(cfg) = self.detect_config_from_checkpoint() {
-            let _ = self.resolved_config.set(cfg.clone());
-            return Ok(cfg);
-        }
-        let name = self.base.model_name.to_lowercase();
-        let config = if name.contains("flux2-dev") || name.contains("flux.2-dev") {
-            Flux2Config::dev()
-        } else if name.contains("9b") {
-            Flux2Config::klein_9b()
-        } else if name.contains("klein") || self.is_gguf_transformer() {
-            // Opaque catalog IDs are common for Klein GGUF checkpoints. GGUF
-            // metadata is not available through the safetensors header probe,
-            // so retain the established Klein-4B default for this format.
-            Flux2Config::klein()
-        } else {
-            return Err(anyhow::anyhow!(
-                "unsupported FLUX.2 architecture for model '{}': checkpoint metadata did not identify a known 3072, 4096, or 6144-wide transformer",
-                self.base.model_name
-            ));
-        };
+        let config = resolve_flux2_config(&self.base.paths.transformer, &self.base.model_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unsupported FLUX.2 architecture for model '{}': checkpoint metadata did not identify a known 3072, 4096, or 6144-wide transformer",
+                    self.base.model_name
+                )
+            })?;
         let _ = self.resolved_config.set(config.clone());
         Ok(config)
-    }
-
-    /// Header-peek the transformer file (if it's a single `.safetensors`)
-    /// and pick the config matching its `hidden_size`. Returns `None` for
-    /// sharded loads or when no `img_in.weight` marker is present.
-    fn detect_config_from_checkpoint(&self) -> Option<Flux2Config> {
-        let path = &self.base.paths.transformer;
-        let is_safetensors = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"));
-        if !is_safetensors {
-            return None;
-        }
-        match super::single_file::detect_hidden_size(path) {
-            Ok(Some(6144)) => Some(Flux2Config::dev()),
-            Ok(Some(4096)) => Some(Flux2Config::klein_9b()),
-            Ok(Some(3072)) => Some(Flux2Config::klein()),
-            // Anything else: unknown variant, defer to name heuristic.
-            _ => None,
-        }
     }
 
     /// Whether this is a Klein-9B model (uses Qwen3-8B text encoder).

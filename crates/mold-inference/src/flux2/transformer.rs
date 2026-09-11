@@ -551,6 +551,35 @@ pub fn flux2_fp8_widen_extra_resident_bytes(
     }
 }
 
+/// The widen's extra resident bytes for a CHECKPOINT, resolved exactly as the
+/// engine resolves them.
+///
+/// This is the one function both sides call. It takes the checkpoint rather
+/// than a byte count so the planner cannot size the gate differently from the
+/// load: the engine derives from `Flux2Config` (parameter count x 1 byte) and
+/// the server used to pass the FILE length, which on a Comfy-Org `fp8mixed`
+/// checkpoint is materially larger because its attention stays BF16 — so the
+/// server's `3 x bytes + headroom <= free` gate could answer `PerForward` and
+/// charge zero where the engine answered `AtLoad` and widened. That is the
+/// under-charge direction, and it is structural, not a tuning error.
+///
+/// The override is read from the process's FROZEN snapshot, the same
+/// authority the engine reads, rather than from the live environment.
+pub fn flux2_fp8_widen_extra_resident_bytes_for_checkpoint(
+    transformer: &std::path::Path,
+    model_name: &str,
+    usable_free_bytes: u64,
+) -> u64 {
+    let Some(cfg) = super::pipeline::resolve_flux2_config(transformer, model_name) else {
+        return 0;
+    };
+    flux2_fp8_widen_extra_resident_bytes(
+        flux2_fp8_checkpoint_bytes(&cfg),
+        usable_free_bytes,
+        crate::runtime_env::value("MOLD_FLUX2_FP8_CACHE").as_deref(),
+    )
+}
+
 /// `MOLD_FLUX2_FP8_CACHE`: `1` forces the widened arm, `0` forces the
 /// per-forward one, anything else (including unset) defers to the budget.
 ///

@@ -115,10 +115,23 @@ fn flux2_fp8_widen_extra_bytes(
     let Some(available) = available_bytes.filter(|bytes| *bytes > 0) else {
         return 0;
     };
-    mold_inference::flux2_fp8_widen_extra_resident_bytes(
-        transformer_component_size(paths),
+    // The checkpoint, not its file length: the engine sizes the gate from the
+    // resolved `Flux2Config`, and a `fp8mixed` file is materially larger than
+    // its parameter count. One function answers for both.
+    //
+    // The model name is the path's stem here rather than the request's model
+    // id, because that is what this estimator has — and it feeds only the
+    // fallback arm of the resolver, which the header probe pre-empts for
+    // every safetensors checkpoint this gate accepts.
+    let model_name = paths
+        .transformer
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    mold_inference::flux2_fp8_widen_extra_resident_bytes_for_checkpoint(
+        &paths.transformer,
+        model_name,
         available,
-        std::env::var("MOLD_FLUX2_FP8_CACHE").ok().as_deref(),
     )
 }
 
@@ -1647,14 +1660,20 @@ pub(crate) fn select_server_load_strategy_for_budget(
     }
 
     let activation = hint.map(|h| h.budget_bytes()).unwrap_or(0);
+    // The fp8 widen holds two bytes per parameter where the file-length
+    // estimate charges one, and this is a LOAD-STRATEGY decision — the whole
+    // point of which is whether the eager set co-resides.
+    let widen = flux2_fp8_widen_extra_bytes(paths, hint, Some(available_bytes));
     let eager_peak =
         mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager)
-            .saturating_add(activation);
+            .saturating_add(activation)
+            .saturating_add(widen);
     let sequential_peak = mold_inference::device::estimate_peak_memory(
         paths,
         mold_inference::LoadStrategy::Sequential,
     )
-    .saturating_add(activation);
+    .saturating_add(activation)
+    .saturating_add(widen);
     let hard_limit = available_bytes.saturating_mul(9) / 10;
 
     // Paired with the qwen_family admission bypass in the preflight guard:
@@ -2129,12 +2148,18 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 projection.source_image || projection.edit_image_count > 0
             }),
     );
+    // Charged HERE, before `eager_peak` is used, because `under_memory_pressure`
+    // reads it and `should_auto_park_text_encoder` reads that — which IS the
+    // encoder-placement decision this charge exists for. Adding it only to the
+    // final peak left the one consumer that matters reading the old number.
+    let fp8_widen_bytes = flux2_fp8_widen_extra_bytes(paths, hint, available_memory_bytes);
     let eager_peak = mold_inference::device::estimate_peak_memory_with_encoder_override(
         paths,
         mold_inference::LoadStrategy::Eager,
         streamed_encoder_charge,
     )
-    .saturating_add(activation);
+    .saturating_add(activation)
+    .saturating_add(fp8_widen_bytes);
     let under_memory_pressure = available_memory_bytes
         .is_some_and(|available| eager_peak > available.saturating_mul(9) / 10);
     let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
@@ -2205,11 +2230,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     // the CPU — the F32 encode this campaign exists to remove. The widen gate
     // and the encoder selector could not see each other; now the planner sees
     // both.
-    let peak = peak.saturating_add(flux2_fp8_widen_extra_bytes(
-        paths,
-        hint,
-        available_memory_bytes,
-    ));
+    let peak = peak.saturating_add(fp8_widen_bytes);
     let fits_available_memory = available_memory_bytes.map(|available| {
         if qwen_family || wan_family {
             peak <= available
@@ -3493,88 +3514,141 @@ mod fail_closed_tests {
     /// The widen decision must be visible to the planner, because it is the
     /// planner that decides whether Qwen3 gets a GPU slot.
     ///
-    /// On a 32 GB card a klein-9B fp8 checkpoint (9.08 GB) resolves `AtLoad`
-    /// and holds 18.16 GB. Priced from its file, the plan then believed there
+    /// On a 32 GB card a klein-9B fp8 checkpoint resolves `AtLoad` and holds
+    /// two bytes per parameter. Priced from its file, the plan believed there
     /// was room for a bf16 Qwen3 that in reality could not fit — and the
     /// encoder-variant selector silently fell back to a Q8 GGUF or to the
-    /// CPU, which is the F32 encode this campaign exists to remove. The two
-    /// decisions could not see each other.
+    /// CPU, which is the F32 encode this campaign exists to remove.
     #[test]
     fn an_fp8_flux2_checkpoint_charges_the_widened_bytes_when_it_will_widen() {
-        const FP8_BYTES: u64 = 9_079_000_000;
         let dir = tempfile::tempdir().unwrap();
-        let transformer = dir.path().join("flux2-klein-9b-fp8.safetensors");
-        std::fs::File::create(&transformer)
-            .unwrap()
-            .set_len(FP8_BYTES)
-            .unwrap();
-        let mut model_paths = paths("/unused/transformer.safetensors");
-        model_paths.transformer = transformer;
+        let make = |name: &str, len: u64| {
+            let path = dir.path().join(name);
+            std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+            path
+        };
         let activation = Some(hint(ActivationFamily::Flux2Dit));
+        let with = |transformer: std::path::PathBuf| {
+            let mut model_paths = paths("/unused/transformer.safetensors");
+            model_paths.transformer = transformer;
+            model_paths
+        };
 
         // A 32 GB card affords three copies at load, so the engine widens and
         // the estimate must charge the second resident copy.
-        assert_eq!(
-            flux2_fp8_widen_extra_bytes(&model_paths, activation, Some(33_600_000_000)),
-            FP8_BYTES,
+        let compact = with(make("flux2-klein-9b-fp8.safetensors", 9_079_000_000));
+        let charged = flux2_fp8_widen_extra_bytes(&compact, activation, Some(33_600_000_000));
+        assert!(
+            charged > 0,
             "a card that will widen must be planned against the widened residency"
         );
 
-        // A 24 GiB card cannot, so nothing is added and the estimate is
-        // exactly what it was before this charge existed.
+        // THE DRIFT THIS FIXES: the charge is derived from the resolved
+        // `Flux2Config`, exactly as the engine derives its gate — so a
+        // `fp8mixed` checkpoint, whose FILE is materially larger because its
+        // attention stays BF16, gets the same answer. When the server sized
+        // this from the file it could say `PerForward` and charge nothing
+        // where the engine said `AtLoad` and widened.
+        let mixed = with(make("flux2-klein-9b-fp8mixed.safetensors", 14_000_000_000));
         assert_eq!(
-            flux2_fp8_widen_extra_bytes(&model_paths, activation, Some(24 * 1024 * 1024 * 1024)),
+            flux2_fp8_widen_extra_bytes(&mixed, activation, Some(33_600_000_000)),
+            charged,
+            "the same architecture must charge the same widen whatever its file weighs"
+        );
+
+        // A 24 GiB card cannot afford three copies, so nothing is added and
+        // the estimate is what it was before this charge existed.
+        assert_eq!(
+            flux2_fp8_widen_extra_bytes(&compact, activation, Some(24 * 1024 * 1024 * 1024)),
             0,
             "a card that keeps the per-forward arm holds one copy, as it always did"
         );
 
         // An unresolvable gate charges nothing rather than guessing.
+        assert_eq!(flux2_fp8_widen_extra_bytes(&compact, activation, None), 0);
         assert_eq!(
-            flux2_fp8_widen_extra_bytes(&model_paths, activation, None),
-            0
-        );
-        assert_eq!(
-            flux2_fp8_widen_extra_bytes(&model_paths, activation, Some(0)),
+            flux2_fp8_widen_extra_bytes(&compact, activation, Some(0)),
             0
         );
 
         // And the gates: only fp8, only flux2, never a GGUF.
-        let mut bf16 = model_paths.clone();
-        bf16.transformer = dir.path().join("flux2-klein-9b-bf16.safetensors");
-        std::fs::File::create(&bf16.transformer)
-            .unwrap()
-            .set_len(FP8_BYTES)
-            .unwrap();
+        let bf16 = with(make("flux2-klein-9b-bf16.safetensors", 9_079_000_000));
         assert_eq!(
             flux2_fp8_widen_extra_bytes(&bf16, activation, Some(33_600_000_000)),
             0,
             "a bf16 checkpoint is never widened"
         );
-
-        let mut gguf = model_paths.clone();
-        gguf.transformer = dir.path().join("flux2-klein-9b-fp8.gguf");
-        std::fs::File::create(&gguf.transformer)
-            .unwrap()
-            .set_len(FP8_BYTES)
-            .unwrap();
+        let gguf = with(make("flux2-klein-9b-fp8.gguf", 9_079_000_000));
         assert_eq!(
             flux2_fp8_widen_extra_bytes(&gguf, activation, Some(33_600_000_000)),
             0,
             "a GGUF takes the quantized path, not the FP8 widen"
         );
-
         assert_eq!(
             flux2_fp8_widen_extra_bytes(
-                &model_paths,
+                &compact,
                 Some(hint(ActivationFamily::FluxDit)),
                 Some(33_600_000_000)
             ),
-            FP8_BYTES,
+            charged,
             "the path name still identifies the family when the hint disagrees"
         );
     }
 
-    /// FLUX.1's predicate gains its flux2 sibling's second step. A 23.8 GB
+    /// The charge reaches the estimator whose output drives encoder
+    /// placement.
+    ///
+    /// `under_memory_pressure` is computed from `eager_peak`, and
+    /// `should_auto_park_text_encoder` reads that — so a charge added only to
+    /// the final peak left the one consumer it was written for reading the
+    /// old number.
+    #[test]
+    fn the_widen_reaches_the_eager_peak_that_decides_encoder_placement() {
+        let dir = tempfile::tempdir().unwrap();
+        let transformer = dir.path().join("flux2-klein-9b-fp8.safetensors");
+        std::fs::File::create(&transformer)
+            .unwrap()
+            .set_len(9_079_000_000)
+            .unwrap();
+        let mut model_paths = paths("/unused/transformer.safetensors");
+        model_paths.transformer = transformer;
+        let activation = Some(hint(ActivationFamily::Flux2Dit));
+
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "portrait",
+            "model": "flux2-klein-9b:fp8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1
+        }))
+        .unwrap();
+
+        let widen = flux2_fp8_widen_extra_bytes(&model_paths, activation, Some(33_600_000_000));
+        assert!(widen > 0, "the fixture must be a card that widens");
+
+        let budget = estimate_generation_memory_for_request(
+            &request,
+            &model_paths,
+            activation,
+            offload(AdmissionPolicy::Disabled),
+            Some(33_600_000_000),
+            false,
+            false,
+        );
+        let bare = mold_inference::device::estimate_peak_memory(
+            &model_paths,
+            mold_inference::LoadStrategy::Eager,
+        );
+        assert!(
+            budget.eager_peak_memory_bytes >= bare.saturating_add(widen),
+            "eager_peak {} must carry the {widen}-byte widen over the {bare}-byte weights",
+            budget.eager_peak_memory_bytes
+        );
+    }
+
+    /// FLUX.1's predicate gains its flux2 sibling's second step.    /// FLUX.1's predicate gains its flux2 sibling's second step. A 23.8 GB
     /// BF16 dev streams its blocks on a 24 GB card, as it always has, and
     /// stops streaming them on a card with room for the whole thing — which
     /// it never did before, because the size test had no availability arm at
