@@ -463,7 +463,10 @@ pub struct ExecutionSemanticConfig {
     ///
     /// `None` for families whose convolutions never take cuDNN, so their
     /// fingerprints stay exactly as they were — the same reason `umt5_variant`
-    /// is skipped when absent.
+    /// is skipped when absent. The flux families left that set when they took
+    /// `ConvPolicy::FastStill`: their VAE now runs cuDNN wherever the feature
+    /// is compiled, and an im2col render and a cuDNN one are not the same
+    /// execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conv_backend: Option<SemanticConvBackend>,
     /// Whether this render will actually reuse first-block residuals.
@@ -739,22 +742,34 @@ impl ExecutionSemanticConfig {
                     SemanticAttentionChunk::Size(*size as u64)
                 }
             },
-            // Only video families can take cuDNN, so only they carry the
-            // field; an image family's fingerprint is byte-identical to what
-            // it was before this existed.
-            conv_backend: match (
-                mold_inference::conv_policy::policy_for_family(family),
-                paint_assets.is_some(),
-            ) {
-                (mold_inference::conv_policy::ConvPolicy::Image, false) => None,
-                (mold_inference::conv_policy::ConvPolicy::Video, _)
-                | (mold_inference::conv_policy::ConvPolicy::Paint, _)
-                | (mold_inference::conv_policy::ConvPolicy::Image, true) => Some(
-                    match mold_inference::conv_policy::resolve_for(if paint_assets.is_some() {
-                        mold_inference::conv_policy::ConvPolicy::Paint
-                    } else {
-                        mold_inference::conv_policy::ConvPolicy::Video
-                    }) {
+            // Only families that can take cuDNN carry the field; a plain
+            // image family's fingerprint is byte-identical to what it was
+            // before this existed. The flux families joined that set with
+            // `ConvPolicy::FastStill`, so their fingerprint now records the
+            // convolution backend — which is the point: an im2col render and
+            // a cuDNN one are not the same execution.
+            conv_backend: {
+                let policy = mold_inference::conv_policy::policy_for_family(family);
+                let resolved = match (policy, paint_assets.is_some()) {
+                    (mold_inference::conv_policy::ConvPolicy::Image, false) => None,
+                    (mold_inference::conv_policy::ConvPolicy::Image, true)
+                    | (mold_inference::conv_policy::ConvPolicy::Paint, _) => {
+                        Some(mold_inference::conv_policy::ConvPolicy::Paint)
+                    }
+                    (mold_inference::conv_policy::ConvPolicy::Video, _) => {
+                        Some(mold_inference::conv_policy::ConvPolicy::Video)
+                    }
+                    (mold_inference::conv_policy::ConvPolicy::FastStill, false) => {
+                        Some(mold_inference::conv_policy::ConvPolicy::FastStill)
+                    }
+                    // Paint assets on a flux request would be a planning bug,
+                    // but the paint scope wins wherever it is present.
+                    (mold_inference::conv_policy::ConvPolicy::FastStill, true) => {
+                        Some(mold_inference::conv_policy::ConvPolicy::Paint)
+                    }
+                };
+                resolved.map(
+                    |policy| match mold_inference::conv_policy::resolve_for(policy) {
                         mold_inference::conv_policy::ConvBackend::Im2Col => {
                             SemanticConvBackend::Im2Col
                         }
@@ -762,7 +777,7 @@ impl ExecutionSemanticConfig {
                             SemanticConvBackend::Cudnn
                         }
                     },
-                ),
+                )
             },
             // Only wan has a step cache, so only wan carries the field; every
             // other family's fingerprint is byte-identical to what it was
@@ -8521,6 +8536,87 @@ mod tests {
         );
     }
 
+    /// The flux families render under `FastStill`, so their semantic config
+    /// must record which convolution backend actually ran and which attention
+    /// kernel the family default resolved to. Without the first, one `mold.db`
+    /// spanning a cudnn and a non-cudnn binary reuses one's timings for the
+    /// other; without the second, the frozen plan would describe arithmetic
+    /// the renderer does not run.
+    #[test]
+    fn the_flux_families_carry_a_resolved_convolution_backend() {
+        let expected = if mold_inference::conv_policy::cudnn_compiled() {
+            SemanticConvBackend::Cudnn
+        } else {
+            SemanticConvBackend::Im2Col
+        };
+        for family in ["flux", "flux2"] {
+            let frozen = frozen_config_for_family(family);
+            let semantic = ExecutionSemanticConfig::from_frozen(&frozen).unwrap();
+            assert_eq!(
+                semantic.conv_backend,
+                Some(expected),
+                "{family} must record the convolution backend it ran on"
+            );
+        }
+        // A plain still family is untouched: no field at all.
+        for family in ["sd15", "sdxl", "qwen-image", "z-image", "minimax-h3"] {
+            let frozen = frozen_config_for_family(family);
+            let semantic = ExecutionSemanticConfig::from_frozen(&frozen).unwrap();
+            assert_eq!(
+                semantic.conv_backend, None,
+                "{family} must keep its pre-existing fingerprint"
+            );
+        }
+        // And the attention side agrees with the engine's own family policy.
+        for family in ["flux", "flux2"] {
+            let frozen = frozen_config_for_family(family);
+            assert_eq!(
+                frozen.attention_backend,
+                mold_inference::attention::AttentionBackend::resolve_for(
+                    mold_inference::attention::AttentionPolicy::FastStill
+                ),
+                "{family}'s frozen backend must be the family default"
+            );
+        }
+    }
+
+    /// Minimal frozen config for a family, with every optional input absent so
+    /// the assertions are about the family policy and nothing else.
+    fn frozen_config_for_family(family: &str) -> mold_inference::FrozenEngineConfig {
+        mold_inference::FrozenEngineConfig {
+            request_offload: None,
+            family: family.to_string(),
+            artifact_root: PathBuf::from("/models"),
+            is_schnell: None,
+            is_turbo: None,
+            scheduler: None,
+            t5_variant: None,
+            qwen3_variant: None,
+            qwen2_variant: None,
+            qwen2_text_encoder_mode: None,
+            ltx2_gemma_variant: None,
+            umt5_variant: None,
+            selected_t5_path: None,
+            selected_qwen3_paths: Vec::new(),
+            selected_qwen2_path: None,
+            selected_gemma_paths: Vec::new(),
+            selected_umt5_path: None,
+            identity_assets: None,
+            ip_adapter_assets: None,
+            paint_assets: None,
+            matting_asset: None,
+            delight_paths: None,
+            h3_factory_authority: None,
+            runtime_environment: mold_inference::runtime_env::FrozenRuntimeEnvironment::default(),
+            attention_backend: mold_inference::attention::AttentionBackend::resolve_for(
+                mold_inference::attention::policy_for_family(family),
+            ),
+            attention_chunk: mold_inference::attention::AttentionChunkPolicy::Auto,
+            vae_tiling: mold_inference::vae_tiling::TiledMode::Auto,
+            vae_dtype: mold_inference::device::VaeDtypePolicy::Auto,
+        }
+    }
+
     #[test]
     fn execution_equivalence_v4_schema_and_hash_are_golden() {
         let content = EquivalenceContentIdentity::Sha256("00".repeat(32));
@@ -8549,8 +8645,12 @@ mod tests {
                 h3_factory_authority_sha256: None,
                 attention_backend: SemanticAttentionBackend::Math,
                 attention_chunk: SemanticAttentionChunk::Auto,
-                // flux is an image family: it never takes cuDNN, so its
-                // fingerprint carries no convolution backend at all.
+                // Hand-built schema fixture: this pins the v4 encoding and
+                // the hash function, not any family's policy. `None` is the
+                // field-absent case (`skip_serializing_if`), which is what a
+                // plain image family still produces — flux itself now carries
+                // `Some(..)` through `ConvPolicy::FastStill`, pinned by
+                // `the_flux_families_carry_a_resolved_convolution_backend`.
                 conv_backend: None,
                 wan_step_cache: None,
                 vae_tiling: SemanticVaeTiling::Auto,

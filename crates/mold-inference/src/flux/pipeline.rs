@@ -2264,7 +2264,10 @@ impl FluxEngine {
                 early_vae_dtype,
             )?;
             // FLUX VAE expects pixels in [-1, 1]; encode applies shift/scale internally
-            let encoded = vae.encode(&source_tensor)?;
+            let encoded = {
+                let _conv = crate::conv_policy::ConvScope::for_family("flux");
+                vae.encode(&source_tensor)?
+            };
             self.base.progress.phase_done(
                 crate::ProgressPhase::Vae,
                 "Encoding source image (VAE)",
@@ -2433,6 +2436,12 @@ impl FluxEngine {
         let vae_decode_start = Instant::now();
         let img_for_vae = img.to_dtype(vae_dtype)?;
         let device_for_sync = device.clone();
+        // FLUX's only convolutions are in the VAE, and the family renders
+        // under `ConvPolicy::FastStill` (#1483's machinery, the flux entry).
+        // The scope restores the previous backend on drop, including on an
+        // error return, so a failed decode cannot leave the next still on a
+        // path that would move its bytes.
+        let _conv = crate::conv_policy::ConvScope::for_family("flux");
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
             |latents| vae.decode(latents).map_err(Into::into),
@@ -3147,7 +3156,10 @@ impl FluxEngine {
                 &loaded.device,
                 loaded.vae_dtype,
             )?;
-            let encoded = loaded.vae.encode(&source_tensor)?;
+            let encoded = {
+                let _conv = crate::conv_policy::ConvScope::for_family("flux");
+                loaded.vae.encode(&source_tensor)?
+            };
             progress.phase_done(
                 crate::ProgressPhase::Vae,
                 "Encoding source image (VAE)",
@@ -3350,6 +3362,7 @@ impl FluxEngine {
         let img_for_vae = img.to_dtype(loaded.vae_dtype)?;
         let vae = &loaded.vae;
         let device_for_sync = loaded.device.clone();
+        let _conv = crate::conv_policy::ConvScope::for_family("flux");
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
             |latents| vae.decode(latents).map_err(Into::into),

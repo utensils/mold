@@ -489,9 +489,15 @@ fn layer_norm(dim: usize, vb: &VarBuilder) -> Result<LayerNorm> {
 }
 
 pub(crate) fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
-    // Single dispatch point — FlashAttention / SDPA / math is selected at
-    // process start via `MOLD_ATTN` and the `flash-attn` cargo feature.
-    crate::attention::attention_default_scale(q, k, v)
+    // Single dispatch point — FlashAttention / math is selected at process
+    // start via `MOLD_ATTN` and the `flash-attn` cargo feature, defaulting to
+    // flash for FLUX.2 under `AttentionPolicy::FastStill`.
+    crate::attention::attention_default_scale_for(
+        crate::attention::AttentionPolicy::FastStill,
+        q,
+        k,
+        v,
+    )
 }
 
 pub(crate) fn rope(pos: &Tensor, dim: usize, theta: usize) -> Result<Tensor> {

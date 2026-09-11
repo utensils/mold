@@ -55,9 +55,15 @@ fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
 }
 
 fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
-    // Single dispatch point — FlashAttention / SDPA / math is selected at
-    // process start via `MOLD_ATTN` and the `flash-attn` cargo feature.
-    Ok(crate::attention::attention_default_scale(q, k, v)?)
+    // Single dispatch point — FlashAttention / math is selected at process
+    // start via `MOLD_ATTN` and the `flash-attn` cargo feature, defaulting to
+    // flash for FLUX under `AttentionPolicy::FastStill`.
+    Ok(crate::attention::attention_default_scale_for(
+        crate::attention::AttentionPolicy::FastStill,
+        q,
+        k,
+        v,
+    )?)
 }
 
 fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {

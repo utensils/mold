@@ -21,6 +21,9 @@
 //!   `wan22-t2v-a14b:q5` 832x480 on an RTX 4090; see `website/models/wan.md`).
 //! * [`ConvPolicy::Paint`] — the new material-paint stage uses its qualified
 //!   cuDNN recipe where available. Existing shape generation keeps Image.
+//! * [`ConvPolicy::FastStill`] — a still family that chose throughput over
+//!   archived-seed byte stability. FLUX.1 and FLUX.2 only, and exactly the
+//!   families [`crate::attention::AttentionPolicy::FastStill`] names.
 //!
 //! `MOLD_CONV={cudnn,im2col}` overrides both directions. It shapes output, so
 //! it is registered in [`crate::runtime_env::ENGINE_SHAPING_VARIABLES`].
@@ -51,6 +54,15 @@ pub enum ConvPolicy {
     Video,
     /// New material painting. cuDNN wherever the feature is compiled in.
     Paint,
+    /// Stills whose family chose throughput over archived-seed byte
+    /// stability: cuDNN wherever the feature is compiled in.
+    ///
+    /// FLUX.1 and FLUX.2 only, mirroring
+    /// [`crate::attention::AttentionPolicy::FastStill`]. Their convolutions
+    /// are all in the VAE — the transformer is linear throughout — which is
+    /// why the scope is applied around encode and decode rather than around
+    /// the whole render.
+    FastStill,
 }
 
 /// The resolved convolution backend for a render.
@@ -85,6 +97,7 @@ pub fn cudnn_compiled() -> bool {
 pub fn policy_for_family(family: &str) -> ConvPolicy {
     match family {
         "wan" | "ltx2" | "ltx-2" | "ltx-2.3" => ConvPolicy::Video,
+        "flux" | "flux2" => ConvPolicy::FastStill,
         _ => ConvPolicy::Image,
     }
 }
@@ -129,7 +142,7 @@ fn resolve_with_request(
 ) -> ConvBackend {
     let wanted = requested.unwrap_or(match policy {
         ConvPolicy::Image => ConvBackend::Im2Col,
-        ConvPolicy::Video | ConvPolicy::Paint => ConvBackend::Cudnn,
+        ConvPolicy::Video | ConvPolicy::Paint | ConvPolicy::FastStill => ConvBackend::Cudnn,
     });
     match wanted {
         ConvBackend::Cudnn if compiled => ConvBackend::Cudnn,
@@ -154,6 +167,7 @@ fn requested_backend_env() -> Option<ConvBackend> {
             compiled = cudnn_compiled(),
             image_default = ?ConvBackend::Im2Col,
             video_default = ?if cudnn_compiled() { ConvBackend::Cudnn } else { ConvBackend::Im2Col },
+            fast_still_default = ?if cudnn_compiled() { ConvBackend::Cudnn } else { ConvBackend::Im2Col },
             "convolution backend policy resolved"
         );
         requested
@@ -253,11 +267,14 @@ mod tests {
         out
     }
 
+    /// The two modules answer the same byte-stability question, so a family
+    /// that takes the fast default for attention and the byte-stable one for
+    /// convolutions (or the reverse) is a bug, not a design. The comparison
+    /// is deliberately "takes the fast default", not "is Video": `FastStill`
+    /// made the two lists longer than the video families and they still have
+    /// to be the same list.
     #[test]
-    fn video_families_match_the_attention_policy_list() {
-        // The two policies answer the same clips-versus-stills question, so a
-        // family that is Video for attention and Image for convolutions (or
-        // the reverse) is a bug, not a design.
+    fn fast_default_families_match_the_attention_policy_list() {
         for family in [
             "wan",
             "ltx2",
@@ -273,17 +290,48 @@ mod tests {
             "wuerstchen",
             "ltx-video",
             "minimax-h3",
+            "hunyuan3d",
+            "unknown",
         ] {
-            let conv = matches!(policy_for_family(family), ConvPolicy::Video);
+            let conv = matches!(
+                policy_for_family(family),
+                ConvPolicy::Video | ConvPolicy::FastStill
+            );
             let attn = matches!(
                 crate::attention::policy_for_family(family),
                 crate::attention::AttentionPolicy::Video
+                    | crate::attention::AttentionPolicy::FastStill
             );
             assert_eq!(
                 conv, attn,
                 "{family} disagrees between conv and attention policy"
             );
         }
+        // And the two fast arms are not interchangeable: flux is a still.
+        assert_eq!(policy_for_family("flux"), ConvPolicy::FastStill);
+        assert_eq!(policy_for_family("flux2"), ConvPolicy::FastStill);
+        assert_eq!(policy_for_family("wan"), ConvPolicy::Video);
+    }
+
+    /// The flux families take cuDNN exactly where the build has it — the same
+    /// shape as the video arm, for the reason in `ConvPolicy::FastStill`.
+    #[test]
+    fn fast_stills_take_cudnn_exactly_when_it_is_compiled() {
+        let expected = if cudnn_compiled() {
+            ConvBackend::Cudnn
+        } else {
+            ConvBackend::Im2Col
+        };
+        assert_eq!(resolve_for(ConvPolicy::FastStill), expected);
+        // `MOLD_CONV` still outranks the family default in both directions.
+        assert_eq!(
+            resolve_with_request(ConvPolicy::FastStill, Some(ConvBackend::Im2Col), true),
+            ConvBackend::Im2Col
+        );
+        assert_eq!(
+            resolve_with_request(ConvPolicy::FastStill, None, false),
+            ConvBackend::Im2Col
+        );
     }
 
     #[test]

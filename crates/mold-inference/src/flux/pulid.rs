@@ -186,7 +186,17 @@ impl PerceiverAttentionCA {
         // stability, which is the same total `dim_head^-0.5`
         // (`encoders_transformer.py:65-66`).
         let scale = (self.config.dim_head as f64).powf(-0.5) as f32;
-        let attn = crate::attention::attention(&q, &k, &v, scale)?;
+        // PuLID cross-attention is part of a FLUX render, so it takes the
+        // family's policy rather than the bare image default: same render,
+        // same trade, and head dim 128 is flash-eligible. The
+        // `MOLD_TEST_PULID_ASSETS` goldens are CPU/F32 and so unaffected.
+        let attn = crate::attention::attention_for(
+            crate::attention::AttentionPolicy::FastStill,
+            &q,
+            &k,
+            &v,
+            scale,
+        )?;
 
         let attn = attn
             .transpose(1, 2)?

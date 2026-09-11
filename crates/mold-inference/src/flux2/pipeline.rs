@@ -1473,6 +1473,7 @@ impl Flux2Engine {
                     &device,
                     vae_dtype,
                 )?;
+                let _conv = crate::conv_policy::ConvScope::for_family("flux2");
                 latents.push(vae.encode(&source)?.to_dtype(gpu_dtype)?);
             }
             let (tokens, ids) = sampling::pack_reference_group(&latents)?;
@@ -1515,7 +1516,10 @@ impl Flux2Engine {
                 &device,
                 vae_dtype,
             )?;
-            let encoded = vae.encode(&source_tensor)?.to_dtype(gpu_dtype)?;
+            let encoded = {
+                let _conv = crate::conv_policy::ConvScope::for_family("flux2");
+                vae.encode(&source_tensor)?.to_dtype(gpu_dtype)?
+            };
             self.base.progress.phase_done(
                 crate::ProgressPhase::Vae,
                 "Encoding source image (VAE)",
@@ -1692,6 +1696,9 @@ impl Flux2Engine {
         }
         let img_for_vae = img.to_dtype(vae_dtype)?;
         let device_for_sync = device.clone();
+        // See the FLUX.1 decode: the transformer is linear throughout, so the
+        // VAE is where `ConvPolicy::FastStill` has anything to decide.
+        let _conv = crate::conv_policy::ConvScope::for_family("flux2");
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
             |latents| vae.decode(latents).map_err(Into::into),
@@ -1936,7 +1943,10 @@ impl Flux2Engine {
                 &loaded.device,
                 loaded.vae_dtype,
             )?;
-            let encoded = loaded.vae.encode(&source_tensor)?;
+            let encoded = {
+                let _conv = crate::conv_policy::ConvScope::for_family("flux2");
+                loaded.vae.encode(&source_tensor)?
+            };
             progress.phase_done(
                 crate::ProgressPhase::Vae,
                 "Encoding source image (VAE)",
@@ -2064,6 +2074,7 @@ impl Flux2Engine {
         let img_for_vae = img.to_dtype(loaded.vae_dtype)?;
         let vae = &loaded.vae;
         let device_for_sync = loaded.device.clone();
+        let _conv = crate::conv_policy::ConvScope::for_family("flux2");
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
             |latents| vae.decode(latents).map_err(Into::into),
