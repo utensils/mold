@@ -615,7 +615,17 @@ impl MoldClient {
         // frame — the server encodes it, the client decodes it, and the same
         // bytes are already on disk in the host's gallery. Where the server
         // says it persists outputs, ask for the metadata and fetch the file.
-        let payload = completion_payload_for(req, self.gallery_persists_outputs().await);
+        // Ask the free half of the decision first. `completion_payload_for`
+        // needs the request to be a saved still BEFORE the host's answer can
+        // matter, so probing unconditionally spent an HTTP round trip on
+        // every video, mesh and `--no-save` render to reach a conclusion the
+        // request alone already forced.
+        let payload = if completion_payload_for(req, Some(true)) == CompletionPayload::MetadataOnly
+        {
+            completion_payload_for(req, self.gallery_persists_outputs().await)
+        } else {
+            CompletionPayload::Full
+        };
         let mut request = self
             .client
             .post(format!("{}/api/generate/stream", self.base_url))
