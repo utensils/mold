@@ -22,7 +22,11 @@ downloads the exact official release provenance from GitHub; caller-supplied
 hashes are deliberately unsupported. A passing report requires the exact
 verified sm86 Linux artifact with exact embedded PTX, matching source identity,
 decoded 256x256 image/video/chained-video outputs, selected GPU UUID evidence,
-observed CUDA compute work from the exact generation PID, math attention, and a
+observed CUDA compute work from the exact generation PID, FlashAttention-2 on
+the FLUX image smoke (the sm86 artifact compiles `flash-attn`, and FLUX's
+`AttentionPolicy::FastStill` selects `Flash` wherever the kernel is compiled --
+so this is the hardware evidence that the newly shipped kernel runs on
+Ampere), and a
 successful CUDA Driver API load of an exact embedded sm86 PTX module followed
 by normal full-Mold generation.
 
@@ -426,7 +430,7 @@ run_smoke() {
   if [[ "$media_decoded" == true ]] \
     && { [[ "$media_kind" != image ]] \
       || grep -Eq \
-        'mold_inference::attention: attention backend selected backend=Math([[:space:]]|$)' \
+        'mold_inference::attention: attention backend selected backend=Flash([[:space:]]|$)' \
         "$log"; } \
     && { [[ "$probe_embedded_ptx" != true ]] \
       || [[ "$embedded_ptx_module_loaded" == true ]]; }; then

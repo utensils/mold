@@ -267,11 +267,43 @@
             "/run/opengl-driver/lib:"
             + lib.makeLibraryPath (desktopLinuxRuntimeInputs ++ devshellLinuxCudaLibs);
 
+          # FlashAttention-2 compiles for every Ampere-or-later compute
+          # capability. `candle-flash-attn`'s kernels are guarded
+          # `__CUDA_ARCH__ >= 800` throughout (`kernels/kernel_traits.h`,
+          # `kernels/utils.h`, `kernels/flash_fwd_launch_template.h`), and
+          # `cudaforge` emits exactly one `-gencode` for the package's own
+          # `CUDA_COMPUTE_CAP`, so each artifact builds its own arch and
+          # nothing else. Verified with CUDA 12.8 by compiling one kernel per
+          # head dim (32 through 512, plus `flash_api.cu`, a causal and a
+          # split-KV variant — every distinct `kernel_traits` instantiation)
+          # at `sm_86`, `sm_100a` and `sm_120a`; `sm_89` already ships them.
+          flashAttnCompiles = computeCap: lib.toInt computeCap >= 80;
+
+          # The Linux CUDA device recipe.
+          #
           # SM89 names `h3-cuda`, never `cuda,h3` -- since #1164 the bare `h3`
           # feature implies neither CUDA nor the SM89 attention kernel, and
           # `h3-cuda` implies `cuda` so it replaces the device feature.
-          desktopFeatureFor =
-            computeCap: if isLinux then if computeCap == "89" then "h3-cuda" else "cuda" else "metal,h3";
+          # `h3-cuda` also implies `flash-attn`, so sm89 must not name it
+          # twice; H3 itself stays sm89-only because its fused kernel is
+          # qualified at that capability alone
+          # (`H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY`).
+          #
+          # Every OTHER capability names `flash-attn` directly. FLUX.1 and
+          # FLUX.2 take `AttentionPolicy::FastStill`, whose `Flash` default is
+          # gated on `flash_compiled()` alone -- but whose math path folds the
+          # softmax scale into K either way. A CUDA artifact without the kernel
+          # therefore takes the seed break without the speedup, which is the
+          # one combination no shipped build may have.
+          cudaDeviceFeatureFor =
+            computeCap:
+            if computeCap == "89" then
+              "h3-cuda"
+            else if flashAttnCompiles computeCap then
+              "cuda,flash-attn"
+            else
+              "cuda";
+          desktopFeatureFor = computeCap: if isLinux then cudaDeviceFeatureFor computeCap else "metal,h3";
           # The desktop app's complete feature recipe. `pulid` rides every
           # desktop build for the same reason it rides every `mold` release
           # recipe (#1223): the embedded This-device server advertises
@@ -319,9 +351,9 @@
               # `cudnn` is Linux-CUDA only and deliberately not implied by
               # `cuda`: it links libcudnn and needs its headers, which a plain
               # `cargo check --features cuda` must not require (#1483).
-              "${
-                if computeCap == "89" then "h3-cuda" else "cuda"
-              },cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
+              # The device half — and with it FlashAttention — is
+              # `cudaDeviceFeatureFor`, shared with the desktop recipe.
+              "${cudaDeviceFeatureFor computeCap},cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
             else if gpuFeature != "" then
               "${gpuFeature},h3,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
             else
@@ -731,6 +763,10 @@
               '';
 
               passthru.moldCudaComputeCapability = computeCap;
+              # The exact feature recipe this artifact compiled, so which
+              # attention and convolution backends it can reach is a question
+              # answerable without unpacking the binary.
+              passthru.moldBuildFeatures = lib.concatStringsSep "," (desktopFeaturesFor computeCap);
 
               meta = with lib; {
                 description = "Mold — native desktop app for local AI image/video generation";
@@ -831,6 +867,9 @@
               }
               // {
                 passthru.moldCudaComputeCapability = computeCap;
+                # As on the desktop package: the compiled feature recipe is
+                # readable without unpacking the artifact.
+                passthru.moldBuildFeatures = releaseFeaturesFor computeCap;
               }
             );
 
@@ -1075,6 +1114,48 @@
               assert mismatch;
               assert unknownPackage;
               pkgs.runCommand "mold-cuda-package-consistency-check" { } ''
+                touch "$out"
+              '';
+
+            # Every shipped Linux CUDA artifact compiles FlashAttention-2.
+            #
+            # FLUX.1 and FLUX.2 are `AttentionPolicy::FastStill`: their math
+            # path folds the softmax scale into K regardless of the feature, so
+            # a CUDA build WITHOUT the kernel takes the archived-seed break and
+            # none of the speedup. That combination must not exist in a
+            # published package, and the sm89 `h3-cuda` edge is not special
+            # here — it is simply the one capability that also carries H3's own
+            # fused kernel, which is qualified at sm89 alone.
+            #
+            # Asserted against the feature builders themselves rather than the
+            # flake's text, so a new capability cannot be added without an
+            # answer to this question.
+            cuda-flash-attention-coverage =
+              let
+                shippedCaps = [
+                  "86"
+                  "89"
+                  "100"
+                  "120"
+                ];
+                compilesFlash =
+                  features:
+                  let
+                    named = lib.splitString "," features;
+                  in
+                  builtins.elem "flash-attn" named || builtins.elem "h3-cuda" named;
+                # H3's fused kernel stays sm89-only; nothing else may name it.
+                namesH3 = features: builtins.elem "h3-cuda" (lib.splitString "," features);
+                releaseCovered = builtins.all (cap: compilesFlash (releaseFeaturesFor cap)) shippedCaps;
+                desktopCovered = builtins.all (
+                  cap: compilesFlash (lib.concatStringsSep "," (desktopFeaturesFor cap))
+                ) shippedCaps;
+                h3OnlyOnAda = builtins.all (cap: namesH3 (releaseFeaturesFor cap) == (cap == "89")) shippedCaps;
+              in
+              assert isLinux -> releaseCovered;
+              assert isLinux -> desktopCovered;
+              assert isLinux -> h3OnlyOnAda;
+              pkgs.runCommand "mold-cuda-flash-attention-coverage-check" { } ''
                 touch "$out"
               '';
 

@@ -115,7 +115,7 @@ for label in \
   observation_path="$evidence_dir/${label}-compute-observations.csv"
   printf 'decoded fixture %s\n' "$label" >"$output_path"
   printf '%s\n' \
-    '2026-07-26T00:00:00Z  INFO mold_inference::attention: attention backend selected backend=Math' \
+    '2026-07-26T00:00:00Z  INFO mold_inference::attention: attention backend selected backend=Flash' \
     >"$log_path"
   printf '%s\n' \
     'polled_at_utc,generation_root_pid,observed_pid,gpu_uuid' \

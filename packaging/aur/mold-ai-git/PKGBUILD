@@ -81,7 +81,12 @@ build() {
   # SM89 names `h3-cuda`, not `cuda,h3`: since #1164 the bare `h3` feature
   # implies neither CUDA nor the SM89 attention kernel. `h3-cuda` implies
   # `cuda`, so it replaces the device feature instead of appending to it.
-  local gpu_feature="cuda"
+  # Every other capability names `flash-attn` beside `cuda`: FLUX renders
+  # through FlashAttention-2 wherever the kernel is compiled, and its math
+  # path changed bytes in 0.29 regardless, so a CUDA build without the kernel
+  # takes the seed change and none of the speedup. `h3-cuda` already implies
+  # `flash-attn`.
+  local gpu_feature="cuda,flash-attn"
   [[ "${CUDA_COMPUTE_CAP}" == "89" ]] && gpu_feature="h3-cuda"
   cargo build --release --frozen --offline \
     -p mold-ai \

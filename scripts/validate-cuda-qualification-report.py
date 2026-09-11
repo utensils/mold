@@ -451,12 +451,19 @@ def validate_report(report_path: Path, schema_path: Path) -> None:
             result["selected_gpu_uuid"],
             name,
         )
+        # The sm86 artifact compiles `flash-attn`, and the image smokes run a
+        # non-GGUF FLUX model, whose `AttentionPolicy::FastStill` selects
+        # `Flash` wherever the kernel is compiled. Requiring that exact line is
+        # the hardware evidence that the kernel this release newly ships for
+        # Ampere actually dispatches on an RTX 3090.
         if media_kind == "image" and re.search(
             r"mold_inference::attention: attention backend selected "
-            r"backend=Math(?:\s|$)",
+            r"backend=Flash(?:\s|$)",
             log.read_text(encoding="utf-8", errors="replace"),
         ) is None:
-            raise ValidationFailure(f"{name}: exact math attention selection is absent")
+            raise ValidationFailure(
+                f"{name}: exact FlashAttention selection is absent"
+            )
         if media_kind == "video" and result["frame_count"] < 1:
             raise ValidationFailure(f"{name}: decoded video has no frames")
 

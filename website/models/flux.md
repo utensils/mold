@@ -95,7 +95,15 @@ mold run flux-dev:q4 "a portrait" --lora style.safetensors --lora-scale 0.8
 ## Speed
 
 On CUDA, FLUX renders through FlashAttention-2 and cuDNN by default wherever
-the artifact compiled them — every shipped Linux CUDA build does. The GGUF
+the artifact compiled them. Every shipped Linux CUDA build compiles both:
+`mold` (sm89), `mold-sm86`, `mold-sm100` and `mold-sm120`, and the matching
+desktop packages. FlashAttention-2's kernels build for every Ampere-or-later
+compute capability, so no shipped package is left on the math path. A build
+you make yourself with `--features cuda` and no `flash-attn` still renders
+correctly, but it takes the math path — and that path changed bytes in 0.29
+too, so it gets the new seed behaviour without the speedup; add `flash-attn`
+to the feature list. Metal builds have no flash kernel at all and are in the
+same position. The GGUF
 tiers also run their activations in BF16 rather than F32, which halves the
 bandwidth every matmul moves and lets the tensor cores engage; candle's
 quantized kernels take BF16 and return it, so the weights stay quantized in

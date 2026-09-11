@@ -87,19 +87,26 @@ release_feature_sources="$({
   sed -n '/^[[:space:]]*releaseFeatures =/,/^[[:space:]]*completionFeatures =/p' flake.nix
 } || true)"
 
+# The H3-scoped qualification features are developer-only and must never reach
+# a published recipe. `flash-attn` is deliberately NOT in this list: the global
+# FlashAttention dispatch ships in every Linux CUDA release package the FA2
+# kernels support (sm86, sm89 through `h3-cuda`, sm100 and sm120), because
+# FLUX's `AttentionPolicy::FastStill` math path folds the softmax scale into K
+# whether or not the kernel is compiled — so a CUDA artifact without it takes
+# the archived-seed break and none of the speedup. That positive matrix is
+# asserted by the flake's own `cuda-flash-attention-coverage` check and pinned
+# in `scripts/tests/cuda-distribution-contract.sh`.
 contains_forbidden_release_feature() {
   LC_ALL=C tr -cs '[:alnum:]_-' '\n' \
     | grep -Fx \
       -e h3-attention-rc \
       -e h3-flash-attn-rc \
-      -e flash-attn \
       >/dev/null
 }
 
 for fixture in \
   'cargo build --release --features=h3-attention-rc' \
   'cargo build --release --features "cuda,h3-flash-attn-rc"' \
-  'cargo build --release --features "cuda,flash-attn"' \
   'releaseFeatures = "cuda,h3-attention-rc"' \
   'releaseFeatures = [ "cuda" "h3-flash-attn-rc" ]'; do
   contains_forbidden_release_feature <<< "$fixture" \
@@ -107,6 +114,7 @@ for fixture in \
 done
 for fixture in \
   'cargo build --release --features=cuda,preview' \
+  'cargo build --release --features "cuda,flash-attn"' \
   'releaseFeatures = "cuda,preview,discord"'; do
   if contains_forbidden_release_feature <<< "$fixture"; then
     fail "release feature scanner rejected allowed fixture: $fixture"
@@ -114,8 +122,16 @@ for fixture in \
 done
 
 if contains_forbidden_release_feature <<< "$release_feature_sources"; then
-  fail "a published release feature set compiles an H3/FlashAttention candidate"
+  fail "a published release feature set compiles an H3 qualification candidate"
 fi
+
+# The other half of the same rule: a Linux CUDA recipe that is not the sm89
+# `h3-cuda` edge must name `flash-attn` explicitly, and no recipe outside sm89
+# may name `h3-cuda`.
+grep -Fq 'else if flashAttnCompiles computeCap then' flake.nix \
+  || fail "flake.nix no longer decides FlashAttention per compute capability"
+grep -Fq '"cuda,flash-attn"' flake.nix \
+  || fail "no Linux CUDA release recipe names flash-attn outside the sm89 h3-cuda edge"
 
 # Since #1164 the bare `h3` feature implies neither CUDA nor the SM89
 # attention kernel, so a recipe still written as `--features cuda,h3` builds a
@@ -164,11 +180,24 @@ for fixture in 'h3-cuda,preview' 'dev-bins,h3-private-uat' 'cuda,h3-attention-rc
   fi
 done
 
-# Nix composes its feature strings rather than passing `--features`, so its two
-# helpers are checked on the literal they yield for SM89.
+# Nix composes its feature strings rather than passing `--features`, so the ONE
+# helper both the release and desktop recipes read is checked on the literal it
+# yields for SM89. Every other Linux CUDA capability falls through it to
+# `cuda,flash-attn`, which is the FlashAttention half asserted above.
 require_text flake.nix \
-  'if computeCap == "89" then "h3-cuda" else "cuda"' \
+  'cudaDeviceFeatureFor =' \
+  "flake.nix no longer resolves the Linux CUDA device features in one place"
+require_text flake.nix \
+  'if computeCap == "89" then' \
   "a flake feature helper no longer selects the h3-cuda edge for SM89"
+grep -A1 -F 'if computeCap == "89" then' flake.nix | grep -Fq '"h3-cuda"' \
+  || fail "the SM89 branch of the Linux CUDA device recipe no longer yields h3-cuda"
+require_text flake.nix \
+  'computeCap: if isLinux then cudaDeviceFeatureFor computeCap else "metal,h3";' \
+  "the desktop feature helper no longer shares the release device recipe"
+require_text flake.nix \
+  '"${cudaDeviceFeatureFor computeCap},cudnn,preview' \
+  "the release feature recipe no longer shares the desktop device recipe"
 require_text flake.nix \
   '"metal,h3"' \
   "the Darwin feature helper no longer enables the public H3 Metal path"
@@ -206,7 +235,7 @@ private_qwen_support_marker='mold.minimax-h3.private-uat-qwen-support-loader.v1'
 h3_compiled_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted'
 public_qwen_support_marker='mold.minimax-h3.qwen-support-loader.v1'
 h3_flash_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=compiled'
-forbidden_global_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled'
+global_flash_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled'
 
 scratch_dir="$(mktemp -d)"
 trap 'rm -rf "$scratch_dir"' EXIT
@@ -238,11 +267,25 @@ printf '%s\n%s\n' "$omitted_marker" "$private_qwen_support_marker" > "$scratch_d
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-qwen-support" >/dev/null 2>&1; then
   fail "release exclusion verifier accepted the private H3 Qwen support loader"
 fi
-printf '%s\n' "$forbidden_global_marker" > "$scratch_dir/global-only"
-if scripts/verify-h3-release-exclusion.sh "$scratch_dir/global-only" >/dev/null 2>&1; then
-  fail "release verifier accepted standalone global FlashAttention provenance"
+# The sm86/sm100/sm120 shipping shape: the global FlashAttention dispatch with
+# no H3-scoped kernel. Accepted, because every Linux CUDA release package the
+# FA2 kernels support compiles `flash-attn` — FLUX's `FastStill` policy changes
+# rendered bytes on a CUDA build whether or not the kernel is there, and only
+# the kernel pays that back in speed.
+printf '%s\n' "$global_flash_marker" > "$scratch_dir/global-only"
+scripts/verify-h3-release-exclusion.sh "$scratch_dir/global-only" >/dev/null
+# It carries no H3 kernel claim and no public H3 Qwen support loader: H3's own
+# fused kernel stays qualified at sm89 alone.
+printf '%s\n%s\n' "$global_flash_marker" "$claim_marker" > "$scratch_dir/global-with-claim"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/global-with-claim" >/dev/null 2>&1; then
+  fail "release verifier accepted an H3 kernel claim on a global-flash-only build"
 fi
-printf '%s\n%s\n' "$omitted_marker" "$forbidden_global_marker" > "$scratch_dir/global-beside-omitted"
+printf '%s\n%s\n' "$global_flash_marker" "$public_qwen_support_marker" \
+  > "$scratch_dir/global-with-support"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/global-with-support" >/dev/null 2>&1; then
+  fail "release verifier accepted H3 Qwen support provenance on a global-flash-only build"
+fi
+printf '%s\n%s\n' "$omitted_marker" "$global_flash_marker" > "$scratch_dir/global-beside-omitted"
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/global-beside-omitted" >/dev/null 2>&1; then
   fail "release verifier accepted global FlashAttention provenance beside an ordinary marker"
 fi

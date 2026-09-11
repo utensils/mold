@@ -329,9 +329,14 @@ require_text "$release_workflow" \
 require_text "$release_workflow" \
   "--features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid  # macOS" \
   "the documented macOS source install omits Hunyuan3D texture baking"
-cuda_release_features="cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
+# `flash-attn` rides all three alongside `cuda`, and sm89 gets the same kernel
+# through `h3-cuda`. FLUX's `AttentionPolicy::FastStill` math path folds the
+# softmax scale into K whether or not the kernel is compiled, so a published
+# CUDA artifact without it would carry the archived-seed break and none of the
+# speedup — the one combination no shipped build may have.
+cuda_release_features="cuda,flash-attn,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
 [[ "$(grep -Fc -- "cargo build --release -p mold-ai --features $cuda_release_features" "$release_workflow")" -eq 3 ]] \
-  || fail "the sm86/sm100/sm120 CUDA release recipes do not all ship the Hunyuan3D mesh stack"
+  || fail "the sm86/sm100/sm120 CUDA release recipes do not all ship FlashAttention and the Hunyuan3D mesh stack"
 require_text "$release_workflow" \
   "cargo build --release -p mold-ai --features h3-cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight" \
   "the sm89 CUDA release recipe omits the Hunyuan3D mesh stack"

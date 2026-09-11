@@ -433,6 +433,33 @@ require_text "flake.nix" 'mold-desktop-sm86 = mkMoldDesktop "86";'
 require_text "flake.nix" 'moldCudaComputeCapability = computeCap;'
 require_text "flake.nix" 'cuda-package-consistency ='
 require_text "flake.nix" 'moduleWarnings "ada" (mkMold "86")'
+# Every shipped Linux CUDA package compiles FlashAttention-2: FLUX's
+# `FastStill` math path changes rendered bytes on a CUDA build whether or not
+# the kernel is there, and only the kernel repays that in speed. One builder
+# answers for the release and desktop recipes alike, and one evaluated flake
+# check asserts the matrix (`cuda-flash-attention-coverage`) so a new compute
+# capability cannot be added without answering the question.
+require_text "flake.nix" 'cudaDeviceFeatureFor ='
+require_text "flake.nix" 'flashAttnCompiles = computeCap: lib.toInt computeCap >= 80;'
+require_text "flake.nix" '"cuda,flash-attn"'
+require_text "flake.nix" '"${cudaDeviceFeatureFor computeCap},cudnn,preview'
+require_text "flake.nix" 'computeCap: if isLinux then cudaDeviceFeatureFor computeCap else "metal,h3";'
+require_text "flake.nix" 'cuda-flash-attention-coverage ='
+require_text "crates/mold-server/Cargo.toml" \
+  'flash-attn = ["cuda", "mold-inference/flash-attn"]'
+require_text "desktop/src-tauri/Cargo.toml" \
+  'flash-attn = ["cuda", "mold-server/flash-attn"]'
+# `h3-cuda` is the sm89 edge alone; H3's fused kernel is qualified at that
+# compute capability and nowhere else.
+require_text "crates/mold-candle/src/minimax_h3/attention.rs" \
+  'H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY: (u16, u16) = (8, 9);'
+# The three publication surfaces that compose their own device feature outside
+# the flake take the same rule.
+require_text "Dockerfile" 'RUN gpu_feature="cuda,flash-attn"; \'
+for aur_source in packaging/aur/mold-ai/PKGBUILD packaging/aur/mold-ai-git/PKGBUILD; do
+  require_text "$aur_source" 'local gpu_feature="cuda,flash-attn"'
+  require_text "$aur_source" '[[ "${CUDA_COMPUTE_CAP}" == "89" ]] && gpu_feature="h3-cuda"'
+done
 require_text "nix/module.nix" 'packageCudaComputeCapability'
 require_text "nix/module.nix" 'ada = "89";'
 if grep -Fq 'lib.optionals (cfg.cudaArch ==' "$repo_root/nix/module.nix"; then

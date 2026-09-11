@@ -89,12 +89,20 @@ const PLAN_SCHEMA_VERSION: u32 = 2;
 /// Exactly one marker is compiled from the same Cargo feature gates that make
 /// the H3 DiT and global FlashAttention code reachable. Published binaries
 /// deliberately retain this value; absence of evidence fails closed. The
-/// verifier accepts `omitted:omitted` (ordinary builds),
-/// `compiled:omitted` (a public H3 build without the global dispatch), and —
-/// since the sm89 `h3-cuda` edge implies `flash-attn` (#735) —
-/// `compiled:compiled`, always beside the H3 kernel claim. Standalone
-/// `omitted:compiled` remains forbidden in published artifacts, and the
-/// default attention backend stays `Math` in every build (#736).
+/// verifier accepts all four: `omitted:omitted` (a build with neither, such
+/// as CPU, Windows or a bare `--features cuda`), `compiled:omitted` (a public
+/// H3 build without the global dispatch), `compiled:compiled` — the sm89
+/// `h3-cuda` edge, which implies `flash-attn` (#735) — always beside the H3
+/// kernel claim, and `omitted:compiled`, which is the shipping shape of every
+/// other Linux CUDA compute capability: sm86, sm100 and sm120 name
+/// `flash-attn` directly, because FLUX's `AttentionPolicy::FastStill` math
+/// path folds the softmax scale into K whether or not the kernel is compiled,
+/// so a published CUDA artifact without it would take the archived-seed break
+/// and none of the speedup. What stays forbidden in a published artifact is
+/// the H3-SCOPED developer kernel — the claim marker and the public Qwen
+/// support loader on a build whose provenance says `h3-rc=omitted` — never
+/// the global dispatch on its own. The default attention backend stays `Math`
+/// for `AttentionPolicy::Image` in every build (#736).
 pub const fn h3_attention_release_provenance_marker() -> &'static str {
     H3_ATTENTION_RELEASE_PROVENANCE_MARKER
 }

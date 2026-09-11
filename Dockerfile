@@ -150,7 +150,13 @@ ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}
 # `cudnn` is orthogonal to the device feature and appends to it: it implies
 # `cuda` but is never implied by it, because cudarc links libcudnn and needs
 # its headers. Video families take the cuDNN convolution path (#1483).
-RUN gpu_feature="cuda"; \
+# Every other capability names `flash-attn` alongside `cuda`. FlashAttention-2
+# builds for every Ampere-or-later compute capability, and FLUX's `FastStill`
+# policy changes rendered bytes on a CUDA build whether or not the kernel is
+# compiled — so an image without it would carry the seed change and none of
+# the speedup. `h3-cuda` already implies `flash-attn`, so sm89 must not repeat
+# it; H3's own fused kernel stays qualified at sm89 alone.
+RUN gpu_feature="cuda,flash-attn"; \
     if [ "${CUDA_COMPUTE_CAP}" = "89" ]; then gpu_feature="h3-cuda"; fi; \
     cargo build --release -p mold-ai --features "${gpu_feature},cudnn,expand,discord,tui,webp,mp4,metrics"
 RUN scripts/seal-cuda-ptx-manifest.py /build/target/release/mold \

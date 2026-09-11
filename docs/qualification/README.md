@@ -100,7 +100,10 @@ generation with sm86. Every workload pins an RTX 3090 UUID with
 together in NVIDIA's active compute process list, requires Mold's CUDA-device
 log, and validates the output media rather than trusting process exit status.
 Image runs use a non-GGUF FLUX model with block offloading so they must select
-and log Mold's math attention backend.
+and log Mold's own attention backend. Since the sm86 artifact compiles
+`flash-attn`, that selection is `Flash`: FLUX's `AttentionPolicy::FastStill`
+takes the kernel wherever it is compiled, so the logged line is the hardware
+evidence that the newly shipped Ampere kernel dispatches on an RTX 3090.
 
 PTX compatibility is one-way: code targeting a compute capability may JIT on
 devices with an equal or greater compute capability, never a lower one. NVIDIA

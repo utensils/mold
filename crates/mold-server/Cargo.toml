@@ -28,6 +28,13 @@ mesh-delight = ["mesh-matting", "mold-core/mesh-delight", "mold-inference/mesh-d
 default = []
 cuda = ["mold-inference/cuda", "nvml", "dep:cudarc"]
 cudnn = ["cuda", "mold-inference/cudnn"]
+# FlashAttention v2, forwarded for the embedded server. `mold-ai` has had this
+# edge since #735; the desktop app embeds the same server on the same Linux
+# CUDA recipe, so it needs the same one. Implies `cuda`. `h3-cuda` already
+# pulls it in on sm89 — every OTHER shipped compute capability names it
+# directly, because FLUX's `FastStill` math path changes bytes whether or not
+# the kernel is compiled and only the kernel pays that back in speed.
+flash-attn = ["cuda", "mold-inference/flash-attn"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
 mp4 = ["mold-inference/mp4"]
