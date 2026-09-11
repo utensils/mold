@@ -38,8 +38,6 @@ interface DialogRequest {
   body: string;
   confirmLabel: string;
   danger: boolean;
-  /** When set, the user must type this phrase to enable the confirm button. */
-  typedPhrase?: string;
   /** kind === "text": input label + initial value. */
   inputLabel?: string;
   inputInitial?: string;
@@ -165,7 +163,6 @@ export interface ConfirmOptions {
   body: string;
   confirmLabel?: string;
   danger?: boolean;
-  typedPhrase?: string;
 }
 
 function openDialog(
@@ -187,7 +184,6 @@ export function requestConfirm(options: ConfirmOptions): Promise<boolean> {
     confirmLabel: options.confirmLabel ?? "Confirm",
     danger: options.danger ?? false,
   };
-  if (options.typedPhrase) request.typedPhrase = options.typedPhrase;
   return openDialog(request) as Promise<boolean>;
 }
 

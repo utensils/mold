@@ -41,6 +41,36 @@ vi.mock("vue-router", () => ({
   useRoute: () => ({ query: {} }),
 }));
 
+describe("MachinesPage geometry and the machine sentence", () => {
+  it("shares the 1120px workspace column with Queue, Styles and Settings", () => {
+    poll.status.value = makeStatus();
+    const w = mount(MachinesPage);
+    const page = w.get('[data-test="machines-title"]').element.parentElement!
+      .parentElement!;
+    expect(page.className).toContain("workspace-page");
+    expect(page.className).not.toContain("max-w-[1800px]");
+  });
+
+  /* One sentence about a machine, the shared one: a four-card box reads the
+   * same here as in the desktop app's list and its machine pane. */
+  it("says every card in the box, what runs them, and where it is", () => {
+    poll.status.value = makeStatus({
+      hostname: "plato",
+      gpus: [0, 1, 2, 3].map((ordinal) => ({
+        ordinal,
+        name: "NVIDIA L40S",
+        vram_total_bytes: 48_000_000_000,
+        vram_used_bytes: 1,
+        state: "idle" as const,
+      })),
+    });
+    const w = mount(MachinesPage);
+    expect(w.get('[data-test="host-gpu"]').text()).toBe(
+      "4× NVIDIA L40S · CUDA · on your network at plato",
+    );
+  });
+});
+
 function makeStatus(over: Partial<HostStatus> = {}): HostStatus {
   return {
     version: "0.16.0",

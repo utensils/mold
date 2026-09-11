@@ -5,22 +5,32 @@
  * the other said "this device".
  */
 import { describe, expect, it } from "vitest";
-import { machineHardware, machineLocation, machineSentence } from "./machineSentence";
-import type { GpuSnapshot } from "./api/types";
+import {
+  machineHardware,
+  machineLocation,
+  machineSentence,
+} from "./machineSentence";
+import type { GpuSnapshot } from "./gpuFleetLabel";
 
-const gpu = (name: string, backend: string | null = "cuda"): GpuSnapshot =>
-  ({ ordinal: 0, name, backend, vram_used: 0, vram_total: 0 }) as GpuSnapshot;
+const gpu = (name: string, backend: string | null = "cuda"): GpuSnapshot => ({
+  name,
+  backend,
+});
 
 describe("machineHardware", () => {
   it("names every card in the box, not just the first", () => {
-    expect(machineHardware([gpu("L40S"), gpu("L40S"), gpu("L40S"), gpu("L40S")])).toBe(
-      "4× L40S · CUDA",
+    expect(
+      machineHardware([gpu("L40S"), gpu("L40S"), gpu("L40S"), gpu("L40S")]),
+    ).toBe("4× L40S · CUDA");
+    expect(machineHardware([gpu("RTX 4090"), gpu("B200")])).toBe(
+      "RTX 4090 + B200 · CUDA",
     );
-    expect(machineHardware([gpu("RTX 4090"), gpu("B200")])).toBe("RTX 4090 + B200 · CUDA");
   });
 
   it("infers the backend from the card when the host does not report one", () => {
-    expect(machineHardware([gpu("Apple M3 Max", null)])).toBe("Apple M3 Max · METAL");
+    expect(machineHardware([gpu("Apple M3 Max", null)])).toBe(
+      "Apple M3 Max · METAL",
+    );
   });
 
   it("says nothing at all before telemetry has arrived", () => {
@@ -34,9 +44,12 @@ describe("machineLocation", () => {
   });
 
   it("names a rented GPU by what it costs to keep", () => {
-    expect(machineLocation({ kind: "remote", baseUrl: "https://abc-8188.proxy.runpod.net" })).toBe(
-      "rented cloud GPU",
-    );
+    expect(
+      machineLocation({
+        kind: "remote",
+        baseUrl: "https://abc-8188.proxy.runpod.net",
+      }),
+    ).toBe("rented cloud GPU");
   });
 
   it("carries the address only where the caller asks for it", () => {

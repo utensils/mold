@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ResourceSnapshot, ServerStatus } from "../../types";
-import { deriveHostCardGpu, deriveTelemetry } from "./machineTelemetry";
+import {
+  deriveHostCardGpu,
+  deriveTelemetry,
+  hostGpuSnapshots,
+} from "./machineTelemetry";
+import { machineSentence } from "@studio/lib/machineSentence";
 
 function statusWithGpus(gpus: NonNullable<ServerStatus["gpus"]>): ServerStatus {
   return {
@@ -129,5 +134,65 @@ describe("deriveHostCardGpu", () => {
       used: 32_768_000_000,
       total: 196_608_000_000,
     });
+  });
+});
+
+/* The machine card says the shared sentence, which needs the cards named one
+ * by one rather than aggregated. This is the adapter from web's `/api/status`
+ * wire to `@studio/lib/machineSentence`'s structural snapshot — nothing else
+ * about the sentence is web's. */
+describe("hostGpuSnapshots", () => {
+  it("names every worker the host reports", () => {
+    const snapshots = hostGpuSnapshots(
+      statusWithGpus([
+        {
+          ordinal: 0,
+          name: "NVIDIA L40S",
+          vram_total_bytes: 1,
+          vram_used_bytes: 0,
+          state: "idle",
+        },
+        {
+          ordinal: 1,
+          name: "NVIDIA L40S",
+          vram_total_bytes: 1,
+          vram_used_bytes: 0,
+          state: "idle",
+        },
+      ]),
+    );
+    expect(snapshots.map((g) => g.name)).toEqual([
+      "NVIDIA L40S",
+      "NVIDIA L40S",
+    ]);
+    expect(
+      machineSentence({ kind: "remote", baseUrl: "plato:7680" }, snapshots, {
+        address: true,
+      }),
+    ).toBe("2× NVIDIA L40S · CUDA · on your network at plato:7680");
+  });
+
+  it("falls back to the single-GPU summary on a host with no worker rows", () => {
+    const status: ServerStatus = {
+      version: "test",
+      models_loaded: [],
+      busy: false,
+      uptime_secs: 1,
+      gpu_info: { name: "Apple M3 Max", vram_total_mb: 1, vram_used_mb: 0 },
+    };
+    expect(hostGpuSnapshots(status).map((g) => g.name)).toEqual([
+      "Apple M3 Max",
+    ]);
+    // No backend on this wire — the sentence infers it from the card's name.
+    expect(
+      machineSentence(
+        { kind: "remote", baseUrl: "" },
+        hostGpuSnapshots(status),
+      ),
+    ).toBe("Apple M3 Max · METAL · on your network");
+  });
+
+  it("says nothing before the first poll answers", () => {
+    expect(hostGpuSnapshots(null)).toEqual([]);
   });
 });

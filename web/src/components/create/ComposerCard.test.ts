@@ -9,7 +9,6 @@ function factory(
   return mount(ComposerCard, {
     props: {
       prompt: "a lighthouse",
-      stylePreset: null,
       aspectLabel: "1:1",
       width: 1024,
       height: 1024,
@@ -117,7 +116,7 @@ describe("ComposerCard", () => {
     expect(wrapper.emitted("submit")).toBeUndefined();
   });
 
-  it("emits the prompt on input without touching style", async () => {
+  it("emits the prompt on input, tagged with how it arrived", async () => {
     const wrapper = factory();
     const ta = wrapper.get("[data-test='composer-prompt']")
       .element as HTMLTextAreaElement;
@@ -129,39 +128,36 @@ describe("ComposerCard", () => {
     ]);
   });
 
-  it("selects a style preset, and deselects it when tapped while active", async () => {
+  /*
+   * Style is the style — the checkpoint the picture is made with. The prompt
+   * presets that also called themselves Style put a second "Photoreal" on the
+   * same screen meaning something else entirely, so the strip is retired here
+   * as it already is on the app and the phone.
+   */
+  it("offers no prompt-preset strip beside the style picker", () => {
     const wrapper = factory();
-    await wrapper.get("[data-test='style-toggle']").trigger("click");
-    await wrapper.get("[data-test='style-chip-cinematic']").trigger("click");
-    expect(wrapper.emitted("update:stylePreset")?.[0]).toEqual(["cinematic"]);
-
-    await wrapper.setProps({ stylePreset: "cinematic" });
-    await wrapper.get("[data-test='style-chip-cinematic']").trigger("click");
-    expect(wrapper.emitted("update:stylePreset")?.[1]).toEqual([null]);
-  });
-
-  it("shows the active preset name in the collapsed style chip", async () => {
-    const wrapper = factory({ stylePreset: "anime" });
-    expect(wrapper.get("[data-test='style-active']").text()).toBe("Anime");
+    expect(wrapper.find("[data-test='style-toggle']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='style-chips']").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Cinematic");
   });
 
   it("renders the summary line, adding ×N only for a batch", () => {
     expect(factory().get("[data-test='composer-summary']").text()).toBe(
-      "1:1 · 1024×1024 · 28 steps",
+      "1:1 · 1024×1024 · 28 passes",
     );
     const batched = factory({ batchSize: 3 });
     expect(batched.get("[data-test='composer-summary']").text()).toBe(
-      "1:1 · 1024×1024 · 28 steps · ×3",
+      "1:1 · 1024×1024 · 28 passes · ×3",
     );
   });
 
-  it("labels Expand for the current batch size", () => {
+  it("asks for more words in the app's own words, for the current batch size", () => {
     expect(factory().get("[data-test='composer-expand']").text()).toContain(
-      "Expand prompt",
+      "Write more for me",
     );
     expect(
       factory({ batchSize: 4 }).get("[data-test='composer-expand']").text(),
-    ).toContain("Expand to 4");
+    ).toContain("Write 4 for me");
   });
 
   it("keeps Generate visible for multi-image batches", () => {

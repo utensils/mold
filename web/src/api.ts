@@ -236,18 +236,20 @@ export interface StreamTarget {
   apiKey?: string;
 }
 
-function targetBase(target?: StreamTarget): string {
+function targetBase(target?: StreamTarget | null): string {
   return target?.baseUrl ?? base;
 }
 
-function targetHeaders(target?: StreamTarget): Record<string, string> {
+function targetHeaders(target?: StreamTarget | null): Record<string, string> {
   return target?.apiKey ? { "x-api-key": target.apiKey } : {};
 }
 
 /** Advisory VRAM preflight against the machine that will render the print. */
 export async function fetchGenerationEstimate(
   req: GenerateRequestWire,
-  target?: StreamTarget,
+  // `null` is the shared badge's way of saying "the serving origin", the same
+  // thing an absent target means here.
+  target?: StreamTarget | null,
 ): Promise<GenerationMemoryEstimate> {
   const res = await fetch(`${targetBase(target)}/api/generate/estimate`, {
     method: "POST",

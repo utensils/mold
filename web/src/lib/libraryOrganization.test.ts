@@ -524,7 +524,7 @@ describe("mutations fan out to every copy's host", () => {
     );
     expect(result.ok.sort()).toEqual(["origin", "plato"]);
     expect(result.failed).toEqual([
-      { hostId: "ghost", error: "That host isn't connected anymore." },
+      { hostId: "ghost", error: "That machine isn't connected anymore." },
     ]);
     expect(api.trashMany).toHaveBeenCalledWith(platoTarget, [
       "twin.png",

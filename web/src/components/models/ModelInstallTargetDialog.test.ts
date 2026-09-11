@@ -56,7 +56,8 @@ describe("ModelInstallTargetDialog", () => {
     const options = w.findAll("[data-test=install-target-option]");
     expect(options).toHaveLength(2);
     expect(options[0].text()).toContain("Studio");
-    expect(options[0].text()).toContain("Install");
+    expect(options[0].text()).toContain("Get it");
+    expect(options[0].text()).not.toContain("Install");
     expect(options[1].text()).toContain("this server");
     expect(options[1].text()).toContain("Repair");
   });

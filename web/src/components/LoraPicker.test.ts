@@ -87,17 +87,23 @@ describe("LoraPicker — multi-LoRA stack", () => {
     const w = mountPicker([]);
     await flushPromises();
     // Old behaviour rendered nothing (a blank drawer section). The picker now
-    // explains the empty state and points at Models rather than going dark.
+    // explains the empty state and points at Styles rather than going dark,
+    // in the words the rest of the app uses for the same thing.
     const empty = w.find("[data-test='lora-hint-empty']");
     expect(empty.exists()).toBe(true);
-    expect(empty.text().toLowerCase()).toContain("no loras installed");
+    expect(empty.text().toLowerCase()).toContain(
+      "no add-on looks on this machine yet",
+    );
+    expect(empty.text().toLowerCase()).not.toContain("installed");
     expect(w.findAll("[data-test='lora-row']")).toHaveLength(0);
   });
 
-  it("clicking + Add LoRA appends a row keyed to the first available LoRA", async () => {
+  it("clicking + Add a look appends a row keyed to the first available LoRA", async () => {
     const w = mountPicker([]);
     await flushPromises();
-    const add = w.findAll("button").find((b) => b.text().includes("Add LoRA"));
+    const add = w
+      .findAll("button")
+      .find((b) => b.text().includes("Add a look"));
     expect(add).toBeDefined();
     await add!.trigger("click");
     const last = w.emitted("update:modelValue")?.at(-1)?.[0] as LoraSelection[];
@@ -107,7 +113,7 @@ describe("LoraPicker — multi-LoRA stack", () => {
     expect(last[0].trainedWords).toEqual(["cinematic style", "moody lighting"]);
   });
 
-  it("Add LoRA picks a LoRA not already in the stack", async () => {
+  it("Add a look picks a LoRA not already in the stack", async () => {
     const w = mountPicker([
       {
         path: "/loras/cinematic.safetensors",
@@ -115,7 +121,9 @@ describe("LoraPicker — multi-LoRA stack", () => {
       },
     ]);
     await flushPromises();
-    const add = w.findAll("button").find((b) => b.text().includes("Add LoRA"));
+    const add = w
+      .findAll("button")
+      .find((b) => b.text().includes("Add a look"));
     await add!.trigger("click");
     const last = w.emitted("update:modelValue")?.at(-1)?.[0] as LoraSelection[];
     expect(last).toHaveLength(2);
@@ -172,7 +180,7 @@ describe("LoraPicker — multi-LoRA stack", () => {
     await flushPromises();
     // The control is a kit Icon with no text, so it is addressed by its
     // accessible name — the spec voice bans emoji glyphs as buttons.
-    const removeBtns = w.findAll("[aria-label='Remove this LoRA']");
+    const removeBtns = w.findAll("[aria-label='Remove this look']");
     expect(removeBtns).toHaveLength(2);
     await removeBtns[0].trigger("click");
     const last = w.emitted("update:modelValue")?.at(-1)?.[0] as LoraSelection[];
@@ -211,7 +219,7 @@ describe("LoraPicker — multi-LoRA stack", () => {
     ]);
 
     await w.setProps({ modelValue: emitted[0][0] as LoraSelection[] });
-    await w.find("[aria-label='Move LoRA down']").trigger("click");
+    await w.find("[aria-label='Move this look down']").trigger("click");
     const moved = w
       .emitted("update:modelValue")
       ?.at(-1)?.[0] as LoraSelection[];
@@ -226,7 +234,7 @@ describe("LoraPicker — multi-LoRA stack", () => {
     const w = mountPicker(rows);
     await flushPromises();
 
-    const moveDown = w.find("[aria-label='Move LoRA down']");
+    const moveDown = w.find("[aria-label='Move this look down']");
     expect(moveDown.exists()).toBe(true);
     await moveDown.trigger("click");
 

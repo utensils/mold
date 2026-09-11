@@ -148,8 +148,8 @@ describe("buildInstallModelCommands", () => {
       id: "install-cv:1",
       model: "cv:1",
       displayName: "Dreamy Mix",
-      label: "Install Dreamy Mix",
-      hint: "not installed · civitai",
+      label: "Get Dreamy Mix",
+      hint: "not on this machine · civitai",
     });
   });
 
@@ -188,7 +188,7 @@ describe("buildInstallModelCommands", () => {
 
   it("omits the source when the catalog does not report one", () => {
     const [cmd] = buildInstallModelCommands([{ id: "cv:1", name: "Mix" }], {});
-    expect(cmd?.hint).toBe("not installed");
+    expect(cmd?.hint).toBe("not on this machine");
   });
 });
 

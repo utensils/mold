@@ -14,7 +14,8 @@ import Icon from "@ui/components/Icon.vue";
 import ActionBlocker from "@ui/components/ActionBlocker.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import ExpandControl from "../generate/ExpandControl.vue";
-import EstimateBadge from "../generate/EstimateBadge.vue";
+import EstimateBadge from "@studio/components/EstimateBadge.vue";
+import { estimateGeneration } from "../../lib/api/estimate";
 import type { GenerateForm } from "../../lib/generateForm";
 import { promptInputForForm } from "../../lib/promptRecipe";
 import type { GenerateRequest } from "../../lib/api/types";
@@ -253,6 +254,7 @@ defineExpose({ focus, expand, record });
           class="ms-composer__estimate"
           :request="estimateRequest"
           :target="estimateTarget"
+          :estimate="estimateGeneration"
         />
       </div>
       <div class="ms-composer__controls">

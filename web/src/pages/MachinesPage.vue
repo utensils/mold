@@ -219,10 +219,13 @@ async function contextForget() {
 </script>
 
 <template>
-  <!-- w-full is load-bearing: the app frame is a column flexbox and an
-       mx-auto child otherwise shrinks to its content width, making the page
-       grow sideways as async content lands. -->
-  <div class="mx-auto w-full max-w-[1800px] px-4 pb-40 pt-6 sm:px-6 lg:px-10">
+  <!-- The shared 1120px workspace column: Queue, Styles, Settings and this
+       page all sit on it, so moving between them does not move the content
+       sideways. Only My images keeps a wider grid, because it is a gallery.
+       `.workspace-page` sets width:100% itself, which the app frame's column
+       flexbox needs — an mx-auto child would otherwise shrink to its content
+       width and grow sideways as async content lands. -->
+  <div class="workspace-page pb-40">
     <div class="mb-5 flex flex-wrap items-center gap-4">
       <h1
         class="font-display text-2xl font-bold tracking-tight text-ink"

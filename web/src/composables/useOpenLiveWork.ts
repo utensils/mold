@@ -1,84 +1,46 @@
 import { useRouter } from "vue-router";
-import type { FleetActiveWork } from "@studio/api/activity";
-import { findQueueEntryById } from "@studio/api/queuePlan";
-import { selectedQueueGeneration } from "@studio/api/generationSelection";
-import { meshWorkflowRouteFor } from "@studio/lib/meshWorkflowProvenance";
+import { openLiveWorkWith } from "@studio/composables/useOpenLiveWork";
 import type { OutputMetadata } from "../types";
 import type { HostRouting } from "./useHostRouting";
 import { setGenerationHandoff } from "./useGenerationHandoff";
 import { toast } from "../lib/toasts";
 
 /**
- * Opens server-owned work in the web surface that can inspect or resume it.
- *
- * A server-side chain row (a long video another client is auto-chaining, or a
- * `mold run --script` job) has no Create surface any more: it goes to its
- * machine's page rather than pretending Create can reattach to it. The guard
- * has to come FIRST, because such a row is `kind: "generation"` carrying
- * `execution: "chain"` — falling into the generation arm below would search
- * `/api/queue` for an id that only exists under `/api/chain-jobs` and dead-end
- * on "cannot restore settings".
+ * The browser's half of opening server-owned work: which machines it can
+ * reach, how it says something went wrong, how it hands settings to Create,
+ * and where a chain row and a download row go. The decision itself — the
+ * chain guard, the queue lookup, the 3-D workflow route — is the shared
+ * `openLiveWorkWith`.
  */
 export function useOpenLiveWork(routing: HostRouting) {
   const router = useRouter();
 
-  return async (row: FleetActiveWork) => {
-    if (row.kind === "sequence" || row.execution === "chain") {
-      await router.push(`/machines/${row.hostId}`);
-      return;
-    }
-    if (row.kind === "generation") {
+  return openLiveWorkWith<OutputMetadata>({
+    targetFor: (hostId) => {
       const host = routing.hosts.value.find(
-        (candidate) => candidate.id === row.hostId,
+        (candidate) => candidate.id === hostId,
       );
-      if (!host) {
-        toast("error", "That machine is no longer connected.");
-        return;
-      }
-      try {
-        const entry = await findQueueEntryById(
-          { baseUrl: host.url, apiKey: host.apiKey ?? null },
-          row.id,
-        );
-        const selection = selectedQueueGeneration<OutputMetadata>(
-          entry ? [entry] : [],
-          row.id,
-        );
-        if (!selection) {
-          toast(
-            "error",
-            "This host cannot restore settings for that generation.",
-          );
-          return;
-        }
-        // A 3-D Studio stage is admitted as an ordinary generation, so it
-        // arrives here looking like any other print. Create cannot resume a
-        // durable workflow — its stages, Cancel, Resume and history live only
-        // under /api/mesh-workflows.
-        const workflow = meshWorkflowRouteFor(selection.metadata, row.hostId);
-        if (workflow) {
-          await router.push(workflow);
-          return;
-        }
-        setGenerationHandoff({
-          metadata: selection.metadata,
-          seedPinned: true,
-          queueSelection: {
-            hostId: row.hostId,
-            jobId: selection.jobId,
-            running: selection.running,
-          },
-        });
-        await router.push("/create");
-      } catch (error) {
-        toast("error", error instanceof Error ? error.message : String(error));
-      }
-      return;
-    }
-    if (row.kind === "download") {
+      return host ? { baseUrl: host.url, apiKey: host.apiKey ?? null } : null;
+    },
+    go: (to) => router.push(to).then(() => undefined),
+    fail: (message) => toast("error", message),
+    restore: (selection, hostId) =>
+      setGenerationHandoff({
+        metadata: selection.metadata,
+        seedPinned: true,
+        queueSelection: {
+          hostId,
+          jobId: selection.jobId,
+          running: selection.running,
+        },
+      }),
+    // A chain row goes to its machine: the browser's queue page cannot
+    // re-enter the work either, and the machine is where its progress is.
+    chainDestination: (row) => `/machines/${row.hostId}`,
+    // Downloads are a popover in the shell, not a page.
+    openDownloads: () => {
       window.dispatchEvent(new CustomEvent("mold:open-downloads"));
-      return;
-    }
-    await router.push(`/machines/${row.hostId}`);
-  };
+      return null;
+    },
+  });
 }

@@ -1156,7 +1156,7 @@ async function galleryRowForCompletion(
   const row = listing.find((candidate) => candidate.filename === filename);
   if (!row) {
     throw new Error(
-      `completed output '${filename}' is not in the host gallery`,
+      `completed output '${filename}' is not in the machine's gallery`,
     );
   }
   durableGalleryRows.set(durableGalleryRowKey(hostId, filename), row);
@@ -1570,7 +1570,7 @@ async function recoverAmbiguousAdmission(
     rejectDurableAdmission(
       clientBatchId,
       tracker?.admission.error ??
-        "The host did not accept this print; try again.",
+        "The machine did not accept this print; try again.",
     );
   } catch {
     // The host is unreachable: the redacted client UUID remains persisted and

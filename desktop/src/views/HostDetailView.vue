@@ -16,7 +16,7 @@ import DownloadsTray from "../components/models/DownloadsTray.vue";
 import HostQueuePanel from "../components/machines/HostQueuePanel.vue";
 import ModelTableRow from "../components/models/ModelTableRow.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
-import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
+import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { unloadModel } from "../lib/api/models";
 import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";

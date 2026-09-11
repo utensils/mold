@@ -194,8 +194,8 @@ export function buildInstallModelCommands(
       id: `install-${entry.id}`,
       model: entry.id,
       displayName: entry.name,
-      label: `Install ${entry.name}`,
-      hint: source ? `not installed · ${source}` : "not installed",
+      label: `Get ${entry.name}`,
+      hint: source ? `not on this machine · ${source}` : "not on this machine",
       keywords: unique([
         ...tokens(entry.name),
         ...tokens(entry.family ?? ""),

@@ -5,7 +5,6 @@ import {
   applyMetadataToForm,
   normalizeLegacyNegativeFormState,
   cloneTemplateForm,
-  promptWithStyle,
   sanitizePersistedForm,
   useGenerateForm,
   __testing__,
@@ -338,13 +337,16 @@ describe("useGenerateForm", () => {
     expect(form.state.value).toMatchObject({ version: 3, prompt: "" });
   });
 
-  it("loads a version 3 snapshot preserving a saved stylePreset", () => {
+  it("drops a saved stylePreset — the strip that showed it is gone", () => {
+    // A draft saved before the preset strip was retired would otherwise
+    // restyle every prompt with no control left to show or clear it.
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({ version: 3, prompt: "a cat", stylePreset: "cinematic" }),
     );
     const form = useGenerateForm();
-    expect(form.state.value.stylePreset).toBe("cinematic");
+    expect(form.state.value.stylePreset).toBeNull();
+    expect(form.state.value.prompt).toBe("a cat");
   });
 
   it("upgrades a version 3 camera picker value into the visible LoRA stack", () => {
@@ -751,13 +753,6 @@ describe("useGenerateForm", () => {
     form.state.value.prompt = "a lighthouse in a storm";
     form.state.value.stylePreset = null;
     expect(form.toRequest().prompt).toBe("a lighthouse in a storm");
-  });
-
-  it("promptWithStyle leaves an empty prompt empty (a template has nothing to wrap)", () => {
-    const form = useGenerateForm();
-    form.state.value.prompt = "";
-    form.state.value.stylePreset = "anime";
-    expect(promptWithStyle(form.state.value)).toBe("");
   });
 
   it("discards a snapshot with a mismatched version to avoid stale schemas", () => {

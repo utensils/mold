@@ -29,6 +29,7 @@ import type {
   ModelInfoExtended,
 } from "../../types";
 import { formatGB } from "../../util/format";
+import { catalogPullLabel } from "@studio/lib/catalogLabel";
 
 const cat = useCatalog();
 // Pull can land on any reachable machine, so a Discover row's runtime answer
@@ -381,6 +382,25 @@ const installPlan = computed(() => {
   return installTargets.planFor(m?.name ?? "", true);
 });
 const isRepair = computed(() => installPlan.value.label === "Repair");
+/*
+ * The acquisition button says the lexicon's verb and the number the user will
+ * actually spend, through the one shared catalog label. The SIZE/FETCH totals
+ * are the drawer's own — it reads the download recipe, which is more exact
+ * than the entry's `size_bytes` — so only the wording is shared.
+ */
+const pullLabel = computed(() =>
+  catalogPullLabel(
+    {
+      weightsBytes: modelWeightsBytes.value,
+      fetchBytes: footprintBytes.value,
+      differs:
+        modelWeightsBytes.value != null &&
+        footprintBytes.value != null &&
+        footprintBytes.value !== modelWeightsBytes.value,
+    },
+    "Get it",
+  ),
+);
 /** The Installed segment's cross-machine install; hidden when nobody lacks it. */
 const canInstallElsewhere = computed(
   () => isInstalled.value && installPlan.value.canInstall,
@@ -475,7 +495,7 @@ async function handleDelete() {
   if (!m || busy.value) return;
   const modelName = m.name;
   const ok = await requestConfirm({
-    title: "Delete model?",
+    title: "Remove this style?",
     body: `Remove ${modelDisplayName(m)} and its files from disk. Shared components used by other models are kept.`,
     confirmLabel: "Delete",
     danger: true,
@@ -522,7 +542,7 @@ function onRetry() {
       :is="panelComponent"
       v-bind="panelProps"
       :open="open"
-      title="Model details"
+      title="Style details"
       @close="onClose"
     >
       <div
@@ -531,14 +551,14 @@ function onRetry() {
         data-test="detail-loading"
       >
         <div class="md__spinner" aria-hidden="true" />
-        <p class="md__state-msg">loading model details…</p>
+        <p class="md__state-msg">loading style details…</p>
       </div>
       <div
         v-else-if="state === 'error'"
         class="md md--state"
         data-test="detail-error"
       >
-        <div class="md__name">Model details</div>
+        <div class="md__name">Style details</div>
         <p class="md__state-msg">{{ cat.detailError.value?.message }}</p>
         <button
           type="button"
@@ -592,7 +612,7 @@ function onRetry() {
             :nsfw="nsfw"
           />
         </div>
-        <div class="md__name">{{ name || "Untitled model" }}</div>
+        <div class="md__name">{{ name || "Untitled style" }}</div>
         <div
           v-if="exactModelId && exactModelId !== name"
           class="md__id"
@@ -767,7 +787,7 @@ function onRetry() {
               :title="
                 isLoaded
                   ? 'Unload before deleting'
-                  : 'Delete this model from disk'
+                  : 'Remove this style from disk'
               "
               @click="handleDelete"
             >
@@ -785,7 +805,7 @@ function onRetry() {
             @click="handleInstallElsewhere"
           >
             <Icon name="download" :size="14" />
-            Install on another machine
+            Get it on another machine
           </button>
         </template>
 
@@ -809,7 +829,7 @@ function onRetry() {
             @click="handlePull"
           >
             <Icon v-if="!isRepair" name="download" :size="15" />
-            {{ isRepair ? "Repair" : "Pull" }}
+            {{ isRepair ? "Repair" : pullLabel }}
           </button>
         </template>
       </div>
@@ -817,9 +837,9 @@ function onRetry() {
          can't render — the panel says so and offers a way out instead of
          painting nothing. -->
       <div v-else class="md md--state" data-test="detail-unrenderable">
-        <div class="md__name">Model details</div>
+        <div class="md__name">Style details</div>
         <p class="md__state-msg">
-          This model's details came back in a shape we can't read. Try opening
+          This style's details came back in a shape we can't read. Try opening
           it again, or check the server version.
         </p>
         <button

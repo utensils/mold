@@ -12,9 +12,14 @@ import { computed } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import CardSurface from "@ui/components/CardSurface.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
-import StatusDot from "./StatusDot.vue";
+import StatusDot from "@ui/components/StatusDot.vue";
 import { useHostPoll } from "./hostClient";
-import { deriveHostCardGpu, formatGb } from "./machineTelemetry";
+import {
+  deriveHostCardGpu,
+  formatGb,
+  hostGpuSnapshots,
+} from "./machineTelemetry";
+import { machineSentence } from "@studio/lib/machineSentence";
 import { HOST_RECONNECTING_LABEL } from "@studio/lib/hostConnectivity";
 import type { HostEntry } from "../../lib/hostRegistry";
 
@@ -59,14 +64,27 @@ function hostAddress(url: string): string | null {
   }
 }
 
+/*
+ * The one plain sentence about a machine — "4× L40S · CUDA · on your network
+ * at plato:7680" — from `@studio/lib/machineSentence`, so the same box reads
+ * identically here, in the desktop app's Machines list and in its machine
+ * pane. The card used to build its own line and called a 4× L40S box "L40S".
+ *
+ * Every machine a browser can see is `remote`: the tab is not running ON any
+ * of them, so "this device" would be a lie even for the serving origin. The
+ * origin has no URL of its own, so its address is the hostname it reports.
+ */
 const gpuLine = computed(() => {
   const status = poll.status.value;
-  const name = deriveHostCardGpu(status)?.label ?? null;
-  const secondary = props.primary
-    ? (status?.hostname ?? null)
-    : hostAddress(props.host.url);
-  const parts = [name, secondary].filter((p): p is string => !!p);
-  return parts.length ? parts.join(" · ") : "—";
+  const address = props.primary
+    ? (status?.hostname ?? "")
+    : (hostAddress(props.host.url) ?? "");
+  const sentence = machineSentence(
+    { kind: "remote", baseUrl: address },
+    hostGpuSnapshots(status),
+    { address: true },
+  );
+  return sentence || "—";
 });
 
 const memory = computed<{ used: number; total: number } | null>(() => {
@@ -264,9 +282,10 @@ function openContextMenu(event: MouseEvent) {
   min-width: 0;
   overflow-wrap: anywhere;
   margin-top: 6px;
-  font-family: var(--f-mono);
+  /* Plain words in sans; the meter's readouts below are the mono truth. */
+  font-family: var(--f-body);
   font-size: 0.875rem;
-  color: var(--ink-3);
+  color: var(--ink-2);
 }
 
 .hc__row {

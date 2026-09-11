@@ -366,9 +366,9 @@ desktop/
 │   ├── composables/ useQueueActivity.ts useQueueRowContext.ts useQueueCommands.ts useShellSubtitle.ts …
 │   ├── views/   GenerateView.vue QueueView.vue LibraryView.vue ModelsView.vue MachinesView.vue HostDetailView.vue RunPodView.vue SettingsView.vue
 │   └── components/
-│       ├── shell/   TitleBar.vue Sidebar.vue QueueRail.vue QueueRowMenu.vue StatusBar.vue CommandPalette.vue Toasts.vue ContextMenu.vue ContextMenuItem.vue ConfirmDialog.vue
+│       ├── shell/   TitleBar.vue Sidebar.vue QueueRail.vue QueueRowMenu.vue StatusBar.vue CommandPalette.vue Toasts.vue ContextMenu.vue ContextMenuItem.vue (the confirm dialog is ui/components/ConfirmDialog.vue)
 │       ├── create/  InspectorPanel.vue ComposerCard.vue CreateHeader.vue (editable print title) StarterList.vue RecentPrints.vue HostChip.vue FileUnderGroup.vue AdvancedSettings.vue
-│       ├── generate/ LoraStack.vue SourceImageWell.vue IdentityWell.vue MaskEditorModal.vue ExpandControl.vue EstimateBadge.vue TemplatesPanel.vue
+│       ├── generate/ LoraStack.vue SourceImageWell.vue IdentityWell.vue MaskEditorModal.vue ExpandControl.vue TemplatesPanel.vue
 │       ├── gallery/ AuthedMedia.vue Lightbox.vue           # the justified virtualized grid lives in LibraryView.vue
 │       ├── library/ LibraryHeader.vue LibraryChipRow.vue CollectionsShelf.vue TrashBanner.vue BulkBar.vue TagEditor.vue CollectionPicker.vue HistoryDrawer.vue (the inline History column)
 │       ├── settings/ AppearanceCard.vue (Look) StylesDiskSection.vue GenerationSection.vue LibrarySection.vue MediaSection.vue UpdatesSection.vue …

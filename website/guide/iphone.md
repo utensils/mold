@@ -93,8 +93,7 @@ machine while only one is reachable.
 The form adapts to
 the selected model family and uses the same request contract and model defaults
 as desktop. The primary controls stay on the main screen; deeper options open in
-a full-screen **More settings** sheet, and prompt **style** presets compose at submit
-without rewriting your prompt text. A **↺ Reset** beside the More settings trigger
+a full-screen **More settings** sheet. A **↺ Reset** beside the More settings trigger
 restores every generation setting to the selected model's defaults, keeping
 your prompt, model choice, and any prepared batch.
 

@@ -1,5 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import {
+  DESTINATIONS,
+  NEVER_A_DESTINATION,
+  NEVER_SAID_ON_STYLES_AND_MACHINES,
+  templateText,
+} from "@studio/lib/lexicon";
 import routerSource from "../router.ts?raw";
 import sidebarSource from "../components/shell/Sidebar.vue?raw";
 import paletteSource from "../components/shell/CommandPalette.vue?raw";
@@ -26,29 +32,13 @@ import { ENGINE_KEY_SCHEMAS, SECTIONS } from "./settingsSchema";
  * inspector's primary controls, and the Styles/Machines views, so a rename
  * on one surface cannot leave the others behind.
  */
-const DESTINATIONS = ["New image", "Queue", "My images", "Styles", "Machines"] as const;
-
-/** Words that may never be a destination's primary label again. */
-const NEVER_A_DESTINATION = ["Create", "Library", "Models", "Hosts", "Gallery", "Catalog"];
+// The word tables live in studio so web's lexicon test reads the same ones.
 
 // vitest runs from desktop/, so the Rust source is read relative to it.
 const menuSource = readFileSync("src-tauri/src/menu.rs", "utf8");
 
 function quoted(source: string): string[] {
   return [...source.matchAll(/"([^"\n]+)"/g)].map((m) => m[1]!);
-}
-
-/**
- * Template text only: strips the `<script>` block, every tag's attributes,
- * and every `{{ … }}` interpolation, so an identifier, a route path, or a
- * `data-test` hook can never trip a never-say scan of what a person reads.
- */
-function templateText(source: string): string {
-  const template = source.replace(/<script[\s\S]*?<\/script>/g, "");
-  return template
-    .replace(/<[^>]*>/g, " ")
-    .replace(/\{\{[\s\S]*?\}\}/g, " ")
-    .replace(/\s+/g, " ");
 }
 
 describe("lexicon — destinations", () => {
@@ -339,7 +329,7 @@ describe("lexicon — Styles and Machines", () => {
     ["ModelTableRow", "../components/models/ModelTableRow.vue"],
     ["DownloadsTray", "../components/models/DownloadsTray.vue"],
   ];
-  const NEVER_SAID = [/\bhost\b/i, /\bmodel page\b/i, /\bPull\b/, /\binstalled\b/i, /\bInstall\b/];
+  const NEVER_SAID = NEVER_SAID_ON_STYLES_AND_MACHINES;
 
   const sources = new Map(
     surfaces.map(([name, path]) => [name, readFileSync(new URL(path, import.meta.url), "utf8")]),
