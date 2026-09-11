@@ -563,9 +563,9 @@ describe("ControlsAside", () => {
       },
     });
     expect(wrapper.findComponent(VideoDurationSlider).exists()).toBe(false);
-    expect(wrapper.find("[data-test='predict-duration-control']").exists()).toBe(
-      false,
-    );
+    expect(
+      wrapper.find("[data-test='predict-duration-control']").exists(),
+    ).toBe(false);
   });
 
   it("draws nothing at all for a video recipe with no mesh or audio group", () => {
@@ -575,7 +575,10 @@ describe("ControlsAside", () => {
     const wrapper = mount(ControlsAside, {
       props: {
         group: "secondary" as const,
-        modelValue: baseForm({ model: "wan22-t2v-a14b:q5", modelFamily: "wan" }),
+        modelValue: baseForm({
+          model: "wan22-t2v-a14b:q5",
+          modelFamily: "wan",
+        }),
         family: "wan",
         model: { name: "wan22-t2v-a14b:q5", family: "wan" } as never,
       },
@@ -875,9 +878,9 @@ describe("ControlsAside", () => {
       "ltx2",
       "secondary",
     );
-    expect(secondary.find("[data-test='generate-audio-control']").exists()).toBe(
-      true,
-    );
+    expect(
+      secondary.find("[data-test='generate-audio-control']").exists(),
+    ).toBe(true);
     expect(secondary.findComponent(VideoDurationSlider).exists()).toBe(false);
     expect(secondary.findComponent(ShapePicker).exists()).toBe(false);
     expect(

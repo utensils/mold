@@ -98,7 +98,11 @@ describe("lexicon — New image controls", () => {
     expect(hostRoutingPicker).toContain(
       `aria-label="${CONTROL_WORDS.whereItRuns}"`,
     );
-    expect(advancedDrawer).toContain(`title="${CONTROL_WORDS.loras}"`);
+    // "Add-on looks" left the Advanced drawer for the rail's own disclosure
+    // row — the one LoRA door — so the guard follows the word, the same way
+    // Reset and Make were followed above rather than lapsing.
+    expect(advancedDrawer).not.toContain(`title="${CONTROL_WORDS.loras}"`);
+    expect(createPage).toContain(CONTROL_WORDS.loras);
     expect(loraPicker).toContain(CONTROL_WORDS.loras);
     expect(composerCard).toContain(`"${CONTROL_WORDS.expand}"`);
     expect(composerCard).toContain("} passes`");

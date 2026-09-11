@@ -405,11 +405,18 @@ describe("ResultCanvas result action bar", () => {
   /*
    * A link only exists for a print the host can address, and a batch-locked
    * recipe renders one at a time — so neither is offered on a result that
-   * cannot honour it. Download always can.
+   * cannot honour it. Download is offered unless the page says it has
+   * neither the bytes nor a filename to fetch them by (a settled durable
+   * completion carries no inline image; the page fetches from the host).
    */
   it("offers only what the print supports", () => {
     const wrapper = finished();
     expect(wrapper.find("[data-test='canvas-download']").exists()).toBe(true);
+    expect(
+      finished({ canDownload: false })
+        .find("[data-test='canvas-download']")
+        .exists(),
+    ).toBe(false);
     expect(wrapper.find("[data-test='canvas-copy-link']").exists()).toBe(false);
     expect(wrapper.find("[data-test='canvas-make-variations']").exists()).toBe(
       false,

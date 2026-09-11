@@ -2399,19 +2399,50 @@ async function copyResultLink(): Promise<void> {
   else toast("error", "Could not copy the link.");
 }
 
-/** Save the bytes already on the canvas; the gallery file is never renamed. */
-function downloadResult(): void {
+/** Download is offered when the canvas holds the bytes OR a filename it can
+ * fetch them by — a durable completion settles with `image: ""` and a
+ * filename, so the button was dead on that path (review). */
+const canDownload = computed(() => {
   const result = latestDone.value?.result;
-  if (!result?.image) return;
-  const binary = atob(result.image);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1)
-    bytes[index] = binary.charCodeAt(index);
+  return !!result && (!!result.image || !!resultFilename.value);
+});
+/** Save the print; the gallery file is never renamed. Bytes already on the
+ * canvas are used as they are; a settled completion is fetched from the host
+ * that rendered it, exactly as Use-as-source does. */
+async function downloadResult(): Promise<void> {
+  const result = latestDone.value?.result;
+  if (!result) return;
   const row = canvasPrintRow.value;
   const name = row
     ? downloadFilename(row)
     : (result.filename ?? `mold-${result.seed_used}.${result.format}`);
-  downloadVideoExport(new Blob([bytes]), name);
+  if (result.image) {
+    const binary = atob(result.image);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1)
+      bytes[index] = binary.charCodeAt(index);
+    downloadVideoExport(new Blob([bytes]), name);
+    return;
+  }
+  const filename = resultFilename.value;
+  if (!filename) return;
+  const hostId =
+    (row as (GalleryImage & { hostId?: string }) | null)?.hostId ??
+    latestDone.value?.hostId ??
+    ORIGIN_HOST_ID;
+  const host = listHosts().find((h) => h.id === hostId);
+  if (!host) {
+    toast("error", "That machine isn't connected anymore.");
+    return;
+  }
+  try {
+    downloadVideoExport(await fetchGalleryBlob(host, filename), name);
+  } catch (error) {
+    toast(
+      "error",
+      error instanceof Error ? error.message : "Could not fetch the print.",
+    );
+  }
 }
 
 /**
@@ -5062,6 +5093,7 @@ onBeforeUnmount(() => {
             :result-mesh-src="resultMeshSrc"
             :result-caption="resultCaption"
             :result-filename="resultFilename"
+            :can-download="canDownload"
             :can-copy-link="canCopyLink"
             :can-make-variations="canMakeVariations"
             :error="latestErrorMessage"

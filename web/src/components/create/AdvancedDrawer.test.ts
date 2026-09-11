@@ -183,9 +183,9 @@ describe("AdvancedDrawer video duration", () => {
       { model: model.name, frames: 97 },
       { models: [model] },
     );
-    expect(wrapper.find("[data-test='predict-duration-control']").exists()).toBe(
-      true,
-    );
+    expect(
+      wrapper.find("[data-test='predict-duration-control']").exists(),
+    ).toBe(true);
     expect(wrapper.findAllComponents(VideoDurationSlider)).toHaveLength(1);
     await wrapper
       .get("[data-test='predict-duration-control'] button[role='switch']")
@@ -202,16 +202,16 @@ describe("AdvancedDrawer video duration", () => {
       { models: [model] },
     );
     expect(predicting.findAllComponents(VideoDurationSlider)).toHaveLength(0);
-    expect(predicting.find("[data-test='predicted-duration-hint']").exists()).toBe(
-      true,
-    );
+    expect(
+      predicting.find("[data-test='predicted-duration-hint']").exists(),
+    ).toBe(true);
   });
 
   it("offers no Predict duration for a checkpoint that cannot do it", () => {
     const wrapper = factory("ltx2", { model: "ltx-2-19b-distilled:fp8" });
-    expect(wrapper.find("[data-test='predict-duration-control']").exists()).toBe(
-      false,
-    );
+    expect(
+      wrapper.find("[data-test='predict-duration-control']").exists(),
+    ).toBe(false);
     expect(wrapper.findAllComponents(VideoDurationSlider)).toHaveLength(1);
   });
 });

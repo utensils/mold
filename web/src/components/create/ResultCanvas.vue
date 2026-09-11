@@ -53,6 +53,8 @@ const props = withDefaults(
     resultFilename?: string;
     resultCaption?: string;
     /** result — the host can address this print, so a link to it exists. */
+    /** The page has the bytes, or a filename to fetch them by. */
+    canDownload?: boolean;
     canCopyLink?: boolean;
     /** result — a finished still on a recipe that can repeat. */
     canMakeVariations?: boolean;
@@ -76,6 +78,7 @@ const props = withDefaults(
     stage: "",
     progressFraction: 0,
     resultFilename: "",
+    canDownload: true,
     canCopyLink: false,
     canMakeVariations: false,
     variations: () => [],
@@ -271,6 +274,7 @@ watch(
         class="canvas__actions"
         :class="{ 'canvas__actions--docked': barDocked }"
         data-test="canvas-actions"
+        @click.stop
       >
         <span
           v-if="resultFilename"
@@ -283,6 +287,7 @@ watch(
         }}</span>
         <span class="canvas__actions-spacer" />
         <button
+          v-if="canDownload"
           type="button"
           class="canvas__action"
           data-test="canvas-download"

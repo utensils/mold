@@ -1539,6 +1539,40 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.batchSize).toBe(1);
   });
 
+  it("downloads a settled print from its host when the canvas holds no bytes", async () => {
+    // Review finding: Download was always offered but returned early without
+    // inline bytes — and a durable completion settles with `image: ""` and
+    // a filename. The page fetches the file from the rendering host.
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [finishedCanvasJob({ image: "" })];
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      blob: async () => new Blob(["png-bytes"]),
+    }));
+    globalThis.fetch = fetchMock as never;
+    const createObjectURL = vi.fn((_blob: Blob) => "blob:print-1");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    try {
+      const wrapper = mount(CreatePage, {
+        global: { stubs: actionBarStubs() },
+      });
+      await flushPromises();
+      await wrapper.get("[data-test='canvas-download']").trigger("click");
+      await flushPromises();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0]?.[0])).toContain(entry.filename);
+      expect(createObjectURL).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      vi.unstubAllGlobals();
+      vi.stubGlobal("prompt", vi.fn());
+    }
+  });
+
   it("never lets a refused Make 4 leak into the next plain Generate", async () => {
     // Review finding: the count lived in a page-level ref that `onSubmit`'s
     // early return (another submission still planning) never cleared, so the
