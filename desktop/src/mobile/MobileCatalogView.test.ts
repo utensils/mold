@@ -1568,6 +1568,39 @@ describe("MobileCatalogView", () => {
     expect(huggingFaceChip().attributes("aria-pressed")).toBe("true");
   });
 
+  it("keeps only the shelf and the search in the scroll, and counts what the sheet hides", async () => {
+    vi.useFakeTimers();
+    wrapper = mountCatalog();
+    await vi.waitFor(() => expect(searchCatalog).toHaveBeenCalledTimes(1));
+
+    // Six narrowing controls used to stack above the results and reflow the
+    // list every time the shelf changed. They live in one sheet now.
+    const sheet = wrapper.get("[data-test='mobile-catalog-filters']");
+    expect(sheet.classes()).not.toContain("is-open");
+    expect(sheet.find(".mobile-catalog-sources").exists()).toBe(true);
+    expect(sheet.find("[data-test='mobile-catalog-kind-chips']").exists()).toBe(true);
+    // Which machine you are browsing went with them, out of the page header.
+    expect(sheet.find(".mobile-catalog-host-picker").exists()).toBe(true);
+    expect(wrapper.find(".mobile-catalog-header .mobile-catalog-host-picker").exists()).toBe(false);
+
+    const chip = wrapper.get("[data-test='mobile-catalog-filters-open']");
+    expect(chip.text()).toBe("Filters");
+    await chip.trigger("click");
+    expect(wrapper.get("[data-test='mobile-catalog-filters']").classes()).toContain("is-open");
+
+    await sheet
+      .findAll(".mobile-catalog-sources button")
+      .find((button) => button.text() === "HuggingFace")!
+      .trigger("click");
+    await vi.advanceTimersByTimeAsync(400);
+    // The chip says what it is standing in for; the shelf itself is not a filter.
+    expect(wrapper.get("[data-test='mobile-catalog-filters-open']").text()).toBe("Filters · 1");
+
+    await wrapper.get("[data-test='mobile-catalog-filters-reset']").trigger("click");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(wrapper.get("[data-test='mobile-catalog-filters-open']").text()).toBe("Filters");
+  });
+
   it("labels every card with a friendly model kind and explicitly marks NSFW entries", async () => {
     searchCatalog.mockResolvedValue(
       searchResponse([

@@ -8,6 +8,10 @@ export type CatalogKindFilter =
 
 export type CatalogSortOption = "downloads" | "rating" | "recent";
 
+/** Which shelf the Styles list is showing, and which provider it queries.
+ *  `installed` is the Ready-to-use shelf and never reaches the search route. */
+export type CatalogSource = "all" | "hf" | "civitai" | "installed";
+
 export const CATALOG_KIND_OPTIONS: { value: CatalogKindFilter; label: string }[] = [
   { value: "checkpoint", label: "Models" },
   { value: "lora", label: "LoRAs" },

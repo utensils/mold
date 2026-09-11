@@ -3438,12 +3438,14 @@ button:disabled {
   text-transform: none;
 }
 
+/* Work in flight, above everything it is fetching for. The warning edge is
+   what separates "this is happening now" from one more list of models. */
 .mobile-catalog-downloads {
   margin: 2px 0 14px;
   overflow: hidden;
-  border: 1px solid var(--mold-border);
+  border: 1px solid var(--mold-warning);
   border-radius: var(--mold-radius-2);
-  background: var(--mold-bg);
+  background: var(--mold-bg-deep);
 }
 
 .mobile-catalog-downloads-head {
@@ -3523,7 +3525,7 @@ button:disabled {
   height: 100%;
   min-width: 2px;
   border-radius: inherit;
-  background: var(--mold-sapphire);
+  background: var(--mold-warning);
 }
 
 .mobile-catalog-download > button {
@@ -3542,12 +3544,16 @@ button:disabled {
   position: sticky;
   top: -16px;
   z-index: 5;
+  display: flex;
+  gap: 8px;
   margin: 0 -1px;
   padding: 10px 1px 8px;
   background: var(--mold-bg-deep);
 }
 
 .mobile-catalog-search-row input {
+  min-width: 0;
+  flex: 1;
   padding: 9px 12px;
 }
 
@@ -3724,6 +3730,29 @@ button:disabled {
   }
 }
 
+/* One chip standing in for six controls, beside the field it narrows. */
+.mobile-catalog-filter-chip {
+  flex: none;
+  min-height: 44px;
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  padding: 0 12px;
+  background: var(--mold-bg);
+  color: var(--mold-text-2);
+  font-family: var(--font-body);
+  font-size: var(--text-caption);
+}
+
+.mobile-catalog-filter-chip[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--mold-blue) 72%, var(--mold-border-control));
+  background: color-mix(in srgb, var(--mold-blue) 11%, var(--mold-bg));
+  color: var(--mold-blue);
+}
+
+.mobile-catalog-filter-sheet .mobile-sheet-body > * + * {
+  margin-top: 14px;
+}
+
 .mobile-catalog-error {
   display: flex;
   align-items: center;
@@ -3785,13 +3814,15 @@ button:disabled {
   background: var(--mold-bg);
 }
 
+/* A 64px grouped row, the density the rest of the phone already uses. It was
+   92px with a 68px thumbnail, so three results filled the screen. */
 .mobile-catalog-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  min-height: 92px;
+  min-height: 64px;
   align-items: center;
-  gap: 8px;
-  padding: 8px 9px;
+  gap: 10px;
+  padding: 9px 12px;
 }
 
 .mobile-catalog-card + .mobile-catalog-card {
@@ -3801,20 +3832,24 @@ button:disabled {
 .mobile-catalog-card-open {
   display: grid;
   min-width: 0;
-  min-height: 72px;
-  grid-template-columns: 68px minmax(0, 1fr);
+  min-height: 46px;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  gap: 11px;
   border: 0;
   padding: 0;
   background: transparent;
   text-align: left;
 }
 
+.mobile-catalog-card-chevron {
+  color: var(--mold-text-faint, var(--mold-text-dim));
+}
+
 .mobile-catalog-card-preview {
   display: grid;
-  width: 68px;
-  height: 68px;
+  width: 44px;
+  height: 44px;
   overflow: hidden;
   place-items: center;
   border-radius: var(--mold-radius-2);
@@ -3838,29 +3873,38 @@ button:disabled {
   min-width: 0;
 }
 
+/* The style's name is a plain word: sans, one line, at the row scale the
+   rest of the phone's grouped lists use. */
 .mobile-catalog-card-title {
-  display: -webkit-box;
   overflow: hidden;
   color: var(--mold-text);
-  font-size: var(--text-body);
-  font-weight: 700;
+  font-family: var(--font-body);
+  font-size: var(--text-body-lg);
   line-height: 1.25;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mobile-catalog-card-badges {
-  margin-top: 5px;
+  margin-top: 4px;
 }
 
-.mobile-catalog-card-meta,
-.mobile-catalog-card-size {
+/* What the style IS, in plain words. */
+.mobile-catalog-card-meta {
   overflow: hidden;
-  margin-top: 4px;
+  margin-top: 3px;
+  color: var(--mold-text-dim);
+  font-family: var(--font-body);
+  font-size: var(--text-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Its weight, in mono, beside the action that would fetch it. */
+.mobile-catalog-card-size {
   color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
