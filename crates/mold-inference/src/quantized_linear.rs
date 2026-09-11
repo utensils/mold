@@ -145,10 +145,24 @@ pub(crate) fn cuda_mmq_block_size(dtype: GgmlDType) -> Option<usize> {
 /// is spelled out because `false`/`off`/`no` are what a user reaching for a
 /// kill switch actually types.
 pub(crate) fn parse_qmatmul_flag(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
-        Some("1" | "true" | "on" | "yes")
-    )
+    parse_qmatmul_flag_with_default(value, false)
+}
+
+/// [`parse_qmatmul_flag`] for a family whose shipped default is the fast path.
+///
+/// FLUX.1 and FLUX.2 have rendered correctly through candle's MMQ kernels for
+/// as long as they have loaded GGUFs — which is a different evidential
+/// position from Qwen-Image's and Z-Image's (`docs/architecture/qwen-mmq-nan.md`),
+/// so their variable is a KILL SWITCH rather than an opt-in. The symmetry that
+/// matters is the failure mode: silence and an unparseable value both take the
+/// family default, so a typo degrades to the shipped path in either direction
+/// rather than to whichever arm the parser happened to name `false`.
+pub(crate) fn parse_qmatmul_flag_with_default(value: Option<&str>, default: bool) -> bool {
+    match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("1" | "true" | "on" | "yes") => true,
+        Some("0" | "false" | "off" | "no") => false,
+        _ => default,
+    }
 }
 
 /// Every shape-fixed half of the linear-arm decision, as a pure function.
@@ -574,6 +588,53 @@ mod tests {
                 assert!(qmatmul_forward_supported(device, 4, force));
             }
         }
+    }
+
+    /// The same parser with the family's own default, for a family whose
+    /// evidence points the other way. FLUX.1 and FLUX.2 have rendered
+    /// correctly through MMQ for as long as they have loaded GGUFs, so their
+    /// flag is a kill switch rather than an opt-in — and a typo must degrade
+    /// to the shipped path in BOTH directions, which is why an unparseable
+    /// value returns the default rather than `false`.
+    #[test]
+    fn parse_qmatmul_flag_with_default_reads_both_directions() {
+        for value in ["1", "true", "on", "yes", " TRUE "] {
+            assert!(
+                parse_qmatmul_flag_with_default(Some(value), false),
+                "{value}"
+            );
+            assert!(
+                parse_qmatmul_flag_with_default(Some(value), true),
+                "{value}"
+            );
+        }
+        for value in ["0", "false", "off", "no"] {
+            assert!(
+                !parse_qmatmul_flag_with_default(Some(value), true),
+                "{value} must be a kill switch even where the default is on"
+            );
+            assert!(
+                !parse_qmatmul_flag_with_default(Some(value), false),
+                "{value}"
+            );
+        }
+        // Silence and nonsense both take the family default.
+        for value in [None, Some(""), Some("garbage"), Some("  ")] {
+            assert!(parse_qmatmul_flag_with_default(value, true), "{value:?}");
+            assert!(!parse_qmatmul_flag_with_default(value, false), "{value:?}");
+        }
+        // The opt-in parser is exactly the default-off case.
+        for value in ["1", "0", "off", "garbage", ""] {
+            assert_eq!(
+                parse_qmatmul_flag(Some(value)),
+                parse_qmatmul_flag_with_default(Some(value), false),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            parse_qmatmul_flag(None),
+            parse_qmatmul_flag_with_default(None, false)
+        );
     }
 
     #[test]

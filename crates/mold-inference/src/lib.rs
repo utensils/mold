@@ -19,6 +19,8 @@ pub mod expand;
 mod factory;
 pub mod flux;
 pub mod flux2;
+/// Opt-in per-step non-finite diagnostics shared by both FLUX families.
+pub(crate) mod flux_debug;
 mod h3_factory;
 /// Hunyuan3D 2.0 image-to-3D shape generation (#1495).
 pub mod hunyuan3d;

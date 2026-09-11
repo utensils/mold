@@ -1626,6 +1626,8 @@ impl Flux2TransformerWrapper {
             // grid — both index `img`'s shape, and a reference-extended `pred`
             // would silently mis-shape them.
             let pred = pred.narrow(1, 0, img.dim(1)?)?;
+            // Off by default and a boolean when off; see `crate::flux_debug`.
+            crate::flux_debug::check_step_is_finite(&pred, "prediction", step)?;
             img = (img + &pred * (t_prev - t_curr))?;
 
             // Inpainting: blend preserved regions back at current noise level

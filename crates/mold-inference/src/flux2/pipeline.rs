@@ -153,6 +153,23 @@ fn flux2_offload_decision(
     Flux2OffloadDecision::Selected
 }
 
+/// The activation dtype a GGUF Flux.2 transformer is built and run at.
+///
+/// The GGUF path used to pin F32 on the premise that candle's quantized
+/// matmul is f32-only. It is not — `fast_mmq::try_fwd` takes BF16/F16/F32 and
+/// returns what it was fed (`candle-core/src/quantized/fast_mmq.rs:218-221`,
+/// `:349-358`) — but the permission is still narrow, and
+/// `crate::quantized_linear::gguf_activation_dtype` is the one place every
+/// GGUF family asks. `MOLD_WAN_FORCE_DMMV=1` withdraws it, because the
+/// fallback it selects reads activations as f32.
+fn gguf_activation_dtype(device: &Device, requested: DType) -> DType {
+    crate::quantized_linear::gguf_activation_dtype(
+        crate::quantized_linear::LinearDevice::of(device),
+        requested,
+        crate::quantized_dmmv::force_dmmv_enabled(),
+    )
+}
+
 fn validate_dev_lora_runtime(config: &Flux2Config, has_lora: bool) -> Result<()> {
     if config.hidden_size == 6144 && has_lora {
         bail!("FLUX.2 [dev] LoRA loading is not implemented")
@@ -593,7 +610,10 @@ impl Flux2Engine {
                 return Ok((
                     Flux2TransformerWrapper::Quantized(
                         super::quantized_transformer::QuantizedFlux2Transformer::new(
-                            cfg, gguf_vb, device,
+                            cfg,
+                            gguf_vb,
+                            device,
+                            gguf_activation_dtype(device, gpu_dtype),
                         )?,
                     ),
                     "Loading Flux.2 transformer (GPU, GGUF + LoRA)",
@@ -610,7 +630,10 @@ impl Flux2Engine {
             Ok((
                 Flux2TransformerWrapper::Quantized(
                     super::quantized_transformer::QuantizedFlux2Transformer::new(
-                        cfg, gguf_vb, device,
+                        cfg,
+                        gguf_vb,
+                        device,
+                        gguf_activation_dtype(device, gpu_dtype),
                     )?,
                 ),
                 "Loading Flux.2 transformer (GPU, GGUF)",

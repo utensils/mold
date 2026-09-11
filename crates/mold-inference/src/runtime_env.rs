@@ -31,6 +31,13 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_EAGER",
     "MOLD_FLUX_DELTA_CACHE",
     "MOLD_FLUX_KEEP_TRANSFORMER",
+    // Selects the Flux.2 GGUF quantized-linear arm on CUDA: candle's MMQ fast
+    // path (the shipped default — the algorithm stable-diffusion.cpp uses, and
+    // the one FLUX.1 has always rendered correctly through) or the per-forward
+    // dequant escape hatch. The arms differ in numerics, transient memory, and
+    // step latency, so a run on one must never share a fingerprint or a
+    // learned-timing bucket with the other.
+    "MOLD_FLUX2_QMATMUL",
     // #1174 follow-up: the reviewed MiniMax H3 Turbo LoRA tier is selected by
     // adapter path plus tier id until manifests own it. Both change which
     // adapter runs, which integrator consumes it, and the step count, so both
@@ -211,6 +218,9 @@ mod tests {
             "MOLD_RESERVE_VRAM_MB",
             "MOLD_WUERSTCHEN_DECODER_GUIDANCE",
             "MOLD_DEVICE",
+            // Selects the FLUX.2 GGUF linear arm; the two differ in numerics,
+            // transient memory and step latency.
+            "MOLD_FLUX2_QMATMUL",
         ] {
             assert!(
                 ENGINE_SHAPING_VARIABLES.contains(&required),
@@ -229,6 +239,10 @@ mod tests {
             // identity. It must never join the engine fingerprint.
             "MOLD_H3_CONDITIONER_CACHE",
             "MOLD_LTX2_DEBUG_TIMINGS",
+            // A per-step diagnostic read: it adds a device sync and a
+            // reduction, so it changes wall clock, but it cannot change a
+            // pixel. Wall clock alone is not execution identity.
+            "MOLD_FLUX_DEBUG_NONFINITE",
             "MOLD_QWEN_DEBUG",
             "MOLD_SD3_DEBUG",
             "MOLD_STEP_PREVIEW",

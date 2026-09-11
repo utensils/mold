@@ -358,6 +358,7 @@ pub enum RuntimeSemanticVariable {
     Eager,
     FluxDeltaCache,
     FluxKeepTransformer,
+    Flux2QMatMul,
     H3TurboAdapter,
     H3TurboTier,
     Hunyuan3dDecodeChunks,
@@ -828,6 +829,10 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_EAGER" => RuntimeSemanticVariable::Eager,
         "MOLD_FLUX_DELTA_CACHE" => RuntimeSemanticVariable::FluxDeltaCache,
         "MOLD_FLUX_KEEP_TRANSFORMER" => RuntimeSemanticVariable::FluxKeepTransformer,
+        // Swaps the Flux.2 GGUF linear arm (candle's MMQ fast path vs a
+        // per-forward dequant), which changes numerics, transient memory, and
+        // step latency — its own execution-equivalence and timing class.
+        "MOLD_FLUX2_QMATMUL" => RuntimeSemanticVariable::Flux2QMatMul,
         "MOLD_HUNYUAN3D_DECODE_CHUNKS" => RuntimeSemanticVariable::Hunyuan3dDecodeChunks,
         "MOLD_H3_TURBO_ADAPTER" => RuntimeSemanticVariable::H3TurboAdapter,
         "MOLD_H3_TURBO_TIER" => RuntimeSemanticVariable::H3TurboTier,

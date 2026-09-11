@@ -26,3 +26,16 @@
   pinned to F32, which halves the bandwidth every matmul moves; the weights
   stay quantized in VRAM exactly as before. `MOLD_WAN_FORCE_DMMV=1` still
   forces F32, because the fallback it selects reads activations as f32.
+- **Flux.2 GGUF renders in BF16 and no longer scrubs NaN after every linear.**
+  The GGUF transformer wrapped all eighteen of its linear sites in a full-tensor
+  NaN compare, a zeros allocation and a `where_cond` — copied from SD3 without a
+  Flux.2 NaN ever having been observed, and measured at about half a second per
+  step. It is gone, and masking a non-finite value was the wrong shape anyway: a
+  transformer emitting NaN has a bug, and zeroing the element turns a loud
+  failure into a quietly wrong picture. `MOLD_FLUX_DEBUG_NONFINITE=1` replaces
+  it with one check per denoise STEP that names the step and fails — off by
+  default, and available for FLUX.1 too. Activations now follow the working
+  dtype (BF16 on CUDA) instead of being cast to F32 at the transformer
+  boundary; position ids stay F32, because the rotary embedding is built from
+  them. `MOLD_FLUX2_QMATMUL=0` restores the per-forward dequantization arm if a
+  render comes out wrong.
