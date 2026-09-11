@@ -228,12 +228,17 @@ describe("LicenseSettingsPanel", () => {
   it("shows a licence link as a link without waiting for a hover that never comes", () => {
     // A finger has no hover. The underline was the only thing marking these as
     // links, so on the phone they read as plain blue text.
-    const source = readFileSync(join(import.meta.dirname, "LicenseSettingsPanel.vue"), "utf8");
-    const link = source.match(/\.license-settings__link\s*\{([^}]*)\}/)?.[1] ?? "";
+    const source = readFileSync(
+      join(import.meta.dirname, "LicenseSettingsPanel.vue"),
+      "utf8",
+    );
+    const link =
+      source.match(/\.license-settings__link\s*\{([^}]*)\}/)?.[1] ?? "";
     expect(link).toMatch(/text-decoration:\s*underline/);
     expect(link).not.toMatch(/text-decoration:\s*none/);
     // The hover state may still strengthen it, but only where hovering exists.
-    const hover = source.match(/@media \(hover: hover\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+    const hover =
+      source.match(/@media \(hover: hover\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
     expect(hover).toContain(".license-settings__link:hover");
   });
 });

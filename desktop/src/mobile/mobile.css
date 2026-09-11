@@ -237,12 +237,15 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   margin-left: auto;
 }
 
-.mobile-header-action--text {
+/* A text action sizes to its word; the square is for a glyph. Two classes so
+   this outranks the 44px square rule wherever the two land in the sheet. */
+.mobile-header-action.mobile-header-action--text {
   width: auto;
   min-width: 44px;
   padding: 0 4px;
   font-size: var(--text-body-lg);
   font-weight: 500;
+  white-space: nowrap;
 }
 
 /* The routing chip: a status dot and the machine's name, with the native
@@ -269,7 +272,7 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   background: var(--mold-bg-deep, var(--mold-bg));
 }
 
-.mobile-header-routing-chip .host-chip {
+.mobile-header-routing .host-chip {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -4005,7 +4008,7 @@ button:disabled {
    92px with a 68px thumbnail, so three results filled the screen. */
 .mobile-catalog-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   min-height: 64px;
   align-items: center;
   gap: 10px;
@@ -4020,7 +4023,7 @@ button:disabled {
   display: grid;
   min-width: 0;
   min-height: 46px;
-  grid-template-columns: 44px minmax(0, 1fr) auto;
+  grid-template-columns: 44px minmax(0, 1fr);
   align-items: center;
   gap: 11px;
   border: 0;
@@ -4052,12 +4055,25 @@ button:disabled {
   object-fit: cover;
 }
 
-.mobile-catalog-card-body,
 .mobile-catalog-card-title,
 .mobile-catalog-card-meta,
 .mobile-catalog-card-size {
   display: block;
   min-width: 0;
+}
+
+/* Two lines: the style's name, then everything about it on one wrapped row.
+   Stacked separately it made a 100px row out of four short phrases. */
+.mobile-catalog-card-body {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 8px;
+}
+
+.mobile-catalog-card-body > .mobile-catalog-card-title {
+  flex-basis: 100%;
 }
 
 /* The style's name is a plain word: sans, one line, at the row scale the
@@ -4073,13 +4089,12 @@ button:disabled {
 }
 
 .mobile-catalog-card-badges {
-  margin-top: 4px;
+  margin-top: 0;
 }
 
 /* What the style IS, in plain words. */
 .mobile-catalog-card-meta {
   overflow: hidden;
-  margin-top: 3px;
   color: var(--mold-text-dim);
   font-family: var(--font-body);
   font-size: var(--text-caption);
@@ -4099,7 +4114,6 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-top: 5px;
 }
 
 .mobile-catalog-host-labels > span {

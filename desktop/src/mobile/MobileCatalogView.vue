@@ -1261,10 +1261,10 @@ onBeforeUnmount(() => {
 <template>
   <section ref="catalogRoot" class="mobile-catalog" aria-labelledby="mobile-catalog-title">
     <header class="mobile-catalog-header">
-      <div>
-        <h1 id="mobile-catalog-title" class="section-title">Styles</h1>
-        <p class="section-note">Find a look for your next picture, clip, or 3-D object</p>
-      </div>
+      <!-- The screen's name is in the shell header; this says what it is for. -->
+      <p id="mobile-catalog-title" class="section-note">
+        Find a look for your next picture, clip, or 3-D object
+      </p>
     </header>
 
     <p
@@ -1484,7 +1484,6 @@ onBeforeUnmount(() => {
                 <span v-for="label in entry.hostLabels" :key="label">{{ label }}</span>
               </span>
             </span>
-            <span class="mobile-catalog-card-chevron" aria-hidden="true">›</span>
           </button>
           <span class="mobile-catalog-card-actions">
             <span v-if="entry.size_bytes != null" class="mobile-catalog-card-size">
@@ -1516,6 +1515,7 @@ onBeforeUnmount(() => {
               {{ pullButtonLabel(entry) }}
             </button>
           </span>
+          <span class="mobile-catalog-card-chevron" aria-hidden="true">›</span>
         </li>
       </ul>
 

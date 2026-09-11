@@ -118,8 +118,12 @@ describe("LiveActivityList swipe actions", () => {
     // A touch device never hovers, so the row's only press feedback was a
     // hover rule that could not fire — and on iOS a sticky :hover then left
     // the last-tapped row lit.
-    const source = readFileSync(join(import.meta.dirname, "LiveActivityList.vue"), "utf8");
-    const hover = source.match(/@media \(hover: hover\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+    const source = readFileSync(
+      join(import.meta.dirname, "LiveActivityList.vue"),
+      "utf8",
+    );
+    const hover =
+      source.match(/@media \(hover: hover\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
     expect(hover).toContain(".live-activity-surface:is(button):hover");
     expect(source).toMatch(/\.live-activity-surface:is\(button\):active\s*\{/);
   });
