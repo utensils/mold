@@ -23,6 +23,21 @@ const MARKER_FILE: &str = "generation.json";
 const WAL_FILE: &str = "mutation.wal";
 const STORAGE_VERSION: u32 = 2;
 
+/// The mutation kinds a single print's publication walks. These are the
+/// per-request hot path, and the only ones that may skip rolling the
+/// immediately-prior checkpoint; every other kind still rolls it.
+const PUBLICATION_KINDS: &[&str] = &[
+    "publish_batch",
+    "retirement_projection_complete",
+    "bind_retained_source_media",
+    "release_retained_source_media",
+];
+
+/// Roll `previous` at least this often even on the hot path, so a long run of
+/// publications still leaves a forensic trail.
+const PREVIOUS_CHECKPOINT_GENERATION_INTERVAL: u64 = 32;
+const PREVIOUS_CHECKPOINT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AuthoritySnapshot {
     version: u32,
@@ -118,6 +133,32 @@ fn wrap_snapshot(snapshot: AuthoritySnapshot) -> anyhow::Result<ChecksummedSnaps
     })
 }
 
+/// The checksummed envelope's bytes, and the payload digest inside them.
+///
+/// One serialization of the whole archive index answers four questions that
+/// used to cost one apiece: the marker's `snapshot_sha256`, and the WAL, the
+/// checkpoint and the backup file contents. `wrap_snapshot` + `atomic_write_json`
+/// serialized the index twice per file (once inside `digest_json`, once to
+/// the writer), so a commit paid nine serializations of a structure that grows
+/// with the gallery.
+///
+/// The envelope is assembled by hand rather than through `ChecksummedSnapshot`
+/// precisely so the digest describes the bytes that land — `validate_envelope`
+/// hashes `RawValue::get()`, i.e. the stored payload text — instead of a
+/// second serialization that merely ought to match.
+/// `the_prebuilt_envelope_matches_the_serde_one` pins the two together.
+fn serialize_envelope(snapshot: &AuthoritySnapshot) -> anyhow::Result<(Vec<u8>, String)> {
+    let payload = serde_json::to_vec(snapshot)?;
+    let digest = format!("{:x}", Sha256::digest(&payload));
+    let prefix =
+        format!(r#"{{"version":{STORAGE_VERSION},"payload_sha256":"{digest}","snapshot":"#);
+    let mut bytes = Vec::with_capacity(prefix.len() + payload.len() + 2);
+    bytes.extend_from_slice(prefix.as_bytes());
+    bytes.extend_from_slice(&payload);
+    bytes.extend_from_slice(b"}\n");
+    Ok((bytes, digest))
+}
+
 fn validate_envelope(
     envelope: RawChecksummedSnapshot,
     path: &Path,
@@ -149,7 +190,27 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
 }
 
 fn read_checkpoint_at(path: &Path) -> anyhow::Result<AuthoritySnapshot> {
+    #[cfg(test)]
+    CHECKPOINT_PARSE_COUNT.with(|count| count.set(count.get() + 1));
     validate_envelope(read_json(path)?, path)
+}
+
+// Full checkpoint parses (a serde pass plus a SHA-256 over the whole archive
+// index) this thread has performed since the last reset. Thread-local for the
+// reason `AUTHORITY_HASH_COUNT` is: the suite runs many tests in one process.
+#[cfg(test)]
+thread_local! {
+    static CHECKPOINT_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_checkpoint_parse_count() {
+    CHECKPOINT_PARSE_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn checkpoint_parse_count() -> usize {
+    CHECKPOINT_PARSE_COUNT.with(|count| count.get())
 }
 
 fn read_checkpoint(root: &Path) -> anyhow::Result<Option<AuthoritySnapshot>> {
@@ -226,6 +287,12 @@ fn sync_dir(path: &Path) -> anyhow::Result<()> {
 }
 
 fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    atomic_write_bytes(path, &bytes)
+}
+
+fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let parent = path.parent().context("authority path has no parent")?;
     fs::create_dir_all(parent)?;
     let temp = parent.join(format!(
@@ -240,8 +307,7 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()>
             .create_new(true)
             .write(true)
             .open(&temp)?;
-        serde_json::to_writer(&mut file, value)?;
-        file.write_all(b"\n")?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temp, path)?;
         sync_dir(parent)?;
@@ -253,37 +319,65 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()>
     result
 }
 
-fn write_checkpoint(root: &Path, snapshot: &AuthoritySnapshot) -> anyhow::Result<()> {
+/// Write the current checkpoint, optionally rolling the previous one.
+///
+/// `existing_generation` is the generation the caller already knows is on
+/// disk. Reading it back is a full parse plus a SHA-256 over the whole archive
+/// index, and a commit already knows the answer from the marker it verified;
+/// `None` means "the caller does not know", which is the cold recovery and
+/// initialization path where the read costs nothing that matters.
+fn write_checkpoint_envelope(
+    root: &Path,
+    generation: u64,
+    envelope: &[u8],
+    existing_generation: Option<u64>,
+    roll_previous: bool,
+) -> anyhow::Result<()> {
     let dir = authority_dir(root);
-    fs::create_dir_all(&dir)?;
-    sync_dir(
-        dir.parent()
-            .context("gallery authority directory has no parent")?,
-    )?;
-    sync_dir(&dir)?;
+    // The parent and the authority directory only need their own entries
+    // fsynced when this call is what created them. Once the directory exists,
+    // every write below already fsyncs it after its own rename.
+    if !dir.is_dir() {
+        fs::create_dir_all(&dir)?;
+        sync_dir(
+            dir.parent()
+                .context("gallery authority directory has no parent")?,
+        )?;
+        sync_dir(&dir)?;
+    }
     let current = checkpoint_path(root);
-    let previous = previous_checkpoint_path(root);
     if current.is_file() {
-        let existing = read_checkpoint_at(&current)
-            .or_else(|_| read_checkpoint_at(&backup_checkpoint_path(root)))?;
+        let existing = match existing_generation {
+            Some(generation) => generation,
+            None => {
+                read_checkpoint_at(&current)
+                    .or_else(|_| read_checkpoint_at(&backup_checkpoint_path(root)))?
+                    .generation
+            }
+        };
         ensure!(
-            existing.generation <= snapshot.generation,
-            "gallery authority checkpoint generation regressed from {} to {}",
-            existing.generation,
-            snapshot.generation
+            existing <= generation,
+            "gallery authority checkpoint generation regressed from {existing} to {generation}"
         );
-        if existing.generation < snapshot.generation {
-            atomic_write_json(&previous, &wrap_snapshot(existing)?)?;
+        if roll_previous && existing < generation {
+            // The bytes currently at `current` ARE the previous checkpoint;
+            // copying the file avoids re-serializing an index we no longer
+            // hold in that shape.
+            let bytes = fs::read(&current)?;
+            atomic_write_bytes(&previous_checkpoint_path(root), &bytes)?;
         }
     }
-    atomic_write_json(&current, &wrap_snapshot(snapshot.clone())?)
+    atomic_write_bytes(&current, envelope)
+}
+
+fn write_checkpoint(root: &Path, snapshot: &AuthoritySnapshot) -> anyhow::Result<()> {
+    let (envelope, _) = serialize_envelope(snapshot)?;
+    write_checkpoint_envelope(root, snapshot.generation, &envelope, None, true)
 }
 
 fn backup_checkpoint(root: &Path, snapshot: &AuthoritySnapshot) -> anyhow::Result<()> {
-    atomic_write_json(
-        &backup_checkpoint_path(root),
-        &wrap_snapshot(snapshot.clone())?,
-    )
+    let (envelope, _) = serialize_envelope(snapshot)?;
+    atomic_write_bytes(&backup_checkpoint_path(root), &envelope)
 }
 
 fn write_marker(root: &Path, marker: &MutationMarker) -> anyhow::Result<()> {
@@ -434,6 +528,15 @@ pub(crate) fn load_existing_read_only(
                 marker.committed_generation == snapshot.generation,
                 "gallery authority checkpoint generation does not match its stable marker"
             );
+            remember_authority_tail(
+                root,
+                AuthorityTail {
+                    generation: snapshot.generation,
+                    legacy_evidence_epochs: snapshot.legacy_evidence_epochs,
+                    previous_rolled_generation: snapshot.generation,
+                    previous_rolled_at: std::time::Instant::now(),
+                },
+            );
             Ok(Some(LoadedAuthority {
                 generation: snapshot.generation,
                 index: snapshot.index,
@@ -483,6 +586,15 @@ pub(crate) fn load_or_initialize(
             snapshot
         }
     };
+    remember_authority_tail(
+        root,
+        AuthorityTail {
+            generation: snapshot.generation,
+            legacy_evidence_epochs: snapshot.legacy_evidence_epochs.clone(),
+            previous_rolled_generation: snapshot.generation,
+            previous_rolled_at: std::time::Instant::now(),
+        },
+    );
     let (stats, changed) = validate_snapshot_files(root, &mut snapshot.index)?;
     if changed {
         let exact_names = snapshot
@@ -520,6 +632,80 @@ pub(crate) fn load_or_initialize(
     })
 }
 
+/// What a commit needs from the checkpoint it is superseding: the generation,
+/// and the legacy-evidence epochs it carries forward. Nothing else in a
+/// multi-megabyte snapshot is read.
+#[derive(Debug, Clone)]
+struct AuthorityTail {
+    generation: u64,
+    legacy_evidence_epochs: std::collections::BTreeMap<String, u64>,
+    previous_rolled_generation: u64,
+    previous_rolled_at: std::time::Instant,
+}
+
+/// The last tail this PROCESS wrote, per canonical gallery root.
+///
+/// Trusting it is safe only under the bookkeeping flock, and only when the
+/// on-disk marker still names the generation the cache does — see
+/// [`cached_commit_tail`]. The marker is a few dozen bytes; the checkpoint it
+/// stands in for grows with the gallery.
+fn authority_tail_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, AuthorityTail>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, AuthorityTail>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn remember_authority_tail(root: &Path, tail: AuthorityTail) {
+    authority_tail_cache()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(root.to_path_buf(), tail);
+}
+
+fn forget_authority_tail(root: &Path) {
+    authority_tail_cache()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(root);
+}
+
+/// The fast path into [`commit_snapshot`], and the whole of its validity
+/// argument.
+///
+/// The caller holds the gallery bookkeeping flock, so no other process can be
+/// mid-mutation. Three on-disk facts then say the cached tail still describes
+/// the checkpoint: the marker exists with no pending mutation, its committed
+/// generation is the one the caller expects AND the one this process last
+/// wrote, and there is no unresolved WAL. Any of those failing hands the
+/// commit back to the full `recover_storage` read, which is also what a cold
+/// process, a foreign writer, or a crash-interrupted mutation gets.
+fn cached_commit_tail(
+    root: &Path,
+    expected_generation: u64,
+) -> anyhow::Result<Option<AuthorityTail>> {
+    let cached = {
+        let cache = authority_tail_cache()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        cache.get(root).cloned()
+    };
+    let Some(cached) = cached.filter(|tail| tail.generation == expected_generation) else {
+        return Ok(None);
+    };
+    let Some(marker) = read_marker(root)? else {
+        return Ok(None);
+    };
+    if marker.pending.is_some() || marker.committed_generation != expected_generation {
+        return Ok(None);
+    }
+    if wal_path(root).try_exists()? {
+        return Ok(None);
+    }
+    Ok(Some(cached))
+}
+
 pub(crate) fn commit_snapshot(
     root: &Path,
     guard: &GalleryBookkeepingGuard,
@@ -530,7 +716,19 @@ pub(crate) fn commit_snapshot(
 ) -> anyhow::Result<u64> {
     guard.ensure_root(root)?;
     let root = guard.canonical_root();
-    let current = recover_storage(root)?.context("gallery authority checkpoint is missing")?;
+    let current = match cached_commit_tail(root, expected_generation)? {
+        Some(tail) => tail,
+        None => {
+            let snapshot =
+                recover_storage(root)?.context("gallery authority checkpoint is missing")?;
+            AuthorityTail {
+                generation: snapshot.generation,
+                legacy_evidence_epochs: snapshot.legacy_evidence_epochs,
+                previous_rolled_generation: snapshot.generation,
+                previous_rolled_at: std::time::Instant::now(),
+            }
+        }
+    };
     ensure!(
         current.generation == expected_generation,
         "gallery authority generation changed from {expected_generation} to {}",
@@ -539,7 +737,7 @@ pub(crate) fn commit_snapshot(
     let generation = expected_generation
         .checked_add(1)
         .context("gallery authority generation overflow")?;
-    let mut legacy_evidence_epochs = current.legacy_evidence_epochs;
+    let mut legacy_evidence_epochs = current.legacy_evidence_epochs.clone();
     let observed_legacy = crate::batch_transaction::legacy_gallery_evidence_paths(root)?;
     legacy_evidence_epochs.retain(|path, _| observed_legacy.contains(path));
     for path in &observed_legacy {
@@ -579,9 +777,24 @@ pub(crate) fn commit_snapshot(
         version: STORAGE_VERSION,
         generation,
         index: index.clone(),
-        legacy_evidence_epochs,
+        legacy_evidence_epochs: legacy_evidence_epochs.clone(),
     };
-    let snapshot_sha256 = digest_json(&snapshot)?;
+    // One serialization, one digest, three files written from the same bytes.
+    let (envelope, snapshot_sha256) = serialize_envelope(&snapshot)?;
+    // The immediately-prior checkpoint is forensic, not recovery authority:
+    // `recover_storage` refuses any checkpoint whose generation disagrees with
+    // the marker, so `previous` can never be what a recovery lands on. Rolling
+    // it costs a second full-index write on a per-print path, so the hot kinds
+    // roll it only periodically. Every other kind still rolls it, and the
+    // same-generation BACKUP below is written on every commit — that one IS
+    // recovery authority.
+    let roll_previous = !PUBLICATION_KINDS.contains(&kind)
+        || generation.saturating_sub(current.previous_rolled_generation)
+            >= PREVIOUS_CHECKPOINT_GENERATION_INTERVAL
+        || current.previous_rolled_at.elapsed() >= PREVIOUS_CHECKPOINT_MIN_INTERVAL;
+    // A failed commit must not leave this process believing a tail it did not
+    // write; the next attempt then takes the full recovery read.
+    forget_authority_tail(root);
     guard.ensure_root(root)?;
     write_marker(
         root,
@@ -597,9 +810,15 @@ pub(crate) fn commit_snapshot(
         },
     )?;
     guard.ensure_root(root)?;
-    atomic_write_json(&wal_path(root), &wrap_snapshot(snapshot.clone())?)?;
+    atomic_write_bytes(&wal_path(root), &envelope)?;
     guard.ensure_root(root)?;
-    write_checkpoint(root, &snapshot)?;
+    write_checkpoint_envelope(
+        root,
+        generation,
+        &envelope,
+        Some(expected_generation),
+        roll_previous,
+    )?;
     guard.ensure_root(root)?;
     write_marker(
         root,
@@ -612,8 +831,25 @@ pub(crate) fn commit_snapshot(
     guard.ensure_root(root)?;
     remove_wal(root)?;
     guard.ensure_root(root)?;
-    backup_checkpoint(root, &snapshot)?;
+    atomic_write_bytes(&backup_checkpoint_path(root), &envelope)?;
     crate::batch_transaction::remove_legacy_gallery_evidence(root, &collect_legacy)?;
+    remember_authority_tail(
+        root,
+        AuthorityTail {
+            generation,
+            legacy_evidence_epochs,
+            previous_rolled_generation: if roll_previous {
+                generation
+            } else {
+                current.previous_rolled_generation
+            },
+            previous_rolled_at: if roll_previous {
+                std::time::Instant::now()
+            } else {
+                current.previous_rolled_at
+            },
+        },
+    );
     Ok(generation)
 }
 
@@ -771,6 +1007,39 @@ mod tests {
             index: CommittedArchiveIndex::default(),
             legacy_evidence_epochs: Default::default(),
         }
+    }
+
+    /// Stand in for another process's checkpoint: writes the bytes with no
+    /// generation-regression check, so a test can move the authority in
+    /// either direction.
+    fn write_checkpoint_for_test(root: &Path, snapshot: &AuthoritySnapshot) {
+        let (envelope, _) = serialize_envelope(snapshot).unwrap();
+        fs::create_dir_all(authority_dir(root)).unwrap();
+        atomic_write_bytes(&checkpoint_path(root), &envelope).unwrap();
+        forget_authority_tail(&fs::canonicalize(root).unwrap());
+    }
+
+    #[test]
+    fn the_prebuilt_envelope_matches_the_serde_one() {
+        // `serialize_envelope` assembles the checksummed envelope by hand so
+        // the digest covers the payload bytes that actually land. If it ever
+        // drifts from `ChecksummedSnapshot`'s serde shape, every checkpoint
+        // this process writes becomes unreadable — so pin the two together.
+        let mut snapshot = empty_snapshot(11);
+        snapshot
+            .legacy_evidence_epochs
+            .insert("evidence/one.json".into(), 3);
+        snapshot.index.quarantined_names.insert("q.png".into());
+        let (bytes, digest) = serialize_envelope(&snapshot).unwrap();
+        let mut expected = serde_json::to_vec(&wrap_snapshot(snapshot.clone()).unwrap()).unwrap();
+        expected.push(b'\n');
+        assert_eq!(bytes, expected);
+        assert_eq!(digest, digest_json(&snapshot).unwrap());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("envelope.json");
+        atomic_write_bytes(&path, &bytes).unwrap();
+        assert_eq!(read_checkpoint_at(&path).unwrap().generation, 11);
     }
 
     #[test]
@@ -951,6 +1220,204 @@ mod tests {
             .unwrap(),
             2,
             "the current-generation backup must remain writable recovery authority"
+        );
+    }
+
+    #[test]
+    fn commit_does_not_reread_the_checkpoint() {
+        // Every commit used to re-read and re-verify the whole checkpoint —
+        // a parse plus a SHA-256 over the entire archive index — and then
+        // re-read it AGAIN inside `write_checkpoint` for the generation
+        // regression check. Under the bookkeeping flock, at the marker's own
+        // generation, the in-memory index IS the checkpoint.
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial =
+            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
+                .unwrap();
+        let mut index = initial.index;
+        let mut generation = initial.generation;
+        for step in 0..3_u64 {
+            index
+                .quarantined_names
+                .insert(format!("publication-{step}.png"));
+            reset_checkpoint_parse_count();
+            generation = commit_snapshot(
+                dir.path(),
+                &guard,
+                generation,
+                &mut index,
+                "publish_batch",
+                vec![format!("publication-{step}.png")],
+            )
+            .unwrap();
+            assert_eq!(
+                checkpoint_parse_count(),
+                0,
+                "a flock-guarded commit at the marker's generation parses no checkpoint"
+            );
+        }
+        assert_eq!(generation, initial.generation + 3);
+        // The bytes on disk are still the authority a cold process reads.
+        let reloaded = load_or_initialize(dir.path(), &guard, || unreachable!()).unwrap();
+        assert_eq!(reloaded.generation, generation);
+        for step in 0..3_u64 {
+            assert!(reloaded
+                .index
+                .quarantined_names
+                .contains(&format!("publication-{step}.png")));
+        }
+    }
+
+    #[test]
+    fn stale_marker_still_forces_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial =
+            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
+                .unwrap();
+        let mut index = initial.index;
+        let generation = commit_snapshot(
+            dir.path(),
+            &guard,
+            initial.generation,
+            &mut index,
+            "publish_batch",
+            Vec::new(),
+        )
+        .unwrap();
+
+        // Somebody else advanced the authority. The cached tail is now stale,
+        // and the commit must notice through the marker rather than writing
+        // over a generation it never read.
+        let mut ahead = empty_snapshot(generation + 5);
+        ahead.index = index.clone();
+        write_checkpoint_for_test(dir.path(), &ahead);
+        write_marker(
+            dir.path(),
+            &MutationMarker {
+                version: STORAGE_VERSION,
+                committed_generation: generation + 5,
+                pending: None,
+            },
+        )
+        .unwrap();
+        let error = commit_snapshot(
+            dir.path(),
+            &guard,
+            generation,
+            &mut index,
+            "publish_batch",
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("generation changed"),
+            "unexpected error: {error:#}"
+        );
+
+        // An unresolved WAL at the cached generation must also drop the fast
+        // path: rolling it forward is recovery's job, not a commit's.
+        write_marker(
+            dir.path(),
+            &MutationMarker {
+                version: STORAGE_VERSION,
+                committed_generation: generation,
+                pending: None,
+            },
+        )
+        .unwrap();
+        write_checkpoint_for_test(dir.path(), &{
+            let mut snapshot = empty_snapshot(generation);
+            snapshot.index = index.clone();
+            snapshot
+        });
+        let mut rolled = empty_snapshot(generation + 1);
+        rolled.index = index.clone();
+        rolled.index.quarantined_names.insert("from-wal.png".into());
+        atomic_write_json(&wal_path(dir.path()), &wrap_snapshot(rolled).unwrap()).unwrap();
+        reset_checkpoint_parse_count();
+        let mut committing = index.clone();
+        let error = commit_snapshot(
+            dir.path(),
+            &guard,
+            generation,
+            &mut committing,
+            "publish_batch",
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("generation changed"),
+            "an unresolved WAL must be recovered, not ignored: {error:#}"
+        );
+        assert!(
+            checkpoint_parse_count() > 0,
+            "an unresolved WAL forces the full recovery read"
+        );
+    }
+
+    #[test]
+    fn the_previous_checkpoint_is_periodic_and_the_backup_is_not() {
+        // The immediately-prior checkpoint is forensic: `recover_storage`
+        // refuses any checkpoint whose generation disagrees with the marker,
+        // so `previous` can never be the snapshot recovery lands on. Writing
+        // the whole index a third time on every publication for it is not
+        // worth a per-print fsync pair.
+        //
+        // The BACKUP is a different thing and stays per-commit: it is the
+        // same-generation copy `read_checkpoint` falls back to when `current`
+        // is unreadable, and `corrupt_current_checkpoint_falls_back_to_current_generation_backup`
+        // is an existing, deliberate durability guarantee.
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial =
+            load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
+                .unwrap();
+        let mut index = initial.index;
+        let mut generation = initial.generation;
+        for step in 0..4_u64 {
+            index.quarantined_names.insert(format!("hot-{step}.png"));
+            generation = commit_snapshot(
+                dir.path(),
+                &guard,
+                generation,
+                &mut index,
+                "publish_batch",
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                read_checkpoint_at(&backup_checkpoint_path(dir.path()))
+                    .unwrap()
+                    .generation,
+                generation,
+                "the backup tracks every publication"
+            );
+        }
+        assert_eq!(
+            read_checkpoint_at(&previous_checkpoint_path(dir.path()))
+                .unwrap()
+                .generation,
+            0,
+            "the previous checkpoint did not follow the hot path"
+        );
+
+        // A kind that is not on the per-request hot path still rolls it.
+        generation = commit_snapshot(
+            dir.path(),
+            &guard,
+            generation,
+            &mut index,
+            "startup_validation",
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_checkpoint_at(&previous_checkpoint_path(dir.path()))
+                .unwrap()
+                .generation,
+            generation - 1,
         );
     }
 

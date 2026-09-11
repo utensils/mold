@@ -1551,6 +1551,7 @@ mod tests {
             output_dir,
             &path,
             record,
+            None,
             &state.gallery_publication_gate,
             &authority,
         )

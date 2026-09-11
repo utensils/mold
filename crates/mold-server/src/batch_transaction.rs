@@ -1002,14 +1002,19 @@ impl Drop for GalleryNameReservation {
         }
         let reservations = reservations_dir(&self.output_dir);
         let transaction_root = self.output_dir.join(TRANSACTION_DIR);
-        let _ = sync_dir(&reservations);
         // Ordinary saves must not leave transaction bookkeeping in an
         // otherwise clean gallery. Both removals are non-recursive and
         // therefore harmless when another save or durable batch still owns
         // anything below these directories.
+        //
+        // Neither the release nor the tidy-up is fsynced — the same reason the
+        // reservation itself is not. These are the removal of a live token and
+        // of two empty bookkeeping directories; a crash that loses either
+        // leaves work the next save redoes, not a print that exists as bytes
+        // without a name. Both syncs were already `let _ =`, which says the
+        // same thing.
         let _ = fs::remove_dir(&reservations);
         let _ = fs::remove_dir(&transaction_root);
-        let _ = sync_dir(&self.output_dir);
     }
 }
 
@@ -5026,10 +5031,19 @@ pub(crate) fn find_completed_output_in_committed_archive(
 /// Persist one ordinary server publication into the same committed authority
 /// domain used by atomic batches. The public file must already be fsynced and
 /// remain hidden behind the gallery writer until this function succeeds.
+/// Archive one ordinary gallery publication.
+///
+/// `precomputed_sha256` is the digest of the bytes the caller just wrote to
+/// `final_path`. Passing it skips re-reading and re-hashing the whole file
+/// immediately after writing it — for a 1024² PNG that was a second full pass
+/// over megabytes already in this process's memory. `None` is for callers that
+/// did not produce the bytes (a durable chain linking a staged file, a
+/// framewise upscale) and still need them hashed.
 pub(crate) fn archive_ordinary_gallery_record(
     output_dir: &Path,
     final_path: &Path,
     mut record: GenerationRecord,
+    precomputed_sha256: Option<String>,
     gate: &GalleryPublicationGate,
     bookkeeping: &GalleryBookkeepingGuard,
 ) -> anyhow::Result<GenerationRecord> {
@@ -5059,11 +5073,18 @@ pub(crate) fn archive_ordinary_gallery_record(
             child_index: 0,
             staging_name: record.filename.clone(),
             final_name: record.filename.clone(),
-            checksum_sha256: Some(checksum_file(final_path)?),
+            checksum_sha256: Some(match precomputed_sha256 {
+                Some(digest) => digest,
+                None => checksum_ordinary_publication(final_path)?,
+            }),
             size_bytes: Some(size_bytes),
             record: record.clone(),
         }],
     };
+    // The one fence the ordering contract names: the final name is durable
+    // before the archive authority records it. Kept even though the ordinary
+    // write path already synced this directory — three of the four callers
+    // reach here by a link or a rename of their own.
     sync_dir(canonical_output_dir)?;
     gate.record_committed_manifest(canonical_output_dir, &manifest, bookkeeping)?;
     Ok(record)
@@ -5453,15 +5474,6 @@ fn reserve_final_name(
     desired: &str,
     owner: &ReservationOwner,
 ) -> anyhow::Result<String> {
-    reserve_final_name_with_directory_sync(output_dir, desired, owner, &sync_dir)
-}
-
-fn reserve_final_name_with_directory_sync(
-    output_dir: &Path,
-    desired: &str,
-    owner: &ReservationOwner,
-    sync_directory: &dyn Fn(&Path) -> anyhow::Result<()>,
-) -> anyhow::Result<String> {
     let path = Path::new(desired);
     let stem = path
         .file_stem()
@@ -5486,10 +5498,19 @@ fn reserve_final_name_with_directory_sync(
             .open(&reservation)
         {
             Ok(mut file) => {
-                let result = (|| {
+                // Deliberately not fsynced, neither the file nor its
+                // directory. A reservation is a live, flock-guarded
+                // mutual-exclusion token, not crash-recovery state: nothing
+                // reads reservation files at startup, name selection also
+                // rejects a candidate whose final name already exists, and
+                // publication is no-replace — so a reservation that did not
+                // survive a crash cannot produce a collision, while a stale
+                // one that did is pure garbage. `release_reservation` has
+                // always ignored its own directory sync's error for the same
+                // reason. Two fsyncs per print, bought nothing.
+                let result: anyhow::Result<()> = (|| {
                     file.write_all(&serde_json::to_vec(owner)?)?;
-                    file.sync_all()?;
-                    sync_directory(&reservations_dir(output_dir))
+                    Ok(())
                 })();
                 if let Err(error) = result {
                     drop(file);
@@ -5531,10 +5552,9 @@ fn release_reservation(
     Ok(())
 }
 
-pub(crate) fn reserve_gallery_final_name_with_directory_sync(
+pub(crate) fn reserve_gallery_final_name(
     output_dir: &Path,
     desired: &str,
-    sync_directory: &dyn Fn(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<GalleryNameReservation> {
     fs::create_dir_all(output_dir)?;
     let bookkeeping_lock = acquire_gallery_bookkeeping_lock(output_dir)?;
@@ -5543,8 +5563,7 @@ pub(crate) fn reserve_gallery_final_name_with_directory_sync(
         parent_id: format!("ordinary:{}", uuid::Uuid::new_v4()),
         attempt_generation: 0,
     };
-    let final_name =
-        reserve_final_name_with_directory_sync(output_dir, desired, &owner, sync_directory)?;
+    let final_name = reserve_final_name(output_dir, desired, &owner)?;
     Ok(GalleryNameReservation {
         output_dir: output_dir.to_path_buf(),
         final_name,
@@ -5795,6 +5814,31 @@ pub(crate) fn checksum_file_for_authority(path: &Path) -> anyhow::Result<String>
     #[cfg(test)]
     AUTHORITY_HASH_COUNT.with(|count| count.set(count.get() + 1));
     checksum_file(path)
+}
+
+/// The fallback re-hash inside `archive_ordinary_gallery_record`, counted
+/// separately from the authority's own validation hashes so a test can assert
+/// that a caller which already hashed its bytes pays nothing here.
+fn checksum_ordinary_publication(path: &Path) -> anyhow::Result<String> {
+    #[cfg(test)]
+    ORDINARY_PUBLICATION_HASH_COUNT.with(|count| count.set(count.get() + 1));
+    checksum_file(path)
+}
+
+#[cfg(test)]
+thread_local! {
+    static ORDINARY_PUBLICATION_HASH_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_ordinary_publication_hash_count() {
+    ORDINARY_PUBLICATION_HASH_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn ordinary_publication_hash_count() -> usize {
+    ORDINARY_PUBLICATION_HASH_COUNT.with(|count| count.get())
 }
 
 // Thread-local, not a process-wide atomic. `cargo test` runs this crate's
@@ -6137,12 +6181,7 @@ mod tests {
     fn ordinary_reservation_drop_cannot_remove_directory_during_batch_begin() {
         let dir = tempfile::tempdir().unwrap();
         let output_dir = StdArc::new(dir.path().to_path_buf());
-        let ordinary = reserve_gallery_final_name_with_directory_sync(
-            &output_dir,
-            "ordinary.png",
-            &|_| Ok(()),
-        )
-        .unwrap();
+        let ordinary = reserve_gallery_final_name(&output_dir, "ordinary.png").unwrap();
         let (directory_ready_tx, directory_ready_rx) = std::sync::mpsc::channel();
         let (continue_begin_tx, continue_begin_rx) = std::sync::mpsc::channel();
         let begin_output = StdArc::clone(&output_dir);
@@ -6190,9 +6229,7 @@ mod tests {
     #[test]
     fn ordinary_reservation_drop_cleans_an_otherwise_empty_gallery() {
         let dir = tempfile::tempdir().unwrap();
-        let reservation =
-            reserve_gallery_final_name_with_directory_sync(dir.path(), "ordinary.png", &|_| Ok(()))
-                .unwrap();
+        let reservation = reserve_gallery_final_name(dir.path(), "ordinary.png").unwrap();
         drop(reservation);
 
         assert!(
@@ -6794,12 +6831,7 @@ mod tests {
             std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
                 .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
         );
-        let reservation = reserve_gallery_final_name_with_directory_sync(
-            &output_dir,
-            "ordinary-process.png",
-            &|_| Ok(()),
-        )
-        .unwrap();
+        let reservation = reserve_gallery_final_name(&output_dir, "ordinary-process.png").unwrap();
         write_process_test_marker("READY");
         let mut input = std::io::BufReader::new(std::io::stdin());
         let mut command = String::new();
@@ -6833,9 +6865,7 @@ mod tests {
         );
         let desired = std::env::var("MOLD_TEST_GALLERY_NAME")
             .expect("MOLD_TEST_GALLERY_NAME must be set by parent test");
-        let reservation =
-            reserve_gallery_final_name_with_directory_sync(&output_dir, &desired, &|_| Ok(()))
-                .unwrap();
+        let reservation = reserve_gallery_final_name(&output_dir, &desired).unwrap();
         assert_eq!(reservation.final_name(), desired);
         write_process_test_marker("READY");
         let mut input = std::io::BufReader::new(std::io::stdin());
@@ -7427,9 +7457,7 @@ mod tests {
         let expected = std::env::var("MOLD_TEST_GALLERY_EXPECTED_NAME")
             .expect("MOLD_TEST_GALLERY_EXPECTED_NAME must be set by parent test");
         write_process_test_marker("RESERVATION_STARTED");
-        let reservation =
-            reserve_gallery_final_name_with_directory_sync(&output_dir, &desired, &|_| Ok(()))
-                .unwrap();
+        let reservation = reserve_gallery_final_name(&output_dir, &desired).unwrap();
         assert_eq!(reservation.final_name(), expected);
         write_process_test_marker("RESERVATION_ACQUIRED");
 
@@ -7554,8 +7582,7 @@ mod tests {
             b"ordinary publication"
         );
         assert!(!reservation_path(dir.path(), desired).exists());
-        let next = reserve_gallery_final_name_with_directory_sync(dir.path(), desired, &|_| Ok(()))
-            .unwrap();
+        let next = reserve_gallery_final_name(dir.path(), desired).unwrap();
         assert_eq!(next.final_name(), "live-publication-1.png");
         drop(next);
     }
@@ -7626,9 +7653,7 @@ mod tests {
             !reservation_path(dir.path(), desired).exists(),
             "recovery leaked the crashed writer's stale reservation"
         );
-        let replacement =
-            reserve_gallery_final_name_with_directory_sync(dir.path(), desired, &|_| Ok(()))
-                .unwrap();
+        let replacement = reserve_gallery_final_name(dir.path(), desired).unwrap();
         assert_eq!(replacement.final_name(), desired);
         drop(replacement);
         let transaction_entries = fs::read_dir(dir.path().join(TRANSACTION_DIR))
@@ -9583,32 +9608,39 @@ mod tests {
         );
     }
 
+    /// A reservation is a live, flock-guarded mutual-exclusion token, not
+    /// crash-recovery state: no startup path reads reservation files, name
+    /// selection also rejects a candidate whose final name already exists,
+    /// and publication is no-replace. So it no longer fsyncs its own file or
+    /// its directory — two fsyncs per print that bought nothing — and a
+    /// filesystem that cannot fsync a directory can no longer refuse it.
+    ///
+    /// What it still does is exclude: a name already reserved is skipped, and
+    /// the on-disk token is still the thing that says so.
     #[test]
-    fn durable_reservation_still_fails_closed_when_directory_sync_fails() {
+    fn a_reservation_excludes_without_paying_for_durability() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(reservations_dir(dir.path())).unwrap();
         let owner = ReservationOwner {
             parent_id: "parent".into(),
             attempt_generation: 0,
         };
-        let unsupported_sync = |_path: &Path| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "injected unsupported directory fsync",
-            )
-            .into())
-        };
 
-        let error = reserve_final_name_with_directory_sync(
-            dir.path(),
-            "strict.png",
-            &owner,
-            &unsupported_sync,
-        )
-        .unwrap_err();
+        crate::dir_sync::reset_recorded_directory_syncs();
+        let first = reserve_final_name(dir.path(), "strict.png", &owner).unwrap();
+        assert_eq!(first, "strict.png");
+        assert!(reservation_path(dir.path(), "strict.png").exists());
+        assert!(
+            crate::dir_sync::recorded_directory_syncs().is_empty(),
+            "reserving a name fsyncs no directory: {:?}",
+            crate::dir_sync::recorded_directory_syncs()
+        );
 
-        assert!(error.to_string().contains("unsupported directory fsync"));
-        assert!(!reservation_path(dir.path(), "strict.png").exists());
+        let second = reserve_final_name(dir.path(), "strict.png", &owner).unwrap();
+        assert_eq!(
+            second, "strict-1.png",
+            "an already-reserved name is still excluded"
+        );
     }
 
     #[test]

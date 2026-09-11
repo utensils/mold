@@ -29,13 +29,40 @@ use std::path::Path;
 /// replaced: every error propagates, and callers that want to tolerate a
 /// filesystem which cannot fsync a directory keep doing so through
 /// `batch_transaction::directory_sync_is_unsupported`.
-#[cfg(unix)]
 pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    RECORDED_SYNCS.with(|recorded| recorded.borrow_mut().push(path.to_path_buf()));
+    sync_directory_impl(path)
+}
+
+// Every directory fsync this process performed on this thread since the last
+// reset. A directory sync is the most expensive thing on the publication path
+// that is not the render, so the count is an assertable contract rather than
+// something to re-measure by hand. Thread-local for the same reason
+// `AUTHORITY_HASH_COUNT` is: the suite runs many tests in one process.
+#[cfg(test)]
+thread_local! {
+    static RECORDED_SYNCS: std::cell::RefCell<Vec<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_recorded_directory_syncs() {
+    RECORDED_SYNCS.with(|recorded| recorded.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn recorded_directory_syncs() -> Vec<std::path::PathBuf> {
+    RECORDED_SYNCS.with(|recorded| recorded.borrow().clone())
+}
+
+#[cfg(unix)]
+fn sync_directory_impl(path: &Path) -> std::io::Result<()> {
     std::fs::File::open(path)?.sync_all()
 }
 
 #[cfg(windows)]
-pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
+fn sync_directory_impl(path: &Path) -> std::io::Result<()> {
     match windows_flush_directory(path) {
         Ok(()) => Ok(()),
         // A directory flush is a durability *upgrade* on an artifact whose
@@ -107,7 +134,7 @@ fn windows_directory_flush_unavailable(error: &std::io::Error) -> bool {
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(crate) fn sync_directory(_path: &Path) -> std::io::Result<()> {
+fn sync_directory_impl(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

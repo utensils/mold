@@ -204,14 +204,18 @@ pub(crate) fn save_image_to_dir_with_suffix(
         suffix,
         title_slug.as_deref(),
     );
-    let (filename, path, reservation) =
-        match write_gallery_bytes_no_replace(dir, &filename, &img.data) {
-            Ok(saved) => saved,
-            Err(e) => {
-                tracing::warn!("failed to save image to {}: {e}", dir.display());
-                return None;
-            }
-        };
+    let PublishedGalleryBytes {
+        filename,
+        path,
+        sha256,
+        reservation,
+    } = match write_gallery_bytes_no_replace(dir, &filename, &img.data) {
+        Ok(saved) => saved,
+        Err(e) => {
+            tracing::warn!("failed to save image to {}: {e}", dir.display());
+            return None;
+        }
+    };
     tracing::info!("saved image to {}", path.display());
     let image_row = if let Some(meta) = metadata {
         let params = mold_db::persist::OutputRecordParams {
@@ -226,6 +230,7 @@ pub(crate) fn save_image_to_dir_with_suffix(
             dir,
             &path,
             record,
+            Some(sha256.clone()),
             gallery_gate,
             reservation.authority(),
         ) {
@@ -522,7 +527,12 @@ fn save_video_to_dir_with_sidecar(
             .and_then(mold_core::title_slug)
             .as_deref(),
     );
-    let (filename, path, reservation) = match write_gallery_bytes_no_replace(dir, &desired, bytes) {
+    let PublishedGalleryBytes {
+        filename,
+        path,
+        sha256,
+        reservation,
+    } = match write_gallery_bytes_no_replace(dir, &desired, bytes) {
         Ok(saved) => saved,
         Err(e) => {
             tracing::error!("failed to save video to {}: {e}", dir.display());
@@ -541,6 +551,7 @@ fn save_video_to_dir_with_sidecar(
         dir,
         &path,
         record,
+        Some(sha256),
         gallery_gate,
         reservation.authority(),
     ) {
@@ -803,6 +814,7 @@ pub(crate) fn save_video_to_dir_named(
             dir,
             &path,
             record,
+            None,
             gallery_gate,
             &authority,
         ) {
@@ -927,6 +939,7 @@ pub(crate) fn publish_video_path_to_dir_named(
             dir,
             &path,
             record,
+            None,
             gallery_gate,
             &authority,
         ) {
@@ -968,15 +981,24 @@ pub(crate) fn publish_video_path_to_dir_named(
     Ok(filename.to_string())
 }
 
+/// One published gallery file: its final name, its path, the digest of the
+/// bytes that landed, and the reservation that held the name.
+///
+/// The digest is computed WHILE the bytes are written. The archive step needs
+/// it, and re-reading a freshly written multi-megabyte PNG to hash it a second
+/// time was a full extra pass over data this process still had in memory.
+pub(crate) struct PublishedGalleryBytes {
+    pub(crate) filename: String,
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) sha256: String,
+    pub(crate) reservation: crate::batch_transaction::GalleryNameReservation,
+}
+
 fn write_gallery_bytes_no_replace(
     dir: &std::path::Path,
     desired: &str,
     bytes: &[u8],
-) -> anyhow::Result<(
-    String,
-    std::path::PathBuf,
-    crate::batch_transaction::GalleryNameReservation,
-)> {
+) -> anyhow::Result<PublishedGalleryBytes> {
     write_gallery_bytes_no_replace_with_directory_sync(
         dir,
         desired,
@@ -990,16 +1012,8 @@ fn write_gallery_bytes_no_replace_with_directory_sync(
     desired: &str,
     bytes: &[u8],
     sync_directory: &dyn Fn(&std::path::Path) -> anyhow::Result<()>,
-) -> anyhow::Result<(
-    String,
-    std::path::PathBuf,
-    crate::batch_transaction::GalleryNameReservation,
-)> {
-    let reservation = crate::batch_transaction::reserve_gallery_final_name_with_directory_sync(
-        dir,
-        desired,
-        sync_directory,
-    )?;
+) -> anyhow::Result<PublishedGalleryBytes> {
+    let reservation = crate::batch_transaction::reserve_gallery_final_name(dir, desired)?;
     let filename = reservation.final_name().to_owned();
     let path = dir.join(&filename);
     // Stage under `<final>.partial` and publish by rename. Writing the final
@@ -1026,7 +1040,16 @@ fn write_gallery_bytes_no_replace_with_directory_sync(
         return Err(error.into());
     }
     sync_directory(dir)?;
-    Ok((filename, path, reservation))
+    let sha256 = {
+        use sha2::Digest as _;
+        format!("{:x}", sha2::Sha256::digest(bytes))
+    };
+    Ok(PublishedGalleryBytes {
+        filename,
+        path,
+        sha256,
+        reservation,
+    })
 }
 
 /// Move staged bytes onto their final gallery name, atomically, without ever
@@ -5767,8 +5790,9 @@ mod tests {
         std::fs::create_dir_all(&reservations).unwrap();
         std::fs::write(reservations.join("same.png.reserve"), b"reserved").unwrap();
 
-        let (filename, path, _reservation) =
+        let published =
             write_gallery_bytes_no_replace(tmp.path(), "same.png", b"ordinary").unwrap();
+        let (filename, path) = (published.filename, published.path);
 
         assert_eq!(filename, "same-1.png");
         assert_eq!(std::fs::read(path).unwrap(), b"ordinary");
@@ -5817,7 +5841,12 @@ mod tests {
 
         let outcome = write_gallery_bytes_no_replace(tmp.path(), "ordinary.png", b"ours");
 
-        if let Ok((filename, _, _)) = outcome {
+        if let Ok(PublishedGalleryBytes {
+            filename,
+            reservation: _reservation,
+            ..
+        }) = outcome
+        {
             assert_ne!(
                 filename, "ordinary.png",
                 "a taken name must never be published over"
@@ -5872,7 +5901,12 @@ mod tests {
         let saved = write_gallery_bytes_no_replace(tmp.path(), "ordinary.png", b"generated output");
 
         let published = match saved {
-            Ok((filename, path, _reservation)) => {
+            Ok(PublishedGalleryBytes {
+                filename,
+                path,
+                reservation: _reservation,
+                ..
+            }) => {
                 assert_eq!(filename, "ordinary.png");
                 path
             }
@@ -5895,7 +5929,12 @@ mod tests {
         std::fs::write(tmp.path().join("taken.png"), b"someone else's").unwrap();
         let refused = write_gallery_bytes_no_replace(tmp.path(), "taken.png", b"ours");
         FORCE_PUBLISH_FALLBACK.store(false, Ordering::SeqCst);
-        if let Ok((filename, _, _)) = refused {
+        if let Ok(PublishedGalleryBytes {
+            filename,
+            reservation: _reservation,
+            ..
+        }) = refused
+        {
             assert_ne!(
                 filename, "taken.png",
                 "a taken name must not be published over"
@@ -5947,12 +5986,108 @@ mod tests {
         );
     }
 
+    /// A print's publication fences its bytes with directory fsyncs, and those
+    /// are the most expensive thing on the path that is not the render.
+    /// Exactly two are load-bearing on the gallery root: the one after the
+    /// staged file is renamed onto its final name, and the one that fences
+    /// that rename before the archive authority records it (the ordering
+    /// contract's "PNG fsync+rename -> authority" step).
+    ///
+    /// The reservation's own two fsyncs are NOT among them: no recovery path
+    /// reads a reservation file, name selection also checks whether the final
+    /// name exists, and the publish is no-replace, so a reservation that did
+    /// not survive a crash cannot produce a collision.
+    #[test]
+    fn ordinary_publication_performs_exactly_two_directory_syncs() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let mut img = fake_image();
+        img.data = b"generated output".to_vec();
+        let metadata =
+            OutputMetadata::from_generate_request(&fake_request("sdxl"), 42, None, "test-version");
+
+        crate::dir_sync::reset_recorded_directory_syncs();
+        let saved = save_image_to_dir_with_suffix(
+            &root,
+            &img,
+            "sdxl",
+            1,
+            None,
+            Some(&metadata),
+            None,
+            None,
+            None,
+            &gate,
+        );
+        assert!(saved.is_some(), "the print must publish");
+        let gallery_root_syncs = crate::dir_sync::recorded_directory_syncs()
+            .into_iter()
+            .filter(|path| path == &root)
+            .count();
+        assert_eq!(
+            gallery_root_syncs,
+            2,
+            "recorded syncs: {:?}",
+            crate::dir_sync::recorded_directory_syncs()
+        );
+    }
+
+    /// The bytes are hashed while they are written; archiving must use that
+    /// digest rather than reading the freshly written file back and hashing it
+    /// a second time. For a 1024^2 PNG that second pass was megabytes this
+    /// process still had in memory.
+    #[test]
+    fn archive_ordinary_gallery_record_uses_precomputed_digest() {
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let mut img = fake_image();
+        img.data = b"generated output".to_vec();
+        let metadata =
+            OutputMetadata::from_generate_request(&fake_request("sdxl"), 42, None, "test-version");
+
+        crate::batch_transaction::reset_ordinary_publication_hash_count();
+        let filename = save_image_to_dir_with_suffix(
+            &root,
+            &img,
+            "sdxl",
+            1,
+            None,
+            Some(&metadata),
+            None,
+            None,
+            None,
+            &gate,
+        )
+        .expect("the print must publish");
+        assert_eq!(
+            crate::batch_transaction::ordinary_publication_hash_count(),
+            0,
+            "a caller that hashed its own bytes must not make the archive read them back"
+        );
+
+        // And the digest that was recorded is the real one.
+        let expected = {
+            use sha2::Digest as _;
+            format!("{:x}", sha2::Sha256::digest(b"generated output"))
+        };
+        let authority = crate::batch_transaction::acquire_gallery_bookkeeping_lock(&root).unwrap();
+        let index = gate
+            .committed_archive_index_while_locked(&root, &authority)
+            .unwrap();
+        let entry = index.get(&filename).expect("the print is archived");
+        assert_eq!(entry.identity.checksum_sha256, expected);
+    }
+
     #[test]
     fn ordinary_gallery_save_leaves_no_staging_file_behind() {
         let tmp = TempDir::new().unwrap();
-        let (filename, path, _reservation) =
+        let published =
             write_gallery_bytes_no_replace(tmp.path(), "ordinary.png", b"generated output")
                 .unwrap();
+        let (filename, path) = (published.filename, published.path);
 
         assert_eq!(filename, "ordinary.png");
         assert_eq!(std::fs::read(path).unwrap(), b"generated output");
@@ -5975,20 +6110,22 @@ mod tests {
             )
         };
 
-        let (filename, path, _reservation) = write_gallery_bytes_no_replace_with_directory_sync(
+        let published = write_gallery_bytes_no_replace_with_directory_sync(
             tmp.path(),
             "ordinary.png",
             b"generated output",
             &unsupported_sync,
         )
         .unwrap();
+        let (filename, path) = (published.filename, published.path);
 
         assert_eq!(filename, "ordinary.png");
         assert_eq!(std::fs::read(path).unwrap(), b"generated output");
         assert_eq!(
             sync_attempts.load(Ordering::SeqCst),
-            2,
-            "reservation and gallery directories both use the explicit best-effort policy"
+            1,
+            "only the gallery directory is synced, through the explicit best-effort policy; \
+             the reservation is a live token and no longer fsyncs anything"
         );
     }
 
