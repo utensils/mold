@@ -199,30 +199,34 @@ a literal.
 
 ## Implementation map
 
-| Design concept                                                                                                                                  | Code                                                                                                                        |
-| ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Tokens: six complete theme maps + the theme-invariant set; a fenced legacy bridge keeps the `--desk/--bath/…` names alive for web and the phone | `ui/tokens.css` (single source, consumed by `web/` and `desktop/`)                                                          |
-| Shell metrics, control heights, semantic surfaces, `--mold-state-*` (desktop and web; the phone reads the fallbacks)                             | `ui/mold-desktop.css`                                                                                                       |
-| Theme contract (`ThemeId`, `THEME_FAMILY_META`, `toneChoice`, `migrateLegacyTheme`, `applyTheme`)                                               | `ui/theme.ts`, re-exported by `desktop/src/lib/theme.ts` and consumed by `web/src/lib/theme.ts`                             |
-| Desktop Tailwind layer (`bg-panel`, `text-fg-dim`, `rounded-control`, `text-micro`…)                                                            | `desktop/src/styles/tokens.css` + `base.css`; `tokens.legacy.test.ts` refuses the retired vocabulary                        |
-| Shared kit: shimmer, pulse, `.ms-toolbar-button`, `.ms-group-label`, `.ms-card-edge`, `.ms-lib-upscaled`                                        | `ui/kit.css`                                                                                                                |
-| Shared primitives (`SegmentedControl` `inline`, `SliderRow` `low`/`high`, `ModalPanel` header + `#description`, `DrawerPanel`)                  | `ui/components/` (Vue, token-var styled)                                                                                    |
-| Shell: unified toolbar · sidebar with the queue · status bar                                                                                    | `desktop/src/components/shell/{TitleBar,Sidebar,QueueRail,StatusBar}.vue`, `stores/hostStatus.ts`                           |
-| Views                                                                                                                                           | `desktop/src/views/{GenerateView,QueueView,LibraryView,ModelsView,MachinesView,HostDetailView,RunPodView,SettingsView}.vue` |
-| Queue: what a row is waiting on, and the only ETA source (`estimated_finish_unix_ms`)                                                           | `desktop/src/composables/useQueueRowContext.ts`, `lib/queueRows.ts`, `components/shell/QueueRowMenu.vue`                    |
-| New image: the inspector's groups (no style field — see the row below)                                                                          | `desktop/src/components/create/InspectorPanel.vue`, `lib/qualityPresets.ts`, `lib/meshDetailLadder.ts`                      |
+| Design concept                                                                                                                                     | Code                                                                                                                        |
+| -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Tokens: six complete theme maps + the theme-invariant set; a fenced legacy bridge keeps the `--desk/--bath/…` names alive for web and the phone    | `ui/tokens.css` (single source, consumed by `web/` and `desktop/`)                                                          |
+| Shell metrics, control heights, semantic surfaces, `--mold-state-*` (desktop and web; the phone reads the fallbacks)                               | `ui/mold-desktop.css`                                                                                                       |
+| Theme contract (`ThemeId`, `THEME_FAMILY_META`, `toneChoice`, `migrateLegacyTheme`, `applyTheme`)                                                  | `ui/theme.ts`, re-exported by `desktop/src/lib/theme.ts` and consumed by `web/src/lib/theme.ts`                             |
+| Desktop Tailwind layer (`bg-panel`, `text-fg-dim`, `rounded-control`, `text-micro`…)                                                               | `desktop/src/styles/tokens.css` + `base.css`; `tokens.legacy.test.ts` refuses the retired vocabulary                        |
+| Shared kit: shimmer, pulse, `.ms-toolbar-button`, `.ms-group-label`, `.ms-card-edge`, `.ms-lib-upscaled`                                           | `ui/kit.css`                                                                                                                |
+| Shared primitives (`SegmentedControl` `inline`, `SliderRow` `low`/`high`, `ModalPanel` header + `#description`, `DrawerPanel`)                     | `ui/components/` (Vue, token-var styled)                                                                                    |
+| Shell: unified toolbar · sidebar with the queue · status bar                                                                                       | `desktop/src/components/shell/{TitleBar,Sidebar,QueueRail,StatusBar}.vue`, `stores/hostStatus.ts`                           |
+| Views                                                                                                                                              | `desktop/src/views/{GenerateView,QueueView,LibraryView,ModelsView,MachinesView,HostDetailView,RunPodView,SettingsView}.vue` |
+| Queue: what a row is waiting on, and the only ETA source (`estimated_finish_unix_ms`)                                                              | `desktop/src/composables/useQueueRowContext.ts`, `lib/queueRows.ts`, `components/shell/QueueRowMenu.vue`                    |
+| New image: the inspector's groups (no style field — see the row below)                                                                             | `desktop/src/components/create/InspectorPanel.vue`, `lib/qualityPresets.ts`, `lib/meshDetailLadder.ts`                      |
 | The ONE style menu — family groups, plain name over mono `id · size · on GPU`, filter, ↑/↓, the not-here row, Browse more (shared by all surfaces) | `studio/components/StyleMenu.vue`, `studio/lib/{styleMenu,styleLabel,modelSource}.ts`                                       |
-| New image: the composer's Style chip and the popover it opens upward around that menu                                                           | `desktop/src/components/create/{StylePicker,ModelPicker}.vue`, `composables/useStylePicker.ts`                              |
-| Web Create: the Style card's chip and the teleported popover around that same menu                                                              | `web/src/components/create/CreateStylePicker.vue` (hosted by `ui/components/Popover.vue`)                                   |
-| New image: the Starters and Recent tabs beside Settings                                                                                         | `desktop/src/components/create/{inspectorTabs.ts,StarterList.vue,RecentPrints.vue}`                                         |
-| My images: scopes, the chip row, the trash banner, History as a column                                                                          | `desktop/src/components/library/{LibraryHeader,LibraryChipRow,CollectionsShelf,TrashBanner,BulkBar,HistoryDrawer}.vue`      |
-| Styles: the one column axis (`--model-row-columns`) and the pinned download banner                                                              | `desktop/src/components/models/{InstalledTab,ModelTableRow,CatalogTab,DownloadsTray}.vue`                                   |
+| New image: the composer's Style chip and the popover it opens upward around that menu                                                              | `desktop/src/components/create/{StylePicker,ModelPicker}.vue`, `composables/useStylePicker.ts`                              |
+| Web Create: the Style card's chip and the teleported popover around that same menu                                                                 | `web/src/components/create/CreateStylePicker.vue` (hosted by `ui/components/Popover.vue`)                                   |
+| Web Create: the composer's chip row (style, shape, Make) and the sticky dock                                                                       | `web/src/pages/CreatePage.vue`, `web/src/components/create/{ComposerCard,ShapeChip,MakeChip}.vue`                           |
+| Web Create: the 320px settings column — machine card, quality ladder, the two sliders, the disclosure rows — drawn once for both widths            | `web/src/components/create/{RailSurface,MachineCard,QualityLadder,ControlsAside,DisclosureList,DisclosureRow}.vue`          |
+| Web Create: the result's Download · Copy link · Make 4 variations bar, and the print address it copies                                             | `web/src/components/create/ResultCanvas.vue`, `web/src/lib/libraryLinks.ts`                                                 |
+| The Draft / Good / Best rungs, from the recipe's own recommended ladder                                                                            | `studio/lib/qualityPresets.ts` (shared by web's rail and desktop's inspector)                                               |
+| New image: the Starters and Recent tabs beside Settings                                                                                            | `desktop/src/components/create/{inspectorTabs.ts,StarterList.vue,RecentPrints.vue}`                                         |
+| My images: scopes, the chip row, the trash banner, History as a column                                                                             | `desktop/src/components/library/{LibraryHeader,LibraryChipRow,CollectionsShelf,TrashBanner,BulkBar,HistoryDrawer}.vue`      |
+| Styles: the one column axis (`--model-row-columns`) and the pinned download banner                                                                 | `desktop/src/components/models/{InstalledTab,ModelTableRow,CatalogTab,DownloadsTray}.vue`                                   |
 | Settings: the one schema, the jump-nav shell, the rows, controls, per-style disclosure and theme cards (web and desktop)                           | `studio/lib/settingsSchema.ts`, `studio/api/config.ts`, `studio/components/settings/`                                       |
 | Machines: the ONE plain sentence about a box (`4× L40S · CUDA · on your network at plato:7680`) and the status dot beside it                       | `studio/lib/{machineSentence,gpuFleetLabel,formatUptime}.ts`, `ui/components/StatusDot.vue`                                 |
-| Styles: the acquisition verb and the honest SIZE/FETCH total behind `Get it · 33.1 GB`                                                            | `studio/lib/catalogLabel.ts`, re-exported by `desktop/src/lib/catalog.ts`                                                   |
+| Styles: the acquisition verb and the honest SIZE/FETCH total behind `Get it · 33.1 GB`                                                             | `studio/lib/catalogLabel.ts`, re-exported by `desktop/src/lib/catalog.ts`                                                   |
 | The three kinds' words and partition, wherever a kind is chosen or filtered (composer toolbar, Styles chips, style menu sections)                  | `studio/lib/outputKind.ts`, shimmed by `{web,desktop}/src/composables/useCreateOutputKind.ts`                               |
-| Context menu: one row, root list and submenu alike                                                                                              | `desktop/src/components/shell/{ContextMenu,ContextMenuItem}.vue`, `stores/contextMenu.ts`                                   |
-| Fonts (one sans + one mono per theme, OFL)                                                                                                      | `ui/fonts/` (app-bundled; `fonts.legacy.css` carries only the Safelight pair for the embedded web bundle)                   |
+| Context menu: one row, root list and submenu alike                                                                                                 | `desktop/src/components/shell/{ContextMenu,ContextMenuItem}.vue`, `stores/contextMenu.ts`                                   |
+| Fonts (one sans + one mono per theme, OFL)                                                                                                         | `ui/fonts/` (app-bundled; `fonts.legacy.css` carries only the Safelight pair for the embedded web bundle)                   |
 
 Rules that gate any new UI: compose only from the shared kit, reference tokens
 (never hard-coded hex), keep the default path one screen, render overlays
@@ -259,6 +263,23 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
 - **Refresh stays in My images.** The primary bucket is SSE-live, but a
   connected remote's gallery is polled, so the toolbar keeps one explicit way to
   ask every machine again.
+
+- **Web New image has a quality ladder the desktop inspector shares, and one
+  sheet where the desktop has a column.** The web mock's settings column is a
+  bare Draft / Good / Best card; the rungs are not the mock's numbers but the
+  recipe's own `steps.recommended`, resolved by `studio/lib/qualityPresets.ts`,
+  because a client that invents passes advertises a quality the machine never
+  promised. A style that pins its passes offers no rows at all and the profile's
+  own note under Detail stays the whole explanation. Below 900px the mock puts
+  the settings column "behind the menu"; the app puts it behind one Settings
+  button on the machine row, which opens the SAME markup the wide column draws
+  (`RailSurface`) — a browser page has one scroll context, and authoring the
+  column twice is how the narrow board drifted from the wide one. A row inside
+  that sheet swaps its body rather than stacking a second sheet over it.
+- **Copy link is on the picture, not only in the header.** The web mock's URL
+  rule makes every view a link; a finished result is a view, so its action bar
+  copies `/library?print=…&printHost=…` — the address My images already opens.
+  The desktop app has nothing to copy and keeps its context menu instead.
 
 - **Web Settings is panes, not one scroll.** The desktop's fixed pane holds every
   section open on its own scroller with the nav as a scroll-spy; a browser page

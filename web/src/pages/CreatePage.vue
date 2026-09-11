@@ -37,8 +37,20 @@ import ReferenceCropModal from "@studio/components/ReferenceCropModal.vue";
 import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import MaskEditorModal from "../components/MaskEditorModal.vue";
 import GenerationTemplatesPanel from "../components/GenerationTemplatesPanel.vue";
+import { loadGenerationTemplates } from "../lib/generationTemplates";
 import ColdStartGuide from "../components/create/ColdStartGuide.vue";
 import RecentGrid from "../components/create/RecentGrid.vue";
+import ShapeChip from "../components/create/ShapeChip.vue";
+import MakeChip from "../components/create/MakeChip.vue";
+import QualityLadder from "../components/create/QualityLadder.vue";
+import MachineCard from "../components/create/MachineCard.vue";
+import DisclosureList from "../components/create/DisclosureList.vue";
+import DisclosureRow from "../components/create/DisclosureRow.vue";
+import HostRoutingPicker from "../components/create/HostRoutingPicker.vue";
+import RailSurface from "../components/create/RailSurface.vue";
+import LoraPicker from "../components/LoraPicker.vue";
+import SheetPanel from "@ui/components/SheetPanel.vue";
+import StatusDot from "@ui/components/StatusDot.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { defaultUpscaler } from "../components/create/advanced/upscalers";
 import { blobToBase64 } from "../lib/base64";
@@ -84,7 +96,8 @@ import {
   type SourceDimensions,
   type SourceResolutionResult,
 } from "@studio/lib/sourceResolution";
-import type { CanvasIntent } from "@studio/lib/outputShape";
+import { resolveOutputShape, type CanvasIntent } from "@studio/lib/outputShape";
+import { qualityPresets } from "@studio/lib/qualityPresets";
 import { copyableError, describeTransportError } from "@studio/lib/errors";
 import { normalizeCameraMotionLoraState } from "@studio/lib/cameraMotion";
 import {
@@ -160,6 +173,10 @@ import { useLiveActivity } from "../composables/useLiveActivity";
 import { useOpenLiveWork } from "../composables/useOpenLiveWork";
 import { useOverlayFocus } from "../composables/useOverlayFocus";
 import { ORIGIN_HOST_ID, listHosts } from "../lib/hostRegistry";
+import { libraryLink } from "../lib/libraryLinks";
+import { downloadFilename } from "../lib/libraryOrganization";
+import { copyTextToClipboard } from "@studio/lib/notificationClipboard";
+import { downloadVideoExport } from "@studio/lib/videoExport";
 
 import { fetchMergedGallery } from "../lib/multiHostGallery";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
@@ -181,6 +198,7 @@ import {
 } from "@studio/lib/sourceFit";
 import {
   conditioningForRequest,
+  referencesLockBatchSize,
   sourceMediaPlan,
 } from "@studio/lib/sourceMediaPlan";
 import type { DropTarget } from "@studio/lib/imageDropRouting";
@@ -371,19 +389,90 @@ function applyH3ReferenceCrop(crop: ReferenceCrop | null): void {
  * overwrite the opening frame the source well holds. */
 const showEndFramePicker = ref(false);
 const showMask = ref(false);
-const showAdvanced = ref(false);
-const showTemplates = ref(false);
-const templatesHost = ref<HTMLElement | null>(null);
+/*
+ * The rail's disclosures open over the page — the web mock's Modals rule
+ * ("modals are the third pane"). There is exactly ONE sheet host on the page;
+ * `railSheet` says which body it is showing. Below 900px the whole rail is one
+ * of those bodies (`"all"`), which is what replaced the inline phone stack and
+ * the second fixed Advanced host — two rail surfaces made the narrow page
+ * LONGER than the wide one.
+ */
+type RailSheet =
+  | "all"
+  | "shape"
+  | "source"
+  | "loras"
+  | "seed"
+  | "starters"
+  | "fileUnder"
+  | "advanced";
+const railSheet = ref<RailSheet | null>(null);
+/** Saved recipes, counted for the Starters row and refreshed when it opens. */
+const starterCount = ref(0);
+/** True while the open body was reached from the rail body, so it offers Back
+ * instead of only Close. */
+const railSheetFromAll = ref(false);
+const RAIL_SHEET_TITLE: Record<RailSheet, string> = {
+  all: "Settings",
+  shape: "Shape and size",
+  source: "Start from a photo",
+  loras: "Add-on looks",
+  seed: "Repeat this look",
+  starters: "Starters",
+  fileUnder: "File under",
+  advanced: "More settings",
+};
+const railSheetTitle = computed(() =>
+  railSheet.value ? RAIL_SHEET_TITLE[railSheet.value] : "",
+);
+function openRailSheet(key: RailSheet) {
+  railSheetFromAll.value = railSheet.value === "all";
+  railSheet.value = key;
+  if (key === "starters") starterCount.value = loadGenerationTemplates().length;
+}
+function closeRailSheet() {
+  railSheet.value = null;
+  railSheetFromAll.value = false;
+}
+function backToRail() {
+  railSheet.value = "all";
+  railSheetFromAll.value = false;
+}
+/* Every existing reveal (`showAdvanced.value = true` in `validateSubmit`, the
+ * Upscale flow) still says the same thing; the sheet is where it lands now. */
+const showAdvanced = computed<boolean>({
+  get: () => railSheet.value === "advanced",
+  set: (open) => {
+    if (open) openRailSheet("advanced");
+    else if (railSheet.value === "advanced") closeRailSheet();
+  },
+});
 const composerError = ref<string | null>(null);
 /** Inline validation for the print title field (`validatePrintTitle`). An
  * invalid title BLOCKS submit — `validateSubmit` re-checks the form value
  * (a restored draft can carry one without an input event) so Generate can
  * never fire while silently dropping the title (codex review). */
 const titleError = ref("");
+/** The last committed title, so Escape can put it back. A commit is Enter or
+ * a blur; every keystroke still validates so Generate is never blocked by a
+ * title the field is no longer showing. */
+let committedTitle = "";
 function onTitleInput(value: string) {
   form.state.value.title = value;
   const result = validatePrintTitle(value);
   titleError.value = result.ok ? "" : result.reason;
+}
+function commitTitle() {
+  if (!titleError.value) committedTitle = form.state.value.title ?? "";
+}
+function revertTitle(event: KeyboardEvent) {
+  onTitleInput(committedTitle);
+  (event.target as HTMLInputElement | null)?.blur();
+}
+
+/** The rail's Change link and the routing picker's own door. */
+function openMachines() {
+  void router.push("/machines");
 }
 
 // ── File under (Create-time Library organization) ─────────────────────
@@ -563,13 +652,6 @@ const submitStatus = computed(
 );
 
 function onTemplatesPointerDown(event: PointerEvent) {
-  if (
-    showTemplates.value &&
-    event.target instanceof Node &&
-    !templatesHost.value?.contains(event.target)
-  ) {
-    showTemplates.value = false;
-  }
   const target = event.target as HTMLElement | null;
   if (!target?.closest("[data-test='recent-context-menu']")) {
     closeRecentContextMenu();
@@ -577,10 +659,6 @@ function onTemplatesPointerDown(event: PointerEvent) {
 }
 
 function onTemplatesKeydown(event: KeyboardEvent) {
-  if (showTemplates.value && event.key === "Escape") {
-    event.preventDefault();
-    showTemplates.value = false;
-  }
   if (recentContextMenu.value && event.key === "Escape") {
     event.preventDefault();
     closeRecentContextMenu(true);
@@ -1237,6 +1315,34 @@ const promptConditioning = computed(() =>
  * conditioning decides the render (LTX-2, Wan, H3) or that reads no prompt at
  * all (Hunyuan3D) is never refused.
  */
+/**
+ * The recipe's own refusal of the conditioning this request carries — an end
+ * frame with no first frame, a text-only tier handed a still. The source wells
+ * live behind a disclosure now, so the rail states the refusal on the row
+ * rather than only inside the sheet nobody has opened; `validateSubmit` reads
+ * this same value, so the row and the submit gate cannot disagree.
+ */
+const sourceConditioningError = computed<string | null>(() =>
+  isMinimaxH3Identity(currentFamily.value, form.state.value.model)
+    ? null
+    : sourceImageValidationError({
+        capability: capabilities.value.sourceImageCapability,
+        hasSourceImage: form.state.value.imageAttachments.length > 0,
+        isExtend: submitsExtend({
+          family: currentFamily.value,
+          extendVideo: form.state.value.extendVideo,
+          extendVideoPath: form.state.value.extendVideoPath,
+        }),
+        hasEndFrame:
+          capabilities.value.supportsEndFrame &&
+          form.state.value.endFrame != null,
+        frames: capabilities.value.supportsVideo
+          ? form.state.value.frames
+          : null,
+        model: form.state.value.model,
+      }),
+);
+
 const promptBlocker = computed<string | null>(() =>
   promptRequired(promptConditioning.value) && !form.state.value.prompt.trim()
     ? "Add a prompt before generating."
@@ -1670,6 +1776,51 @@ watch(pendingGenerationHandoff(), applyGenerationHandoff, { immediate: true });
 
 const composerCardRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 
+/**
+ * Below 900px the composer is docked (fixed) at the bottom, so the page has to
+ * reserve exactly its height or the last row of Recent sits under it. The
+ * height is MEASURED rather than guessed: the prompt bed autogrows to eight
+ * lines and the chip row wraps.
+ */
+const dockedComposerHeight = ref(0);
+let composerResizeObserver: ResizeObserver | null = null;
+function composerElement(): HTMLElement | null {
+  const element = (composerCardRef.value as { $el?: unknown } | null)?.$el;
+  return element instanceof HTMLElement ? element : null;
+}
+function measureDockedComposer() {
+  dockedComposerHeight.value = isPhone.value
+    ? (composerElement()?.offsetHeight ?? 0)
+    : 0;
+}
+watch(
+  [isPhone, composerCardRef],
+  () => {
+    composerResizeObserver?.disconnect();
+    composerResizeObserver = null;
+    const element = composerElement();
+    if (!isPhone.value || !element) {
+      dockedComposerHeight.value = 0;
+      return;
+    }
+    measureDockedComposer();
+    if (typeof ResizeObserver === "function") {
+      composerResizeObserver = new ResizeObserver(measureDockedComposer);
+      composerResizeObserver.observe(element);
+    }
+  },
+  { flush: "post" },
+);
+onBeforeUnmount(() => {
+  composerResizeObserver?.disconnect();
+  composerResizeObserver = null;
+});
+const pageStyle = computed(() =>
+  dockedComposerHeight.value > 0
+    ? { paddingBottom: `${dockedComposerHeight.value}px` }
+    : undefined,
+);
+
 function onPromptAuthored(
   prompt: string,
   source: PromptAuthoringSource = "typed",
@@ -1801,6 +1952,136 @@ const advCount = computed(() =>
       : 0,
   }),
 );
+
+// ── The composer chip row and the rail (web mock, artboards 1 and 2) ──
+
+/**
+ * ONE `resolveOutputShape` result stands behind the shape chip, the rail's
+ * chips and pills, the badge and the status sentence — the output-shape
+ * invariant. The chip renders that object's own words and never computes a
+ * size of its own.
+ */
+const outputShape = computed(() =>
+  resolveOutputShape({
+    model: currentModel.value ?? null,
+    family: currentFamily.value,
+    pipeline: form.state.value.pipeline,
+    width: form.state.value.width,
+    height: form.state.value.height,
+    source: activeSourceDimensions.value ?? null,
+    intent: canvasIntent.value,
+  }),
+);
+/* The chip says the SHAPE, in the shape vocabulary the rail's chips use, and
+ * falls back to the resolver's own badge for a canvas no family claims. */
+const shapeChipLabel = computed(() => {
+  const shape = outputShape.value;
+  return (
+    shape.families.find((family) => family.id === shape.selectedFamilyId)
+      ?.label ?? shape.badge
+  );
+});
+const shapeChipSublabel = computed(() => {
+  const { width, height } = form.state.value;
+  if (!width || !height) return "";
+  return width === height ? String(width) : `${width}×${height}`;
+});
+
+/**
+ * The batch lock, asked once. `ControlsAside` used to own this question and
+ * the rail's stepper; the chip is the one control now, so the page reads the
+ * shared rule and hands it down.
+ */
+const batchLocked = computed(
+  () =>
+    capabilities.value.forcesBatchSizeOne ||
+    referencesLockBatchSize(capabilities.value.sourceImageMode, {
+      hasSource: Boolean(form.state.value.imageAttachments[0]?.base64),
+      referenceCount:
+        capabilities.value.sourceImageMode === "single-or-references" ||
+        capabilities.value.sourceImageMode === "single-and-references"
+          ? (form.state.value.referenceImages?.length ?? 0)
+          : form.state.value.imageAttachments.length,
+      lastWrite: form.state.value.exclusiveWell ?? null,
+    }),
+);
+
+/** Draft / Good / Best from the recipe's own ladder. No rows on a recipe that
+ * pins its steps — the profile's note under Detail is the explanation. */
+const qualityLadder = computed(() => qualityPresets(activeRecipe.value?.steps));
+function selectQuality(steps: number) {
+  form.state.value.steps = steps;
+}
+
+// ── The rail's machine card ───────────────────────────────────────────
+const machineHost = computed(() => {
+  const id = routing.targetId.value;
+  const pinned = routing.hosts.value.find((host) => host.id === id) ?? null;
+  return pinned ?? routing.hosts.value[0] ?? null;
+});
+const machineName = computed(() => machineHost.value?.label ?? "this server");
+const machineStatus = computed<
+  "ready" | "connecting" | "reconnecting" | "error"
+>(() => {
+  const host = machineHost.value;
+  if (!host) return "connecting";
+  if (host.status === "error") return "error";
+  if (host.status === "ready") return host.stale ? "reconnecting" : "ready";
+  return "connecting";
+});
+/** The browser's own sentence about the connection — the mock's Machine rule.
+ * A browser has no local GPU, so this is never "making images here". */
+const MACHINE_SENTENCE =
+  "This tab is talking to a machine on your network. Close the tab and it keeps working.";
+const machineQueueDepth = computed(() => machineHost.value?.queueDepth ?? null);
+
+// ── The rail's disclosure values ──────────────────────────────────────
+const sourceDisclosureValue = computed(() => {
+  const references = form.state.value.referenceImages?.length ?? 0;
+  if (references > 0)
+    return references === 1 ? "1 reference" : `${references} references`;
+  const photos =
+    form.state.value.imageAttachments.length +
+    (form.state.value.identityImage ? 1 : 0);
+  if (photos === 0) return "None";
+  return photos === 1 ? "1 photo" : `${photos} photos`;
+});
+const loraDisclosureValue = computed(() => {
+  const count = form.state.value.loras.length;
+  return count === 0 ? "None" : String(count);
+});
+const seedDisclosureValue = computed(() =>
+  form.state.value.seedMode === "random" ||
+  form.state.value.seed === null ||
+  form.state.value.seed === undefined
+    ? "Surprise me"
+    : `seed ${form.state.value.seed}`,
+);
+const fileUnderDisclosureValue = computed(() => {
+  const state = fileUnder.state.value;
+  const tags = state.manualTags.length;
+  const collection = state.picked?.name ?? null;
+  const parts = [
+    tags > 0 ? (tags === 1 ? "1 tag" : `${tags} tags`) : "",
+    collection ?? "",
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "None";
+});
+const advancedDisclosureValue = computed(() =>
+  advCount.value > 0 ? String(advCount.value) : "None",
+);
+
+/** The rail's Shape/Size group, reached from the composer's shape chip. On a
+ * phone the rail lives in the sheet, so the chip opens it there. */
+const shapeAnchor = ref<HTMLElement | null>(null);
+function openShapeGroup() {
+  if (isPhone.value) {
+    openRailSheet("all");
+  }
+  void nextTick(() => {
+    shapeAnchor.value?.scrollIntoView?.({ block: "nearest" });
+  });
+}
 
 // ── Canvas state ──────────────────────────────────────────────────────
 function percentFor(job: Job): number | null {
@@ -2013,6 +2294,80 @@ const resultCaption = computed(() => {
 
 function openLatestResult() {
   if (latestDone.value) openJob(latestDone.value);
+}
+
+// ── The result's action bar (web mock rule 1: every view is a link) ────
+
+/** The print's own filename, which is what Copy link and Download name. */
+const resultFilename = computed(() => {
+  const result = latestDone.value?.result;
+  if (!result) return "";
+  return result.filename ?? canvasPrintRow.value?.filename ?? "";
+});
+/** Copy link needs a filename to address — a print the host did not name has
+ * no Library row to open, so the action is not offered rather than copying a
+ * URL that resolves to nothing. */
+const canCopyLink = computed(() => resultFilename.value !== "");
+/**
+ * Make 4 variations means the picture on the canvas, made again as a batch.
+ * Only a finished STILL can be — a clip, a mesh and a sound have no batch —
+ * and a batch-locked recipe would promise four and make exactly one.
+ */
+const canMakeVariations = computed(() => {
+  const result = latestDone.value?.result;
+  if (!result || batchLocked.value) return false;
+  if (isMeshCompletion(result) || isAudioCompletion(result)) return false;
+  return !result.video_frames && result.format !== "mp4";
+});
+
+/** `/library?print=<filename>&printHost=<hostId>` — the shape the Library
+ * already honours and the Lightbox already copies. Never a second shape. */
+function printLink(): string | null {
+  const filename = resultFilename.value;
+  if (!filename) return null;
+  const hostId =
+    (canvasPrintRow.value as (GalleryImage & { hostId?: string }) | null)
+      ?.hostId ??
+    latestDone.value?.hostId ??
+    ORIGIN_HOST_ID;
+  const origin =
+    typeof window === "undefined" ? "http://localhost" : window.location.origin;
+  return libraryLink(origin, { print: filename, printHost: hostId });
+}
+
+async function copyResultLink(): Promise<void> {
+  const link = printLink();
+  if (!link) return;
+  if (await copyTextToClipboard(link)) toast("info", "Link copied.");
+  else toast("error", "Could not copy the link.");
+}
+
+/** Save the bytes already on the canvas; the gallery file is never renamed. */
+function downloadResult(): void {
+  const result = latestDone.value?.result;
+  if (!result?.image) return;
+  const binary = atob(result.image);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1)
+    bytes[index] = binary.charCodeAt(index);
+  const row = canvasPrintRow.value;
+  const name = row
+    ? downloadFilename(row)
+    : (result.filename ?? `mold-${result.seed_used}.${result.format}`);
+  downloadVideoExport(new Blob([bytes]), name);
+}
+
+/**
+ * One submission at batch four. The count rides THIS request only — the
+ * persisted `batchSize` is the user's own choice and is never rewritten by an
+ * action on a finished print.
+ */
+const VARIATION_BATCH = 4;
+const batchOverride = ref<number | null>(null);
+function makeVariations(): void {
+  if (!canMakeVariations.value) return;
+  batchOverride.value = VARIATION_BATCH;
+  void onSubmit();
 }
 
 /**
@@ -2391,27 +2746,7 @@ function validateSubmit(): boolean {
   // the missing one precisely. A continuation carries its own first frames in
   // the tail of the clip it continues, so it satisfies the contract exactly as
   // admission's `request_carries_source_frames` reads it (#783).
-  const conditioningError = isMinimaxH3Identity(
-    currentFamily.value,
-    form.state.value.model,
-  )
-    ? null
-    : sourceImageValidationError({
-        capability: capabilities.value.sourceImageCapability,
-        hasSourceImage: form.state.value.imageAttachments.length > 0,
-        isExtend: submitsExtend({
-          family: currentFamily.value,
-          extendVideo: form.state.value.extendVideo,
-          extendVideoPath: form.state.value.extendVideoPath,
-        }),
-        hasEndFrame:
-          capabilities.value.supportsEndFrame &&
-          form.state.value.endFrame != null,
-        frames: capabilities.value.supportsVideo
-          ? form.state.value.frames
-          : null,
-        model: form.state.value.model,
-      });
+  const conditioningError = sourceConditioningError.value;
   if (conditioningError) {
     composerError.value = conditioningError;
     showAdvanced.value = true;
@@ -2882,6 +3217,14 @@ function requestCopyCount(request: GenerateRequestWire): number {
   return Math.max(1, Math.floor(request.batch_size ?? 1));
 }
 
+/** Make 4 variations rides ONE submission. The persisted `batchSize` is the
+ * user's own choice and an action on a finished print never rewrites it. */
+function withBatchOverride(request: GenerateRequestWire): GenerateRequestWire {
+  return batchOverride.value === null
+    ? request
+    : { ...request, batch_size: batchOverride.value };
+}
+
 /** False when the machine refused the print — nothing was queued, so the
  * caller must keep the reviewed rewrite rather than clearing it. */
 function submitRequestCopies(
@@ -2947,6 +3290,7 @@ async function onSubmit(allowStaleQuick = false) {
       allowStaleQuick,
     );
   } finally {
+    batchOverride.value = null;
     if (attempt === submitAttempt) {
       submitController = null;
       submitInFlight.value = false;
@@ -3015,7 +3359,7 @@ async function onSubmitInner(
     }
     if (!isCurrent()) return;
   }
-  const currentRequest = form.toRequest(currentModel.value);
+  const currentRequest = withBatchOverride(form.toRequest(currentModel.value));
   if (h3Cropped) {
     currentRequest.references = minimaxH3ReferenceProjection(h3Cropped);
   }
@@ -3106,7 +3450,7 @@ async function onSubmitInner(
   );
   if (!isCurrent()) return;
   if (preparedSource === false) return;
-  let req = form.toRequest(currentModel.value);
+  let req = withBatchOverride(form.toRequest(currentModel.value));
   const finalizedCopies = requestCopyCount(req);
   if (quick) req.original_prompt = quick.originalPrompt;
   if (quick?.promptTransform) req.prompt_transform = quick.promptTransform;
@@ -4533,7 +4877,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div data-test="generate-shell" class="workspace-page create-page">
+  <div
+    data-test="generate-shell"
+    class="workspace-page create-page"
+    :style="pageStyle"
+  >
     <header class="create-header">
       <h1
         class="font-display text-2xl font-bold tracking-tight text-ink"
@@ -4549,6 +4897,32 @@ onBeforeUnmount(() => {
         data-test="web-output-kind"
         @update:model-value="output.selectKind"
       />
+      <!-- The print's name, inline beside the kind strip: click to edit, Enter
+           or blur commits, Escape reverts. It rides every request as `title`
+           and an invalid one blocks Generate (`validatePrintTitle`). -->
+      <label class="create-title" data-test="print-title-field">
+        <span class="sr-only">Print title</span>
+        <input
+          :value="form.state.value.title ?? ''"
+          type="text"
+          maxlength="160"
+          placeholder="Untitled print"
+          aria-label="Print title"
+          class="create-title__input"
+          data-test="print-title"
+          @input="onTitleInput(($event.target as HTMLInputElement).value)"
+          @blur="commitTitle"
+          @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
+          @keydown.escape="revertTitle"
+        />
+        <span
+          v-if="titleError"
+          class="create-title__error"
+          role="alert"
+          data-test="print-title-error"
+          >{{ titleError }}</span
+        >
+      </label>
       <p v-if="output.notice.value" role="status" class="text-sm text-ink-2">
         {{ output.notice.value }}
         <router-link
@@ -4566,9 +4940,11 @@ onBeforeUnmount(() => {
     </header>
     <div
       data-test="generate-workspace"
-      class="grid gap-6 min-[900px]:grid-cols-[minmax(0,1fr)_300px]"
+      class="grid gap-6 min-[900px]:grid-cols-[minmax(0,1fr)_320px]"
     >
-      <!-- Center: activity + composer + canvas + recent -->
+      <!-- Left column: activity, the picture, the sticky composer, then
+           everything that scrolls UNDER it. Nothing on this path may set an
+           `overflow` — a `sticky` child is inert inside one. -->
       <main class="flex min-w-0 flex-col gap-4">
         <ActivityStrip
           :jobs="localActivityJobs"
@@ -4615,6 +4991,9 @@ onBeforeUnmount(() => {
             :result-audio-src="resultAudioSrc"
             :result-mesh-src="resultMeshSrc"
             :result-caption="resultCaption"
+            :result-filename="resultFilename"
+            :can-copy-link="canCopyLink"
+            :can-make-variations="canMakeVariations"
             :error="latestErrorMessage"
             :error-copy="latestErrorCopy"
             :variations="variations"
@@ -4624,63 +5003,47 @@ onBeforeUnmount(() => {
             @use-variation="useVariation"
             @discard="discardVariations"
             @queue="queueVariations"
+            @download="downloadResult"
+            @copy-link="copyResultLink"
+            @make-variations="makeVariations"
             @context-menu="openCanvasContextMenu"
             @click="canvasMode === 'result' ? openLatestResult() : undefined"
           />
         </section>
 
-        <div class="flex items-center gap-2">
-          <!-- Print title (D5): a real field bound to the form, not a
-               constant. Rides every request as `title`; empty is untitled
-               (placeholder, never a literal). -->
-          <label
-            class="flex min-w-0 flex-1 items-center gap-2"
-            data-test="print-title-field"
+        <!-- Below 900px the rail leaves the page and the connection is stated
+             on one row instead, with the door to the one sheet that holds it. -->
+        <div
+          v-if="isPhone"
+          class="create-machine-row"
+          data-test="phone-machine-row"
+        >
+          <StatusDot
+            :state="
+              machineStatus === 'ready'
+                ? 'online'
+                : machineStatus === 'error'
+                  ? 'offline'
+                  : 'unknown'
+            "
+          />
+          <span class="create-machine-row__name">{{ machineName }}</span>
+          <span class="create-machine-row__meta"
+            >{{ form.state.value.steps }} passes</span
           >
-            <span class="sr-only">Print title</span>
-            <input
-              :value="form.state.value.title ?? ''"
-              type="text"
-              maxlength="160"
-              placeholder="Name (optional)"
-              aria-label="Print title"
-              class="w-full min-w-0 max-w-[28rem] rounded-control border border-transparent bg-transparent px-2 py-1 font-display text-[15px] font-semibold text-ink outline-none transition placeholder:font-medium placeholder:text-ink-3 hover:border-ce focus:border-safelight"
-              data-test="print-title"
-              @input="onTitleInput(($event.target as HTMLInputElement).value)"
-            />
-            <span
-              v-if="titleError"
-              class="shrink-0 text-[11px] text-stop"
-              role="alert"
-              data-test="print-title-error"
-              >{{ titleError }}</span
-            >
-          </label>
-          <div ref="templatesHost" class="relative">
-            <button
-              type="button"
-              class="flex items-center gap-1.5 rounded-control border border-ce px-3 py-1.5 text-xs text-ink-2 hover:bg-white/5"
-              data-test="templates-toggle"
-              @click="showTemplates = !showTemplates"
-            >
-              <Icon name="star" :size="14" />
-              Templates
-            </button>
-            <div
-              v-if="showTemplates"
-              class="absolute right-0 z-30 mt-2 w-80 rounded-card border border-edge bg-bench p-3 shadow-[var(--shadow-raised)]"
-              data-test="templates-popover"
-            >
-              <GenerationTemplatesPanel
-                v-model="form.state.value"
-                :models="models"
-              />
-            </div>
-          </div>
+          <button
+            type="button"
+            class="create-machine-row__settings"
+            data-test="phone-open-rail"
+            @click="openRailSheet('all')"
+          >
+            Settings
+          </button>
         </div>
 
         <ComposerCard
           ref="composerCardRef"
+          :class="isPhone ? 'composer--docked' : 'composer--sticky'"
           :prompt="form.state.value.prompt"
           :aspect-label="aspectLabel"
           :width="form.state.value.width"
@@ -4704,75 +5067,36 @@ onBeforeUnmount(() => {
           @remix="onRemix"
           @undo-expand="undoExpand"
         >
-          <template v-if="isPhone" #mobile-controls>
-            <div
-              class="mt-3 flex flex-col gap-3"
-              data-test="phone-create-controls"
-            >
-              <CreateStylePicker
-                :models="composerModels"
-                :model="form.state.value.model"
-                :missing-model="missingModelId"
-                :availability-tag="styleAvailabilityTag"
-                :browse-to="output.browseTo.value"
-                empty-label="No styles ready"
-                @select="selectModel"
-                @browse="browseStyles"
-              />
-              <ControlsAside
-                v-model="form.state.value"
-                :family="currentFamily"
-                :model="currentModel"
-                :routing-request="durationRoutingRequest"
-                :source-dimensions="activeSourceDimensions"
-                :canvas-intent="canvasIntent"
-                :adv-count="advCount"
-                :mobile="true"
-                :last-seed="lastSeedUsed"
-                @open-advanced="openAdvanced"
-                @reset-settings="onResetSettings"
-                @canvas-intent="setCanvasIntent"
-              >
-                <template v-if="fileUnder.available.value" #file-under>
-                  <FileUnderGroup
-                    v-model:state="fileUnder.state.value"
-                    :title="form.state.value.title"
-                    :auto-tag="autoTagTitle"
-                    :suggestions="fileUnder.suggestions.value"
-                    :collections="fileUnder.collections.value"
-                    :model="form.state.value.model"
-                    :ext="form.state.value.outputFormat"
-                    :timestamp="fileUnderStamp"
-                  />
-                </template>
-              </ControlsAside>
-              <SourceMediaPanel
-                v-model="form.state.value"
-                :family="currentFamily"
-                :models="models"
-                @open-picker="showPicker = true"
-                @open-target-picker="openTargetPicker"
-                @clear-source="onClearSource"
-                @open-end-frame-picker="showEndFramePicker = true"
-                @clear-end-frame="onClearEndFrame"
-                @open-mask="showMask = true"
-                @open-h3-first-frame-picker="
-                  h3BoundaryPickerTarget = 'firstFrame'
-                "
-                @open-h3-last-frame-picker="
-                  h3BoundaryPickerTarget = 'lastFrame'
-                "
-                @open-h3-reference-picker="h3ReferencePickerOpen = true"
-                @open-named-view-picker="namedViewPickerTarget = $event"
-                @open-reference-picker="showReferencePicker = true"
-                @crop-h3-reference="h3CropIndex = $event"
-              />
-              <IdentityPanel
-                v-model="form.state.value"
-                :models="models"
-                :notice="identityRestoreNotice"
-              />
-            </div>
+          <!-- The composer owns the Style chip on every width (desktop's
+               pattern): the style is what the picture is made with, so it
+               belongs beside the words, not in a settings column. -->
+          <template #style>
+            <CreateStylePicker
+              :models="composerModels"
+              :model="form.state.value.model"
+              :missing-model="missingModelId"
+              :availability-tag="styleAvailabilityTag"
+              :browse-to="output.browseTo.value"
+              empty-label="No styles ready"
+              @select="selectModel"
+              @browse="browseStyles"
+            />
+          </template>
+          <template #shape>
+            <ShapeChip
+              v-if="!outputShape.canvasless"
+              :label="shapeChipLabel"
+              :sublabel="shapeChipSublabel"
+              @open="openShapeGroup"
+            />
+          </template>
+          <template #count>
+            <MakeChip
+              :model-value="form.state.value.batchSize"
+              :locked="batchLocked"
+              locked-reason="one at a time"
+              @update:model-value="form.state.value.batchSize = $event"
+            />
           </template>
         </ComposerCard>
         <EstimateBadge
@@ -4897,12 +5221,16 @@ onBeforeUnmount(() => {
             <span class="font-display text-[15px] font-semibold text-rebate"
               >Recent</span
             >
-            <span class="font-mono text-[11px] text-ink-3"
-              >{{ galleryEntries.length }} prints</span
+            <router-link
+              to="/library"
+              class="font-mono text-[11px] text-ink-3 underline"
+              data-test="recent-see-all"
+              >See all in My images</router-link
             >
           </div>
           <RecentGrid
             :entries="galleryEntries"
+            :max-rows="2"
             :limit="isPhone ? 18 : 50"
             @open="openItem"
             @context-menu="openRecentContextMenu"
@@ -4910,34 +5238,207 @@ onBeforeUnmount(() => {
         </section>
       </main>
 
-      <!-- Primary controls stay visible. Extra settings disclose inline on
-           wide screens and use the same controls in a sheet below 900px. -->
-      <div v-if="!isPhone" class="flex min-w-0 flex-col gap-4">
-        <CreateStylePicker
-          :models="composerModels"
-          :model="form.state.value.model"
-          :missing-model="missingModelId"
-          :availability-tag="styleAvailabilityTag"
-          :browse-to="output.browseTo.value"
-          empty-label="No styles ready"
-          @select="selectModel"
-          @browse="browseStyles"
-        />
-        <ControlsAside
-          v-model="form.state.value"
-          :family="currentFamily"
-          :model="currentModel"
-          :routing-request="durationRoutingRequest"
-          :source-dimensions="activeSourceDimensions"
-          :canvas-intent="canvasIntent"
-          :adv-count="advCount"
-          :mobile="false"
-          :last-seed="lastSeedUsed"
-          @open-advanced="openAdvanced"
-          @reset-settings="onResetSettings"
-          @canvas-intent="setCanvasIntent"
+      <!-- The rail, 320px, authored ONCE. Machine first — a browser has no
+           local GPU, so which machine this tab is talking to is the first
+           thing it says. Below 900px the same markup is the one sheet. -->
+      <RailSurface
+        :sheet="isPhone"
+        :open="railSheet === 'all'"
+        title="Settings"
+        @close="closeRailSheet"
+      >
+        <MachineCard
+          :name="machineName"
+          :status="machineStatus"
+          :sentence="MACHINE_SENTENCE"
+          :queue="machineQueueDepth"
+          :multi-host="routing.multiHost.value"
         >
-          <template v-if="fileUnder.available.value" #file-under>
+          <template #picker>
+            <HostRoutingPicker
+              :hosts="routing.hosts.value"
+              :target-id="routing.targetId.value"
+              @select="routing.setTarget"
+              @open-machines="openMachines"
+            />
+          </template>
+        </MachineCard>
+
+        <QualityLadder
+          :presets="qualityLadder"
+          :steps="form.state.value.steps"
+          @select="selectQuality"
+        />
+
+        <div class="create-rail-head">
+          <span class="create-rail-head__kicker">Settings</span>
+          <button
+            type="button"
+            class="create-rail-head__reset"
+            data-test="controls-reset"
+            aria-label="Reset to the style's defaults"
+            title="Reset to the style's defaults"
+            @click="onResetSettings"
+          >
+            ↺ Reset
+          </button>
+        </div>
+        <div ref="shapeAnchor">
+          <ControlsAside
+            v-model="form.state.value"
+            :family="currentFamily"
+            :model="currentModel"
+            :routing-request="durationRoutingRequest"
+            :source-dimensions="activeSourceDimensions"
+            :canvas-intent="canvasIntent"
+            :adv-count="advCount"
+            :last-seed="lastSeedUsed"
+            @open-advanced="openAdvanced"
+            @reset-settings="onResetSettings"
+            @canvas-intent="setCanvasIntent"
+          />
+        </div>
+
+        <DisclosureList>
+          <DisclosureRow
+            label="Start from a photo"
+            note="Crop, mask or use a face — opens over the page"
+            :value="sourceDisclosureValue"
+            test-id="disclosure-source"
+            @open="openRailSheet('source')"
+          />
+          <p
+            v-if="sourceConditioningError"
+            class="create-disclosure-advisory"
+            role="alert"
+            data-test="disclosure-source-error"
+          >
+            {{ sourceConditioningError }}
+          </p>
+          <DisclosureRow
+            label="Add-on looks"
+            note="Stack extra styles on top of this one"
+            :value="loraDisclosureValue"
+            test-id="disclosure-loras"
+            @open="openRailSheet('loras')"
+          />
+          <DisclosureRow
+            label="Repeat this look"
+            note="Keep the number to get the same look again"
+            :value="seedDisclosureValue"
+            test-id="disclosure-seed"
+            @open="openRailSheet('seed')"
+          />
+          <DisclosureRow
+            label="Starters"
+            note="Saved recipes you can drop in"
+            :value="String(starterCount)"
+            test-id="disclosure-starters"
+            @open="openRailSheet('starters')"
+          />
+          <DisclosureRow
+            v-if="fileUnder.available.value"
+            label="File under"
+            note="Tags and a collection for this print"
+            :value="fileUnderDisclosureValue"
+            test-id="disclosure-file-under"
+            @open="openRailSheet('fileUnder')"
+          />
+          <DisclosureRow
+            label="More settings"
+            note="Everything else this style can do"
+            :value="advancedDisclosureValue"
+            test-id="disclosure-advanced"
+            @open="openRailSheet('advanced')"
+          />
+        </DisclosureList>
+      </RailSurface>
+    </div>
+
+    <!-- ONE sheet host for the whole page. `ui/` sheets are absolute-in-frame
+         by design, so a scrolling web page needs this fixed viewport host or
+         they render off-screen. `SheetPanel`'s full variant drops `#header`,
+         so the head row is rendered in the body. -->
+    <div
+      v-if="railSheet && railSheet !== 'all'"
+      class="fixed inset-0 z-40"
+      data-test="create-rail-sheet"
+    >
+      <SheetPanel :open="true" :title="railSheetTitle" @close="closeRailSheet">
+        <div class="rail-sheet">
+          <button
+            v-if="railSheetFromAll"
+            type="button"
+            class="rail-sheet__back"
+            data-test="rail-sheet-back"
+            @click="backToRail"
+          >
+            ← Settings
+          </button>
+
+          <!-- Source media in the primary form: the model dictates whether
+               (and how) it renders, exactly like resolutions. The identity
+               photo is media the user attaches, not a setting, so it sits
+               with the source wells; only its two knobs are Advanced. -->
+          <template v-if="railSheet === 'source'">
+            <SourceMediaPanel
+              v-model="form.state.value"
+              :family="currentFamily"
+              :models="models"
+              @open-picker="showPicker = true"
+              @open-target-picker="openTargetPicker"
+              @clear-source="onClearSource"
+              @open-end-frame-picker="showEndFramePicker = true"
+              @clear-end-frame="onClearEndFrame"
+              @open-mask="showMask = true"
+              @open-h3-first-frame-picker="
+                h3BoundaryPickerTarget = 'firstFrame'
+              "
+              @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
+              @open-h3-reference-picker="h3ReferencePickerOpen = true"
+              @open-named-view-picker="namedViewPickerTarget = $event"
+              @open-reference-picker="showReferencePicker = true"
+              @crop-h3-reference="h3CropIndex = $event"
+            />
+            <IdentityPanel
+              v-model="form.state.value"
+              :models="models"
+              :notice="identityRestoreNotice"
+            />
+          </template>
+
+          <template v-else-if="railSheet === 'loras'">
+            <LoraPicker
+              :family="currentFamily"
+              :model-value="form.state.value.loras"
+              @update:model-value="form.state.value.loras = $event"
+              @append-prompt="onAppendPromptPhrase"
+            />
+          </template>
+
+          <template v-else-if="railSheet === 'seed'">
+            <ControlsAside
+              v-model="form.state.value"
+              group="seed"
+              :family="currentFamily"
+              :model="currentModel"
+              :routing-request="durationRoutingRequest"
+              :source-dimensions="activeSourceDimensions"
+              :canvas-intent="canvasIntent"
+              :adv-count="advCount"
+              :last-seed="lastSeedUsed"
+              @canvas-intent="setCanvasIntent"
+            />
+          </template>
+
+          <template v-else-if="railSheet === 'starters'">
+            <GenerationTemplatesPanel
+              v-model="form.state.value"
+              :models="models"
+            />
+          </template>
+
+          <template v-else-if="railSheet === 'fileUnder'">
             <FileUnderGroup
               v-model:state="fileUnder.state.value"
               :title="form.state.value.title"
@@ -4949,93 +5450,48 @@ onBeforeUnmount(() => {
               :timestamp="fileUnderStamp"
             />
           </template>
-        </ControlsAside>
-        <!-- Source media in the primary form: the model dictates whether
-             (and how) it renders, exactly like resolutions. -->
-        <SourceMediaPanel
-          v-model="form.state.value"
-          :family="currentFamily"
-          :models="models"
-          @open-picker="showPicker = true"
-          @open-target-picker="openTargetPicker"
-          @clear-source="onClearSource"
-          @open-end-frame-picker="showEndFramePicker = true"
-          @clear-end-frame="onClearEndFrame"
-          @open-mask="showMask = true"
-          @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
-          @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
-          @open-h3-reference-picker="h3ReferencePickerOpen = true"
-          @open-named-view-picker="namedViewPickerTarget = $event"
-          @open-reference-picker="showReferencePicker = true"
-          @crop-h3-reference="h3CropIndex = $event"
-        />
-        <!-- The identity photo is media the user attaches, not a setting, so
-             it sits with the source wells; only its two knobs are Advanced. -->
-        <IdentityPanel
-          v-model="form.state.value"
-          :models="models"
-          :notice="identityRestoreNotice"
-        />
-        <details
-          class="create-more-settings"
-          :open="showAdvanced"
-          @toggle="showAdvanced = ($event.target as HTMLDetailsElement).open"
-        >
-          <summary>
-            More settings <span v-if="advCount">{{ advCount }}</span>
-          </summary>
-          <AdvancedDrawer
-            :mobile="false"
-            v-model="form.state.value"
-            :family="currentFamily"
-            :adv-count="advCount"
-            :placement-gpus="gpuListForPlacement"
-            :models="models"
-            :routing-request="durationRoutingRequest"
-            :can-extend="canExtend"
-            :extend-default-overlap-frames="extendDefaultOverlapFrames"
-            @open-picker="showPicker = true"
-            @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
-            @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
-            @clear-source="onClearSource"
-            @open-end-frame-picker="showEndFramePicker = true"
-            @clear-end-frame="onClearEndFrame"
-            @open-mask="showMask = true"
-            @append-prompt="onAppendPromptPhrase"
-            @canvas-intent="setCanvasIntent"
-          />
-        </details>
-      </div>
-    </div>
 
-    <!-- Phone: the same Advanced content in a viewport-fixed sheet host, so it
-         overlays the scrolling document rather than anchoring in the tall
-         controls column (SheetPanel is absolute-in-frame by design). -->
-    <div v-if="isPhone && showAdvanced" class="fixed inset-0 z-40">
-      <AdvancedDrawer
-        :open="true"
-        :mobile="true"
-        v-model="form.state.value"
-        :family="currentFamily"
-        :adv-count="advCount"
-        :placement-gpus="gpuListForPlacement"
-        :models="models"
-        :routing-request="durationRoutingRequest"
-        :can-extend="canExtend"
-        :extend-default-overlap-frames="extendDefaultOverlapFrames"
-        @close="showAdvanced = false"
-        @open-picker="showPicker = true"
-        @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
-        @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
-        @clear-source="onClearSource"
-        @open-end-frame-picker="showEndFramePicker = true"
-        @clear-end-frame="onClearEndFrame"
-        @open-mask="showMask = true"
-        @append-prompt="onAppendPromptPhrase"
-        @canvas-intent="setCanvasIntent"
-      />
+          <template v-else>
+            <!-- The mesh, clip and audio groups live under More settings now;
+                 the rail keeps only the sliders and the canvas. -->
+            <ControlsAside
+              v-model="form.state.value"
+              group="secondary"
+              :family="currentFamily"
+              :model="currentModel"
+              :routing-request="durationRoutingRequest"
+              :source-dimensions="activeSourceDimensions"
+              :canvas-intent="canvasIntent"
+              :adv-count="advCount"
+              :last-seed="lastSeedUsed"
+              @canvas-intent="setCanvasIntent"
+            />
+            <AdvancedDrawer
+              :mobile="false"
+              v-model="form.state.value"
+              :family="currentFamily"
+              :adv-count="advCount"
+              :placement-gpus="gpuListForPlacement"
+              :models="models"
+              :routing-request="durationRoutingRequest"
+              :can-extend="canExtend"
+              :extend-default-overlap-frames="extendDefaultOverlapFrames"
+              @open-picker="showPicker = true"
+              @open-h3-first-frame-picker="
+                h3BoundaryPickerTarget = 'firstFrame'
+              "
+              @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
+              @clear-source="onClearSource"
+              @open-end-frame-picker="showEndFramePicker = true"
+              @clear-end-frame="onClearEndFrame"
+              @open-mask="showMask = true"
+              @append-prompt="onAppendPromptPhrase"
+              @canvas-intent="setCanvasIntent"
+            />
+          </template>
+        </div>
+      </SheetPanel>
     </div>
-
     <ExpandModal
       :open="showExpand"
       :prompt="form.state.value.prompt"
@@ -5239,19 +5695,167 @@ onBeforeUnmount(() => {
 .create-header p {
   flex-basis: 100%;
 }
+/* `min-width: 0` only. An `overflow` here would make the composer's
+ * `position: sticky` silently inert — that is the whole rule of this page. */
 .create-result {
   min-width: 0;
 }
-.create-more-settings {
-  border-top: 1px solid var(--mold-border);
-  padding-top: 16px;
+
+.create-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 200px;
 }
-.create-more-settings summary {
+.create-title__input {
+  width: 100%;
+  min-width: 0;
+  max-width: 20rem;
+  border: 1px solid transparent;
+  border-radius: var(--mold-radius-2);
+  background: transparent;
+  color: var(--mold-text);
+  font-family: var(--mold-font-sans);
+  font-size: var(--mold-fs-base);
+  font-weight: 600;
+  padding: 4px 8px;
+  outline: none;
+}
+.create-title__input::placeholder {
+  color: var(--mold-text-dim);
+  font-weight: 500;
+}
+.create-title__input:hover {
+  border-color: var(--mold-border-control);
+}
+.create-title__input:focus {
+  border-color: var(--mold-blue);
+}
+.create-title__error {
+  flex: 0 0 auto;
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-error);
+}
+
+/*
+ * The mock's Scroll rule: one scroll context, and Generate never leaves the
+ * viewport. The sticky containing block is the left `<main>`, which the grid
+ * stretches to the taller column, so the composer rides the rail's full
+ * height too. Every ancestor on that path is free of `overflow`.
+ */
+.composer--sticky {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  background: var(--mold-surface);
+  box-shadow: 0 -10px 24px -14px rgb(0 0 0 / 55%);
+}
+
+/* Below 900px the settings column has left the page, so the composer docks. */
+.composer--docked {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  background: var(--mold-surface);
+}
+
+.create-machine-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-surface);
+}
+.create-machine-row__name {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.create-machine-row__meta {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-dim);
+}
+.create-machine-row__settings {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--mold-blue);
+  font-size: var(--mold-fs-xs);
   cursor: pointer;
-  padding: 8px 0;
-  font-size: 0.875rem;
-  color: var(--mold-text-2);
 }
+
+.create-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  padding: 0 2px;
+}
+.create-rail-head__kicker {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mold-text-dim);
+}
+.create-rail-head__reset {
+  border: 1px solid var(--mold-border-control);
+  background: transparent;
+  color: var(--mold-text-2);
+  padding: 4px 11px;
+  border-radius: 999px; /* literal: a pill is half its own height. */
+  font-size: var(--mold-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.create-rail-head__reset:hover {
+  border-color: var(--mold-blue);
+  color: var(--mold-text);
+}
+
+/* Every wrapper inside the sheet keeps `min-height: 0` so an inner height can
+ * never floor the flex column and hide the scrollbar. */
+.rail-sheet {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 12px;
+}
+.rail-sheet > * {
+  min-height: 0;
+}
+.create-disclosure-advisory {
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--mold-border);
+  font-size: var(--mold-fs-xs);
+  line-height: 1.4;
+  color: var(--mold-error);
+}
+
+.rail-sheet__back {
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  color: var(--mold-blue);
+  font-size: var(--mold-fs-xs);
+  padding: 0;
+  cursor: pointer;
+}
+
 @media (max-width: 899px) {
   .create-header :deep(.ms-seg) {
     flex-basis: 100%;
