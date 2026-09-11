@@ -1,11 +1,26 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from "vue";
-import BadgePill from "@ui/components/BadgePill.vue";
-import Icon from "@ui/components/Icon.vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import LiveActivityList from "@ui/components/LiveActivityList.vue";
 import type { FleetActiveWork } from "@studio/api/activity";
+import { queueSection } from "@studio/lib/queueSections";
 
-defineProps<{ rows: FleetActiveWork[] }>();
+const props = defineProps<{ rows: FleetActiveWork[] }>();
+
+/** The chip says what the queue says — "Making 1 · 3 waiting" — from the one
+ *  shared classifier, so the header and the Queue page cannot disagree. */
+const chipLabel = computed(() => {
+  let making = 0;
+  let waiting = 0;
+  for (const row of props.rows) {
+    const section = queueSection(row.phase, row.stale);
+    if (section === "waiting") waiting += 1;
+    else making += 1;
+  }
+  const parts: string[] = [];
+  if (making > 0) parts.push(`Making ${making}`);
+  if (waiting > 0) parts.push(`${waiting} waiting`);
+  return parts.join(" · ");
+});
 const emit = defineEmits<{ select: [row: FleetActiveWork] }>();
 
 const open = ref(false);
@@ -44,9 +59,8 @@ onBeforeUnmount(() => {
       aria-controls="now-developing-panel"
       @click="open = !open"
     >
-      <Icon name="create" :size="15" />
-      <span class="now-developing__label">Now developing</span>
-      <BadgePill tone="accent">{{ rows.length }}</BadgePill>
+      <span class="now-developing__dot" aria-hidden="true" />
+      <span class="now-developing__label">{{ chipLabel }}</span>
     </button>
     <section
       v-if="open"
@@ -80,11 +94,13 @@ onBeforeUnmount(() => {
   min-height: 36px;
   align-items: center;
   gap: 7px;
-  padding: 5px 9px;
-  border: 1px solid var(--edge);
+  padding: 5px 11px;
+  /* The mock's accent-bordered "Making 1 · 3 waiting" chip beside the
+     warning-bordered downloads chip: two kinds of work, two chips. */
+  border: 1px solid var(--mold-blue);
   border-radius: var(--radius-control);
   background: var(--surface);
-  color: var(--ink-2);
+  color: var(--rebate);
   font-family: var(--f-body);
   font-size: 12px;
   font-weight: 600;
@@ -94,6 +110,13 @@ onBeforeUnmount(() => {
 .now-developing__trigger[aria-expanded="true"] {
   border-color: color-mix(in srgb, var(--safelight) 36%, var(--edge));
   background: color-mix(in srgb, var(--safelight) 7%, var(--surface));
+}
+.now-developing__dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%; /* literal: a dot is the one circle allowed */
+  background: var(--mold-blue);
 }
 .now-developing__panel {
   position: absolute;
@@ -119,7 +142,7 @@ onBeforeUnmount(() => {
 }
 @media (max-width: 799px) {
   .now-developing__label {
-    display: none;
+    font-size: var(--mold-fs-micro);
   }
 }
 </style>

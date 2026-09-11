@@ -64,3 +64,32 @@ describe("NowDevelopingPopover", () => {
     wrapper.unmount();
   });
 });
+
+describe("the live-work chip's words", () => {
+  // The mock's header chip: "Making 1 · 3 waiting" — the queue's own words
+  // (Being made / Waiting), never a count with a noun nobody says.
+  it("says how many are being made and how many wait", () => {
+    const making = row();
+    const waiting = { ...row(), id: "job-2", key: "origin/job-2", phase: "queued" };
+    const alsoWaiting = { ...row(), id: "job-3", key: "origin/job-3", phase: "queued" };
+    const wrapper = mount(NowDevelopingPopover, {
+      props: { rows: [making, waiting, alsoWaiting] },
+      attachTo: document.body,
+    });
+    expect(wrapper.get("[data-test='now-developing-trigger']").text()).toBe(
+      "Making 1 · 2 waiting",
+    );
+    wrapper.unmount();
+  });
+
+  it("drops the half that is zero", () => {
+    const wrapper = mount(NowDevelopingPopover, {
+      props: { rows: [row()] },
+      attachTo: document.body,
+    });
+    expect(wrapper.get("[data-test='now-developing-trigger']").text()).toBe(
+      "Making 1",
+    );
+    wrapper.unmount();
+  });
+});
