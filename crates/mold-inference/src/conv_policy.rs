@@ -415,3 +415,67 @@ mod tests {
         });
     }
 }
+
+/// The number of convolutions candle has dispatched to cuDNN in this process.
+///
+/// A silent cuDNN failure degrades to im2col without an error, and a
+/// non-contiguous kernel takes candle's own path, so a resolved `Cudnn`
+/// backend is a request, never proof. This counter is the proof.
+pub fn cudnn_dispatch_count() -> u64 {
+    cudnn_policy::dispatch_count()
+}
+
+/// What a VAE decode actually ran on, derived from the dispatch counter.
+///
+/// `before` is the counter read before the decode; a delta of zero under a
+/// resolved `Cudnn` backend means every convolution fell back, which is a
+/// finding worth a log line rather than a quiet 4x slowdown.
+pub(crate) fn vae_decode_backend_report(
+    resolved: ConvBackend,
+    before: u64,
+    after: u64,
+) -> &'static str {
+    match (resolved, after.saturating_sub(before)) {
+        (ConvBackend::Cudnn, 0) => "cudnn requested, every convolution fell back to im2col",
+        (ConvBackend::Cudnn, _) => "cudnn",
+        (ConvBackend::Im2Col, 0) => "im2col",
+        (ConvBackend::Im2Col, _) => "im2col requested, cudnn dispatched (scope leaked?)",
+    }
+}
+
+/// Log which convolution backend a family's VAE decode ran on.
+pub fn report_vae_decode_backend(family: &str, before: u64) {
+    let after = cudnn_dispatch_count();
+    let resolved = resolve_for(policy_for_family(family));
+    tracing::info!(
+        family,
+        backend = vae_decode_backend_report(resolved, before, after),
+        cudnn_dispatches = after.saturating_sub(before),
+        "VAE decode convolution backend"
+    );
+}
+
+#[cfg(test)]
+mod vae_decode_report_tests {
+    use super::*;
+
+    #[test]
+    fn the_dispatch_delta_decides_what_the_decode_ran_on() {
+        assert_eq!(
+            vae_decode_backend_report(ConvBackend::Cudnn, 10, 10),
+            "cudnn requested, every convolution fell back to im2col"
+        );
+        assert_eq!(
+            vae_decode_backend_report(ConvBackend::Cudnn, 10, 74),
+            "cudnn"
+        );
+        assert_eq!(
+            vae_decode_backend_report(ConvBackend::Im2Col, 10, 10),
+            "im2col"
+        );
+        assert_eq!(
+            vae_decode_backend_report(ConvBackend::Im2Col, 10, 11),
+            "im2col requested, cudnn dispatched (scope leaked?)"
+        );
+    }
+}

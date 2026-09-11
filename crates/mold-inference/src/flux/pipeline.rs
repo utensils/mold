@@ -2508,6 +2508,7 @@ impl FluxEngine {
         // The scope restores the previous backend on drop, including on an
         // error return, so a failed decode cannot leave the next still on a
         // path that would move its bytes.
+        let cudnn_dispatches_before = crate::conv_policy::cudnn_dispatch_count();
         let _conv = crate::conv_policy::ConvScope::for_family("flux");
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
@@ -2520,6 +2521,7 @@ impl FluxEngine {
                 }
             },
         )?;
+        crate::conv_policy::report_vae_decode_backend("flux", cudnn_dispatches_before);
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
@@ -3428,6 +3430,7 @@ impl FluxEngine {
         let img_for_vae = img.to_dtype(loaded.vae_dtype)?;
         let vae = &loaded.vae;
         let device_for_sync = loaded.device.clone();
+        let cudnn_dispatches_before = crate::conv_policy::cudnn_dispatch_count();
         let _conv = crate::conv_policy::ConvScope::for_family("flux");
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
@@ -3440,6 +3443,7 @@ impl FluxEngine {
                 }
             },
         )?;
+        crate::conv_policy::report_vae_decode_backend("flux", cudnn_dispatches_before);
 
         // 9. Convert to u8 image: clamp to [-1, 1], map to [0, 255]
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;

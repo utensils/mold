@@ -1804,6 +1804,7 @@ impl Flux2Engine {
         let device_for_sync = device.clone();
         // See the FLUX.1 decode: the transformer is linear throughout, so the
         // VAE is where `ConvPolicy::FastStill` has anything to decide.
+        let cudnn_dispatches_before = crate::conv_policy::cudnn_dispatch_count();
         let _conv = crate::conv_policy::ConvScope::for_family("flux2");
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
@@ -1816,6 +1817,7 @@ impl Flux2Engine {
                 }
             },
         )?;
+        crate::conv_policy::report_vae_decode_backend("flux2", cudnn_dispatches_before);
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
@@ -2199,6 +2201,7 @@ impl Flux2Engine {
         let img_for_vae = img.to_dtype(loaded.vae_dtype)?;
         let vae = &loaded.vae;
         let device_for_sync = loaded.device.clone();
+        let cudnn_dispatches_before = crate::conv_policy::cudnn_dispatch_count();
         let _conv = crate::conv_policy::ConvScope::for_family("flux2");
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
@@ -2211,6 +2214,7 @@ impl Flux2Engine {
                 }
             },
         )?;
+        crate::conv_policy::report_vae_decode_backend("flux2", cudnn_dispatches_before);
 
         // 8. Convert to u8 image: clamp to [-1, 1], map to [0, 255]
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
