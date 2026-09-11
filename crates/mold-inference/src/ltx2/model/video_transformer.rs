@@ -459,6 +459,9 @@ impl LtxLinear {
                 crate::quantized_linear::QuantizedLinearKind::Dequant => {
                     crate::ltx2::gguf::LINEAR_KIND_DEQUANT
                 }
+                crate::quantized_linear::QuantizedLinearKind::Dense => {
+                    crate::ltx2::gguf::LINEAR_KIND_DENSE
+                }
             });
             return Ok(Self::Quantized {
                 inner: Arc::new(inner),

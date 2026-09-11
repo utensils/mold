@@ -1,9 +1,9 @@
 //! Per-variant PuLID injection coverage on a synthetic FLUX transformer.
 //!
-//! `FluxTransformer` has four arms and they reach their block loops through
-//! three different code paths: the candle fork's `forward_with_hook` for the
-//! dense and quantized upstream models, and mold's own loops in `offload.rs`
-//! and `quantized_transformer.rs`. The injection policy is shared — one
+//! `FluxTransformer` has three arms and they reach their block loops through
+//! two different code paths: the candle fork's `forward_with_hook` for the
+//! dense upstream model, and mold's own loops in `offload.rs` and
+//! `quantized_transformer.rs`. The injection policy is shared — one
 //! `PulidBlockHook` — but the plumbing is not, so each arm is exercised here
 //! against the same three claims:
 //!
@@ -29,7 +29,6 @@ use candle_core::quantized::GgmlDType;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{VarBuilder, VarMap};
 use candle_transformers::models::flux;
-use candle_transformers::quantized_var_builder;
 
 use crate::flux::pulid::{
     tests::{synthetic_adapter, synthetic_context, tiny_config},
@@ -90,7 +89,10 @@ pub(crate) fn shared_weights(cfg: &flux::model::Config) -> HashMap<String, Tenso
 /// exact dtype keeps the "bit-identical" claim about the injection rather than
 /// about rounding. It also sidesteps the 32-element block constraint the real
 /// quantized dtypes place on the last axis.
-fn gguf_weights(weights: &HashMap<String, Tensor>, path: &std::path::Path) -> Result<()> {
+pub(crate) fn gguf_weights(
+    weights: &HashMap<String, Tensor>,
+    path: &std::path::Path,
+) -> Result<()> {
     let quantized: Vec<(String, candle_core::quantized::QTensor)> = weights
         .iter()
         .map(|(name, tensor)| {
@@ -99,6 +101,43 @@ fn gguf_weights(weights: &HashMap<String, Tensor>, path: &std::path::Path) -> Re
                 GgmlDType::F32,
                 &Device::Cpu,
             )?;
+            Ok((name.clone(), q))
+        })
+        .collect::<Result<_>>()?;
+    let refs: Vec<(&str, &candle_core::quantized::QTensor)> = quantized
+        .iter()
+        .map(|(name, q)| (name.as_str(), q))
+        .collect();
+    let mut file = std::fs::File::create(path)?;
+    candle_core::quantized::gguf_file::write(&mut file, &[], &refs)?;
+    Ok(())
+}
+
+/// The same weights as a gguf whose tensors are stored the way a real FLUX
+/// GGUF stores them: every 2-D weight whose input width the Q8_0 block size
+/// divides is quantized, and everything else — the narrow stems, every bias,
+/// every norm scale — stays dense F16.
+///
+/// That mix is the whole point. `QTensor::dequantize` always answers F32
+/// (`candle-core/src/quantized/mod.rs:740-744`), so a transformer running at
+/// any other working dtype has to materialize the dense half itself; a
+/// fixture quantized uniformly would never exercise that.
+pub(crate) fn mixed_dtype_gguf_weights(
+    weights: &HashMap<String, Tensor>,
+    path: &std::path::Path,
+) -> Result<()> {
+    let quantized: Vec<(String, candle_core::quantized::QTensor)> = weights
+        .iter()
+        .map(|(name, tensor)| {
+            let dense = tensor.to_dtype(DType::F32)?.contiguous()?;
+            let dims = dense.dims();
+            let quantizable = dims.len() == 2 && dims[1].is_multiple_of(32);
+            let dtype = if quantizable {
+                GgmlDType::Q8_0
+            } else {
+                GgmlDType::F16
+            };
+            let q = mold_candle::quantized::quantize_onto(&dense, dtype, &Device::Cpu)?;
             Ok((name.clone(), q))
         })
         .collect::<Result<_>>()?;
@@ -229,7 +268,13 @@ fn denoise_inner(
         .expect("f32 output")
 }
 
-/// The four arms, all carrying the same weights.
+/// The three arms, all carrying the same weights.
+///
+/// There used to be a fourth: `FluxTransformer::Quantized`, the candle fork's
+/// own quantized model. It was deleted in the FLUX performance campaign
+/// because it had no attention-policy hook, and its equivalence with the arm
+/// that replaced it is pinned in `flux::quantized_transformer` rather than
+/// here.
 fn variants(
     cfg: &flux::model::Config,
     gguf: &std::path::Path,
@@ -240,12 +285,6 @@ fn variants(
     let dense_vb = VarBuilder::from_tensors(weights.clone(), DType::F32, &Device::Cpu);
     let bf16 = FluxTransformer::BF16(flux::model::Flux::new(cfg, dense_vb).expect("dense variant"));
 
-    let quantized_vb =
-        quantized_var_builder::VarBuilder::from_gguf(gguf, &Device::Cpu).expect("gguf var builder");
-    let quantized = FluxTransformer::Quantized(
-        flux::quantized_model::Flux::new(cfg, quantized_vb).expect("quantized variant"),
-    );
-
     let progress = ProgressReporter::default();
     // mold's bypass transformer takes mold-candle's own quantized VarBuilder,
     // not candle-transformers'.
@@ -253,7 +292,11 @@ fn variants(
         .expect("gguf var builder");
     let bypass = FluxTransformer::QuantizedBypass(
         crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
-            cfg, bypass_vb, None, &progress,
+            cfg,
+            bypass_vb,
+            None,
+            &progress,
+            DType::F32,
         )
         .expect("bypass variant"),
     );
@@ -276,7 +319,6 @@ fn variants(
 
     vec![
         ("BF16", bf16),
-        ("Quantized", quantized),
         ("QuantizedBypass", bypass),
         ("Offloaded", offloaded),
     ]
@@ -539,10 +581,10 @@ fn cfg_start_step_is_measured_against_the_untruncated_schedule() {
     }
 }
 
-/// The four arms agree numerically, which is what makes the per-variant
-/// bit-identity claims above claims about one model rather than four.
+/// The three arms agree numerically, which is what makes the per-variant
+/// bit-identity claims above claims about one model rather than three.
 #[test]
-fn the_four_variants_are_the_same_model() {
+fn the_three_variants_are_the_same_model() {
     let cfg = tiny_flux_config();
     let dir = tempfile::tempdir().expect("tempdir");
     let gguf = dir.path().join("tiny-flux.gguf");
@@ -658,7 +700,7 @@ fn every_variant_is_bit_identical_when_true_cfg_is_not_engaged() {
 /// `neg + scale * (pos - neg)` — `PuLID/flux/sampling.py:149`.
 ///
 /// Checked on the dense arm alone because the formula is variant-independent;
-/// what the four arms differ in is the forward pass, which the test above
+/// what the three arms differ in is the forward pass, which the test above
 /// covers. A scale of 1 must reproduce the conditional prediction and a scale
 /// of 0 the negative one, which is what pins the direction of the lerp: the
 /// two are trivially swappable and swapping them renders the negative prompt.

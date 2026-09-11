@@ -92,6 +92,50 @@ fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool, transformer_is_fp8: boo
     }
 }
 
+/// The activation dtype a GGUF FLUX transformer is built and run at.
+///
+/// `flux_runtime_dtype` already answers BF16 on CUDA for a quantized model;
+/// what this adds is the kernel-side veto. `MOLD_WAN_FORCE_DMMV=1` is a
+/// process switch mold itself flips and never clears, and it routes every
+/// CUDA quantized matmul into `dequantize_matmul`, which reads the activation
+/// as f32 — so a BF16 transformer built while it is set would fail on its
+/// first linear. Metal and CPU answer F32 for the reasons in
+/// `crate::quantized_linear::gguf_activation_dtype`, which is the one rule
+/// every GGUF family reads.
+fn gguf_transformer_dtype(device: &Device, requested: DType) -> DType {
+    crate::quantized_linear::gguf_activation_dtype(
+        crate::quantized_linear::LinearDevice::of(device),
+        requested,
+        crate::quantized_dmmv::force_dmmv_enabled(),
+    )
+}
+
+/// Build the GGUF FLUX transformer — the ONE place a `.gguf` becomes a
+/// `FluxTransformer`, whether or not a LoRA is stacked on it.
+///
+/// Before the FLUX performance campaign a no-LoRA GGUF took
+/// `flux::quantized_model::Flux` from the candle fork instead. That model has
+/// no attention-policy hook — `flux/model.rs:64-76` is unchunked F32 math —
+/// so the common case could not reach FlashAttention however the artifact was
+/// built, and its F32 `LayerNorm` weights pinned the whole render to F32
+/// activations. The two were verified bit-identical before the arm was
+/// deleted (`f32_bypass_forward_matches_the_upstream_quantized_model`).
+fn build_gguf_transformer(
+    flux_cfg: &flux::model::Config,
+    vb: mold_candle::quantized::VarBuilder,
+    registry: Option<&crate::flux::lora_bypass::LoraRegistry>,
+    progress: &ProgressReporter,
+    device: &Device,
+    requested_dtype: DType,
+) -> Result<FluxTransformer> {
+    let dtype = gguf_transformer_dtype(device, requested_dtype);
+    Ok(FluxTransformer::QuantizedBypass(
+        crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
+            flux_cfg, vb, registry, progress, dtype,
+        )?,
+    ))
+}
+
 /// Path for the Q8 GGUF cache of an FP8 safetensors file.
 /// Cache key: stem + file size + FNV-1a hash of 4KB sampled from the weight
 /// data region (past the JSON header). This avoids collisions between
@@ -1460,13 +1504,13 @@ impl FluxEngine {
         );
 
         let flux_model = if is_quantized {
-            let vb = crate::weight_loader::load_transformers_gguf_var_builder(
+            let vb = crate::weight_loader::load_gguf_var_builder(
                 &transformer_path,
                 &device,
                 "FLUX transformer (GGUF)",
                 &self.base.progress,
             )?;
-            FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+            build_gguf_transformer(&flux_cfg, vb, None, &self.base.progress, &device, gpu_dtype)?
         } else {
             let flux_vb = flux_transformer_var_builder(flux_safetensors_var_builder(
                 &transformer_path,
@@ -2126,19 +2170,19 @@ impl FluxEngine {
                     &self.base.progress,
                 )?;
                 let vb = crate::weight_loader::load_gguf_var_builder(
-                    &transformer_path,
-                    &device,
-                    "FLUX transformer (GGUF)",
+                &transformer_path,
+                &device,
+                "FLUX transformer (GGUF)",
+                &self.base.progress,
+            )?;
+                build_gguf_transformer(
+                    &flux_cfg,
+                    vb,
+                    registry.as_ref(),
                     &self.base.progress,
-                )?;
-                FluxTransformer::QuantizedBypass(
-                    crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
-                        &flux_cfg,
-                        vb,
-                        registry.as_ref(),
-                        &self.base.progress,
-                    )?,
-                )
+                    &device,
+                    gpu_dtype,
+                )?
             } else {
                 // Legacy fallback: dequantize LoRA-affected layers, keep rest quantized.
                 let vb = flux_gguf_lora_var_builder(
@@ -2148,23 +2192,23 @@ impl FluxEngine {
                     &self.base.progress,
                     self.lora_delta_cache_handle(),
                 )?;
-                FluxTransformer::QuantizedBypass(
-                    crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
-                        &flux_cfg,
-                        vb,
-                        None,
-                        &self.base.progress,
-                    )?,
-                )
+                build_gguf_transformer(
+                    &flux_cfg,
+                    vb,
+                    None,
+                    &self.base.progress,
+                    &device,
+                    gpu_dtype,
+                )?
             }
         } else if is_quantized {
-            let vb = crate::weight_loader::load_transformers_gguf_var_builder(
+            let vb = crate::weight_loader::load_gguf_var_builder(
                 &transformer_path,
                 &device,
                 "FLUX transformer (GGUF)",
                 &self.base.progress,
             )?;
-            FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+            build_gguf_transformer(&flux_cfg, vb, None, &self.base.progress, &device, gpu_dtype)?
         } else if has_lora {
             // LoRA without offload (GPU has enough VRAM for full model)
             let flux_vb = flux_lora_var_builder(
@@ -2193,8 +2237,17 @@ impl FluxEngine {
             self.base.progress.info(&status);
         }
 
-        // Generate noise and build state
-        let noise_dtype = if is_quantized { DType::F32 } else { gpu_dtype };
+        // Generate noise and build state.
+        //
+        // The GGUF path used to pin this to F32 on the premise that candle's
+        // quantized matmul is f32-only. It is not: `fast_mmq::try_fwd` takes
+        // BF16/F16/F32 and returns what it was fed
+        // (`candle-core/src/quantized/fast_mmq.rs:218-221`, `:349-358`), and
+        // the transformer is now built at the dtype its activations will
+        // arrive in. The latent's dtype is also what the position ids and the
+        // RoPE tables take (`flux/sampling.rs:25,43,47`, `model.rs:92`), which
+        // is exactly what the dense BF16 arm has always done.
+        let noise_dtype = gguf_transformer_dtype(&device, gpu_dtype);
         let latent_h = height / 16 * 2;
         let latent_w = width / 16 * 2;
         // Pre-compute timestep schedule (needed before mixing for img2img).
@@ -2322,15 +2375,13 @@ impl FluxEngine {
         // path (which returns GPU tensors) costs nothing here.
         let t5_emb = t5_emb.to_device(&device)?;
         let clip_emb = clip_emb.to_device(&device)?;
-        let (t5_emb_state, clip_emb_state, img_state) = if is_quantized {
-            (
-                t5_emb.to_dtype(DType::F32)?,
-                clip_emb.to_dtype(DType::F32)?,
-                img.to_dtype(DType::F32)?,
-            )
-        } else {
-            (t5_emb, clip_emb, img)
-        };
+        // Conditioning follows the transformer's working dtype, whether the
+        // weights are dense or quantized — `noise_dtype` is that answer.
+        let (t5_emb_state, clip_emb_state, img_state) = (
+            t5_emb.to_dtype(noise_dtype)?,
+            clip_emb.to_dtype(noise_dtype)?,
+            img.to_dtype(noise_dtype)?,
+        );
 
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
         // The negative branch's conditioning, prepared exactly as the positive
@@ -2342,7 +2393,7 @@ impl FluxEngine {
             neg_clip_emb.as_ref(),
             &img_state,
             &device,
-            is_quantized,
+            noise_dtype,
         )?;
         let inpaint_ctx = inpaint_ctx
             .as_ref()
@@ -2664,14 +2715,14 @@ impl FluxEngine {
                             "FLUX transformer (GGUF)",
                             progress,
                         )?;
-                        FluxTransformer::QuantizedBypass(
-                            crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
-                                &flux_cfg,
-                                vb,
-                                registry.as_ref(),
-                                progress,
-                            )?,
-                        )
+                        build_gguf_transformer(
+                            &flux_cfg,
+                            vb,
+                            registry.as_ref(),
+                            progress,
+                            &loaded.device,
+                            loaded.dtype,
+                        )?
                     } else {
                         let vb = flux_gguf_lora_var_builder(
                             &transformer_path,
@@ -2680,20 +2731,30 @@ impl FluxEngine {
                             progress,
                             cache_handle.clone(),
                         )?;
-                        FluxTransformer::QuantizedBypass(
-                            crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
-                                &flux_cfg, vb, None, progress,
-                            )?,
-                        )
+                        build_gguf_transformer(
+                            &flux_cfg,
+                            vb,
+                            None,
+                            progress,
+                            &loaded.device,
+                            loaded.dtype,
+                        )?
                     }
                 } else if loaded.is_quantized {
-                    let vb = crate::weight_loader::load_transformers_gguf_var_builder(
+                    let vb = crate::weight_loader::load_gguf_var_builder(
                         &transformer_path,
                         &loaded.device,
                         "FLUX transformer (GGUF)",
                         progress,
                     )?;
-                    FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+                    build_gguf_transformer(
+                        &flux_cfg,
+                        vb,
+                        None,
+                        progress,
+                        &loaded.device,
+                        loaded.dtype,
+                    )?
                 } else if has_lora {
                     // BF16 + LoRA stack: merge all deltas during construction
                     let flux_vb = flux_lora_var_builder(
@@ -2939,27 +3000,23 @@ impl FluxEngine {
 /// not run one.
 ///
 /// Mirrors the positive path exactly — the same device migration, the same
-/// quantized-F32 cast, and the same `State::new` over the SAME image latent —
-/// because upstream builds it with the identical `prepare()` call
+/// cast to the working dtype, and the same `State::new` over the SAME image
+/// latent — because upstream builds it with the identical `prepare()` call
 /// (`PuLID/app_flux.py:111`) and any divergence here would be a difference the
-/// guidance formula then amplifies.
+/// guidance formula then amplifies. `dtype` is therefore the positive path's
+/// resolved activation dtype, never a second decision.
 fn negative_conditioning_state(
     neg_t5_emb: Option<&candle_core::Tensor>,
     neg_clip_emb: Option<&candle_core::Tensor>,
     img_state: &candle_core::Tensor,
     device: &Device,
-    is_quantized: bool,
+    dtype: DType,
 ) -> Result<Option<flux::sampling::State>> {
     let (Some(t5), Some(clip)) = (neg_t5_emb, neg_clip_emb) else {
         return Ok(None);
     };
-    let t5 = t5.to_device(device)?;
-    let clip = clip.to_device(device)?;
-    let (t5, clip) = if is_quantized {
-        (t5.to_dtype(DType::F32)?, clip.to_dtype(DType::F32)?)
-    } else {
-        (t5, clip)
-    };
+    let t5 = t5.to_device(device)?.to_dtype(dtype)?;
+    let clip = clip.to_device(device)?.to_dtype(dtype)?;
     Ok(Some(flux::sampling::State::new(&t5, &clip, img_state)?))
 }
 
@@ -3107,9 +3164,10 @@ impl FluxEngine {
         gpu_ordinal: usize,
         identity: &mut RenderIdentity<'_>,
     ) -> Result<GenerateResponse> {
-        // 3. Generate initial noise (F32 for quantized, gpu_dtype for BF16)
+        // 3. Generate initial noise at the transformer's working dtype — see
+        //    the sequential path for why a GGUF no longer pins F32.
         let noise_dtype = if loaded.is_quantized {
-            DType::F32
+            gguf_transformer_dtype(&loaded.device, loaded.dtype)
         } else {
             loaded.dtype
         };
@@ -3210,16 +3268,12 @@ impl FluxEngine {
         // cache-restore path costs nothing here.
         let t5_emb = t5_emb.to_device(&loaded.device)?;
         let clip_emb = clip_emb.to_device(&loaded.device)?;
-        // For quantized model, state tensors must be F32
-        let (t5_emb_state, clip_emb_state, img_state) = if loaded.is_quantized {
-            (
-                t5_emb.to_dtype(DType::F32)?,
-                clip_emb.to_dtype(DType::F32)?,
-                img.to_dtype(DType::F32)?,
-            )
-        } else {
-            (t5_emb, clip_emb, img)
-        };
+        // Conditioning follows the transformer's working dtype.
+        let (t5_emb_state, clip_emb_state, img_state) = (
+            t5_emb.to_dtype(noise_dtype)?,
+            clip_emb.to_dtype(noise_dtype)?,
+            img.to_dtype(noise_dtype)?,
+        );
 
         // Build sampling state
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
@@ -3230,7 +3284,7 @@ impl FluxEngine {
             neg_clip_emb.as_ref(),
             &img_state,
             &loaded.device,
-            loaded.is_quantized,
+            noise_dtype,
         )?;
         let inpaint_ctx = inpaint_ctx
             .as_ref()
@@ -3422,9 +3476,9 @@ impl FluxEngine {
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_loras, flux_rms_norm_scale_aliases, flux_runtime_dtype,
-        flux_transformer_var_builder, park_cond_to_cpu, should_use_offload_bypass_registry,
-        LoraBypassMode,
+        build_gguf_transformer, effective_loras, flux_rms_norm_scale_aliases, flux_runtime_dtype,
+        flux_transformer_var_builder, gguf_transformer_dtype, park_cond_to_cpu,
+        should_use_offload_bypass_registry, FluxTransformer, LoraBypassMode, ProgressReporter,
     };
     use crate::{InferenceEngine, LoadStrategy};
     use candle_core::{DType, Device, Result, Tensor};
@@ -3961,6 +4015,51 @@ mod tests {
         assert_eq!(flux_runtime_dtype(true, false, true), DType::F16);
         assert_eq!(flux_runtime_dtype(true, false, false), DType::BF16);
         assert_eq!(flux_runtime_dtype(false, false, true), DType::F32);
+    }
+
+    /// Every GGUF load — with or without a LoRA — goes through
+    /// `build_gguf_transformer` and lands on the mold-owned bypass arm. The
+    /// candle fork's `flux::quantized_model::Flux` used to serve the no-LoRA
+    /// case, and because it carries no attention-policy hook that silently
+    /// excluded the COMMONEST FLUX render from every fast path the artifact
+    /// compiled.
+    #[test]
+    fn no_lora_gguf_builds_the_bypass_transformer() {
+        use crate::flux::pulid_variants::{gguf_weights, shared_weights, tiny_flux_config};
+
+        let device = Device::Cpu;
+        let cfg = tiny_flux_config();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tiny-flux.gguf");
+        gguf_weights(&shared_weights(&cfg), &path).unwrap();
+
+        let vb = mold_candle::quantized::VarBuilder::from_gguf(&path, &device).unwrap();
+        let built = build_gguf_transformer(
+            &cfg,
+            vb,
+            None,
+            &ProgressReporter::default(),
+            &device,
+            DType::BF16,
+        )
+        .unwrap();
+        assert!(
+            matches!(built, FluxTransformer::QuantizedBypass(_)),
+            "a no-LoRA GGUF must take the mold-owned transformer"
+        );
+    }
+
+    /// The requested working dtype survives only where the kernels accept it.
+    /// CPU is the case this suite can reach: a BF16 request there resolves to
+    /// F32, because candle's CPU `QMatMul` bails on anything but f32/f16 and
+    /// the dequant arm it would otherwise take reads f32.
+    #[test]
+    fn gguf_transformer_dtype_narrows_to_f32_off_cuda() {
+        assert_eq!(
+            gguf_transformer_dtype(&Device::Cpu, DType::BF16),
+            DType::F32
+        );
+        assert_eq!(gguf_transformer_dtype(&Device::Cpu, DType::F32), DType::F32);
     }
 
     #[test]

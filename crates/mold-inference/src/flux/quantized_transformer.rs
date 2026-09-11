@@ -12,14 +12,42 @@
 //! without forking the upstream model. Re-implementing here gives us the
 //! same forward math while letting LoRAs bind cheaply.
 //!
+//! Since the FLUX performance campaign this is the ONLY GGUF path: the
+//! `FluxTransformer::Quantized` arm that wrapped the fork's own quantized
+//! model is gone. It had no attention-policy hook (`flux/model.rs:64-76` is
+//! unchunked F32 math), so every no-LoRA GGUF render — the common case —
+//! could not reach FlashAttention no matter what the build compiled. The
+//! two were verified bit-identical before the deletion (see
+//! `f32_bypass_forward_matches_the_upstream_quantized_model`).
+//!
+//! ## Working dtype
+//!
+//! The transformer is built at an explicit `working_dtype`, which on CUDA is
+//! BF16 — what BFL runs (`util.py:666-668`, `cli.py:274`) and what ComfyUI
+//! runs (`model_management.py:1959-1960`). Three things follow from that and
+//! none of them are optional:
+//!
+//! * **Every dense tensor in the GGUF must be materialized at that dtype at
+//!   load.** `QTensor::dequantize` always answers F32
+//!   (`candle-core/src/quantized/mod.rs:740-744`), so a bias or a stem left
+//!   as it comes out is a `broadcast_add`/`matmul` dtype error on the first
+//!   forward. [`crate::quantized_linear::QuantizedLinear`] owns that rule.
+//! * **Norm weights follow the activations.** candle's fused RMSNorm and
+//!   LayerNorm kernels are dtype-typed (`candle-nn/src/ops.rs:535-537`,
+//!   `:770`) and bail on a mismatch.
+//! * **LayerNorm carries an explicit zero bias.** `LayerNorm::forward` reaches
+//!   the fused kernel only when a bias is present
+//!   (`candle-nn/src/layer_norm.rs:118-122`); `new_no_bias` takes the
+//!   unfused sum/div/sqrt sequence instead, which is both slower and, at a
+//!   half working dtype, a second dtype trap.
+//!
 //! ## Forward-pass equivalence
 //!
 //! The block-level math (modulation, RMS-norm Q/K, RoPE, attention, MLP)
-//! is identical to the upstream quantized model. The only difference is
-//! the per-Linear forward dispatch: we call [`super::lora_bypass::LoraLinear::forward`]
-//! instead of `quantized_nn::Linear::forward`. With no LoRA installed
-//! (the no-LoRA hot path) the dispatch collapses to `Quantized(_)` which
-//! is bit-identical to the upstream call.
+//! is the upstream quantized model's. Two deliberate divergences move the
+//! bytes: FLUX renders under `AttentionPolicy::FastStill`, whose math path
+//! folds the softmax scale into K, and the LayerNorms above are fused.
+//! Neither changes the network; both change reduction order.
 
 // `rebind_lora` / `set_lora_registry` are public-API surface for the future
 // in-place LoRA swap (no transformer reload). The current pipeline still
@@ -32,8 +60,9 @@ use candle_nn::{LayerNorm, RmsNorm};
 use candle_transformers::models::flux::model::{Config, EmbedNd};
 use candle_transformers::models::flux::BlockHook;
 use mold_candle::quantized::VarBuilder;
-use mold_candle::quantized_nn::Linear as QuantizedLinear;
 use std::sync::Arc;
+
+use crate::quantized_linear::QuantizedLinear;
 
 use crate::flux::lora_bypass::{LoraLinear, LoraRegistry};
 use crate::progress::ProgressReporter;
@@ -92,9 +121,17 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe: &Tensor) -> Result<Tensor> 
     Ok(x.transpose(1, 2)?.flatten_from(2)?)
 }
 
-fn layer_norm(dim: usize, vb: &VarBuilder) -> Result<LayerNorm> {
-    let ws = Tensor::ones(dim, DType::F32, vb.device())?;
-    Ok(LayerNorm::new_no_bias(ws, 1e-6))
+/// FLUX's affine-less LayerNorm, built so it reaches candle's fused kernel.
+///
+/// Upstream builds a ones weight and no bias (`quantized_model.rs:7-10`), and
+/// `LayerNorm::forward` takes the fused `ops::layer_norm` only when a bias is
+/// present (`candle-nn/src/layer_norm.rs:118-122`). An explicit zero bias is
+/// arithmetically the same affine and reaches the kernel. Both tensors are
+/// built at the working dtype because that kernel is dtype-typed.
+fn layer_norm(dim: usize, vb: &VarBuilder, dtype: DType) -> Result<LayerNorm> {
+    let ws = Tensor::ones(dim, dtype, vb.device())?;
+    let bs = Tensor::zeros(dim, dtype, vb.device())?;
+    Ok(LayerNorm::new(ws, bs, 1e-6))
 }
 
 // ── LoraLinear constructors ──────────────────────────────────────────────────
@@ -109,14 +146,11 @@ fn load_quantized_linear(
     out_dim: usize,
     bias: bool,
     vb: VarBuilder,
+    dtype: DType,
     registry: Option<&LoraRegistry>,
     key: &str,
 ) -> Result<LoraLinear> {
-    let inner = if bias {
-        mold_candle::quantized_nn::linear_b(in_dim, out_dim, true, vb)?
-    } else {
-        mold_candle::quantized_nn::linear_no_bias(in_dim, out_dim, vb)?
-    };
+    let inner = quantized_linear_at(in_dim, out_dim, bias, &vb, dtype)?;
     let adapters = registry
         .map(|r| r.adapters_for(key).to_vec())
         .unwrap_or_default();
@@ -133,18 +167,55 @@ fn quantized_linear(
     in_dim: usize,
     out_dim: usize,
     vb: VarBuilder,
+    dtype: DType,
     registry: Option<&LoraRegistry>,
     key: &str,
 ) -> Result<LoraLinear> {
-    load_quantized_linear(in_dim, out_dim, true, vb, registry, key)
+    load_quantized_linear(in_dim, out_dim, true, vb, dtype, registry, key)
+}
+
+/// One [`QuantizedLinear`] from a GGUF entry, at the working dtype.
+///
+/// `qmatmul_enabled` is unconditionally `true` here: FLUX.1 has rendered
+/// correctly through candle's MMQ kernels since before
+/// `crate::quantized_linear` existed, which is a different evidential
+/// position from Qwen-Image's and Z-Image's (`docs/architecture/qwen-mmq-nan.md`).
+/// A weight the kernels decline still falls through to the dequant arm, and a
+/// densely stored one takes the hoisted dense arm.
+fn quantized_linear_at(
+    in_dim: usize,
+    out_dim: usize,
+    bias: bool,
+    vb: &VarBuilder,
+    dtype: DType,
+) -> Result<QuantizedLinear> {
+    let weight = vb.get((out_dim, in_dim), "weight")?;
+    let bias = if bias {
+        Some(vb.get(out_dim, "bias")?.dequantize(vb.device())?)
+    } else {
+        None
+    };
+    Ok(QuantizedLinear::new(
+        weight,
+        bias,
+        vb.device(),
+        dtype,
+        true,
+    )?)
 }
 
 /// Pull a (de-)quantized norm scale tensor out of the GGUF — used for
-/// `query_norm.scale` / `key_norm.scale`. The upstream quantized model
-/// dequantizes via `vb.get(...).dequantize(device)`; we do the same so
-/// the resulting `RmsNorm` is bit-identical to upstream's.
-fn rms_norm_from_qtensor(dim: usize, vb: VarBuilder, name: &str) -> Result<RmsNorm> {
-    let weight = vb.get(dim, name)?.dequantize(vb.device())?;
+/// `query_norm.scale` / `key_norm.scale`.
+///
+/// Upstream dequantizes via `vb.get(...).dequantize(device)` and stops there,
+/// which is F32 unconditionally. The scale has to follow the activations
+/// instead: candle's fused RMSNorm kernel is dtype-typed and bails on a
+/// mismatch (`candle-nn/src/ops.rs:535-537`).
+fn rms_norm_from_qtensor(dim: usize, vb: VarBuilder, name: &str, dtype: DType) -> Result<RmsNorm> {
+    let weight = vb
+        .get(dim, name)?
+        .dequantize(vb.device())?
+        .to_dtype(dtype)?;
     Ok(RmsNorm::new(weight, 1e-6))
 }
 
@@ -158,6 +229,7 @@ impl Modulation1 {
     fn load(
         dim: usize,
         vb: VarBuilder,
+        dtype: DType,
         registry: Option<&LoraRegistry>,
         base_key: &str,
     ) -> Result<Self> {
@@ -165,6 +237,7 @@ impl Modulation1 {
             dim,
             3 * dim,
             vb.pp("lin"),
+            dtype,
             registry,
             &format!("{base_key}.lin.weight"),
         )?;
@@ -189,6 +262,7 @@ impl Modulation2 {
     fn load(
         dim: usize,
         vb: VarBuilder,
+        dtype: DType,
         registry: Option<&LoraRegistry>,
         base_key: &str,
     ) -> Result<Self> {
@@ -196,6 +270,7 @@ impl Modulation2 {
             dim,
             6 * dim,
             vb.pp("lin"),
+            dtype,
             registry,
             &format!("{base_key}.lin.weight"),
         )?;
@@ -232,6 +307,7 @@ impl SelfAttention {
         num_heads: usize,
         qkv_bias: bool,
         vb: VarBuilder,
+        dtype: DType,
         registry: Option<&LoraRegistry>,
         base_key: &str,
     ) -> Result<Self> {
@@ -241,15 +317,17 @@ impl SelfAttention {
             dim * 3,
             qkv_bias,
             vb.pp("qkv"),
+            dtype,
             registry,
             &format!("{base_key}.qkv.weight"),
         )?;
-        let query_norm = rms_norm_from_qtensor(head_dim, vb.pp("norm"), "query_norm.scale")?;
-        let key_norm = rms_norm_from_qtensor(head_dim, vb.pp("norm"), "key_norm.scale")?;
+        let query_norm = rms_norm_from_qtensor(head_dim, vb.pp("norm"), "query_norm.scale", dtype)?;
+        let key_norm = rms_norm_from_qtensor(head_dim, vb.pp("norm"), "key_norm.scale", dtype)?;
         let proj = quantized_linear(
             dim,
             dim,
             vb.pp("proj"),
+            dtype,
             registry,
             &format!("{base_key}.proj.weight"),
         )?;
@@ -288,6 +366,7 @@ impl Mlp {
         in_sz: usize,
         mlp_sz: usize,
         vb: VarBuilder,
+        dtype: DType,
         registry: Option<&LoraRegistry>,
         base_key: &str,
     ) -> Result<Self> {
@@ -297,6 +376,7 @@ impl Mlp {
             in_sz,
             mlp_sz,
             vb.pp("0"),
+            dtype,
             registry,
             &format!("{base_key}.0.weight"),
         )?;
@@ -304,6 +384,7 @@ impl Mlp {
             mlp_sz,
             in_sz,
             vb.pp("2"),
+            dtype,
             registry,
             &format!("{base_key}.2.weight"),
         )?;
@@ -336,6 +417,7 @@ impl DoubleBlock {
     fn load(
         cfg: &Config,
         vb: VarBuilder,
+        dtype: DType,
         registry: Option<&LoraRegistry>,
         idx: usize,
     ) -> Result<Self> {
@@ -343,39 +425,55 @@ impl DoubleBlock {
         let mlp_sz = (h as f64 * cfg.mlp_ratio) as usize;
         let base = format!("double_blocks.{idx}");
         Ok(Self {
-            img_mod: Modulation2::load(h, vb.pp("img_mod"), registry, &format!("{base}.img_mod"))?,
-            img_norm1: layer_norm(h, &vb.pp("img_norm1"))?,
+            img_mod: Modulation2::load(
+                h,
+                vb.pp("img_mod"),
+                dtype,
+                registry,
+                &format!("{base}.img_mod"),
+            )?,
+            img_norm1: layer_norm(h, &vb.pp("img_norm1"), dtype)?,
             img_attn: SelfAttention::load(
                 h,
                 cfg.num_heads,
                 cfg.qkv_bias,
                 vb.pp("img_attn"),
+                dtype,
                 registry,
                 &format!("{base}.img_attn"),
             )?,
-            img_norm2: layer_norm(h, &vb.pp("img_norm2"))?,
+            img_norm2: layer_norm(h, &vb.pp("img_norm2"), dtype)?,
             img_mlp: Mlp::load(
                 h,
                 mlp_sz,
                 vb.pp("img_mlp"),
+                dtype,
                 registry,
                 &format!("{base}.img_mlp"),
             )?,
-            txt_mod: Modulation2::load(h, vb.pp("txt_mod"), registry, &format!("{base}.txt_mod"))?,
-            txt_norm1: layer_norm(h, &vb.pp("txt_norm1"))?,
+            txt_mod: Modulation2::load(
+                h,
+                vb.pp("txt_mod"),
+                dtype,
+                registry,
+                &format!("{base}.txt_mod"),
+            )?,
+            txt_norm1: layer_norm(h, &vb.pp("txt_norm1"), dtype)?,
             txt_attn: SelfAttention::load(
                 h,
                 cfg.num_heads,
                 cfg.qkv_bias,
                 vb.pp("txt_attn"),
+                dtype,
                 registry,
                 &format!("{base}.txt_attn"),
             )?,
-            txt_norm2: layer_norm(h, &vb.pp("txt_norm2"))?,
+            txt_norm2: layer_norm(h, &vb.pp("txt_norm2"), dtype)?,
             txt_mlp: Mlp::load(
                 h,
                 mlp_sz,
                 vb.pp("txt_mlp"),
+                dtype,
                 registry,
                 &format!("{base}.txt_mlp"),
             )?,
@@ -465,6 +563,7 @@ impl SingleBlock {
     fn load(
         cfg: &Config,
         vb: VarBuilder,
+        dtype: DType,
         registry: Option<&LoraRegistry>,
         idx: usize,
     ) -> Result<Self> {
@@ -477,6 +576,7 @@ impl SingleBlock {
                 h,
                 h * 3 + mlp_sz,
                 vb.pp("linear1"),
+                dtype,
                 registry,
                 &format!("{base}.linear1.weight"),
             )?,
@@ -484,15 +584,17 @@ impl SingleBlock {
                 h + mlp_sz,
                 h,
                 vb.pp("linear2"),
+                dtype,
                 registry,
                 &format!("{base}.linear2.weight"),
             )?,
-            query_norm: rms_norm_from_qtensor(head_dim, vb.pp("norm"), "query_norm.scale")?,
-            key_norm: rms_norm_from_qtensor(head_dim, vb.pp("norm"), "key_norm.scale")?,
-            pre_norm: layer_norm(h, &vb.pp("pre_norm"))?,
+            query_norm: rms_norm_from_qtensor(head_dim, vb.pp("norm"), "query_norm.scale", dtype)?,
+            key_norm: rms_norm_from_qtensor(head_dim, vb.pp("norm"), "key_norm.scale", dtype)?,
+            pre_norm: layer_norm(h, &vb.pp("pre_norm"), dtype)?,
             modulation: Modulation1::load(
                 h,
                 vb.pp("modulation"),
+                dtype,
                 registry,
                 &format!("{base}.modulation"),
             )?,
@@ -551,14 +653,16 @@ struct FinalLayer {
 }
 
 impl FinalLayer {
-    fn load(h_sz: usize, p_sz: usize, out_c: usize, vb: VarBuilder) -> Result<Self> {
+    fn load(h_sz: usize, p_sz: usize, out_c: usize, vb: VarBuilder, dtype: DType) -> Result<Self> {
         Ok(Self {
-            norm_final: layer_norm(h_sz, &vb.pp("norm_final"))?,
-            linear: mold_candle::quantized_nn::linear(h_sz, p_sz * p_sz * out_c, vb.pp("linear"))?,
-            ada_ln_modulation: mold_candle::quantized_nn::linear(
+            norm_final: layer_norm(h_sz, &vb.pp("norm_final"), dtype)?,
+            linear: quantized_linear_at(h_sz, p_sz * p_sz * out_c, true, &vb.pp("linear"), dtype)?,
+            ada_ln_modulation: quantized_linear_at(
                 h_sz,
                 2 * h_sz,
-                vb.pp("adaLN_modulation.1"),
+                true,
+                &vb.pp("adaLN_modulation.1"),
+                dtype,
             )?,
         })
     }
@@ -581,10 +685,10 @@ struct StemMlpEmbedder {
 }
 
 impl StemMlpEmbedder {
-    fn load(in_sz: usize, h_sz: usize, vb: VarBuilder) -> Result<Self> {
+    fn load(in_sz: usize, h_sz: usize, vb: VarBuilder, dtype: DType) -> Result<Self> {
         Ok(Self {
-            in_layer: mold_candle::quantized_nn::linear(in_sz, h_sz, vb.pp("in_layer"))?,
-            out_layer: mold_candle::quantized_nn::linear(h_sz, h_sz, vb.pp("out_layer"))?,
+            in_layer: quantized_linear_at(in_sz, h_sz, true, &vb.pp("in_layer"), dtype)?,
+            out_layer: quantized_linear_at(h_sz, h_sz, true, &vb.pp("out_layer"), dtype)?,
         })
     }
 }
@@ -627,23 +731,34 @@ impl QuantizedFluxTransformer {
         vb: VarBuilder,
         registry: Option<&LoraRegistry>,
         progress: &ProgressReporter,
+        working_dtype: DType,
     ) -> Result<Self> {
         progress.info("Loading FLUX quantized transformer (bypass-mode LoRA)");
+        let dtype = working_dtype;
 
-        let img_in =
-            mold_candle::quantized_nn::linear(cfg.in_channels, cfg.hidden_size, vb.pp("img_in"))?;
-        let txt_in = mold_candle::quantized_nn::linear(
+        let img_in = quantized_linear_at(
+            cfg.in_channels,
+            cfg.hidden_size,
+            true,
+            &vb.pp("img_in"),
+            dtype,
+        )?;
+        let txt_in = quantized_linear_at(
             cfg.context_in_dim,
             cfg.hidden_size,
-            vb.pp("txt_in"),
+            true,
+            &vb.pp("txt_in"),
+            dtype,
         )?;
-        let time_in = StemMlpEmbedder::load(256, cfg.hidden_size, vb.pp("time_in"))?;
-        let vector_in = StemMlpEmbedder::load(cfg.vec_in_dim, cfg.hidden_size, vb.pp("vector_in"))?;
+        let time_in = StemMlpEmbedder::load(256, cfg.hidden_size, vb.pp("time_in"), dtype)?;
+        let vector_in =
+            StemMlpEmbedder::load(cfg.vec_in_dim, cfg.hidden_size, vb.pp("vector_in"), dtype)?;
         let guidance_in = if cfg.guidance_embed {
             Some(StemMlpEmbedder::load(
                 256,
                 cfg.hidden_size,
                 vb.pp("guidance_in"),
+                dtype,
             )?)
         } else {
             None
@@ -652,22 +767,28 @@ impl QuantizedFluxTransformer {
         let pe_dim = cfg.hidden_size / cfg.num_heads;
         let pe_embedder = EmbedNd::new(pe_dim, cfg.theta, cfg.axes_dim.to_vec());
 
-        let final_layer =
-            FinalLayer::load(cfg.hidden_size, 1, cfg.in_channels, vb.pp("final_layer"))?;
+        let final_layer = FinalLayer::load(
+            cfg.hidden_size,
+            1,
+            cfg.in_channels,
+            vb.pp("final_layer"),
+            dtype,
+        )?;
 
         let mut double_blocks = Vec::with_capacity(cfg.depth);
         let vb_d = vb.pp("double_blocks");
         for idx in 0..cfg.depth {
-            double_blocks.push(DoubleBlock::load(cfg, vb_d.pp(idx), registry, idx)?);
+            double_blocks.push(DoubleBlock::load(cfg, vb_d.pp(idx), dtype, registry, idx)?);
         }
         let mut single_blocks = Vec::with_capacity(cfg.depth_single_blocks);
         let vb_s = vb.pp("single_blocks");
         for idx in 0..cfg.depth_single_blocks {
-            single_blocks.push(SingleBlock::load(cfg, vb_s.pp(idx), registry, idx)?);
+            single_blocks.push(SingleBlock::load(cfg, vb_s.pp(idx), dtype, registry, idx)?);
         }
 
         progress.info(&format!(
-            "Quantized transformer loaded: {} double + {} single blocks (GPU-resident)",
+            "Quantized transformer loaded: {} double + {} single blocks \
+             (GPU-resident, {dtype:?} activations)",
             double_blocks.len(),
             single_blocks.len(),
         ));
@@ -825,6 +946,190 @@ mod tests {
     use candle_core::quantized::GgmlDType;
     use candle_core::Device;
 
+    /// The mold-owned bypass transformer and the candle fork's
+    /// `flux::quantized_model::Flux` are the same network read two ways, and
+    /// the whole reason the fork arm can be deleted is that they agree.
+    ///
+    /// They are NOT bit-identical any more, by design and in exactly two
+    /// named places: FLUX renders under `AttentionPolicy::FastStill`, whose
+    /// math path folds the softmax scale into K rather than multiplying the
+    /// score matrix, and this transformer's LayerNorms now carry a zero bias
+    /// so they reach candle's fused kernel (`candle-nn/src/layer_norm.rs:118`)
+    /// instead of the unfused sum/div/sqrt sequence. Both change reduction
+    /// order, neither changes the network. `1e-4` over a four-double /
+    /// eight-single forward at F32 is what that costs.
+    #[test]
+    fn f32_bypass_forward_matches_the_upstream_quantized_model() {
+        use crate::flux::pulid_variants::{gguf_weights, shared_weights, tiny_flux_config};
+        use candle_transformers::models::flux::WithForward;
+
+        let device = Device::Cpu;
+        let cfg = tiny_flux_config();
+        let weights = shared_weights(&cfg);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tiny-flux-f32.gguf");
+        gguf_weights(&weights, &path).expect("the synthetic gguf writes");
+
+        let upstream_vb =
+            candle_transformers::quantized_var_builder::VarBuilder::from_gguf(&path, &device)
+                .expect("upstream gguf var builder");
+        let upstream =
+            candle_transformers::models::flux::quantized_model::Flux::new(&cfg, upstream_vb)
+                .expect("upstream quantized model");
+
+        let progress = ProgressReporter::default();
+        let mold_vb =
+            mold_candle::quantized::VarBuilder::from_gguf(&path, &device).expect("mold gguf vb");
+        let mold = QuantizedFluxTransformer::load(&cfg, mold_vb, None, &progress, DType::F32)
+            .expect("mold quantized transformer");
+
+        let inputs = tiny_forward_inputs(&cfg, DType::F32, &device);
+        let want = upstream
+            .forward(
+                &inputs.img,
+                &inputs.img_ids,
+                &inputs.txt,
+                &inputs.txt_ids,
+                &inputs.timesteps,
+                &inputs.y,
+                None,
+            )
+            .expect("upstream forward");
+        let got = mold
+            .forward_with_hook(
+                &inputs.img,
+                &inputs.img_ids,
+                &inputs.txt,
+                &inputs.txt_ids,
+                &inputs.timesteps,
+                &inputs.y,
+                None,
+                None,
+            )
+            .expect("mold forward");
+        assert_eq!(got.dims(), want.dims());
+        let diff = max_abs_diff(&got, &want);
+        assert!(
+            diff < 1e-5,
+            "the mold-owned transformer diverged from the fork's by {diff}"
+        );
+    }
+
+    /// A real GGUF is a mix: quantized blocks beside dense F16 stems, biases
+    /// and norm scales. At any working dtype other than F32 the dense half
+    /// has to be materialized at that dtype — `QTensor::dequantize` answers
+    /// F32 and nothing downstream will widen for it — and the norms have to
+    /// follow, because candle's fused RMS/LayerNorm kernels are dtype-typed
+    /// (`candle-nn/src/ops.rs:535-537`, `:770`). Get any of that wrong and
+    /// the forward does not merely drift, it errors.
+    #[test]
+    fn mixed_f16_and_q8_gguf_forwards_in_a_non_f32_working_dtype() {
+        use crate::flux::pulid_variants::{
+            mixed_dtype_gguf_weights, shared_weights, tiny_flux_config,
+        };
+
+        let device = Device::Cpu;
+        let cfg = tiny_flux_config();
+        let weights = shared_weights(&cfg);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tiny-flux-mixed.gguf");
+        mixed_dtype_gguf_weights(&weights, &path).expect("the synthetic gguf writes");
+
+        let progress = ProgressReporter::default();
+        let forward_at = |dtype: DType| {
+            let vb =
+                mold_candle::quantized::VarBuilder::from_gguf(&path, &device).expect("gguf vb");
+            let model = QuantizedFluxTransformer::load(&cfg, vb, None, &progress, dtype)
+                .expect("mixed-dtype transformer");
+            let inputs = tiny_forward_inputs(&cfg, dtype, &device);
+            model
+                .forward_with_hook(
+                    &inputs.img,
+                    &inputs.img_ids,
+                    &inputs.txt,
+                    &inputs.txt_ids,
+                    &inputs.timesteps,
+                    &inputs.y,
+                    None,
+                    None,
+                )
+                .expect("mixed-dtype forward")
+        };
+
+        let reference = forward_at(DType::F32);
+        let half = forward_at(DType::F16);
+        assert_eq!(half.dtype(), DType::F16, "the working dtype must survive");
+        let diff = max_abs_diff(
+            &reference.to_dtype(DType::F32).unwrap(),
+            &half.to_dtype(DType::F32).unwrap(),
+        );
+        assert!(
+            diff < 5e-2,
+            "the F16 working dtype diverged from F32 by {diff}"
+        );
+    }
+
+    struct TinyForwardInputs {
+        img: Tensor,
+        img_ids: Tensor,
+        txt: Tensor,
+        txt_ids: Tensor,
+        timesteps: Tensor,
+        y: Tensor,
+    }
+
+    /// Deterministic forward inputs at an explicit dtype.
+    ///
+    /// The position ids follow the activation dtype because that is what
+    /// `flux::sampling::State::new` does (`sampling.rs:25`, `:43`, `:47`) and
+    /// what `rope` keys its inverse frequencies on (`model.rs:92`) — a
+    /// mismatch there is a `broadcast_mul` dtype error, not a drift.
+    fn tiny_forward_inputs(cfg: &Config, dtype: DType, device: &Device) -> TinyForwardInputs {
+        let img_tokens = 6usize;
+        let txt_tokens = 5usize;
+        let ramp = |count: usize, offset: f32| -> Vec<f32> {
+            (0..count)
+                .map(|i| ((i as f32 * 0.017 + offset).sin()) * 0.5)
+                .collect()
+        };
+        let img = Tensor::from_vec(
+            ramp(img_tokens * cfg.in_channels, 0.0),
+            (1, img_tokens, cfg.in_channels),
+            device,
+        )
+        .unwrap()
+        .to_dtype(dtype)
+        .unwrap();
+        let txt = Tensor::from_vec(
+            ramp(txt_tokens * cfg.context_in_dim, 1.0),
+            (1, txt_tokens, cfg.context_in_dim),
+            device,
+        )
+        .unwrap()
+        .to_dtype(dtype)
+        .unwrap();
+        TinyForwardInputs {
+            img,
+            img_ids: Tensor::zeros((1, img_tokens, 3), dtype, device).unwrap(),
+            txt,
+            txt_ids: Tensor::zeros((1, txt_tokens, 3), dtype, device).unwrap(),
+            timesteps: Tensor::from_vec(vec![0.5f32], 1, device)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap(),
+            y: Tensor::from_vec(
+                (0..cfg.vec_in_dim)
+                    .map(|i| i as f32 / 16.0)
+                    .collect::<Vec<_>>(),
+                (1, cfg.vec_in_dim),
+                device,
+            )
+            .unwrap()
+            .to_dtype(dtype)
+            .unwrap(),
+        }
+    }
+
     /// Quantized linear with no adapter must be bit-identical to the
     /// unwrapped quantized linear. Catches any forward dispatch
     /// regression on the no-LoRA hot path.
@@ -848,7 +1153,14 @@ mod tests {
         let bias: Vec<f32> = (0..out_dim).map(|i| (i as f32) * 0.01).collect();
         let bias = Tensor::from_vec(bias, (out_dim,), &device).unwrap();
 
-        let inner = QuantizedLinear::from_arc(q_weight.clone(), Some(bias.clone())).unwrap();
+        let inner = QuantizedLinear::new(
+            q_weight.clone(),
+            Some(bias.clone()),
+            &device,
+            DType::F32,
+            false,
+        )
+        .unwrap();
         let wrapped = LoraLinear::Quantized(inner.clone());
 
         let x_data: Vec<f32> = (0..2 * 3 * in_dim)
@@ -893,7 +1205,7 @@ mod tests {
 
         // Bypass: quantize base only, apply LoRA at forward.
         let q_w = arc_quantize_cpu(&w, GgmlDType::Q8_0, &device).unwrap();
-        let inner = QuantizedLinear::from_arc(q_w, None).unwrap();
+        let inner = QuantizedLinear::new(q_w, None, &device, DType::F32, false).unwrap();
         let bypass = LoraLinear::WithAdaptersQuantized {
             inner,
             adapters: vec![LinearLoraAdapter {
@@ -911,7 +1223,8 @@ mod tests {
         let merged_delta = up.matmul(&down).unwrap().affine(scale as f64, 0.0).unwrap();
         let merged_w = (&w + &merged_delta).unwrap();
         let q_merged = arc_quantize_cpu(&merged_w, GgmlDType::Q8_0, &device).unwrap();
-        let merged_inner = QuantizedLinear::from_arc(q_merged, None).unwrap();
+        let merged_inner =
+            QuantizedLinear::new(q_merged, None, &device, DType::F32, false).unwrap();
 
         let x_vec: Vec<f32> = (0..3 * in_dim)
             .map(|i| ((i as f32) * 0.029).cos() * 0.5)
@@ -963,7 +1276,7 @@ mod tests {
         let s2 = -0.3f32;
 
         // Both adapters bypassed at forward.
-        let inner = QuantizedLinear::from_arc(q_w.clone(), None).unwrap();
+        let inner = QuantizedLinear::new(q_w.clone(), None, &device, DType::F32, false).unwrap();
         let two = LoraLinear::WithAdaptersQuantized {
             inner: inner.clone(),
             adapters: vec![
@@ -1014,7 +1327,7 @@ mod tests {
         let one1_out = one1.forward(&x).unwrap();
         let one2_out = one2.forward(&x).unwrap();
         let base_out = <QuantizedLinear as candle_core::Module>::forward(
-            &QuantizedLinear::from_arc(q_w, None).unwrap(),
+            &QuantizedLinear::new(q_w, None, &device, DType::F32, false).unwrap(),
             &x,
         )
         .unwrap();
@@ -1039,7 +1352,7 @@ mod tests {
             .collect();
         let w = Tensor::from_vec(w, (out_dim, in_dim), &device).unwrap();
         let q_w = arc_quantize_cpu(&w, GgmlDType::Q8_0, &device).unwrap();
-        let inner = QuantizedLinear::from_arc(q_w, None).unwrap();
+        let inner = QuantizedLinear::new(q_w, None, &device, DType::F32, false).unwrap();
 
         // Adapter only touches Q (rows [0, h)).
         let down: Vec<f32> = (0..rank * in_dim)

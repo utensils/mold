@@ -50,6 +50,14 @@ impl Linear {
     pub fn from_weights(weight: QMatMul, bias: Option<Tensor>) -> Self {
         Self { weight, bias }
     }
+
+    /// The bias this linear adds after the quantized product, if any.
+    ///
+    /// Mirrors `candle_nn::Linear::bias`. Callers that materialize the bias
+    /// at a chosen kernel dtype need to be able to assert they did.
+    pub fn bias(&self) -> Option<&Tensor> {
+        self.bias.as_ref()
+    }
 }
 
 impl Module for Linear {

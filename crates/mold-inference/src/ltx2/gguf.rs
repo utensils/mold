@@ -37,6 +37,7 @@ use mold_core::ltx2_weight_index::canonical_tensor_name;
 /// `provenance_vocabulary` when that module lands).
 pub(crate) const LINEAR_KIND_QMATMUL: &str = "ltx2 linear kind=qmatmul";
 pub(crate) const LINEAR_KIND_DEQUANT: &str = "ltx2 linear kind=dequant";
+pub(crate) const LINEAR_KIND_DENSE: &str = "ltx2 linear kind=dense";
 
 /// Emit the linear-kind provenance line once per literal, mirroring
 /// `convrot::log_int8_arm_once`: the env decision is process-frozen and the

@@ -183,7 +183,10 @@ fn qlinear(vb: &VarBuilder, name: &str) -> Result<QwenLinear> {
                 fallback,
             })
         }
-        QwenLinearKind::Dequant => Ok(QwenLinear::Dequant { weight, bias }),
+        // A densely stored tensor takes the same per-forward dequant arm it
+        // has always taken here: the hoisted `Dense` arm is FLUX's opt-in, and
+        // Qwen-Image's bytes are not in scope for this change.
+        QwenLinearKind::Dequant | QwenLinearKind::Dense => Ok(QwenLinear::Dequant { weight, bias }),
     }
 }
 
@@ -1439,8 +1442,11 @@ mod tests {
         );
         assert_eq!(
             choose(GgmlDType::F16, 3072, true, true, false),
-            QwenLinearKind::Dequant,
-            "a float-stored tensor falls through to a fallback that rejects BF16"
+            QwenLinearKind::Dense,
+            "a float-stored tensor reaches no kernel at all; the shared selector \
+             names that case since the FLUX campaign, and `qwen_linear` maps it \
+             onto the same `QwenLinear::Dequant` runtime arm it always took, so \
+             no Qwen-Image byte moves"
         );
         assert_eq!(
             choose(GgmlDType::Q6K, 3072, true, true, true),

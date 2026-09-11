@@ -297,3 +297,12 @@ modulation transformer (BF16 or GGUF), and a BN-VAE decoder. Klein-4B uses
 Qwen3-4B (hidden_size=2560), Klein-9B uses Qwen3-8B (hidden_size=4096). GGUF
 variants keep weights quantized in VRAM with on-the-fly dequantization per
 matmul, minimizing memory usage.
+
+## Speed
+
+On CUDA, Flux.2 renders through FlashAttention-2 and cuDNN by default wherever
+the artifact compiled them — every shipped Linux CUDA build does — and its GGUF
+tiers run their activations in BF16 rather than F32. `MOLD_ATTN=math` and
+`MOLD_CONV=im2col` render the byte-stable way instead; a print archived before
+mold 0.29 does not re-render byte-for-byte after it under any setting, and
+renders made from 0.29 on are reproducible among themselves.

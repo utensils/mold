@@ -92,6 +92,26 @@ mold run flux-dev:bf16 "a portrait" --lora style.safetensors --lora-scale 0.8
 mold run flux-dev:q4 "a portrait" --lora style.safetensors --lora-scale 0.8
 ```
 
+## Speed
+
+On CUDA, FLUX renders through FlashAttention-2 and cuDNN by default wherever
+the artifact compiled them — every shipped Linux CUDA build does. The GGUF
+tiers also run their activations in BF16 rather than F32, which halves the
+bandwidth every matmul moves and lets the tensor cores engage; candle's
+quantized kernels take BF16 and return it, so the weights stay quantized in
+VRAM exactly as before. Set `MOLD_ATTN=math` and `MOLD_CONV=im2col` to render
+the byte-stable way instead.
+
+A FLUX print archived before mold 0.29 will not re-render byte-for-byte after
+it, under any setting: flash attention, cuDNN and BF16 activations all change
+the order the same sums are accumulated in. Renders made from 0.29 on are
+reproducible among themselves — same seed, same settings, same backend, same
+bytes.
+
+The full-precision `:bf16` tier is the one exception on the attention side: it
+runs through upstream Candle's own attention, which has no backend switch, so
+it stays on the math path.
+
 ## VRAM Notes
 
 - Full BF16 (23 GB) auto-offloads on 24 GB cards; blocks stream CPU↔GPU

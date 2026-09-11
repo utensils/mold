@@ -11,15 +11,22 @@ use crate::progress::{ProgressEvent, ProgressReporter};
 
 /// BF16, quantized (GGUF), or offloaded FLUX transformer.
 ///
-/// `QuantizedBypass` is the mold-owned GGUF path that supports
-/// bypass-mode LoRA — it never touches base weights, applying LoRA
-/// deltas at forward time instead. A merged GGUF LoRA also uses this Mold-owned
-/// variant with no runtime registry; ordinary unmodified GGUF loads retain the
-/// upstream `Quantized` variant.
+/// `QuantizedBypass` is the mold-owned GGUF path, and since the FLUX
+/// performance campaign it is the ONLY GGUF path — it never touches base
+/// weights, applying any LoRA deltas at forward time instead. The fork's own
+/// `flux::quantized_model::Flux` used to serve the no-LoRA case; it had no
+/// attention-policy hook (`flux/model.rs:64-76` is unchunked F32 math) and
+/// F32 `LayerNorm` weights, so the commonest GGUF render could reach neither
+/// FlashAttention nor BF16 activations whatever the artifact compiled. The
+/// two were verified bit-identical before the arm was deleted
+/// (`flux::quantized_transformer`'s
+/// `f32_bypass_forward_matches_the_upstream_quantized_model`).
+///
+/// `BF16` still attends through upstream Candle and so keeps the math path;
+/// giving it the family policy needs a hook in the fork.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum FluxTransformer {
     BF16(flux::model::Flux),
-    Quantized(flux::quantized_model::Flux),
     QuantizedBypass(QuantizedFluxTransformer),
     /// Block-level offloading: blocks on CPU, streamed to GPU one at a time.
     Offloaded(OffloadedFluxTransformer),
@@ -202,25 +209,6 @@ impl FluxTransformer {
                 Some(guidance_tensor),
             )?,
             (Self::BF16(m), Some(hook)) => m.forward_with_hook(
-                img,
-                img_ids,
-                txt,
-                txt_ids,
-                t_vec,
-                vec_,
-                Some(guidance_tensor),
-                hook,
-            )?,
-            (Self::Quantized(m), None) => m.forward(
-                img,
-                img_ids,
-                txt,
-                txt_ids,
-                t_vec,
-                vec_,
-                Some(guidance_tensor),
-            )?,
-            (Self::Quantized(m), Some(hook)) => m.forward_with_hook(
                 img,
                 img_ids,
                 txt,

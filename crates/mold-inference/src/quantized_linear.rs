@@ -12,10 +12,20 @@
 //! its own working-dtype policy; the tables and the forward rules are one.
 //!
 //! Default on CUDA is the dequant arm for every family that has asked so
-//! far: candle's fast MMQ kernels returned non-finite values for both
-//! Qwen-Image (100% NaN) and Z-Image (solid-black renders) — #1048 is the
-//! open kernel investigation — so a new family must opt in per render via
-//! its env flag rather than ship the fast path untested.
+//! far EXCEPT the FLUX families: candle's fast MMQ kernels returned
+//! non-finite values for both Qwen-Image (100% NaN) and Z-Image (solid-black
+//! renders) — #1048 is the open kernel investigation — so a new family must
+//! opt in per render via its env flag rather than ship the fast path
+//! untested. FLUX.1 and FLUX.2 have rendered correctly through MMQ since
+//! before this module existed, which is the evidence their default rests on.
+//!
+//! A third arm, [`QuantizedLinearKind::Dense`], covers the dense F32/F16/BF16
+//! tensors every real GGUF carries beside its quantized blocks — stems, the
+//! final layer, biases, norm scales. `QTensor::dequantize` always returns F32
+//! (`candle-core/src/quantized/mod.rs:740-744`), so a BF16 working dtype
+//! cannot meet one of those without a cast; materializing it once at load is
+//! both the fix and strictly less work than the per-forward dequant those
+//! weights used to take on CUDA.
 
 use std::sync::Arc;
 
@@ -55,6 +65,40 @@ fn quantized_kernel_dtype(device: LinearDevice, requested: DType) -> DType {
     }
 }
 
+/// The activation dtype a GGUF-backed transformer may run at.
+///
+/// One rule for every family that loads a GGUF: the working dtype survives
+/// only where the kernels that will see it accept the width.
+///
+/// * **CUDA** takes BF16, F16 or F32 and returns what it was fed — candle's
+///   `fast_mmq::try_fwd` declines anything else and casts the F32 product
+///   back to the input dtype (`candle-core/src/quantized/fast_mmq.rs:218-221`,
+///   `:252-258`, `:349-358`). This is the only place a non-F32 activation
+///   buys anything: half the bandwidth and the tensor cores.
+/// * **`FORCE_DMMV`** routes every CUDA quantized matmul into
+///   `dequantize_matmul`, which reads the activation as f32, so the permission
+///   is withdrawn while it is set.
+/// * **Metal** quantized kernels are F32-only ([`quantized_kernel_dtype`]
+///   already enforces the cast boundary; this keeps the surrounding model from
+///   paying for a cast it cannot use).
+/// * **CPU** `QMatMul` accepts F32 and F16 and bails on anything else
+///   (`candle-core/src/quantized/mod.rs:1042`), and the dequant arm it
+///   otherwise takes is not a speed path worth a dtype for.
+///
+/// Upstream runs the whole FLUX transformer in bf16 — BFL's `util.py:666-668`
+/// (`.to(torch.bfloat16)`) and `cli.py:274`'s autocast, ComfyUI's
+/// `model_management.py:1959-1960`.
+pub(crate) fn gguf_activation_dtype(
+    device: LinearDevice,
+    requested: DType,
+    force_dmmv: bool,
+) -> DType {
+    match device {
+        LinearDevice::Cuda if !force_dmmv => requested,
+        _ => DType::F32,
+    }
+}
+
 /// Which implementation a quantized linear resolves to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum QuantizedLinearKind {
@@ -62,6 +106,10 @@ pub(crate) enum QuantizedLinearKind {
     QMatMul,
     /// Full per-forward dequantization to the working dtype.
     Dequant,
+    /// The GGUF stored this tensor densely (F32/F16/BF16). It is
+    /// dequantized once at load and applied as an ordinary
+    /// `candle_nn::Linear` at the kernel dtype.
+    Dense,
 }
 
 /// `qk` — the block quantization size candle's MMQ kernel requires the
@@ -118,6 +166,11 @@ pub(crate) fn parse_qmatmul_flag(value: Option<&str>) -> bool {
 /// (`MOLD_WAN_FORCE_DMMV=1`, from Wan's denoise loop) and never clears, so it
 /// can also flip after this decision is made; [`qmatmul_forward_supported`]
 /// is the per-forward half that catches an engine built before the flip.
+///
+/// A tensor the GGUF stored densely never reaches any of that: no kernel
+/// accepts it, `QTensor::dequantize` always answers F32, and both remaining
+/// arms would redo that cast on every forward. It resolves to
+/// [`QuantizedLinearKind::Dense`] on every device instead.
 pub(crate) fn select_linear_kind(
     device: LinearDevice,
     weight_dtype: GgmlDType,
@@ -126,6 +179,12 @@ pub(crate) fn select_linear_kind(
     qmatmul_enabled: bool,
     force_dmmv: bool,
 ) -> QuantizedLinearKind {
+    if matches!(
+        weight_dtype,
+        GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16
+    ) {
+        return QuantizedLinearKind::Dense;
+    }
     match device {
         LinearDevice::Metal => QuantizedLinearKind::QMatMul,
         LinearDevice::Cuda
@@ -219,6 +278,9 @@ enum QuantizedLinearArm {
         inner: QMatMulLinear,
         fallback: Option<DequantFallback>,
     },
+    /// Densely stored in the GGUF: dequantized once at load, applied as an
+    /// ordinary linear at the kernel dtype.
+    Dense { inner: candle_nn::Linear },
 }
 
 /// Device-dispatched quantized linear with the Wan `CastBoundary` rule: the
@@ -278,8 +340,29 @@ impl QuantizedLinear {
                 }
             }
             QuantizedLinearKind::Dequant => QuantizedLinearArm::Dequant { weight, bias },
+            QuantizedLinearKind::Dense => {
+                // One dequantize, one cast, for the life of the engine —
+                // exactly what `dequant_forward` computes per call, hoisted.
+                let dense = weight.dequantize(device)?.to_dtype(kernel_dtype)?;
+                QuantizedLinearArm::Dense {
+                    inner: candle_nn::Linear::new(dense, bias),
+                }
+            }
         };
         Ok(Self { arm, kernel_dtype })
+    }
+
+    /// The dtype the bias was materialized at, or `None` for a linear
+    /// without one. Test surface: the bias rides the kernel's own output, so
+    /// a bias left at the checkpoint's dtype is a `broadcast_add` error
+    /// waiting for the first non-F32 render.
+    #[cfg(test)]
+    pub(crate) fn bias_dtype(&self) -> Option<DType> {
+        match &self.arm {
+            QuantizedLinearArm::Dequant { bias, .. } => bias.as_ref().map(Tensor::dtype),
+            QuantizedLinearArm::QMatMul { inner, .. } => inner.bias().map(Tensor::dtype),
+            QuantizedLinearArm::Dense { inner } => inner.bias().map(Tensor::dtype),
+        }
     }
 
     /// The arm this linear resolved to at construction.
@@ -287,6 +370,7 @@ impl QuantizedLinear {
         match &self.arm {
             QuantizedLinearArm::Dequant { .. } => QuantizedLinearKind::Dequant,
             QuantizedLinearArm::QMatMul { .. } => QuantizedLinearKind::QMatMul,
+            QuantizedLinearArm::Dense { .. } => QuantizedLinearKind::Dense,
         }
     }
 }
@@ -297,6 +381,14 @@ impl Module for QuantizedLinear {
         let out = match &self.arm {
             QuantizedLinearArm::Dequant { weight, bias } => {
                 dequant_forward(weight, bias.as_ref(), xs, self.kernel_dtype)?
+            }
+            QuantizedLinearArm::Dense { inner } => {
+                let xs = if xs.dtype() == self.kernel_dtype {
+                    xs.clone()
+                } else {
+                    xs.to_dtype(self.kernel_dtype)?
+                };
+                inner.forward(&xs)?
             }
             QuantizedLinearArm::QMatMul { inner, fallback } => {
                 if !qmatmul_forward_supported(
@@ -594,6 +686,131 @@ mod tests {
             diff <= 0.02 * peak + 1e-3,
             "QMatMul and dequant disagree by {diff} against peak {peak}"
         );
+    }
+
+    /// A GGUF transformer's activations may only leave F32 where the kernels
+    /// that will see them accept the width. CUDA's MMQ/MMVQ path takes
+    /// BF16/F16/F32 and returns what it was fed
+    /// (`candle-core/src/quantized/fast_mmq.rs:218-221`, `:349-358`); Metal's
+    /// quantized kernels are F32-only; candle's CPU `QMatMul` accepts F32 and
+    /// F16 and bails on anything else
+    /// (`candle-core/src/quantized/mod.rs:1042`); and every decline on any
+    /// device lands in `dequantize_matmul`, which reads the activation as f32.
+    /// `FORCE_DMMV` routes CUDA into exactly that fallback, so it withdraws
+    /// the permission too.
+    #[test]
+    fn gguf_activation_dtype_is_the_working_dtype_only_on_cuda_without_force_dmmv() {
+        assert_eq!(
+            gguf_activation_dtype(LinearDevice::Cuda, DType::BF16, false),
+            DType::BF16
+        );
+        assert_eq!(
+            gguf_activation_dtype(LinearDevice::Cuda, DType::BF16, true),
+            DType::F32
+        );
+        assert_eq!(
+            gguf_activation_dtype(LinearDevice::Metal, DType::BF16, false),
+            DType::F32
+        );
+        assert_eq!(
+            gguf_activation_dtype(LinearDevice::Other, DType::BF16, false),
+            DType::F32
+        );
+        // An F32 request is F32 everywhere, and the function never widens.
+        for device in [LinearDevice::Cuda, LinearDevice::Metal, LinearDevice::Other] {
+            for force in [false, true] {
+                assert_eq!(
+                    gguf_activation_dtype(device, DType::F32, force),
+                    DType::F32,
+                    "{device:?} {force}"
+                );
+            }
+        }
+    }
+
+    /// A GGUF holds dense F32/F16/BF16 tensors beside its quantized blocks —
+    /// stems, the final layer, every bias, every norm scale. `QTensor::
+    /// dequantize` always returns F32 (`quantized/mod.rs:740-744`), so those
+    /// must be materialized ONCE in the kernel dtype at load, or a BF16
+    /// activation meets an F32 weight and `matmul` errors. The dense arm is
+    /// that materialization; before it, CUDA sent them down the per-forward
+    /// `Dequant` arm and re-dequantized every stem on every step.
+    #[test]
+    fn float_stored_gguf_weights_take_the_dense_arm_in_the_kernel_dtype() {
+        for stored in [GgmlDType::F32, GgmlDType::F16, GgmlDType::BF16] {
+            for device in [LinearDevice::Cuda, LinearDevice::Metal, LinearDevice::Other] {
+                for enabled in [false, true] {
+                    assert_eq!(
+                        select_linear_kind(device, stored, 64, true, enabled, false),
+                        QuantizedLinearKind::Dense,
+                        "{stored:?} on {device:?}"
+                    );
+                }
+            }
+        }
+        // And it really is dense at the kernel dtype, agreeing with the
+        // per-forward dequant reference to the bit.
+        let device = Device::Cpu;
+        let (out_dim, in_dim) = (4usize, 64usize);
+        let weight = quantized(out_dim, in_dim, GgmlDType::F32);
+        let bias = Tensor::from_vec(vec![0.5f32, -0.5, 1.0, 0.0], out_dim, &device).unwrap();
+        let linear = QuantizedLinear::new(
+            weight.clone(),
+            Some(bias.clone()),
+            &device,
+            DType::F16,
+            false,
+        )
+        .unwrap();
+        assert_eq!(linear.kind(), QuantizedLinearKind::Dense);
+
+        let x = Tensor::from_vec(
+            (0..2 * in_dim)
+                .map(|i| i as f32 * 0.01 - 0.3)
+                .collect::<Vec<_>>(),
+            (1, 2, in_dim),
+            &device,
+        )
+        .unwrap()
+        .to_dtype(DType::F16)
+        .unwrap();
+        let got = linear.forward(&x).unwrap();
+        assert_eq!(
+            got.dtype(),
+            DType::F16,
+            "CastBoundary: output follows input"
+        );
+        let reference = dequant_forward(&weight, Some(&bias), &x, DType::F16).unwrap();
+        let diff = (got.to_dtype(DType::F32).unwrap() - reference.to_dtype(DType::F32).unwrap())
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert_eq!(diff, 0.0, "the dense arm must be the dequant arm, hoisted");
+    }
+
+    /// A genuinely quantized weight keeps whichever arm it had — the dense
+    /// arm is about float STORAGE, not about the working dtype — and its bias
+    /// is still materialized at the kernel dtype, because that is what the
+    /// kernel's own output will be added to.
+    #[test]
+    fn q8_stored_weights_keep_their_arm_and_cast_the_bias() {
+        for device in [LinearDevice::Cuda, LinearDevice::Metal, LinearDevice::Other] {
+            assert_ne!(
+                select_linear_kind(device, GgmlDType::Q8_0, 64, true, true, false),
+                QuantizedLinearKind::Dense,
+                "{device:?} must not mistake a quantized weight for a dense one"
+            );
+        }
+        let device = Device::Cpu;
+        let weight = quantized(4, 64, GgmlDType::Q8_0);
+        let bias = Tensor::from_vec(vec![0.5f32, -0.5, 1.0, 0.0], 4, &device).unwrap();
+        let linear = QuantizedLinear::new(weight, Some(bias), &device, DType::F16, false).unwrap();
+        assert_eq!(linear.kind(), QuantizedLinearKind::Dequant);
+        assert_eq!(linear.bias_dtype(), Some(DType::F16));
     }
 
     /// CPU construction with the flag on still resolves the dequant arm —

@@ -22,8 +22,9 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::Linear;
-use mold_candle::quantized_nn::Linear as QuantizedLinear;
 use std::collections::HashMap;
+
+use crate::quantized_linear::QuantizedLinear;
 
 /// Slice a [`LinearLoraAdapter`]'s contribution into a fused output.
 ///
@@ -99,9 +100,18 @@ impl LinearLoraAdapter {
 ///
 /// The Plain↔Quantized split lets the offload path keep using the BF16
 /// `candle_nn::Linear` (it streams base weights CPU↔GPU each step) while
-/// the GGUF path stores `quantized_nn::Linear` permanently on GPU. Both
+/// the GGUF path stores a [`QuantizedLinear`] permanently on GPU. Both
 /// share the same `LinearLoraAdapter` math because adapter weights are
 /// always small dense BF16/F32 tensors regardless of the base.
+///
+/// The quantized arm is [`crate::quantized_linear::QuantizedLinear`] rather
+/// than `mold_candle::quantized_nn::Linear` because the GGUF transformer now
+/// runs at a working dtype the checkpoint does not choose: that type owns the
+/// activation cast boundary, materializes the bias at the kernel dtype, and
+/// hoists a densely stored tensor's dequantization out of the forward. The
+/// adapter math is unaffected — `LinearLoraAdapter::apply` takes its dtype
+/// from the linear's OUTPUT, which the cast boundary has already returned to
+/// the caller's.
 #[derive(Clone, Debug)]
 pub enum LoraLinear {
     Plain(Linear),
@@ -1034,7 +1044,14 @@ mod tests {
         let device = Device::Cpu;
         let weight = Tensor::zeros((4, 4), DType::F32, &device).unwrap();
         let storage = QTensor::quantize(&weight, GgmlDType::F32).unwrap();
-        let inner = QuantizedLinear::from_arc(std::sync::Arc::new(storage), None).unwrap();
+        let inner = QuantizedLinear::new(
+            std::sync::Arc::new(storage),
+            None,
+            &Device::Cpu,
+            DType::F32,
+            false,
+        )
+        .unwrap();
         let q = LoraLinear::quantized(inner);
         let _ = q.inner();
     }
