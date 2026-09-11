@@ -241,3 +241,24 @@ describe("SecretControl", () => {
     expect(wrapper.emitted("save")).toBeUndefined();
   });
 });
+
+describe("SelectControl with a value the options do not list", () => {
+  it("shows the machine's own value rather than rendering blank", () => {
+    const wrapper = mount(SelectControl, {
+      props: {
+        modelValue: "q6_k",
+        options: [
+          { value: "auto", label: "auto" },
+          { value: "q8_0", label: "q8_0" },
+        ],
+      },
+    });
+    const select = wrapper.get("select").element as HTMLSelectElement;
+    expect(select.value).toBe("q6_k");
+    expect(wrapper.findAll("option").map((o) => o.text())).toEqual([
+      "q6_k",
+      "auto",
+      "q8_0",
+    ]);
+  });
+});

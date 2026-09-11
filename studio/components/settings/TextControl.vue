@@ -34,6 +34,7 @@ function commit(event: Event) {
 <style scoped>
 .ms-setting-field {
   width: 176px;
+  max-width: 100%;
   height: var(--mold-ctl-lg, 32px);
   padding: 0 var(--mold-sp-2);
   border: var(--mold-bw) solid var(--mold-border);
@@ -45,6 +46,7 @@ function commit(event: Event) {
 }
 .ms-setting-field--wide {
   width: 288px;
+  max-width: 100%;
 }
 .ms-setting-field::placeholder {
   color: var(--mold-text-dim);

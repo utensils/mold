@@ -60,7 +60,7 @@ export const SECTIONS: SectionInfo[] = [
   {
     id: "app",
     label: "Look",
-    summary: "Theme, interface size, and how the app behaves",
+    summary: "Theme, light or dark, and how the app behaves",
     keywords: [
       "theme",
       "appearance",
@@ -68,6 +68,7 @@ export const SECTIONS: SectionInfo[] = [
       "light",
       "match system",
       "scale",
+      "interface size",
       "notifications",
     ],
     surfaces: ["web", "desktop"],
@@ -88,7 +89,7 @@ export const SECTIONS: SectionInfo[] = [
   {
     id: "hosts",
     label: "Machines",
-    summary: "This device, its key, and the Mold home it works out of",
+    summary: "This machine, what it runs on, and the others you can reach",
     keywords: ["hosts", "this device", "engine", "api key", "mold home"],
     surfaces: ["web", "desktop"],
   },
@@ -338,7 +339,7 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     help: "The size of its T5 text encoder. Smaller trades a little fidelity for graphics memory.",
     editor: "select",
     options: [
-      { value: "", label: "auto" },
+      { value: "auto", label: "auto" },
       { value: "fp16", label: "fp16" },
       { value: "q8_0", label: "q8_0" },
       { value: "q5_k_m", label: "q5_k_m" },
@@ -352,7 +353,7 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     help: "The size of its UMT5 text encoder. Smaller trades a little fidelity for graphics memory.",
     editor: "select",
     options: [
-      { value: "", label: "auto" },
+      { value: "auto", label: "auto" },
       { value: "fp16", label: "fp16" },
       { value: "q8_0", label: "q8_0" },
       { value: "q5_k_m", label: "q5_k_m" },
@@ -366,7 +367,7 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     help: "The size of their Qwen3 text encoder. Smaller trades a little fidelity for graphics memory.",
     editor: "select",
     options: [
-      { value: "", label: "auto" },
+      { value: "auto", label: "auto" },
       { value: "bf16", label: "bf16" },
       { value: "q8_0", label: "q8_0" },
       { value: "q5_k_m", label: "q5_k_m" },

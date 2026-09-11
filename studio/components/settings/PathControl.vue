@@ -63,7 +63,7 @@ function commit(event: Event) {
   gap: var(--mold-sp-2);
 }
 .ms-path__value {
-  max-width: 256px;
+  max-width: min(256px, 100%);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -90,6 +90,7 @@ function commit(event: Event) {
 }
 .ms-path__field {
   width: 288px;
+  max-width: 100%;
   height: var(--mold-ctl-lg, 32px);
   padding: 0 var(--mold-sp-2);
   border: var(--mold-bw) solid var(--mold-border);

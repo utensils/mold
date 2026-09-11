@@ -373,10 +373,10 @@ describe("Settings sections", () => {
 
   it("finds a section by a word that appears only in its summary sentence", () => {
     const look = SECTIONS.find((section) => section.id === "app")!;
-    expect(sectionMatchesSearch("interface size", look)).toBe(true);
+    expect(sectionMatchesSearch("light or dark", look)).toBe(true);
     expect(
       sectionMatchesSearch(
-        "interface size",
+        "light or dark",
         SECTIONS.find((s) => s.id === "media")!,
       ),
     ).toBe(false);

@@ -228,7 +228,10 @@ onBeforeUnmount(() => {
 <template>
   <section
     class="device-panel"
-    :class="{ 'device-panel--compact': compact }"
+    :class="{
+      'device-panel--compact': compact,
+      'device-panel--planned': plan !== null,
+    }"
     :data-device-count="devices.length"
     :data-lane-count="laneCount"
     data-test="device-panel"
@@ -473,7 +476,15 @@ onBeforeUnmount(() => {
   gap: 12px;
   align-items: baseline;
   justify-content: space-between;
+  font-size: var(--mold-fs-sm);
   font-weight: 650;
+}
+/* A sentence beside the plan, not a paragraph of the page: the panel is
+ * mounted on pages whose body copy is 16px (web) and 13px (desktop). */
+.device-panel__lifecycle {
+  margin: 0;
+  color: var(--mold-text-dim, #777);
+  font-size: var(--mold-fs-xs);
 }
 .device-panel__tentative,
 .device-panel__empty {
@@ -487,13 +498,17 @@ onBeforeUnmount(() => {
   align-items: stretch;
   gap: 10px;
 }
+/* The lane below a card holds the plan's queue; without a plan the card is
+ * its readings, and a 226px box around three lines reads as broken. */
+.device-panel--planned .device-card {
+  min-height: 226px;
+}
 .device-panel--compact .device-panel__grid {
   grid-template-columns: minmax(0, 1fr);
 }
 .device-card {
   display: grid;
   min-width: 0;
-  min-height: 226px;
   align-content: start;
   gap: 8px;
   padding: 12px;

@@ -134,4 +134,19 @@ defineEmits<{ (e: "reset"): void }>();
 .ms-setting-row__reset:hover {
   color: var(--mold-error);
 }
+
+/* A phone has no room for a label beside a field: the control drops under the
+ * text and takes the row's width, and the words keep their line length. */
+@media (max-width: 639px) {
+  .ms-setting-row {
+    flex-wrap: wrap;
+  }
+  .ms-setting-row__text {
+    flex-basis: 100%;
+  }
+  .ms-setting-row__control {
+    max-width: 100%;
+    margin-left: auto;
+  }
+}
 </style>
