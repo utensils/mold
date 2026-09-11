@@ -241,6 +241,11 @@ A supplied `--mesh` is a `.glb` or `.obj`. On a host that advertises
 reference uploads and is reached with an API key, its bytes stream through a
 request-bound upload lease instead of riding the request as base64.
 
+An omitted `--model` resolves per MODE, because the modes do not share a
+checkpoint: a roundtrip runs through the 2.1 shape VAE and defaults to that
+tier, while text-to-3-D and texturing default to the small fast one. Naming a
+checkpoint the mode cannot run is refused with the flag that fixes it.
+
 ## Jobs and queues
 
 ```bash

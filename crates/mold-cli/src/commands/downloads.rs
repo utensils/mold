@@ -105,7 +105,22 @@ async fn accept_licenses_on_the_server(
     Ok(accepted)
 }
 
+/// Refuse an empty download id by name.
+///
+/// The same trap `mold mesh-workflow` has: a blank path segment resolves to
+/// the collection route, so the verb is answered by something that is not the
+/// job it was given, and the user reads an error about the answer rather than
+/// about the blank argument.
+pub fn require_download_id(id: &str) -> Result<&str> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        bail!("a download id is required; `mold downloads list` shows the ids on this machine");
+    }
+    Ok(trimmed)
+}
+
 async fn cancel(client: &MoldClient, id: &str) -> Result<()> {
+    let id = require_download_id(id)?;
     client.cancel_download(id).await?;
     println!("{} cancelled {id}", theme::icon_ok());
     Ok(())
@@ -393,6 +408,18 @@ mod tests {
             assert!(message.contains("mold pull"), "{message}");
             assert!(message.contains(id), "{message}");
         }
+    }
+
+    /// An empty id is refused by name rather than reaching the collection
+    /// route and failing with a sentence about the answer.
+    #[test]
+    fn an_empty_download_id_is_refused_rather_than_reaching_the_queue_route() {
+        for blank in ["", "  "] {
+            let message = require_download_id(blank).unwrap_err().to_string();
+            assert!(message.contains("download id is required"), "{message}");
+            assert!(message.contains("downloads list"), "{message}");
+        }
+        assert_eq!(require_download_id(" dl-1 ").unwrap(), "dl-1");
     }
 
     #[test]

@@ -2198,3 +2198,101 @@ async fn list_json_prints_the_rows_the_api_serves() {
     assert_eq!(rows[0]["name"], "hunyuan3d-2.1:fp16");
     assert_eq!(rows[0]["default_steps"], 30);
 }
+
+/// A blank id reaches no route at all.
+///
+/// An empty path segment resolves to the COLLECTION route, so every lifecycle
+/// verb was answered by a listing (or a 404 from the wrong handler) and the
+/// user read an error about that answer instead of about the blank argument.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blank_id_is_refused_before_any_request() {
+    use wiremock::MockServer;
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    for verb in ["show", "events", "resume", "cancel", "delete"] {
+        env.cmd()
+            .env("MOLD_HOST", server.uri())
+            .args(["mesh-workflow", verb, ""])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("workflow id is required"));
+    }
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["downloads", "cancel", "  "])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("download id is required"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// With no `--model`, a roundtrip picks the 2.1 shape checkpoint, which is the
+/// only tier that can run one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_roundtrip_defaults_to_the_only_checkpoint_that_can_run_it() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(models_listing()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/mesh-workflows"))
+        .respond_with(
+            ResponseTemplate::new(202).set_body_json(serde_json::json!({ "job_id": "mw-9" })),
+        )
+        .mount(&server)
+        .await;
+
+    let mesh = env.home.join("armchair.glb");
+    std::fs::write(&mesh, b"glTF binary bytes").unwrap();
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["mesh-workflow", "create", "--mesh"])
+        .arg(&mesh)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mw-9"));
+
+    let posted = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.url.path() == "/api/mesh-workflows")
+        .expect("the workflow was submitted");
+    let body: serde_json::Value = serde_json::from_slice(&posted.body).unwrap();
+    assert_eq!(body["mode"], "mesh_roundtrip");
+    assert_eq!(body["roundtrip_request"]["model"], "hunyuan3d-2.1:fp16");
+}
+
+/// Naming a checkpoint the mode cannot run says which flag fixes it, and
+/// nothing is submitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_roundtrip_on_the_wrong_checkpoint_names_the_flag() {
+    use wiremock::MockServer;
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    let mesh = env.home.join("armchair.glb");
+    std::fs::write(&mesh, b"glTF").unwrap();
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args([
+            "mesh-workflow",
+            "create",
+            "--model",
+            "hunyuan3d-mini-turbo:fp16",
+            "--mesh",
+        ])
+        .arg(&mesh)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--model hunyuan3d-2.1:fp16"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

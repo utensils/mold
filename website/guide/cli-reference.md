@@ -278,20 +278,23 @@ The mode is inferred from what you supply:
 
 `--mode` names it outright when a script would rather not depend on that.
 
-| Flag                                                     | Meaning                                                   |
-| -------------------------------------------------------- | --------------------------------------------------------- |
-| `--model <MODEL>`                                        | The 3-D model every stage after the picture uses          |
-| `--image-model <MODEL>`                                  | The image model a text-to-3-D run starts from             |
-| `--up-axis y\|z`, `--meters-per-unit <M>`                | How to read the supplied mesh                             |
-| `--texture` / `--no-texture`, `--texture-resolution <N>` | PBR texturing                                             |
-| `--matting auto\|on\|off`, `--delight`                   | Conditioning stages                                       |
-| `--octree <N>`, `--threshold <T>`, `--target-faces <N>`  | Geometry controls                                         |
-| `--seed <N>`                                             | Seed used by every stage, so one value reproduces the run |
-| `--follow`                                               | Stream the stages until the workflow settles              |
-| `--json`                                                 | Print the accepted job as JSON                            |
+| Flag                                                     | Meaning                                                                     |
+| -------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `--model <MODEL>`                                        | The 3-D model every stage after the picture uses; the default is mode-aware |
+| `--image-model <MODEL>`                                  | The image model a text-to-3-D run starts from                               |
+| `--up-axis y\|z`, `--meters-per-unit <M>`                | How to read the supplied mesh                                               |
+| `--texture` / `--no-texture`, `--texture-resolution <N>` | PBR texturing                                                               |
+| `--matting auto\|on\|off`, `--delight`                   | Conditioning stages                                                         |
+| `--octree <N>`, `--threshold <T>`, `--target-faces <N>`  | Geometry controls                                                           |
+| `--seed <N>`                                             | Seed used by every stage, so one value reproduces the run                   |
+| `--follow`                                               | Stream the stages until the workflow settles                                |
+| `--json`                                                 | Print the accepted job as JSON                                              |
 
-Omit a geometry control and the recipe's own default answers. `delete` is
-settled-only: cancel or wait first. A supplied mesh is a `.glb` or `.obj`, and
+Omit a geometry control and the recipe's own default answers. Omit `--model`
+and the MODE decides, because the modes do not share a checkpoint: a roundtrip
+runs through the 2.1 shape VAE and defaults to that tier, while text-to-3-D and
+texturing default to the small fast one. `delete` is settled-only: cancel or
+wait first. A supplied mesh is a `.glb` or `.obj`, and
 on a server that advertises reference uploads and is reached with an API key
 its bytes stream through an upload lease rather than riding the request.
 

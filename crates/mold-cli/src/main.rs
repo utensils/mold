@@ -1418,7 +1418,9 @@ explicit.")]
         #[arg(long, value_enum)]
         mode: Option<MeshWorkflowModeArg>,
 
-        /// The 3-D model every stage after the picture uses.
+        /// The 3-D model every stage after the picture uses. The default is
+        /// mode-aware: a roundtrip needs the 2.1 shape checkpoint, and the
+        /// other modes take the small fast one.
         #[arg(long, short = 'm', value_name = "MODEL",
               add = ArgValueCandidates::new(commands::run::complete_model_name))]
         model: Option<String>,

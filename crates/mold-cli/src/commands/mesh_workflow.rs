@@ -23,6 +23,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
+use mold_core::generation_profile::MeshWorkflowMode;
 use mold_core::mesh_workflow::{
     validate_create_mesh_workflow, CreateMeshWorkflowRequest, MeshWorkflowEvent,
     MeshWorkflowJobDetail, MeshWorkflowJobState, MeshWorkflowJobSummary, MeshWorkflowStageRecord,
@@ -112,23 +113,28 @@ pub async fn run(action: MeshWorkflowAction) -> Result<()> {
             .await
         }
         MeshWorkflowAction::List { json } => list(&client, json).await,
-        MeshWorkflowAction::Show { id, json } => show(&client, &id, json).await,
+        MeshWorkflowAction::Show { id, json } => {
+            show(&client, require_workflow_id(&id)?, json).await
+        }
         MeshWorkflowAction::Events { id } => {
-            follow_workflow(&client, &id).await?;
+            follow_workflow(&client, require_workflow_id(&id)?).await?;
             Ok(())
         }
         MeshWorkflowAction::Resume { id } => {
-            client.resume_mesh_workflow(&id).await?;
+            let id = require_workflow_id(&id)?;
+            client.resume_mesh_workflow(id).await?;
             println!("{} resumed {id}", theme::icon_ok());
             Ok(())
         }
         MeshWorkflowAction::Cancel { id } => {
-            client.cancel_mesh_workflow(&id).await?;
+            let id = require_workflow_id(&id)?;
+            client.cancel_mesh_workflow(id).await?;
             println!("{} cancelled {id}", theme::icon_ok());
             Ok(())
         }
         MeshWorkflowAction::Delete { id } => {
-            client.delete_mesh_workflow(&id).await?;
+            let id = require_workflow_id(&id)?;
+            client.delete_mesh_workflow(id).await?;
             println!(
                 "{} deleted {id} and the artifacts it retained",
                 theme::icon_ok()
@@ -178,6 +184,60 @@ pub fn resolve_mode(args: &CreateArgs) -> Result<MeshWorkflowModeArg> {
     }
 }
 
+/// The 3-D model this mode runs on when `--model` names none.
+///
+/// The modes do not share a checkpoint, so neither can their default:
+/// `mold_core::generation_profile::default_model_for_mesh_workflow_mode` is
+/// the one authority, and it sits beside the function that decides which
+/// modes a recipe advertises so the two cannot disagree.
+pub fn default_model_for(mode: MeshWorkflowModeArg) -> &'static str {
+    mold_core::generation_profile::default_model_for_mesh_workflow_mode(wire_mode(mode))
+}
+
+/// The wire mode this flag names.
+fn wire_mode(mode: MeshWorkflowModeArg) -> MeshWorkflowMode {
+    match mode {
+        MeshWorkflowModeArg::TextToMesh => MeshWorkflowMode::TextToMesh,
+        MeshWorkflowModeArg::MeshTexture => MeshWorkflowMode::MeshTexture,
+        MeshWorkflowModeArg::MeshRoundtrip => MeshWorkflowMode::MeshRoundtrip,
+    }
+}
+
+/// Refuse a checkpoint the chosen mode cannot run, naming the flag that fixes
+/// it.
+///
+/// `validate_create_mesh_workflow` refuses the same request, but its sentence
+/// is written for the HTTP door and names no flag — "mesh-roundtrip requires
+/// a Hunyuan3D 2.1 shape checkpoint" leaves a terminal user to guess both
+/// which model that is and how to select it. Checked before the request is
+/// built so nothing is read from disk first.
+fn refuse_a_model_the_mode_cannot_run(mode: MeshWorkflowModeArg, model: &str) -> Result<()> {
+    if mode == MeshWorkflowModeArg::MeshRoundtrip
+        && !mold_core::manifest::hunyuan3d_shape21_model(model)
+    {
+        bail!(
+            "a roundtrip runs through the 2.1 shape VAE, and '{model}' has none; \
+             pass --model {}",
+            default_model_for(MeshWorkflowModeArg::MeshRoundtrip)
+        );
+    }
+    Ok(())
+}
+
+/// Refuse an empty workflow id by name.
+///
+/// An empty path segment resolves to the LIST route, so the id every
+/// lifecycle verb takes would otherwise be answered by a listing the client
+/// tries to read as one job: `error decoding response body: expected value at
+/// line 1 column 1`, which says nothing about the argument that was blank.
+pub fn require_workflow_id(id: &str) -> Result<&str> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        bail!("a workflow id is required; `mold mesh-workflow list` shows the ids on this machine");
+    }
+    Ok(trimmed)
+}
+
 async fn create(client: &MoldClient, args: CreateArgs) -> Result<()> {
     if args.local {
         bail!("{LOCAL_REFUSAL}");
@@ -188,8 +248,9 @@ async fn create(client: &MoldClient, args: CreateArgs) -> Result<()> {
     let mesh_model = args
         .model
         .clone()
-        .unwrap_or_else(|| mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string());
+        .unwrap_or_else(|| default_model_for(mode).to_string());
     let mesh_model = mold_core::manifest::resolve_model_name(&mesh_model);
+    refuse_a_model_the_mode_cannot_run(mode, &mesh_model)?;
 
     let models = client
         .list_models_extended()
@@ -1229,6 +1290,81 @@ mod tests {
             ["shape", "finalize"]
         );
         assert_eq!(workflow.mode_str(), "mesh_roundtrip");
+    }
+
+    /// A mode's default model is one that can actually run it.
+    ///
+    /// A roundtrip needs the 2.1 shape VAE and nothing else has one, so a
+    /// single default meant `mold mesh-workflow create --mesh chair.glb` was
+    /// refused by the door it had just been sent to.
+    #[test]
+    fn each_mode_defaults_to_a_model_that_can_run_it() {
+        assert_eq!(
+            default_model_for(MeshWorkflowModeArg::MeshRoundtrip),
+            mold_core::manifest::HUNYUAN3D_21_MODEL
+        );
+        assert_eq!(
+            default_model_for(MeshWorkflowModeArg::TextToMesh),
+            mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL
+        );
+        assert_eq!(
+            default_model_for(MeshWorkflowModeArg::MeshTexture),
+            mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL
+        );
+        // The roundtrip default passes the validator's own test, so the
+        // default can never be the thing admission refuses.
+        assert!(mold_core::manifest::hunyuan3d_shape21_model(
+            default_model_for(MeshWorkflowModeArg::MeshRoundtrip)
+        ));
+    }
+
+    /// A model the mode cannot run is refused by naming the flag that fixes
+    /// it, not by repeating the wire validator's flagless sentence.
+    #[test]
+    fn a_model_the_mode_cannot_run_names_the_flag_that_fixes_it() {
+        let message = refuse_a_model_the_mode_cannot_run(
+            MeshWorkflowModeArg::MeshRoundtrip,
+            mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("--model hunyuan3d-2.1:fp16"), "{message}");
+        assert!(
+            message.contains(mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL),
+            "the refusal names the model that cannot do it: {message}"
+        );
+
+        // The 2.1 tier and its derived quantizations are accepted, and the
+        // other modes take any tier.
+        for model in ["hunyuan3d-2.1:fp16", "hunyuan3d-2.1:q4"] {
+            assert!(
+                refuse_a_model_the_mode_cannot_run(MeshWorkflowModeArg::MeshRoundtrip, model)
+                    .is_ok(),
+                "{model} runs a roundtrip"
+            );
+        }
+        assert!(refuse_a_model_the_mode_cannot_run(
+            MeshWorkflowModeArg::TextToMesh,
+            mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL
+        )
+        .is_ok());
+    }
+
+    /// An empty id is refused by name rather than resolving to the LIST route.
+    ///
+    /// `/api/mesh-workflows/` with a blank segment answers with the listing,
+    /// which the client then fails to read as one job — "expected value at
+    /// line 1 column 1", a sentence about JSON that says nothing about the
+    /// blank argument.
+    #[test]
+    fn an_empty_workflow_id_is_refused_rather_than_listing_every_job() {
+        for blank in ["", "   ", "\t"] {
+            let message = require_workflow_id(blank).unwrap_err().to_string();
+            assert!(message.contains("workflow id is required"), "{message}");
+            assert!(message.contains("mesh-workflow list"), "{message}");
+        }
+        // A real id survives, trimmed of whatever a shell handed us.
+        assert_eq!(require_workflow_id("  mw-1  ").unwrap(), "mw-1");
     }
 
     /// `--local` is refused by name: there is no local form of a durable
