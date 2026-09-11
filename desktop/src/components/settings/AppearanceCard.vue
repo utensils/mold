@@ -1,54 +1,46 @@
 <script setup lang="ts">
 /*
- * Settings ▸ Look: the five themes as cards, the System · Light · Dark control,
- * interface scale, and the app-behaviour toggles beneath a divider. All of it
- * drives the existing appPrefs plumbing — nothing here blocks first use.
+ * Settings ▸ Look: the theme picker, interface scale, and the app-behaviour
+ * toggles beneath a divider. All of it drives the existing appPrefs plumbing —
+ * nothing here blocks first use.
  *
- * A card names a THEME and nothing else; the tone control names the TONE. The
- * two are independent, which is why there is no longer a Match-system switch
- * sitting beside a card that already said "dark".
+ * The theme cards and the System · Light · Dark control are the shared kit's
+ * `ThemePicker`, so the app, the browser and the phone pick a theme the same
+ * way. Interface scale and the four behaviour toggles stay here: they are
+ * properties of THIS app, and a browser tab has neither.
  */
 import { computed } from "vue";
-import SegmentedControl from "@ui/components/SegmentedControl.vue";
-import ToggleControl from "./ToggleControl.vue";
+import ThemePicker from "@studio/components/settings/ThemePicker.vue";
+import ToggleControl from "@studio/components/settings/ToggleControl.vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
-import {
-  THEME_FAMILY_META,
-  applyFamilyChoice,
-  applyToneChoice,
-  familyOf,
-  themeFamilyMeta,
-  themeId,
-  toneChoice,
-  toneOf,
-  type ThemeFamilyId,
-  type ToneChoice,
-} from "../../lib/theme";
+import type { ThemeId } from "../../lib/theme";
+import type { AppSettings } from "../../lib/ipc";
 import { shortcutLabel } from "../../lib/platform";
 
 const prefs = useAppPrefsStore();
 
-const TONE_OPTIONS = [
-  { value: "system" as const, label: "System" },
-  { value: "light" as const, label: "Light" },
-  { value: "dark" as const, label: "Dark" },
-];
-
-/** The card that reads as chosen, and the map each card's band paints from. */
-const activeFamily = computed(() => familyOf(prefs.theme));
-const tone = computed(() => toneOf(prefs.theme));
-const activeTone = computed<ToneChoice>(() =>
-  toneChoice({ theme: prefs.theme, matchSystem: prefs.matchSystem }),
-);
-
-const toneHelp = computed(() =>
-  prefs.matchSystem
-    ? `Follows this Mac: ${themeFamilyMeta(prefs.theme).label} switches between its light and dark tone.`
-    : `${themeFamilyMeta(prefs.theme).label} stays ${tone.value} whatever this Mac does.`,
-);
-
-function pickTone(choice: ToneChoice) {
-  void prefs.update(applyToneChoice(choice, prefs.theme));
+/**
+ * One write per choice, even when a choice moves both fields.
+ *
+ * `ThemePicker` emits `update:theme` and `update:matchSystem` separately, and
+ * picking System moves both. `prefs.update` re-reads settings.json before it
+ * merges — deliberately, so other writers are not clobbered — so two
+ * overlapping calls would both read the pre-change file and the second would
+ * erase the first field. Coalescing on the microtask keeps one click to one
+ * write.
+ */
+let pending: Partial<AppSettings> | null = null;
+function queue(patch: Partial<AppSettings>) {
+  if (pending) {
+    Object.assign(pending, patch);
+    return;
+  }
+  pending = { ...patch };
+  void Promise.resolve().then(() => {
+    const next = pending;
+    pending = null;
+    if (next) void prefs.update(next);
+  });
 }
 
 const scaleHelp = computed(
@@ -84,75 +76,16 @@ const BEHAVIOUR_TOGGLES = [
 function toggleValue(key: (typeof BEHAVIOUR_TOGGLES)[number]["key"]): boolean {
   return prefs[key];
 }
-
-function pick(family: ThemeFamilyId) {
-  void prefs.update(
-    applyFamilyChoice(family, { theme: prefs.theme, matchSystem: prefs.matchSystem }),
-  );
-}
 </script>
 
 <template>
   <div class="p-3.5">
-    <!-- Theme -->
-    <div class="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Theme">
-      <button
-        v-for="meta in THEME_FAMILY_META"
-        :key="meta.id"
-        type="button"
-        role="radio"
-        :aria-checked="activeFamily === meta.id"
-        :data-test="`theme-${meta.id}`"
-        class="flex flex-col gap-1.5 rounded-control border p-2.5 text-left transition-colors duration-100"
-        :class="
-          activeFamily === meta.id
-            ? 'border-accent bg-accent-tint'
-            : 'border-border hover:border-border-focus'
-        "
-        @click="pick(meta.id)"
-      >
-        <!-- The theme's own surfaces, painted by its own map: the band carries
-             `data-theme`, so ui/tokens.css stays the only place a hex lives.
-             The cells read `var(--mold-*)` DIRECTLY — a Tailwind `bg-*` alias
-             is substituted at the root and would paint the current theme on
-             every card. See the note in AppearanceCard.test.ts.
-
-             Order and widths echo the mock's theme preview: the deep rail on
-             the left, the wide canvas beside it, a surface card, an accent
-             stripe. -->
-        <span
-          :data-theme="themeId(meta.id, tone)"
-          class="flex h-11 overflow-hidden rounded-inner border border-border"
-          aria-hidden="true"
-        >
-          <span class="ms-band__rail" />
-          <span class="ms-band__field" />
-          <span class="ms-band__card" />
-          <span class="ms-band__accent" />
-        </span>
-        <span class="text-sm font-semibold text-fg">{{ meta.label }}</span>
-        <span class="text-micro text-fg-dim">{{ meta.blurb }}</span>
-        <span class="truncate font-mono text-micro text-fg-dim">{{ meta.type }}</span>
-      </button>
-    </div>
-
-    <!-- Tone -->
-    <div class="mt-3 flex items-center justify-between gap-4 py-1.5">
-      <div class="min-w-0">
-        <div class="text-sm text-fg">Light or dark</div>
-        <p class="mt-0.5 text-micro text-fg-dim">{{ toneHelp }}</p>
-      </div>
-      <div class="shrink-0" data-test="tone-control">
-        <SegmentedControl
-          :model-value="activeTone"
-          :options="TONE_OPTIONS"
-          label="Light or dark"
-          variant="neutral"
-          compact
-          @update:model-value="pickTone"
-        />
-      </div>
-    </div>
+    <ThemePicker
+      :theme="prefs.theme"
+      :match-system="prefs.matchSystem"
+      @update:theme="(value: ThemeId) => queue({ theme: value })"
+      @update:match-system="(value: boolean) => queue({ matchSystem: value })"
+    />
 
     <!-- Interface scale -->
     <div class="mt-2 flex items-center justify-between gap-4 py-1.5">
@@ -196,26 +129,3 @@ function pick(family: ThemeFamilyId) {
     </div>
   </div>
 </template>
-
-<style scoped>
-/* The swatch band. Each cell reads the theme map the band itself carries, so
- * a nested `[data-theme]` actually reaches it. Tailwind's colour utilities
- * resolve through `--color-*`, which is defined (and therefore substituted)
- * at the root — see AppearanceCard.test.ts for the full substitution rule. */
-.ms-band__rail {
-  flex: 0 0 22%;
-  background: var(--mold-bg-deep);
-}
-.ms-band__field {
-  flex: 1 1 auto;
-  background: var(--mold-bg);
-}
-.ms-band__card {
-  flex: 0 0 22%;
-  background: var(--mold-surface);
-}
-.ms-band__accent {
-  flex: 0 0 16%;
-  background: var(--mold-blue);
-}
-</style>

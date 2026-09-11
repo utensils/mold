@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import ConfigSettingRow from "./ConfigSettingRow.vue";
+import EngineRow from "./EngineRow.vue";
 </script>
 
 <template>
   <div>
-    <ConfigSettingRow schema-key="expand.enabled" />
-    <ConfigSettingRow schema-key="expand.backend" />
-    <ConfigSettingRow schema-key="expand.model" />
-    <ConfigSettingRow schema-key="expand.api_model" />
-    <ConfigSettingRow schema-key="expand.temperature" />
-    <ConfigSettingRow schema-key="expand.top_p" />
-    <ConfigSettingRow schema-key="expand.max_tokens" />
-    <ConfigSettingRow schema-key="expand.thinking" />
+    <EngineRow schema-key="expand.enabled" />
+    <EngineRow schema-key="expand.backend" />
+    <EngineRow schema-key="expand.model" />
+    <EngineRow schema-key="expand.api_model" />
+    <EngineRow schema-key="expand.temperature" />
+    <EngineRow schema-key="expand.top_p" />
+    <EngineRow schema-key="expand.max_tokens" />
+    <EngineRow schema-key="expand.thinking" />
   </div>
 </template>

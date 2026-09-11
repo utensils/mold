@@ -1,7 +1,13 @@
 import { defineStore } from "pinia";
 import { ApiError } from "../lib/api/client";
 import { fetchConfig, fetchProfiles, resetConfig, setConfig, setProfile } from "../lib/api/config";
-import { sectionForConfigKey } from "../lib/settingsSchema";
+import {
+  parsePerStyleKey,
+  schemaFor,
+  schemasForSection,
+  sectionForConfigKey,
+  type SectionId,
+} from "../lib/settingsSchema";
 import type { ConfigRow } from "../lib/api/types";
 
 /**
@@ -25,6 +31,41 @@ export const useSettingsConfigStore = defineStore("settingsConfig", {
       return state.rows
         .filter((r) => sectionForConfigKey(r.key) === "advanced")
         .sort((a, b) => a.key.localeCompare(b.key));
+    },
+    /**
+     * Every row a section renders, so a body names its keys once. Curated keys
+     * come out in the order the schema declares them — which is the order the
+     * section reads in — and anything this build has never heard of follows,
+     * sorted by key, rather than disappearing.
+     */
+    rowsForSection(state) {
+      return (id: SectionId): ConfigRow[] => {
+        const order = new Map(schemasForSection(id).map((schema, index) => [schema.key, index]));
+        return state.rows
+          .filter((row) => sectionForConfigKey(row.key) === id)
+          .sort((a, b) => {
+            const ai = order.get(a.key) ?? order.size;
+            const bi = order.get(b.key) ?? order.size;
+            return ai - bi || a.key.localeCompare(b.key);
+          });
+      };
+    },
+    /** `models.<style>.<field>` rows, in the order the engine reported them —
+     *  `groupPerStyleRows` is what turns them into one row per style. */
+    perStyleRows(state): ConfigRow[] {
+      return state.rows.filter((row) => parsePerStyleKey(row.key) !== null);
+    },
+    /**
+     * The raw engine keys each section actually draws, so the shell's search
+     * can match a section on them. Per-style overrides are raw rows too, and
+     * they belong to Per-style defaults — searching a style name must find the
+     * section it is in, not the Advanced list it left.
+     */
+    rawKeysBySection(): Partial<Record<SectionId, string[]>> {
+      return {
+        advanced: this.advancedRows.filter((row) => !schemaFor(row.key)).map((row) => row.key),
+        styleDefaults: this.perStyleRows.map((row) => row.key),
+      };
     },
   },
   actions: {

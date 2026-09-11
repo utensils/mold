@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import SettingRow from "./SettingRow.vue";
+import SettingRow from "@studio/components/settings/SettingRow.vue";
 import { ipc } from "../../lib/ipc";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useToastStore } from "../../stores/toasts";

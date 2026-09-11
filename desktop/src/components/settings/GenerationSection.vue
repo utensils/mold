@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import ConfigSettingRow from "./ConfigSettingRow.vue";
+import EngineRow from "./EngineRow.vue";
 import { useModelStore } from "../../stores/models";
 
 const models = useModelStore();
@@ -13,13 +13,14 @@ const modelOptions = computed(() => [
 
 <template>
   <div>
-    <ConfigSettingRow schema-key="default_model" :options="modelOptions" />
-    <ConfigSettingRow schema-key="default_width" />
-    <ConfigSettingRow schema-key="default_height" />
-    <ConfigSettingRow schema-key="default_steps" />
-    <ConfigSettingRow schema-key="default_negative_prompt" />
-    <ConfigSettingRow schema-key="embed_metadata" />
-    <ConfigSettingRow schema-key="t5_variant" />
-    <ConfigSettingRow schema-key="qwen3_variant" />
+    <EngineRow schema-key="default_model" :options="modelOptions" />
+    <EngineRow schema-key="default_width" />
+    <EngineRow schema-key="default_height" />
+    <EngineRow schema-key="default_steps" />
+    <EngineRow schema-key="default_negative_prompt" />
+    <EngineRow schema-key="embed_metadata" />
+    <EngineRow schema-key="t5_variant" />
+    <EngineRow schema-key="umt5_variant" />
+    <EngineRow schema-key="qwen3_variant" />
   </div>
 </template>

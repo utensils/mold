@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
-import ToggleControl from "../settings/ToggleControl.vue";
+import ToggleControl from "@studio/components/settings/ToggleControl.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import Stepper from "@ui/components/Stepper.vue";
