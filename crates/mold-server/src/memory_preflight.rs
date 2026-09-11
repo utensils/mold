@@ -46,7 +46,21 @@ fn transformer_component_size(paths: &ModelPaths) -> u64 {
     }
 }
 
-fn large_flux_bf16_should_auto_offload(paths: &ModelPaths, hint: Option<ActivationHint>) -> bool {
+/// Whether a large BF16 FLUX.1 checkpoint takes the block-streaming path.
+///
+/// Mirrors [`large_flux2_bf16_should_auto_offload`] exactly, including its
+/// two-step shape: `available_bytes: None` answers the size question alone —
+/// today's answer, byte for byte — and `Some(available)` narrows it by asking
+/// whether the checkpoint plus this render's workspace actually exceeds 90 %
+/// of the card. Without the second step a 23.8 GB BF16 dev streams its blocks
+/// on a 46 GB L40S that has room for the whole thing, at the documented 3–5x
+/// penalty, for nothing.
+fn large_flux_bf16_should_auto_offload(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    available_bytes: Option<u64>,
+    activation_bytes: u64,
+) -> bool {
     const LARGE_FLUX_BF16_TRANSFORMER_BYTES: u64 = 20_000_000_000;
 
     if !hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
@@ -64,7 +78,20 @@ fn large_flux_bf16_should_auto_offload(paths: &ModelPaths, hint: Option<Activati
         return false;
     }
 
-    transformer_component_size(paths) >= LARGE_FLUX_BF16_TRANSFORMER_BYTES
+    if transformer_component_size(paths) < LARGE_FLUX_BF16_TRANSFORMER_BYTES {
+        return false;
+    }
+
+    available_bytes
+        .filter(|bytes| *bytes > 0)
+        .is_none_or(|available| {
+            let resident_peak = mold_inference::device::estimate_peak_memory(
+                paths,
+                mold_inference::LoadStrategy::Sequential,
+            )
+            .saturating_add(activation_bytes);
+            resident_peak > available.saturating_mul(9) / 10
+        })
 }
 
 fn large_flux2_bf16_should_auto_offload(
@@ -512,16 +539,18 @@ fn preflight_memory_guard_with_available_and_policy_for_request(
         policy.request_has_lora,
         policy.forced_offload,
     );
-    let flux_offload = if conservative_flux_offload
-        && !policy.forced_offload
-        && large_flux2_bf16_should_auto_offload(paths, hint, None, 0)
-    {
-        large_flux2_bf16_should_auto_offload(
-            paths,
-            hint,
-            Some(effective_available),
-            activation_memory_for_estimate(hint, false),
-        )
+    // Both families' size predicates are narrowed by the measured card in the
+    // same shape: the conservative answer above is a size question, and a card
+    // with room for the whole checkpoint must not stream its blocks.
+    let flux_offload = if conservative_flux_offload && !policy.forced_offload {
+        let activation = activation_memory_for_estimate(hint, false);
+        if large_flux2_bf16_should_auto_offload(paths, hint, None, 0) {
+            large_flux2_bf16_should_auto_offload(paths, hint, Some(effective_available), activation)
+        } else if large_flux_bf16_should_auto_offload(paths, hint, None, 0) {
+            large_flux_bf16_should_auto_offload(paths, hint, Some(effective_available), activation)
+        } else {
+            conservative_flux_offload
+        }
     } else {
         conservative_flux_offload
     };
@@ -1652,6 +1681,13 @@ pub(crate) fn select_server_load_strategy_for_device(
 /// resident and can OOM with Klein-9B BF16 on a 24 GB card, and worse,
 /// `generate_inner` would unload the eagerly loaded transformer anyway. The
 /// execution plan must make these runtime constraints authoritative.
+///
+/// What this does NOT decide is transformer RESIDENCY. Both engines keep or
+/// drop the transformer around VAE decode on their own budget
+/// (`mold_inference::device::still_transformer_residency`), sampled against
+/// the card at the moment of the decode rather than against the planner's
+/// estimate, so an Eager strategy no longer implies a transformer that
+/// survives the render and a Sequential one no longer implies a reload.
 pub(crate) fn request_aware_load_strategy(
     strategy: mold_inference::LoadStrategy,
     paths: &ModelPaths,
@@ -1717,7 +1753,7 @@ pub(crate) fn server_offload_enabled_for_paths_with_request(
     }
 
     forced_offload
-        || large_flux_bf16_should_auto_offload(paths, hint)
+        || large_flux_bf16_should_auto_offload(paths, hint, None, 0)
         || large_flux2_bf16_should_auto_offload(paths, hint, None, 0)
 }
 
@@ -1875,12 +1911,19 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
         request_has_lora,
         offload_policy.forced,
     );
-    let block_offload = if conservative_block_offload
-        && !offload_policy.forced
-        && !request_has_lora
-        && large_flux2_bf16_should_auto_offload(paths, hint, None, 0)
+    // Both families' size predicates are narrowed by the measured card, in
+    // the same shape and for the same reason: a 46 GB L40S that can hold a
+    // 23.8 GB BF16 checkpoint whole must not stream its blocks at the
+    // documented 3-5x penalty.
+    let block_offload = if conservative_block_offload && !offload_policy.forced && !request_has_lora
     {
-        large_flux2_bf16_should_auto_offload(paths, hint, available_memory_bytes, activation)
+        if large_flux2_bf16_should_auto_offload(paths, hint, None, 0) {
+            large_flux2_bf16_should_auto_offload(paths, hint, available_memory_bytes, activation)
+        } else if large_flux_bf16_should_auto_offload(paths, hint, None, 0) {
+            large_flux_bf16_should_auto_offload(paths, hint, available_memory_bytes, activation)
+        } else {
+            conservative_block_offload
+        }
     } else {
         conservative_block_offload
     };
@@ -3404,6 +3447,69 @@ mod fail_closed_tests {
             unreadable_references.activation_memory_bytes > with_references.activation_memory_bytes,
             "unreadable reference headers must retain the cap-based fail-closed estimate"
         );
+    }
+
+    /// FLUX.1's predicate gains its flux2 sibling's second step. A 23.8 GB
+    /// BF16 dev streams its blocks on a 24 GB card, as it always has, and
+    /// stops streaming them on a card with room for the whole thing — which
+    /// it never did before, because the size test had no availability arm at
+    /// all.
+    #[test]
+    fn large_flux_bf16_auto_offloads_only_when_residency_does_not_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        let transformer = dir.path().join("flux1-dev.safetensors");
+        std::fs::File::create(&transformer)
+            .unwrap()
+            .set_len(23_800_000_000)
+            .unwrap();
+        let mut model_paths = paths("/unused/transformer.safetensors");
+        model_paths.transformer = transformer;
+        let activation = Some(hint(ActivationFamily::FluxDit));
+
+        assert!(
+            large_flux_bf16_should_auto_offload(&model_paths, activation, None, 0),
+            "the size question alone is today's answer, byte for byte"
+        );
+        assert!(
+            large_flux_bf16_should_auto_offload(
+                &model_paths,
+                activation,
+                Some(24_000_000_000),
+                256_000_000
+            ),
+            "a 24 GB card cannot hold a 23.8 GB BF16 checkpoint and its workspace"
+        );
+        assert!(
+            !large_flux_bf16_should_auto_offload(
+                &model_paths,
+                activation,
+                Some(96_000_000_000),
+                256_000_000
+            ),
+            "a 96 GB card must not pay the 3-5x streaming penalty for a checkpoint it holds"
+        );
+
+        // The eligibility gates are untouched: a GGUF of the same size never
+        // enters, and neither does another family's checkpoint.
+        let gguf = dir.path().join("flux1-dev-Q8_0.gguf");
+        std::fs::File::create(&gguf)
+            .unwrap()
+            .set_len(23_800_000_000)
+            .unwrap();
+        let mut gguf_paths = model_paths.clone();
+        gguf_paths.transformer = gguf;
+        assert!(!large_flux_bf16_should_auto_offload(
+            &gguf_paths,
+            activation,
+            None,
+            0
+        ));
+        assert!(!large_flux_bf16_should_auto_offload(
+            &model_paths,
+            Some(hint(ActivationFamily::Flux2Dit)),
+            None,
+            0
+        ));
     }
 
     #[test]

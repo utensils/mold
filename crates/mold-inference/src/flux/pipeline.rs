@@ -1009,6 +1009,59 @@ pub(crate) fn effective_loras(req: &mold_core::GenerateRequest) -> Vec<mold_core
         .collect()
 }
 
+/// Attention heads in every shipped FLUX.1 checkpoint — dev, schnell, krea,
+/// kontext and fill all carry `num_heads: 24` over a 3072-wide stream
+/// (`candle-transformers`' `flux::model::Config::{dev,schnell}`). The score
+/// tile the math attention budget charges is per head, so this is a term in
+/// [`crate::device::flux_activation_budget_bytes_for`].
+const FLUX1_ATTENTION_HEADS: u64 = 24;
+
+/// What the eager path does with the transformer before VAE decode, and why.
+///
+/// The reason travels with the answer because the log line names it: an
+/// operator watching a warm render reload a 12 GB checkpoint every time needs
+/// to know whether the card refused the residency or they asked for the drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResidencyDecision {
+    /// The budget fits (or the operator asked for the keep and the budget
+    /// agreed): the transformer survives into the next render.
+    KeepResident,
+    /// The budget does not fit. This is #276's force-drop, generalized: it is
+    /// now the answer for an unset variable too, rather than only an override
+    /// of an explicit `1`.
+    DropForHeadroom,
+    /// `MOLD_FLUX_KEEP_TRANSFORMER=0` — the operator asked for the drop.
+    DropRequested,
+}
+
+/// Resolve the eager path's residency from the variable and the budget.
+///
+/// The default CHANGED here: before this, an unset `MOLD_FLUX_KEEP_TRANSFORMER`
+/// dropped the transformer on every render regardless of the card, so a 46 GB
+/// L40S re-read a 12.6 GB Q8 checkpoint from disk (8.4 s) for every print. The
+/// unset answer is now the budget's.
+///
+/// `1` therefore resolves identically to unset — it is preserved as an
+/// accepted value rather than removed, because #276's whole point was that an
+/// explicit keep must still yield to a card that cannot afford it, and that
+/// override is exactly what [`crate::device::still_transformer_residency`] now
+/// expresses for everyone. `0` is the one value that still changes the answer:
+/// it forces the drop even where the budget fits, which is the opt-out an
+/// operator debugging a memory problem needs.
+pub(crate) fn resolve_flux_keep_transformer(
+    env: Option<&str>,
+    budget: crate::device::TransformerResidency,
+) -> ResidencyDecision {
+    if env == Some("0") {
+        return ResidencyDecision::DropRequested;
+    }
+    if budget.keeps() {
+        ResidencyDecision::KeepResident
+    } else {
+        ResidencyDecision::DropForHeadroom
+    }
+}
+
 /// Loaded FLUX model components, ready for inference.
 /// FLUX transformer and VAE always run on GPU. T5 and CLIP run on GPU or CPU
 /// depending on available VRAM (checked at load time after the transformer is loaded).
@@ -1170,23 +1223,39 @@ impl FluxEngine {
     /// Free the GPU state VAE decode competes with, before the decode starts.
     ///
     /// The eager path's decision to keep the transformer hot is
-    /// `MOLD_FLUX_KEEP_TRANSFORMER` minus the headroom override; whatever it
-    /// decides, the PuLID adapter follows. Both live here rather than at the
-    /// call site so the pair cannot drift — a drop that released the
-    /// transformer and left 0.8–1.7 GB of adapter resident would hand the VAE
-    /// back part of the headroom the drop just created, on exactly the
-    /// machines that needed it.
+    /// [`resolve_flux_keep_transformer`]; whatever it decides, the PuLID
+    /// adapter follows. Both live here rather than at the call site so the
+    /// pair cannot drift — a drop that released the transformer and left
+    /// 0.8–1.7 GB of adapter resident would hand the VAE back part of the
+    /// headroom the drop just created, on exactly the machines that needed it.
     ///
     /// Takes `&mut Option<FluxTransformer>` rather than `&mut LoadedFlux` so a
     /// test can drive it with a synthetic transformer and no encoders or VAE.
     /// Returns whether the transformer was dropped.
+    /// Device bytes the resident transformer holds, from the checkpoint that
+    /// produced it.
+    ///
+    /// The file length is the right measure for both arms: a GGUF stays
+    /// quantized at rest so its resident bytes ARE its file bytes, and a BF16
+    /// safetensors is materialized one-for-one. `transformer_path` is the
+    /// RESOLVED path, so an fp8 checkpoint reports its Q8 cache rather than
+    /// the original it was converted from — which is the file that is actually
+    /// on the card.
+    fn resident_transformer_bytes(loaded: &LoadedFlux) -> u64 {
+        if loaded.flux_model.is_none() {
+            return 0;
+        }
+        std::fs::metadata(&loaded.transformer_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0)
+    }
+
     fn free_gpu_state_before_vae_decode(
         flux_model: &mut Option<FluxTransformer>,
         identity: &mut RenderIdentity<'_>,
-        keep_transformer_env: bool,
-        force_drop_for_headroom: bool,
+        decision: ResidencyDecision,
     ) -> bool {
-        if keep_transformer_env && !force_drop_for_headroom {
+        if decision == ResidencyDecision::KeepResident {
             return false;
         }
         *flux_model = None;
@@ -3346,69 +3415,82 @@ impl FluxEngine {
         tracing::info!("denoising complete, decoding VAE...");
 
         // Free denoising intermediates and transformer before VAE decode.
-        // On discrete GPUs (CUDA), the BF16 transformer alone is ~24GB — VAE
-        // decode needs that VRAM for conv2d intermediates. For Q8 (~12GB) on a
-        // 24GB GPU, the transformer can stay resident; dropping forces a full
-        // `gguf_lora_var_builder` rebuild on the next generation, which peaks
-        // at ~95GB CPU when LoRAs are applied. `MOLD_FLUX_KEEP_TRANSFORMER=1`
-        // opts into keeping it loaded across same-LoRA generations.
+        //
+        // Whether the transformer goes with them is a BUDGET, not a default.
+        // On discrete GPUs the BF16 transformer alone is ~24 GB and the VAE
+        // decode needs a large contiguous conv2d workspace, so it has to go;
+        // a Q8 (~12.6 GB) on the same card does not, and dropping it forces a
+        // full `gguf_lora_var_builder` rebuild on the next generation (8.4 s
+        // measured, peaking at ~95 GB host when LoRAs are applied) for no
+        // reason. `crate::device::still_transformer_residency` decides, and
+        // `MOLD_FLUX_KEEP_TRANSFORMER=0` is the opt-out.
         drop(state);
         drop(t5_emb_state);
         drop(clip_emb_state);
         drop(img_state);
-        let keep_transformer_env = crate::runtime_env::value("MOLD_FLUX_KEEP_TRANSFORMER")
-            .map(|v| v == "1")
-            .unwrap_or(false);
 
-        // Even with KEEP_TRANSFORMER=1 the keep is conditional: VAE decode
-        // needs a large contiguous conv2d allocation (~2–3 GB peak at 1024²,
-        // ~10–12 GB at 2048²). When the kept transformer + LoRA-merged
-        // tensors leave too little headroom (observed at ~3 GB free with a
-        // 2-LoRA stack on a 24 GB card), the VAE alloc OOMs even though the
-        // resident transformer size is identical to the no-LoRA case. The
-        // next request rebuilds — that's the trade-off for not OOMing here.
+        // The three terms the budget weighs at this moment: the weights that
+        // are resident right now, the denoise workspace the next render will
+        // want, and the decode workspace this render is about to allocate.
         //
-        // The headroom budget scales with output resolution via
-        // [`activation_bytes`] instead of a fixed 5 GB magic — at 1024² the
-        // budget is the FluxDit floor (~256 MB, the previous 5 GB was wildly
-        // over-conservative on a busy 24 GB card with KEEP_TRANSFORMER=1)
-        // while at 2048² it grows past 1 GB, catching what fixed 5 GB only
-        // approximated.
-        let vae_headroom_bytes = crate::device::activation_bytes(
-            req.width,
-            req.height,
-            1,
-            crate::device::dtype_bytes(loaded.dtype),
-            crate::device::ActivationFamily::FluxDit,
-        );
+        // `free_vram_bytes` is sampled with the transformer STILL RESIDENT, so
+        // its bytes are added back — `still_transformer_residency` is defined
+        // against the card as if nothing this render loaded were on it, the
+        // same convention `memory_preflight` uses with `active_vram_bytes`.
+        // Charging them twice would drop every warm render on every card.
+        let transformer_bytes = Self::resident_transformer_bytes(loaded);
+        let budget = crate::device::StillTransformerBudget {
+            transformer_bytes,
+            activation_bytes: crate::device::flux_activation_budget_bytes_for(
+                req.width,
+                req.height,
+                1,
+                crate::device::dtype_bytes(loaded.dtype),
+                crate::device::ActivationFamily::FluxDit,
+                FLUX1_ATTENTION_HEADS,
+                crate::device::flux_effective_attention_backend(),
+            ),
+            vae_decode_peak_bytes: crate::device::flux_vae_decode_peak_bytes(
+                req.width,
+                req.height,
+                crate::device::dtype_bytes(loaded.vae_dtype),
+            ),
+            runtime_headroom_bytes: crate::device::STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+        };
         let free_before_vae = crate::device::free_vram_bytes(gpu_ordinal).unwrap_or(0);
-        let force_drop_for_headroom =
-            keep_transformer_env && free_before_vae > 0 && free_before_vae < vae_headroom_bytes;
+        let usable_free = if free_before_vae == 0 {
+            0
+        } else {
+            free_before_vae.saturating_add(transformer_bytes)
+        };
+        let decision = resolve_flux_keep_transformer(
+            crate::runtime_env::value("MOLD_FLUX_KEEP_TRANSFORMER").as_deref(),
+            crate::device::still_transformer_residency(&budget, usable_free),
+        );
 
         // The PuLID adapter follows the transformer, and is released here —
         // before the sync below — so the bytes are actually available to the
         // decode rather than freed after it.
-        if Self::free_gpu_state_before_vae_decode(
-            &mut loaded.flux_model,
-            identity,
-            keep_transformer_env,
-            force_drop_for_headroom,
-        ) {
-            if force_drop_for_headroom {
-                tracing::info!(
+        if Self::free_gpu_state_before_vae_decode(&mut loaded.flux_model, identity, decision) {
+            match decision {
+                ResidencyDecision::DropForHeadroom => tracing::info!(
                     free_mb = free_before_vae / 1024 / 1024,
-                    headroom_mb = vae_headroom_bytes / 1024 / 1024,
-                    "Transformer force-dropped before VAE decode (free VRAM below \
-                     resolution-scaled headroom; overrides MOLD_FLUX_KEEP_TRANSFORMER=1 \
-                     for this request)"
-                );
-            } else {
-                tracing::info!("Transformer dropped to free VRAM for VAE decode");
+                    required_mb = budget.required_bytes() / 1024 / 1024,
+                    usable_mb = usable_free / 1024 / 1024,
+                    "Transformer dropped before VAE decode: the residency budget does not fit \
+                     this card at this resolution"
+                ),
+                ResidencyDecision::DropRequested => tracing::info!(
+                    "Transformer dropped before VAE decode (MOLD_FLUX_KEEP_TRANSFORMER=0)"
+                ),
+                ResidencyDecision::KeepResident => unreachable!("a keep does not drop"),
             }
         } else {
             tracing::info!(
                 free_mb = free_before_vae / 1024 / 1024,
-                "Transformer kept loaded (MOLD_FLUX_KEEP_TRANSFORMER=1)"
+                required_mb = budget.required_bytes() / 1024 / 1024,
+                "Transformer kept resident: the residency budget fits, so the next render \
+                 skips the reload"
             );
         }
         // Force CUDA to complete pending operations and release freed memory
@@ -3685,7 +3767,10 @@ mod tests {
     /// would free nothing.
     #[test]
     fn dropping_the_transformer_for_vae_headroom_releases_the_adapter() {
-        for (keep_env, force_drop) in [(false, false), (false, true), (true, true)] {
+        for decision in [
+            super::ResidencyDecision::DropForHeadroom,
+            super::ResidencyDecision::DropRequested,
+        ] {
             let mut state = super::super::identity::tests::state_holding_an_adapter();
             let watched = state
                 .resident_adapter_for_test()
@@ -3703,11 +3788,10 @@ mod tests {
             let dropped = super::FluxEngine::free_gpu_state_before_vae_decode(
                 &mut flux_model,
                 &mut identity,
-                keep_env,
-                force_drop,
+                decision,
             );
 
-            assert!(dropped, "keep_env={keep_env} force_drop={force_drop}");
+            assert!(dropped, "{decision:?} must drop");
             assert!(flux_model.is_none(), "the transformer must be gone");
             assert_eq!(
                 identity.resident_bytes(),
@@ -3736,19 +3820,60 @@ mod tests {
         let dropped = super::FluxEngine::free_gpu_state_before_vae_decode(
             &mut flux_model,
             &mut identity,
-            /* keep_transformer_env */ true,
-            /* force_drop_for_headroom */ false,
+            super::ResidencyDecision::KeepResident,
         );
 
         assert!(!dropped);
-        assert!(
-            flux_model.is_some(),
-            "MOLD_FLUX_KEEP_TRANSFORMER=1 keeps it"
-        );
+        assert!(flux_model.is_some(), "a budget that fits keeps it");
         assert_eq!(identity.resident_bytes(), before);
         assert!(
             identity.is_active(),
             "and the render keeps its conditioning"
+        );
+    }
+
+    /// The variable's precedence, including the part that CHANGED: unset now
+    /// means "ask the budget" rather than "always drop", and `1` means the
+    /// same thing because #276's override — an explicit keep must still yield
+    /// to a card that cannot afford it — is what the budget now expresses for
+    /// everybody. `0` is the one value that overrides a fitting budget.
+    #[test]
+    fn resolve_flux_keep_transformer_env_precedence() {
+        use super::{resolve_flux_keep_transformer, ResidencyDecision};
+        use crate::device::TransformerResidency;
+
+        let fits = TransformerResidency::Keep;
+        let does_not = TransformerResidency::Drop {
+            shortfall_bytes: 4_000_000_000,
+        };
+
+        for env in [None, Some("1")] {
+            assert_eq!(
+                resolve_flux_keep_transformer(env, fits),
+                ResidencyDecision::KeepResident,
+                "env={env:?} with a fitting budget keeps"
+            );
+            assert_eq!(
+                resolve_flux_keep_transformer(env, does_not),
+                ResidencyDecision::DropForHeadroom,
+                "env={env:?} yields to a budget that does not fit (#276)"
+            );
+        }
+
+        assert_eq!(
+            resolve_flux_keep_transformer(Some("0"), fits),
+            ResidencyDecision::DropRequested,
+            "an explicit 0 drops even where the card has room"
+        );
+        assert_eq!(
+            resolve_flux_keep_transformer(Some("0"), does_not),
+            ResidencyDecision::DropRequested
+        );
+
+        // Anything else is not "0", so it reads as the default.
+        assert_eq!(
+            resolve_flux_keep_transformer(Some("true"), fits),
+            ResidencyDecision::KeepResident
         );
     }
 
