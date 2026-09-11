@@ -237,6 +237,15 @@ function browse() {
   font-weight: 400;
   color: var(--mold-text-dim);
 }
+@media (max-width: 639px) {
+  /* Three chips on one phone row: the exact id lives in the menu there. */
+  .style-chip__label {
+    max-width: 14ch;
+  }
+  .style-chip__id {
+    display: none;
+  }
+}
 .style-chip__caret {
   font-size: var(--mold-fs-micro);
   color: var(--mold-text-dim);

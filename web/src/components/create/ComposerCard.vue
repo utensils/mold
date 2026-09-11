@@ -372,6 +372,26 @@ watch(
   margin-top: 12px;
 }
 
+/* Docked over a phone-width page every row costs a 44px touch target, so the
+ * summary (the chips already say it) and the keyboard hints (no ⌘ on a
+ * phone) leave, and the two transforms share a row. */
+@media (max-width: 639px) {
+  .composer__summary,
+  .composer__expand :deep(.ms-keycap),
+  .composer__generate :deep(.ms-keycap) {
+    display: none;
+  }
+  .composer__chips,
+  .composer__actions {
+    gap: 8px;
+  }
+  .composer__generate {
+    flex: 1 1 100%;
+    justify-content: center;
+    padding: 0 18px;
+  }
+}
+
 .composer__summary {
   font-family: var(--f-mono);
   font-size: 10px;
