@@ -2666,13 +2666,19 @@ button:disabled {
 /* A running row's status is a sentence about what is happening, so it takes
    the plain sans every other sentence on the phone takes. The mono uppercase
    code is for the rows that are waiting, held or settled. */
-.mobile-generation-job-sentence {
+/* Two classes: `.mobile-generation-job-copy span` above sets the mono face and
+   truncation for the subtitle, and a bare class cannot outrank it. */
+.mobile-generation-job-copy .mobile-generation-job-sentence {
   display: block;
+  overflow: visible;
   margin-top: 5px;
   color: var(--mold-text-2);
   font-family: var(--font-body);
-  font-size: var(--text-caption);
+  font-size: var(--text-body);
   line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .mobile-generation-job-meter {

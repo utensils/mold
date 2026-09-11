@@ -258,9 +258,13 @@ describe("mobile generation status containment", () => {
     // mono uppercase stays the code for a waiting, held or settled row.
     const sentence = css.match(/\.mobile-generation-job-sentence\s*\{([^}]*)\}/s);
     expect(sentence?.[1]).toMatch(/font-family:\s*var\(--font-body\)/);
-    expect(sentence?.[1]).toMatch(/font-size:\s*var\(--text-caption\)/);
+    expect(sentence?.[1]).toMatch(/font-size:\s*var\(--text-body\)/);
     expect(sentence?.[1]).toMatch(/color:\s*var\(--mold-text-2\)/);
     expect(sentence?.[1]).not.toMatch(/text-transform:\s*uppercase/);
+    // It is a sentence, so it wraps. The mono lines beside it truncate, and
+    // inheriting that turned "Denoising (50 steps) · 19/50" into "Denoising…".
+    expect(sentence?.[1]).toMatch(/white-space:\s*normal/);
+    expect(sentence?.[1]).not.toMatch(/text-overflow:\s*ellipsis/);
   });
 
   it("bounds shared and swipeable activity surfaces before truncating detail", () => {
