@@ -1155,15 +1155,30 @@ impl Flux2Engine {
     ///
     /// `retained_bytes` is zero when nothing is resident, which makes the
     /// answer false: there is nothing to drop.
+    ///
+    /// Everything else FAILS CLOSED, for the reason the three other probe
+    /// sites do. A reading of `Measured(0)` is a card with nothing free — the
+    /// most pressured answer there is — and `Unmeasurable` is a probe that
+    /// failed on a device that has VRAM. Both used to return "keep", on the
+    /// very path whose own comment describes a 35 GB prefix landing beside a
+    /// 33 GB transformer on a 46 GB card.
     fn encoder_needs_transformer_dropped(
         retained_bytes: u64,
         encoder_peak_bytes: u64,
-        usable_free_bytes: u64,
+        usable_free: crate::device::UsableFreeVram,
     ) -> bool {
-        if retained_bytes == 0 || usable_free_bytes == 0 {
+        if retained_bytes == 0 {
             return false;
         }
-        retained_bytes.saturating_add(encoder_peak_bytes) > usable_free_bytes
+        match usable_free {
+            // A CPU render's encoder and transformer share host memory, where
+            // this drop frees nothing the encoder can use.
+            crate::device::UsableFreeVram::NotApplicable => false,
+            crate::device::UsableFreeVram::Unmeasurable => true,
+            crate::device::UsableFreeVram::Measured(free) => {
+                retained_bytes.saturating_add(encoder_peak_bytes) > free
+            }
+        }
     }
 
     /// Whether FLUX.2 [dev]'s Mistral3 prefix should live in host RAM.
@@ -1609,18 +1624,19 @@ impl Flux2Engine {
             // resident. Ask the budget whether the two fit; on FLUX.2 [dev]
             // they do not, and the slot goes before the encoder allocates
             // rather than after it fails.
-            let retained_bytes = if self.retained_transformer.is_some() {
-                xformer_component_bytes(&self.base.paths)
-            } else {
-                0
-            };
+            // The slot's OWN recorded bytes, not a fresh `stat` of the
+            // checkpoint: that is the figure the residency budget was decided
+            // against, and the file may have moved since.
+            let retained_bytes = self
+                .retained_transformer
+                .as_ref()
+                .map_or(0, |retained| retained.device_bytes);
             if retained_bytes > 0 {
-                let free_now = crate::device::free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-                let usable_free = if free_now == 0 {
-                    0
-                } else {
-                    free_now.saturating_add(retained_bytes)
-                };
+                let usable_free = crate::device::usable_free_for_residency(
+                    &device,
+                    self.base.gpu_ordinal,
+                    retained_bytes,
+                );
                 let encoder_peak = self.text_encoder_peak_bytes(gpu_dtype);
                 if Self::encoder_needs_transformer_dropped(
                     retained_bytes,
@@ -2342,17 +2358,22 @@ impl Flux2Engine {
                 .unwrap_or(DType::BF16),
         );
         let eager_usable_free = {
-            let free_now = crate::device::free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             let resident = self
                 .base
                 .loaded
                 .as_ref()
                 .is_some_and(|loaded| loaded.transformer.is_some());
-            match (free_now, resident) {
-                (0, _) => 0,
-                (free, true) => free.saturating_add(transformer_bytes),
-                (free, false) => free,
-            }
+            let device = self
+                .base
+                .loaded
+                .as_ref()
+                .map(|loaded| loaded.device.clone())
+                .unwrap_or(Device::Cpu);
+            crate::device::usable_free_for_residency(
+                &device,
+                self.base.gpu_ordinal,
+                if resident { transformer_bytes } else { 0 },
+            )
         };
         // The post-denoise residency budget, resolved here for the same
         // borrow reason: `loaded` is mutably borrowed across the whole render.
@@ -3093,42 +3114,64 @@ mod tests {
         assert!(engine.uses_sequential_generate_path(&req));
     }
 
-    /// The prompt-encode ordering rule is now arithmetic rather than a
-    /// strategy check. The three rows that matter:
+    /// The prompt-encode ordering rule is arithmetic, and it FAILS CLOSED.
     ///
     /// * FLUX.2 [dev] on a 46 GB card — a 33 GB Q8 transformer beside a
     ///   ~3.6 GB streamed Mistral3 peak is fine, but beside the ~35 GB prefix
     ///   a host-parked encoder would hold, it is not;
     /// * Klein on a 24 GB card — a 9.5 GB Q8 transformer and a ~8 GB Qwen3
     ///   co-reside;
-    /// * nothing resident — there is nothing to drop, whatever the numbers.
+    /// * nothing resident — there is nothing to drop, whatever the numbers;
+    /// * an UNMEASURABLE or zero-free card drops, like the three other probe
+    ///   sites. This was the fourth one still failing open: it returned
+    ///   "keep" on a zero sentinel, on the very path whose own comment
+    ///   describes 68 GB landing on a 46 GB card.
     #[test]
     fn the_encoder_drops_the_transformer_only_when_the_two_do_not_fit() {
+        use crate::device::UsableFreeVram::{Measured, NotApplicable, Unmeasurable};
         const GB: u64 = 1_000_000_000;
 
         assert!(
-            !Flux2Engine::encoder_needs_transformer_dropped(33 * GB, 3_600_000_000, 46 * GB),
+            !Flux2Engine::encoder_needs_transformer_dropped(
+                33 * GB,
+                3_600_000_000,
+                Measured(46 * GB)
+            ),
             "a streamed Mistral3 peak co-resides with a 33 GB transformer on a 46 GB card"
         );
         assert!(
-            Flux2Engine::encoder_needs_transformer_dropped(33 * GB, 35 * GB, 46 * GB),
+            Flux2Engine::encoder_needs_transformer_dropped(33 * GB, 35 * GB, Measured(46 * GB)),
             "a resident 35 GB prefix beside a 33 GB transformer is 68 GB on a 46 GB card"
         );
         assert!(
-            !Flux2Engine::encoder_needs_transformer_dropped(9_500_000_000, 8 * GB, 24 * GB),
+            !Flux2Engine::encoder_needs_transformer_dropped(
+                9_500_000_000,
+                8 * GB,
+                Measured(24 * GB)
+            ),
             "Klein's Qwen3 and its Q8 transformer fit a 24 GB card together"
         );
         assert!(
-            Flux2Engine::encoder_needs_transformer_dropped(20 * GB, 8 * GB, 24 * GB),
+            Flux2Engine::encoder_needs_transformer_dropped(20 * GB, 8 * GB, Measured(24 * GB)),
             "a BF16 Klein-9B plus its encoder does not"
         );
         assert!(
-            !Flux2Engine::encoder_needs_transformer_dropped(0, 35 * GB, 24 * GB),
+            !Flux2Engine::encoder_needs_transformer_dropped(0, 35 * GB, Measured(24 * GB)),
             "nothing resident means nothing to drop"
         );
+
+        // The fail-closed rows.
         assert!(
-            !Flux2Engine::encoder_needs_transformer_dropped(33 * GB, 35 * GB, 0),
-            "an unmeasurable card is not evidence of pressure"
+            Flux2Engine::encoder_needs_transformer_dropped(33 * GB, 35 * GB, Unmeasurable),
+            "a failed accelerator probe must drop, not keep 33 GB resident"
+        );
+        assert!(
+            Flux2Engine::encoder_needs_transformer_dropped(33 * GB, 35 * GB, Measured(0)),
+            "a card measured at zero free is the most pressured reading there is"
+        );
+        assert!(
+            !Flux2Engine::encoder_needs_transformer_dropped(33 * GB, 35 * GB, NotApplicable),
+            "a CPU render's encoder and transformer share host memory; this drop frees nothing"
         );
     }
 
