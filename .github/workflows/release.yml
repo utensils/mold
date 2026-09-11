@@ -605,7 +605,11 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "120"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,flash-attn,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
+        # No `flash-attn`: FA2 picks its head-dim 96/128/160 tile on a runtime
+        # `is_sm8x` test that consumer Blackwell fails, so sm120 would take the
+        # A100/H100 tile on an Ada-sized SM. Unmeasured, not unsupported — see
+        # `flashAttnQualifiedCaps` in flake.nix.
+        run: cargo build --release -p mold-ai --features cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 120 target/release/build

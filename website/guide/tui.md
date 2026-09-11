@@ -666,7 +666,7 @@ cargo build --release -p mold-ai --features metal,tui
 ```
 
 ```bash [Linux (CUDA)]
-cargo build --release -p mold-ai --features cuda,tui
+cargo build --release -p mold-ai --features cuda,flash-attn,tui
 ```
 
 ```bash [Release feature set]

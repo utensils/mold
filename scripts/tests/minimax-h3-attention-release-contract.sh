@@ -89,13 +89,15 @@ release_feature_sources="$({
 
 # The H3-scoped qualification features are developer-only and must never reach
 # a published recipe. `flash-attn` is deliberately NOT in this list: the global
-# FlashAttention dispatch ships in every Linux CUDA release package the FA2
-# kernels support (sm86, sm89 through `h3-cuda`, sm100 and sm120), because
-# FLUX's `AttentionPolicy::FastStill` math path folds the softmax scale into K
-# whether or not the kernel is compiled — so a CUDA artifact without it takes
-# the archived-seed break and none of the speedup. That positive matrix is
-# asserted by the flake's own `cuda-flash-attention-coverage` check and pinned
-# in `scripts/tests/cuda-distribution-contract.sh`.
+# FlashAttention dispatch ships in every Linux CUDA release package that is
+# QUALIFIED for it (sm86, sm89 through `h3-cuda`, and sm100 — sm120 compiles
+# the kernels but picks the A100/H100 tile for its Ada-sized SM at runtime, so
+# it stays on math until measured), because FLUX's `AttentionPolicy::FastStill`
+# math path folds the softmax scale into K whether or not the kernel is
+# compiled — so a CUDA artifact without it takes the archived-seed break and
+# none of the speedup. That matrix and its allow-list are asserted by the
+# flake's own `cuda-flash-attention-coverage` check and pinned in
+# `scripts/tests/cuda-distribution-contract.sh`.
 contains_forbidden_release_feature() {
   LC_ALL=C tr -cs '[:alnum:]_-' '\n' \
     | grep -Fx \
@@ -125,11 +127,14 @@ if contains_forbidden_release_feature <<< "$release_feature_sources"; then
   fail "a published release feature set compiles an H3 qualification candidate"
 fi
 
-# The other half of the same rule: a Linux CUDA recipe that is not the sm89
-# `h3-cuda` edge must name `flash-attn` explicitly, and no recipe outside sm89
-# may name `h3-cuda`.
-grep -Fq 'else if flashAttnCompiles computeCap then' flake.nix \
+# The other half of the same rule: a QUALIFIED Linux CUDA recipe that is not
+# the sm89 `h3-cuda` edge must name `flash-attn` explicitly, no recipe outside
+# sm89 may name `h3-cuda`, and qualification is an allow-list rather than a
+# comparison so an unreasoned capability falls through to plain `cuda`.
+grep -Fq 'else if flashAttnQualified computeCap then' flake.nix \
   || fail "flake.nix no longer decides FlashAttention per compute capability"
+grep -Fq 'flashAttnQualifiedCaps = [' flake.nix \
+  || fail "flake.nix no longer carries an explicit FlashAttention allow-list"
 grep -Fq '"cuda,flash-attn"' flake.nix \
   || fail "no Linux CUDA release recipe names flash-attn outside the sm89 h3-cuda edge"
 
@@ -182,8 +187,9 @@ done
 
 # Nix composes its feature strings rather than passing `--features`, so the ONE
 # helper both the release and desktop recipes read is checked on the literal it
-# yields for SM89. Every other Linux CUDA capability falls through it to
-# `cuda,flash-attn`, which is the FlashAttention half asserted above.
+# yields for SM89. Every other QUALIFIED Linux CUDA capability falls through it
+# to `cuda,flash-attn`, which is the FlashAttention half asserted above; an
+# unqualified one falls through to plain `cuda`.
 require_text flake.nix \
   'cudaDeviceFeatureFor =' \
   "flake.nix no longer resolves the Linux CUDA device features in one place"
@@ -267,11 +273,12 @@ printf '%s\n%s\n' "$omitted_marker" "$private_qwen_support_marker" > "$scratch_d
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-qwen-support" >/dev/null 2>&1; then
   fail "release exclusion verifier accepted the private H3 Qwen support loader"
 fi
-# The sm86/sm100/sm120 shipping shape: the global FlashAttention dispatch with
-# no H3-scoped kernel. Accepted, because every Linux CUDA release package the
-# FA2 kernels support compiles `flash-attn` — FLUX's `FastStill` policy changes
-# rendered bytes on a CUDA build whether or not the kernel is there, and only
-# the kernel pays that back in speed.
+# The sm86/sm100 shipping shape: the global FlashAttention dispatch with no
+# H3-scoped kernel. Accepted, because a Linux CUDA release package qualified
+# for flash compiles it — FLUX's `FastStill` policy changes rendered bytes on a
+# CUDA build whether or not the kernel is there, and only the kernel pays that
+# back in speed. sm120 ships the `omitted:omitted` shape instead, which the
+# first fixture above already covers.
 printf '%s\n' "$global_flash_marker" > "$scratch_dir/global-only"
 scripts/verify-h3-release-exclusion.sh "$scratch_dir/global-only" >/dev/null
 # It carries no H3 kernel claim and no public H3 Qwen support loader: H3's own

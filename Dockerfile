@@ -150,14 +150,21 @@ ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}
 # `cudnn` is orthogonal to the device feature and appends to it: it implies
 # `cuda` but is never implied by it, because cudarc links libcudnn and needs
 # its headers. Video families take the cuDNN convolution path (#1483).
-# Every other capability names `flash-attn` alongside `cuda`. FlashAttention-2
-# builds for every Ampere-or-later compute capability, and FLUX's `FastStill`
-# policy changes rendered bytes on a CUDA build whether or not the kernel is
-# compiled — so an image without it would carry the seed change and none of
-# the speedup. `h3-cuda` already implies `flash-attn`, so sm89 must not repeat
-# it; H3's own fused kernel stays qualified at sm89 alone.
+# sm86 and sm100 name `flash-attn` alongside `cuda`, and sm89 gets it through
+# `h3-cuda`. FLUX's `FastStill` policy changes rendered bytes on a CUDA build
+# whether or not the kernel is compiled, so an image without it carries the
+# seed change and none of the speedup.
+#
+# sm120 is the deliberate exception and stays on plain `cuda`. FA2 selects its
+# head-dim 96/128/160 tile on a runtime `is_sm8x` test (cc_major == 8 &&
+# cc_minor > 0) that consumer Blackwell fails at 12.0, so FLUX's head dim of
+# 128 would take the A100/H100 64 KB tile rather than the 48 KB one upstream
+# picked for the same ~100 KB SM Ada has. That fits — it is an occupancy
+# question, not a capacity one — but it is unmeasured, and mold has no
+# RTX 50-series sample. See `flashAttnQualifiedCaps` in flake.nix.
 RUN gpu_feature="cuda,flash-attn"; \
     if [ "${CUDA_COMPUTE_CAP}" = "89" ]; then gpu_feature="h3-cuda"; fi; \
+    if [ "${CUDA_COMPUTE_CAP}" = "120" ]; then gpu_feature="cuda"; fi; \
     cargo build --release -p mold-ai --features "${gpu_feature},cudnn,expand,discord,tui,webp,mp4,metrics"
 RUN scripts/seal-cuda-ptx-manifest.py /build/target/release/mold \
     "${CUDA_COMPUTE_CAP}" /build/target/release/build

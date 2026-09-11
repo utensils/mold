@@ -81,13 +81,18 @@ build() {
   # SM89 names `h3-cuda`, not `cuda,h3`: since #1164 the bare `h3` feature
   # implies neither CUDA nor the SM89 attention kernel. `h3-cuda` implies
   # `cuda`, so it replaces the device feature instead of appending to it.
-  # Every other capability names `flash-attn` beside `cuda`: FLUX renders
-  # through FlashAttention-2 wherever the kernel is compiled, and its math
-  # path changed bytes in 0.29 regardless, so a CUDA build without the kernel
-  # takes the seed change and none of the speedup. `h3-cuda` already implies
-  # `flash-attn`.
+  # sm86 and sm100 name `flash-attn` beside `cuda`: FLUX renders through
+  # FlashAttention-2 wherever the kernel is compiled, and its math path changed
+  # bytes in 0.29 regardless, so a CUDA build without the kernel takes the seed
+  # change and none of the speedup. `h3-cuda` already implies `flash-attn`.
+  #
+  # sm120 stays on plain `cuda` until it is measured: FA2 chooses its head-dim
+  # 96/128/160 tile on a runtime `is_sm8x` test that consumer Blackwell fails,
+  # so FLUX's head dim of 128 would take the A100/H100 tile on an Ada-sized SM.
+  # See `flashAttnQualifiedCaps` in flake.nix.
   local gpu_feature="cuda,flash-attn"
   [[ "${CUDA_COMPUTE_CAP}" == "89" ]] && gpu_feature="h3-cuda"
+  [[ "${CUDA_COMPUTE_CAP}" == "120" ]] && gpu_feature="cuda"
   cargo build --release --frozen --offline \
     -p mold-ai \
     --features "${gpu_feature},cudnn,preview,expand,tui,webp,mp4,metrics,mdns,pulid"

@@ -267,17 +267,60 @@
             "/run/opengl-driver/lib:"
             + lib.makeLibraryPath (desktopLinuxRuntimeInputs ++ devshellLinuxCudaLibs);
 
-          # FlashAttention-2 compiles for every Ampere-or-later compute
-          # capability. `candle-flash-attn`'s kernels are guarded
-          # `__CUDA_ARCH__ >= 800` throughout (`kernels/kernel_traits.h`,
-          # `kernels/utils.h`, `kernels/flash_fwd_launch_template.h`), and
-          # `cudaforge` emits exactly one `-gencode` for the package's own
-          # `CUDA_COMPUTE_CAP`, so each artifact builds its own arch and
-          # nothing else. Verified with CUDA 12.8 by compiling one kernel per
-          # head dim (32 through 512, plus `flash_api.cu`, a causal and a
-          # split-KV variant — every distinct `kernel_traits` instantiation)
-          # at `sm_86`, `sm_100a` and `sm_120a`; `sm_89` already ships them.
-          flashAttnCompiles = computeCap: lib.toInt computeCap >= 80;
+          # Which compute capabilities SHIP FlashAttention-2. This is an
+          # allow-list, not a comparison: compiling is necessary and not
+          # sufficient, so a capability nobody has reasoned about must fall
+          # through to plain `cuda` rather than inherit flash from an
+          # inequality.
+          #
+          # COMPILING is settled for every Ampere-or-later capability.
+          # `candle-flash-attn`'s kernels are guarded `__CUDA_ARCH__ >= 800`
+          # throughout (`kernels/kernel_traits.h`, `kernels/utils.h`,
+          # `kernels/flash_fwd_launch_template.h`), and `cudaforge` emits
+          # exactly one `-gencode` for the package's own `CUDA_COMPUTE_CAP`,
+          # so each artifact builds its own arch and nothing else. Verified
+          # with CUDA 12.8 by compiling one kernel per head dim (32 through
+          # 512, plus `flash_api.cu`, a causal and a split-KV variant — every
+          # distinct `kernel_traits` instantiation) at `sm_86`, `sm_100a` and
+          # `sm_120a`; `sm_89` already ships them.
+          #
+          # RUNNING is what sm120 is missing. `flash_fwd_launch_template.h`
+          # picks the tile for head dims 96, 128 and 160 on a RUNTIME
+          # `is_sm8x = cc_major == 8 && cc_minor > 0` test, and consumer
+          # Blackwell reports 12.0, so it takes the `else` arm written for
+          # A100/H100. For FLUX's and FLUX.2's head dim of 128 non-causal that
+          # is `<128, 128, 64, 4>` at 64 KB of shared memory instead of the
+          # `<128, 128, 32, 4>` 48 KB tile upstream chose for sm86/sm89 — and
+          # sm120 has Ada's ~100 KB SM, not Hopper's 228 KB, so it is the 48 KB
+          # tile that fits twice per SM. This is NOT a capacity failure: 64 KB
+          # is inside the 99 KB per-block opt-in, and every tile that could
+          # overflow a 100 KB SM (head dims 224, 256 and 512) is selected by a
+          # runtime `cudaDevAttrMaxSharedMemoryPerBlockOptin` query rather than
+          # by `is_sm8x`. It is an occupancy regression of unknown size on the
+          # one architecture mold owns no sample of, and `error.h` reduces
+          # `C10_CUDA_CHECK` to a no-op that discards the error, so anything
+          # that did go wrong would surface far from here. sm120 therefore
+          # ships `cuda` alone — math attention, correct, and carrying the same
+          # byte change every CUDA build carries — until it is measured on a
+          # real RTX 50-series card.
+          #
+          # sm86 and sm100 are unaffected by that branch. sm86 IS `is_sm8x`, so
+          # it takes upstream's own choice for its SM size. sm100 takes the
+          # `else` arm the tile was tuned for on A100/H100, and its correctness
+          # does not depend on the datacenter part's larger SM at all: the
+          # widest tile any `is_sm8x` branch can pick is 80 KB (head dim 160),
+          # which fits even Ada's 99 KB per-block opt-in, and every wider tile
+          # is chosen by the runtime capacity query instead. Measured by
+          # instantiating each dispatched `Flash_fwd_kernel_traits` and reading
+          # `kSmemSize`: hdim 128 is 48 KB on the `is_sm8x` arm and 64 KB on
+          # the other; hdim 224/256/512 reach 112/128/128 KB and are all
+          # capacity-guarded.
+          flashAttnQualifiedCaps = [
+            "86"
+            "89"
+            "100"
+          ];
+          flashAttnQualified = computeCap: builtins.elem computeCap flashAttnQualifiedCaps;
 
           # The Linux CUDA device recipe.
           #
@@ -289,17 +332,18 @@
           # qualified at that capability alone
           # (`H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY`).
           #
-          # Every OTHER capability names `flash-attn` directly. FLUX.1 and
-          # FLUX.2 take `AttentionPolicy::FastStill`, whose `Flash` default is
-          # gated on `flash_compiled()` alone -- but whose math path folds the
-          # softmax scale into K either way. A CUDA artifact without the kernel
-          # therefore takes the seed break without the speedup, which is the
-          # one combination no shipped build may have.
+          # Every other QUALIFIED capability names `flash-attn` directly.
+          # FLUX.1 and FLUX.2 take `AttentionPolicy::FastStill`, whose `Flash`
+          # default is gated on `flash_compiled()` alone -- but whose math path
+          # folds the softmax scale into K either way. So an unqualified
+          # capability still takes 0.29's byte change; what it does not take is
+          # the speedup, and that is the honest trade while sm120 is
+          # unmeasured. Every doc row says so in those words.
           cudaDeviceFeatureFor =
             computeCap:
             if computeCap == "89" then
               "h3-cuda"
-            else if flashAttnCompiles computeCap then
+            else if flashAttnQualified computeCap then
               "cuda,flash-attn"
             else
               "cuda";
@@ -1146,15 +1190,40 @@
                   builtins.elem "flash-attn" named || builtins.elem "h3-cuda" named;
                 # H3's fused kernel stays sm89-only; nothing else may name it.
                 namesH3 = features: builtins.elem "h3-cuda" (lib.splitString "," features);
-                releaseCovered = builtins.all (cap: compilesFlash (releaseFeaturesFor cap)) shippedCaps;
-                desktopCovered = builtins.all (
-                  cap: compilesFlash (lib.concatStringsSep "," (desktopFeaturesFor cap))
+                releaseMatches = builtins.all (
+                  cap: compilesFlash (releaseFeaturesFor cap) == flashAttnQualified cap
+                ) shippedCaps;
+                desktopMatches = builtins.all (
+                  cap: compilesFlash (lib.concatStringsSep "," (desktopFeaturesFor cap)) == flashAttnQualified cap
                 ) shippedCaps;
                 h3OnlyOnAda = builtins.all (cap: namesH3 (releaseFeaturesFor cap) == (cap == "89")) shippedCaps;
+                # The allow-list is an ALLOW-list: a capability nobody has
+                # entered must read as unqualified, or adding one to the
+                # shipped set would quietly inherit flash.
+                unlistedIsRefused = !(flashAttnQualified "70" || flashAttnQualified "121");
+                # And the membership is pinned HERE, not merely read from the
+                # list -- the recipe and the list move together by
+                # construction, so without this an unqualified capability
+                # could be added in one line and every assertion above would
+                # still hold. sm120 is deliberately absent: see
+                # `flashAttnQualifiedCaps` for the runtime `is_sm8x` tile
+                # selection that makes it unmeasured rather than unsupported.
+                membershipPinned =
+                  flashAttnQualifiedCaps == [
+                    "86"
+                    "89"
+                    "100"
+                  ];
+                sm120StaysOnMath =
+                  !(compilesFlash (releaseFeaturesFor "120"))
+                  && !(compilesFlash (lib.concatStringsSep "," (desktopFeaturesFor "120")));
               in
-              assert isLinux -> releaseCovered;
-              assert isLinux -> desktopCovered;
+              assert isLinux -> releaseMatches;
+              assert isLinux -> desktopMatches;
               assert isLinux -> h3OnlyOnAda;
+              assert unlistedIsRefused;
+              assert membershipPinned;
+              assert isLinux -> sm120StaysOnMath;
               pkgs.runCommand "mold-cuda-flash-attention-coverage-check" { } ''
                 touch "$out"
               '';

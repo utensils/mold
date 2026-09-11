@@ -1,16 +1,20 @@
 - **FLUX.1 and FLUX.2 are fast by default on CUDA.** Both families now render
   through FlashAttention-2 wherever the kernel is compiled in and their VAE
   convolutions take cuDNN wherever that feature is compiled in. Every shipped
-  Linux CUDA build compiles both — the sm86, sm89, sm100 and sm120 release
-  archives, the `mold`/`mold-sm86`/`mold-sm100`/`mold-sm120` Nix packages, the
-  per-architecture container images, the AUR packages, and the Linux desktop
-  builds. Before this, only the sm89 `h3-cuda` artifact carried the flash
-  kernel, which would have left an RTX 3090/A40, an RTX 50-series card or a
-  B200 with this release's byte change and none of its speedup: FLUX's math
-  path folds the softmax scale into K whether or not the kernel is there. A
-  binary you build yourself with `--features cuda` and no `flash-attn`, and
-  every Metal build, are still in that position — correct, byte-changed, and
-  on the math path — so add `flash-attn` to a source build's feature list.
+  qualified Linux CUDA build compiles both — the sm86, sm89 and sm100 release
+  archives, the `mold`/`mold-sm86`/`mold-sm100` Nix packages, their container
+  and AUR builds, and the matching Linux desktop packages. Before this, only
+  the sm89 `h3-cuda` artifact carried the flash kernel, which left an RTX
+  3090/A40 and a B200 with this release's byte change and none of its speedup:
+  FLUX's math path folds the softmax scale into K whether or not the kernel is
+  there. **`mold-sm120` (RTX 50-series) deliberately stays on math attention**
+  — FlashAttention picks its tile from a runtime test that reads consumer
+  Blackwell as a datacenter part with far more shared memory than it has, and
+  nobody has measured the result on that hardware — so it takes the byte change
+  without the speedup until someone does. A binary you build yourself with
+  `--features cuda` and no `flash-attn`, and every Metal build, are in the same
+  position; add `flash-attn` to a source build's feature list on sm86, sm89 or
+  sm100.
   Every other still family — SD1.5, SDXL, SD3, Qwen-Image, Z-Image, LTX-Video,
   Hunyuan3D, MiniMax-H3 — keeps the byte-stable math/im2col defaults it has
   always had, unchanged in every build.

@@ -329,14 +329,24 @@ require_text "$release_workflow" \
 require_text "$release_workflow" \
   "--features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid  # macOS" \
   "the documented macOS source install omits Hunyuan3D texture baking"
-# `flash-attn` rides all three alongside `cuda`, and sm89 gets the same kernel
-# through `h3-cuda`. FLUX's `AttentionPolicy::FastStill` math path folds the
-# softmax scale into K whether or not the kernel is compiled, so a published
-# CUDA artifact without it would carry the archived-seed break and none of the
-# speedup — the one combination no shipped build may have.
+# `flash-attn` rides sm86 and sm100 alongside `cuda`, and sm89 gets the same
+# kernel through `h3-cuda`. FLUX's `AttentionPolicy::FastStill` math path folds
+# the softmax scale into K whether or not the kernel is compiled, so a
+# published CUDA artifact without it carries the archived-seed break and none
+# of the speedup.
+#
+# sm120 is the one qualified exception and is asserted SEPARATELY, so dropping
+# flash from another capability cannot hide inside a loosened count. FA2 keys
+# its head-dim 96/128/160 tile on a runtime `is_sm8x` test that consumer
+# Blackwell fails, so it would take the A100/H100 tile on an Ada-sized SM —
+# unmeasured, and mold owns no RTX 50-series card. See `flashAttnQualifiedCaps`
+# in flake.nix.
 cuda_release_features="cuda,flash-attn,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
-[[ "$(grep -Fc -- "cargo build --release -p mold-ai --features $cuda_release_features" "$release_workflow")" -eq 3 ]] \
-  || fail "the sm86/sm100/sm120 CUDA release recipes do not all ship FlashAttention and the Hunyuan3D mesh stack"
+[[ "$(grep -Fc -- "cargo build --release -p mold-ai --features $cuda_release_features" "$release_workflow")" -eq 2 ]] \
+  || fail "the sm86/sm100 CUDA release recipes do not both ship FlashAttention and the Hunyuan3D mesh stack"
+sm120_release_features="cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
+[[ "$(grep -Fc -- "cargo build --release -p mold-ai --features $sm120_release_features" "$release_workflow")" -eq 1 ]] \
+  || fail "the sm120 CUDA release recipe must ship the mesh stack on math attention, without flash-attn"
 require_text "$release_workflow" \
   "cargo build --release -p mold-ai --features h3-cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight" \
   "the sm89 CUDA release recipe omits the Hunyuan3D mesh stack"

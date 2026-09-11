@@ -342,12 +342,15 @@ not reproduce from the same seed and settings.
 ## Speed
 
 On CUDA, Flux.2 renders through FlashAttention-2 and cuDNN by default wherever
-the artifact compiled them. Every shipped Linux CUDA build compiles both —
-`mold` (sm89), `mold-sm86`, `mold-sm100`, `mold-sm120` and the matching desktop
-packages — because FlashAttention-2 builds for every Ampere-or-later compute
-capability. A self-built `--features cuda` binary without `flash-attn`, and
-every Metal build, take the math path instead: still correct, but carrying
-0.29's byte change without its speedup. `MOLD_ATTN=math`
+the artifact compiled them — `mold` (sm89), `mold-sm86`, `mold-sm100` and the
+matching desktop packages compile both. `mold-sm120` uses math attention:
+FlashAttention's tile selection reads consumer Blackwell as a datacenter part
+with far more shared memory than it has, and mold owns no RTX 50-series card to
+measure the result on, so that artifact waits for qualification. A self-built
+`--features cuda` binary without `flash-attn`, and every Metal build, take the
+math path too: still correct, but carrying 0.29's byte change without its
+speedup — the byte change is a property of every CUDA build, not of the kernel.
+`MOLD_ATTN=math`
 and `MOLD_CONV=im2col` render the byte-stable way instead; a print archived
 before mold 0.29 does not re-render byte-for-byte after it under any setting,
 and renders made from 0.29 on are reproducible among themselves. Every other

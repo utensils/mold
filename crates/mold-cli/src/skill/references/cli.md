@@ -22,11 +22,14 @@ counts, steps, guidance, conditioning, or audio. A catalog model can differ
 from a built-in manifest profile.
 
 A seed reproduces a render only within one mold version and one backend. FLUX.1
-and FLUX.2 in particular changed their arithmetic in mold 0.29: on a CUDA build
-that compiled the kernels they now attend through FlashAttention-2, convolve
-through cuDNN, and run their GGUF activations in BF16, all of which change the
-order the same sums accumulate in. A FLUX print archived before that release
-will not re-render byte-for-byte after it under any setting. `MOLD_ATTN=math`
+and FLUX.2 in particular changed their arithmetic in mold 0.29, and the change
+lands on EVERY CUDA build regardless of which kernels it compiled: their math
+attention path now folds the softmax scale into the keys, and their GGUF
+activations run in BF16. A build that also compiled the kernels additionally
+attends through FlashAttention-2 and convolves through cuDNN. All of those
+change the order the same sums accumulate in, so a FLUX print archived before
+that release will not re-render byte-for-byte after it under any setting — on
+any CUDA artifact, whether or not it has the kernels. `MOLD_ATTN=math`
 and `MOLD_CONV=im2col` are the cross-build determinism contract going forward,
 and every other still family already renders that way in every build. Never
 promise a user that an old seed will reproduce an old picture; re-render and
