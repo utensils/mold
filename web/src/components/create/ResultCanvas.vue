@@ -49,7 +49,13 @@ const props = withDefaults(
     /** result — playable WAV for an audio-only print; `resultSrc` is then the
      * rendered waveform. Empty for every other kind of print. */
     resultAudioSrc?: string;
+    /** result — the print's file name, said in mono on the action bar. */
+    resultFilename?: string;
     resultCaption?: string;
+    /** result — the host can address this print, so a link to it exists. */
+    canCopyLink?: boolean;
+    /** result — a finished still on a recipe that can repeat. */
+    canMakeVariations?: boolean;
     /** error — server or transport failure copy. */
     error?: string;
     /** error — optional raw diagnostic appended to clipboard copy. */
@@ -69,6 +75,9 @@ const props = withDefaults(
     progress: 0,
     stage: "",
     progressFraction: 0,
+    resultFilename: "",
+    canCopyLink: false,
+    canMakeVariations: false,
     variations: () => [],
     queueingVariations: false,
     emptyGuidance: REQUIRED_PROMPT_GUIDANCE,
@@ -103,7 +112,24 @@ const emit = defineEmits<{
    *  print that is and what its menu offers; the bed only reports the event
    *  so the same actions a Recent tile has reach the render on the canvas. */
   "context-menu": [event: MouseEvent];
+  /** result — the docked action bar. The page owns the file, the link shape
+   *  and the prepared-variations submission; the bed only reports intent. */
+  download: [];
+  "copy-link": [];
+  "make-variations": [];
 }>();
+
+/*
+ * A clip and an audio print carry their own transport along the bottom edge,
+ * so the bar stands under them rather than over them: docking a Download
+ * button across a video's play button takes the play button away.
+ */
+const barDocked = computed(
+  () => !props.resultVideoSrc && !props.resultAudioSrc,
+);
+
+/** The prepared-variations path submits a batch of four. */
+const VARIATION_COUNT = 4;
 
 function editVariation(index: number, value: string) {
   const next = props.variations.slice();
@@ -241,8 +267,47 @@ watch(
         :src="resultAudioSrc"
         data-test="canvas-audio"
       />
-      <div class="canvas__caption" data-test="canvas-caption">
-        {{ resultCaption }}
+      <div
+        class="canvas__actions"
+        :class="{ 'canvas__actions--docked': barDocked }"
+        data-test="canvas-actions"
+      >
+        <span
+          v-if="resultFilename"
+          class="canvas__filename"
+          data-test="canvas-filename"
+          >{{ resultFilename }}</span
+        >
+        <span class="canvas__caption" data-test="canvas-caption">{{
+          resultCaption
+        }}</span>
+        <span class="canvas__actions-spacer" />
+        <button
+          type="button"
+          class="canvas__action"
+          data-test="canvas-download"
+          @click.stop="emit('download')"
+        >
+          Download
+        </button>
+        <button
+          v-if="canCopyLink"
+          type="button"
+          class="canvas__action"
+          data-test="canvas-copy-link"
+          @click.stop="emit('copy-link')"
+        >
+          Copy link
+        </button>
+        <button
+          v-if="canMakeVariations"
+          type="button"
+          class="canvas__action"
+          data-test="canvas-make-variations"
+          @click.stop="emit('make-variations')"
+        >
+          Make {{ VARIATION_COUNT }} variations
+        </button>
       </div>
     </div>
 
@@ -481,11 +546,76 @@ watch(
   display: block;
 }
 
-.canvas__caption {
+/* The bar docks over the PICTURE, so the block stays shrink-to-fit: it is
+ * the image's own box the absolute bar spans, not the whole bed. */
+.canvas__result {
+  position: relative;
+}
+
+/* Docked over the bottom edge of the picture, the mock's own scrim. */
+.canvas__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
   margin-top: 12px;
-  font-family: var(--f-mono);
-  font-size: 10.5px;
-  color: var(--ink-3);
+  padding: 8px 10px;
+}
+
+.canvas__actions--docked {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  margin-top: 0;
+  border-bottom-left-radius: var(--mold-radius-3);
+  border-bottom-right-radius: var(--mold-radius-3);
+  background: color-mix(in srgb, var(--mold-bg-crust) 84%, transparent);
+}
+
+.canvas__actions-spacer {
+  flex: 1;
+}
+
+.canvas__filename {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas__action {
+  /* literal: the mock's 28px chip row. */
+  --composer-chip-h: 28px;
+  display: inline-flex;
+  align-items: center;
+  height: var(--composer-chip-h);
+  padding: 0 10px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: transparent;
+  color: var(--mold-text-2);
+  font-size: var(--mold-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
+}
+
+.canvas__action:hover {
+  border-color: var(--mold-border-focus);
+  color: var(--mold-text);
+}
+
+.canvas__caption {
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 
 .canvas__error {
