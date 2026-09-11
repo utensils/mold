@@ -1867,6 +1867,115 @@ pub(crate) enum Flux2TransformerWrapper {
     Quantized(super::quantized_transformer::QuantizedFlux2Transformer),
 }
 
+// ---------------------------------------------------------------------------
+// Classifier-free guidance: one batched forward or two sequential ones
+// ---------------------------------------------------------------------------
+
+/// How a guided FLUX.2 [klein] base step issues its two predictions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flux2CfgBatching {
+    /// One forward at batch 2 — BFL's own shape (`flux2/sampling.py:375-406`).
+    /// Every weight is read once for both branches, which on a bandwidth-bound
+    /// tier is most of the step.
+    Batched,
+    /// Two batch-1 forwards. The historical path, and the fallback whenever the
+    /// prompts differ in length or the card cannot hold the doubled
+    /// activations.
+    Sequential,
+}
+
+impl Flux2CfgBatching {
+    /// The sentence the progress stream publishes for this choice.
+    pub(crate) fn progress_note(self) -> &'static str {
+        match self {
+            Self::Batched => "one batched forward per step",
+            Self::Sequential => "two forwards per step (prompts differ in length)",
+        }
+    }
+}
+
+/// Whether a batch-2 CFG forward fits the card.
+///
+/// Charged against the card's TOTAL VRAM rather than what happens to be free
+/// at this instant, so the server's plan and the engine reach the same answer
+/// for the same request — a decision that flipped between planning and
+/// execution would mis-price every queued job behind it.
+pub fn flux2_cfg_batching(
+    transformer_bytes: u64,
+    activation_bytes_batch2: u64,
+    device_total_bytes: u64,
+) -> Flux2CfgBatching {
+    let required = transformer_bytes
+        .checked_add(activation_bytes_batch2)
+        .and_then(|bytes| bytes.checked_add(ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM));
+    match required {
+        Some(required) if required <= device_total_bytes => Flux2CfgBatching::Batched,
+        _ => Flux2CfgBatching::Sequential,
+    }
+}
+
+/// The resolved batching for a guided render: the token-length gate, then the
+/// budget.
+///
+/// The length gate is not a budget question and cannot be folded into one.
+/// `sampling.rs` does not pad the encoder output to a fixed width, so a
+/// negative prompt of a different length produces a different `txt` sequence
+/// and the two branches cannot be concatenated on the batch axis at all —
+/// upstream's `cat([txt_empty, txt_prompt])` (`flux2/sampling.py:368`) assumes
+/// a padded encoder that mold does not have.
+pub fn flux2_cfg_batching_for(
+    positive_txt_tokens: usize,
+    negative_txt_tokens: usize,
+    transformer_bytes: u64,
+    activation_bytes_batch2: u64,
+    device_total_bytes: u64,
+) -> Flux2CfgBatching {
+    if positive_txt_tokens != negative_txt_tokens {
+        return Flux2CfgBatching::Sequential;
+    }
+    flux2_cfg_batching(
+        transformer_bytes,
+        activation_bytes_batch2,
+        device_total_bytes,
+    )
+}
+
+/// Peak activation bytes one FLUX.2 forward holds beyond the weights.
+///
+/// Counted per token over the tensors that are live at the same moment inside
+/// one single-stream block, which is the widest point in the model: the
+/// working hidden state, the fused `3*hidden + 2*mlp` projection, its SwiGLU
+/// product, and the attention output. Math attention additionally materializes
+/// a query-chunk-bounded score tile per head; flash materializes none, which is
+/// why the backend is an input rather than an assumption.
+pub fn flux2_activation_bytes_for(
+    cfg: &Flux2Config,
+    tokens: usize,
+    batch: usize,
+    dtype: DType,
+    backend: crate::attention::AttentionBackend,
+) -> u64 {
+    /// The query rows math attention keeps live at once; mirrors the chunk the
+    /// shared math path bounds itself to.
+    const MATH_SCORE_TILE_ROWS: u64 = 512;
+
+    let width = dtype.size_in_bytes() as u64;
+    let hidden = cfg.hidden_size as u64;
+    let mlp = (cfg.hidden_size as f64 * cfg.mlp_ratio) as u64;
+    let tokens = tokens as u64;
+    let batch = batch as u64;
+
+    let per_token = hidden + (3 * hidden + 2 * mlp) + mlp + hidden;
+    let stream = batch * tokens * per_token * width;
+    let scores = match backend {
+        crate::attention::AttentionBackend::Flash => 0,
+        crate::attention::AttentionBackend::Math => {
+            batch * cfg.num_heads as u64 * MATH_SCORE_TILE_ROWS * tokens * width
+        }
+    };
+    stream.saturating_add(scores)
+}
+
 /// The unconditional branch of a classifier-free-guided FLUX.2 render.
 ///
 /// Only the undistilled [klein] base checkpoints use one: they carry no
@@ -1892,6 +2001,21 @@ pub(crate) struct Flux2CfgBranch<'a> {
     /// The negative prompt's encoder hidden states.
     pub txt: &'a Tensor,
     pub txt_ids: &'a Tensor,
+    /// Resolved by the caller, which is the one place that knows the config,
+    /// the card and both prompts' lengths. The engine obeys it rather than
+    /// re-deciding, so the plan and the render cannot disagree.
+    pub batching: Flux2CfgBatching,
+}
+
+/// Whether the positional embedding these ids build can be shared across a
+/// doubled batch.
+///
+/// `apply_rope` broadcasts a batch-1 embedding over any batch, and nothing
+/// else: at any other leading dim the embedding's batch axis lines up against
+/// the head axis. The latent's own batch is one for every render that reaches
+/// the CFG path, so this is a guard rather than a restriction.
+fn batchable_positional_embedding(img_ids: &Tensor) -> bool {
+    img_ids.dim(0).map(|b| b == 1).unwrap_or(false)
 }
 
 impl Flux2TransformerWrapper {
@@ -1938,21 +2062,62 @@ impl Flux2TransformerWrapper {
             } else {
                 (img.clone(), img_ids.clone())
             };
-            let pred = self.forward_once(
-                &model_img,
-                &model_img_ids,
-                txt,
-                txt_ids,
-                &t_vec,
-                vec_,
-                &guidance_tensor,
-            )?;
-            // The unconditional branch. `None` leaves `pred` exactly what the
-            // single-forward path produced — the same conditioning, the same
-            // call — so a distilled render is byte-identical to one made
-            // before this branch existed.
+            // `None` takes exactly the call the single-forward path always
+            // made — the same conditioning, the same arguments — so a
+            // distilled render is byte-identical to one made before any of
+            // this existed.
             let pred = match cfg {
+                Some(branch)
+                    if branch.batching == Flux2CfgBatching::Batched
+                        && batchable_positional_embedding(&model_img_ids) =>
+                {
+                    // BFL `flux2/sampling.py:375-406`: duplicate the latent,
+                    // concatenate the text with the UNCONDITIONAL branch
+                    // first, run ONE forward, and `pred.chunk(2)`. Every
+                    // weight is read once for both branches.
+                    //
+                    // The ids are NOT duplicated, unlike upstream's. The
+                    // rotary embedding is a function of position alone, so
+                    // both batch rows want the identical table, and mold's
+                    // `apply_rope` broadcasts a batch-shared one over any
+                    // batch — duplicating it would instead line the embedding's
+                    // batch axis up against the head axis and fail to
+                    // broadcast at all.
+                    let img = Tensor::cat(&[&model_img, &model_img], 0)?;
+                    let txt = Tensor::cat(&[branch.txt, txt], 0)?;
+                    let t_vec = Tensor::full(*t_curr as f32, b_sz * 2, dev)?;
+                    let guidance_tensor = Tensor::full(guidance as f32, b_sz * 2, dev)?;
+                    let vec_ = Tensor::cat(&[vec_, vec_], 0)?;
+                    let both = self.forward_once(
+                        &img,
+                        &model_img_ids,
+                        &txt,
+                        txt_ids,
+                        &t_vec,
+                        &vec_,
+                        &guidance_tensor,
+                    )?;
+                    let halves = both.chunk(2, 0)?;
+                    let [neg, pos] = halves.as_slice() else {
+                        anyhow::bail!(
+                            "a batched CFG forward must split into two predictions, got {}",
+                            halves.len()
+                        )
+                    };
+                    // `pipeline_flux2_klein.py:875` / `sampling.py:405`:
+                    // `noise_pred = neg + guidance_scale * (noise_pred - neg)`
+                    (neg + ((pos - neg)? * branch.scale)?)?
+                }
                 Some(branch) => {
+                    let pred = self.forward_once(
+                        &model_img,
+                        &model_img_ids,
+                        txt,
+                        txt_ids,
+                        &t_vec,
+                        vec_,
+                        &guidance_tensor,
+                    )?;
                     let neg = self.forward_once(
                         &model_img,
                         &model_img_ids,
@@ -1962,11 +2127,17 @@ impl Flux2TransformerWrapper {
                         vec_,
                         &guidance_tensor,
                     )?;
-                    // `pipeline_flux2_klein.py:875`:
-                    // `noise_pred = neg + guidance_scale * (noise_pred - neg)`
                     (&neg + ((&pred - &neg)? * branch.scale)?)?
                 }
-                None => pred,
+                None => self.forward_once(
+                    &model_img,
+                    &model_img_ids,
+                    txt,
+                    txt_ids,
+                    &t_vec,
+                    vec_,
+                    &guidance_tensor,
+                )?,
             };
             // Drop the reference tokens back off the prediction. The model
             // was handed target + references as one sequence and returns a
@@ -2099,6 +2270,28 @@ mod tests {
         cfg: Option<(&Tensor, &Tensor, f64)>,
         reference: Option<(&Tensor, &Tensor)>,
     ) -> Vec<f32> {
+        denoise_once_batched(
+            wrapper,
+            guidance,
+            txt,
+            txt_ids,
+            cfg,
+            reference,
+            Flux2CfgBatching::Sequential,
+        )
+    }
+
+    /// As `denoise_once_with_reference`, with the CFG batching mode named.
+    #[allow(clippy::too_many_arguments)]
+    fn denoise_once_batched(
+        wrapper: &Flux2TransformerWrapper,
+        guidance: f64,
+        txt: &Tensor,
+        txt_ids: &Tensor,
+        cfg: Option<(&Tensor, &Tensor, f64)>,
+        reference: Option<(&Tensor, &Tensor)>,
+        batching: Flux2CfgBatching,
+    ) -> Vec<f32> {
         use crate::flux2::quantized_transformer::test_support::spread;
         let device = candle_core::Device::Cpu;
         let img = spread((3, 4), 3.1).reshape((1, 3, 4)).unwrap();
@@ -2108,6 +2301,7 @@ mod tests {
             scale,
             txt,
             txt_ids,
+            batching,
         });
         let progress = crate::progress::ProgressReporter::default();
         wrapper
@@ -2552,6 +2746,198 @@ mod tests {
             got.iter().all(|v| v.is_finite()),
             "a clamped activation casts to a finite F8E4M3"
         );
+    }
+
+    /// One batch-2 forward must produce the same step as two batch-1 ones.
+    ///
+    /// BFL's `denoise_cfg` (`flux2/sampling.py:375-406`) duplicates the latent,
+    /// concatenates the text with the UNCONDITIONAL branch first, runs one
+    /// forward and chunks the prediction. The order matters: swapped, the lerp
+    /// would guide away from the prompt, which is why the two paths are
+    /// compared here rather than just the shapes.
+    #[test]
+    fn batched_cfg_matches_two_sequential_forwards() {
+        use crate::flux2::quantized_transformer::test_support::{
+            spread, tiny_cfg, tiny_transformer,
+        };
+        let cfg = tiny_cfg(false);
+        let wrapper = Flux2TransformerWrapper::Quantized(tiny_transformer(&cfg));
+        let device = candle_core::Device::Cpu;
+
+        let pos = spread((2, 6), 3.2).reshape((1, 2, 6)).unwrap();
+        let neg = spread((2, 6), 4.9).reshape((1, 2, 6)).unwrap();
+        let ids = Tensor::zeros((1, 2, 4), DType::F32, &device).unwrap();
+
+        let sequential = denoise_once_batched(
+            &wrapper,
+            1.0,
+            &pos,
+            &ids,
+            Some((&neg, &ids, 3.5)),
+            None,
+            Flux2CfgBatching::Sequential,
+        );
+        let batched = denoise_once_batched(
+            &wrapper,
+            1.0,
+            &pos,
+            &ids,
+            Some((&neg, &ids, 3.5)),
+            None,
+            Flux2CfgBatching::Batched,
+        );
+
+        assert_eq!(sequential.len(), batched.len());
+        let worst = sequential
+            .iter()
+            .zip(&batched)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1e-5,
+            "the batched forward moved the step by {worst} — check the uncond-first order"
+        );
+
+        // The guidance must actually be doing something, or the comparison
+        // above would pass on two identical unconditional renders.
+        let unguided = denoise_once_batched(
+            &wrapper,
+            1.0,
+            &pos,
+            &ids,
+            None,
+            None,
+            Flux2CfgBatching::Batched,
+        );
+        let moved = unguided
+            .iter()
+            .zip(&batched)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(moved > 1e-6, "the guided and unguided steps are identical");
+    }
+
+    /// A negative prompt of a different length cannot be concatenated onto the
+    /// positive one, so the budget is never even asked.
+    #[test]
+    fn unequal_prompt_lengths_fall_back_to_two_forwards() {
+        const GB: u64 = 1_000_000_000;
+        assert_eq!(
+            flux2_cfg_batching_for(512, 300, GB, GB, 1_000 * GB),
+            Flux2CfgBatching::Sequential,
+            "a shorter negative prompt must not be batched, however much VRAM there is"
+        );
+        assert_eq!(
+            flux2_cfg_batching_for(512, 512, GB, GB, 1_000 * GB),
+            Flux2CfgBatching::Batched,
+            "equal lengths on an enormous card must batch"
+        );
+    }
+
+    /// The budget, over the cards the campaign cares about.
+    #[test]
+    fn cfg_batching_budget_matrix() {
+        const GB: u64 = 1_000_000_000;
+        let rows: [(&str, u64, u64, u64, Flux2CfgBatching); 5] = [
+            (
+                "klein-9B Q8 at 1024 squared on a 24 GB card",
+                10 * GB,
+                4 * GB,
+                24 * GB,
+                Flux2CfgBatching::Batched,
+            ),
+            (
+                "klein-9B Q8 at 2048 squared on the same 24 GB card",
+                10 * GB,
+                16 * GB,
+                24 * GB,
+                Flux2CfgBatching::Sequential,
+            ),
+            (
+                "klein-9B BF16 at 1024 squared on a 24 GB card",
+                19 * GB,
+                4 * GB,
+                24 * GB,
+                Flux2CfgBatching::Sequential,
+            ),
+            (
+                "klein-9B BF16 at 1024 squared on a 46 GB L40S",
+                19 * GB,
+                4 * GB,
+                46 * GB,
+                Flux2CfgBatching::Batched,
+            ),
+            (
+                "klein-4B Q8 at 1024 squared on a 24 GB card",
+                4 * GB,
+                3 * GB,
+                24 * GB,
+                Flux2CfgBatching::Batched,
+            ),
+        ];
+        for (what, transformer, activation, total, want) in rows {
+            assert_eq!(
+                flux2_cfg_batching(transformer, activation, total),
+                want,
+                "{what}"
+            );
+        }
+
+        // The boundary, so the inequality cannot silently flip.
+        let exact = 10 * GB + 4 * GB + ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM;
+        assert_eq!(
+            flux2_cfg_batching(10 * GB, 4 * GB, exact),
+            Flux2CfgBatching::Batched
+        );
+        assert_eq!(
+            flux2_cfg_batching(10 * GB, 4 * GB, exact - 1),
+            Flux2CfgBatching::Sequential
+        );
+    }
+
+    /// Flash attention never materializes a score matrix; math does, and the
+    /// estimate has to say so or a math render batches into an OOM.
+    #[test]
+    fn the_activation_estimate_is_backend_aware() {
+        let cfg = Flux2Config::klein();
+        let flash = flux2_activation_bytes_for(
+            &cfg,
+            4_608,
+            2,
+            DType::BF16,
+            crate::attention::AttentionBackend::Flash,
+        );
+        let math = flux2_activation_bytes_for(
+            &cfg,
+            4_608,
+            2,
+            DType::BF16,
+            crate::attention::AttentionBackend::Math,
+        );
+        assert!(
+            math > flash,
+            "math must be charged its score tile ({math} vs {flash})"
+        );
+        let single = flux2_activation_bytes_for(
+            &cfg,
+            4_608,
+            1,
+            DType::BF16,
+            crate::attention::AttentionBackend::Flash,
+        );
+        assert_eq!(flash, 2 * single, "the estimate must scale with the batch");
+    }
+
+    /// The engine may only batch when the positional embedding is shared
+    /// across the batch — `apply_rope` broadcasts a batch-1 table and nothing
+    /// else.
+    #[test]
+    fn a_batched_step_requires_a_batch_shared_positional_embedding() {
+        let device = candle_core::Device::Cpu;
+        let shared = Tensor::zeros((1, 3, 4), DType::F32, &device).unwrap();
+        let per_row = Tensor::zeros((2, 3, 4), DType::F32, &device).unwrap();
+        assert!(batchable_positional_embedding(&shared));
+        assert!(!batchable_positional_embedding(&per_row));
     }
 
     #[test]

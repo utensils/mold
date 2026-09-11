@@ -64,6 +64,58 @@ struct LoadedFlux2 {
 // Engine
 // ---------------------------------------------------------------------------
 
+/// How a guided FLUX.2 [klein] base render issues its two predictions.
+///
+/// Resolved by the caller, which is the only place that knows the config, the
+/// checkpoint's size, the card and both prompts' token counts; the engine
+/// obeys the answer rather than re-deriving it, so the progress line and the
+/// render cannot disagree. Without a readable VRAM total — CPU, Metal, a build
+/// without NVML — the answer is the historical two forwards.
+fn resolve_cfg_batching(
+    flux2_cfg: &super::transformer::Flux2Config,
+    positive_txt: &candle_core::Tensor,
+    negative_txt: &candle_core::Tensor,
+    img_tokens: usize,
+    transformer_bytes: u64,
+    dtype: candle_core::DType,
+    device: &candle_core::Device,
+) -> super::transformer::Flux2CfgBatching {
+    use super::transformer::Flux2CfgBatching;
+    let ordinal = match device.location() {
+        candle_core::DeviceLocation::Cuda { gpu_id } => Some(gpu_id),
+        _ => None,
+    };
+    let Some(total) = ordinal.and_then(crate::device::total_vram_bytes) else {
+        return Flux2CfgBatching::Sequential;
+    };
+    let positive_tokens = positive_txt.dim(1).unwrap_or(0);
+    let negative_tokens = negative_txt.dim(1).unwrap_or(usize::MAX);
+    let head_dim = flux2_cfg
+        .hidden_size
+        .checked_div(flux2_cfg.num_heads)
+        .unwrap_or(0);
+    let backend = crate::attention::effective_backend_under(
+        crate::attention::AttentionPolicy::FastStill,
+        device,
+        dtype,
+        head_dim,
+    );
+    let activation = super::transformer::flux2_activation_bytes_for(
+        flux2_cfg,
+        positive_tokens + img_tokens,
+        2,
+        dtype,
+        backend,
+    );
+    super::transformer::flux2_cfg_batching_for(
+        positive_tokens,
+        negative_tokens,
+        transformer_bytes,
+        activation,
+        total,
+    )
+}
+
 /// Flux.2 Klein inference engine (4B and 9B variants) backed by candle.
 pub struct Flux2Engine {
     base: EngineBase<LoadedFlux2>,
@@ -355,6 +407,23 @@ impl Flux2Engine {
     }
 
     /// The negative prompt this render's unconditional branch encodes, or
+    /// The transformer checkpoint's size on disk, across shards.
+    ///
+    /// Stands in for its resident size because it is measured per tier: a Q8
+    /// GGUF is charged its quantized bytes, not what the same parameters would
+    /// cost in the working dtype.
+    fn transformer_file_bytes(&self) -> u64 {
+        let paths = if self.base.paths.transformer_shards.is_empty() {
+            std::slice::from_ref(&self.base.paths.transformer)
+        } else {
+            self.base.paths.transformer_shards.as_slice()
+        };
+        paths
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
+            .sum()
+    }
+
     /// `None` when the render runs one forward per step.
     ///
     /// `diffusers`' `pipeline_flux2_klein.py:593` is the condition —
@@ -1650,6 +1719,17 @@ impl Flux2Engine {
             .as_ref()
             .map(|emb| sampling::text_conditioning(emb, state.img.dim(0)?, state.img.device()))
             .transpose()?;
+        let cfg_batching = neg_conditioning.as_ref().map(|(neg_txt, _)| {
+            resolve_cfg_batching(
+                &flux2_cfg,
+                &state.txt,
+                neg_txt,
+                state.img.dim(1).unwrap_or(0),
+                self.transformer_file_bytes(),
+                gpu_dtype,
+                &device,
+            )
+        });
         let cfg_branch =
             neg_conditioning
                 .as_ref()
@@ -1657,11 +1737,14 @@ impl Flux2Engine {
                     scale: req.guidance,
                     txt,
                     txt_ids,
+                    batching: cfg_batching
+                        .unwrap_or(super::transformer::Flux2CfgBatching::Sequential),
                 });
-        if cfg_branch.is_some() {
+        if let Some(branch) = cfg_branch.as_ref() {
             self.base.progress.info(&format!(
-                "Undistilled FLUX.2 base: classifier-free guidance at {:.2} (two forwards per step)",
-                req.guidance
+                "Undistilled FLUX.2 base: classifier-free guidance at {:.2} ({})",
+                req.guidance,
+                branch.batching.progress_note()
             ));
         }
         let img = transformer.denoise(
@@ -1923,6 +2006,11 @@ impl Flux2Engine {
 
         self.reload_transformer_if_needed()?;
 
+        // Read before the mutable borrow below: the CFG batching decision
+        // needs both, and neither changes during the denoise.
+        let eager_cfg = self.resolve_config()?;
+        let eager_transformer_bytes = self.transformer_file_bytes();
+
         let loaded = self
             .base
             .loaded
@@ -2026,6 +2114,17 @@ impl Flux2Engine {
             .as_ref()
             .map(|emb| sampling::text_conditioning(emb, state.img.dim(0)?, state.img.device()))
             .transpose()?;
+        let cfg_batching = neg_conditioning.as_ref().map(|(neg_txt, _)| {
+            resolve_cfg_batching(
+                &eager_cfg,
+                &state.txt,
+                neg_txt,
+                state.img.dim(1).unwrap_or(0),
+                eager_transformer_bytes,
+                loaded.dtype,
+                &loaded.device,
+            )
+        });
         let cfg_branch =
             neg_conditioning
                 .as_ref()
@@ -2033,11 +2132,14 @@ impl Flux2Engine {
                     scale: req.guidance,
                     txt,
                     txt_ids,
+                    batching: cfg_batching
+                        .unwrap_or(super::transformer::Flux2CfgBatching::Sequential),
                 });
-        if cfg_branch.is_some() {
+        if let Some(branch) = cfg_branch.as_ref() {
             progress.info(&format!(
-                "Undistilled FLUX.2 base: classifier-free guidance at {:.2} (two forwards per step)",
-                req.guidance
+                "Undistilled FLUX.2 base: classifier-free guidance at {:.2} ({})",
+                req.guidance,
+                branch.batching.progress_note()
             ));
         }
         let img = transformer.denoise(

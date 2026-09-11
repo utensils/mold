@@ -163,9 +163,14 @@ publishes them as the base for fine-tuning, LoRA training, and custom
 pipelines.
 
 These are the only Flux.2 checkpoints that use a **negative prompt**. Guidance
-above 1.0 runs a second, unconditional forward per step, so a base render costs
-roughly twice a distilled render of the same step count; `--guidance 1` skips
-the branch entirely.
+above 1.0 adds an unconditional branch; `--guidance 1` skips it entirely. Where
+the card has room, both branches ride in ONE batch-2 forward per step, so each
+weight is read once for the pair and a guided render costs far less than two
+separate ones — on a bandwidth-bound quantized tier, closer to 1.2x a distilled
+render than 2x. mold falls back to two sequential forwards when the negative
+prompt tokenizes to a different length than the positive one (the two cannot be
+concatenated) or when the doubled activations would not fit beside the weights.
+The progress line says which ran.
 
 - **Developer**: [Black Forest Labs](https://blackforestlabs.ai/)
 - **License**: Apache 2.0 (4B), Non-Commercial (9B)
