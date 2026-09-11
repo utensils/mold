@@ -185,6 +185,25 @@ mold run --script shot.toml --output walk.mp4
 mold jobs list
 ```
 
+A 3-D render can be one shot or a durable workflow. A workflow keeps every
+stage — the picture it starts from, its matted and delighted copies, the
+shape, the paint — as its own retained artifact, reports progress stage by
+stage, and resumes after a restart. It lives on the machine that runs it:
+
+```bash
+mold mesh-workflow create --prompt "a small ceramic fox" --texture --follow
+mold mesh-workflow create --mesh chair.glb --image chair-albedo.png
+mold mesh-workflow list
+```
+
+Find weights to install, and watch them arrive:
+
+```bash
+mold search "anime style" --kind lora
+mold pull flux-dev:q4
+mold downloads watch
+```
+
 See the [remote workflow](https://utensils.io/mold/guide/remote-workflows) and
 [RunPod](https://utensils.io/mold/deployment/runpod-cli) guides. Use
 `mold queue` to manage remote work and `mold library` to browse and organize

@@ -256,6 +256,45 @@ mold run hunyuan3d-mini-turbo --image chair.png --output - > chair.glb
 cat chair.png | mold run hunyuan3d-mini-turbo --image - -o chair.glb
 ```
 
+## Durable workflows from the CLI
+
+`mold run` against a 3-D model is one render: it succeeds or it does not.
+`mold mesh-workflow` is the durable form of the same work. Each stage — the
+picture a text-to-3-D run starts from, its matted and delighted copies, the
+shape, the paint — is admitted as its own generation and keeps its own
+retained artifact, the job survives a server restart, and a resume picks up at
+the first unfinished stage rather than starting over.
+
+```bash
+mold mesh-workflow create --prompt "a small ceramic fox" --texture --follow
+mold mesh-workflow create --mesh chair.glb --image chair-albedo.png
+mold mesh-workflow create --mesh chair.glb --mode mesh_roundtrip --octree 320
+mold mesh-workflow list
+mold mesh-workflow show WORKFLOW-ID
+```
+
+The mode is inferred from what you supply: `--prompt` renders a picture and
+reconstructs it, `--mesh` with `--image` paints the mesh you supplied, and
+`--mesh` alone rebuilds it through the 2.1 shape VAE. `--mode` names it
+outright when a script would rather not depend on that.
+
+Every verb talks to the server at `MOLD_HOST`. A workflow is durable on ONE
+machine — its manifest, its stage artifacts and its queue rows live in that
+machine's data root — so there is no local form, and `--local` is refused with
+the one-shot alternative rather than quietly running something else.
+
+The geometry and conditioning controls are the same ones `mold run` takes:
+`--octree`, `--threshold`, `--target-faces`, `--matting`, `--delight`,
+`--texture` and `--texture-resolution`. This is the only surface that exposes
+all of them on a durable workflow; the apps author texture, texture resolution
+and delight only. `--seed` applies to every stage, so one value reproduces the
+whole run.
+
+Follow a running workflow with `--follow` on `create`, or attach to one later
+with `mold mesh-workflow events`. `resume` restarts a paused or failed job,
+`cancel` stops a running one, and `delete` removes a settled workflow and the
+artifacts it retained — settled only, so cancel or wait first.
+
 ## From the apps
 
 The web SPA, the desktop app, and the iPhone app all generate and view meshes

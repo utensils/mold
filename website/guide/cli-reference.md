@@ -232,6 +232,54 @@ Durable chain jobs store checkpoints under `MOLD_HOME/jobs/<job_id>`.
 shim jobs and explicitly discarding completed jobs' editable scene caches.
 Automatic maintenance leaves durable scene caches intact.
 
+## `mold mesh-workflow`
+
+Create and follow durable multi-stage 3-D workflows.
+
+```bash
+mold mesh-workflow create --prompt "a small ceramic fox" --texture --follow
+mold mesh-workflow create --mesh chair.glb --image chair-albedo.png
+mold mesh-workflow create --mesh chair.glb --mode mesh_roundtrip --octree 320
+mold mesh-workflow list --json
+mold mesh-workflow show WORKFLOW-ID
+mold mesh-workflow events WORKFLOW-ID
+mold mesh-workflow resume WORKFLOW-ID
+mold mesh-workflow cancel WORKFLOW-ID
+mold mesh-workflow delete WORKFLOW-ID
+```
+
+A one-shot `mold run` against a 3-D model is a single render. A workflow keeps
+every stage as its own retained artifact, reports progress stage by stage, and
+resumes after a restart from the first unfinished stage. It is durable on one
+machine, so every verb talks to `MOLD_HOST` and there is no local form.
+
+The mode is inferred from what you supply:
+
+| You give it            | Workflow                                              |
+| ---------------------- | ----------------------------------------------------- |
+| `--prompt`             | `text_to_mesh`: render a picture, then reconstruct it |
+| `--mesh` and `--image` | `mesh_texture`: paint the mesh you supplied           |
+| `--mesh` alone         | `mesh_roundtrip`: rebuild it through the shape VAE    |
+
+`--mode` names it outright when a script would rather not depend on that.
+
+| Flag                                                     | Meaning                                                   |
+| -------------------------------------------------------- | --------------------------------------------------------- |
+| `--model <MODEL>`                                        | The 3-D model every stage after the picture uses          |
+| `--image-model <MODEL>`                                  | The image model a text-to-3-D run starts from             |
+| `--up-axis y\|z`, `--meters-per-unit <M>`                | How to read the supplied mesh                             |
+| `--texture` / `--no-texture`, `--texture-resolution <N>` | PBR texturing                                             |
+| `--matting auto\|on\|off`, `--delight`                   | Conditioning stages                                       |
+| `--octree <N>`, `--threshold <T>`, `--target-faces <N>`  | Geometry controls                                         |
+| `--seed <N>`                                             | Seed used by every stage, so one value reproduces the run |
+| `--follow`                                               | Stream the stages until the workflow settles              |
+| `--json`                                                 | Print the accepted job as JSON                            |
+
+Omit a geometry control and the recipe's own default answers. `delete` is
+settled-only: cancel or wait first. A supplied mesh is a `.glb` or `.obj`, and
+on a server that advertises reference uploads and is reached with an API key
+its bytes stream through an upload lease rather than riding the request.
+
 ## `mold queue`
 
 Inspect and control the generation queue on a running `mold serve` instance.
@@ -588,6 +636,62 @@ SHA-256 pass after the download; `--accept-license` records a third-party
 model-license acceptance before pulling (see
 [Configuration](/guide/configuration#third-party-model-licenses)).
 `mold info <model> --verify` verifies checksums for that model.
+`mold list --json` prints the same rows the API serves, so a script reads one
+shape whichever it asks.
+
+## `mold search`
+
+Find models in the Hugging Face and Civitai catalogs.
+
+```bash
+mold search flux
+mold search "anime style" --kind lora --sort recent
+mold search sdxl --source civitai --page 2 --page-size 50
+mold search flux --no-nsfw --json
+```
+
+The search runs on the server at `MOLD_HOST` when one answers, so it sees the
+Hugging Face and Civitai credentials that machine has stored, and the
+installed column answers about the machine that would do the downloading. With
+no server reachable it runs here instead, using `HF_TOKEN` and `CIVITAI_TOKEN`
+from the environment.
+
+| Flag                               | Meaning                                              |
+| ---------------------------------- | ---------------------------------------------------- |
+| `--family <FAMILY>`                | Restrict to one model family                         |
+| `--kind <KIND>`                    | Restrict to one kind, such as `checkpoint` or `lora` |
+| `--source hf\|civitai`             | Restrict to one catalog                              |
+| `--sort downloads\|recent\|rating` | Result ordering (default `downloads`)                |
+| `--page <N>` / `--page-size <N>`   | Paging, from 1 and 1 to 100                          |
+| `--nsfw` / `--no-nsfw`             | Include or leave out mature-content results          |
+| `--json`                           | Print the page as JSON                               |
+
+A merged search whose one provider failed still returns the other's rows; the
+failure is reported on stderr so a piped search still carries only results.
+Install a result with `mold pull` and the id the table printed.
+
+## `mold downloads`
+
+Inspect the model download queue on a running server.
+
+```bash
+mold downloads list
+mold downloads list --json
+mold downloads add flux-dev:q4
+mold downloads add pulid-flux --accept-license insightface-antelopev2
+mold downloads watch
+mold downloads cancel DOWNLOAD-ID
+```
+
+Remote only: a download queue belongs to the machine whose disk fills up, so
+an unreachable server is reported rather than answered from this one.
+`mold pull` remains the command that also works with no server at all.
+
+`mold downloads add` takes a model name from `mold list`. A `cv:` or `hf:`
+catalog id is a different door and is refused here by name, pointing at
+`mold pull`, which resolves the catalog entry and its companions.
+`mold downloads watch` opens with a full snapshot of the queue and then prints
+a line per event, with a smoothed transfer rate and estimate.
 
 ## `mold config`
 

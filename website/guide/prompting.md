@@ -819,6 +819,9 @@ mold library export chair.glb --format zip -o chair.zip
 # Share a turntable: the poster spun a full turn as an animated GIF (or apng, webp)
 mold library export chair.glb --format gif
 mold library export chair.glb --format gif --playback bounce --repeat once --frames 24
+
+# The durable form: every stage retained, resumable, followed to settlement
+mold mesh-workflow create --mesh chair.glb --image chair-albedo.png --follow
 ```
 
 `--texture` asks for PBR maps beside the geometry and needs the paint bundle;
@@ -844,6 +847,15 @@ to the profile's `capabilities.mesh.target_faces_texture_default` instead,
 mirroring Tencent's own paint pipeline, because UV unwrapping is superlinear
 in triangle count. `mold library export`, the `export_mesh` MCP tool, and the
 gallery export menu all transcode the same stored `.glb`.
+
+`mold run` is one render. `mold mesh-workflow` is the durable form of the same
+work: each stage is admitted as its own generation and keeps its own retained
+artifact, the job survives a server restart, and a resume picks up at the
+first unfinished stage. It takes the same geometry, matting and delight
+controls, infers its mode from what it is given (`--prompt` to render a
+picture and reconstruct it, `--mesh` with `--image` to paint a supplied mesh,
+`--mesh` alone to rebuild one), and is remote by construction — the job lives
+in one machine's data root.
 
 #### Sources
 
