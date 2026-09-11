@@ -13,13 +13,8 @@ import {
   __testing__,
 } from "../../composables/useGenerateForm";
 import type { ModelInfoExtended } from "../../types";
-import {
-  addHost,
-  getGenerateTargetId,
-  setGenerateTargetId,
-} from "../../lib/hostRegistry";
+import { addHost } from "../../lib/hostRegistry";
 import { __testing__ as routingTesting } from "../../composables/useHostRouting";
-import { CAPABLE_TARGET_ID } from "../../lib/hostRouting";
 import type { GenerateFormState } from "../../types";
 
 const pushMock = vi.hoisted(() => vi.fn());
@@ -46,9 +41,13 @@ function baseForm(
   return { ...state, ...overrides };
 }
 
-function factory(overrides: Partial<GenerateFormState> = {}, family = "flux") {
+function factory(
+  overrides: Partial<GenerateFormState> = {},
+  family = "flux",
+  group: "primary" | "secondary" | "seed" = "primary",
+) {
   return mount(ControlsAside, {
-    props: { modelValue: baseForm(overrides), family, advCount: 0 },
+    props: { modelValue: baseForm(overrides), family, advCount: 0, group },
   });
 }
 
@@ -321,6 +320,7 @@ describe("ControlsAside", () => {
     } as ModelInfoExtended;
     const wrapper = mount(ControlsAside, {
       props: {
+        group: "secondary" as const,
         modelValue: baseForm({
           model: model.name,
           modelFamily: "ltx2",
@@ -350,6 +350,7 @@ describe("ControlsAside", () => {
     model.supports_audio = false;
     const wrapper = mount(ControlsAside, {
       props: {
+        group: "secondary" as const,
         modelValue: baseForm({ model: model.name, modelFamily: "ltx2" }),
         family: "ltx2",
         model,
@@ -375,6 +376,7 @@ describe("ControlsAside", () => {
     model.supports_audio = true;
     const wrapper = mount(ControlsAside, {
       props: {
+        group: "secondary" as const,
         modelValue: baseForm({ model: model.name, modelFamily: "ltx2" }),
         family: "ltx2",
         model,
@@ -398,6 +400,7 @@ describe("ControlsAside", () => {
     } as ModelInfoExtended;
     const wrapper = mount(ControlsAside, {
       props: {
+        group: "secondary" as const,
         modelValue: baseForm({ model: model.name, modelFamily: "ltx2" }),
         family: "ltx2",
         model,
@@ -532,6 +535,7 @@ describe("ControlsAside", () => {
   it("shows a per-model duration slider for one-shot video", async () => {
     const wrapper = mount(ControlsAside, {
       props: {
+        group: "secondary" as const,
         modelValue: baseForm({ frames: 97, fps: 24 }),
         family: "ltx2",
         model: {
@@ -677,7 +681,7 @@ describe("ControlsAside", () => {
   }
 
   it("maps the seed control to Surprise me/Keep and reveals the seed input when fixed", async () => {
-    const wrapper = factory({ seedMode: "random", seed: null });
+    const wrapper = factory({ seedMode: "random", seed: null }, "flux", "seed");
     expect(wrapper.find("[data-test='controls-seed']").exists()).toBe(false);
 
     await seedButton(wrapper, "Keep").trigger("click");
@@ -688,24 +692,25 @@ describe("ControlsAside", () => {
   });
 
   it("keeps an increment seed under the Fixed segment", () => {
-    const wrapper = factory({ seedMode: "increment", seed: 100 });
+    const wrapper = factory(
+      { seedMode: "increment", seed: 100 },
+      "flux",
+      "seed",
+    );
     // Fixed covers both static and increment, so the seed input is shown.
     expect(wrapper.find("[data-test='controls-seed']").exists()).toBe(true);
   });
 
-  it("steps the batch size", async () => {
+  /* Make is the composer's own chip now, beside the words it applies to. The
+   * rail keeps no second stepper and no second batch-lock rule. */
+  it("keeps no batch control of its own", () => {
     const wrapper = factory({ batchSize: 1 });
-    const stepper = wrapper
-      .findAllComponents(Stepper)
-      .find((candidate) => candidate.props("label") === "Batch size")!;
-    expect(stepper.props("editable")).toBe(true);
-    expect(stepper.props("max")).toBe(10_000);
-    stepper.vm.$emit("update:modelValue", 300);
-    await wrapper.vm.$nextTick();
-    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
-      GenerateFormState,
-    ];
-    expect(next.batchSize).toBe(300);
+    expect(
+      wrapper
+        .findAllComponents(Stepper)
+        .some((candidate) => candidate.props("label") === "Batch size"),
+    ).toBe(false);
+    expect(wrapper.find("[data-test='batch-locked']").exists()).toBe(false);
   });
 
   it("shows the advanced badge and opens the sheet on phones", async () => {
@@ -731,39 +736,22 @@ describe("ControlsAside", () => {
     expect(wrapper.find("[data-test='open-advanced']").exists()).toBe(false);
   });
 
-  it("offers a settings reset in the rail header", async () => {
+  /* Reset moved to the rail's own small header, beside the kicker, where it
+   * resets the whole rail rather than one card. The emit is unchanged, which
+   * is what the page's CanvasIntent regression pins depend on. */
+  it("keeps the reset-settings emit without drawing the head itself", async () => {
     const wrapper = factory();
-    const reset = wrapper.get("[data-test='settings-reset']");
-    expect(reset.attributes("aria-label")).toBe(
-      "Reset to the style's defaults",
-    );
-    await reset.trigger("click");
+    expect(wrapper.find("[data-test='settings-reset']").exists()).toBe(false);
+    expect(wrapper.find(".controls__head").exists()).toBe(false);
+    wrapper.vm.$emit("reset-settings");
+    await wrapper.vm.$nextTick();
     expect(wrapper.emitted("reset-settings")).toHaveLength(1);
-  });
-
-  it("offers the same settings reset on phones", async () => {
-    const wrapper = mount(ControlsAside, {
-      props: { modelValue: baseForm(), family: "flux", mobile: true },
-    });
-    await wrapper.get("[data-test='settings-reset']").trigger("click");
-    expect(wrapper.emitted("reset-settings")).toHaveLength(1);
-  });
-
-  it("locks batch to 1 for edit families", () => {
-    const wrapper = mount(ControlsAside, {
-      props: {
-        modelValue: baseForm(),
-        family: "qwen-image-edit",
-        advCount: 0,
-      },
-    });
-    expect(wrapper.find("[data-test='batch-locked']").exists()).toBe(true);
-    expect(wrapper.getComponent(Stepper).props("max")).toBe(1);
   });
 
   it("offers lock-last-seed while random once a run has completed", async () => {
     const wrapper = mount(ControlsAside, {
       props: {
+        group: "seed" as const,
         modelValue: baseForm({ seedMode: "random", seed: null }),
         family: "flux",
         advCount: 0,
@@ -782,13 +770,14 @@ describe("ControlsAside", () => {
   });
 
   it("hides the lock control before any run completes", () => {
-    const wrapper = factory({ seedMode: "random", seed: null });
+    const wrapper = factory({ seedMode: "random", seed: null }, "flux", "seed");
     expect(wrapper.find("[data-test='lock-last-seed']").exists()).toBe(false);
   });
 
   it("hides the lock control while the seed is already fixed", () => {
     const wrapper = mount(ControlsAside, {
       props: {
+        group: "seed" as const,
         modelValue: baseForm({ seedMode: "static", seed: 7 }),
         family: "flux",
         advCount: 0,
@@ -799,7 +788,7 @@ describe("ControlsAside", () => {
   });
 
   it("reroll switches seed back to random", async () => {
-    const wrapper = factory({ seedMode: "static", seed: 42 });
+    const wrapper = factory({ seedMode: "static", seed: 42 }, "flux", "seed");
     await wrapper.get("[data-test='seed-reroll']").trigger("click");
     const events = wrapper.emitted("update:modelValue") ?? [];
     const last = events.at(-1)?.[0] as GenerateFormState;
@@ -807,46 +796,14 @@ describe("ControlsAside", () => {
     expect(last.seed).toBeNull();
   });
 
-  it("collapses the run-on row to this server with no remote machines", () => {
-    const wrapper = factory();
-    expect(wrapper.get("[data-test='controls-host']").text()).toContain(
-      "Run on this server",
-    );
-    expect(wrapper.find("[data-test='host-chip']").exists()).toBe(false);
-  });
-
-  it("opens the machines workspace when the collapsed host row is clicked", async () => {
-    const wrapper = factory();
-    await wrapper.get("[data-test='controls-host']").trigger("click");
-    expect(pushMock).toHaveBeenCalledWith("/machines");
-  });
-
-  it("offers the routing menu once a remote machine is registered", async () => {
-    const host = addHost({ url: "http://studio:7680", name: "Studio" });
-    const wrapper = factory();
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    expect(wrapper.find("[data-test='host-option-auto']").exists()).toBe(true);
-    expect(wrapper.find(`[data-test='host-option-${host.id}']`).exists()).toBe(
-      true,
-    );
-  });
-
-  it("persists a routing pick made from the rail", async () => {
+  /* Where it runs is the rail's Machine card, at the top, where the audit
+   * found nobody was looking for it at the bottom of the settings list. The
+   * picker's own behaviour is pinned by `HostRoutingPicker.test.ts`. */
+  it("hosts no routing picker of its own", () => {
     addHost({ url: "http://studio:7680", name: "Studio" });
     const wrapper = factory();
-    await wrapper.get("[data-test='host-chip']").trigger("click");
-    await wrapper.get("[data-test='host-option-capable']").trigger("click");
-    expect(getGenerateTargetId()).toBe(CAPABLE_TARGET_ID);
-  });
-
-  it("names an already-persisted sticky pick on the chip", async () => {
-    const host = addHost({ url: "http://studio:7680", name: "Studio" });
-    setGenerateTargetId(host.id);
-    const wrapper = factory();
-    await wrapper.vm.$nextTick();
-    expect(wrapper.get("[data-test='host-chip']").text()).toContain(
-      "Run on Studio",
-    );
+    expect(wrapper.find("[data-test='controls-host']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='host-chip']").exists()).toBe(false);
   });
 
   // Create is one-shot only: there is no output mode to choose any more.
@@ -860,7 +817,13 @@ describe("ControlsAside", () => {
     );
   });
 
-  it("leads the rail with Shape, and keeps Batch unlocked for a video model", () => {
+  /*
+   * The rail carries only what a person touches while writing: Shape, Size,
+   * Detail and Stick to my words. Make is the composer's chip, Repeat this
+   * look is a disclosure row, and the clip and 3-D groups are under More
+   * settings — all four are absent here.
+   */
+  it("leads with Shape and keeps only the two sliders beside the canvas", () => {
     const wrapper = mount(ControlsAside, {
       props: {
         modelValue: baseForm({ batchSize: 4, width: 1024, height: 1024 }),
@@ -871,17 +834,30 @@ describe("ControlsAside", () => {
     expect(wrapper.find(".controls__group").text()).toContain("Shape");
     expect(wrapper.findComponent(ShapePicker).exists()).toBe(true);
     expect(wrapper.findComponent(ResolutionSelector).exists()).toBe(true);
-    const stepper = wrapper
-      .findAllComponents(Stepper)
-      .find((s) => s.props("label") === "Batch size")!;
-    expect(stepper.props("modelValue")).toBe(4);
-    expect(wrapper.find("[data-test='batch-locked']").exists()).toBe(false);
     const labels = wrapper
       .findAllComponents(SliderRow)
       .map((row) => row.props("label"));
-    expect(labels).toContain("Detail");
-    expect(labels).toContain("Stick to my words");
-    expect(wrapper.find("[data-test='seed-seg']").exists()).toBe(true);
+    expect(labels).toEqual(["Detail", "Stick to my words"]);
+    expect(wrapper.find("[data-test='seed-seg']").exists()).toBe(false);
+    expect(
+      wrapper
+        .findAllComponents(Stepper)
+        .some((candidate) => candidate.props("label") === "Batch size"),
+    ).toBe(false);
+    expect(wrapper.findComponent(VideoDurationSlider).exists()).toBe(false);
+  });
+
+  it("moves the clip and 3-D groups under More settings", () => {
+    const secondary = factory(
+      { frames: 97, model: "ltx-2-19b-distilled:fp8" },
+      "ltx2",
+      "secondary",
+    );
+    expect(secondary.findComponent(VideoDurationSlider).exists()).toBe(true);
+    expect(secondary.findComponent(ShapePicker).exists()).toBe(false);
+    expect(
+      secondary.findAllComponents(SliderRow).map((row) => row.props("label")),
+    ).not.toContain("Detail");
   });
 });
 

@@ -41,11 +41,11 @@ const emit = defineEmits<{ open: [] }>();
   gap: 7px;
   height: var(--mold-ctl-md, 28px);
   padding: 0 10px;
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
   background: transparent;
-  color: var(--ink-2);
-  font-size: 12px;
+  color: var(--mold-text-2);
+  font-size: var(--mold-fs-xs);
   cursor: pointer;
 }
 .chip:disabled {
@@ -53,8 +53,8 @@ const emit = defineEmits<{ open: [] }>();
   cursor: not-allowed;
 }
 .chip__sub {
-  font-family: var(--f-mono);
-  font-size: 11px;
-  color: var(--ink-3);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-dim);
 }
 </style>

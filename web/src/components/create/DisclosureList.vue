@@ -11,9 +11,9 @@
 
 <style scoped>
 .list {
-  background: var(--bench);
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-card-lg);
+  background: var(--mold-surface);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-3);
   overflow: clip;
 }
 </style>

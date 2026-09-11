@@ -34,6 +34,7 @@ import {
   sdxlRecipe,
 } from "@studio/lib/generationProfile.testFixtures";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
+import { resolveOutputShape } from "@studio/lib/outputShape";
 import type {
   GalleryImage,
   GenerateFormState,
@@ -559,6 +560,76 @@ describe("CreatePage layout and behavior", () => {
     wrapper.unmount();
     vi.unstubAllGlobals();
     vi.stubGlobal("prompt", vi.fn());
+  });
+
+  /*
+   * The output-shape invariant: the chip, the rail's pills and the badge read
+   * ONE `resolveOutputShape` result, so they cannot disagree. The chip renders
+   * that object's own badge and the pixels the form holds — it never computes
+   * a size, and it is absent on a recipe that renders on no canvas at all.
+   */
+  it("reads the shape chip from the same resolver the rail's pills read", async () => {
+    const model = modelWithRecipe("sdxl:fp16", "sdxl");
+    hostModelsMock.mockResolvedValue([model]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.width = 1024;
+    form.state.value.height = 1024;
+    await nextTick();
+
+    const chip = wrapper.getComponent({ name: "ShapeChip" });
+    const shape = resolveOutputShape({
+      model,
+      family: "sdxl",
+      pipeline: null,
+      width: 1024,
+      height: 1024,
+      source: null,
+      intent: "model-default",
+    });
+    expect(chip.props("label")).toBe(shape.badge);
+    // A square says its side once, not "1024×1024".
+    expect(chip.props("sublabel")).toBe("1024");
+
+    form.state.value.width = 1216;
+    form.state.value.height = 704;
+    await nextTick();
+    expect(wrapper.getComponent({ name: "ShapeChip" }).props("sublabel")).toBe(
+      "1216×704",
+    );
+  });
+
+  it("writes the batch through the composer's Make chip and locks it for an edit recipe", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+      installedModelRow("qwen-image-edit:q8", "qwen-image-edit"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    await nextTick();
+
+    const chip = wrapper.getComponent({ name: "MakeChip" });
+    expect(chip.props("locked")).toBe(false);
+    chip.vm.$emit("update:modelValue", 4);
+    await nextTick();
+    expect(form.state.value.batchSize).toBe(4);
+
+    // The rail keeps no second stepper — the chip is the one control.
+    expect(wrapper.find("[data-test='controls-stub']").exists()).toBe(true);
+    expect(wrapper.findAllComponents({ name: "MakeChip" })).toHaveLength(1);
+
+    form.state.value.model = "qwen-image-edit:q8";
+    form.state.value.modelFamily = "qwen-image-edit";
+    await nextTick();
+    expect(wrapper.getComponent({ name: "MakeChip" }).props("locked")).toBe(
+      true,
+    );
   });
 
   /* The rail is the mock's, in the mock's order: the connection first, because
@@ -1267,6 +1338,112 @@ describe("CreatePage layout and behavior", () => {
     });
     return stubs;
   }
+
+  // ── The result's action bar (web mock rule 1: every view is a link) ────
+
+  /** A ResultCanvas stub that fires the bar's three actions. */
+  function actionBarStubs(): Record<string, Component> {
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.ResultCanvas = defineComponent({
+      name: "ResultCanvas",
+      props: ["mode", "canCopyLink", "canMakeVariations", "resultFilename"],
+      template:
+        '<div data-test="result-canvas" :data-can-copy="String(canCopyLink)" :data-can-vary="String(canMakeVariations)">' +
+        '<button data-test="canvas-download" @click="$emit(\'download\')">d</button>' +
+        '<button data-test="canvas-copy-link" @click="$emit(\'copy-link\')">c</button>' +
+        '<button data-test="canvas-make-variations" @click="$emit(\'make-variations\')">v</button>' +
+        "</div>",
+    });
+    return stubs;
+  }
+
+  it("copies the print's Library link, the shape the Library already opens", async () => {
+    const writeText = vi.fn((_text: string) => Promise.resolve());
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    streamJobsRef.value = [finishedCanvasJob()];
+    const wrapper = mount(CreatePage, {
+      global: { stubs: actionBarStubs() },
+    });
+    await flushPromises();
+
+    expect(
+      wrapper.get("[data-test='result-canvas']").attributes("data-can-copy"),
+    ).toBe("true");
+    await wrapper.get("[data-test='canvas-copy-link']").trigger("click");
+    await flushPromises();
+    const link = writeText.mock.calls.at(-1)![0];
+    const url = new URL(link);
+    expect(url.pathname).toBe("/library");
+    expect(url.searchParams.get("print")).toBe(entry.filename);
+    expect(url.searchParams.get("printHost")).toBe(ORIGIN_HOST_ID);
+    vi.unstubAllGlobals();
+    vi.stubGlobal("prompt", vi.fn());
+    wrapper.unmount();
+  });
+
+  /*
+   * Make 4 variations is the picture on the canvas, made again as a batch. The
+   * count rides THAT submission only — the persisted Make is the person's own
+   * choice and an action on a finished print never rewrites it.
+   */
+  it("makes four variations on one submission without touching the saved count", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [finishedCanvasJob()];
+    const wrapper = mount(CreatePage, {
+      global: { stubs: actionBarStubs() },
+    });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = entry.metadata.model;
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.batchSize = 1;
+    await nextTick();
+
+    expect(
+      wrapper.get("[data-test='result-canvas']").attributes("data-can-vary"),
+    ).toBe("true");
+    await wrapper.get("[data-test='canvas-make-variations']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalledTimes(4);
+    for (const call of submitMock.mock.calls) {
+      expect(call[0].batch_size).toBe(1);
+      expect(call[0].batch_count).toBe(4);
+    }
+    expect(form.state.value.batchSize).toBe(1);
+  });
+
+  it("offers no variations for a clip, or on a recipe that renders one at a time", async () => {
+    streamJobsRef.value = [
+      finishedCanvasJob({ format: "mp4", video_frames: 81 }),
+    ];
+    const clip = mount(CreatePage, { global: { stubs: actionBarStubs() } });
+    await flushPromises();
+    expect(
+      clip.get("[data-test='result-canvas']").attributes("data-can-vary"),
+    ).toBe("false");
+    clip.unmount();
+
+    // A Qwen edit recipe renders one print at a time, so four would be a
+    // promise the admission gate coerces back to one.
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("qwen-image-edit:q8", "qwen-image-edit"),
+    ]);
+    streamJobsRef.value = [finishedCanvasJob()];
+    const edit = mount(CreatePage, { global: { stubs: actionBarStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "qwen-image-edit:q8";
+    form.state.value.modelFamily = "qwen-image-edit";
+    await nextTick();
+    expect(
+      edit.get("[data-test='result-canvas']").attributes("data-can-vary"),
+    ).toBe("false");
+    edit.unmount();
+  });
 
   it("offers the print actions when the finished render is right-clicked", async () => {
     const originalFetch = globalThis.fetch;

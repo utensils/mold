@@ -37,9 +37,9 @@ const emit = defineEmits<{ open: [] }>();
   min-height: var(--mold-row-h-disclosure, 44px);
   padding: 6px 12px;
   border: 0;
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--mold-border);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   text-align: left;
   cursor: pointer;
 }
@@ -47,7 +47,7 @@ const emit = defineEmits<{ open: [] }>();
   border-top: 0;
 }
 .row:hover {
-  background: var(--sel-bg);
+  background: var(--mold-row-hover);
 }
 .row__text {
   display: grid;
@@ -55,18 +55,18 @@ const emit = defineEmits<{ open: [] }>();
   flex: 1;
 }
 .row__label {
-  font-size: 12px;
+  font-size: var(--mold-fs-xs);
   font-weight: 600;
-  color: var(--rebate);
+  color: var(--mold-text);
 }
 .row__note {
-  font-size: 11px;
-  color: var(--ink-3);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-dim);
 }
 .row__value {
-  font-family: var(--f-mono);
-  font-size: 11px;
-  color: var(--ink-3);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-dim);
   white-space: nowrap;
 }
 </style>

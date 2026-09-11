@@ -84,9 +84,9 @@ const meterPercent = computed(() => {
 
 <style scoped>
 .machine {
-  background: var(--bench);
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-card-lg);
+  background: var(--mold-surface);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-3);
   padding: 14px;
 }
 .machine__head {
@@ -95,42 +95,42 @@ const meterPercent = computed(() => {
   gap: 8px;
 }
 .machine__name {
-  font-family: var(--f-mono);
+  font-family: var(--mold-font-mono);
   font-weight: 700;
-  font-size: 13px;
-  color: var(--rebate);
+  font-size: var(--mold-fs-sm);
+  color: var(--mold-text);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .machine__change {
   margin-left: auto;
-  font-size: 11px;
-  color: var(--safelight);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-blue);
   text-decoration: none;
 }
 .machine__sentence {
   margin: 9px 0 0;
-  font-size: 11px;
+  font-size: var(--mold-fs-xs);
   line-height: 1.45;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .machine__meter {
   margin-top: 10px;
   height: 5px;
-  background: var(--bath);
+  background: var(--mold-bg-crust);
   overflow: hidden;
 }
 .machine__meter span {
   display: block;
   height: 100%;
-  background: var(--safelight);
+  background: var(--mold-blue);
 }
 .machine__queue {
   margin: 8px 0 0;
-  font-family: var(--f-mono);
-  font-size: 10px;
-  color: var(--ink-3);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 .machine__picker {
   margin-top: 10px;

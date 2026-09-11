@@ -55,12 +55,12 @@ const shown = computed(() => (props.locked ? 1 : props.modelValue));
   height: var(--mold-ctl-md, 28px);
 }
 .make__label {
-  font-size: 12px;
-  color: var(--ink-2);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-2);
 }
 .make__note {
-  font-family: var(--f-mono);
-  font-size: 10px;
-  color: var(--ink-3);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 </style>

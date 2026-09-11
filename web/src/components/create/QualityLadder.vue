@@ -57,17 +57,17 @@ function meta(preset: QualityPreset): string {
 
 <style scoped>
 .ladder {
-  background: var(--bench);
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-card-lg);
+  background: var(--mold-surface);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-3);
   padding: 14px;
 }
 .ladder__kicker {
-  font-family: var(--f-mono);
-  font-size: 10px;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   margin-bottom: 9px;
 }
 .ladder__row {
@@ -79,23 +79,23 @@ function meta(preset: QualityPreset): string {
   min-height: var(--mold-row-h-preset, 34px);
   padding: 0 10px;
   border: 1px solid transparent;
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   background: transparent;
-  color: var(--ink-2);
-  font-size: 12px;
+  color: var(--mold-text-2);
+  font-size: var(--mold-fs-xs);
   cursor: pointer;
 }
 .ladder__row--on {
-  border-color: var(--safelight);
-  color: var(--rebate);
+  border-color: var(--mold-blue);
+  color: var(--mold-text);
 }
 .ladder__row:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 .ladder__meta {
-  font-family: var(--f-mono);
-  font-size: 11px;
-  color: var(--ink-3);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-dim);
 }
 </style>

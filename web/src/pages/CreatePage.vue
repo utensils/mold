@@ -5705,29 +5705,29 @@ onBeforeUnmount(() => {
   min-width: 0;
   max-width: 20rem;
   border: 1px solid transparent;
-  border-radius: var(--radius-control);
+  border-radius: var(--mold-radius-2);
   background: transparent;
-  color: var(--ink);
-  font-family: var(--f-display);
-  font-size: 15px;
+  color: var(--mold-text);
+  font-family: var(--mold-font-sans);
+  font-size: var(--mold-fs-base);
   font-weight: 600;
   padding: 4px 8px;
   outline: none;
 }
 .create-title__input::placeholder {
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
   font-weight: 500;
 }
 .create-title__input:hover {
-  border-color: var(--ce);
+  border-color: var(--mold-border-control);
 }
 .create-title__input:focus {
-  border-color: var(--safelight);
+  border-color: var(--mold-blue);
 }
 .create-title__error {
   flex: 0 0 auto;
-  font-size: 11px;
-  color: var(--stop);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-error);
 }
 
 /*
@@ -5740,7 +5740,7 @@ onBeforeUnmount(() => {
   position: sticky;
   bottom: 0;
   z-index: 5;
-  background: var(--bench);
+  background: var(--mold-surface);
   box-shadow: 0 -10px 24px -14px rgb(0 0 0 / 55%);
 }
 
@@ -5755,7 +5755,7 @@ onBeforeUnmount(() => {
   border-left: 0;
   border-right: 0;
   border-bottom: 0;
-  background: var(--bench);
+  background: var(--mold-surface);
 }
 
 .create-machine-row {
@@ -5763,29 +5763,29 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-card);
-  background: var(--bench);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-surface);
 }
 .create-machine-row__name {
-  font-family: var(--f-mono);
-  font-size: 12px;
-  color: var(--rebate);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .create-machine-row__meta {
-  font-family: var(--f-mono);
-  font-size: 11px;
-  color: var(--ink-3);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text-dim);
 }
 .create-machine-row__settings {
   margin-left: auto;
   border: 0;
   background: transparent;
-  color: var(--safelight);
-  font-size: 12px;
+  color: var(--mold-blue);
+  font-size: var(--mold-fs-xs);
   cursor: pointer;
 }
 
@@ -5797,25 +5797,25 @@ onBeforeUnmount(() => {
   padding: 0 2px;
 }
 .create-rail-head__kicker {
-  font-family: var(--f-mono);
-  font-size: 10px;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--mold-text-dim);
 }
 .create-rail-head__reset {
-  border: 1px solid var(--ce);
+  border: 1px solid var(--mold-border-control);
   background: transparent;
-  color: var(--ink-2);
+  color: var(--mold-text-2);
   padding: 4px 11px;
-  border-radius: var(--radius-pill);
-  font-size: 11.5px;
+  border-radius: 999px; /* literal: a pill is half its own height. */
+  font-size: var(--mold-fs-xs);
   font-weight: 600;
   cursor: pointer;
 }
 .create-rail-head__reset:hover {
-  border-color: var(--safelight);
-  color: var(--rebate);
+  border-color: var(--mold-blue);
+  color: var(--mold-text);
 }
 
 /* Every wrapper inside the sheet keeps `min-height: 0` so an inner height can
@@ -5832,18 +5832,18 @@ onBeforeUnmount(() => {
 .create-disclosure-advisory {
   margin: 0;
   padding: 8px 12px;
-  border-top: 1px solid var(--edge);
-  font-size: 11px;
+  border-top: 1px solid var(--mold-border);
+  font-size: var(--mold-fs-xs);
   line-height: 1.4;
-  color: var(--stop);
+  color: var(--mold-error);
 }
 
 .rail-sheet__back {
   align-self: flex-start;
   border: 0;
   background: transparent;
-  color: var(--safelight);
-  font-size: 12px;
+  color: var(--mold-blue);
+  font-size: var(--mold-fs-xs);
   padding: 0;
   cursor: pointer;
 }
