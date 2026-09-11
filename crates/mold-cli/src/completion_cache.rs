@@ -142,12 +142,17 @@ fn load_for_update() -> CompletionCache {
 /// Write the cache atomically. Errors are swallowed by [`record`]; a cache
 /// that cannot be written is a completion that does not improve, never a
 /// command that fails.
+///
+/// The temp name carries this process's id, because `rename` is atomic but
+/// the WRITE before it is not: two listings finishing at once on one shared
+/// temp path would rename a mixture of both documents. A corrupt cache is
+/// only ever treated as absent, so this costs nothing and loses nothing.
 fn save(cache: &CompletionCache) -> anyhow::Result<()> {
     let path = cache_path().ok_or_else(|| anyhow::anyhow!("no mold home"))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     std::fs::write(&tmp, serde_json::to_string_pretty(cache)?)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
@@ -330,6 +335,31 @@ mod tests {
             assert!(
                 !home.join(CACHE_FILE).exists(),
                 "completing must not create the cache"
+            );
+        });
+    }
+
+    /// The write leaves no temp file behind, and the one it uses is this
+    /// process's own — two listings finishing at once cannot rename a mixture
+    /// of each other's bytes.
+    #[test]
+    fn the_write_is_atomic_and_its_temp_name_is_this_process() {
+        with_home(|home| {
+            record(|cache| cache.record_tags(["cat".into()]));
+            let leftovers: Vec<String> = std::fs::read_dir(home)
+                .unwrap()
+                .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+                .filter(|name| name.ends_with(".tmp"))
+                .collect();
+            assert!(leftovers.is_empty(), "{leftovers:?}");
+
+            let path = cache_path().unwrap();
+            assert_eq!(
+                path.with_extension(format!("json.{}.tmp", std::process::id()))
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy(),
+                format!("completion-cache.json.{}.tmp", std::process::id())
             );
         });
     }

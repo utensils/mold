@@ -16,6 +16,12 @@
 //! canvas, and the same `{"mode": …}` object the browsers record rides the
 //! request, so a print made here reopens in the Library with its crop intact.
 //!
+//! One deliberate divergence beyond the rounding note on
+//! [`resolve_source_fit_transform`]: the draw dimensions carry a `.max(1.0)`
+//! floor the reference does not have. It can only differ for a downscale so
+//! extreme that the browser would draw a zero-width image, and a zero-sized
+//! resize is a panic here rather than a no-op there.
+//!
 //! Two of the five browser modes are refused BY NAME rather than silently
 //! mapped: `pad-repaint` needs a generated repaint mask and `upscale-then-fit`
 //! needs an upscaler pass, and both are features of the app, not of this

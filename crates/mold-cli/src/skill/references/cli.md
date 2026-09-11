@@ -115,6 +115,11 @@ mold run flux-dev:q4 "A lighthouse at dusk" --image wide.png --fit lanczos-resiz
 first needs a generated repaint mask, the second an upscaler pass. For the
 second, run `mold upscale` on the picture first and then `--fit crop-fill`.
 
+The provenance rides a SINGLE-clip render. A `--frames` value the model cannot
+reach in one pass auto-chains, and the sequence wire carries no source-fit
+field, so the stitched print gets the fitted pixels on the fitted canvas but
+records no crop to restore.
+
 ## Local and remote execution
 
 `mold run` first targets `MOLD_HOST` (default `http://localhost:7680`) and can

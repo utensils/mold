@@ -127,6 +127,11 @@ mold run flux-dev:q4 "A lighthouse at dusk" --image wide.png --fit crop-fill --w
 mold run sdxl-base:fp16 "A cabin in snow" --image tall.jpg --fit pad-fit --width 1024 --height 576
 ```
 
+The recorded policy rides a single-clip render. A `--frames` value past what
+the model renders in one pass auto-chains, and the sequence wire carries no
+source-fit field, so that stitched print gets the fitted pixels on the fitted
+canvas but records no crop to restore.
+
 For video, the `--output` extension outranks the family's container default:
 `mold run <video-model> "…" -o clip.gif` writes a real GIF even where the family
 would have picked MP4. An extension this binary cannot encode (`.mp4` without

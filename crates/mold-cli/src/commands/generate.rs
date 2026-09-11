@@ -384,7 +384,9 @@ fn apply_run_source_fit(
     config: &Config,
     model_cfg: &mold_core::ModelConfig,
     model: &str,
-    family: Option<&str>,
+    // The caller's own answer, not a second family comparison: a canvasless
+    // recipe is decided once, at `is_mesh`.
+    is_mesh: bool,
 ) -> Result<FittedSource> {
     let Some(mode) = mode else {
         return Ok(FittedSource {
@@ -397,7 +399,8 @@ fn apply_run_source_fit(
     let Some(bytes) = source_image else {
         if edit_images.is_some_and(|images| !images.is_empty()) {
             anyhow::bail!(
-                "--fit resamples a source image, and '{model}' reads ordered reference images                  instead — the engine conditions on those at their own size. Drop --fit."
+                "--fit resamples a source image, and '{model}' reads ordered reference images \
+                 instead — the engine conditions on those at their own size. Drop --fit."
             );
         }
         anyhow::bail!(
@@ -408,12 +411,10 @@ fn apply_run_source_fit(
     // never the source's shape, which is the rule `--fit` exists to override.
     let target_width = width.unwrap_or_else(|| model_cfg.effective_width(config));
     let target_height = height.unwrap_or_else(|| model_cfg.effective_height(config));
-    if family == Some(mold_core::manifest::HUNYUAN3D_FAMILY)
-        || target_width == 0
-        || target_height == 0
-    {
+    if is_mesh || target_width == 0 || target_height == 0 {
         anyhow::bail!(
-            "--fit needs a canvas and '{model}' renders without one: the engine letterboxes the              source to the checkpoint's own conditioning size, so there is nothing to fit it to."
+            "--fit needs a canvas and '{model}' renders without one: the engine letterboxes the \
+             source to the checkpoint's own conditioning size, so there is nothing to fit it to."
         );
     }
     let (fitted, transform) =
@@ -1228,7 +1229,7 @@ pub async fn run(
         &config,
         &model_cfg,
         model,
-        family.as_deref(),
+        is_mesh,
     )?;
 
     // Default video models to a sensible container unless the user explicitly picked one.
@@ -6307,7 +6308,7 @@ mod tests {
             &config,
             &model_cfg,
             "flux-dev:q4",
-            Some("flux"),
+            false,
         )
         .unwrap();
         assert_eq!((fitted.width, fitted.height), (Some(512), Some(512)));
@@ -6328,7 +6329,7 @@ mod tests {
             &config,
             &model_cfg,
             "flux-dev:q4",
-            Some("flux"),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -6352,7 +6353,7 @@ mod tests {
             &Config::default(),
             &ModelConfig::default(),
             "flux-dev:q4",
-            Some("flux"),
+            false,
         )
         .unwrap();
         assert_eq!(passthrough.source_image, Some(source));
@@ -6381,11 +6382,14 @@ mod tests {
             &config,
             &model_cfg,
             "flux-dev:q4",
-            Some("flux"),
+            false,
         )
         .unwrap_err()
         .to_string();
-        assert!(missing.contains("--image"), "{missing}");
+        assert_eq!(
+            missing,
+            "--fit needs a source image: pass --image <PATH>, or --image - to read one from stdin"
+        );
 
         let references = apply_run_source_fit(
             Some(crate::source_fit::SourceFitMode::CropFill),
@@ -6396,11 +6400,15 @@ mod tests {
             &config,
             &model_cfg,
             "qwen-image-edit:q8",
-            Some("qwen-image-edit"),
+            false,
         )
         .unwrap_err()
         .to_string();
-        assert!(references.contains("reference images"), "{references}");
+        assert_eq!(
+            references,
+            "--fit resamples a source image, and 'qwen-image-edit:q8' reads ordered reference \
+             images instead \u{2014} the engine conditions on those at their own size. Drop --fit."
+        );
 
         let canvasless = apply_run_source_fit(
             Some(crate::source_fit::SourceFitMode::CropFill),
@@ -6411,11 +6419,19 @@ mod tests {
             &config,
             &model_cfg,
             mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL,
-            Some(mold_core::manifest::HUNYUAN3D_FAMILY),
+            true,
         )
         .unwrap_err()
         .to_string();
-        assert!(canvasless.contains("canvas"), "{canvasless}");
+        assert_eq!(
+            canvasless,
+            format!(
+                "--fit needs a canvas and '{}' renders without one: the engine letterboxes the \
+                 source to the checkpoint's own conditioning size, so there is nothing to fit it \
+                 to.",
+                mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL
+            )
+        );
     }
 
     #[test]

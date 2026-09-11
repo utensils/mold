@@ -1195,6 +1195,95 @@ async fn run_fit_resamples_the_source_onto_the_requested_canvas() {
     );
 }
 
+/// An auto-chained `--fit` render submits the fitted PIXELS and the fitted
+/// CANVAS, and no `source_fit` provenance.
+///
+/// `--fit` is resolved above chain routing, so the long-video path gets the
+/// same picture on the same canvas as a single clip. But `ChainRequest`
+/// carries no `source_fit` field and the orchestrator hard-wires `None` into
+/// every stage, so the stitched print records no crop. That is a real
+/// limitation of the sequence wire rather than a bug here, it is stated in the
+/// docs, and this pins it so a later wire change is a deliberate one.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_auto_chained_fit_render_carries_the_pixels_but_not_the_provenance() {
+    use base64::Engine as _;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let source = env.home.join("wide.png");
+    image::RgbaImage::from_pixel(64, 16, image::Rgba([9, 9, 9, 255]))
+        .save(&source)
+        .unwrap();
+
+    let server = MockServer::start().await;
+    // Refuse the job: the request body is the whole subject.
+    Mock::given(method("POST"))
+        .and(path("/api/chain-jobs"))
+        .respond_with(
+            ResponseTemplate::new(422).set_body_json(serde_json::json!({"error": "mock refusal"})),
+        )
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args([
+            "run",
+            "ltx-2-19b-distilled:fp8",
+            "a cat walks along a wall",
+            "--image",
+        ])
+        .arg(&source)
+        .args([
+            "--fit",
+            "crop-fill",
+            "--width",
+            "512",
+            "--height",
+            "512",
+            "--frames",
+            "200",
+            "--host",
+            &server.uri(),
+            "--output",
+            "out.mp4",
+        ])
+        .assert()
+        .failure();
+
+    let sent: Vec<serde_json::Value> = server
+        .received_requests()
+        .await
+        .expect("the mock server records requests")
+        .iter()
+        .filter(|request| request.url.path() == "/api/chain-jobs")
+        .map(|request| serde_json::from_slice(&request.body).expect("the CLI posts JSON"))
+        .collect();
+    assert_eq!(sent.len(), 1, "one chain job per auto-chained run");
+    assert_eq!(sent[0]["width"], serde_json::json!(512));
+    assert_eq!(sent[0]["height"], serde_json::json!(512));
+    // Normalisation folds the auto-expand source into the opening stage, so
+    // that is where the fitted picture lands.
+    let encoded = sent[0]["stages"][0]["source_image"]
+        .as_str()
+        .expect("the fitted source rides the opening stage as base64");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("base64 body");
+    let fitted = image::load_from_memory(&bytes).expect("a decodable image");
+    assert_eq!(
+        (fitted.width(), fitted.height()),
+        (512, 512),
+        "the chain gets the same fitted pixels a single clip would"
+    );
+    assert!(
+        !sent[0].to_string().contains("source_fit"),
+        "the sequence wire carries no source-fit provenance: {}",
+        sent[0]
+    );
+}
+
 /// The two browser-only policies are refused by name, with the reason and the
 /// nearest thing the terminal can do.
 #[test]
