@@ -23,8 +23,9 @@ pub const DISCORD_MAX_VARIATIONS: usize = 5;
 /// response remains reliable without imposing a product-level batch limit.
 pub const EXPANSION_CHUNK_SIZE: usize = 4;
 
-/// Number of attempts allowed for each bounded chunk. A partial response keeps
-/// its non-empty prompts and retries only the missing count.
+/// Number of non-progress attempts allowed for each bounded chunk. A partial
+/// response keeps its distinct non-empty prompts without spending this budget.
+/// At most chunk_target + EXPANSION_CHUNK_ATTEMPTS - 1 completions can run.
 pub const EXPANSION_CHUNK_ATTEMPTS: usize = 3;
 
 /// Per-request safety ceiling for prepared prompt expansion.
@@ -259,7 +260,8 @@ where
         // later attempt, which is what actually ended the chunk.
         let mut overshoot: Option<(usize, usize)> = None;
 
-        for _ in 0..EXPANSION_CHUNK_ATTEMPTS {
+        let mut stalled_attempts = 0;
+        while stalled_attempts < EXPANSION_CHUNK_ATTEMPTS {
             let missing = chunk_target - chunk.len();
             if missing == 0 {
                 break;
@@ -274,29 +276,60 @@ where
                 total: config.variations,
             };
             let attempt = generate(&attempt_config, attempt_context)?;
-            if attempt.len() > missing {
+            let returned = attempt.len();
+            if returned > missing {
                 // An over-delivering completion is ambiguous: `parse_variations`
                 // deliberately refuses to truncate a response it cannot prove is
                 // all prompts, so the extras may be reasoning rather than
                 // variations and none of them may be kept. Spend one of this
                 // chunk's attempts and ask again — a single ambiguous completion
                 // must never fail a whole batch.
-                overshoot = Some((attempt.len(), missing));
+                overshoot = Some((returned, missing));
+                stalled_attempts += 1;
+                tracing::warn!(
+                    requested = missing,
+                    returned,
+                    accepted = 0,
+                    assembled = expanded.len() + chunk.len(),
+                    total = config.variations,
+                    stalled_attempts,
+                    "expansion completion over-delivered"
+                );
                 continue;
             }
             overshoot = None;
+            let before = chunk.len();
             for prompt in attempt {
                 let key = normalize_expanded_prompt(&prompt);
                 if !key.is_empty() && normalized.insert(key) {
                     chunk.push(prompt);
                 }
             }
+            let accepted = chunk.len() - before;
+            // A model returning one new prompt per completion can fill a chunk
+            // of four. Counting productive partials as failures stopped at three.
+            // Do not reset stalls on progress: even intermittent duplicates are
+            // bounded by chunk_target + the non-progress budget minus one.
+            if accepted == 0 {
+                stalled_attempts += 1;
+            }
+            if accepted < missing {
+                tracing::warn!(
+                    requested = missing,
+                    returned,
+                    accepted,
+                    assembled = expanded.len() + chunk.len(),
+                    total = config.variations,
+                    stalled_attempts,
+                    "expansion completion needs more distinct prompts"
+                );
+            }
         }
 
         if chunk.len() != chunk_target {
             if let Some((returned, requested)) = overshoot {
                 anyhow::bail!(
-                    "expansion backend returned {returned} prompts when exactly {requested} were requested, and did not return a usable count in {EXPANSION_CHUNK_ATTEMPTS} attempts; assembled {} of {} prompts",
+                    "expansion backend returned {returned} prompts when exactly {requested} were requested, and did not return a usable count in {EXPANSION_CHUNK_ATTEMPTS} non-progress attempts; assembled {} of {} prompts",
                     expanded.len() + chunk.len(),
                     config.variations
                 );
@@ -1216,6 +1249,158 @@ I need four alternatives [composition, camera, lighting, setting].
     }
 
     #[test]
+    fn ten_prompts_complete_when_every_completion_returns_one_new_prompt() {
+        // Production symptom: batch 10 failed with 3 collected. Exercise the
+        // real parser as well as assembly, including singleton JSON retries.
+        for variations in [10, 4, 5, 8, 17, 32] {
+            let config = ExpandConfig {
+                variations,
+                ..Default::default()
+            };
+            let mut calls = 0;
+            let prompts = expand_exact_with(&config, |attempt, context| {
+                calls += 1;
+                assert_eq!(context.start, calls);
+                assert_eq!(context.total, variations);
+                assert!(attempt.variations <= EXPANSION_CHUNK_SIZE);
+                assert_eq!(
+                    attempt.max_tokens,
+                    config.max_tokens * attempt.variations as u32
+                );
+                Ok(parse_variations(
+                    &format!(r#"["prompt {}"]"#, context.start),
+                    attempt.variations,
+                ))
+            })
+            .unwrap();
+            assert_eq!(calls, variations);
+            assert_eq!(
+                prompts,
+                (1..=variations)
+                    .map(|n| format!("prompt {n}"))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn api_expansion_assembles_ten_partial_completions() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let call = observed.fetch_add(1, Ordering::SeqCst) + 1;
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let count = [4, 3, 2, 1, 3, 2, 1, 3, 2, 1][call - 1];
+                assert_eq!(body["max_tokens"], count * 300);
+                assert_eq!(body["messages"][1]["content"], "a lighthouse");
+                let system = body["messages"][0]["content"].as_str().unwrap();
+                assert!(system.contains(&format!("variations {call} through {} of 10", call + count - 1)));
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "choices": [{"message": {"content": format!(r#"["lighthouse variation {call}"]"#)}}]
+                }))
+            })
+            .expect(10)
+            .mount(&server).await;
+        let endpoint = server.uri();
+        let result = tokio::task::spawn_blocking(move || {
+            ApiExpander::new(&endpoint, "test-expander").expand(
+                "a lighthouse",
+                &ExpandConfig {
+                    variations: 10,
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.original, "a lighthouse");
+        assert_eq!(calls.load(Ordering::SeqCst), 10);
+        validate_expanded_prompts(&result.expanded, 10).unwrap();
+        assert_eq!(
+            result.expanded,
+            (1..=10)
+                .map(|n| format!("lighthouse variation {n}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn productive_partials_do_not_spend_the_stall_budget() {
+        let config = ExpandConfig {
+            variations: 10,
+            ..Default::default()
+        };
+        let mut calls = 0;
+        let prompts = expand_exact_with(&config, |attempt, context| {
+            calls += 1;
+            match calls {
+                1 => Ok(vec!["prompt 1".into()]),
+                2 => Ok(vec!["  PROMPT   1 ".into()]), // normalized duplicate
+                3 => Ok(vec!["prompt 2".into()]),
+                4 => Ok(vec!["  ".into()]),
+                _ => Ok((0..attempt.variations)
+                    .map(|n| format!("prompt {}", context.start + n))
+                    .collect()),
+            }
+        })
+        .unwrap();
+        assert_eq!(prompts.len(), 10);
+        validate_expanded_prompts(&prompts, 10).unwrap();
+        assert_eq!(calls, 7);
+    }
+
+    #[test]
+    fn intermittent_progress_cannot_reset_the_stall_budget() {
+        let config = ExpandConfig {
+            variations: 10,
+            ..Default::default()
+        };
+        let mut calls = 0;
+        let error = expand_exact_with(&config, |_, context| {
+            calls += 1;
+            if calls % 2 == 1 {
+                Ok(vec![format!("prompt {}", context.start)])
+            } else {
+                Ok(vec![])
+            }
+        })
+        .unwrap_err();
+        assert_eq!(calls, EXPANSION_CHUNK_SIZE + EXPANSION_CHUNK_ATTEMPTS - 1);
+        assert!(error.to_string().contains("backend returned 3"), "{error}");
+    }
+
+    #[test]
+    fn backend_error_after_progress_aborts_without_retry_or_partial_success() {
+        let config = ExpandConfig {
+            variations: 10,
+            ..Default::default()
+        };
+        let mut calls = 0;
+        let error = expand_exact_with(&config, |_, _| {
+            calls += 1;
+            if calls == 1 {
+                Ok(vec!["prompt 1".into()])
+            } else {
+                anyhow::bail!("cancelled")
+            }
+        })
+        .unwrap_err();
+        assert_eq!(calls, 2);
+        assert_eq!(error.to_string(), "cancelled");
+    }
+
+    #[test]
     fn exact_expansion_retries_only_missing_prompts() {
         let config = ExpandConfig {
             variations: 8,
@@ -1266,7 +1451,7 @@ I need four alternatives [composition, camera, lighting, setting].
         })
         .unwrap_err();
 
-        assert_eq!(attempts, EXPANSION_CHUNK_ATTEMPTS);
+        assert_eq!(attempts, 1 + EXPANSION_CHUNK_ATTEMPTS);
         assert!(
             error
                 .to_string()
@@ -1420,7 +1605,9 @@ I need four alternatives [composition, camera, lighting, setting].
             "{message}"
         );
         assert!(
-            message.contains(&format!("in {EXPANSION_CHUNK_ATTEMPTS} attempts")),
+            message.contains(&format!(
+                "in {EXPANSION_CHUNK_ATTEMPTS} non-progress attempts"
+            )),
             "{message}"
         );
         assert!(message.contains("assembled 0 of 1 prompts"), "{message}");
