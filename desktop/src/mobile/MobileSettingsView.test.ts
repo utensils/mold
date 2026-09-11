@@ -193,6 +193,27 @@ describe("MobileSettingsView", () => {
     expect(wrapper.emitted("manage-hosts")).toHaveLength(1);
   });
 
+  it("offers pairing from Settings, not only from inside the Machines tab", async () => {
+    const wrapper = mount(MobileSettingsView, {
+      props: {
+        settings: {
+          theme: "mocha-dark",
+          matchSystem: false,
+          autoSavePhotos: true,
+          autoTagTitle: true,
+        },
+        hostCount: 0,
+        appVersion: "Development build",
+      },
+    });
+
+    // A fresh install with no machines looks here first; the scanner used to
+    // live behind a disclosure two tabs away.
+    expect(wrapper.find("[data-test='mobile-pair-scan-card']").exists()).toBe(true);
+    await wrapper.get("[data-test='mobile-pair-scan']").trigger("click");
+    expect(wrapper.emitted("scan-pairing")).toHaveLength(1);
+  });
+
   it("keeps CPU utility work visible when a host reports no GPUs", async () => {
     const host = {
       id: "cpu-host",

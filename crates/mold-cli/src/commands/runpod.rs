@@ -1675,6 +1675,10 @@ pub struct RunOptions {
     pub height: Option<u32>,
     pub create: CreateOptions,
     pub wait_ready_timeout_secs: u64,
+    /// `--no-save`: publish the print on the pod's own Library and move it
+    /// straight to that machine's trash. The file still lands in
+    /// `--output-dir` on this machine, which is the point of the command.
+    pub no_save: bool,
 }
 
 /// `mold runpod run "<prompt>"` — end-to-end: reuse warm pod or create one,
@@ -1763,6 +1767,12 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         .negative_prompt
         .clone()
         .or_else(|| config.default_negative_prompt.clone());
+    // The ONE authority on what `--no-save` puts on the wire, shared with
+    // `mold run`: absent means save, and the only value ever sent is `false`.
+    let filing = super::generate::FilingOptions {
+        no_save: opts.no_save,
+        ..super::generate::FilingOptions::default()
+    };
     let req = mold_core::GenerateRequest {
         // The CLI authors one-shots; 3-D workflows are a Studio surface.
         mesh_workflow: None,
@@ -1803,7 +1813,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         control_model: None,
         control_scale: 1.0,
         expand: None,
-        save_to_gallery: None,
+        save_to_gallery: filing.save_to_gallery(),
         original_prompt: None,
         prompt_transform: None,
         batch_id: None,
@@ -2712,6 +2722,7 @@ mod tests {
             height: None,
             create: policy_create_options(None),
             wait_ready_timeout_secs: 1,
+            no_save: false,
         };
         let error = run_run(run)
             .await
@@ -2746,6 +2757,7 @@ mod tests {
             height: None,
             create: policy_create_options(None),
             wait_ready_timeout_secs: 1,
+            no_save: false,
         };
         let error = require_run_model_activation(&mut config, &run)
             .await

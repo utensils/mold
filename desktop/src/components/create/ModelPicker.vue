@@ -2,8 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import type { ModelEntry } from "../../lib/api/types";
-import { modelAvailabilityTag } from "../../lib/hosts";
 import { modelDisplayName, modelDisplayNameForId } from "../../lib/models";
+import { modelAvailabilityTag } from "@studio/lib/modelAvailability";
 import { modelSource } from "@studio/lib/modelSource";
 import { formatGB } from "../../lib/format";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -91,10 +91,18 @@ const phantomLabel = computed(() =>
   phantom.value ? modelDisplayNameForId(phantom.value, props.models) : "",
 );
 
-/** The desktop rule, injected: the shared menu never learns what a host is. */
+/**
+ * The shared rule, injected: the menu itself never learns what a machine is.
+ * Only machines this Mac can reach right now are counted — an errored or
+ * still-connecting one cannot run anything, so naming it would send the reader
+ * to a machine that will not answer.
+ */
+const reachableMachines = computed(() =>
+  hosts.all.filter((h) => h.status === "ready").map((h) => ({ id: h.id, label: h.label })),
+);
 function availabilityTag(m: ModelEntry): string | null {
   if (!hosts.multiHost || !props.showAvailability) return null;
-  return modelAvailabilityTag(hostModels.hostsFor(m.name), hosts.all);
+  return modelAvailabilityTag(hostModels.hostsFor(m.name), reachableMachines.value);
 }
 
 function toggle() {

@@ -91,8 +91,20 @@ for duplicate in \
   web/src/lib/sourceFit.ts \
   desktop/src/lib/sourceFit.ts \
   web/src/lib/chainToml.ts \
-  desktop/src/lib/chainScript.ts; do
+  desktop/src/lib/chainScript.ts \
+  web/src/lib/modelAvailability.ts \
+  web/src/lib/styleAvailability.ts \
+  desktop/src/lib/styleAvailability.ts \
+  desktop/src/mobile/modelAvailability.ts; do
   test ! -e "$duplicate" || fail "$duplicate duplicates studio domain logic"
 done
+
+# The style picker's availability rule is ONE rule, studio/lib/modelAvailability.ts,
+# and the surfaces only bind it to their own reachable machines. A path list cannot
+# catch a desktop copy here (desktop/src/lib/modelAvailability.ts is the unrelated
+# catalog media-type filter), so guard the string the rule emits.
+if grep -REn --include='*.ts' --include='*.vue' '\$\{[^}]*length\} machines`' web/src desktop/src ui; then
+  fail "the availability tag's wording belongs to studio/lib/modelAvailability.ts"
+fi
 
 echo "frontend-architecture: ok"

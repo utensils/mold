@@ -141,4 +141,21 @@ describe("phone sheet dismissal", () => {
     swipe(wrapper.get(selector).element);
     expect(wrapper.emitted("close")).toHaveLength(1);
   });
+
+  it("caps the fall and keeps the scrim legible however far the finger travels", async () => {
+    // Ported from the lane's own composable test when main's implementation
+    // won the merge: these two numbers are what stop a committed gesture
+    // dragging the panel off the screen and blacking out the scrim behind it.
+    const wrapper = library();
+    const grabber = wrapper.get(".mobile-library-sheet-grabber").element;
+    touch(grabber, "touchstart", 100, 100);
+    touch(grabber, "touchmove", 100, 1_000);
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.get(".mobile-library-sheet-panel").attributes("style")).toContain(
+      "translateY(280px)",
+    );
+    const scrim = wrapper.get(".mobile-library-sheet-backdrop").attributes("style") ?? "";
+    expect(Number(/opacity:\s*([\d.]+)/.exec(scrim)?.[1])).toBeCloseTo(0.24, 5);
+  });
 });

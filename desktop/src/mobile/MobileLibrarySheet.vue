@@ -8,8 +8,9 @@
  * never vanish the way SheetPanel's `full` variant drops its #header slot.
  */
 import { useSheetDismiss } from "./useSheetDismiss";
+import { useSheetFocus } from "./useSheetFocus";
 import { useMobileBack } from "./useMobileBack";
-import { nextTick, onBeforeUnmount, ref, watch, toRef } from "vue";
+import { ref, toRef } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 
 const props = withDefaults(
@@ -40,75 +41,27 @@ const emit = defineEmits<{ close: [] }>();
 useMobileBack(toRef(props, "open"), () => emit("close"));
 const panel = ref<HTMLElement | null>(null);
 const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-library-sheet");
-let restoreFocus: HTMLElement | null = null;
 const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
   useSheetDismiss({
     enabled: () => props.open && isTop() && props.swipeToDismiss,
     close: () => emit("close"),
   });
 
-watch(
-  () => props.open,
-  async (open) => {
-    if (open) {
-      restoreFocus = document.activeElement as HTMLElement | null;
-      // Editing sheets may raise the keyboard immediately. Read-first sheets
-      // focus the panel so the keyboard waits for an explicit field tap.
-      await nextTick();
-      if (props.open && isTop()) {
-        if (!props.focusFirstControl) {
-          panel.value?.focus?.();
-          return;
-        }
-        const first = panel.value?.querySelector<HTMLElement>(
+// Editing sheets may raise the keyboard immediately. Read-first sheets focus
+// the panel so the keyboard waits for an explicit field tap.
+const { onKeydown } = useSheetFocus({
+  panel,
+  open: () => props.open,
+  isTop,
+  onClose: () => emit("close"),
+  onBeforeClose: resetDrag,
+  firstControl: () =>
+    props.focusFirstControl
+      ? (panel.value?.querySelector<HTMLElement>(
           "input, textarea, select, button:not([data-sheet-close])",
-        );
-        (first ?? panel.value)?.focus?.();
-      }
-    } else {
-      resetDrag();
-      restoreFocus?.focus?.();
-      restoreFocus = null;
-    }
-  },
-  { immediate: true },
-);
-
-onBeforeUnmount(() => {
-  resetDrag();
-  restoreFocus = null;
+        ) ?? null)
+      : null,
 });
-
-function onKeydown(event: KeyboardEvent): void {
-  if (!props.open || !isTop()) return;
-  if (event.key === "Escape") {
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    emit("close");
-  } else if (event.key === "Tab") {
-    const controls = [
-      ...(panel.value?.querySelectorAll<HTMLElement>(
-        "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex='0']",
-      ) ?? []),
-    ].filter((node) => !node.closest("[inert]") && node.getClientRects().length > 0);
-    const first = controls[0];
-    const last = controls.at(-1);
-    if (
-      !first ||
-      (event.shiftKey &&
-        (document.activeElement === first || document.activeElement === panel.value))
-    ) {
-      event.preventDefault();
-      (last ?? panel.value)?.focus();
-    } else if (
-      !event.shiftKey &&
-      (document.activeElement === last || document.activeElement === panel.value)
-    ) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
-}
 </script>
 
 <template>

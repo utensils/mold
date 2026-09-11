@@ -177,12 +177,40 @@ gets it back until retention sweeps it. It applies to renders a server
 performs — a local render has no Library, and refuses the flag rather than
 ignoring it.
 
+Pass `--fit` beside `--image` when the source and the canvas disagree. Without
+it the picture decides the canvas; with it the canvas is what you asked for and
+the picture is resampled onto it — `crop-fill` trims the edges, `pad-fit` adds
+black borders, `lanczos-resize` stretches.
+
+```bash
+mold run flux-dev:q4 "a lighthouse at dusk" --image wide.png --fit crop-fill --width 1024 --height 1024
+```
+
 A sequence of several clips is scripted, not composed in an app:
 
 ```bash
 mold chain validate shot.toml
 mold run --script shot.toml --output walk.mp4
 mold jobs list
+```
+
+A 3-D render can be one shot or a durable workflow. A workflow keeps every
+stage — the picture it starts from, its matted and delighted copies, the
+shape, the paint — as its own retained artifact, reports each stage as it
+changes state, and resumes after a restart. It lives on the machine that runs it:
+
+```bash
+mold mesh-workflow create --prompt "a small ceramic fox" --texture --follow
+mold mesh-workflow create --mesh chair.glb --image chair-albedo.png
+mold mesh-workflow list
+```
+
+Find weights to install, and watch them arrive:
+
+```bash
+mold search "anime style" --kind lora
+mold pull flux-dev:q4
+mold downloads watch
 ```
 
 See the [remote workflow](https://utensils.io/mold/guide/remote-workflows) and

@@ -1,5 +1,12 @@
+// The MCP tool catalogue is one `json!` literal per tool inside one array
+// (`commands::mcp::builtin_tool_definitions`), and `json_internal!` recurses
+// once per token, so the default 128-deep limit is reached by the schemas
+// themselves rather than by anything pathological.
+#![recursion_limit = "512"]
+
 mod catalog_bridge;
 mod commands;
+mod completion_cache;
 mod control;
 mod errors;
 mod fs_util;
@@ -7,6 +14,7 @@ mod metadata_db;
 mod output;
 mod procinfo;
 mod skill;
+mod source_fit;
 #[cfg(test)]
 mod test_support;
 mod theme;
@@ -235,10 +243,22 @@ struct MeshArgs {
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
-enum MeshMattingArg {
+pub enum MeshMattingArg {
     Auto,
     On,
     Off,
+}
+
+impl MeshMattingArg {
+    /// The wire policy this flag names. One place, so `mold run` and
+    /// `mold mesh-workflow` cannot spell the same three words differently.
+    pub fn mode(self) -> mold_core::MeshMattingMode {
+        match self {
+            Self::Auto => mold_core::MeshMattingMode::Auto,
+            Self::On => mold_core::MeshMattingMode::On,
+            Self::Off => mold_core::MeshMattingMode::Off,
+        }
+    }
 }
 
 impl MeshArgs {
@@ -253,11 +273,7 @@ impl MeshArgs {
             target_faces: self.target_faces,
             texture: self.texture,
             texture_resolution: self.texture_resolution,
-            matting: self.matting.map(|value| match value {
-                MeshMattingArg::Auto => mold_core::MeshMattingMode::Auto,
-                MeshMattingArg::On => mold_core::MeshMattingMode::On,
-                MeshMattingArg::Off => mold_core::MeshMattingMode::Off,
-            }),
+            matting: self.matting.map(MeshMattingArg::mode),
             delight: self.delight,
         }
     }
@@ -518,6 +534,12 @@ Examples:
         /// Keep the pod running after generation (otherwise left warm)
         #[arg(long)]
         keep: bool,
+        /// Keep this render out of the pod's Library: the print is published
+        /// there and moved straight to that machine's Trash, so it stays
+        /// recoverable until retention sweeps it. The image is still written
+        /// to --output-dir on this machine.
+        #[arg(long)]
+        no_save: bool,
         /// Seed
         #[arg(long)]
         seed: Option<u64>,
@@ -705,7 +727,7 @@ Examples:
   MOLD_HOST=plato mold server status       Same, from the environment")]
     Status {
         /// Report on this server instead of the local managed daemon
-        #[arg(long, env = "MOLD_HOST", help_heading = "Server")]
+        #[arg(long, env = "MOLD_HOST", help_heading = "Server", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
     /// Discover mold servers advertised on the local network via mDNS
@@ -761,7 +783,7 @@ Examples:
   mold jobs show job-abc123 --script > edited.toml")]
     Show {
         /// Sequence job id as shown by `mold jobs list`
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         /// Print the raw `ChainJobDetail` document as JSON
         #[arg(long, conflicts_with = "script")]
@@ -772,9 +794,13 @@ Examples:
         script: bool,
     },
     Resume {
+        /// Sequence job id as shown by `mold jobs list`
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
     },
     Retake {
+        /// Sequence job id as shown by `mold jobs list`
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         #[arg(long)]
         stage: u32,
@@ -801,7 +827,7 @@ Examples:
   mold jobs amend job-abc123 --script edited.toml --fps 30 --no-audio")]
     Amend {
         /// Sequence job id as shown by `mold jobs list`
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         /// Edited `mold.chain.v1` TOML script carrying the full stage list
         #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
@@ -832,9 +858,13 @@ Examples:
         dry_run: bool,
     },
     Cancel {
+        /// Sequence job id as shown by `mold jobs list`
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
     },
     Delete {
+        /// Sequence job id as shown by `mold jobs list`
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         #[arg(long)]
         yes: bool,
@@ -868,7 +898,7 @@ pub enum QueueAction {
     /// Show one job in full, with its plan entry and batch progress
     Show {
         /// Job id as shown by `mold queue list`
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_id: String,
         /// Print the raw server documents as JSON
         #[arg(long)]
@@ -877,7 +907,7 @@ pub enum QueueAction {
     /// Cancel jobs by id, the whole waiting queue, or one batch
     Cancel {
         /// Job ids as shown by `mold queue list`
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_ids: Vec<String>,
         /// Cancel every still-queued job; running work is left alone
         #[arg(long, conflicts_with_all = ["job_ids", "batch"])]
@@ -895,7 +925,7 @@ pub enum QueueAction {
     /// repair is refused by name rather than skipped.
     Retry {
         /// Job ids as shown by `mold queue list --held`
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_ids: Vec<String>,
         /// Retry every retryable hold
         #[arg(long, conflicts_with = "job_ids")]
@@ -903,7 +933,7 @@ pub enum QueueAction {
     },
     /// Send a held job to another running Mold server, preserving its request
     Send {
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_id: String,
         /// Destination URL (source remains MOLD_HOST)
         #[arg(long, value_name = "HOST")]
@@ -915,7 +945,7 @@ pub enum QueueAction {
     /// Move one queued job to a new place in line
     Move {
         /// Job id as shown by `mold queue list`
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_id: String,
         /// New 0-based position; a value past the tail is clamped by the host
         #[arg(long, value_name = "POSITION")]
@@ -923,12 +953,12 @@ pub enum QueueAction {
     },
     /// Pause one waiting job, or omit JOB-ID to hold host-wide dispatch
     Pause {
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_id: Option<String>,
     },
     /// Resume one paused job, or omit JOB-ID to resume host-wide dispatch
     Resume {
-        #[arg(value_name = "JOB-ID")]
+        #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         job_id: Option<String>,
     },
     /// Run the held-row and settled-batch retention sweeps now
@@ -945,7 +975,7 @@ enum VideoUpscaleAction {
         model: String,
         #[arg(long, env = "MOLD_UPSCALE_TILE_SIZE")]
         tile_size: Option<u32>,
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
         /// Follow the job through terminal publication
         #[arg(long)]
@@ -953,31 +983,31 @@ enum VideoUpscaleAction {
     },
     /// List durable Framewise upscale jobs
     List {
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
     /// Print one job as JSON
     Status {
         id: String,
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
     /// Pause after the current frame boundary
     Pause {
         id: String,
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
     /// Resume from the last completed frame checkpoint
     Resume {
         id: String,
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
     /// Cancel without replacing or publishing source media
     Cancel {
         id: String,
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
 }
@@ -997,7 +1027,7 @@ pub enum TrashAction {
     /// Restore trashed prints to the live gallery
     Restore {
         /// Gallery filenames as shown by `mold trash list`
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
     },
     /// Permanently delete the named prints, bypassing the trash
@@ -1013,7 +1043,7 @@ Examples:
     Delete {
         /// Gallery filenames as shown by `mold trash list` or
         /// `mold library list`
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
         /// Skip the confirmation prompt
         #[arg(long, short = 'y')]
@@ -1042,28 +1072,28 @@ pub enum LibraryTagAction {
     },
     /// Add one or more tags to existing prints
     Add {
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
-        #[arg(long = "tag", required = true, value_name = "TAG", value_parser = tag_parser)]
+        #[arg(long = "tag", required = true, value_name = "TAG", value_parser = tag_parser, add = ArgValueCandidates::new(completion_cache::complete_tag))]
         tags: Vec<String>,
     },
     /// Remove one or more tags from existing prints
     Remove {
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
-        #[arg(long = "tag", required = true, value_name = "TAG", value_parser = tag_parser)]
+        #[arg(long = "tag", required = true, value_name = "TAG", value_parser = tag_parser, add = ArgValueCandidates::new(completion_cache::complete_tag))]
         tags: Vec<String>,
     },
     /// Rename a tag everywhere it is used
     Rename {
-        #[arg(value_name = "OLD", value_parser = tag_parser)]
+        #[arg(value_name = "OLD", value_parser = tag_parser, add = ArgValueCandidates::new(completion_cache::complete_tag))]
         old: String,
         #[arg(value_name = "NEW", value_parser = tag_parser)]
         new: String,
     },
     /// Delete a tag and detach it from every print
     Delete {
-        #[arg(value_name = "TAG", value_parser = tag_parser)]
+        #[arg(value_name = "TAG", value_parser = tag_parser, add = ArgValueCandidates::new(completion_cache::complete_tag))]
         tag: String,
         #[arg(long, short = 'y')]
         yes: bool,
@@ -1079,7 +1109,7 @@ pub enum LibraryCollectionAction {
     },
     /// Show one collection and its ordered member filenames
     Show {
-        #[arg(value_name = "NAME-OR-SLUG")]
+        #[arg(value_name = "NAME-OR-SLUG", add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: String,
         #[arg(long)]
         json: bool,
@@ -1093,7 +1123,7 @@ pub enum LibraryCollectionAction {
     },
     /// Update a collection's name, description, cover, or visibility
     Update {
-        #[arg(value_name = "NAME-OR-SLUG")]
+        #[arg(value_name = "NAME-OR-SLUG", add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: String,
         #[arg(long, value_name = "TEXT", value_parser = collection_name_parser)]
         name: Option<String>,
@@ -1101,7 +1131,7 @@ pub enum LibraryCollectionAction {
         description: Option<String>,
         #[arg(long, conflicts_with = "description")]
         clear_description: bool,
-        #[arg(long, value_name = "FILENAME", conflicts_with = "clear_cover")]
+        #[arg(long, value_name = "FILENAME", conflicts_with = "clear_cover", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         cover: Option<String>,
         #[arg(long, conflicts_with = "cover")]
         clear_cover: bool,
@@ -1112,23 +1142,23 @@ pub enum LibraryCollectionAction {
     },
     /// Delete a collection without deleting its prints
     Delete {
-        #[arg(value_name = "NAME-OR-SLUG")]
+        #[arg(value_name = "NAME-OR-SLUG", add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: String,
         #[arg(long, short = 'y')]
         yes: bool,
     },
     /// Add existing prints to a collection
     Add {
-        #[arg(value_name = "NAME-OR-SLUG")]
+        #[arg(value_name = "NAME-OR-SLUG", add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: String,
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
     },
     /// Remove existing prints from a collection
     Remove {
-        #[arg(value_name = "NAME-OR-SLUG")]
+        #[arg(value_name = "NAME-OR-SLUG", add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: String,
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
     },
 }
@@ -1139,9 +1169,9 @@ pub enum LibraryAction {
     List {
         #[arg(long, value_name = "TEXT")]
         query: Option<String>,
-        #[arg(long = "tag", value_name = "TAG", value_parser = tag_parser)]
+        #[arg(long = "tag", value_name = "TAG", value_parser = tag_parser, add = ArgValueCandidates::new(completion_cache::complete_tag))]
         tags: Vec<String>,
-        #[arg(long, value_name = "NAME-OR-SLUG")]
+        #[arg(long, value_name = "NAME-OR-SLUG", add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: Option<String>,
         #[arg(long)]
         favorite: bool,
@@ -1158,7 +1188,7 @@ pub enum LibraryAction {
     },
     /// Show one print's metadata and optionally preview it inline
     Show {
-        #[arg(value_name = "FILENAME")]
+        #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filename: String,
         #[arg(long, conflicts_with = "preview")]
         json: bool,
@@ -1167,14 +1197,14 @@ pub enum LibraryAction {
     },
     /// Open the protocol-aware terminal Library grid
     Grid {
-        #[arg(long, value_name = "URL", conflicts_with = "local")]
+        #[arg(long, value_name = "URL", conflicts_with = "local", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
         #[arg(long, conflicts_with = "host")]
         local: bool,
     },
     /// Set or clear one existing print's title
     Title {
-        #[arg(value_name = "FILENAME")]
+        #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filename: String,
         #[arg(value_name = "TEXT", required_unless_present = "clear", conflicts_with = "clear", value_parser = print_title_parser)]
         title: Option<String>,
@@ -1183,12 +1213,12 @@ pub enum LibraryAction {
     },
     /// Mark existing prints as favorites
     Favorite {
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
     },
     /// Remove the favorite mark from existing prints
     Unfavorite {
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
     },
     /// Manage tags on existing prints
@@ -1215,7 +1245,7 @@ Examples:
   mold library source-media cat.png --member 6f1c... --output - | viu -")]
     SourceMedia {
         /// Gallery filename as shown by `mold library list`
-        #[arg(value_name = "FILENAME")]
+        #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filename: String,
         /// Download this member instead of listing. The id comes from the
         /// listing and is opaque — never a path on the host.
@@ -1231,7 +1261,7 @@ Examples:
     },
     /// Move live prints into the recoverable gallery trash
     Trash {
-        #[arg(required = true, value_name = "FILENAME")]
+        #[arg(required = true, value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filenames: Vec<String>,
     },
     /// Export one stored 3-D print as OBJ, an OBJ+PBR ZIP, STL, PLY, or a turntable GIF/APNG/WebP
@@ -1260,7 +1290,7 @@ Examples:
   mold library export chair.glb --format gif --playback bounce --repeat once
   mold library export chair.glb --format webp --frames 72 --fps 24 --max-dimension 768")]
     Export {
-        #[arg(value_name = "FILENAME")]
+        #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
         filename: String,
         /// Container: glb, obj, zip, stl, ply, or a gif/apng/webp turntable.
         /// glb downloads the stored file unchanged; zip packages OBJ + MTL +
@@ -1360,6 +1390,255 @@ impl From<GeometryArgs> for mold_core::MeshGeometryOptions {
     }
 }
 
+/// `mold mesh-workflow` — durable multi-stage 3-D jobs on one machine.
+///
+/// A mesh workflow is the only 3-D path that keeps each stage's output as its
+/// own retained artifact and survives a restart, so every verb here is remote
+/// by construction: the job lives in ONE host's data root and there is no
+/// local queue to fall back to.
+#[derive(clap::Subcommand)]
+pub enum MeshWorkflowAction {
+    /// Start a durable 3-D workflow
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow create --prompt \"a ceramic fox\" --texture --follow
+  mold mesh-workflow create --mesh chair.glb --image chair-albedo.png
+  mold mesh-workflow create --mesh chair.glb --octree 320 --target-faces 40000
+
+The mode is inferred from what you give it: a prompt starts a text-to-3-D
+run, a mesh with an appearance image textures that mesh, and a mesh on its own
+is reconstructed through the 2.1 shape VAE. Name it with --mode to be
+explicit.")]
+    Create {
+        /// Text-to-3-D prompt. Its presence selects the text_to_mesh mode.
+        #[arg(long, value_name = "TEXT")]
+        prompt: Option<String>,
+
+        /// Workflow shape, when you would rather not rely on inference.
+        #[arg(long, value_enum)]
+        mode: Option<MeshWorkflowModeArg>,
+
+        /// The 3-D model every stage after the picture uses. The default is
+        /// mode-aware: a roundtrip needs the 2.1 shape checkpoint, and the
+        /// other modes take the small fast one.
+        #[arg(long, short = 'm', value_name = "MODEL",
+              add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        model: Option<String>,
+
+        /// The image model that renders the picture a text-to-3-D run starts
+        /// from. Defaults to your configured default model.
+        #[arg(long, value_name = "MODEL",
+              add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        image_model: Option<String>,
+
+        /// Appearance image for a texture-only run.
+        #[arg(long, short = 'i', value_name = "PATH", value_hint = ValueHint::FilePath)]
+        image: Option<std::path::PathBuf>,
+
+        /// Source mesh (.glb or .obj) for a texture-only or roundtrip run.
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+        mesh: Option<std::path::PathBuf>,
+
+        /// Which world axis points up in the supplied mesh (default y).
+        #[arg(long, value_name = "y|z", help_heading = "3D")]
+        up_axis: Option<mold_core::MeshUpAxis>,
+
+        /// Scale of the supplied mesh, in metres per unit (default 1).
+        #[arg(long, value_name = "M", help_heading = "3D")]
+        meters_per_unit: Option<f64>,
+
+        /// Generate PBR textures as well as geometry.
+        #[arg(long, help_heading = "3D", conflicts_with = "no_texture")]
+        texture: bool,
+
+        /// Geometry only, even where texturing is the mode's default.
+        #[arg(long, help_heading = "3D")]
+        no_texture: bool,
+
+        /// Edge length of the generated texture atlas.
+        #[arg(long, value_name = "N", help_heading = "3D")]
+        texture_resolution: Option<u32>,
+
+        /// Background removal before 3-D conditioning.
+        #[arg(long, value_enum, help_heading = "3D")]
+        matting: Option<MeshMattingArg>,
+
+        /// Remove baked lighting and highlights before shape and paint.
+        #[arg(long, help_heading = "3D")]
+        delight: bool,
+
+        /// Resolution of the query grid the occupancy field is evaluated on.
+        #[arg(long, value_name = "N", help_heading = "3D")]
+        octree: Option<u32>,
+
+        /// Iso-level at which the surface is extracted. `--mesh-threshold`
+        /// is accepted too, so the flag `mold run` uses reads the same here.
+        #[arg(long, alias = "mesh-threshold", value_name = "T", help_heading = "3D")]
+        threshold: Option<f32>,
+
+        /// Decimate the mesh to approximately this many triangles.
+        #[arg(long, value_name = "N", help_heading = "3D")]
+        target_faces: Option<u32>,
+
+        /// Seed used by every stage of the workflow.
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
+
+        /// Report each stage as it changes state, until the workflow settles.
+        #[arg(long)]
+        follow: bool,
+
+        /// Print the accepted job as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Accepted so the refusal explains itself: a workflow is durable on
+        /// one machine and has no local form.
+        #[arg(long, hide = true)]
+        local: bool,
+    },
+    /// List the 3-D workflows on the server
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow list
+  mold mesh-workflow list --json")]
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one workflow with its stages and retained artifacts
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow show WORKFLOW-ID
+  mold mesh-workflow show WORKFLOW-ID --json")]
+    Show {
+        /// Workflow id as shown by `mold mesh-workflow list`
+        #[arg(value_name = "ID", add = ArgValueCandidates::new(completion_cache::complete_workflow_id))]
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Follow one workflow's stages until it settles
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow events WORKFLOW-ID")]
+    Events {
+        /// Workflow id as shown by `mold mesh-workflow list`
+        #[arg(value_name = "ID", add = ArgValueCandidates::new(completion_cache::complete_workflow_id))]
+        id: String,
+    },
+    /// Resume a paused or failed workflow from its first unfinished stage
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow resume WORKFLOW-ID")]
+    Resume {
+        /// Workflow id as shown by `mold mesh-workflow list`
+        #[arg(value_name = "ID", add = ArgValueCandidates::new(completion_cache::complete_workflow_id))]
+        id: String,
+    },
+    /// Cancel a queued or running workflow
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow cancel WORKFLOW-ID")]
+    Cancel {
+        /// Workflow id as shown by `mold mesh-workflow list`
+        #[arg(value_name = "ID", add = ArgValueCandidates::new(completion_cache::complete_workflow_id))]
+        id: String,
+    },
+    /// Delete a settled workflow and the artifacts it retained
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow delete WORKFLOW-ID")]
+    Delete {
+        /// Workflow id as shown by `mold mesh-workflow list`
+        #[arg(value_name = "ID", add = ArgValueCandidates::new(completion_cache::complete_workflow_id))]
+        id: String,
+    },
+}
+
+/// The three workflow shapes, spelled the way the wire spells them.
+///
+/// `text_to_mesh` rather than clap's default `text-to-mesh`, because this is
+/// the `mode` tag on `POST /api/mesh-workflows` and the same word
+/// `capabilities.mesh.workflow_modes` advertises. The kebab spelling stays
+/// accepted as an alias so a typed guess still works.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshWorkflowModeArg {
+    /// Render a picture, then reconstruct it.
+    #[value(name = "text_to_mesh", alias = "text-to-mesh")]
+    TextToMesh,
+    /// Texture a mesh you supply, using an appearance image.
+    #[value(name = "mesh_texture", alias = "mesh-texture")]
+    MeshTexture,
+    /// Rebuild a mesh you supply through the 2.1 shape VAE.
+    #[value(name = "mesh_roundtrip", alias = "mesh-roundtrip")]
+    MeshRoundtrip,
+}
+
+/// `mold downloads` — the server's model download queue.
+#[derive(clap::Subcommand)]
+pub enum DownloadsAction {
+    /// Show what is transferring, waiting, and recently finished
+    #[command(after_long_help = "\
+Examples:
+  mold downloads list
+  mold downloads list --json")]
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Queue a model download on the server
+    #[command(after_long_help = "\
+Examples:
+  mold downloads add flux-dev:q4
+  mold downloads add pulid-flux --accept-license insightface-antelopev2
+
+Takes a model name from `mold list`. A catalog id (cv:… or hf:…) is a
+different door; pull one of those with `mold pull` instead.")]
+    Add {
+        /// Model name to download
+        #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        model: String,
+
+        /// Record acceptance of a third-party model license before pulling.
+        /// Repeat the flag for a bundle covered by more than one agreement.
+        #[arg(long, value_name = "ID", action = clap::ArgAction::Append)]
+        accept_license: Vec<String>,
+    },
+    /// Cancel one queued or transferring download
+    #[command(after_long_help = "\
+Examples:
+  mold downloads cancel DOWNLOAD-ID")]
+    Cancel {
+        /// Download id as shown by `mold downloads list`
+        #[arg(value_name = "ID", add = ArgValueCandidates::new(completion_cache::complete_download_id))]
+        id: String,
+    },
+    /// Follow the download queue until you stop it
+    #[command(after_long_help = "\
+Examples:
+  mold downloads watch
+  mold downloads watch --json")]
+    Watch {
+        /// Print one JSON event per line instead of progress lines
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub enum CatalogSourceArg {
+    Hf,
+    Civitai,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub enum CatalogSortArg {
+    Downloads,
+    Recent,
+    Rating,
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
@@ -1367,6 +1646,15 @@ enum Commands {
     ///
     /// First positional arg is treated as MODEL if it matches a known model name.
     /// Remaining args are the prompt.
+    ///
+    /// Fit policy: by default a --image source decides the canvas — the
+    /// picture is fitted to the model's bounds and the render takes its
+    /// shape. Pass --fit to do the opposite and resample the picture onto the
+    /// canvas you asked for (--width/--height, else the model's default):
+    /// crop-fill keeps proportions and trims the edges, pad-fit keeps the
+    /// whole picture and adds black borders, lanczos-resize stretches it. The
+    /// policy is recorded beside the print, so reusing it in Mold Studio
+    /// restores the same crop.
     #[command(after_long_help = "\
 Examples:
   mold run \"a cat on a skateboard\"
@@ -1406,12 +1694,12 @@ Examples:
 
         /// File the print under a tag. Repeatable, up to 20 tags
         /// (1-64 characters each). Tags are matched case-insensitively.
-        #[arg(long = "tag", help_heading = "Output", value_name = "TAG", value_parser = tag_parser)]
+        #[arg(long = "tag", help_heading = "Output", value_name = "TAG", value_parser = tag_parser, add = ArgValueCandidates::new(completion_cache::complete_tag))]
         tags: Vec<String>,
 
         /// File the print into a collection, creating it if it does not
         /// exist yet. Collections merge across machines by name.
-        #[arg(long, help_heading = "Output", value_name = "NAME", value_parser = collection_name_parser)]
+        #[arg(long, help_heading = "Output", value_name = "NAME", value_parser = collection_name_parser, add = ArgValueCandidates::new(completion_cache::complete_collection))]
         collection: Option<String>,
 
         /// Do not add the title as a tag, whatever
@@ -1691,7 +1979,7 @@ Examples:
         camera_control: Option<String>,
 
         /// Server URL to connect to
-        #[arg(long, env = "MOLD_HOST", help_heading = "Server")]
+        #[arg(long, env = "MOLD_HOST", help_heading = "Server", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
 
         /// Skip server and run inference locally (requires GPU features)
@@ -1846,6 +2134,20 @@ Examples:
         /// source preservation (1.0 pins the opening frame).
         #[arg(long, help_heading = "img2img")]
         strength: Option<f64>,
+
+        /// How a source image whose shape differs from the canvas is mapped
+        /// onto it: `crop-fill` keeps proportions and trims the edges,
+        /// `pad-fit` keeps the whole picture and adds black borders,
+        /// `lanczos-resize` stretches it. Without --fit the canvas is derived
+        /// from the picture instead. Requires --image.
+        #[arg(
+            long,
+            value_name = "crop-fill|pad-fit|lanczos-resize",
+            requires = "image",
+            help_heading = "img2img",
+            value_parser = source_fit::parse_source_fit_mode
+        )]
+        fit: Option<source_fit::SourceFitMode>,
 
         /// Mask image for inpainting (file path; white = repaint, black = preserve)
         #[arg(long, requires = "image", help_heading = "img2img", value_hint = ValueHint::FilePath)]
@@ -2003,7 +2305,7 @@ and whose args are [\"mcp\", \"--host\", \"http://localhost:7680\"]. Run
 `mold serve` separately before calling generation tools.")]
     Mcp {
         /// Server URL to connect to
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
     },
 
@@ -2194,8 +2496,126 @@ Files shared between models (e.g. VAE, CLIP) are kept until no model references 
     },
 
     /// List locally available models — shows installed models with disk usage, plus models available to pull
-    #[command(alias = "ls")]
-    List,
+    #[command(
+        alias = "ls",
+        after_long_help = "\
+Examples:
+  mold list
+  mold list --json"
+    )]
+    List {
+        /// Print the rows as JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Search the Hugging Face and Civitai catalogs for models to pull
+    #[command(after_long_help = "\
+Examples:
+  mold search flux
+  mold search \"anime style\" --kind lora --sort recent
+  mold search sdxl --source civitai --page 2 --json
+
+The search runs on MOLD_HOST when one answers, so it sees any Hugging Face or
+Civitai credentials that machine has stored. With no server reachable it runs
+here instead, using HF_TOKEN and CIVITAI_TOKEN from the environment.
+
+Install a result with `mold pull <id>`.")]
+    Search {
+        /// What to look for
+        #[arg(value_name = "QUERY")]
+        query: Option<String>,
+
+        /// Talk to this machine instead of the one `MOLD_HOST` names.
+        #[arg(long, env = "MOLD_HOST", value_name = "URL",
+              add = ArgValueCandidates::new(completion_cache::complete_host))]
+        host: Option<String>,
+
+        /// Restrict to one model family (see `mold list` for the names in use)
+        #[arg(long, value_name = "FAMILY")]
+        family: Option<String>,
+
+        /// Restrict to one kind, such as `checkpoint` or `lora`
+        #[arg(long, value_name = "KIND")]
+        kind: Option<String>,
+
+        /// Restrict to one catalog
+        #[arg(long, value_enum)]
+        source: Option<CatalogSourceArg>,
+
+        /// Result ordering (default downloads)
+        #[arg(long, value_enum)]
+        sort: Option<CatalogSortArg>,
+
+        /// Page of results, from 1
+        #[arg(long, value_name = "N")]
+        page: Option<u32>,
+
+        /// Results per page, 1 to 100
+        #[arg(long, value_name = "N")]
+        page_size: Option<u32>,
+
+        /// Include mature-content results (default), or leave them out
+        #[arg(long, overrides_with = "no_nsfw")]
+        nsfw: bool,
+
+        /// Leave mature-content results out
+        #[arg(long)]
+        no_nsfw: bool,
+
+        /// Print the page as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect the model download queue on a running server
+    #[command(after_long_help = "\
+Examples:
+  mold downloads list
+  mold downloads add flux-dev:q4
+  mold downloads watch
+
+Talks to the server at MOLD_HOST (MOLD_API_KEY when configured). A download
+queue belongs to one machine, so there is no local fallback: `mold pull`
+is the command that also works without a server.")]
+    Downloads {
+        /// Talk to this machine instead of the one `MOLD_HOST` names.
+        ///
+        /// Global, so it reads the same before or after the verb —
+        /// `mold downloads --host plato list` and `mold downloads list --host
+        /// plato` are the same command. Which machine you are talking to is
+        /// not a per-verb choice.
+        #[arg(long, env = "MOLD_HOST", global = true, value_name = "URL",
+              add = ArgValueCandidates::new(completion_cache::complete_host))]
+        host: Option<String>,
+        #[command(subcommand)]
+        action: DownloadsAction,
+    },
+
+    /// Create and follow durable multi-stage 3-D workflows
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow create --prompt \"a ceramic fox\" --texture --follow
+  mold mesh-workflow create --mesh chair.glb --image chair-albedo.png
+  mold mesh-workflow list
+  mold mesh-workflow show WORKFLOW-ID
+
+Unlike a one-shot `mold run` against a 3-D model, a workflow keeps every
+stage's output as its own retained artifact, reports stage-by-stage progress,
+and can be resumed after a restart. It is durable on ONE machine, so every
+verb here talks to MOLD_HOST.")]
+    MeshWorkflow {
+        /// Talk to this machine instead of the one `MOLD_HOST` names.
+        ///
+        /// Global, so it reads the same before or after the verb. A workflow
+        /// is durable on ONE machine, so this is which machine's workflows
+        /// you are acting on.
+        #[arg(long, env = "MOLD_HOST", global = true, value_name = "URL",
+              add = ArgValueCandidates::new(completion_cache::complete_host))]
+        host: Option<String>,
+        #[command(subcommand)]
+        action: MeshWorkflowAction,
+    },
 
     /// Show disk usage overview for models, output, logs, and shared components
     #[command(after_long_help = "\
@@ -2536,7 +2956,7 @@ Examples:
     #[cfg(feature = "tui")]
     Tui {
         /// Server URL override
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
 
         /// Force local inference (no server connection)
@@ -2594,7 +3014,7 @@ Examples:
         tile_size: Option<u32>,
 
         /// Server URL to connect to
-        #[arg(long, env = "MOLD_HOST")]
+        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
         host: Option<String>,
 
         /// Skip server and run inference locally
@@ -2924,6 +3344,7 @@ async fn run() -> anyhow::Result<()> {
             lora_scale,
             image,
             strength,
+            fit,
             mask,
             id_image,
             id_weight,
@@ -3121,6 +3542,7 @@ async fn run() -> anyhow::Result<()> {
                 lora_scale,
                 image,
                 strength,
+                fit,
                 mask,
                 commands::identity::IdentityArgs {
                     id_images: id_image,
@@ -3352,8 +3774,49 @@ async fn run() -> anyhow::Result<()> {
         Commands::Rm { models, force } => {
             commands::rm::run(&models, force).await?;
         }
-        Commands::List => {
-            commands::list::run().await?;
+        Commands::List { json } => {
+            commands::list::run(json).await?;
+        }
+        Commands::Search {
+            query,
+            host,
+            family,
+            kind,
+            source,
+            sort,
+            page,
+            page_size,
+            nsfw,
+            no_nsfw,
+            json,
+        } => {
+            commands::search::run(commands::search::SearchArgs {
+                query,
+                host,
+                family,
+                kind,
+                source,
+                sort,
+                page,
+                page_size,
+                // Absent means "the host's default", which is to include
+                // them; only an explicit --no-nsfw puts `false` on the wire.
+                include_nsfw: if no_nsfw {
+                    Some(false)
+                } else if nsfw {
+                    Some(true)
+                } else {
+                    None
+                },
+                json,
+            })
+            .await?;
+        }
+        Commands::Downloads { host, action } => {
+            commands::downloads::run(host.as_deref(), action).await?;
+        }
+        Commands::MeshWorkflow { host, action } => {
+            commands::mesh_workflow::run(host.as_deref(), action).await?;
         }
         Commands::Stats { json } => {
             commands::stats::run(json)?;
@@ -3483,6 +3946,7 @@ async fn run() -> anyhow::Result<()> {
                 model,
                 output_dir,
                 keep,
+                no_save,
                 seed,
                 steps,
                 width,
@@ -3518,6 +3982,7 @@ async fn run() -> anyhow::Result<()> {
                     height,
                     create,
                     wait_ready_timeout_secs: wait_timeout,
+                    no_save,
                 };
                 commands::runpod::run_run(opts).await?
             }
@@ -4008,6 +4473,39 @@ mod tests {
     /// Parse CLI args from a vector (simulates command-line invocation).
     fn parse(args: &[&str]) -> Cli {
         try_parse(args).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// The three remote families this PR adds take `--host` like every other
+    /// remote verb, so inspecting a second machine does not mean exporting an
+    /// env var. It sits on the PARENT of the two subcommand families, because
+    /// which machine you are talking to is not a per-verb choice.
+    #[test]
+    fn the_new_remote_commands_take_a_host() {
+        match parse(&["search", "flux", "--host", "http://plato:7680"]).command {
+            Commands::Search { host, query, .. } => {
+                assert_eq!(host.as_deref(), Some("http://plato:7680"));
+                assert_eq!(query.as_deref(), Some("flux"));
+            }
+            _ => panic!("expected search"),
+        }
+        match parse(&["downloads", "--host", "http://plato:7680", "list"]).command {
+            Commands::Downloads { host, .. } => {
+                assert_eq!(host.as_deref(), Some("http://plato:7680"))
+            }
+            _ => panic!("expected downloads"),
+        }
+        // Global, so after the verb reads the same as before it.
+        match parse(&["mesh-workflow", "list", "--host", "http://plato:7680"]).command {
+            Commands::MeshWorkflow { host, .. } => {
+                assert_eq!(host.as_deref(), Some("http://plato:7680"))
+            }
+            _ => panic!("expected mesh-workflow"),
+        }
+        // Absent is absent: the client then reads MOLD_HOST as it always did.
+        match parse(&["mesh-workflow", "list"]).command {
+            Commands::MeshWorkflow { host, .. } => assert_eq!(host, None),
+            _ => panic!("expected mesh-workflow"),
+        }
     }
 
     /// Try to parse CLI args, returning the clap error on failure. The full
@@ -4527,6 +5025,38 @@ mod tests {
         );
     }
 
+    /// `mold runpod run --no-save` reads the same way and says the same
+    /// thing: the pod files the print and trashes it there, while the image
+    /// still lands in `--output-dir` on this machine.
+    #[test]
+    fn runpod_run_no_save_flag() {
+        match parse(&["runpod", "run", "a cat"]).command {
+            Commands::Runpod {
+                action: RunpodAction::Run { no_save, .. },
+            } => assert!(!no_save),
+            _ => panic!("expected runpod run"),
+        }
+        match parse(&["runpod", "run", "a cat", "--no-save"]).command {
+            Commands::Runpod {
+                action: RunpodAction::Run { no_save, .. },
+            } => assert!(no_save),
+            _ => panic!("expected runpod run --no-save"),
+        }
+        let help = on_large_stack(|| {
+            <Cli as clap::CommandFactory>::command()
+                .find_subcommand_mut("runpod")
+                .expect("runpod subcommand")
+                .find_subcommand_mut("run")
+                .expect("runpod run subcommand")
+                .render_long_help()
+                .to_string()
+        });
+        assert!(
+            help.contains("Trash") || help.contains("recoverable"),
+            "the help must say the print is recoverable: {help}"
+        );
+    }
+
     #[test]
     fn run_no_metadata_flag() {
         let cli = parse(&["run", "model", "test", "--no-metadata"]);
@@ -4579,6 +5109,56 @@ mod tests {
             Commands::Run { image, .. } => assert_eq!(image, vec!["input.jpg"]),
             _ => panic!("expected Run"),
         }
+    }
+
+    /// `--fit` parses to the three honoured policies and refuses the two
+    /// browser-only ones with their reason rather than clap's "invalid
+    /// value" list.
+    #[test]
+    fn run_fit_parses_the_three_terminal_policies() {
+        for (raw, expected) in [
+            ("crop-fill", source_fit::SourceFitMode::CropFill),
+            ("pad-fit", source_fit::SourceFitMode::PadFit),
+            ("lanczos-resize", source_fit::SourceFitMode::LanczosResize),
+        ] {
+            let cli = parse(&["run", "model", "test", "-i", "in.png", "--fit", raw]);
+            match cli.command {
+                Commands::Run { fit, .. } => assert_eq!(fit, Some(expected)),
+                _ => panic!("expected Run"),
+            }
+        }
+
+        let cli = parse(&["run", "model", "test", "-i", "in.png"]);
+        match cli.command {
+            Commands::Run { fit, .. } => assert_eq!(fit, None),
+            _ => panic!("expected Run"),
+        }
+
+        let refusal = try_parse(&[
+            "run",
+            "model",
+            "test",
+            "-i",
+            "in.png",
+            "--fit",
+            "pad-repaint",
+        ])
+        .err()
+        .expect("a refused policy is a parse error")
+        .to_string();
+        assert!(refusal.contains("pad-repaint"), "{refusal}");
+        assert!(refusal.contains("--fit pad-fit"), "{refusal}");
+    }
+
+    /// `--fit` is a source-image policy, so clap refuses it on a run with no
+    /// picture instead of composing a request that would ignore it.
+    #[test]
+    fn run_fit_requires_an_image_at_parse_time() {
+        let error = try_parse(&["run", "model", "test", "--fit", "crop-fill"])
+            .err()
+            .expect("--fit without --image is a parse error")
+            .to_string();
+        assert!(error.contains("--image"), "{error}");
     }
 
     #[test]

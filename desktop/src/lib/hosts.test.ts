@@ -4,7 +4,6 @@ import {
   hostIdFromUrl,
   inferBackendFromGpuName,
   mergeSavedHostsByInstanceId,
-  modelAvailabilityTag,
   normalizeHostUrl,
   normalizeTargetHost,
   pickAutoHost,
@@ -305,32 +304,6 @@ describe("pickMostCapableHost", () => {
   it("returns null when nothing is ready", () => {
     expect(pickMostCapableHost([capable({ id: "down", status: "error" })], null)).toBeNull();
     expect(pickMostCapableHost([], null)).toBeNull();
-  });
-});
-
-describe("modelAvailabilityTag", () => {
-  const fleet = [
-    { id: "local", label: "This Mac", primary: true },
-    { id: "hal9000-7680", label: "hal9000", primary: false },
-    { id: "bender-7680", label: "bender", primary: false },
-  ];
-
-  it("stays quiet when availability is unknown or the primary has the model", () => {
-    expect(modelAvailabilityTag([], fleet)).toBeNull();
-    expect(modelAvailabilityTag(["local"], fleet)).toBeNull();
-    expect(modelAvailabilityTag(["local", "hal9000-7680", "bender-7680"], fleet)).toBeNull();
-  });
-
-  it("names the single non-primary host that has the model", () => {
-    expect(modelAvailabilityTag(["hal9000-7680"], fleet)).toBe("hal9000");
-  });
-
-  it("counts hosts when several non-primary hosts have the model", () => {
-    expect(modelAvailabilityTag(["hal9000-7680", "bender-7680"], fleet)).toBe("2 hosts");
-  });
-
-  it("ignores host ids that are no longer connected", () => {
-    expect(modelAvailabilityTag(["gone-host"], fleet)).toBeNull();
   });
 });
 

@@ -190,29 +190,150 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
   font-size: 0.875rem;
 }
 
+/* Every screen's own title, and the one action it offers. The Make screen
+   also pins the two answers that used to scroll away with the form: where the
+   next print lands, and what kind of thing it is. */
 .mobile-header {
   min-height: 52px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
+  flex-direction: column;
+  gap: 10px;
+  padding: 6px max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left));
   border-bottom: 1px solid var(--mold-border);
   background: var(--mold-bg);
 }
 
-.mobile-header-actions {
+.mobile-header-title-row {
   display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+}
+
+.mobile-large-title {
   min-width: 0;
   flex: 1;
+  overflow: hidden;
+  margin: 0;
+  color: var(--mold-text);
+  font-family: var(--font-display);
+  font-size: min(var(--text-display), 28px);
+  font-weight: 700;
+  letter-spacing: -0.014em;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-large-title:focus-visible {
+  outline: 2px solid var(--mold-border-focus);
+  outline-offset: 2px;
+}
+
+.mobile-header-title-row > .mobile-header-action,
+.mobile-header-title-row > .mobile-settings-button,
+.mobile-library-heading-actions {
+  flex: none;
+  margin-left: auto;
+}
+
+/* A text action sizes to its word; the square is for a glyph. Two classes so
+   this outranks the 44px square rule wherever the two land in the sheet. */
+.mobile-header-action.mobile-header-action--text {
+  width: auto;
+  min-width: 44px;
+  padding: 0 4px;
+  font-size: var(--text-body-lg);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* The routing chip: a status dot and the machine's name, with the native
+   picker lying over it so one tap opens the list. */
+.mobile-header-routing {
+  display: flex;
+  min-width: 0;
   align-items: center;
-  justify-content: flex-end;
   gap: 8px;
 }
 
-.mobile-header-actions .host-chip {
+.mobile-header-routing-chip {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  /* The one control that decides where every print goes. It was a 32px chip
+     with an invisible select over it, below the 44pt floor this very screen
+     asserts for its own header action. */
+  min-height: 44px;
+  max-width: min(58vw, 240px);
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  padding: 0 11px;
+  background: var(--mold-bg-deep, var(--mold-bg));
+}
+
+.mobile-header-routing .host-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  color: var(--mold-text);
   font-size: min(var(--text-edge-code), 16px);
-  max-width: min(58vw, 220px);
+}
+
+.mobile-header-routing .status-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.mobile-header-routing .status-dot.is-ready {
+  background: var(--mold-success, var(--mold-blue));
+}
+
+.mobile-header-routing-caret {
+  flex: none;
+  color: var(--mold-text-dim);
+}
+
+.mobile-header-routing-select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  opacity: 0;
+  appearance: none;
+}
+
+/* The select is invisible by design, so the CHIP shows the ring a keyboard or
+   Full Keyboard Access would otherwise land on with nothing to see. */
+.mobile-header-routing-chip:has(.mobile-header-routing-select:focus-visible) {
+  outline: 2px solid var(--mold-border-focus);
+  outline-offset: 2px;
+}
+
+/* NIT 14: the header is now where several screens' single action lives. */
+.mobile-header-action:focus-visible {
+  outline: 2px solid var(--mold-border-focus);
+  outline-offset: 2px;
+}
+
+/* What that machine is doing, in the mono half of the row. */
+.mobile-header-routing-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--mold-text-dim);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-header .mobile-output-kinds {
+  width: 100%;
 }
 
 .mobile-settings-button,
@@ -276,14 +397,6 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 .mobile-settings-nav-spacer {
   width: 44px;
   justify-self: end;
-}
-
-.mobile-wordmark {
-  flex: none;
-  font-family: var(--font-display);
-  font-size: min(var(--text-display), 28px);
-  font-weight: 700;
-  letter-spacing: -0.035em;
 }
 
 .host-chip {
@@ -695,6 +808,69 @@ html.mobile-surface:has(.mobile-shell.is-pair-scanning) #app,
 
 .mobile-settings-manage {
   width: 100%;
+}
+
+/* Pair with your desktop. A 64px tile holding the literal word QR — the phone
+   scans the desktop's code, so there is nothing here to render. */
+.mobile-pair-scan-card {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+}
+
+.mobile-pair-scan-glyph {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--mold-border);
+  background: var(--mold-surface, var(--mold-bg-deep));
+  color: var(--mold-text-dim);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+}
+
+.mobile-pair-scan-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.mobile-pair-scan-copy > strong {
+  font-family: var(--font-body);
+  font-size: var(--text-body);
+  font-weight: 600;
+}
+
+.mobile-pair-scan-copy > span {
+  color: var(--mold-text-dim);
+  font-family: var(--font-body);
+  font-size: var(--text-caption);
+  line-height: 1.45;
+}
+
+.mobile-pair-scan-button {
+  align-self: flex-start;
+  min-height: 44px;
+  margin-top: 3px;
+  padding: 0 14px;
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+  color: var(--mold-blue);
+  font-family: var(--font-body);
+  font-size: var(--text-body-lg);
+}
+
+.mobile-pair-scan-button:disabled {
+  color: var(--mold-text-dim);
 }
 
 .mobile-settings-about {
@@ -1416,6 +1592,9 @@ textarea.control {
   border-bottom: 1px solid var(--mold-border);
 }
 
+/* A disclosure line is a sentence about the picture you attached, so it takes
+   the same plain sans as every other row label. The mono utility face is for
+   the technical truth beside it, never for the words. */
 .mobile-native-disclosure > summary,
 .mobile-disclosure-button {
   box-sizing: border-box;
@@ -1427,8 +1606,9 @@ textarea.control {
   padding: 4px 2px;
   background: transparent;
   color: var(--mold-text);
-  font-family: var(--font-utility);
-  font-size: var(--text-data);
+  font-family: var(--font-body);
+  font-size: var(--text-body-lg);
+  letter-spacing: 0;
   text-align: left;
 }
 
@@ -1459,6 +1639,7 @@ textarea.control {
   min-width: 0;
   overflow: hidden;
   color: var(--mold-text-dim);
+  font-family: var(--font-body);
   font-size: var(--text-caption);
   font-weight: 400;
   text-overflow: ellipsis;
@@ -2444,6 +2625,117 @@ button:disabled {
   gap: 7px;
 }
 
+/* A leading square: the picture as it is being made, or the place in line of
+   a row that has no pixels yet. */
+.mobile-generation-job--leading {
+  grid-template-columns: auto minmax(0, 1fr) minmax(64px, 30%);
+  align-items: start;
+}
+
+.mobile-generation-job--leading.mobile-generation-job--detailed-status {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.mobile-generation-job--active {
+  border-left: 2px solid var(--mold-blue);
+}
+
+.mobile-generation-job--warning {
+  border-left: 2px solid var(--mold-warning);
+}
+
+.mobile-generation-job-thumb {
+  display: block;
+  width: 64px;
+  height: 64px;
+  flex: none;
+  overflow: hidden;
+  border: 1px solid var(--mold-blue);
+  background: var(--mold-bg-deep);
+}
+
+.mobile-generation-job-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 44px, because it sits where a finger expects the row to start. */
+.mobile-generation-job-position {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--mold-border);
+  background: var(--mold-bg-deep);
+  color: var(--mold-text-2);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+}
+
+.mobile-generation-job--warning .mobile-generation-job-position {
+  border-color: var(--mold-warning);
+  color: var(--mold-warning);
+}
+
+/* A running row's status is a sentence about what is happening, so it takes
+   the plain sans every other sentence on the phone takes. The mono uppercase
+   code is for the rows that are waiting, held or settled. */
+/* Two classes: `.mobile-generation-job-copy span` above sets the mono face and
+   truncation for the subtitle, and a bare class cannot outrank it. */
+.mobile-generation-job-copy .mobile-generation-job-sentence {
+  display: block;
+  overflow: visible;
+  margin-top: 5px;
+  color: var(--mold-text-2);
+  font-family: var(--font-body);
+  font-size: var(--text-body);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.mobile-generation-job-meter {
+  margin-top: 7px;
+}
+
+/* Which one of the batch, and where — the technical truth, so mono. */
+/* Finished today: three square tiles, the same shape the Library uses. */
+.mobile-queue-finished-strip {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+
+.mobile-queue-finished-tile {
+  min-width: 0;
+  flex: 1;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border: 1px solid var(--mold-border);
+  padding: 0;
+  background: var(--mold-bg-deep);
+}
+
+.mobile-queue-finished-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.mobile-generation-job-meta {
+  display: block;
+  overflow: hidden;
+  margin-top: 6px;
+  color: var(--mold-text-dim);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mobile-generation-job-copy {
   min-width: 0;
 }
@@ -3395,12 +3687,14 @@ button:disabled {
   text-transform: none;
 }
 
+/* Work in flight, above everything it is fetching for. The warning edge is
+   what separates "this is happening now" from one more list of models. */
 .mobile-catalog-downloads {
   margin: 2px 0 14px;
   overflow: hidden;
-  border: 1px solid var(--mold-border);
+  border: 1px solid var(--mold-warning);
   border-radius: var(--mold-radius-2);
-  background: var(--mold-bg);
+  background: var(--mold-bg-deep);
 }
 
 .mobile-catalog-downloads-head {
@@ -3480,7 +3774,7 @@ button:disabled {
   height: 100%;
   min-width: 2px;
   border-radius: inherit;
-  background: var(--mold-sapphire);
+  background: var(--mold-warning);
 }
 
 .mobile-catalog-download > button {
@@ -3499,27 +3793,38 @@ button:disabled {
   position: sticky;
   top: -16px;
   z-index: 5;
+  display: flex;
+  gap: 8px;
   margin: 0 -1px;
   padding: 10px 1px 8px;
   background: var(--mold-bg-deep);
 }
 
 .mobile-catalog-search-row input {
+  min-width: 0;
+  flex: 1;
   padding: 9px 12px;
 }
 
-.mobile-catalog-media,
+/* Four media choices never fit a 393pt row as equal tiles: they wrapped onto a
+   second row and pushed the results down the screen. One strip that scrolls,
+   the same answer the kind chips already use. */
+.mobile-catalog-media {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.mobile-catalog-media::-webkit-scrollbar {
+  display: none;
+}
+
 .mobile-catalog-sources {
   display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-}
-
-.mobile-catalog-media {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.mobile-catalog-sources {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
   margin-top: 10px;
 }
 
@@ -3573,7 +3878,10 @@ button:disabled {
 }
 
 .mobile-catalog-media button {
+  flex: none;
   min-height: 44px;
+  padding: 0 14px;
+  white-space: nowrap;
 }
 
 .mobile-catalog-sources button {
@@ -3681,6 +3989,29 @@ button:disabled {
   }
 }
 
+/* One chip standing in for six controls, beside the field it narrows. */
+.mobile-catalog-filter-chip {
+  flex: none;
+  min-height: 44px;
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  padding: 0 12px;
+  background: var(--mold-bg);
+  color: var(--mold-text-2);
+  font-family: var(--font-body);
+  font-size: var(--text-caption);
+}
+
+.mobile-catalog-filter-chip[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--mold-blue) 72%, var(--mold-border-control));
+  background: color-mix(in srgb, var(--mold-blue) 11%, var(--mold-bg));
+  color: var(--mold-blue);
+}
+
+.mobile-catalog-filter-sheet .mobile-sheet-body > * + * {
+  margin-top: 14px;
+}
+
 .mobile-catalog-error {
   display: flex;
   align-items: center;
@@ -3742,13 +4073,15 @@ button:disabled {
   background: var(--mold-bg);
 }
 
+/* A 64px grouped row, the density the rest of the phone already uses. It was
+   92px with a 68px thumbnail, so three results filled the screen. */
 .mobile-catalog-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  min-height: 92px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  min-height: 64px;
   align-items: center;
-  gap: 8px;
-  padding: 8px 9px;
+  gap: 10px;
+  padding: 9px 12px;
 }
 
 .mobile-catalog-card + .mobile-catalog-card {
@@ -3758,20 +4091,24 @@ button:disabled {
 .mobile-catalog-card-open {
   display: grid;
   min-width: 0;
-  min-height: 72px;
-  grid-template-columns: 68px minmax(0, 1fr);
+  min-height: 46px;
+  grid-template-columns: 44px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
+  gap: 11px;
   border: 0;
   padding: 0;
   background: transparent;
   text-align: left;
 }
 
+.mobile-catalog-card-chevron {
+  color: var(--mold-text-faint, var(--mold-text-dim));
+}
+
 .mobile-catalog-card-preview {
   display: grid;
-  width: 68px;
-  height: 68px;
+  width: 44px;
+  height: 44px;
   overflow: hidden;
   place-items: center;
   border-radius: var(--mold-radius-2);
@@ -3787,7 +4124,6 @@ button:disabled {
   object-fit: cover;
 }
 
-.mobile-catalog-card-body,
 .mobile-catalog-card-title,
 .mobile-catalog-card-meta,
 .mobile-catalog-card-size {
@@ -3795,25 +4131,51 @@ button:disabled {
   min-width: 0;
 }
 
+/* Two lines: the style's name, then everything about it on one wrapped row.
+   Stacked separately it made a 100px row out of four short phrases. */
+.mobile-catalog-card-body {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 8px;
+}
+
+.mobile-catalog-card-body > .mobile-catalog-card-title {
+  flex-basis: 100%;
+}
+
+/* The style's name is a plain word: sans, one line, at the row scale the
+   rest of the phone's grouped lists use. */
 .mobile-catalog-card-title {
-  display: -webkit-box;
   overflow: hidden;
   color: var(--mold-text);
-  font-size: var(--text-body);
-  font-weight: 700;
+  font-family: var(--font-body);
+  font-size: var(--text-body-lg);
   line-height: 1.25;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mobile-catalog-card-badges {
-  margin-top: 5px;
+  margin-top: 0;
 }
 
-.mobile-catalog-card-meta,
-.mobile-catalog-card-size {
+/* What the style IS, in plain words. */
+.mobile-catalog-card-meta {
   overflow: hidden;
-  margin-top: 4px;
+  color: var(--mold-text-dim);
+  font-family: var(--font-body);
+  font-size: var(--text-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The runnable id, on the second line beside what the style is. */
+.mobile-catalog-card-id {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
   color: var(--mold-text-dim);
   font-family: var(--font-utility);
   font-size: var(--text-edge-code);
@@ -3821,11 +4183,30 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* Which machines have it, stacked and right-aligned in mono. */
+.mobile-catalog-card-hosts {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  color: var(--mold-sapphire);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Its weight, in mono, beside the action that would fetch it. */
+.mobile-catalog-card-size {
+  color: var(--mold-text-dim);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  white-space: nowrap;
+}
+
 .mobile-catalog-host-labels {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-top: 5px;
 }
 
 .mobile-catalog-host-labels > span {
@@ -4422,6 +4803,125 @@ button:disabled {
 
 .host-telemetry-meter {
   width: 100%;
+}
+
+/* A machine card: what the box is, in one sentence, over its own load. The
+   list used to say a name and a URL and leave the hardware a mystery. */
+.mobile-machines-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mobile-machines-head > .section-title {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The one trailing action a screen is allowed. */
+.mobile-header-action {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  place-items: center;
+  border: 0;
+  border-radius: var(--mold-radius-2);
+  background: transparent;
+  color: var(--mold-blue);
+  font-family: var(--font-body);
+  font-size: 22px;
+  line-height: 1;
+}
+
+.mobile-machine-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+}
+
+.mobile-machine-card.is-target {
+  border-color: var(--mold-blue);
+  background: var(--mold-surface, var(--mold-bg-deep));
+}
+
+.mobile-machine-open {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  flex-direction: column;
+  gap: 6px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.mobile-machine-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.mobile-machine-head > .host-name {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-utility);
+  font-size: var(--text-body);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-machine-head > .badge-pill,
+.mobile-machine-head > .host-chip {
+  margin-left: auto;
+}
+
+.mobile-machine-chevron {
+  flex: none;
+  color: var(--mold-text-faint, var(--mold-text-dim));
+}
+
+/* The hardware sentence: plain words, so plain sans. */
+.mobile-machine-blurb {
+  color: var(--mold-text-2);
+  font-family: var(--font-body);
+  font-size: var(--text-caption);
+  line-height: 1.45;
+}
+
+.mobile-machine-card > .host-telemetry {
+  margin-top: 0;
+}
+
+.mobile-machine-card > .host-telemetry .host-telemetry-row {
+  margin-top: 6px;
+  margin-bottom: 0;
+}
+
+.mobile-machine-card > .row-actions {
+  margin-top: 0;
+}
+
+.mobile-machines-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  text-align: left;
+}
+
+.mobile-machines-empty p {
+  margin: 0;
+  color: var(--mold-text-dim);
+  font-size: var(--text-caption);
+  line-height: 1.45;
 }
 
 .mobile-detail {
@@ -5858,30 +6358,28 @@ button:disabled {
 .mobile-shell.is-keyboard-open .mobile-create-head {
   display: none;
 }
+/* While the keyboard is up, the header keeps only the screen's name. The
+   routing chip and the output-kind control answer questions you are not asking
+   mid-sentence, and in portrait — where prompts get written — they were the
+   difference between seeing what you typed and not. */
+.mobile-shell.is-keyboard-open .mobile-header-routing,
+.mobile-shell.is-keyboard-open .mobile-header .mobile-output-kinds {
+  display: none;
+}
 .mobile-shell.is-keyboard-open .mobile-create-action {
   padding-bottom: 8px;
 }
 
-/* Pairing is primary on first launch; saved machines lead on later visits. */
-.mobile-add-machine {
-  margin-block: 20px;
-  padding: 16px;
-  border: 1px solid var(--mold-border);
-  border-radius: 12px;
-  background: var(--mold-surface);
-}
-.mobile-host-form {
+/* Adding a machine is a sheet now, so the flow's own spacing is all that is
+   left here — the pairing button leads, the manual form trails. */
+.mobile-host-form,
+.mobile-discovered-form {
   margin-top: 20px;
 }
 
-.mobile-add-machine > summary {
-  min-height: var(--mobile-touch-target, 44px);
-  align-content: center;
-  font-weight: 600;
-  cursor: pointer;
-}
-.mobile-add-machine[open] > summary {
-  margin-bottom: 12px;
+.mobile-add-machine-body > .secondary-button,
+.mobile-add-machine-body > .primary-button {
+  width: 100%;
 }
 
 /* In landscape the IME can leave less than 150px. Give that space to the

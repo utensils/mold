@@ -251,14 +251,19 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
   line-height: var(--mold-lh-body);
   color: var(--mold-text);
 }
+/* Underlined at rest: a finger has no hover, so an underline that only
+   appears on hover is no affordance at all on the phone. */
 .license-settings__link {
   flex-shrink: 0;
   font-size: var(--mold-fs-xs);
   color: var(--mold-blue);
-  text-decoration: none;
-}
-.license-settings__link:hover {
   text-decoration: underline;
+  text-underline-offset: 2px;
+}
+@media (hover: hover) {
+  .license-settings__link:hover {
+    text-decoration-thickness: var(--mold-bw-thick);
+  }
 }
 .license-settings__state {
   flex-shrink: 0;

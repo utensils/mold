@@ -95,6 +95,31 @@ everything else: `--image`/`--strength`, `--mask`, ControlNet and a LoRA all
 stay live in the same pass, and batches work because the encoded picture
 applies to every image in the batch.
 
+## Fitting a source image to the canvas
+
+By default a `--image` source decides the canvas: mold fits the picture to the
+model's bounds and renders at its shape, so `--width`/`--height` have no effect.
+`--fit` reverses that — the canvas is what was asked for (or the model's
+default) and the PICTURE is resampled onto it. `crop-fill` keeps proportions and
+trims the edges, `pad-fit` keeps the whole picture and adds black borders, and
+`lanczos-resize` stretches it. The policy rides the request as provenance, so
+reusing the print in Mold Studio restores the same crop.
+
+```bash
+mold run flux-dev:q4 "A lighthouse at dusk" --image wide.png --fit crop-fill --width 1024 --height 1024
+mold run sdxl-base:fp16 "A cabin in snow" --image tall.jpg --fit pad-fit --width 1024 --height 576
+mold run flux-dev:q4 "A lighthouse at dusk" --image wide.png --fit lanczos-resize
+```
+
+`pad-repaint` and `upscale-then-fit` are app-only and refused by name: the
+first needs a generated repaint mask, the second an upscaler pass. For the
+second, run `mold upscale` on the picture first and then `--fit crop-fill`.
+
+The provenance rides a SINGLE-clip render. A `--frames` value the model cannot
+reach in one pass auto-chains, and the sequence wire carries no source-fit
+field, so the stitched print gets the fitted pixels on the fitted canvas but
+records no crop to restore.
+
 ## Local and remote execution
 
 `mold run` first targets `MOLD_HOST` (default `http://localhost:7680`) and can
@@ -176,6 +201,63 @@ mold jobs amend job-abc123 --script edited.toml --fps 30 --no-audio
 mold jobs delete job-abc123 --yes
 ```
 
+## Durable 3-D workflows
+
+`mold run <3-D model>` is one render. A mesh WORKFLOW is the durable,
+multi-stage form: each stage — the picture a text-to-3-D run starts from, its
+matted and delighted copies, the shape, the paint — is admitted as its own
+generation and keeps its own retained artifact, the job survives a server
+restart, and a resume picks up at the first unfinished stage instead of
+rerunning the whole thing.
+
+Every verb is remote. The manifest, the stage artifacts and the queue rows
+live in ONE machine's data root, so there is no local form; `--local` is
+refused by name and the honest alternative is a one-shot `mold run`.
+
+The mode is inferred from what you supply: a prompt renders a picture and
+reconstructs it, a mesh with an appearance image textures that mesh, and a
+mesh on its own is rebuilt through the 2.1 shape VAE. Name it with `--mode`
+when a script would rather not depend on inference.
+
+```bash
+mold mesh-workflow create --prompt "a small ceramic fox" --texture --follow
+mold mesh-workflow create --mesh chair.glb --image chair-albedo.png --texture-resolution 2048
+mold mesh-workflow create --mesh chair.glb --mode mesh_roundtrip --octree 320 --target-faces 40000
+mold mesh-workflow list --json
+mold mesh-workflow show WORKFLOW-ID
+mold mesh-workflow events WORKFLOW-ID
+mold mesh-workflow resume WORKFLOW-ID
+mold mesh-workflow cancel WORKFLOW-ID
+mold mesh-workflow delete WORKFLOW-ID
+```
+
+`--octree`, `--threshold` (spelled `--mesh-threshold` on `mold run`, and
+accepted under both names here), `--target-faces`, `--matting` and `--delight`
+are the same controls a one-shot render takes, and this is the only surface
+that exposes all of them on a durable workflow. Omit one and the recipe's own
+default answers; do not restate a default here. `--matting` and `--delight`
+prepare a conditioning PICTURE, so a roundtrip — whose stages are shape then
+finalize — refuses them rather than accepting a control it never reaches.
+`--seed` applies to every stage, so one value reproduces the whole run.
+`delete` is settled-only — cancel or wait first, and the server says so if you
+do not.
+
+A supplied `--mesh` is a `.glb` or `.obj`, and rides the request as base64.
+On a host that advertises `capabilities.reference_uploads` AND is reached with
+an API key, the CLI takes that host's request-bound upload route instead, and
+refuses by name a mesh larger than the limits that block advertises. A keyless
+host always takes the inline path.
+
+`--follow` prints a line each time a stage changes state. The lines are
+derived from the snapshots `/:id/events` sends — that endpoint emits whole
+snapshots and nothing finer — so the granularity is the server's polling
+interval, not per-step progress.
+
+An omitted `--model` resolves per MODE, because the modes do not share a
+checkpoint: a roundtrip runs through the 2.1 shape VAE and defaults to that
+tier, while text-to-3-D and texturing default to the small fast one. Naming a
+checkpoint the mode cannot run is refused with the flag that fixes it.
+
 ## Jobs and queues
 
 ```bash
@@ -213,6 +295,7 @@ examples because it is a broad destructive action.
 ```bash
 mold pull flux2-klein:q8
 mold list
+mold list --json
 mold info flux2-klein:q8 --verify
 mold stats --json
 mold default flux2-klein:q8
@@ -225,6 +308,35 @@ mold version
 `mold info MODEL --verify` re-checksums the installed bytes. Normal loading
 checks file sizes and formats only, so this is the explicit way to answer
 "are these weights intact".
+
+`mold search` queries the Hugging Face and Civitai catalogs. It runs on the
+selected server when one answers, so it sees the credentials THAT machine
+stored and its `installed` column answers about the machine that would do the
+downloading; with no server reachable it runs locally against `HF_TOKEN` and
+`CIVITAI_TOKEN`. A merged search whose one provider failed still returns the
+other's rows and reports the failure on stderr. Install a result with
+`mold pull` and its printed id.
+
+```bash
+mold search flux
+mold search "anime style" --kind lora --sort recent
+mold search sdxl --source civitai --page 2 --page-size 50 --no-nsfw --json
+```
+
+`mold downloads` is the server's own download queue — what is transferring,
+what is waiting, and what recently finished. It is remote only, because a
+queue belongs to the machine whose disk fills up. `mold downloads add` takes a
+model name from `mold list`; a `cv:` or `hf:` catalog id belongs to
+`mold pull`, which routes on the id itself, and is refused here by name.
+
+```bash
+mold downloads list
+mold downloads list --json
+mold downloads add flux-dev:q4
+mold downloads add pulid-flux --accept-license insightface-antelopev2
+mold downloads watch
+mold downloads cancel DOWNLOAD-ID
+```
 
 `mold quantize` derives a smaller Hunyuan3D shape tier from an installed one
 and registers it in THIS host's config; no other machine knows the name.
@@ -331,13 +443,30 @@ mold mcp --host http://localhost:7680
 mold skill list
 ```
 
+Shell completion is installed with `mold completions <shell>`. Model names
+complete from the manifest, and tags, collections, sequence and queue job ids,
+download ids, 3-D workflow ids, gallery filenames and `--host` complete from
+what earlier commands saw: `mold library list`, `mold library tag list`,
+`mold library collection list`, `mold jobs list`, `mold queue list`,
+`mold downloads list` (or `watch`) and `mold mesh-workflow list` each record
+their answers, and `mold search` records the machine. Run one of those against
+a machine before expecting `--tag`, `--host` or an id to offer anything.
+Completion never contacts a server.
+
 The MCP server exposes thirteen tools: `generate_image`, `generate_mesh`,
 `export_mesh`, `generate_image_async`, `generation_status`,
 `generation_retry`, `list_gallery`, `get_gallery_image`, `list_models`,
 `list_loras`, `server_status`, `expand_prompt` and `remix_prompt`.
-`generate_mesh` is a ONE-SHOT render, not the durable 3-D workflow — a
-multi-stage workflow is `/api/mesh-workflows`, which no tool and no CLI
-command wraps.
+`generate_mesh` is a ONE-SHOT render, not the durable 3-D workflow. A
+multi-stage workflow is `mold mesh-workflow` at the CLI and
+`/api/mesh-workflows` over HTTP; no MCP tool wraps it.
+
+`generate_image`, `generate_image_async` and `generate_mesh` each take an
+optional `save_to_gallery`. Omit it and the render is filed in the host's
+Library as usual; pass `false` and the host publishes the print and moves it
+straight to that machine's Trash, where it stays recoverable until retention
+sweeps it. `false` is the only value that changes anything — an explicit `true`
+is the default.
 
 Starting, stopping, restarting, or reconfiguring a server changes external
 state. Do so only when requested, and verify health plus the selected host

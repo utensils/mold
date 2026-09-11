@@ -4,7 +4,6 @@ import {
   loadMobileGenerateTarget,
   mobileAutoRoutingAvailable,
   mobileGenerateTargetLabel,
-  mobileModelAvailabilityTag,
   mobileRoutingHosts,
   resolveMobileGenerateTarget,
   saveMobileGenerateTarget,
@@ -137,13 +136,5 @@ describe("labels", () => {
     expect(mobileGenerateTargetLabel("stale", degraded)).toBe("Studio · reconnecting");
     expect(mobileGenerateTargetLabel("unknown", degraded)).toBe("New host · unreachable");
     expect(mobileGenerateTargetLabel("mismatch", degraded)).toBe("Render · identity changed");
-  });
-
-  it("tags a model only when it is not on every reachable machine", () => {
-    expect(mobileModelAvailabilityTag(["studio"], fleet)).toBe("Studio");
-    expect(mobileModelAvailabilityTag(["studio", "plato"], fleet)).toBeNull();
-    expect(mobileModelAvailabilityTag([], fleet)).toBeNull();
-    const three = [...fleet, host({ id: "hal", name: "hal9000" })];
-    expect(mobileModelAvailabilityTag(["studio", "plato"], three)).toBe("2 machines");
   });
 });

@@ -361,6 +361,81 @@ fn effective_dimensions(
     }
 }
 
+/// What `--fit` leaves the request carrying.
+///
+/// With no `--fit` every field is the caller's own value, which is what keeps
+/// the derive-the-canvas-from-the-picture default byte-for-byte unchanged.
+#[derive(Debug)]
+struct FittedSource {
+    source_image: Option<Vec<u8>>,
+    width: Option<u32>,
+    height: Option<u32>,
+    source_fit: Option<serde_json::Value>,
+}
+
+/// Resolve `--fit`: resample the source image onto the request's canvas.
+#[allow(clippy::too_many_arguments)]
+fn apply_run_source_fit(
+    mode: Option<crate::source_fit::SourceFitMode>,
+    source_image: Option<Vec<u8>>,
+    edit_images: Option<&[Vec<u8>]>,
+    width: Option<u32>,
+    height: Option<u32>,
+    config: &Config,
+    model_cfg: &mold_core::ModelConfig,
+    model: &str,
+    // The caller's own answer, not a second family comparison: a canvasless
+    // recipe is decided once, at `is_mesh`.
+    is_mesh: bool,
+) -> Result<FittedSource> {
+    let Some(mode) = mode else {
+        return Ok(FittedSource {
+            source_image,
+            width,
+            height,
+            source_fit: None,
+        });
+    };
+    let Some(bytes) = source_image else {
+        if edit_images.is_some_and(|images| !images.is_empty()) {
+            anyhow::bail!(
+                "--fit resamples a source image, and '{model}' reads ordered reference images \
+                 instead — the engine conditions on those at their own size. Drop --fit."
+            );
+        }
+        anyhow::bail!(
+            "--fit needs a source image: pass --image <PATH>, or --image - to read one from stdin"
+        );
+    };
+    // The target is the requested canvas, else the model's own default —
+    // never the source's shape, which is the rule `--fit` exists to override.
+    let target_width = width.unwrap_or_else(|| model_cfg.effective_width(config));
+    let target_height = height.unwrap_or_else(|| model_cfg.effective_height(config));
+    if is_mesh || target_width == 0 || target_height == 0 {
+        anyhow::bail!(
+            "--fit needs a canvas and '{model}' renders without one: the engine letterboxes the \
+             source to the checkpoint's own conditioning size, so there is nothing to fit it to."
+        );
+    }
+    let (fitted, transform) =
+        crate::source_fit::apply_source_fit(&bytes, target_width, target_height, mode)?;
+    status!(
+        "{} Source image fitted to {}x{} ({}, resampled to {}x{})",
+        theme::icon_info(),
+        target_width,
+        target_height,
+        mode.as_wire(),
+        transform.draw_width,
+        transform.draw_height,
+    );
+    Ok(FittedSource {
+        source_image: Some(fitted),
+        width: Some(target_width),
+        height: Some(target_height),
+        source_fit: Some(crate::source_fit::source_fit_provenance(mode)),
+    })
+}
+
 /// Steps the request submits when the user passed no `--steps`.
 ///
 /// MiniMax H3's step authority is per manifest tier — 21 for the compact
@@ -910,6 +985,10 @@ pub struct Ltx2Options {
     pub distill_strength_low: Option<f64>,
     /// Display-safe first-frame provenance. Never a client path.
     pub source_image_name: Option<String>,
+    /// `--fit`: resample the source image onto the REQUESTED canvas before
+    /// submitting, rather than deriving the canvas from the image. `None`
+    /// keeps the historical derive-from-image rule.
+    pub source_fit: Option<crate::source_fit::SourceFitMode>,
     /// Payload-free ordered H3 Ref2VA descriptors.
     pub references: Option<Vec<GenerationReference>>,
     /// Local files corresponding one-for-one with `references`. They are
@@ -955,7 +1034,7 @@ impl FilingOptions {
     /// nothing. `false` does not discard the render — the host publishes the
     /// print and moves it straight to trash, so it stays recoverable until
     /// retention sweeps it.
-    fn save_to_gallery(&self) -> Option<bool> {
+    pub(crate) fn save_to_gallery(&self) -> Option<bool> {
         self.no_save.then_some(false)
     }
 
@@ -1067,6 +1146,7 @@ pub async fn run(
         distill_strength_high,
         distill_strength_low,
         source_image_name,
+        source_fit,
         references,
         reference_uploads,
     } = ltx2;
@@ -1126,6 +1206,31 @@ pub async fn run(
     let is_ltx2 = family.as_deref() == Some("ltx2");
     let is_mesh = family.as_deref() == Some(mold_core::manifest::HUNYUAN3D_FAMILY);
     validate_cli_batch_for_family(family.as_deref(), batch)?;
+
+    // `--fit` reverses this command's historical rule. Without it the CANVAS
+    // is derived from the picture (`source_image_model_dimensions`); with it
+    // the canvas is what the user asked for, or the model's own default, and
+    // the PICTURE is resampled onto it — the same three policies the apps
+    // apply with a `<canvas>` `drawImage`, and the same `source_fit`
+    // provenance recorded beside the print. Applied here, above chain routing
+    // and above `effective_dimensions`, so the auto-chained clip, the
+    // single-clip request and a `--local` render all submit the same pixels.
+    let FittedSource {
+        source_image,
+        width,
+        height,
+        source_fit: source_fit_provenance,
+    } = apply_run_source_fit(
+        source_fit,
+        source_image,
+        edit_images.as_deref(),
+        width,
+        height,
+        &config,
+        &model_cfg,
+        model,
+        is_mesh,
+    )?;
 
     // Default video models to a sensible container unless the user explicitly picked one.
     // An audio-only pipeline goes to WAV instead: it emits no frames, so both
@@ -1549,7 +1654,7 @@ pub async fn run(
         collection: resolved_filing.collection,
         tags: resolved_filing.tags,
         title,
-        source_fit: None,
+        source_fit: source_fit_provenance,
         hdr_exr_dir,
         hdr_exr_full_float,
         guidance_overrides,
@@ -5294,6 +5399,7 @@ mod tests {
                 distill_strength_high: None,
                 distill_strength_low: None,
                 source_image_name: None,
+                source_fit: None,
                 references: None,
                 reference_uploads: Vec::new(),
             },
@@ -5558,23 +5664,51 @@ mod tests {
         );
     }
 
-    /// Every request `mold run` builds — the ordinary one and the HDR chain
-    /// probe that rides the same invocation — reads that one authority, so a
-    /// `--no-save` render cannot half-save.
+    /// EVERY request this crate builds reads that one authority, so nothing
+    /// that can be asked not to save can half-save.
+    ///
+    /// `mold run` builds two (the ordinary request and the HDR chain probe
+    /// that rides the same invocation); `mold runpod run` and the MCP
+    /// generate tools build one each. A new construction site is welcome —
+    /// hard-wiring the field at one is not, which is why this matches the
+    /// expression by exact text rather than counting sites.
     #[test]
-    fn every_request_this_command_builds_reads_the_one_save_authority() {
-        let source = include_str!("generate.rs");
-        let sites: Vec<&str> = source
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.starts_with("save_to_gallery:"))
-            .collect();
-        assert!(sites.len() >= 2, "expected both request sites: {sites:?}");
-        for site in sites {
-            assert_eq!(
-                site, "save_to_gallery: filing.save_to_gallery(),",
-                "a request site that hard-wires the field cannot honour --no-save"
+    fn every_request_this_crate_builds_reads_the_one_save_authority() {
+        const AUTHORITY: &str = "save_to_gallery: filing.save_to_gallery(),";
+        // Every other expression the field is allowed to be given, and why
+        // each still reads that one authority: the MCP mesh tool forwards its
+        // own tool argument INTO the shared image builder, which applies the
+        // authority there; and one test fixture asks the authority for its
+        // default. Anything else — a hard-wired `None`, an explicit
+        // `Some(true)` — fails here.
+        const FORWARDS: &[&str] = &[
+            "save_to_gallery: args.save_to_gallery,",
+            "save_to_gallery: FilingOptions::default().save_to_gallery(),",
+        ];
+        let builders = [
+            ("commands/generate.rs", include_str!("generate.rs"), 2),
+            ("commands/runpod.rs", include_str!("runpod.rs"), 1),
+            ("commands/mcp.rs", include_str!("mcp.rs"), 1),
+        ];
+        for (file, source, least) in builders {
+            let sites: Vec<&str> = source
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("save_to_gallery:"))
+                // A struct FIELD carrying the flag is a declaration, not a
+                // request site; only an initializer names a value.
+                .filter(|line| !line.ends_with("Option<bool>,"))
+                .collect();
+            assert!(
+                sites.iter().filter(|site| **site == AUTHORITY).count() >= least,
+                "{file} should build at least {least} request(s) from the authority: {sites:?}"
             );
+            for site in sites {
+                assert!(
+                    site == AUTHORITY || FORWARDS.contains(&site),
+                    "a site in {file} that hard-wires the field cannot honour --no-save: {site}"
+                );
+            }
         }
     }
 
@@ -6150,6 +6284,154 @@ mod tests {
                 source_image.is_some()
             );
         }
+    }
+
+    /// `--fit` takes the requested canvas, or the model's default when the
+    /// user named neither dimension — never the picture's own shape, which is
+    /// the rule the flag exists to override.
+    #[test]
+    fn source_fit_targets_the_requested_canvas_then_the_models_default() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1024),
+            default_height: Some(768),
+            ..ModelConfig::default()
+        };
+        let source = png_with_dimensions(320, 64);
+
+        let fitted = apply_run_source_fit(
+            Some(crate::source_fit::SourceFitMode::CropFill),
+            Some(source.clone()),
+            None,
+            Some(512),
+            Some(512),
+            &config,
+            &model_cfg,
+            "flux-dev:q4",
+            false,
+        )
+        .unwrap();
+        assert_eq!((fitted.width, fitted.height), (Some(512), Some(512)));
+        assert_eq!(
+            fitted.source_fit,
+            Some(serde_json::json!({ "mode": "crop-fill" })),
+            "the policy is recorded on the request"
+        );
+        let pixels = image::load_from_memory(&fitted.source_image.unwrap()).unwrap();
+        assert_eq!((pixels.width(), pixels.height()), (512, 512));
+
+        let defaulted = apply_run_source_fit(
+            Some(crate::source_fit::SourceFitMode::PadFit),
+            Some(source.clone()),
+            None,
+            None,
+            None,
+            &config,
+            &model_cfg,
+            "flux-dev:q4",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            (defaulted.width, defaulted.height),
+            (Some(1024), Some(768)),
+            "no --width/--height falls back to the model's own canvas"
+        );
+    }
+
+    /// Without `--fit` nothing is touched, which is what keeps the
+    /// derive-the-canvas-from-the-picture default byte-for-byte unchanged.
+    #[test]
+    fn no_fit_passes_the_source_and_the_dimensions_through() {
+        let source = png_with_dimensions(32, 16);
+        let passthrough = apply_run_source_fit(
+            None,
+            Some(source.clone()),
+            None,
+            None,
+            None,
+            &Config::default(),
+            &ModelConfig::default(),
+            "flux-dev:q4",
+            false,
+        )
+        .unwrap();
+        assert_eq!(passthrough.source_image, Some(source));
+        assert_eq!(passthrough.width, None);
+        assert_eq!(passthrough.height, None);
+        assert_eq!(passthrough.source_fit, None);
+    }
+
+    /// The two shapes `--fit` cannot serve say which one they hit: a run with
+    /// no source picture, and a family that renders without a canvas at all.
+    #[test]
+    fn source_fit_refuses_a_run_it_cannot_serve_by_name() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1024),
+            default_height: Some(1024),
+            ..ModelConfig::default()
+        };
+
+        let missing = apply_run_source_fit(
+            Some(crate::source_fit::SourceFitMode::CropFill),
+            None,
+            None,
+            None,
+            None,
+            &config,
+            &model_cfg,
+            "flux-dev:q4",
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            missing,
+            "--fit needs a source image: pass --image <PATH>, or --image - to read one from stdin"
+        );
+
+        let references = apply_run_source_fit(
+            Some(crate::source_fit::SourceFitMode::CropFill),
+            None,
+            Some(&[png_with_dimensions(8, 8)]),
+            None,
+            None,
+            &config,
+            &model_cfg,
+            "qwen-image-edit:q8",
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            references,
+            "--fit resamples a source image, and 'qwen-image-edit:q8' reads ordered reference \
+             images instead \u{2014} the engine conditions on those at their own size. Drop --fit."
+        );
+
+        let canvasless = apply_run_source_fit(
+            Some(crate::source_fit::SourceFitMode::CropFill),
+            Some(png_with_dimensions(64, 64)),
+            None,
+            None,
+            None,
+            &config,
+            &model_cfg,
+            mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            canvasless,
+            format!(
+                "--fit needs a canvas and '{}' renders without one: the engine letterboxes the \
+                 source to the checkpoint's own conditioning size, so there is nothing to fit it \
+                 to.",
+                mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL
+            )
+        );
     }
 
     #[test]

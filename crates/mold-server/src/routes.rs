@@ -11448,24 +11448,9 @@ async fn accept_licenses_endpoint(
 
 // ─── Downloads UI (Agent A) ──────────────────────────────────────────────────
 
-#[derive(serde::Deserialize, utoipa::ToSchema)]
-pub struct CreateDownloadBody {
-    pub model: String,
-    /// Third-party licenses the user has accepted, each carrying the exact
-    /// terms they were shown, recorded in this server's Mold data root before
-    /// the pull starts.
-    ///
-    /// Additive: absent means "accept nothing", which is what every existing
-    /// client sends and leaves their behaviour unchanged.
-    #[serde(default)]
-    pub accept_licenses: Vec<mold_core::LicenseAcceptance>,
-}
-
-#[derive(serde::Serialize, utoipa::ToSchema)]
-pub struct CreateDownloadResponse {
-    pub id: String,
-    pub position: usize,
-}
+// The download-door body and its answer are `mold_core` types so the client
+// in that crate deserializes exactly what this handler serializes.
+use mold_core::types::{CreateDownloadBody, CreateDownloadResponse};
 
 #[utoipa::path(
     post,

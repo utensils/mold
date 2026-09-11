@@ -1811,3 +1811,126 @@ fn sidecar_to_wire_shape_is_pinned() {
     });
     assert_eq!(got, expected);
 }
+
+/// A fully-populated live entry, the way Civitai's richest rows arrive.
+///
+/// `hf_checkpoint` above is deliberately sparse — every optional field is
+/// `None` — which is exactly why it never caught the client-side type
+/// mismatches this fixture does.
+fn civitai_lora_with_every_field_populated() -> mold_catalog::entry::CatalogEntry {
+    use mold_catalog::entry::{
+        Bundling, CatalogEntry, CatalogId, DownloadRecipe, FamilyRole, FileFormat, Kind,
+        LicenseFlags, Modality, RecipeFile, Source, TokenKind,
+    };
+
+    CatalogEntry {
+        id: CatalogId::from("cv:691639".to_string()),
+        source: Source::Civitai,
+        source_id: "691639".into(),
+        name: "Flux Skin Texture".into(),
+        author: Some("someone".into()),
+        family: mold_catalog::families::Family::Flux,
+        family_role: FamilyRole::Finetune,
+        sub_family: Some("dev".into()),
+        modality: Modality::Image,
+        kind: Kind::Lora,
+        file_format: FileFormat::Safetensors,
+        bundling: Bundling::SingleFile,
+        size_bytes: Some(167_938_890),
+        download_count: 2_400_000,
+        rating: Some(4.5),
+        likes: 12,
+        nsfw: false,
+        thumbnail_url: Some("https://example.invalid/thumb.jpg".into()),
+        description: Some("A long description of the adapter.".into()),
+        license: Some("CreativeML Open RAIL-M".into()),
+        license_flags: LicenseFlags {
+            commercial: Some(true),
+            derivatives: Some(false),
+            different_license: None,
+        },
+        tags: vec!["skin".into(), "realism".into()],
+        companions: vec!["flux-vae".into()],
+        download_recipe: DownloadRecipe {
+            files: vec![RecipeFile {
+                url: "https://example.invalid/model.safetensors".into(),
+                dest: "model.safetensors".into(),
+                sha256: None,
+                size_bytes: Some(167_938_890),
+                role: None,
+            }],
+            // A string on the wire, not a boolean. This one field is what
+            // made every live `mold search` fail to decode.
+            needs_token: Some(TokenKind::Civitai),
+        },
+        supported: true,
+        created_at: Some(1_701_098_351),
+        updated_at: Some(1_701_098_400),
+        added_at: 1_701_098_351,
+        trained_words: vec!["realskin".into()],
+        page_url: Some("https://civitai.com/models/1?modelVersionId=691639".into()),
+    }
+}
+
+/// The page `GET /api/catalog/search` answers with deserializes into the
+/// type `MoldClient::search_catalog` reads.
+///
+/// The two sides were written apart: the handler serializes an ad-hoc
+/// `serde_json::json!` built from `live_entry_to_wire`, and the client reads
+/// `mold_core::catalog_wire::CatalogSearchPage`. Nothing made them agree, and
+/// they did not — `download_recipe.needs_token` is a token KIND on the wire
+/// (`"civitai"`) against a client `bool`, and the timestamps are epoch
+/// integers against a client `String` — so every live search failed to
+/// decode while the installed endpoint, which sends `null` for all three,
+/// kept working. This builds the real page and parses it.
+#[test]
+fn a_live_search_page_deserializes_into_the_type_the_client_reads() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let entry = civitai_lora_with_every_field_populated();
+    let page = serde_json::json!({
+        "entries": [super::live_entry_to_wire(&entry, tmp.path())],
+        "page": 1,
+        "page_size": 20,
+        "total": 1,
+        "provider_errors": [],
+    });
+
+    let parsed: mold_core::catalog_wire::CatalogSearchPage =
+        serde_json::from_value(page).expect("the live wire is what the client deserializes");
+
+    assert_eq!(parsed.total, 1);
+    assert_eq!(parsed.page, 1);
+    let row = &parsed.entries[0];
+    assert_eq!(row.id, "cv:691639");
+    assert_eq!(row.source, "civitai");
+    assert_eq!(row.name, "Flux Skin Texture");
+    assert_eq!(row.author.as_deref(), Some("someone"));
+    assert_eq!(row.family, "flux");
+    assert_eq!(row.kind, "lora");
+    assert_eq!(row.size_bytes, Some(167_938_890));
+    assert_eq!(row.download_count, 2_400_000);
+    assert_eq!(row.nsfw, Some(false));
+    assert!(row.supported);
+    assert!(!row.installed);
+    assert!(row.page_url.is_some());
+}
+
+/// The installed listing parses into the SAME type, so one struct can serve
+/// both endpoints rather than two that drift apart.
+#[test]
+fn an_installed_catalog_page_deserializes_into_the_same_type() {
+    let entry = civitai_lora_with_every_field_populated();
+    let sidecar = sidecar_from_entry(&entry, "model.safetensors".to_string());
+    let wire = super::sidecar_to_wire(sidecar, true, Some("/models/cv-691639".into()));
+    let listing = serde_json::json!({
+        "entries": [wire],
+        "page": 1,
+        "page_size": 1,
+        "total": 1,
+    });
+
+    let parsed: mold_core::catalog_wire::InstalledCatalogResponse =
+        serde_json::from_value(listing).expect("the installed wire parses");
+    assert_eq!(parsed.entries[0].id, "cv:691639");
+    assert!(parsed.entries[0].installed);
+}

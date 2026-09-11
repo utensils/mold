@@ -2394,6 +2394,31 @@ fn recipe(
     }
 }
 
+/// The Hunyuan3D checkpoint a durable workflow runs on when the user names
+/// none.
+///
+/// MODE-AWARE, because the modes do not share a checkpoint. A roundtrip goes
+/// through the 2.1 shape VAE and no other tier has one — the same
+/// `hunyuan3d_shape21_model` test that decides whether a recipe advertises
+/// `MeshRoundtrip` at all — and a multiview reconstruction needs a 2mv
+/// checkpoint. Everything else runs on the small fast default.
+///
+/// One default for every mode is what made `mold mesh-workflow create --mesh
+/// chair.glb` answer `mesh-roundtrip requires a Hunyuan3D 2.1 shape
+/// checkpoint` to anyone who did not already know to pass `--model`. This
+/// lives beside [`mesh_capabilities_profile`] so the model a mode defaults to
+/// and the modes a model advertises cannot disagree; a test asserts exactly
+/// that.
+pub fn default_model_for_mesh_workflow_mode(mode: MeshWorkflowMode) -> &'static str {
+    match mode {
+        MeshWorkflowMode::MeshRoundtrip => crate::manifest::HUNYUAN3D_21_MODEL,
+        MeshWorkflowMode::MultiviewToMesh => crate::manifest::HUNYUAN3D_2MV_TURBO_MODEL,
+        MeshWorkflowMode::ImageToMesh
+        | MeshWorkflowMode::TextToMesh
+        | MeshWorkflowMode::MeshTexture => crate::manifest::HUNYUAN3D_DEFAULT_MODEL,
+    }
+}
+
 /// The 3-D control block, built from the SAME constants
 /// `validation::validate_mesh_request` enforces, so a client that stays inside
 /// the advertised bounds can never be refused by the door it was reading.
@@ -2705,6 +2730,51 @@ fn provenance(family: &str) -> Vec<ProfileProvenance> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every workflow mode's default model is one that ADVERTISES that mode.
+    ///
+    /// The two facts sit in adjacent functions and could drift the moment a
+    /// tier gains or loses a capability. Asking the capability builder itself
+    /// is the only check that cannot go stale — and it is the check that was
+    /// missing when a roundtrip defaulted to the 2.0 tier and was refused by
+    /// the door it had just been sent to.
+    #[test]
+    fn every_workflow_mode_defaults_to_a_model_that_advertises_it() {
+        for mode in [
+            MeshWorkflowMode::ImageToMesh,
+            MeshWorkflowMode::MultiviewToMesh,
+            MeshWorkflowMode::MeshRoundtrip,
+            MeshWorkflowMode::MeshTexture,
+            MeshWorkflowMode::TextToMesh,
+        ] {
+            // Texturing is a build feature, so on a build with no paint
+            // engine NO model advertises it and there is nothing to check.
+            if mode == MeshWorkflowMode::MeshTexture && !cfg!(feature = "mesh-texture") {
+                continue;
+            }
+            let model = default_model_for_mesh_workflow_mode(mode);
+            let advertised = mesh_capabilities_profile(model).workflow_modes;
+            assert!(
+                advertised.contains(&mode),
+                "{mode:?} defaults to {model}, which advertises {advertised:?}"
+            );
+        }
+    }
+
+    /// A roundtrip's default is a 2.1 shape checkpoint by the same test the
+    /// workflow validator applies, so the CLI default can never be the thing
+    /// admission refuses.
+    #[test]
+    fn the_roundtrip_default_passes_the_validators_own_2_1_test() {
+        assert!(crate::manifest::hunyuan3d_shape21_model(
+            default_model_for_mesh_workflow_mode(MeshWorkflowMode::MeshRoundtrip)
+        ));
+        // And the ordinary default is deliberately NOT a 2.1 tier: it is the
+        // small fast one, which is why the mode has to decide.
+        assert!(!crate::manifest::hunyuan3d_shape21_model(
+            default_model_for_mesh_workflow_mode(MeshWorkflowMode::TextToMesh)
+        ));
+    }
 
     fn input<'a>(model: &'a str, family: &'a str) -> GenerationProfileInput<'a> {
         GenerationProfileInput {

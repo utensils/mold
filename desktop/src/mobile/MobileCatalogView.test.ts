@@ -1596,6 +1596,123 @@ describe("MobileCatalogView", () => {
     expect(huggingFaceChip().attributes("aria-pressed")).toBe("true");
   });
 
+  it("keeps only the shelf and the search in the scroll, and counts what the sheet hides", async () => {
+    vi.useFakeTimers();
+    wrapper = mountCatalog();
+    await vi.waitFor(() => expect(searchCatalog).toHaveBeenCalledTimes(1));
+
+    // Six narrowing controls used to stack above the results and reflow the
+    // list every time the shelf changed. They live in one sheet now.
+    const sheet = wrapper.get("[data-test='mobile-catalog-filters']");
+    expect(sheet.classes()).not.toContain("is-open");
+    expect(sheet.find(".mobile-catalog-sources").exists()).toBe(true);
+    expect(sheet.find("[data-test='mobile-catalog-kind-chips']").exists()).toBe(true);
+    // Which machine you are browsing went with them, out of the page header.
+    expect(sheet.find(".mobile-catalog-host-picker").exists()).toBe(true);
+    expect(wrapper.find(".mobile-catalog-header .mobile-catalog-host-picker").exists()).toBe(false);
+
+    const chip = wrapper.get("[data-test='mobile-catalog-filters-open']");
+    expect(chip.text()).toBe("Filters");
+    await chip.trigger("click");
+    expect(wrapper.get("[data-test='mobile-catalog-filters']").classes()).toContain("is-open");
+
+    await sheet
+      .findAll(".mobile-catalog-sources button")
+      .find((button) => button.text() === "HuggingFace")!
+      .trigger("click");
+    await vi.advanceTimersByTimeAsync(400);
+    // The chip says what it is standing in for; the shelf itself is not a filter.
+    expect(wrapper.get("[data-test='mobile-catalog-filters-open']").text()).toBe("Filters · 1");
+
+    await wrapper.get("[data-test='mobile-catalog-filters-reset']").trigger("click");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(wrapper.get("[data-test='mobile-catalog-filters-open']").text()).toBe("Filters");
+  });
+
+  it("says a ready-to-use style in plain words, with the machine that has it", async () => {
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-catalog-segment-installed']").trigger("click");
+    await flushPromises();
+
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("installed:q8"))!;
+
+    // The friendly name leads, the way StyleMenu already names a style; the
+    // runnable id follows in mono because it is the technical truth.
+    expect(card.get(".mobile-catalog-card-title").text()).toBe("A test model");
+    expect(card.get("[data-test='mobile-catalog-card-id']").text()).toBe("installed:q8");
+    // Family and weight are what it IS; the machine is where it lives.
+    expect(card.get(".mobile-catalog-card-meta").text()).toContain("FLUX");
+    expect(card.get(".mobile-catalog-card-meta").text()).toContain("12");
+    expect(card.get(".mobile-catalog-card-hosts").text()).toBe("Studio");
+
+    // On this shelf every row is installed, so saying so on each one is noise,
+    // and the kind badge repeats what the row already reads as.
+    expect(card.find(".mobile-catalog-installed").exists()).toBe(false);
+    expect(card.find("[data-test='model-kind-badge']").exists()).toBe(false);
+    expect(card.text()).not.toContain("SIZE");
+  });
+
+  it("names a Browse more row by its model name, never by its marketing copy", async () => {
+    // A live catalog description is up to 1,200 characters of prose. On the
+    // shelf whose whole job is recognising a model you have never seen, the
+    // title must be the model's own name.
+    vi.useFakeTimers();
+    const prose =
+      "A photoreal checkpoint trained on 4 million curated portraits for cinematic " +
+      "lighting, shallow depth of field, and skin detail that holds up at 2x upscale.";
+    searchCatalog.mockResolvedValue(
+      searchResponse([entry("Portrait Base", { description: prose })]),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("Portrait Base"))!;
+    expect(card.get(".mobile-catalog-card-title").text()).toBe("Portrait Base");
+    expect(card.text()).not.toContain("cinematic");
+
+    // What the row SAYS is what VoiceOver announces and what search matches.
+    expect(card.get(".mobile-catalog-card-open").attributes("aria-label")).toContain(
+      "Portrait Base",
+    );
+    await wrapper.get("[data-test='mobile-catalog-search']").setValue("Portrait Base");
+    await vi.advanceTimersByTimeAsync(400);
+    await flushPromises();
+    expect(wrapper.text()).toContain("Portrait Base");
+  });
+
+  it("finds a ready-to-use style by the friendly name it shows", async () => {
+    vi.useFakeTimers();
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-catalog-segment-installed']").trigger("click");
+    await flushPromises();
+
+    // The row reads "A test model"; typing that must not empty the list.
+    await wrapper.get("[data-test='mobile-catalog-search']").setValue("A test model");
+    await vi.advanceTimersByTimeAsync(400);
+    await flushPromises();
+    expect(wrapper.findAll("[data-test='mobile-catalog-card']")).toHaveLength(1);
+    expect(wrapper.get(".mobile-catalog-card-title").text()).toBe("A test model");
+  });
+
+  it("keeps the kind badge and the Pull action on the Browse more shelf", async () => {
+    searchCatalog.mockResolvedValue(searchResponse([entry("Portrait Base", { kind: "lora" })]));
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("Portrait Base"))!;
+    // Browsing, the kind is the thing you are choosing between.
+    expect(card.get("[data-test='model-kind-badge']").text()).toBe("LoRA");
+    expect(card.find(".mobile-catalog-pull").exists()).toBe(true);
+  });
+
   it("labels every card with a friendly model kind and explicitly marks NSFW entries", async () => {
     searchCatalog.mockResolvedValue(
       searchResponse([

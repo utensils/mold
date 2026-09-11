@@ -15,7 +15,10 @@ and the shipped shared components are authoritative where a mock differs.
   theme token map, shell anatomy, the component table, and the contrast rules.
 - **`mold-studio-web.dc.html`**, **`mold-studio-iphone.dc.html`** — the web
   and phone references. iOS was accepted complete after #1639; Android shares
-  those redesigned screens. Web presentation and Android platform acceptance
+  those redesigned screens. The five items the phone redesign deferred —
+  per-screen large titles, the Queue running-job card, the Styles filter
+  consolidation, Machines cards, and shared-panel touch density — shipped in
+  #1685; see [the mobile redesign plan](mobile-redesign-plan.md). Web presentation and Android platform acceptance
   continue in [the web/Android completion plan](web-android-redesign-plan.md).
 - **`mold-tokens.css`** — the token vocabulary the mocks are written in.
   `ui/tokens.css` is the shipped copy, with one complete map per theme.

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import type { FleetActiveWork } from "@studio/api/activity";
@@ -109,6 +111,35 @@ describe("LiveActivityList swipe actions", () => {
     );
     expect(wrapper.get(".live-activity-surface").classes()).toContain(
       "live-activity-surface",
+    );
+  });
+
+  it("gives a finger the feedback it used to reserve for a pointer", () => {
+    // A touch device never hovers, so the row's only press feedback was a
+    // hover rule that could not fire — and on iOS a sticky :hover then left
+    // the last-tapped row lit.
+    const source = readFileSync(
+      join(import.meta.dirname, "LiveActivityList.vue"),
+      "utf8",
+    );
+    const hover =
+      source.match(/@media \(hover: hover\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(hover).toContain(".live-activity-surface:is(button):hover");
+    expect(source).toMatch(/\.live-activity-surface:is\(button\):active\s*\{/);
+  });
+
+  it("bounds its surface and truncates its detail rather than widening the row", () => {
+    // Moved here from desktop/src/mobile/mobile.css.test.ts: the phone stopped
+    // using this list, and web's two consumers are what these bounds protect.
+    const source = readFileSync(
+      join(import.meta.dirname, "LiveActivityList.vue"),
+      "utf8",
+    );
+    expect(source).toMatch(
+      /\.live-activity-surface\s*\{[^}]*width:\s*100%\s*;[^}]*min-width:\s*0\s*;[^}]*box-sizing:\s*border-box\s*;/s,
+    );
+    expect(source).toMatch(
+      /\.live-activity-copy\s+span\s*\{[^}]*overflow:\s*hidden\s*;[^}]*text-overflow:\s*ellipsis\s*;[^}]*white-space:\s*nowrap\s*;/s,
     );
   });
 });

@@ -115,12 +115,33 @@ pub(crate) fn col_width(
 /// average rate across the window. This avoids the wild oscillation that
 /// occurs when indicatif's built-in estimator sees zero progress between
 /// coarse SSE events.
-struct SmoothedRate {
+pub(crate) struct SmoothedRate {
     samples: VecDeque<(Instant, u64)>,
     max_samples: usize,
 }
 
+/// Sample window every download surface shares, so the progress bars the pull
+/// spinner draws and the lines `mold downloads watch` prints smooth the same
+/// way over the same number of coarse SSE frames.
+const DOWNLOAD_RATE_SAMPLES: usize = 8;
+
 impl SmoothedRate {
+    /// A window sized for download events.
+    pub(crate) fn for_downloads() -> Self {
+        Self::new(DOWNLOAD_RATE_SAMPLES)
+    }
+
+    /// This window's transfer speed, ready to print.
+    pub(crate) fn speed_label(&self) -> String {
+        format_speed(self.rate_bps())
+    }
+
+    /// The time remaining at this window's speed, ready to print. `--` when
+    /// there is not enough movement yet to estimate one.
+    pub(crate) fn eta_label(&self, total: u64) -> String {
+        format_eta(self.eta_secs(total))
+    }
+
     fn new(max_samples: usize) -> Self {
         Self {
             samples: VecDeque::with_capacity(max_samples + 1),
@@ -128,7 +149,7 @@ impl SmoothedRate {
         }
     }
 
-    fn record(&mut self, position: u64) {
+    pub(crate) fn record(&mut self, position: u64) {
         let now = Instant::now();
         self.samples.push_back((now, position));
         while self.samples.len() > self.max_samples {
@@ -360,7 +381,7 @@ pub(crate) async fn render_progress(
                     );
                     b.set_message(download_label(&filename, file_index, total_files));
                     b.enable_steady_tick(Duration::from_millis(100));
-                    (b, SmoothedRate::new(8))
+                    (b, SmoothedRate::for_downloads())
                 });
                 rate.record(bytes_downloaded);
                 bar.set_prefix(format!(
