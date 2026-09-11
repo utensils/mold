@@ -386,6 +386,16 @@ impl Mistral3Encoder {
         })
     }
 
+    /// Whether this shell was built for `device` at `dtype`.
+    ///
+    /// A retained encoder is keyed on both, because a later request may pin
+    /// the conditioner to a different device (`--device-text-encoders cpu`),
+    /// which also changes the dtype it runs at — and a parked prefix built at
+    /// BF16 on the GPU is not the checkpoint a CPU F32 encode wants.
+    pub(crate) fn matches_placement(&self, device: &Device, dtype: DType) -> bool {
+        self.dtype == dtype && self.device.same_device(device)
+    }
+
     /// Whether this encoder is holding its prefix in host RAM.
     pub(crate) fn is_parked(&self) -> bool {
         self.parked.is_some()

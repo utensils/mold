@@ -1635,6 +1635,14 @@ impl Flux2Engine {
                 // RAM from the previous request. `dev_text_encoder` is what
                 // makes that possible: the shell is cheap (paths, tokenizer,
                 // the resolved namespace) and what it OWNS is the park.
+                // A shell built for a different placement is not reusable:
+                // a prefix parked at BF16 on the GPU is not the checkpoint a
+                // CPU F32 encode wants.
+                if self.dev_text_encoder.as_ref().is_some_and(|encoder| {
+                    !encoder.matches_placement(&encoder_device, encoder_dtype)
+                }) {
+                    self.dev_text_encoder = None;
+                }
                 if self.dev_text_encoder.is_none() {
                     let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
                     self.dev_text_encoder = Some(encoders::mistral3::Mistral3Encoder::load(
