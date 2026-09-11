@@ -1,6 +1,8 @@
 //! Unit tests for the resources module.
 
-use crate::resources::{nonzero_process_vram, ResourceBroadcaster, TelemetryTarget};
+use crate::resources::{
+    attribute_used_ram, nonzero_process_vram, ResourceBroadcaster, TelemetryTarget,
+};
 use mold_core::{GpuBackend, GpuSnapshot, RamSnapshot, ResourceSnapshot};
 use mold_inference::device::CudaDeviceKind;
 
@@ -199,11 +201,14 @@ fn ram_snapshot_satisfies_invariants() {
         ram.used,
         ram.total
     );
+    // Deliberately NOT `used_by_mold <= used`: RSS and `total - MemAvailable`
+    // are computed on different bases, so a process holding mmap'd weights
+    // legitimately exceeds `used`. See `attribute_used_ram`.
     assert!(
-        ram.used_by_mold <= ram.used,
-        "used_by_mold ({}) must be <= used ({})",
+        ram.used_by_mold <= ram.total,
+        "used_by_mold ({}) must be <= total ({})",
         ram.used_by_mold,
-        ram.used
+        ram.total
     );
     assert_eq!(
         ram.used_by_other,
@@ -614,4 +619,36 @@ fn metal_policy_receives_the_shared_host_observation_without_estimated_fallback(
             expected
         );
     }
+}
+
+/// The pair the watchdog exists to measure, and the one the clamp destroyed.
+///
+/// On Linux sysinfo's `used` is `total - MemAvailable`, while `/proc/self/statm`
+/// counts clean file-backed resident pages in RSS that `MemAvailable` reports
+/// as available. A process holding mmap'd GGUF weights therefore has an RSS
+/// LARGER than `used` as a matter of course — not as a pathology — so clamping
+/// `used_by_mold` by `used` reported ~0 RSS across a multi-GB mmap and sent
+/// `used_by_other` to the whole machine.
+#[test]
+fn mmapped_weights_do_not_shrink_this_processs_own_attribution() {
+    let used = 8 << 30;
+    let rss = 40u64 << 30;
+    let (used_by_mold, used_by_other) = attribute_used_ram(used, rss);
+    assert_eq!(
+        used_by_mold, rss,
+        "the RSS probe must survive intact; it is the whole measurement"
+    );
+    // The two figures are on different bases, so "everything else" is simply
+    // not derivable here. Zero is the honest floor, not an attribution.
+    assert_eq!(used_by_other, 0);
+}
+
+/// And the ordinary case still splits `used` the way it always did.
+#[test]
+fn a_resident_set_inside_used_still_splits_it() {
+    let used = 32 << 30;
+    let rss = 12 << 30;
+    let (used_by_mold, used_by_other) = attribute_used_ram(used, rss);
+    assert_eq!(used_by_mold, rss);
+    assert_eq!(used_by_other, 20 << 30);
 }

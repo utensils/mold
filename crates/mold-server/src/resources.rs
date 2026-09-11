@@ -759,6 +759,24 @@ pub(crate) fn ram_snapshot_from_system() -> RamSnapshot {
     })
 }
 
+/// Split `used` between this process and everything else.
+///
+/// `used_by_mold` is the measured RSS, deliberately NOT clamped by `used`.
+/// The two are computed on different bases: on Linux sysinfo reports
+/// `used = total - MemAvailable`, while `/proc/self/statm`'s resident field
+/// counts clean file-backed pages that `MemAvailable` simultaneously counts
+/// as available. A process holding mmap'd GGUF weights therefore has an RSS
+/// larger than `used` routinely rather than exceptionally, and clamping made
+/// the one figure the memory watchdog reads — `used_by_mold`, sampled as
+/// `rss_before`/`rss_after` around a load — report ~0 across a multi-GB mmap.
+///
+/// `used_by_other` saturates to zero in that case. With the two figures on
+/// different bases the rest of the machine is not derivable from them, and a
+/// floor of zero is the honest answer; nothing reads it for a decision.
+pub(crate) fn attribute_used_ram(used: u64, rss: u64) -> (u64, u64) {
+    (rss, used.saturating_sub(rss))
+}
+
 pub(crate) fn ram_snapshot_from_system_with_available(
     sample_available: impl FnOnce(&System) -> Option<u64>,
 ) -> RamSnapshot {
@@ -773,8 +791,7 @@ pub(crate) fn ram_snapshot_from_system_with_available(
             sample_available(&sys),
         )
     };
-    let used_by_mold = process_rss_bytes().min(used);
-    let used_by_other = used.saturating_sub(used_by_mold);
+    let (used_by_mold, used_by_other) = attribute_used_ram(used, process_rss_bytes());
     RamSnapshot {
         total,
         used,
