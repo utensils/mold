@@ -142,6 +142,38 @@ fn gallery_authority_status(output_dir: Option<&std::path::Path>, json: bool) ->
     if status.torn_log_tail {
         println!("  torn log tail: yes — start `mold serve` once to resolve it");
     }
+    // A home where both formats were written carries TWO indexes, and which
+    // one is ahead decides whether a downgrade is safe at all. Reporting only
+    // the active store hid exactly the divergence the switch exists to manage.
+    for (label, facts) in [
+        ("version-2 store", status.legacy_store),
+        ("version-3 store", status.log_store),
+    ] {
+        let Some(facts) = facts else { continue };
+        println!(
+            "  other {label}: version {}, generation {}",
+            facts
+                .checkpoint_version
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "unreadable".into()),
+            facts
+                .generation
+                .map(|g| g.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+        );
+    }
+    if let (Some(legacy), Some(active)) = (
+        status.legacy_store.and_then(|facts| facts.generation),
+        status.generation,
+    ) {
+        if legacy > active {
+            println!(
+                "  the version-2 store is AHEAD (generation {legacy} against {active}) — an \
+                 older binary has published here since the upgrade. `downgrade` will refuse \
+                 rather than discard those prints."
+            );
+        }
+    }
     if status.marker_version == Some(3) || status.checkpoint_version == Some(3) {
         println!(
             "  a mold older than 0.29 cannot publish against this store; \

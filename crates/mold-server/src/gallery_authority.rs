@@ -1203,6 +1203,37 @@ pub fn downgrade_to_legacy_storage(root: &Path) -> anyhow::Result<DowngradeOutco
     // place (v3 bytes under the `-v2` name, the production incident), and a
     // proper v3 store in its own directory.
     let target = legacy_authority_dir(root);
+
+    // The v2 store is SHARED STATE with whatever older binary has been using
+    // this home, and the whole point of leaving it intact was that it might
+    // still be in use. On a home where both formats were written it can be
+    // AHEAD of the v3 one, and folding the v3 replay over it would discard
+    // every print the older binary published since the upgrade and walk the
+    // generation backwards. Every other checkpoint write in this file passes
+    // the `existing <= generation` guard in `write_checkpoint_envelope`; this
+    // one wrote the three copies with `atomic_write_bytes` directly and so
+    // bypassed it entirely.
+    //
+    // Refuse rather than merge: the two indexes describe different sets of
+    // prints and nothing here can know which membership the operator wants.
+    if target != authority_dir(root) {
+        if let Ok(existing) = read_checkpoint_at(&target.join(CHECKPOINT_FILE)) {
+            ensure!(
+                existing.generation <= generation,
+                "the version-2 gallery archive authority in {} is at generation {}, AHEAD of the \
+                 version-3 store's {}. An older binary has published to this home since the \
+                 upgrade, and downgrading would discard those prints. Nothing has been changed. \
+                 Decide which store is authoritative: to keep the version-2 one, stop every \
+                 writer and remove {}; to keep the version-3 one, move the version-2 store aside \
+                 first.",
+                target.display(),
+                existing.generation,
+                generation,
+                authority_dir_v3(root).display(),
+            );
+        }
+    }
+
     fs::create_dir_all(&target)?;
     let mut legacy = snapshot.clone();
     legacy.version = LEGACY_STORAGE_VERSION;
@@ -1290,13 +1321,51 @@ pub struct AuthorityStorageStatus {
     pub log_bytes: u64,
     pub pending_mutation: bool,
     pub torn_log_tail: bool,
+    /// The version-2 store, when one exists and is not the active one.
+    ///
+    /// The divergence this whole switch is about is invisible if the status
+    /// command only describes whichever store happens to be live: a home where
+    /// both formats were written has TWO indexes, and which one is ahead is
+    /// precisely the question an operator deciding whether to downgrade needs
+    /// answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_store: Option<AuthorityStoreFacts>,
+    /// The version-3 store, when one exists and is not the active one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_store: Option<AuthorityStoreFacts>,
+}
+
+/// One store's own facts, independent of which one is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AuthorityStoreFacts {
+    pub checkpoint_version: Option<u32>,
+    pub generation: Option<u64>,
+}
+
+/// Read one store directory's facts without resolving which is active.
+fn store_facts(dir: &Path) -> Option<AuthorityStoreFacts> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let checkpoint = read_checkpoint_at(&dir.join(CHECKPOINT_FILE)).ok();
+    Some(AuthorityStoreFacts {
+        checkpoint_version: checkpoint.as_ref().map(|snapshot| snapshot.version),
+        generation: checkpoint.as_ref().map(|snapshot| snapshot.generation),
+    })
 }
 
 /// Describe the store without touching it.
 pub fn storage_status(root: &Path) -> anyhow::Result<AuthorityStorageStatus> {
     let guard = crate::batch_transaction::acquire_gallery_bookkeeping_lock(root)?;
     let root = guard.canonical_root();
-    if !authority_dir(root).is_dir() {
+    let active = authority_dir(root);
+    let legacy_store = (legacy_authority_dir(root) != active)
+        .then(|| store_facts(&legacy_authority_dir(root)))
+        .flatten();
+    let log_store = (authority_dir_v3(root) != active)
+        .then(|| store_facts(&authority_dir_v3(root)))
+        .flatten();
+    if !active.is_dir() {
         return Ok(AuthorityStorageStatus {
             present: false,
             checkpoint_version: None,
@@ -1306,6 +1375,8 @@ pub fn storage_status(root: &Path) -> anyhow::Result<AuthorityStorageStatus> {
             log_bytes: 0,
             pending_mutation: false,
             torn_log_tail: false,
+            legacy_store,
+            log_store,
         });
     }
     let marker = read_marker(root).ok().flatten();
@@ -1326,6 +1397,8 @@ pub fn storage_status(root: &Path) -> anyhow::Result<AuthorityStorageStatus> {
         log_bytes: mutation_log_bytes(root),
         pending_mutation: marker.is_some_and(|marker| marker.pending.is_some()),
         torn_log_tail: scan.map(|scan| scan.discarded > 0).unwrap_or(false),
+        legacy_store,
+        log_store,
     })
 }
 
@@ -1933,6 +2006,47 @@ fn write_fresh_store_v3(
         &dir.join(MARKER_FILE),
         &MutationMarker {
             version: STORAGE_VERSION,
+            committed_generation: snapshot.generation,
+            pending: None,
+        },
+    )?;
+    sync_dir(&dir)?;
+
+    // An older binary sharing this home looks ONLY at the version-2 name. On
+    // a home upgraded from v2 it finds the frozen store the upgrade left
+    // behind, but a home initialized FRESH with the switch on has never had
+    // one — and `recover_storage` returning `Ok(None)` drops that binary into
+    // `load_committed_archive_index_legacy`, which re-derives a whole index
+    // by scanning the output directory. That is the path that silently
+    // resurrects deleted prints, and the two-directory design would otherwise
+    // make it reachable again for exactly this case.
+    //
+    // So lay down an authoritative, empty version-2 store beside the v3 one.
+    // An older binary then reads a real index that says "nothing published
+    // yet" and publishes forward from it, instead of inventing one from the
+    // filesystem.
+    let mut legacy = snapshot.clone();
+    legacy.version = LEGACY_STORAGE_VERSION;
+    let (legacy_envelope, _) = serialize_envelope_at(&legacy, LEGACY_STORAGE_VERSION)?;
+    write_fresh_store_v2(root, &legacy, &legacy_envelope)?;
+    Ok(())
+}
+
+/// Lay down a version-2 store in the version-2 directory.
+fn write_fresh_store_v2(
+    root: &Path,
+    snapshot: &AuthoritySnapshot,
+    envelope: &[u8],
+) -> anyhow::Result<()> {
+    let dir = legacy_authority_dir(root);
+    fs::create_dir_all(&dir)?;
+    atomic_write_bytes(&dir.join(CHECKPOINT_FILE), envelope)?;
+    atomic_write_bytes(&dir.join(BACKUP_CHECKPOINT_FILE), envelope)?;
+    atomic_write_bytes(&dir.join(PREVIOUS_CHECKPOINT_FILE), envelope)?;
+    atomic_write_json(
+        &dir.join(MARKER_FILE),
+        &MutationMarker {
+            version: LEGACY_STORAGE_VERSION,
             committed_generation: snapshot.generation,
             pending: None,
         },
@@ -2744,12 +2858,16 @@ mod tests {
         }
     }
 
-    /// A home that opts in before it has any store at all still leaves the
-    /// version-2 name free for an older mold.
+    /// A home that opts in before it has any store at all still leaves an
+    /// authoritative version-2 store for an older mold.
     ///
-    /// The upgrade path was covered; this one was not, and it wrote version-3
-    /// bytes under the `-v2` name — reproducing the incident on a brand-new
-    /// home, where there is not even a v2 store to roll back to.
+    /// Two separate hazards meet here. Writing version-3 bytes under the
+    /// `-v2` name reproduced the incident on a brand-new home; but leaving
+    /// that name EMPTY is its own bug, because an older binary that finds no
+    /// store falls into `load_committed_archive_index_legacy` and re-derives
+    /// an index by scanning the output directory — the path that silently
+    /// resurrects deleted prints. So the fresh v3 store is accompanied by a
+    /// real, empty version-2 one.
     #[test]
     fn a_fresh_v3_home_leaves_the_v2_name_free() {
         let dir = tempfile::tempdir().unwrap();
@@ -2778,13 +2896,26 @@ mod tests {
         assert_eq!(read_mutation_log(dir.path(), 0).unwrap().records.len(), 1);
         assert_eq!(generation, 1);
 
-        // And the name an older mold reads holds nothing it would refuse.
+        // And the name an older mold reads holds a real version-2 store it
+        // can both read and publish forward from — never a version it cannot
+        // read, and never nothing at all.
         let v2 = legacy_authority_dir(dir.path());
-        assert!(
-            !v2.join(CHECKPOINT_FILE).exists(),
+        let legacy = read_checkpoint_at(&v2.join(CHECKPOINT_FILE))
+            .expect("an older mold must find an authoritative store, not an empty directory");
+        assert_eq!(
+            legacy.version, LEGACY_STORAGE_VERSION,
             "an older mold must not find a version it cannot read at the v2 path"
         );
-        assert!(!v2.join(MARKER_FILE).exists());
+        assert!(
+            legacy.index.quarantined_names.is_empty(),
+            "and it starts empty rather than inventing membership"
+        );
+        let marker = read_checkpoint_at(&v2.join(BACKUP_CHECKPOINT_FILE)).unwrap();
+        assert_eq!(marker.version, LEGACY_STORAGE_VERSION);
+        assert!(
+            v2.join(MARKER_FILE).exists(),
+            "with its own generation marker, so recovery does not treat it as absent"
+        );
     }
 
     /// The shape the production incident actually left behind, and the one
@@ -2880,6 +3011,154 @@ mod tests {
         assert_eq!(again.generation, generation);
         assert_eq!(again.replayed_records, 0);
         assert!(again.already_legacy);
+    }
+
+    /// The documented remedy must not destroy the half it was called to
+    /// rescue.
+    ///
+    /// On a home where both formats were written — a 0.29 binary publishing
+    /// v3 while an older one kept publishing v2 — the two stores diverge, and
+    /// the v2 one can be AHEAD. `downgrade` replayed the v3 log straight over
+    /// all three v2 checkpoint copies with `atomic_write_bytes`, which bypasses
+    /// the `existing <= generation` guard every other checkpoint write goes
+    /// through, so it silently discarded the newer v2 prints and walked the
+    /// generation backwards.
+    /// The tooling built to manage the divergence has to be able to SEE it.
+    ///
+    /// `storage_status` described only whichever store was active, so on a
+    /// home where both formats were written — the one case the switch exists
+    /// to manage — an operator could not tell that a second index existed at
+    /// all, let alone which one was ahead.
+    #[test]
+    fn storage_status_reports_both_stores_and_their_generations() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
+        let mut index = initial.index;
+        let v3_generation = publish(dir.path(), &guard, &mut index, initial.generation, "v3.png");
+        drop(guard);
+
+        // An older binary publishing into the version-2 store beside it.
+        let v2_dir = legacy_authority_dir(dir.path());
+        let ahead = v3_generation + 7;
+        let mut v2_snapshot = empty_snapshot(ahead);
+        v2_snapshot.version = LEGACY_STORAGE_VERSION;
+        let (envelope, _) = serialize_envelope_at(&v2_snapshot, LEGACY_STORAGE_VERSION).unwrap();
+        atomic_write_bytes(&v2_dir.join(CHECKPOINT_FILE), &envelope).unwrap();
+        forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
+
+        let status = storage_status(dir.path()).unwrap();
+        // The active store is the v3 one.
+        assert_eq!(status.checkpoint_version, Some(STORAGE_VERSION));
+        assert_eq!(status.generation, Some(v3_generation));
+        // And the other one is reported rather than hidden.
+        let legacy = status
+            .legacy_store
+            .expect("the version-2 store beside the active one must be reported");
+        assert_eq!(legacy.checkpoint_version, Some(LEGACY_STORAGE_VERSION));
+        assert_eq!(legacy.generation, Some(ahead));
+        assert!(
+            status.log_store.is_none(),
+            "the ACTIVE store is not repeated as an 'other' one"
+        );
+    }
+
+    #[test]
+    fn downgrade_refuses_when_the_v2_store_is_ahead_of_the_v3_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
+        let mut index = initial.index;
+        let v3_generation = publish(dir.path(), &guard, &mut index, initial.generation, "v3.png");
+        drop(guard);
+
+        // An older binary kept publishing into the version-2 store, which the
+        // upgrade deliberately left intact — and got further than the v3 one.
+        let v2_dir = legacy_authority_dir(dir.path());
+        fs::create_dir_all(&v2_dir).unwrap();
+        let ahead = v3_generation + 50;
+        let mut v2_snapshot = empty_snapshot(ahead);
+        v2_snapshot.version = LEGACY_STORAGE_VERSION;
+        v2_snapshot
+            .index
+            .quarantined_names
+            .insert("only-in-v2.png".into());
+        let (envelope, _) = serialize_envelope_at(&v2_snapshot, LEGACY_STORAGE_VERSION).unwrap();
+        atomic_write_bytes(&v2_dir.join(CHECKPOINT_FILE), &envelope).unwrap();
+        atomic_write_bytes(&v2_dir.join(BACKUP_CHECKPOINT_FILE), &envelope).unwrap();
+        atomic_write_json(
+            &v2_dir.join(MARKER_FILE),
+            &MutationMarker {
+                version: LEGACY_STORAGE_VERSION,
+                committed_generation: ahead,
+                pending: None,
+            },
+        )
+        .unwrap();
+        forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
+
+        let error = downgrade_to_legacy_storage(dir.path())
+            .expect_err("a downgrade that would lose prints must refuse");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&ahead.to_string()) && message.contains(&v3_generation.to_string()),
+            "the refusal must name BOTH generations so an operator can tell              which store is ahead: {message}"
+        );
+
+        // And it must have changed nothing: the v2 store still holds its own
+        // print at its own generation.
+        let stored = read_checkpoint_at(&v2_dir.join(CHECKPOINT_FILE)).unwrap();
+        assert_eq!(stored.generation, ahead);
+        assert!(stored.index.quarantined_names.contains("only-in-v2.png"));
+        assert!(
+            authority_dir_v3(dir.path()).is_dir(),
+            "the v3 store must survive a refused downgrade too"
+        );
+    }
+
+    /// A v2 store BEHIND the v3 one is the ordinary case the command exists
+    /// for, and it still folds forward.
+    #[test]
+    fn downgrade_still_folds_forward_over_an_older_v2_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
+        let mut index = initial.index;
+        let mut generation = initial.generation;
+        for step in 0..3_u64 {
+            generation = publish(
+                dir.path(),
+                &guard,
+                &mut index,
+                generation,
+                &format!("p{step}.png"),
+            );
+        }
+        drop(guard);
+
+        // A stale v2 store, strictly behind.
+        let v2_dir = legacy_authority_dir(dir.path());
+        fs::create_dir_all(&v2_dir).unwrap();
+        let mut stale = empty_snapshot(0);
+        stale.version = LEGACY_STORAGE_VERSION;
+        let (envelope, _) = serialize_envelope_at(&stale, LEGACY_STORAGE_VERSION).unwrap();
+        atomic_write_bytes(&v2_dir.join(CHECKPOINT_FILE), &envelope).unwrap();
+        forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
+
+        let outcome = downgrade_to_legacy_storage(dir.path()).unwrap();
+        assert_eq!(outcome.generation, generation);
+        let stored = read_checkpoint_at(&v2_dir.join(CHECKPOINT_FILE)).unwrap();
+        assert_eq!(stored.version, LEGACY_STORAGE_VERSION);
+        assert_eq!(stored.generation, generation);
     }
 
     #[test]
