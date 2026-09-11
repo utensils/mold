@@ -514,37 +514,41 @@ pub struct ExecutionSemanticConfig {
     /// rule, which is every family but these two.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantized_activation_dtype: Option<SemanticQuantizedActivationDType>,
-    /// Whether this host's BUDGET permits an undistilled FLUX.2 base render to
-    /// issue its two classifier-free guidance branches as one batch-2 forward.
+    /// Whether this render issues its two classifier-free guidance branches as
+    /// one batch-2 forward.
     ///
-    /// `None` outside flux2. Resolved through the engine's OWN gate —
-    /// `mold_inference::flux2::flux2_cfg_batching`, the same pure function
-    /// `flux2::pipeline::resolve_cfg_batching` calls — charged against the
-    /// card's TOTAL VRAM rather than what is free at this instant, which is
-    /// precisely why `DeviceFact` carries the total: the free figure moves
-    /// between planning and execution, so charging it would let the plan and
-    /// the render disagree about which execution this is.
+    /// `None` outside flux2. Resolved through the engine's OWN gate and the
+    /// engine's OWN inputs — `mold_inference::flux2::flux2_cfg_batching`, the
+    /// pure function `flux2::pipeline::resolve_cfg_batching` calls, charged
+    /// with the activation term that function charges
+    /// (`flux2_cfg_plan_activation_bytes`, which IS
+    /// `flux2_activation_bytes_for`) — against the card's TOTAL VRAM rather
+    /// than what is free at this instant. That total is precisely why
+    /// `DeviceFact` carries it: the free figure moves between planning and
+    /// execution, so charging it would let the plan and the render disagree
+    /// about which execution this is.
     ///
-    /// This records the BUDGET decision and nothing else. The engine applies
-    /// three further gates that are properties of the REQUEST, not of the
-    /// host, and none of them is answerable here: the tier test
-    /// (`validation::is_flux2_base_model`) and `guidance > 1.0`, which decide
-    /// whether a CFG branch exists at all, and the equal-token-length test in
-    /// `flux2_cfg_batching_for`, which falls back to two forwards when the
-    /// prompt and the negative prompt encode to different widths — a fact only
-    /// the encoder has, at render time.
+    /// `Batched` is reserved for the render that actually batches. The engine
+    /// applies three gates on top of the budget, and the plan asks all three:
+    /// the tier test (`validation::is_flux2_base_model`) and `guidance > 1`
+    /// decide whether a CFG branch exists at all, and both are answerable
+    /// here — `PlanContext` carries the model name and the request — so a
+    /// [dev], a distilled [klein], or an unguided base render records
+    /// `Sequential` and does NOT vary with the card. A value that moved with
+    /// the card's total for a render that issues one forward per step would
+    /// split its equivalence class and its learned-timing bucket across two
+    /// machines that execute identically, which is the same defect as the
+    /// collision, in the mirror.
     ///
-    /// That residue is real and deliberately not papered over: no fingerprint
-    /// input carries a prompt. The equivalence descriptor holds no request
-    /// text, and the learned-timing key's shape bucket is
-    /// `{w}x{h}:s{steps}:f{frames}` (`gpu_pool::scheduling_shape_bucket`), so
-    /// two base renders on one host whose prompts happen to tokenize to
-    /// different lengths still share a class. What this field buys is the
-    /// thing that was actually wrong: a card that CAN batch and a card that
-    /// cannot no longer share one. The length residue closes on its own if
-    /// Klein prompts are padded to a fixed encoder width, at which point the
-    /// gate is always true and the budget is the whole answer; nothing here
-    /// changes either way.
+    /// The third gate — `flux2_cfg_batching_for`'s equal-token-length test —
+    /// is the one the plan genuinely cannot ask, and since Klein prompts are
+    /// truncated and right-padded to `FLUX2_KLEIN_MAX_LENGTH` it is always
+    /// true anyway; it survives in the engine as a structural guard on the
+    /// concatenation. It is also the one the fingerprint could not have
+    /// carried: no fingerprint input holds a prompt, since the equivalence
+    /// descriptor has no request text and the learned-timing key's shape
+    /// bucket is `{w}x{h}:s{steps}:f{frames}`
+    /// (`gpu_pool::scheduling_shape_bucket`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flux2_cfg_batching: Option<SemanticFlux2CfgBatching>,
     pub vae_tiling: SemanticVaeTiling,
@@ -3824,11 +3828,11 @@ fn build_plan(
         context.pending_artifacts,
         flux2_cfg_budget(
             context.family,
+            context.model,
             context.request,
             device,
             context.artifacts,
             context.pending_artifacts,
-            context.engine_config.attention_backend,
         ),
     ) {
         Ok(environment) => environment,
@@ -4264,57 +4268,71 @@ fn flux2_transformer_weight_bytes(
     measured.then_some(total)
 }
 
-/// The budget the FLUX.2 CFG gate is charged with for this plan.
+/// The budget the FLUX.2 CFG gate is charged with for this plan, or the
+/// default — which resolves `Sequential` — for a render that cannot batch.
 ///
-/// Every input is the one the engine itself uses, read from where the planner
-/// can see it:
+/// Every input is the ENGINE's, read from where the planner can see it:
 ///
 /// * the transformer's bytes, summed exactly as the engine sums them;
-/// * a batch-2 denoise workspace from `device`'s FLUX activation budget — the
-///   same estimator [`crate::memory_preflight`] prices every other FLUX render
-///   with, asked for the doubled batch a batched CFG step allocates;
+/// * the batch-2 denoise workspace from
+///   `mold_inference::flux2::flux2_cfg_plan_activation_bytes`, which is the
+///   engine's own `flux2_activation_bytes_for` at the engine's own arguments.
+///   Charging a DIFFERENT estimator here was the first version's defect: the
+///   gate is a comparison, so sharing the comparison without sharing its
+///   inputs still disagrees on every card whose total falls between the two
+///   answers, which is precisely the collision the field exists to prevent;
 /// * the card's total VRAM, which is why `DeviceFact` carries it.
 ///
-/// The head count is `Flux2Config::dev()`'s, the widest of the three published
-/// FLUX.2 configurations. Heads enter the estimate through the math-attention
-/// score tile and nowhere else, and the planner does not read checkpoint
-/// headers (a plan may be resolved before a byte has landed, and the
-/// equivalence path is forbidden from reading model bytes on the coordinator
-/// thread at all), so the widest is the conservative choice: it can only move
-/// a marginal card toward `Sequential`, which is the class it had before this
-/// field resolved anything. On a build whose flux attention resolves to flash
-/// the term is zero and the head count does not enter at all.
+/// The four refusals below are the renders that never issue a batched step,
+/// and each is the ENGINE's own test asked of the plan's own inputs:
+///
+/// * a family that is not flux2;
+/// * a device that is not CUDA — `resolve_cfg_batching` reads the total
+///   through a CUDA ordinal and answers `Sequential` for every other device
+///   location, so charging a Metal card's unified total would have the plan
+///   claim an execution the engine never runs;
+/// * a checkpoint that is not an undistilled [klein] base tier, by
+///   `mold_core::validation::is_flux2_base_model` — the same function
+///   `Flux2Engine::cfg_branch_prompt` asks — which is also what names the
+///   geometry the activation term is charged over;
+/// * `guidance` at or below 1, by the shared `engine::cfg_active`. That is
+///   the same question `cfg_branch_prompt`'s `req.guidance <= 1.0` asks, an
+///   epsilon apart: a guidance inside 1e-4 of 1 is CFG to the engine and no
+///   branch to this, which resolves `Sequential` — the conservative side, and
+///   a value no one types.
+///
+/// A render failing any of them records `Sequential` and therefore does not
+/// vary with the card, which matters as much as the batched case does: a
+/// [dev] or distilled [klein] print executes identically on a 24 GB and a
+/// 48 GB card, and a card-dependent value would split its equivalence class
+/// and its learned-timing bucket for nothing.
 fn flux2_cfg_budget(
     family: &str,
+    model: &str,
     request: &GenerateRequest,
     device: &DeviceFact,
     artifacts: &BTreeMap<ComponentRole, PathBuf>,
     pending_artifacts: &BTreeMap<PathBuf, PendingArtifactIdentity>,
-    attention_backend: mold_inference::attention::AttentionBackend,
 ) -> Flux2CfgBudget {
-    // CUDA is the only backend that can reach a batched step at all:
-    // `resolve_cfg_batching` reads the total through a CUDA ordinal and
-    // answers `Sequential` for every other device location, so charging a
-    // Metal card's unified total here would have the plan claim an execution
-    // the engine never runs.
-    if family != "flux2" || device.backend != GpuBackend::Cuda {
+    if family != "flux2"
+        || device.backend != GpuBackend::Cuda
+        || !mold_inference::engine::cfg_active(request.guidance)
+    {
         return Flux2CfgBudget::default();
     }
+    let Some(geometry) = mold_inference::flux2::flux2_base_tier_config(model) else {
+        return Flux2CfgBudget::default();
+    };
     let Some(transformer_bytes) = flux2_transformer_weight_bytes(artifacts, pending_artifacts)
     else {
         return Flux2CfgBudget::default();
     };
-    let hint = crate::memory_preflight::ActivationHint::from_request(request, family);
     Flux2CfgBudget {
         transformer_bytes,
-        activation_bytes_batch2: mold_inference::device::flux_activation_budget_bytes_for(
-            hint.width,
-            hint.height,
-            2,
-            hint.dtype_bytes,
-            hint.family,
-            mold_inference::flux2::Flux2Config::dev().num_heads as u64,
-            attention_backend,
+        activation_bytes_batch2: mold_inference::flux2::flux2_cfg_plan_activation_bytes(
+            &geometry,
+            request.width,
+            request.height,
         ),
         device_total_vram_bytes: device.total_vram_bytes,
     }
@@ -9284,32 +9302,41 @@ mod tests {
             (ComponentRole::Vae, root.path().join("vae.safetensors")),
         ]);
         let pending = BTreeMap::new();
-        let request = request(None);
+        let base = "test-flux2-klein-base-9b:q8";
+        let mut request = request(None);
+        request.guidance = 4.0;
         let card = &devices(&[24 * GIB])[0];
-        let backend = mold_inference::attention::AttentionBackend::Math;
 
-        let budget = flux2_cfg_budget("flux2", &request, card, &artifacts, &pending, backend);
+        let budget = flux2_cfg_budget("flux2", base, &request, card, &artifacts, &pending);
         assert_eq!(
             budget.transformer_bytes,
             9 * GIB + GIB / 2,
             "every transformer shard is charged, exactly as the engine sums its files"
         );
         assert_eq!(budget.device_total_vram_bytes, Some(24 * GIB));
-        assert!(budget.activation_bytes_batch2 > 0);
+        assert_eq!(
+            budget.activation_bytes_batch2,
+            mold_inference::flux2::flux2_cfg_plan_activation_bytes(
+                &mold_inference::flux2::flux2_base_tier_config(base).unwrap(),
+                request.width,
+                request.height,
+            ),
+            "the activation term is the engine's own, over this checkpoint's geometry"
+        );
 
-        // A card with no sampled total, a non-CUDA card, another family, and a
-        // checkpoint whose bytes cannot be measured each fall back to the
-        // budget that resolves `Sequential` — never to a guess.
+        // Everything that cannot batch is charged nothing at all, which
+        // resolves `Sequential` — never a guess, and never a value that then
+        // varies with the card.
         let mut unknown_total = card.clone();
         unknown_total.total_vram_bytes = None;
         assert_eq!(
             flux2_cfg_budget(
                 "flux2",
+                base,
                 &request,
                 &unknown_total,
                 &artifacts,
-                &pending,
-                backend,
+                &pending
             )
             .device_total_vram_bytes,
             None
@@ -9317,28 +9344,208 @@ mod tests {
         assert_eq!(
             flux2_cfg_budget(
                 "flux2",
+                base,
                 &request,
                 &metal_devices(&[24 * GIB])[0],
                 &artifacts,
                 &pending,
-                backend,
             ),
             Flux2CfgBudget::default(),
             "Metal never reaches a batched step, so it is charged no budget"
         );
         assert_eq!(
-            flux2_cfg_budget("flux", &request, card, &artifacts, &pending, backend),
+            flux2_cfg_budget("flux", base, &request, card, &artifacts, &pending),
             Flux2CfgBudget::default(),
+        );
+        for distilled in ["test-flux2-klein-9b:q8", "test-flux2-dev:bf16"] {
+            assert_eq!(
+                flux2_cfg_budget("flux2", distilled, &request, card, &artifacts, &pending),
+                Flux2CfgBudget::default(),
+                "{distilled} runs no CFG branch, so it is charged no budget"
+            );
+        }
+        let mut unguided = request.clone();
+        unguided.guidance = 1.0;
+        assert_eq!(
+            flux2_cfg_budget("flux2", base, &unguided, card, &artifacts, &pending),
+            Flux2CfgBudget::default(),
+            "guidance at 1 skips the branch entirely"
         );
         let absent = BTreeMap::from([(
             ComponentRole::Transformer,
             root.path().join("never-downloaded.gguf"),
         )]);
         assert_eq!(
-            flux2_cfg_budget("flux2", &request, card, &absent, &pending, backend),
+            flux2_cfg_budget("flux2", base, &request, card, &absent, &pending),
             Flux2CfgBudget::default(),
             "an unmeasurable checkpoint must not be charged the 64 MiB unknown-artifact stub"
         );
+    }
+
+    /// A flux2 plan against one klein-base checkpoint, on a card whose total
+    /// this caller chooses.
+    fn flux2_base_plan(
+        root: &Path,
+        model: &str,
+        transformer_bytes: u64,
+        guidance: f64,
+        canvas: (u32, u32),
+        device_total_bytes: u64,
+    ) -> ResolvedExecutionPlan {
+        let mut config = config(root, "flux2", None);
+        let entry = config.models.remove("test:q4").expect("fixture model");
+        config.models.insert(model.to_string(), entry);
+        let mut request = request(None);
+        request.model = model.to_string();
+        request.guidance = guidance;
+        request.width = canvas.0;
+        request.height = canvas.1;
+        let mut card = devices(&[transformer_bytes.saturating_add(48 * GIB)])[0].clone();
+        card.total_vram_bytes = Some(device_total_bytes);
+        resolve_execution_plans(&config, &request, &[card], false)
+            .expect("a flux2 base plan resolves")
+            .remove(0)
+    }
+
+    /// The plan and the engine must share the activation ESTIMATE, not merely
+    /// the comparator it is fed to.
+    ///
+    /// `flux2_cfg_batching` is a comparison, so two sides that agree on the
+    /// comparison and disagree on its inputs still disagree on every card
+    /// whose total falls between their two answers — and the whole point of
+    /// the field is that the plan names the execution that will run. The
+    /// engine charges `flux2_activation_bytes_for`, a token model; charging an
+    /// area model read ~1.45 GB at 1024² where the engine's token model read
+    /// ~1.36 GB, and the gap widens with the canvas — so a band of card totals
+    /// was recorded as the opposite execution.
+    ///
+    /// The assertion is the BOUNDARY rather than a sweep, because a sweep
+    /// coarse enough to be cheap steps straight over a band this narrow (the
+    /// first draft of this test did exactly that and passed against the wrong
+    /// estimator). The engine's own gate is bisected for the smallest card
+    /// total it will batch on, and the plan must flip at that exact byte: any
+    /// difference in the activation term at all moves the plan's boundary and
+    /// fails one of the two.
+    #[test]
+    fn the_plan_charges_the_engines_own_activation_model() {
+        let root = TempDir::new().unwrap();
+        let model = "test-flux2-klein-base-9b:q8";
+        let transformer_bytes = 9 * GIB;
+        sparse_file(&root.path().join("transformer-q4.gguf"), transformer_bytes);
+        sparse_file(&root.path().join("vae.safetensors"), GIB / 2);
+        sparse_file(&root.path().join("t5.safetensors"), GIB / 2);
+
+        let geometry = mold_inference::flux2::flux2_base_tier_config(model)
+            .expect("a klein-base name resolves its own transformer geometry");
+        let recorded = |canvas: (u32, u32), total: u64| {
+            flux2_base_plan(root.path(), model, transformer_bytes, 4.0, canvas, total)
+                .execution_environment
+                .semantic_config
+                .flux2_cfg_batching
+        };
+        for canvas in [(1024, 1024), (1536, 1536)] {
+            let activation = mold_inference::flux2::flux2_cfg_plan_activation_bytes(
+                &geometry, canvas.0, canvas.1,
+            );
+            let batches = |total: u64| {
+                matches!(
+                    mold_inference::flux2::flux2_cfg_batching(transformer_bytes, activation, total),
+                    mold_inference::flux2::Flux2CfgBatching::Batched
+                )
+            };
+            let (mut lo, mut hi) = (0u64, 64 * GIB);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if batches(mid) {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            let boundary = lo;
+            assert!(boundary > 0 && batches(boundary) && !batches(boundary - 1));
+
+            assert_eq!(
+                recorded(canvas, boundary),
+                Some(SemanticFlux2CfgBatching::Batched),
+                "{canvas:?} must batch at the engine's own smallest sufficient total"
+            );
+            assert_eq!(
+                recorded(canvas, boundary - 1),
+                Some(SemanticFlux2CfgBatching::Sequential),
+                "{canvas:?} must NOT batch one byte below it"
+            );
+            // And far from the boundary in both directions, so a plan that
+            // stopped charging a budget at all cannot pass.
+            assert_eq!(
+                recorded(canvas, 64 * GIB),
+                Some(SemanticFlux2CfgBatching::Batched)
+            );
+            assert_eq!(
+                recorded(canvas, 4 * GIB),
+                Some(SemanticFlux2CfgBatching::Sequential)
+            );
+        }
+    }
+
+    /// Only a guided, undistilled base render can batch — so only that render
+    /// may record a class that moves with the card.
+    ///
+    /// `Batched` is reserved for the case that batches. Everything else in the
+    /// family runs one forward per step and records `Sequential`, because a
+    /// value that varied with the card for a [dev] or a distilled [klein]
+    /// print would split its equivalence class and its learned-timing bucket
+    /// across two machines that execute identically.
+    #[test]
+    fn only_a_guided_undistilled_base_render_records_batched() {
+        let root = TempDir::new().unwrap();
+        let transformer_bytes = GIB;
+        sparse_file(&root.path().join("transformer-q4.gguf"), transformer_bytes);
+        sparse_file(&root.path().join("vae.safetensors"), GIB / 2);
+        sparse_file(&root.path().join("t5.safetensors"), GIB / 2);
+        let recorded = |model: &str, guidance: f64, total: u64| {
+            flux2_base_plan(
+                root.path(),
+                model,
+                transformer_bytes,
+                guidance,
+                (512, 512),
+                total,
+            )
+        };
+
+        assert_eq!(
+            recorded("test-flux2-klein-base:bf16", 4.0, 48 * GIB)
+                .execution_environment
+                .semantic_config
+                .flux2_cfg_batching,
+            Some(SemanticFlux2CfgBatching::Batched),
+            "a guided undistilled base render on a card with room IS the batched case"
+        );
+
+        // The three renders that never reach a CFG branch at all: guidance at
+        // or below 1, a distilled tier, and [dev]'s embedded guidance.
+        for (model, guidance) in [
+            ("test-flux2-klein-base:bf16", 1.0),
+            ("test-flux2-klein:bf16", 4.0),
+            ("test-flux2-dev:bf16", 4.0),
+        ] {
+            let small = recorded(model, guidance, 12 * GIB);
+            let large = recorded(model, guidance, 48 * GIB);
+            for plan in [&small, &large] {
+                assert_eq!(
+                    plan.execution_environment
+                        .semantic_config
+                        .flux2_cfg_batching,
+                    Some(SemanticFlux2CfgBatching::Sequential),
+                    "{model} at guidance {guidance} issues no batched step"
+                );
+            }
+            assert_eq!(
+                small.execution_equivalence_fingerprint, large.execution_equivalence_fingerprint,
+                "{model} executes identically on both cards and must share one class"
+            );
+        }
     }
 
     /// `MOLD_FLUX_KEEP_TRANSFORMER=0` is the one value that changes the

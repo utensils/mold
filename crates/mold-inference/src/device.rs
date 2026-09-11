@@ -1771,7 +1771,7 @@ pub const STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES: u64 = 1_000_000_000;
 /// Both families pack 2x2 patches of the 8x latent, so the grid is the canvas
 /// divided by 16 (BFL `sampling.py`'s `prepare`, and `flux2::sampling`'s
 /// `pack`).
-fn flux_token_count(width: u32, height: u32) -> u64 {
+pub(crate) fn flux_token_count(width: u32, height: u32) -> u64 {
     let grid_h = (u64::from(height) / 16).max(1);
     let grid_w = (u64::from(width) / 16).max(1);
     grid_h.saturating_mul(grid_w)

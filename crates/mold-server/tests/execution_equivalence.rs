@@ -518,10 +518,18 @@ fn every_frozen_semantic_field_and_runtime_input_is_differential() {
 /// `DeviceFact` carried a total, every host reported the same class.
 ///
 /// Only the total moves here: `available_vram_bytes` is held fixed precisely
-/// because it is the number this gate must NOT depend on.
+/// because it is the number this gate must NOT depend on. The fixture is
+/// renamed to a klein-base tier and guided past 1, because those are the two
+/// request-side gates a batched step also has to pass — an unguided or
+/// distilled render records `Sequential` on every card by design.
 #[test]
 fn the_flux2_cfg_class_follows_the_cards_total_vram() {
-    let (_root, config, request) = fixture();
+    let (_root, mut config, mut request) = fixture();
+    let model = "test-flux2-klein-base:bf16";
+    let entry = config.models.remove("test:q4").expect("fixture model");
+    config.models.insert(model.into(), entry);
+    request.model = model.into();
+    request.guidance = 4.0;
     let planned = |total: Option<u64>| {
         let mut card = device("cuda:0", GpuBackend::Cuda, Some((8, 6)));
         card.total_vram_bytes = total;
