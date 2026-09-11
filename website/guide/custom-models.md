@@ -112,7 +112,7 @@ caveat that these recipes come from upstream rather than from a mold test run.
 
 The web, desktop, and iPhone Models surfaces search Hugging Face and Civitai
 live. Open **Models** (the Discover segment), choose a family and LoRA kind
-where available, then use **Install** on the web or **Pull** in a native app.
+where available, then use **Get it** on the web or desktop, or **Pull** on the phone.
 Once installed, it appears in compatible Create LoRA pickers on that host.
 The web Installed shelf refreshes when the pull finishes. Model details mark
 each runtime component ready or missing. When the server supplies a repair
