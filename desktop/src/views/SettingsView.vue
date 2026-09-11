@@ -179,7 +179,12 @@ watch(
  * the content column is what has to scroll — a scroller ABOVE it moves the
  * sections and the observer root together and the nav highlight never moves.
  */
-.settings-shell {
+/* `div.` on purpose: the kit's own `.ms-settings-shell { align-items: start }`
+ * carries the same specificity as a bare class here, and a tie is decided by
+ * whichever stylesheet Vite happens to inject last. The element qualifier
+ * settles it. Without stretch the content column is only as tall as its
+ * content, and a column that never overflows never scrolls. */
+div.settings-shell {
   align-items: stretch;
 }
 .settings-shell :deep(.ms-settings-content) {
