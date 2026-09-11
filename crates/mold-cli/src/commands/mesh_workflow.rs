@@ -341,10 +341,25 @@ fn refuse_flags_the_mode_cannot_use(mode: MeshWorkflowModeArg, args: &CreateArgs
             if args.texture {
                 bail!("a roundtrip reconstructs geometry and cannot paint it; texture the result with --mode mesh_texture");
             }
+            // Both stages prepare a conditioning IMAGE, and a roundtrip has
+            // none: its stage graph is shape then finalize. Sending either
+            // would be a control the run never reaches.
+            if args.matting.is_some() {
+                bail!("a roundtrip conditions on the supplied mesh, not a picture, so --matting has nothing to remove");
+            }
+            if args.delight {
+                bail!("a roundtrip conditions on the supplied mesh, not a picture, so --delight has nothing to relight");
+            }
         }
     }
     if args.texture_resolution.is_some() && !texture_for(mode, args) {
         bail!("--texture-resolution needs --texture; it has no effect on a geometry-only run");
+    }
+    if args.image_model.is_some() && mode != MeshWorkflowModeArg::TextToMesh {
+        bail!("--image-model names the model that renders a text-to-3-D run's picture; this workflow renders none");
+    }
+    if (args.up_axis.is_some() || args.meters_per_unit.is_some()) && args.mesh.is_none() {
+        bail!("--up-axis and --meters-per-unit describe a supplied mesh, and this workflow builds its own");
     }
     Ok(())
 }
@@ -1026,6 +1041,60 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(message.contains("--texture-resolution"), "{message}");
+    }
+
+    /// A control whose stage the run never reaches is refused rather than
+    /// sent and ignored.
+    #[test]
+    fn a_control_with_no_stage_to_act_on_is_refused() {
+        // A roundtrip's graph is shape then finalize: no picture, so nothing
+        // for matting or delight to do.
+        for (args, flag) in [
+            (
+                CreateArgs {
+                    mesh: Some("chair.glb".into()),
+                    matting: Some(MeshMattingArg::On),
+                    ..args()
+                },
+                "--matting",
+            ),
+            (
+                CreateArgs {
+                    mesh: Some("chair.glb".into()),
+                    delight: true,
+                    ..args()
+                },
+                "--delight",
+            ),
+            (
+                CreateArgs {
+                    mesh: Some("chair.glb".into()),
+                    image_model: Some("flux-schnell:q8".into()),
+                    ..args()
+                },
+                "--image-model",
+            ),
+        ] {
+            let message =
+                refuse_flags_the_mode_cannot_use(MeshWorkflowModeArg::MeshRoundtrip, &args)
+                    .unwrap_err()
+                    .to_string();
+            assert!(message.contains(flag), "{flag}: {message}");
+        }
+
+        // The mesh coordinates describe a mesh you supplied, and a
+        // text-to-3-D run builds its own.
+        let message = refuse_flags_the_mode_cannot_use(
+            MeshWorkflowModeArg::TextToMesh,
+            &CreateArgs {
+                prompt: Some("a fox".into()),
+                up_axis: Some(MeshUpAxis::Z),
+                ..args()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("--up-axis"), "{message}");
     }
 
     /// A texture-only run paints by definition; a roundtrip never does; a

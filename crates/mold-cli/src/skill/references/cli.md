@@ -210,9 +210,12 @@ mold mesh-workflow delete WORKFLOW-ID
 accepted under both names here), `--target-faces`, `--matting` and `--delight`
 are the same controls a one-shot render takes, and this is the only surface
 that exposes all of them on a durable workflow. Omit one and the recipe's own
-default answers; do not restate a default here. `--seed` applies to every
-stage, so one value reproduces the whole run. `delete` is settled-only —
-cancel or wait first, and the server says so if you do not.
+default answers; do not restate a default here. `--matting` and `--delight`
+prepare a conditioning PICTURE, so a roundtrip — whose stages are shape then
+finalize — refuses them rather than accepting a control it never reaches.
+`--seed` applies to every stage, so one value reproduces the whole run.
+`delete` is settled-only — cancel or wait first, and the server says so if you
+do not.
 
 A supplied `--mesh` is a `.glb` or `.obj`. On a host that advertises
 reference uploads and is reached with an API key, its bytes stream through a

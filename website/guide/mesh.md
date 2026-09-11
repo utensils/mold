@@ -284,11 +284,14 @@ machine's data root — so there is no local form, and `--local` is refused with
 the one-shot alternative rather than quietly running something else.
 
 The geometry and conditioning controls are the same ones `mold run` takes:
-`--octree`, `--threshold`, `--target-faces`, `--matting`, `--delight`,
-`--texture` and `--texture-resolution`. This is the only surface that exposes
-all of them on a durable workflow; the apps author texture, texture resolution
-and delight only. `--seed` applies to every stage, so one value reproduces the
-whole run.
+`--octree`, `--threshold` (also accepted as `--mesh-threshold`),
+`--target-faces`, `--matting`, `--delight`, `--texture` and
+`--texture-resolution`. This is the only surface that exposes all of them on a
+durable workflow; the apps author texture, texture resolution and delight
+only. `--matting` and `--delight` prepare a conditioning picture, so a
+roundtrip refuses them by name rather than taking a control its stages never
+reach. `--seed` applies to every stage, so one value reproduces the whole
+run.
 
 Follow a running workflow with `--follow` on `create`, or attach to one later
 with `mold mesh-workflow events`. `resume` restarts a paused or failed job,
