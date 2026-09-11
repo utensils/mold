@@ -794,7 +794,9 @@ fn run_gpu_owner_loop(
                         .map(|tx| DeferredOwnerCompletion::ChainStage {
                             tx: Some(tx),
                             result: Some(chain_result.unwrap_or_else(|| {
-                                Err("chain stage ended without an actor result".to_string())
+                                Err(crate::chain_job_runner::StageExecutionError::Failed(
+                                    "chain stage ended without an actor result".to_string(),
+                                ))
                             })),
                         });
                 let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Completed {
@@ -837,7 +839,10 @@ fn run_gpu_owner_loop(
                         .map(|tx| DeferredOwnerCompletion::ChainStage {
                             tx: Some(tx),
                             result: Some(Err(
-                                "GPU owner panicked while executing the chain stage".to_string()
+                                crate::chain_job_runner::StageExecutionError::Failed(
+                                    "GPU owner panicked while executing the chain stage"
+                                        .to_string(),
+                                ),
                             )),
                         });
                 let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Completed {
@@ -1082,9 +1087,19 @@ fn validate_grant_before_acceptance(
 pub enum DeferredOwnerCompletion {
     ChainStage {
         tx: Option<
-            tokio::sync::oneshot::Sender<Result<crate::chain_job_runner::StageExecution, String>>,
+            tokio::sync::oneshot::Sender<
+                Result<
+                    crate::chain_job_runner::StageExecution,
+                    crate::chain_job_runner::StageExecutionError,
+                >,
+            >,
         >,
-        result: Option<Result<crate::chain_job_runner::StageExecution, String>>,
+        result: Option<
+            Result<
+                crate::chain_job_runner::StageExecution,
+                crate::chain_job_runner::StageExecutionError,
+            >,
+        >,
     },
 }
 
@@ -1113,7 +1128,9 @@ impl DeferredOwnerCompletion {
                 let _ = tx
                     .take()
                     .expect("deferred actor completion owns its sender")
-                    .send(Err(error));
+                    .send(Err(crate::chain_job_runner::StageExecutionError::Failed(
+                        error,
+                    )));
             }
         }
     }
@@ -1125,8 +1142,7 @@ impl Drop for DeferredOwnerCompletion {
             Self::ChainStage { tx, .. } => {
                 if let Some(tx) = tx.take() {
                     let _ = tx.send(Err(
-                        "scheduler coordinator stopped before settling the chain-stage lease"
-                            .to_string(),
+                        crate::chain_job_runner::StageExecutionError::SchedulerStopped,
                     ));
                 }
             }
@@ -1141,7 +1157,12 @@ enum OwnerProcessOutcome {
         /// Kept separate from `successful` so the scheduler can record it as
         /// `EstimateOutcome::Invalidated` rather than memory evidence.
         cancelled: bool,
-        chain_result: Option<Result<crate::chain_job_runner::StageExecution, String>>,
+        chain_result: Option<
+            Result<
+                crate::chain_job_runner::StageExecution,
+                crate::chain_job_runner::StageExecutionError,
+            >,
+        >,
     },
     PlanInvalidated {
         grant: Box<LeaseGrant>,
@@ -1193,8 +1214,11 @@ fn process_owner_work(
 ) -> OwnerProcessOutcome {
     if let Err(error) = ensure_owner_thread(worker) {
         let error = error.to_string();
-        let chain_result =
-            matches!(&grant.work, OwnerWork::ChainStage(_)).then(|| Err(error.clone()));
+        let chain_result = matches!(&grant.work, OwnerWork::ChainStage(_)).then(|| {
+            Err(crate::chain_job_runner::StageExecutionError::Failed(
+                error.clone(),
+            ))
+        });
         if chain_result.is_none() {
             grant.work.reject(error);
         }
@@ -1306,7 +1330,9 @@ fn process_owner_work(
             .take()
             .and_then(|on_leased| on_leased(worker.gpu.ordinal).err())
         {
-            let chain_result = Some(Err(error));
+            let chain_result = Some(Err(crate::chain_job_runner::StageExecutionError::Failed(
+                error,
+            )));
             return OwnerProcessOutcome::Completed {
                 successful: false,
                 cancelled: false,
@@ -1716,7 +1742,7 @@ fn chain_stage_failure_message(
 fn process_scheduled_chain_stage(
     worker: &GpuWorker,
     mut job: crate::chain_job_runner::ScheduledChainStageWork,
-) -> Result<crate::chain_job_runner::StageExecution, String> {
+) -> Result<crate::chain_job_runner::StageExecution, crate::chain_job_runner::StageExecutionError> {
     if (job.cancelled)() {
         return Ok(crate::chain_job_runner::StageExecution {
             outcome: crate::chain_job_runner::StageRenderOutcome::Cancelled,
