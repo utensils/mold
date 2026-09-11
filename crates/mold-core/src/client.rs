@@ -638,7 +638,7 @@ impl MoldClient {
         let request_warnings = parse_request_warnings(resp.headers());
 
         // Parse SSE events from chunked response body
-        let mut buffer = String::new();
+        let mut buffer = SseFrameParser::new();
         // The server-assigned job id, latched from the first `queued` event.
         // It exists only once the job is admitted — and an admitted job is a
         // journalled one.
@@ -655,9 +655,9 @@ impl MoldClient {
                     ));
                 }
             };
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.push(&chunk);
 
-            while let Some(event_text) = next_sse_event(&mut buffer) {
+            while let Some(event_text) = buffer.next_frame() {
                 let (event_type, data) = parse_sse_event(&event_text);
                 match event_type.as_str() {
                     "progress" => {
@@ -902,10 +902,10 @@ impl MoldClient {
             error: None,
             output: None,
         };
-        let mut buffer = String::new();
+        let mut buffer = SseFrameParser::new();
         while let Some(chunk) = resp.chunk().await? {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(event_text) = next_sse_event(&mut buffer) {
+            buffer.push(&chunk);
+            while let Some(event_text) = buffer.next_frame() {
                 let (_, data) = parse_sse_event(&event_text);
                 let Ok(event) = serde_json::from_str::<ChainJobEvent>(&data) else {
                     continue;
@@ -1265,10 +1265,10 @@ impl MoldClient {
             error: None,
             output_filename: None,
         };
-        let mut buffer = String::new();
+        let mut buffer = SseFrameParser::new();
         while let Some(chunk) = resp.chunk().await? {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(event_text) = next_sse_event(&mut buffer) {
+            buffer.push(&chunk);
+            while let Some(event_text) = buffer.next_frame() {
                 let (_, data) = parse_sse_event(&event_text);
                 let Ok(event) = serde_json::from_str::<MeshWorkflowEvent>(&data) else {
                     continue;
@@ -1444,10 +1444,10 @@ impl MoldClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(ServerResponseError { status, body }.into());
         }
-        let mut buffer = String::new();
+        let mut buffer = SseFrameParser::new();
         while let Some(chunk) = resp.chunk().await? {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(event_text) = next_sse_event(&mut buffer) {
+            buffer.push(&chunk);
+            while let Some(event_text) = buffer.next_frame() {
                 let (_, data) = parse_sse_event(&event_text);
                 let Ok(event) = serde_json::from_str::<DownloadEvent>(&data) else {
                     continue;
@@ -1606,11 +1606,11 @@ impl MoldClient {
         }
 
         // Parse SSE events (same pattern as generate_stream)
-        let mut buffer = String::new();
+        let mut buffer = SseFrameParser::new();
         while let Some(chunk) = resp.chunk().await? {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.push(&chunk);
 
-            while let Some(event_text) = next_sse_event(&mut buffer) {
+            while let Some(event_text) = buffer.next_frame() {
                 let (event_type, data) = parse_sse_event(&event_text);
                 match event_type.as_str() {
                     "progress" => {
@@ -2900,11 +2900,11 @@ impl MoldClient {
             anyhow::bail!("server error {status}: {body}");
         }
 
-        let mut buffer = String::new();
+        let mut buffer = SseFrameParser::new();
         while let Some(chunk) = resp.chunk().await? {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.push(&chunk);
 
-            while let Some(event_text) = next_sse_event(&mut buffer) {
+            while let Some(event_text) = buffer.next_frame() {
                 let (event_type, data) = parse_sse_event(&event_text);
                 match event_type.as_str() {
                     "progress" => {
@@ -3416,15 +3416,104 @@ fn parse_audio_headers(headers: &reqwest::header::HeaderMap) -> Option<AudioMeta
     })
 }
 
-fn next_sse_event(buffer: &mut String) -> Option<String> {
-    for separator in ["\r\n\r\n", "\n\n"] {
-        if let Some(pos) = buffer.find(separator) {
-            let event_text = buffer[..pos].to_string();
-            *buffer = buffer[pos + separator.len()..].to_string();
-            return Some(event_text);
+/// The longest frame delimiter, `\r\n\r\n`. A delimiter can straddle a chunk
+/// boundary, so a resumed scan must back up by one byte less than this.
+const SSE_DELIMITER_MAX_LEN: usize = 4;
+
+/// Incremental reader for an SSE byte stream.
+///
+/// It replaces a `String` buffer that each chunk was `from_utf8_lossy`'d into
+/// and then searched from the start. Two bugs came with that:
+///
+/// * a multi-byte character split across a network chunk became replacement
+///   characters, silently corrupting any non-ASCII text the server echoed
+///   back — so this buffers BYTES and decodes whole frames;
+/// * `buffer.find(separator)` rescanned everything already buffered on every
+///   chunk, so one large frame cost O(n^2) in the number of chunks. The scan
+///   resumes where the last one stopped, which makes it linear.
+pub(crate) struct SseFrameParser {
+    buf: Vec<u8>,
+    /// Where the unconsumed bytes begin. Compaction is amortized rather than
+    /// per frame, so a stream of small frames does not re-copy the tail each
+    /// time.
+    start: usize,
+    /// Absolute index past which no delimiter has been looked for yet.
+    scan_from: usize,
+    scanned_bytes: usize,
+}
+
+impl SseFrameParser {
+    pub(crate) fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            start: 0,
+            scan_from: 0,
+            scanned_bytes: 0,
         }
     }
-    None
+
+    pub(crate) fn push(&mut self, chunk: &[u8]) {
+        if self.start > 0 && self.start * 2 >= self.buf.len() {
+            self.buf.drain(..self.start);
+            self.scan_from = self.scan_from.saturating_sub(self.start);
+            self.start = 0;
+        }
+        self.buf.extend_from_slice(chunk);
+    }
+
+    /// The next complete frame, with its delimiter removed, or `None` when
+    /// the buffered bytes do not yet contain one.
+    pub(crate) fn next_frame(&mut self) -> Option<String> {
+        let resume = self
+            .scan_from
+            .max(self.start)
+            .saturating_sub(SSE_DELIMITER_MAX_LEN - 1)
+            .max(self.start);
+        let mut index = resume;
+        while index < self.buf.len() {
+            let Some(offset) = self.buf[index..].iter().position(|byte| *byte == b'\n') else {
+                self.scanned_bytes += self.buf.len() - index;
+                self.scan_from = self.buf.len();
+                return None;
+            };
+            let newline = index + offset;
+            self.scanned_bytes += newline + 1 - index;
+            let tail = &self.buf[newline..];
+            let delimiter = if tail.starts_with(b"\n\r\n")
+                && newline > self.start
+                && self.buf[newline - 1] == b'\r'
+            {
+                Some((newline - 1, 4))
+            } else if tail.starts_with(b"\n\n") {
+                Some((newline, 2))
+            } else {
+                None
+            };
+            if let Some((delimiter_start, delimiter_len)) = delimiter {
+                let frame =
+                    String::from_utf8_lossy(&self.buf[self.start..delimiter_start]).into_owned();
+                self.start = delimiter_start + delimiter_len;
+                self.scan_from = self.start;
+                return Some(frame);
+            }
+            index = newline + 1;
+        }
+        self.scan_from = self.buf.len();
+        None
+    }
+
+    /// The bytes buffered but not yet part of a complete frame.
+    #[cfg(test)]
+    pub(crate) fn pending(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.buf[self.start..])
+    }
+
+    /// How many bytes the delimiter search has examined. The pin on
+    /// linearity; see `the_frame_parser_scans_each_byte_about_once`.
+    #[cfg(test)]
+    pub(crate) fn scanned_bytes(&self) -> usize {
+        self.scanned_bytes
+    }
 }
 
 fn parse_sse_event(event_text: &str) -> (String, String) {
@@ -4788,11 +4877,77 @@ mod tests {
     }
 
     #[test]
-    fn next_sse_event_supports_crlf_delimiters() {
-        let mut buffer = "event: progress\r\ndata: {\"ok\":true}\r\n\r\nrest".to_string();
-        let event = next_sse_event(&mut buffer).expect("expected one event");
+    fn the_frame_parser_supports_crlf_delimiters() {
+        let mut parser = SseFrameParser::new();
+        parser.push(b"event: progress\r\ndata: {\"ok\":true}\r\n\r\nrest");
+        let event = parser.next_frame().expect("expected one event");
         assert!(event.contains("event: progress"));
-        assert_eq!(buffer, "rest");
+        assert!(parser.next_frame().is_none());
+        assert_eq!(parser.pending(), "rest");
+    }
+
+    #[test]
+    fn the_frame_parser_splits_on_both_delimiters_and_keeps_order() {
+        let mut parser = SseFrameParser::new();
+        parser.push(b"event: a\ndata: 1\n\nevent: b\r\ndata: 2\r\n\r\n");
+        let first = parser.next_frame().expect("first frame");
+        let second = parser.next_frame().expect("second frame");
+        assert!(parser.next_frame().is_none());
+        assert_eq!(parse_sse_event(&first), ("a".to_string(), "1".to_string()));
+        assert_eq!(parse_sse_event(&second), ("b".to_string(), "2".to_string()));
+    }
+
+    /// The old reader decoded each network chunk with
+    /// `String::from_utf8_lossy` before buffering it, so a multi-byte
+    /// character split across a chunk boundary became two replacement
+    /// characters — silently corrupting a prompt or a title echoed back in a
+    /// progress event. The parser buffers BYTES and decodes whole frames.
+    #[test]
+    fn the_frame_parser_reassembles_a_split_multibyte_character() {
+        let payload = "event: progress\ndata: {\"title\":\"café 🎨 привет\"}\n\n";
+        for split in 1..payload.len() {
+            if !payload.is_char_boundary(split) {
+                // Exactly the case that used to corrupt: cut mid-character.
+            }
+            let bytes = payload.as_bytes();
+            let mut parser = SseFrameParser::new();
+            parser.push(&bytes[..split]);
+            parser.push(&bytes[split..]);
+            let frame = parser.next_frame().expect("one frame");
+            let (event_type, data) = parse_sse_event(&frame);
+            assert_eq!(event_type, "progress");
+            assert_eq!(data, "{\"title\":\"café 🎨 привет\"}", "split at {split}");
+        }
+    }
+
+    /// The old reader called `buffer.find(separator)` on the WHOLE buffer for
+    /// every chunk, so a large frame cost O(n^2) in the number of chunks. On
+    /// a mesh or video complete event that is real CPU on the client's
+    /// critical path.
+    #[test]
+    fn the_frame_parser_scans_each_byte_about_once() {
+        const FRAME: usize = 16 * 1024 * 1024;
+        const CHUNK: usize = 16 * 1024;
+        let mut payload = Vec::with_capacity(FRAME + 32);
+        payload.extend_from_slice(b"event: complete\ndata: ");
+        payload.resize(FRAME, b'x');
+        payload.extend_from_slice(b"\n\n");
+
+        let mut parser = SseFrameParser::new();
+        let mut frames = 0;
+        for chunk in payload.chunks(CHUNK) {
+            parser.push(chunk);
+            while parser.next_frame().is_some() {
+                frames += 1;
+            }
+        }
+        assert_eq!(frames, 1);
+        assert!(
+            parser.scanned_bytes() < 3 * payload.len(),
+            "scanned {} bytes for a {} byte frame",
+            parser.scanned_bytes(),
+            payload.len()
+        );
     }
 
     // ── Audio header parsing tests ───────────────────────────────────────
