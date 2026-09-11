@@ -590,7 +590,10 @@ describe("CreatePage layout and behavior", () => {
       source: null,
       intent: "model-default",
     });
-    expect(chip.props("label")).toBe(shape.badge);
+    expect(chip.props("label")).toBe(
+      shape.families.find((family) => family.id === shape.selectedFamilyId)!
+        .label,
+    );
     // A square says its side once, not "1024×1024".
     expect(chip.props("sublabel")).toBe("1024");
 

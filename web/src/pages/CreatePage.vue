@@ -1972,7 +1972,15 @@ const outputShape = computed(() =>
     intent: canvasIntent.value,
   }),
 );
-const shapeChipLabel = computed(() => outputShape.value.badge);
+/* The chip says the SHAPE, in the shape vocabulary the rail's chips use, and
+ * falls back to the resolver's own badge for a canvas no family claims. */
+const shapeChipLabel = computed(() => {
+  const shape = outputShape.value;
+  return (
+    shape.families.find((family) => family.id === shape.selectedFamilyId)
+      ?.label ?? shape.badge
+  );
+});
 const shapeChipSublabel = computed(() => {
   const { width, height } = form.state.value;
   if (!width || !height) return "";
