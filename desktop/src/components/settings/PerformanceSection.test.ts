@@ -12,10 +12,15 @@ import { useConnectionStore } from "../../stores/connection";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import type { ConfigRow } from "../../lib/api/types";
 
-const SCHEDULER_KEYS = [
+/* Everything the schema routes to Speed & memory. `server_port` moved here
+ * from Advanced (it is a speed/serving fact, not an unknown key) and
+ * `queue.held_retention_days` arrived with it, so this count is five. */
+const SECTION_KEYS = [
+  "server_port",
   "scheduler.replan_debounce_ms",
   "scheduler.replan_max_delay_ms",
   "scheduler.warm_wait_max_ms",
+  "queue.held_retention_days",
 ];
 
 function configRow(key: string, value: number): ConfigRow {
@@ -33,7 +38,7 @@ function mountSection(mode: "local" | "external" | "remote") {
   conn.info = { mode, baseUrl: "http://127.0.0.1:7680", apiKey: null };
   conn.status = "ready";
   const config = useSettingsConfigStore();
-  config.rows = SCHEDULER_KEYS.map((key) => configRow(key, 250));
+  config.rows = SECTION_KEYS.map((key) => configRow(key, 250));
   return mount(PerformanceSection);
 }
 
@@ -42,7 +47,7 @@ beforeEach(() => {
 });
 
 describe("Speed & memory", () => {
-  it("renders the scheduler keys it declares, on every kind of engine", async () => {
+  it("renders every key it declares, on every kind of engine", async () => {
     // The schema puts these three in this section; without a render site,
     // searching "replan" narrowed the nav to Speed & memory and showed
     // nothing at all.
@@ -50,7 +55,9 @@ describe("Speed & memory", () => {
       setActivePinia(createPinia());
       const wrapper = mountSection(mode);
       await flushPromises();
-      expect(wrapper.findAll("[data-test='performance-engine-row']")).toHaveLength(3);
+      expect(wrapper.findAll("[data-test='performance-engine-row']")).toHaveLength(
+        SECTION_KEYS.length,
+      );
       expect(wrapper.text()).toContain("Queue replan debounce");
       expect(wrapper.text()).toContain("Maximum replan delay");
       expect(wrapper.text()).toContain("Maximum warm-model wait");

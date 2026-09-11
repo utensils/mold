@@ -8,7 +8,7 @@
  */
 import { computed, nextTick, ref, watch } from "vue";
 import ModalPanel from "@ui/components/ModalPanel.vue";
-import ToggleControl from "../settings/ToggleControl.vue";
+import ToggleControl from "@studio/components/settings/ToggleControl.vue";
 import { ipc, type DiscoveredHost } from "../../lib/ipc";
 import { addressLabel, prepareHosts, versionLabel } from "../../lib/discovery";
 import { useAppPrefsStore } from "../../stores/appPrefs";

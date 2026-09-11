@@ -4,8 +4,8 @@ import { formatBytes } from "../../lib/format";
 import type { UpdateChannel } from "../../lib/ipc";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useUpdaterStore } from "../../stores/updater";
-import SelectControl from "./SelectControl.vue";
-import SettingRow from "./SettingRow.vue";
+import SelectControl from "@studio/components/settings/SelectControl.vue";
+import SettingRow from "@studio/components/settings/SettingRow.vue";
 
 const prefs = useAppPrefsStore();
 const updater = useUpdaterStore();

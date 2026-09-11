@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
-import SettingRow from "./SettingRow.vue";
+import SettingRow from "@studio/components/settings/SettingRow.vue";
 import { apiJson } from "../../lib/api/client";
 import { ipc, inTauri } from "../../lib/ipc";
 import { openExternal } from "../../lib/openExternal";

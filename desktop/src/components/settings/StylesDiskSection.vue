@@ -6,7 +6,7 @@
  * remote machine's storage stays on its own machine pane.
  */
 import { computed } from "vue";
-import ConfigSettingRow from "./ConfigSettingRow.vue";
+import EngineRow from "./EngineRow.vue";
 import { formatGBPair, percent } from "../../lib/format";
 import { useHostStatusStore } from "../../stores/hostStatus";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
@@ -26,8 +26,8 @@ const usedPercent = computed(() =>
 <template>
   <div>
     <template v-if="config.available">
-      <ConfigSettingRow schema-key="models_dir" />
-      <ConfigSettingRow schema-key="output_dir" />
+      <EngineRow schema-key="models_dir" />
+      <EngineRow schema-key="output_dir" />
     </template>
 
     <div
