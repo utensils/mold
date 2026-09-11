@@ -2535,9 +2535,33 @@ pub fn used_system_swap_bytes() -> Option<u64> {
 /// This mirrors ComfyUI's `text_encoder_offload_device()` behavior
 /// (`comfy/model_management.py:1012`).
 pub fn keep_te_in_ram() -> bool {
-    crate::runtime_env::value("MOLD_KEEP_TE_RAM")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    keep_te_ram_mode() == crate::flux2::text_encoder_residency::KeepTeRamMode::Force
+}
+
+/// `MOLD_KEEP_TE_RAM` as the tri-state it became.
+///
+/// The variable now answers two questions. It has always been the OPT-IN that
+/// keeps FLUX's T5, SD3's and Wan's encoders in host RAM — and
+/// [`keep_te_in_ram`], which those families read, is exactly `Force`, so their
+/// behaviour is byte-for-byte what it was: `1` opts in, `0` and every other
+/// value including absence do not. It is now also the OVERRIDE on a decision
+/// that has a real default
+/// ([`crate::flux2::text_encoder_residency::decide_text_encoder_residency`]),
+/// and `Auto` is that default.
+///
+/// The paragraph above `keep_te_in_ram` is still the reason `Auto` is not
+/// simply "park whenever there is room": a probe here describes the MACHINE,
+/// not this process's cgroup. What changed is that the residency decision now
+/// takes a measured budget with a safety floor and a transformer term, so
+/// `Auto` refuses a park long before a container limit could be reached — a
+/// 64 GB host streams — rather than engaging against a limit it cannot see.
+pub fn keep_te_ram_mode() -> crate::flux2::text_encoder_residency::KeepTeRamMode {
+    use crate::flux2::text_encoder_residency::KeepTeRamMode;
+    match crate::runtime_env::value("MOLD_KEEP_TE_RAM").as_deref() {
+        Some("1") => KeepTeRamMode::Force,
+        Some("0") => KeepTeRamMode::Never,
+        _ => KeepTeRamMode::Auto,
+    }
 }
 
 #[cfg(feature = "cuda")]

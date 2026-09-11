@@ -137,6 +137,17 @@ pub struct Flux2Engine {
     /// to wrap the transformer's `VarBuilder` with a `Flux2LoraBackend`.
     pending_loras: Vec<LoraWeight>,
     shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
+    /// FLUX.2 [dev]'s Mistral3 conditioner, outliving the request that built
+    /// it.
+    ///
+    /// The shell itself is cheap — paths, a tokenizer, the resolved key
+    /// namespace — and the encoder holds NO device weights between requests
+    /// either way, because `encode` builds and drops one decoder layer at a
+    /// time. What this slot exists for is the HOST park: when
+    /// `decide_text_encoder_residency` says the machine can afford it, the
+    /// prefix stays in RAM and the next encode is a host-to-device copy per
+    /// layer instead of a page fault, a dtype conversion and a copy.
+    dev_text_encoder: Option<encoders::mistral3::Mistral3Encoder>,
     /// A transformer the SEQUENTIAL generate path kept on the card, when the
     /// residency budget allowed it.
     ///
@@ -344,6 +355,7 @@ impl Flux2Engine {
             pending_placement: None,
             pending_loras: Vec::new(),
             shared_pool,
+            dev_text_encoder: None,
             retained_transformer: None,
         }
     }
@@ -407,6 +419,7 @@ impl Flux2Engine {
             pending_placement: None,
             pending_loras: Vec::new(),
             shared_pool,
+            dev_text_encoder: None,
             retained_transformer: None,
         })
     }
@@ -1119,6 +1132,39 @@ impl Flux2Engine {
         retained_bytes.saturating_add(encoder_peak_bytes) > usable_free_bytes
     }
 
+    /// Whether FLUX.2 [dev]'s Mistral3 prefix should live in host RAM.
+    ///
+    /// The engine asks the SAME pure function the planner asks
+    /// (`text_encoder_residency::decide_text_encoder_residency`), with the
+    /// host's own live numbers, so a machine that the planner charged for a
+    /// park actually takes one and a machine it did not is not surprised by
+    /// 35 GB it never budgeted.
+    fn decide_mistral_prefix_residency(
+        encoder_device: &Device,
+        encoder_dtype: DType,
+        transformer_bytes: u64,
+    ) -> super::text_encoder_residency::TextEncoderResidency {
+        use super::text_encoder_residency as residency;
+        let device = if encoder_device.is_metal() {
+            residency::TextEncoderDevice::Metal
+        } else if encoder_device.is_cuda() {
+            residency::TextEncoderDevice::Cuda
+        } else {
+            residency::TextEncoderDevice::Cpu
+        };
+        residency::decide_text_encoder_residency(&residency::TextEncoderResidencyInputs {
+            encoder_bytes: residency::mistral3_prefix_bytes(encoder_dtype),
+            transformer_bytes,
+            // An unmeasurable host reads as zero, which the decision answers
+            // with `StreamFromMmap` — today's behaviour.
+            host_total_bytes: crate::flux::pinned::total_system_ram_bytes().unwrap_or(0),
+            host_available_bytes: crate::device::available_system_memory_bytes().unwrap_or(0),
+            pinned_cap_bytes: crate::flux::pinned::pinned_cap_bytes(),
+            keep_te_ram: crate::device::keep_te_ram_mode(),
+            device,
+        })
+    }
+
     /// Peak device bytes this checkpoint's conditioner holds while it runs.
     ///
     /// [dev] streams its Mistral3 prefix, so the figure is the streamed peak
@@ -1567,13 +1613,56 @@ impl Flux2Engine {
                     activation_budget,
                 )?;
 
-                let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
-                let encoder = encoders::mistral3::Mistral3Encoder::load(
-                    &encoder_paths,
-                    text_tokenizer,
+                // The encoder may already be here, holding its prefix in host
+                // RAM from the previous request. `dev_text_encoder` is what
+                // makes that possible: the shell is cheap (paths, tokenizer,
+                // the resolved namespace) and what it OWNS is the park.
+                if self.dev_text_encoder.is_none() {
+                    let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
+                    self.dev_text_encoder = Some(encoders::mistral3::Mistral3Encoder::load(
+                        &encoder_paths,
+                        text_tokenizer,
+                        &encoder_device,
+                        encoder_dtype,
+                    )?);
+                }
+                let park = Self::decide_mistral_prefix_residency(
                     &encoder_device,
                     encoder_dtype,
-                )?;
+                    xformer_component_bytes(&self.base.paths),
+                );
+                let encoder = self
+                    .dev_text_encoder
+                    .as_mut()
+                    .expect("just installed above");
+                match park {
+                    super::text_encoder_residency::TextEncoderResidency::HostParked { pinned } => {
+                        if !encoder.is_parked() {
+                            let park_label = "Parking Mistral3 prefix in host RAM";
+                            self.base.progress.stage_start(park_label);
+                            let park_start = Instant::now();
+                            encoder.park_prefix(pinned)?;
+                            self.base
+                                .progress
+                                .stage_done(park_label, park_start.elapsed());
+                            tracing::info!(
+                                pinned,
+                                host_gb = encoder.parked_bytes() as f64 / 1e9,
+                                "Mistral3 prefix parked in host RAM"
+                            );
+                        }
+                    }
+                    super::text_encoder_residency::TextEncoderResidency::StreamFromMmap => {
+                        if encoder.is_parked() {
+                            encoder.unpark();
+                            tracing::info!(
+                                "released the parked Mistral3 prefix: the host budget no longer \
+                                 allows it"
+                            );
+                        }
+                    }
+                }
+                let encoder = &*encoder;
                 // Name the device and the streamed peak in the stage label:
                 // the whole point of the planner's streaming charge is that
                 // this phase runs on the GPU in bf16 at ~3.6 GB rather than on
@@ -1610,9 +1699,11 @@ impl Flux2Engine {
                     &encoder_label,
                     encode_start.elapsed(),
                 );
-                drop(encoder);
+                // The DEVICE side of the encoder is released by `encode`
+                // itself — every layer is built and dropped inside the stream
+                // loop — so there is nothing to free here beyond the sync. The
+                // shell (and its host park, when it has one) stays.
                 encoder_device.synchronize()?;
-                self.base.progress.info("Freed streamed Mistral3 encoder");
                 encoded
             } else {
                 // Reserve-adjusted reading drives the Qwen3 variant selection.
@@ -2659,8 +2750,11 @@ impl InferenceEngine for Flux2Engine {
         // The retained slot is the one piece of GPU state that does NOT live
         // in `base.loaded`, so `base.unload()` cannot release it and the model
         // cache's eviction would otherwise leave ~33 GB on the card with no
-        // owner that can be asked about it.
+        // owner that can be asked about it. The parked Mistral3 prefix is the
+        // same story in HOST memory: ~35 GB the host ledger has been told is
+        // spent, which only this engine can give back.
         self.retained_transformer = None;
+        self.dev_text_encoder = None;
         clear_cache(&self.prompt_cache);
     }
 

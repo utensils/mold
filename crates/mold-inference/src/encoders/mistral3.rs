@@ -302,6 +302,61 @@ fn resolve_lm_prefix(encoder_paths: &[PathBuf]) -> Result<&'static str> {
     );
 }
 
+/// Whether a tensor name belongs to the prefix the encoder actually runs.
+///
+/// The prefix is the token embedding plus decoder layers `0..=last`. Nothing
+/// else may be parked: the single-file republication of this checkpoint ships
+/// a vision tower, a multimodal projector and decoder layers 30-39 beside the
+/// prefix, and a whole-file park would charge host RAM for every byte of them
+/// — roughly a third again on top of the 34.7 GB that IS read. A memory
+/// mapping never pages those in because nothing asks for them; an eager park
+/// would.
+///
+/// `prefix` is the resolved namespace (`language_model.model` or `model`), so
+/// the filter is exact rather than a substring guess.
+pub(crate) fn parked_prefix_tensor(prefix: &str, last_layer: usize, name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('.'))
+    else {
+        return false;
+    };
+    if rest.starts_with("embed_tokens.") {
+        return true;
+    }
+    let Some(rest) = rest.strip_prefix("layers.") else {
+        return false;
+    };
+    let Some((index, _)) = rest.split_once('.') else {
+        return false;
+    };
+    index
+        .parse::<usize>()
+        .is_ok_and(|index| index <= last_layer)
+}
+
+/// The streamed prefix, held in host RAM between requests.
+///
+/// Every tensor is a CPU tensor at the encoder's working dtype, so an encode
+/// is a host-to-device copy per layer instead of a page fault, a dtype
+/// conversion and a copy. `_pinned` holds the page-locked registrations for
+/// the lifetime of the tensors they cover — dropping it unregisters them, so
+/// it must not be replaced with a bare bool.
+pub(crate) struct ParkedPrefix {
+    tensors: std::collections::HashMap<String, Tensor>,
+    _pinned: Vec<crate::flux::pinned::PinnedRegion>,
+}
+
+impl ParkedPrefix {
+    /// Host bytes this park is holding.
+    pub(crate) fn bytes(&self) -> u64 {
+        self.tensors
+            .values()
+            .map(|tensor| (tensor.elem_count() * tensor.dtype().size_in_bytes()) as u64)
+            .sum()
+    }
+}
+
 pub(crate) struct Mistral3Encoder {
     encoder_paths: Vec<PathBuf>,
     /// Resolved at load from the checkpoint's own headers.
@@ -309,6 +364,8 @@ pub(crate) struct Mistral3Encoder {
     tokenizer: Arc<Tokenizer>,
     device: Device,
     dtype: DType,
+    /// The prefix held in host RAM, when the residency budget allowed it.
+    parked: Option<ParkedPrefix>,
 }
 
 impl Mistral3Encoder {
@@ -325,7 +382,72 @@ impl Mistral3Encoder {
             tokenizer,
             device: device.clone(),
             dtype,
+            parked: None,
         })
+    }
+
+    /// Whether this encoder is holding its prefix in host RAM.
+    pub(crate) fn is_parked(&self) -> bool {
+        self.parked.is_some()
+    }
+
+    /// Host bytes the park is holding, or zero.
+    pub(crate) fn parked_bytes(&self) -> u64 {
+        self.parked.as_ref().map_or(0, ParkedPrefix::bytes)
+    }
+
+    /// Read the prefix into host RAM, page-locking it when asked.
+    ///
+    /// ONE copy per tensor, out of a mapping, through the shared
+    /// `encoders::park` loader — and FILTERED, so the vision tower, the
+    /// projector and layers 30-39 are never touched at all.
+    ///
+    /// `pinned` is the residency decision's own answer, never re-derived here.
+    /// A pin that the driver or the tracker's soft cap declines is a no-op
+    /// rather than an error: the park is still worth having without it.
+    pub(crate) fn park_prefix(&mut self, pinned: bool) -> Result<()> {
+        if self.parked.is_some() {
+            return Ok(());
+        }
+        let prefix = self.lm_prefix;
+        let last_layer = last_required_layer();
+        let tensors =
+            crate::encoders::park::load_tensors_to_cpu_filtered(&self.encoder_paths, |name| {
+                parked_prefix_tensor(prefix, last_layer, name)
+            })?;
+        if tensors.is_empty() {
+            anyhow::bail!(
+                "Mistral3 prefix park found no tensors under `{prefix}` — refusing to park an \
+                 empty set rather than render from one"
+            );
+        }
+        let mut regions = Vec::new();
+        if pinned {
+            let tracker = crate::flux::pinned::PinnedMemoryTracker::new(
+                crate::flux::pinned::pinned_cap_bytes(),
+            );
+            for tensor in tensors.values() {
+                match crate::flux::pinned::try_pin_to_host(tensor, &tracker) {
+                    Ok(Some(region)) => regions.push(region),
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::debug!(%error, "Mistral3 prefix pin declined; parking unpinned");
+                        regions.clear();
+                        break;
+                    }
+                }
+            }
+        }
+        self.parked = Some(ParkedPrefix {
+            tensors,
+            _pinned: regions,
+        });
+        Ok(())
+    }
+
+    /// Release the host park.
+    pub(crate) fn unpark(&mut self) {
+        self.parked = None;
     }
 
     pub fn encode(
@@ -347,14 +469,32 @@ impl Mistral3Encoder {
             .map(|index| index < token_count)
             .collect::<Vec<_>>();
 
-        let vb = crate::weight_loader::load_safetensors_with_progress(
-            &self.encoder_paths,
-            self.dtype,
-            &self.device,
-            STREAMED_ENCODER_COMPONENT,
-            &crate::progress::ProgressReporter::default(),
-        )?
-        .pp(self.lm_prefix);
+        // The parked prefix and the mapping produce the SAME weights: the park
+        // is `MmapedSafetensors::multi` plus one CPU load per tensor, which is
+        // what the mapping-backed `VarBuilder` would have done lazily. What
+        // changes is where the bytes come from on the second and later
+        // requests — host RAM, already at the working dtype and optionally
+        // page-locked, instead of a page fault plus a conversion.
+        //
+        // `pp(lm_prefix)` is applied in both arms because the park keeps the
+        // checkpoint's own key namespace, so the two builders are addressed
+        // identically and the layer loop below cannot tell them apart.
+        let vb = match self.parked.as_ref() {
+            Some(parked) => crate::encoders::park::varbuilder_from_parked(
+                &parked.tensors,
+                self.dtype,
+                &self.device,
+            )
+            .pp(self.lm_prefix),
+            None => crate::weight_loader::load_safetensors_with_progress(
+                &self.encoder_paths,
+                self.dtype,
+                &self.device,
+                STREAMED_ENCODER_COMPONENT,
+                &crate::progress::ProgressReporter::default(),
+            )?
+            .pp(self.lm_prefix),
+        };
 
         let input_ids = Tensor::from_vec(tokens, (1, MAX_LENGTH), &self.device)?;
         let hidden = {
@@ -505,6 +645,81 @@ mod tests {
     use super::*;
     use candle_core::IndexOp;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The park's filter is what keeps ~12 GB of weights the encoder never runs
+    /// out of host RAM.
+    ///
+    /// The single-file republication of this checkpoint carries a vision tower, a
+    /// multimodal projector, decoder layers 30-39, the final norm and the LM head
+    /// beside the prefix. A memory mapping never pages them in, because nothing
+    /// asks for them; an eager whole-file park would charge every byte. So the
+    /// filter is not an optimization, it is the difference between a 34.7 GB park
+    /// and one half again as large.
+    #[test]
+    fn the_park_filter_never_admits_the_vision_tower_or_the_unused_layers() {
+        let last = last_required_layer();
+        assert_eq!(last, 29, "the prefix is layers 0..=29");
+
+        for prefix in MISTRAL3_LM_PREFIXES {
+            assert!(parked_prefix_tensor(
+                prefix,
+                last,
+                &format!("{prefix}.embed_tokens.weight")
+            ));
+            for layer in [0, 1, 15, 28, 29] {
+                for leaf in [
+                    "input_layernorm.weight",
+                    "self_attn.q_proj.weight",
+                    "mlp.down_proj.weight",
+                ] {
+                    assert!(
+                        parked_prefix_tensor(
+                            prefix,
+                            last,
+                            &format!("{prefix}.layers.{layer}.{leaf}")
+                        ),
+                        "{prefix}.layers.{layer}.{leaf} is part of the prefix"
+                    );
+                }
+            }
+
+            // Everything the encoder never reads.
+            for name in [
+                format!("{prefix}.layers.30.input_layernorm.weight"),
+                format!("{prefix}.layers.39.mlp.down_proj.weight"),
+                format!("{prefix}.norm.weight"),
+                "vision_tower.transformer.layers.0.attention.q_proj.weight".to_string(),
+                "multi_modal_projector.linear_1.weight".to_string(),
+                "lm_head.weight".to_string(),
+            ] {
+                assert!(
+                    !parked_prefix_tensor(prefix, last, &name),
+                    "{name} must never be parked"
+                );
+            }
+        }
+
+        // A name under the OTHER namespace is not this checkpoint's prefix. The
+        // two spellings differ only by a wrapper, and `model.layers.0...` is a
+        // suffix of `language_model.model.layers.0...`, so a substring test would
+        // have accepted both — which is why this is an exact prefix strip.
+        assert!(!parked_prefix_tensor(
+            "language_model.model",
+            last,
+            "model.layers.0.input_layernorm.weight"
+        ));
+        // And a layer index that merely starts with an admitted one is refused.
+        assert!(!parked_prefix_tensor(
+            "model",
+            last,
+            "model.layers.290.input_layernorm.weight"
+        ));
+        assert!(!parked_prefix_tensor(
+            "model",
+            last,
+            "model.layers.30x.weight"
+        ));
+    }
 
     /// A stand-in for a decoder layer that reports its own residency.
     ///

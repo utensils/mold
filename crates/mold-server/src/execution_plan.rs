@@ -3333,6 +3333,56 @@ fn build_plan(
             context.paths,
         )
     });
+    // A GPU-placed Mistral3 encoder may also hold its ~35 GB prefix in HOST
+    // RAM between requests. That is a real, irreclaimable allocation the
+    // engine makes on its own, and the planner has to charge it or two queued
+    // [dev] prints on a 128 GB host would both be admitted against memory only
+    // one of them can have. The decision is the ENGINE's own function, asked
+    // with this ledger's host snapshot, so the plan and the render cannot
+    // disagree about whether a park happens.
+    //
+    // It is a COLD charge only: a warm hit finds the prefix already parked,
+    // and `MemAvailable` — this ledger's own input — already excludes it.
+    let mistral_host_park_bytes = mistral_charge
+        .as_ref()
+        .filter(|_| device.backend == GpuBackend::Cuda)
+        .map_or(0, |_| {
+            use mold_inference::flux2::text_encoder_residency as residency;
+            let host = crate::h3_admission::current_h3_host_memory();
+            let transformer_bytes: u64 = context
+                .artifacts
+                .iter()
+                .filter(|(role, _)| {
+                    matches!(
+                        role,
+                        ComponentRole::Transformer | ComponentRole::TransformerShard(_)
+                    )
+                })
+                .map(|(_, path)| {
+                    context
+                        .pending_artifacts
+                        .get(path)
+                        .map_or_else(|| artifact_size(path), |artifact| artifact.bytes)
+                })
+                .sum();
+            let prefix = residency::mistral3_prefix_bytes_bf16();
+            let decision =
+                residency::decide_text_encoder_residency(&residency::TextEncoderResidencyInputs {
+                    encoder_bytes: prefix,
+                    transformer_bytes,
+                    host_total_bytes: host.total_bytes,
+                    host_available_bytes: host.spendable_bytes(),
+                    pinned_cap_bytes:
+                        mold_inference::flux2::text_encoder_residency::host_pinned_cap_bytes(),
+                    keep_te_ram: mold_inference::device::keep_te_ram_mode(),
+                    device: residency::TextEncoderDevice::Cuda,
+                });
+            if decision.parks() {
+                prefix
+            } else {
+                0
+            }
+        });
     for (role, path) in context.artifacts {
         let place_cpu = placements.get(role).copied().unwrap_or(false);
         let bytes = context
@@ -3430,11 +3480,21 @@ fn build_plan(
                 }
                 _ => bytes,
             };
+            // The host park rides on the SAME anchor the device peak does, so
+            // a multi-shard encoder is charged once.
+            let host = if mistral_peak_anchor.as_ref() == Some(role) {
+                mistral_host_park_bytes
+            } else {
+                0
+            };
+            if host > 0 {
+                host_bytes_by_path.insert(path.clone(), host);
+            }
             (
                 ResolvedComponentPlacement::Device(device.id.clone()),
                 strategy,
                 vram,
-                0,
+                host,
             )
         };
         components.insert(
@@ -6088,7 +6148,20 @@ mod tests {
             mistral_charge(&config, "flux2-dev:q8").device_peak,
             "charge the streamed peak, never the shard"
         );
-        assert_eq!(encoder.predicted_host_bytes, 0);
+        // The host side is either nothing — the encoder streams from its
+        // mapping, which is reclaimable and already counted as available — or
+        // EXACTLY the parked prefix, on a host whose own memory allows the
+        // park. It is never the 36 GB shard set, which is the charge that
+        // refused a 64 GB desktop outright. Which of the two it is depends on
+        // the machine this test runs on, and that is the point: the planner
+        // asks the engine's own residency function with this host's numbers.
+        assert!(
+            encoder.predicted_host_bytes == 0
+                || encoder.predicted_host_bytes
+                    == mold_inference::flux2::text_encoder_residency::mistral3_prefix_bytes_bf16(),
+            "host charge was {} bytes",
+            encoder.predicted_host_bytes
+        );
     }
 
     /// The same answer on a 24 GB card with a Q4 transformer: the encoder is

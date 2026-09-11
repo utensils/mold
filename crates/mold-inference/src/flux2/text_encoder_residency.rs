@@ -128,6 +128,23 @@ pub fn mistral3_streamed_device_peak_bytes(dtype: DType, lookahead: u64) -> u64 
         .saturating_add(hidden)
 }
 
+/// [`mistral3_prefix_bytes`] at the dtype a GPU-placed encoder runs at.
+///
+/// The entry point for consumers outside this crate, for the same reason
+/// [`mistral3_admission_charge_for_gpu`] is one: `mold-server` names no candle
+/// type by design, and the dtype is the engine's choice rather than the
+/// planner's.
+pub fn mistral3_prefix_bytes_bf16() -> u64 {
+    mistral3_prefix_bytes(DType::BF16)
+}
+
+/// The page-locked host cap, re-exported so a planner can ask the residency
+/// decision the same question the engine asks without reaching into
+/// `flux::pinned` — which is otherwise a FLUX.1 block-offload detail.
+pub fn host_pinned_cap_bytes() -> u64 {
+    crate::flux::pinned::pinned_cap_bytes()
+}
+
 /// Whether a text-encoder artifact is a FLUX.2 [dev] Mistral3 shard the
 /// encoder STREAMS rather than materializes.
 ///
@@ -200,10 +217,396 @@ pub fn mistral3_admission_charge_for_gpu(
     mistral3_admission_charge(model, paths, DType::BF16)
 }
 
+// ── Host residency ───────────────────────────────────────────────────────────
+
+/// The accelerator a text encoder would run on.
+///
+/// Only three answers matter to this decision and none of them is a candle
+/// type, so the planner can ask the same question the engine asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextEncoderDevice {
+    /// Discrete VRAM with a real host-to-device copy — the only case where
+    /// holding weights in host RAM buys anything.
+    Cuda,
+    /// Unified memory. "Parking in host RAM" is where the weights already are,
+    /// so it saves no copy and spends the same budget twice.
+    Metal,
+    /// The encoder is running on the host already.
+    Cpu,
+}
+
+/// What `MOLD_KEEP_TE_RAM` asks for.
+///
+/// Tri-state because the variable now answers two different questions. It has
+/// always been the opt-in that keeps FLUX's T5, SD3's and Wan's encoders in
+/// host RAM ([`crate::device::keep_te_in_ram`] is exactly `Force`, so those
+/// families are untouched), and it is now also the OVERRIDE on a decision
+/// that has a real default. `Auto` is that default and is what an unset
+/// variable means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepTeRamMode {
+    /// Decide from the host's own memory. Unset, or any value that is neither
+    /// `1` nor `0`.
+    Auto,
+    /// `MOLD_KEEP_TE_RAM=1` — park whenever the encoder itself fits above the
+    /// floor, without asking whether the transformer would also fit.
+    Force,
+    /// `MOLD_KEEP_TE_RAM=0` — never park.
+    Never,
+}
+
+/// Everything the residency decision reads. Bytes throughout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextEncoderResidencyInputs {
+    /// Host bytes the parked prefix would occupy — for Mistral3,
+    /// [`mistral3_prefix_bytes`] at the encoder's own dtype.
+    pub encoder_bytes: u64,
+    /// Host bytes the TRANSFORMER's own load competes for: its mapping's page
+    /// cache, and on a LoRA request the merge's staging copies.
+    pub transformer_bytes: u64,
+    /// Total host RAM.
+    pub host_total_bytes: u64,
+    /// Host RAM available right now — `MemAvailable`, plus whatever credit the
+    /// caller's own ledger already applies.
+    pub host_available_bytes: u64,
+    /// Soft cap on page-locked host memory, from
+    /// [`crate::flux::pinned::pinned_cap_bytes`].
+    pub pinned_cap_bytes: u64,
+    pub keep_te_ram: KeepTeRamMode,
+    pub device: TextEncoderDevice,
+}
+
+/// Where a text encoder's weights live between requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextEncoderResidency {
+    /// Build each layer from the memory mapping, as the streaming loader
+    /// always has. The shard pages are file-backed and reclaimable, so this
+    /// costs the host nothing it cannot get back.
+    StreamFromMmap,
+    /// Hold the prefix in host RAM across requests.
+    HostParked {
+        /// Whether the host allocation is page-locked for fast async H2D.
+        pinned: bool,
+    },
+}
+
+impl TextEncoderResidency {
+    pub fn parks(self) -> bool {
+        matches!(self, Self::HostParked { .. })
+    }
+
+    pub fn is_pinned(self) -> bool {
+        matches!(self, Self::HostParked { pinned: true })
+    }
+}
+
+/// The host-memory safety floor: 15 % of the machine, never below 8 GiB.
+///
+/// This is the scheduler's OWN floor (`h3_admission::H3HostMemory::
+/// safety_floor_bytes`), reproduced here rather than imported because
+/// `mold-inference` cannot depend on `mold-server` and because the engine has
+/// to be able to answer this question with no scheduler in the process at all
+/// — the forced-local CLI path. The arithmetic is identical, including the
+/// remainder term that keeps it exact on a total that is not a multiple of
+/// 100.
+pub fn host_safety_floor_bytes(host_total_bytes: u64) -> u64 {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let whole = host_total_bytes / 100;
+    let remainder = host_total_bytes % 100;
+    whole
+        .saturating_mul(15)
+        .saturating_add(remainder.saturating_mul(15) / 100)
+        .max(8 * GIB)
+}
+
+/// Whether a text encoder's weights should live in host RAM between requests.
+///
+/// The decision is BINARY, not partial, and that is the whole shape of it:
+/// parking P of the prefix's Q bytes buys nothing, because the remaining
+/// `Q - P` still has to be built from the mapping every request and the P is
+/// now unavailable to the page cache that was serving it. So either the whole
+/// prefix fits above the floor or none of it does.
+///
+/// * **Metal and CPU stream.** Unified memory means the "parked" copy is in
+///   the same pool the encoder runs from, so the park is a second allocation
+///   of memory that was already reachable, charged against a budget the Metal
+///   policy is already tight on. On the CPU the weights are already host-side.
+/// * **`Never` streams**, and is the documented way to get today's behaviour
+///   back on a host where parking turns out to be wrong.
+/// * **`Force` parks whenever the encoder alone fits above the floor.** It is
+///   an operator saying "I know this machine"; it still respects the floor,
+///   because the floor is what keeps the process from being OOM-killed rather
+///   than merely slow.
+/// * **`Auto` also requires room for the TRANSFORMER.** The transformer's own
+///   load wants host RAM at the same time — its mapping's pages, and on a LoRA
+///   request the merge's staging copies — and the campaign's rule is that no
+///   residency decision may make a smaller machine worse. A 64 GB desktop
+///   therefore streams, a 128 GB host parks one engine's prefix, and plato's
+///   1.5 TB parks and pins.
+///
+/// `pinned` is decided last and never widens the park: page-locked memory is
+/// a scarcer resource than host RAM (it cannot be paged out at all), so it is
+/// granted only when the prefix fits the pinned cap AND the host still has the
+/// floor's worth of room left after the park.
+pub fn decide_text_encoder_residency(inputs: &TextEncoderResidencyInputs) -> TextEncoderResidency {
+    if matches!(
+        inputs.device,
+        TextEncoderDevice::Metal | TextEncoderDevice::Cpu
+    ) {
+        return TextEncoderResidency::StreamFromMmap;
+    }
+    if inputs.keep_te_ram == KeepTeRamMode::Never {
+        return TextEncoderResidency::StreamFromMmap;
+    }
+    if inputs.encoder_bytes == 0 || inputs.host_total_bytes == 0 {
+        return TextEncoderResidency::StreamFromMmap;
+    }
+
+    let floor = host_safety_floor_bytes(inputs.host_total_bytes);
+    let required = match inputs.keep_te_ram {
+        KeepTeRamMode::Force => inputs.encoder_bytes.saturating_add(floor),
+        KeepTeRamMode::Auto => inputs
+            .encoder_bytes
+            .saturating_add(inputs.transformer_bytes)
+            .saturating_add(floor),
+        KeepTeRamMode::Never => unreachable!("handled above"),
+    };
+    if inputs.host_available_bytes < required {
+        return TextEncoderResidency::StreamFromMmap;
+    }
+
+    // Strictly above the floor, not merely at it: page-locked pages cannot be
+    // paged out at all, so a park that lands exactly on the safety floor is
+    // the one that must not also make its bytes unreclaimable.
+    let pinned = inputs.encoder_bytes <= inputs.pinned_cap_bytes
+        && inputs
+            .host_available_bytes
+            .saturating_sub(inputs.encoder_bytes)
+            > floor;
+    TextEncoderResidency::HostParked { pinned }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+    /// Decimal GB — the unit a machine's RAM is advertised in, and the one the
+    /// plan's matrix rows are written in.
+    const GB: u64 = 1_000_000_000;
+
+    fn inputs(
+        host_total: u64,
+        host_available: u64,
+        transformer: u64,
+        keep_te_ram: KeepTeRamMode,
+        device: TextEncoderDevice,
+    ) -> TextEncoderResidencyInputs {
+        TextEncoderResidencyInputs {
+            encoder_bytes: mistral3_prefix_bytes(DType::BF16),
+            transformer_bytes: transformer,
+            host_total_bytes: host_total,
+            host_available_bytes: host_available,
+            // Linux's default: half the machine.
+            pinned_cap_bytes: host_total / 2,
+            keep_te_ram,
+            device,
+        }
+    }
+
+    /// The floor is the scheduler's own, reproduced rather than imported.
+    #[test]
+    fn the_host_floor_is_fifteen_percent_or_eight_gibibytes() {
+        let fifteen_percent = |total: u64| (u128::from(total) * 15 / 100) as u64;
+        assert_eq!(
+            host_safety_floor_bytes(32 * GB),
+            8 * GIB,
+            "15 % of a 32 GB machine is under the 8 GiB minimum"
+        );
+        for total in [64 * GB, 128 * GB, 1_500 * GB] {
+            assert_eq!(host_safety_floor_bytes(total), fifteen_percent(total));
+        }
+        assert_eq!(
+            host_safety_floor_bytes(0),
+            8 * GIB,
+            "an unmeasured host still floors"
+        );
+    }
+
+    /// How many of `gpus` workers park, each asking the same question after
+    /// the ones before it have taken their bytes.
+    fn parks_across(
+        gpus: usize,
+        host_total: u64,
+        host_available: u64,
+        mode: KeepTeRamMode,
+    ) -> usize {
+        const TRANSFORMER: u64 = 33_000_000_000;
+        let mut available = host_available;
+        let mut parked = 0;
+        for _ in 0..gpus {
+            let decision = decide_text_encoder_residency(&inputs(
+                host_total,
+                available,
+                TRANSFORMER,
+                mode,
+                TextEncoderDevice::Cuda,
+            ));
+            if !decision.parks() {
+                break;
+            }
+            parked += 1;
+            available = available.saturating_sub(mistral3_prefix_bytes(DType::BF16));
+        }
+        parked
+    }
+
+    /// The matrix the campaign's "no regression on a smaller machine" rule is
+    /// measured against: host RAM against the number of engines that might
+    /// want to park, plus the override and device rows.
+    ///
+    /// The prefix is ~34.7 GB at BF16 and the transformer term is a 33 GB Q8
+    /// FLUX.2 [dev]. Each GPU's worker asks the SAME question after the ones
+    /// before it have taken their bytes, so what the matrix pins is how many
+    /// of them the host can afford — never a per-machine constant.
+    #[test]
+    fn residency_matrix_over_host_ram_and_gpu_count() {
+        // 32 GB desktop: the floor alone is 8 GiB and the prefix is 34.7 GB.
+        // Nothing fits, under any mode, at any GPU count.
+        for mode in [KeepTeRamMode::Auto, KeepTeRamMode::Force] {
+            for gpus in [1, 4] {
+                assert_eq!(
+                    parks_across(gpus, 32 * GB, 30 * GB, mode),
+                    0,
+                    "a 32 GB desktop cannot hold the prefix at all ({mode:?}, {gpus} GPUs)"
+                );
+            }
+        }
+
+        // 64 GB desktop with 58 GB free: the prefix plus the floor fits, but
+        // the prefix plus the TRANSFORMER plus the floor does not — so Auto
+        // streams and an operator who insists gets exactly one park.
+        assert_eq!(
+            parks_across(4, 64 * GB, 58 * GB, KeepTeRamMode::Auto),
+            0,
+            "a 64 GB desktop must stream: this is the no-regression rule"
+        );
+        assert_eq!(
+            parks_across(4, 64 * GB, 58 * GB, KeepTeRamMode::Force),
+            1,
+            "an explicit keep is an operator saying they know the machine, and \
+             it still stops at the floor"
+        );
+
+        // 128 GB host: some park and not all four. The exact count is the
+        // host's business; what must hold is that a four-GPU box does not
+        // reserve four prefixes on a machine this size.
+        let mid = parks_across(4, 128 * GB, 120 * GB, KeepTeRamMode::Auto);
+        assert!(
+            (1..4).contains(&mid),
+            "a 128 GB host parks some engines and not every one; parked {mid}"
+        );
+
+        // plato: 1.5 TB, four GPUs. Every one of the four parks, and pins.
+        assert_eq!(
+            parks_across(4, 1_500 * GB, 1_400 * GB, KeepTeRamMode::Auto),
+            4
+        );
+        assert_eq!(
+            decide_text_encoder_residency(&inputs(
+                1_500 * GB,
+                1_400 * GB,
+                33_000_000_000,
+                KeepTeRamMode::Auto,
+                TextEncoderDevice::Cuda
+            )),
+            TextEncoderResidency::HostParked { pinned: true },
+            "1.5 TB is the machine UAT runs on: parked and pinned"
+        );
+
+        // `Never` streams everywhere, whatever the machine.
+        assert_eq!(
+            parks_across(4, 1_500 * GB, 1_400 * GB, KeepTeRamMode::Never),
+            0
+        );
+
+        // Metal and the CPU stream on the largest host there is: unified
+        // memory means the park is a second allocation of memory that was
+        // already reachable.
+        for device in [TextEncoderDevice::Metal, TextEncoderDevice::Cpu] {
+            for mode in [KeepTeRamMode::Auto, KeepTeRamMode::Force] {
+                assert_eq!(
+                    decide_text_encoder_residency(&inputs(
+                        1_500 * GB,
+                        1_400 * GB,
+                        33_000_000_000,
+                        mode,
+                        device
+                    )),
+                    TextEncoderResidency::StreamFromMmap,
+                    "{device:?} / {mode:?}"
+                );
+            }
+        }
+    }
+
+    /// Pinning never widens the park, and it is refused on its own cap.
+    #[test]
+    fn pinning_is_decided_after_the_park_and_only_under_its_own_cap() {
+        let mut narrow = inputs(
+            1_500 * GB,
+            1_400 * GB,
+            33_000_000_000,
+            KeepTeRamMode::Auto,
+            TextEncoderDevice::Cuda,
+        );
+        assert_eq!(
+            decide_text_encoder_residency(&narrow),
+            TextEncoderResidency::HostParked { pinned: true }
+        );
+
+        narrow.pinned_cap_bytes = narrow.encoder_bytes - 1;
+        assert_eq!(
+            decide_text_encoder_residency(&narrow),
+            TextEncoderResidency::HostParked { pinned: false },
+            "a prefix over the page-locked cap still parks, just not pinned"
+        );
+
+        // Exactly enough for the park, with the floor and not a byte more
+        // left afterwards: parked, unpinned.
+        let mut tight = inputs(
+            1_500 * GB,
+            0,
+            0,
+            KeepTeRamMode::Force,
+            TextEncoderDevice::Cuda,
+        );
+        tight.host_available_bytes =
+            tight.encoder_bytes + host_safety_floor_bytes(tight.host_total_bytes);
+        assert_eq!(
+            decide_text_encoder_residency(&tight),
+            TextEncoderResidency::HostParked { pinned: false },
+            "page-locked memory cannot be paged out, so it needs room to spare"
+        );
+    }
+
+    /// An encoder with no bytes, or an unmeasured host, is not evidence for a
+    /// park — the fallback is always today's streaming behaviour.
+    #[test]
+    fn an_unmeasured_host_streams() {
+        let mut unknown = inputs(0, 0, 0, KeepTeRamMode::Force, TextEncoderDevice::Cuda);
+        assert_eq!(
+            decide_text_encoder_residency(&unknown),
+            TextEncoderResidency::StreamFromMmap
+        );
+        unknown.host_total_bytes = 1_500 * GB;
+        unknown.encoder_bytes = 0;
+        assert_eq!(
+            decide_text_encoder_residency(&unknown),
+            TextEncoderResidency::StreamFromMmap
+        );
+    }
 
     fn within_one_percent(got: u64, anchor: u64) -> bool {
         let delta = got.abs_diff(anchor) as f64;
