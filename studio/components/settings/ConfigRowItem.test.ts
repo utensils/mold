@@ -2,7 +2,7 @@ import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 
 import ConfigRowItem from "./ConfigRowItem.vue";
-import type { ConfigRow } from "../../lib/api/types";
+import type { ConfigRow } from "../../api/config";
 
 /*
  * Advanced's raw rows write straight to `/api/config`, and this component
@@ -14,13 +14,13 @@ import type { ConfigRow } from "../../lib/api/types";
 
 function row(over: Partial<ConfigRow> = {}): ConfigRow {
   return {
-    key: "scheduler.replan_debounce_ms",
+    key: "some.future.key",
     value: 250,
     source: "db",
     env_var: null,
     restart_required: false,
     ...over,
-  } as ConfigRow;
+  };
 }
 
 function mountRow(over: Partial<ConfigRow> = {}) {
@@ -50,7 +50,7 @@ describe("ConfigRowItem commits", () => {
   });
 
   it("stays silent when a row is only tabbed through", async () => {
-    const { wrapper, input } = mountRow({ value: "hello", key: "some.text" });
+    const { wrapper, input } = mountRow({ value: "hello" });
     await input.trigger("blur");
     await input.trigger("keydown.enter");
 
@@ -66,7 +66,7 @@ describe("ConfigRowItem commits", () => {
   });
 
   it("still saves a real text change, and can clear a text row", async () => {
-    const { wrapper, input } = mountRow({ value: "hello", key: "some.text" });
+    const { wrapper, input } = mountRow({ value: "hello" });
     await input.setValue("");
     await input.trigger("blur");
 
@@ -75,11 +75,32 @@ describe("ConfigRowItem commits", () => {
 
   it("saves a checkbox on change", async () => {
     const wrapper = mount(ConfigRowItem, {
-      props: { row: row({ value: false, key: "some.flag" }) },
+      props: { row: row({ value: false }) },
     });
-    const box = wrapper.get("input[type='checkbox']");
-    await box.setValue(true);
+    await wrapper.get("input[type='checkbox']").setValue(true);
 
     expect(wrapper.emitted("save")).toEqual([[true]]);
+  });
+});
+
+describe("ConfigRowItem provenance", () => {
+  /* This sentence is the WHOLE point of the contract test: it can only appear
+   * for a key newer than this client, never for one nobody curated. */
+  it("says the key came from the machine, and names it verbatim", () => {
+    const { wrapper } = mountRow();
+    expect(wrapper.text()).toContain("some.future.key");
+    expect(wrapper.text()).toContain("Server-provided configuration key.");
+  });
+
+  it("offers Reset only on a DB-surface row, and locks an env one", () => {
+    expect(
+      mountRow().wrapper.find("[data-test='raw-row-reset']").exists(),
+    ).toBe(true);
+    const env = mountRow({ source: "env", env_var: "MOLD_FUTURE" });
+    expect(env.wrapper.find("[data-test='raw-row-reset']").exists()).toBe(
+      false,
+    );
+    expect(env.wrapper.text()).toContain("MOLD_FUTURE");
+    expect(env.input.attributes("disabled")).toBeDefined();
   });
 });

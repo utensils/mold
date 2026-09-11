@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import { listDevices, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import {
@@ -8,8 +8,7 @@ import {
   setQueueDevicePin,
   type QueuePlan,
 } from "@studio/api/queuePlan";
-import ConfigRowItem from "./ConfigRowItem.vue";
-import ConfigSettingRow from "./ConfigSettingRow.vue";
+import ConfigRowItem from "@studio/components/settings/ConfigRowItem.vue";
 import PlacementSection from "./PlacementSection.vue";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
@@ -129,6 +128,12 @@ onBeforeUnmount(() => {
   deviceEventsAbort?.abort();
 });
 
+/** Advanced draws ONLY keys no schema knows. Per-style overrides moved to
+ *  Per-style defaults and `server_port` to Speed & memory, so on a current
+ *  engine this list is empty — which is what makes the sentence beneath a
+ *  raw row mean "newer than this client". */
+const rawRows = computed(() => config.advancedRows.filter((row) => !schemaFor(row.key)));
+
 async function save(row: ConfigRow, value: ConfigRow["value"]) {
   const error = await config.save(row.key, value);
   toasts.push(error ?? `Saved ${row.key}`, error ? "error" : "info");
@@ -156,7 +161,6 @@ async function reset(row: ConfigRow) {
         @toggle="toggleDevice"
       />
     </div>
-    <ConfigSettingRow schema-key="server_port" />
     <div class="px-3.5 pt-3.5">
       <PlacementSection />
     </div>
@@ -164,13 +168,20 @@ async function reset(row: ConfigRow) {
       Everything the engine exposes that has no curated control — including keys added by newer
       engines. Provenance: ⌂ database · ⛁ config.toml · ⚿ environment.
     </p>
-    <template v-for="row in config.advancedRows" :key="row.key">
+    <template v-for="row in rawRows" :key="row.key">
       <ConfigRowItem
         v-if="!schemaFor(row.key)"
         :row="row"
-        @save="(v) => save(row, v)"
+        @save="(v: ConfigRow['value']) => save(row, v)"
         @reset="reset(row)"
       />
     </template>
+    <p
+      v-if="rawRows.length === 0"
+      class="px-3.5 pb-3.5 text-micro text-fg-dim"
+      data-test="advanced-no-raw-rows"
+    >
+      Nothing here — every key this engine reports has a control of its own.
+    </p>
   </div>
 </template>

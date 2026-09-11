@@ -163,6 +163,8 @@ describe("lexicon — Settings", () => {
       "Phone pairing",
       "Speed & memory",
       "Accounts & tokens",
+      "Cloud GPUs",
+      "Per-style defaults",
       "Profiles",
       "Advanced",
       "Updates & about",
@@ -182,6 +184,7 @@ describe("lexicon — Settings", () => {
       ["default_negative_prompt", "Words to avoid"],
       ["embed_metadata", "Keep the recipe in the file"],
       ["t5_variant", "How FLUX reads your words"],
+      ["umt5_variant", "How Wan reads your words"],
       ["qwen3_variant", "How Flux.2 and Z-Image read your words"],
     ]);
   });
@@ -393,7 +396,7 @@ describe("lexicon — view copy and assistive labels", () => {
   const lightbox = read("../components/gallery/Lightbox.vue");
   const history = read("../components/library/HistoryDrawer.vue");
   const fileUnder = read("../components/create/FileUnderGroup.vue");
-  const settingsSchemaSource = read("./settingsSchema.ts");
+  const settingsSchemaSource = read("../../../studio/lib/settingsSchema.ts");
   const validationSource = read("./generateValidation.ts");
   const appearance = read("../components/settings/AppearanceCard.vue");
   const chipRow = read("../components/library/LibraryChipRow.vue");

@@ -8,33 +8,14 @@
  */
 import type { ConfigRow, ConfigSource } from "./api/types";
 
+/** Provenance tagging is the shared kit's — one glyph vocabulary for every
+ *  surface that renders a config row. */
+export { isRowLocked, provenance, type ProvenanceTag } from "@studio/api/config";
+
 export type ConfigTab = "engine" | "generation" | "advanced";
 
 /** Precedence order used for both the provenance tag and the sort. */
 const SOURCE_ORDER: ConfigSource[] = ["env", "file", "db", "default"];
-
-export interface ProvenanceTag {
-  glyph: string;
-  label: string;
-}
-
-export function provenance(source: ConfigSource): ProvenanceTag {
-  switch (source) {
-    case "db":
-      return { glyph: "⌂", label: "db" };
-    case "file":
-      return { glyph: "⛁", label: "file" };
-    case "env":
-      return { glyph: "⚿", label: "env" };
-    default:
-      return { glyph: "·", label: "default" };
-  }
-}
-
-/** Env-resolved rows are locked — the environment wins over any stored value. */
-export function isRowLocked(row: ConfigRow): boolean {
-  return row.source === "env";
-}
 
 /** Tab a config key belongs to, or null when it should not surface (tui.*). */
 export function tabForKey(key: string): ConfigTab | null {

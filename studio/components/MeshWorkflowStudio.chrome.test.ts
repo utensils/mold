@@ -60,7 +60,7 @@ describe("the 3-D Studio wears the shell", () => {
   /*
    * The view toolbar is the shell's, and the inspector's own header is exactly
    * one toolbar tall so the two rules meet — the metric `InspectorPanel`'s tab
-   * strip binds. Both carry a fallback because web imports ui/kit.css and
+   * strip binds. Both carry a fallback because the phone imports ui/kit.css and
    * ui/tokens.css but never ui/mold-desktop.css.
    */
   it("binds the shell's own toolbar height, with a fallback", () => {

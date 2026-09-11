@@ -11,10 +11,10 @@
  *     sentence naming which one it is instead.
  */
 import { computed, reactive } from "vue";
-import ConfigSettingRow from "./ConfigSettingRow.vue";
-import SettingRow from "./SettingRow.vue";
-import SelectControl from "./SelectControl.vue";
-import NumberControl from "./NumberControl.vue";
+import SettingRow from "@studio/components/settings/SettingRow.vue";
+import SelectControl from "@studio/components/settings/SelectControl.vue";
+import NumberControl from "@studio/components/settings/NumberControl.vue";
+import EngineRow from "./EngineRow.vue";
 import { ENGINE_KEY_SCHEMAS, ENV_KNOB_SCHEMAS } from "../../lib/settingsSchema";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useConnectionStore } from "../../stores/connection";
@@ -24,7 +24,10 @@ const prefs = useAppPrefsStore();
 const conn = useConnectionStore();
 const toasts = useToastStore();
 
-/** The curated engine keys this section owns (scheduler replan/warm-wait). */
+/** The curated engine keys this section owns — the scheduler's replan and
+ *  warm-wait windows, the port the engine listens on, and how long a held
+ *  queue row is kept. Whatever the schema routes here renders here, so a
+ *  search that narrows the nav to this section always finds something. */
 const engineRows = ENGINE_KEY_SCHEMAS.filter((schema) => schema.section === "performance");
 
 /** Env knobs edit a draft; Restart engine applies them to a fresh engine. */
@@ -65,7 +68,7 @@ async function restartEngine() {
 
 <template>
   <div>
-    <ConfigSettingRow
+    <EngineRow
       v-for="schema in engineRows"
       :key="schema.key"
       :schema-key="schema.key"

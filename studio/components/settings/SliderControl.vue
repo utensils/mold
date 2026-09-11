@@ -7,21 +7,21 @@ const props = defineProps<{
   max: number;
   step: number;
   disabled?: boolean | undefined;
-  /** Accessible name — the slider has no visible <label> associated with it. */
+  /** Accessible name — the slider has no visible <label> beside it. */
   ariaLabel?: string | undefined;
 }>();
 const emit = defineEmits<{ (e: "commit", value: number): void }>();
 
-// Track the drag locally; commit on release so we don't spam the config API.
+// Track the drag locally; commit on release so a drag is one write, not fifty.
 const live = ref(props.modelValue);
 watch(
   () => props.modelValue,
-  (v) => (live.value = v),
+  (value) => (live.value = value),
 );
 </script>
 
 <template>
-  <div class="flex items-center gap-2">
+  <div class="ms-slider">
     <input
       type="range"
       :value="live"
@@ -30,10 +30,31 @@ watch(
       :step="step"
       :disabled="disabled"
       :aria-label="ariaLabel"
-      class="w-36 accent-accent disabled:opacity-40"
       @input="live = Number(($event.target as HTMLInputElement).value)"
       @change="emit('commit', live)"
     />
-    <span class="font-mono w-10 text-right text-micro text-fg-2">{{ live }}</span>
+    <span class="ms-slider__value">{{ live }}</span>
   </div>
 </template>
+
+<style scoped>
+.ms-slider {
+  display: flex;
+  align-items: center;
+  gap: var(--mold-sp-2);
+}
+.ms-slider input {
+  width: 144px;
+  accent-color: var(--mold-blue);
+}
+.ms-slider input:disabled {
+  opacity: 0.4;
+}
+.ms-slider__value {
+  width: 40px;
+  text-align: right;
+  color: var(--mold-text-2);
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+}
+</style>

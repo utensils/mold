@@ -2742,7 +2742,7 @@ onBeforeUnmount(() => {
         </template>
       </span>
       <span class="gal__flex"></span>
-      <router-link class="gal__banner-link" to="/settings"
+      <router-link class="gal__banner-link" to="/settings?section=library"
         >Change retention · Settings</router-link
       >
       <router-link

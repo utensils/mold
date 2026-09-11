@@ -39,10 +39,12 @@ async function throwApiError(response: Response): Promise<never> {
   } catch {
     // Non-JSON failures still retain their HTTP status and status text.
   }
+  // HTTP/2 carries no reason phrase, so `statusText` is often "": an error
+  // with an empty message is one nobody can show, so the status stands in.
   const detail =
     typeof body === "object" && body !== null && "error" in body
       ? String((body as { error: unknown }).error)
-      : response.statusText;
+      : response.statusText || `HTTP ${response.status}`;
   throw new ApiError(detail, response.status, body);
 }
 

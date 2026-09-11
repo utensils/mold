@@ -135,3 +135,29 @@ describe("target-explicit Studio API", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("throwApiError without a reason phrase", () => {
+  it("names the status when the response carries no statusText and no error body", async () => {
+    const { apiFetchTo, ApiError } = await import("./client");
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      ({
+        ok: false,
+        status: 503,
+        statusText: "",
+        clone() {
+          return { json: async () => ({}) };
+        },
+      }) as unknown as Response) as typeof fetch;
+    try {
+      await expect(
+        apiFetchTo({ baseUrl: "http://m", apiKey: null }, "/api/config"),
+      ).rejects.toMatchObject({ message: "HTTP 503", status: 503 });
+      await expect(
+        apiFetchTo({ baseUrl: "http://m", apiKey: null }, "/api/config"),
+      ).rejects.toBeInstanceOf(ApiError);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
