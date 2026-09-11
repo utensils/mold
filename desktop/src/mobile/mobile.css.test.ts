@@ -9,7 +9,6 @@ const mobileGenerationQueueCard = readFileSync("src/mobile/MobileGenerationQueue
 const preparedComponent = readFileSync("src/mobile/MobilePreparedExpansionBatch.vue", "utf8");
 const pullComponent = readFileSync("src/mobile/MobileExpansionPullStatus.vue", "utf8");
 const sharedParamsComponent = readFileSync("src/mobile/MobileSharedParams.vue", "utf8");
-const liveActivityComponent = readFileSync("../ui/components/LiveActivityList.vue", "utf8");
 const swipeActionRowComponent = readFileSync("../studio/components/SwipeActionRow.vue", "utf8");
 const galleryViewerComponent = readFileSync("src/mobile/MobileGalleryViewer.vue", "utf8");
 
@@ -267,13 +266,10 @@ describe("mobile generation status containment", () => {
     expect(sentence?.[1]).not.toMatch(/text-overflow:\s*ellipsis/);
   });
 
-  it("bounds shared and swipeable activity surfaces before truncating detail", () => {
-    expect(liveActivityComponent).toMatch(
-      /\.live-activity-surface\s*\{[^}]*width:\s*100%\s*;[^}]*min-width:\s*0\s*;[^}]*box-sizing:\s*border-box\s*;/s,
-    );
-    expect(liveActivityComponent).toMatch(
-      /\.live-activity-copy\s+span\s*\{[^}]*overflow:\s*hidden\s*;[^}]*text-overflow:\s*ellipsis\s*;[^}]*white-space:\s*nowrap\s*;/s,
-    );
+  it("bounds the swipeable row surface before truncating detail", () => {
+    // LiveActivityList left the phone entirely when a machine's own queue work
+    // moved onto the shared card; its own bounds are pinned beside it, in
+    // ui/components/LiveActivityList.test.ts, where web still uses it.
     expect(swipeActionRowComponent).toMatch(
       /\.swipe-row__surface\s*\{[^}]*width:\s*100%\s*;[^}]*min-width:\s*0\s*;[^}]*box-sizing:\s*border-box\s*;/s,
     );
@@ -973,6 +969,19 @@ describe("iOS type vocabulary", () => {
     expect(row?.[1]).toMatch(/display:\s*flex/);
     const note = css.match(/\.mobile-header-routing-note\s*\{([^}]*)\}/s);
     expect(note?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+  });
+
+  it("gives the keyboard the header's answers back while you are typing", () => {
+    // Make's header is a title row plus the routing row plus the output-kind
+    // control — roughly 130px against the old wordmark bar's 52px. Portrait is
+    // the orientation people write prompts in, and only the landscape block
+    // used to respond, so the shrunken viewport lost that space permanently.
+    const hidden = css.match(
+      /\.mobile-shell\.is-keyboard-open \.mobile-header-routing,\s*\n\.mobile-shell\.is-keyboard-open \.mobile-header \.mobile-output-kinds\s*\{([^}]*)\}/s,
+    );
+    expect(hidden?.[1]).toMatch(/display:\s*none/);
+    // The screen's own name stays: it is what tells you where you are.
+    expect(hidden?.[1]).not.toContain("mobile-large-title");
   });
 
   it("makes every Back control a 15px sans accent label with a chevron", () => {

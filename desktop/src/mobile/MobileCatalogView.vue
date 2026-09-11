@@ -1298,12 +1298,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section ref="catalogRoot" class="mobile-catalog" aria-labelledby="mobile-catalog-title">
+  <!-- The screen's own name is in the shell header, which this component
+       cannot reach, so the landmark names itself rather than borrowing the
+       tagline below it. -->
+  <section ref="catalogRoot" class="mobile-catalog" aria-label="Styles">
     <header class="mobile-catalog-header">
-      <!-- The screen's name is in the shell header; this says what it is for. -->
-      <p id="mobile-catalog-title" class="section-note">
-        Find a look for your next picture, clip, or 3-D object
-      </p>
+      <p class="section-note">Find a look for your next picture, clip, or 3-D object</p>
     </header>
 
     <p

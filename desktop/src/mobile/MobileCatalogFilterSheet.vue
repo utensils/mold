@@ -135,7 +135,7 @@ const { onKeydown } = useSheetFocus({
           <span>Browse on</span>
           <select
             :value="selectedHostId"
-            aria-label="Catalog host"
+            aria-label="Machine"
             @change="emit('select-host', ($event.target as HTMLSelectElement).value)"
           >
             <option v-for="host in hosts" :key="host.id" :value="host.id">

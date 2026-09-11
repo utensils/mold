@@ -6333,6 +6333,14 @@ button:disabled {
 .mobile-shell.is-keyboard-open .mobile-create-head {
   display: none;
 }
+/* While the keyboard is up, the header keeps only the screen's name. The
+   routing chip and the output-kind control answer questions you are not asking
+   mid-sentence, and in portrait — where prompts get written — they were the
+   difference between seeing what you typed and not. */
+.mobile-shell.is-keyboard-open .mobile-header-routing,
+.mobile-shell.is-keyboard-open .mobile-header .mobile-output-kinds {
+  display: none;
+}
 .mobile-shell.is-keyboard-open .mobile-create-action {
   padding-bottom: 8px;
 }

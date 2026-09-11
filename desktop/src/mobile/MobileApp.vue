@@ -3026,8 +3026,11 @@ function activityRowMeta(row: ActivityRow): string {
   return [place, row.print.hostLabel].filter(Boolean).join(" · ");
 }
 
-/** A queued row stands its place in line where the picture will be. */
+/** A queued row stands its place in line where the picture will be. Work that
+ *  is already being made never does: "3rd in line" under a heading that says
+ *  Being made is a contradiction the reader has to resolve. */
 function activityRowPosition(row: ActivityRow): string | null {
+  if (activityRowRunning(row)) return null;
   if (activityRowThumbnail(row)) return null;
   if (durableHold(row.print)) return "↓";
   const place = row.queuePosition ?? row.print.queuePosition;
@@ -3235,8 +3238,9 @@ function sharedQueueProgress(row: FleetActiveWork): number | null {
   return Math.max(0, Math.min(100, Math.round((row.current / row.total) * 100)));
 }
 
-/** Place in line for a row with nothing to show yet. */
+/** Place in line for a row that is still waiting to be made. */
 function sharedQueuePosition(row: FleetActiveWork): string | null {
+  if (sharedQueueRunning(row)) return null;
   if (sharedQueueProgress(row) !== null) return null;
   return row.position ? String(row.position) : null;
 }
@@ -3340,10 +3344,10 @@ function revealRestoredMobileGeneration(submitted = false): void {
     if (!scroller) return;
     // Measure from the scroller's own edge: `offsetTop` is relative to the
     // shell, whose header sits above the scroller, and parked the canvas one
-    // header-height under the wordmark.
-    // A restore lands on the heading (top); a submission lands on the canvas,
-    // with the scroller's own inset kept above it so the frame does not hug
-    // the wordmark.
+    // header-height too low.
+    // A restore lands at the top of the scroll; a submission lands on the
+    // canvas, with the scroller's own inset kept above it so the frame does
+    // not hug the header.
     const slot = submitted ? makeCanvasSlot.value : null;
     const top = slot
       ? Math.max(
@@ -12028,13 +12032,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           @update:model-value="selectOutputKind"
         />
       </template>
-      <div v-else-if="tab !== 'generate'" class="mobile-header-routing">
-        <div class="host-chip">
-          <span class="status-dot" :class="headerTargetDot" aria-hidden="true" />{{
-            headerTargetLabel
-          }}
-        </div>
-      </div>
     </header>
 
     <p class="sr-only" aria-live="polite" aria-atomic="true">

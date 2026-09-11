@@ -66,9 +66,14 @@ that machine is doing) and the Picture / Short clip / 3-D object control inside
 the header, so neither answer scrolls away as the form grows.
 
 Every bottom sheet — Style, More settings, Library, Filters, Add a machine —
-drags down to dismiss through one implementation,
-`desktop/src/mobile/useSheetDismiss.ts`: one finger, from a body already at its
-top, never from a control, past 96px of damped travel.
+shares two implementations rather than five copies each.
+`desktop/src/mobile/useSheetDismiss.ts` is the drag: one finger, from a body
+already at its top, never from a control, past 96px of damped travel.
+`useSheetFocus.ts` is what makes `aria-modal="true"` true over a background
+that is not inert — focus into the panel on open, Tab held inside (including
+the very first Tab, which always arrives with the panel itself focused),
+Escape out, and focus handed back to whatever opened it. Only the sheet the
+overlay register calls top acts on either.
 
 - **Make** puts the canvas first: the develop bed, the status line and the
   finished result form one block directly beneath what you are making, and
@@ -425,12 +430,13 @@ top, never from a control, past 96px of damped travel.
   have it stacked in mono, and a chevron. The Ready-to-use shelf drops the kind
   badge and the per-row "Installed" chip, because the shelf already says both;
   Browse more keeps them and the Pull action. Media type is one horizontally
-  scrolling strip: four equal tiles wrapped to a second row at 393pt.
+  scrolling strip, because four equal tiles wrapped onto a second row at 393pt
+  and pushed the results down the screen.
 - **Machines** lists each saved machine as a card: a status dot, its name in
   mono, the health chip, a **making images here** badge when work is pinned
   to it, the same plain hardware sentence the desktop says
   (`desktop/src/lib/machineSentence.ts`, "RTX 4090 · CUDA · on your network ·
-  up 6 days"), a VRAM meter, and its memory and waiting count in mono. Adding
+  up 6d 0h"), a VRAM meter, and its memory and waiting count in mono. Adding
   one opens `MobileAddMachineSheet.vue` from the header `+`; an empty fleet
   shows an invitation rather than springing a form open. The sheet starts with
   native QR scanning for the recommended pairing path,
