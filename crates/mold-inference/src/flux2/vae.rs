@@ -46,11 +46,41 @@ impl Flux2VaeConfig {
 // Building blocks (diffusers naming)
 // ---------------------------------------------------------------------------
 
+/// Query rows the mid-block attention keeps live at once on the math path.
+///
+/// The decoder's mid block attends over every latent token as ONE head, so at
+/// 1024 squared that is 128x128 = 16,384 tokens and an unchunked score matrix
+/// of 16,384^2 — 537 MB at BF16, 1.07 GB at F32, with the softmax output live
+/// beside it. That spike is what used to trip `decode_with_oom_fallback` into
+/// tiled recovery on a loaded card, which is far slower than the spike itself.
+/// Chunking is arithmetically a no-op: each chunk softmaxes over the full key
+/// axis.
+const MID_BLOCK_QUERY_CHUNK: usize = 512;
+
+/// The mid block's attention, under the FLUX family's policy.
+///
+/// Flash where the kernel is compiled in and the tensor is eligible — the
+/// head dim here is the block's CHANNEL count (512 for every Flux.2 VAE
+/// config), which the kernel accepts — and a force-chunked math path
+/// otherwise, because the shared math heuristic only chunks past 1024 query
+/// rows on CUDA and would materialize the whole matrix on Metal or CPU.
 fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
+    use crate::attention::{AttentionBackend, AttentionPolicy};
     let dim = q.dim(D::Minus1)?;
-    let scale_factor = 1.0 / (dim as f64).sqrt();
-    let attn_weights = (q.matmul(&k.t()?)? * scale_factor)?;
-    candle_nn::ops::softmax_last_dim(&attn_weights)?.matmul(v)
+    let scale = (1.0 / (dim as f64).sqrt()) as f32;
+    match crate::attention::effective_backend_under(
+        AttentionPolicy::FastStill,
+        q.device(),
+        q.dtype(),
+        dim,
+    ) {
+        AttentionBackend::Flash => {
+            crate::attention::attention_default_scale_for(AttentionPolicy::FastStill, q, k, v)
+        }
+        AttentionBackend::Math => {
+            crate::attention::math_attention_with_chunk(q, k, v, scale, MID_BLOCK_QUERY_CHUNK)
+        }
+    }
 }
 
 /// Diffusers attention block using Linear layers (not Conv2d).
@@ -608,6 +638,57 @@ mod tests {
             .map(|(name, tensor)| (name.to_string(), tensor))
             .collect::<HashMap<_, _>>();
         VarBuilder::from_tensors(map, DType::F32, &Device::Cpu)
+    }
+
+    /// Chunking the mid-block attention must not move a pixel.
+    ///
+    /// The reference here is the unchunked implementation this replaced, kept
+    /// verbatim so the comparison is against the arithmetic that shipped
+    /// rather than against another copy of the new code.
+    #[test]
+    fn vae_attention_matches_unchunked_reference() {
+        fn unchunked(q: &Tensor, k: &Tensor, v: &Tensor) -> Tensor {
+            let dim = q.dim(D::Minus1).unwrap();
+            let scale_factor = 1.0 / (dim as f64).sqrt();
+            let attn_weights = (q.matmul(&k.t().unwrap()).unwrap() * scale_factor).unwrap();
+            candle_nn::ops::softmax_last_dim(&attn_weights)
+                .unwrap()
+                .matmul(v)
+                .unwrap()
+        }
+
+        let device = Device::Cpu;
+        // More query rows than the chunk, so the chunked path really splits.
+        let (tokens, channels) = (1_300usize, 8usize);
+        let make = |salt: f64| {
+            Tensor::arange(0f32, (tokens * channels) as f32, &device)
+                .unwrap()
+                .affine(0.0007, salt)
+                .unwrap()
+                .sin()
+                .unwrap()
+                .reshape((1, 1, tokens, channels))
+                .unwrap()
+        };
+        let (q, k, v) = (make(0.1), make(0.7), make(1.3));
+
+        let want = unchunked(&q, &k, &v);
+        let got = scaled_dot_product_attention(&q, &k, &v).unwrap();
+        assert_eq!(got.dims(), want.dims());
+        let diff = (&got - &want)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(
+            diff < 1e-6,
+            "the chunked mid-block attention diverged by {diff}"
+        );
     }
 
     #[test]

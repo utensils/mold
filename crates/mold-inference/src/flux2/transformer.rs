@@ -378,7 +378,7 @@ impl Module for Flux2Linear {
                     Some(s) if scalar_scale.is_none() => w.broadcast_mul(&s.to_dtype(dtype)?)?,
                     _ => w,
                 };
-                let out = fp8_matmul(x, &w.t()?)?;
+                let out = flux2_matmul(x, &w.t()?)?;
                 let out = match scalar_scale {
                     Some(s) => out.broadcast_mul(&s.to_dtype(dtype)?)?,
                     None => out,
@@ -402,7 +402,7 @@ impl Module for Flux2Linear {
                 } else {
                     weight.to_dtype(dtype)?
                 };
-                let out = fp8_matmul(x, &w.t()?)?;
+                let out = flux2_matmul(x, &w.t()?)?;
                 let out = match scale {
                     Some(s) => out.broadcast_mul(&s.to_dtype(dtype)?)?,
                     None => out,
@@ -677,12 +677,12 @@ fn fp8_native_gemm(x: &Tensor, weight: &Tensor) -> Result<Option<Tensor>> {
         return Ok(None);
     }
     let quantized = quantize_activation_to_fp8(x)?;
-    Ok(Some(fp8_matmul(&quantized, &weight.t()?)?))
+    Ok(Some(flux2_matmul(&quantized, &weight.t()?)?))
 }
 
-/// The one matmul both FP8 arms use, so a widened layer and a per-forward one
-/// cannot drift in shape handling.
-fn fp8_matmul(x: &Tensor, w_t: &Tensor) -> Result<Tensor> {
+/// The one matmul every mold-owned FLUX.2 projection uses — both FP8 arms and
+/// the fused QKV — so they cannot drift in shape handling.
+fn flux2_matmul(x: &Tensor, w_t: &Tensor) -> Result<Tensor> {
     match *x.dims() {
         [b1, b2, m, k] => x
             .reshape((b1 * b2 * m, k))?
@@ -1077,12 +1077,179 @@ impl candle_core::Module for Mlp {
 // DoubleStreamBlock — joint image+text attention (diffusers naming)
 // ---------------------------------------------------------------------------
 
+/// The double block's Q/K/V projections.
+///
+/// BFL ships ONE `[3*dim, dim]` GEMM per stream (`flux2/model.py:384`);
+/// diffusers splits it into `to_q` / `to_k` / `to_v`, which is the layout mold
+/// loads, and running the split form reads the activation three times and
+/// hands cuBLAS a third of the N it could have. The weights are concatenated
+/// at load where their arms allow it and the output is narrowed, which is what
+/// the GGUF path already does and what `fuse_qkv_projections()` does in
+/// diffusers.
+// One `DoubleAttention` per stream per block holds one of these, so the
+// unused tail of the smaller variant costs a few kilobytes across the whole
+// model. Boxing the larger one would buy that back with an allocation and a
+// pointer chase on every forward.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+enum QkvProjections {
+    /// One GEMM. `scales` carries each component's rank-0 output scale, which
+    /// rides the NARROWED slice — the same place the unfused FP8 arm applies
+    /// it, so fusing does not move it onto the weight.
+    Fused {
+        weight: Tensor,
+        scales: [Option<Tensor>; 3],
+        out_dim: usize,
+    },
+    /// Three separate projections, for every arm whose weights cannot be
+    /// concatenated: NVFP4 streaming (dequantized per forward from a packed
+    /// CPU source) and the per-forward FP8 arm (whose whole point is that the
+    /// slab stays packed).
+    Split {
+        to_q: Flux2Linear,
+        to_k: Flux2Linear,
+        to_v: Flux2Linear,
+    },
+}
+
+/// The `[out, in]` weight a linear can contribute to a fused projection, and
+/// the output scale its slice must carry.
+///
+/// `None` means "not fusable", which is a property of the arm rather than of
+/// the checkpoint. A bias would have to be concatenated too; FLUX.2's linears
+/// carry none, so a biased one is left split rather than handled.
+fn fusable_projection(linear: &Flux2Linear) -> Option<(&Tensor, Option<&Tensor>)> {
+    match linear {
+        Flux2Linear::Standard(inner) if inner.bias().is_none() => Some((inner.weight(), None)),
+        Flux2Linear::Fp8Widened {
+            weight,
+            scale,
+            bias: None,
+        } => Some((weight, scale.as_ref())),
+        _ => None,
+    }
+}
+
+impl QkvProjections {
+    /// Fuse when every arm allows it, else keep the three.
+    fn new(to_q: Flux2Linear, to_k: Flux2Linear, to_v: Flux2Linear) -> Result<Self> {
+        let parts = [
+            fusable_projection(&to_q),
+            fusable_projection(&to_k),
+            fusable_projection(&to_v),
+        ];
+        let (Some(q), Some(k), Some(v)) = (parts[0], parts[1], parts[2]) else {
+            return Ok(Self::Split { to_q, to_k, to_v });
+        };
+        let weights = [q.0, k.0, v.0];
+        let dtype = weights[0].dtype();
+        let out_dim = weights[0].dim(0)?;
+        let same_shape = weights
+            .iter()
+            .all(|w| w.dtype() == dtype && w.dim(0).map(|d| d == out_dim).unwrap_or(false));
+        if !same_shape {
+            return Ok(Self::Split { to_q, to_k, to_v });
+        }
+        let weight = Tensor::cat(&weights, 0)?;
+        let scales = [q.1.cloned(), k.1.cloned(), v.1.cloned()];
+        Ok(Self::Fused {
+            weight,
+            scales,
+            out_dim,
+        })
+    }
+
+    fn project(&self, xs: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+        match self {
+            Self::Fused {
+                weight,
+                scales,
+                out_dim,
+            } => {
+                let dtype = xs.dtype();
+                let w = if weight.dtype() == dtype {
+                    weight.clone()
+                } else {
+                    weight.to_dtype(dtype)?
+                };
+                let out = flux2_matmul(xs, &w.t()?)?;
+                let mut parts = Vec::with_capacity(3);
+                for (index, scale) in scales.iter().enumerate() {
+                    // `narrow` on the last dim is a view; the caller reshapes
+                    // it into heads, so make it contiguous here — exactly the
+                    // bytes three separate GEMMs would have written.
+                    let part = out
+                        .narrow(D::Minus1, index * out_dim, *out_dim)?
+                        .contiguous()?;
+                    parts.push(match scale {
+                        Some(s) => part.broadcast_mul(&s.to_dtype(dtype)?)?,
+                        None => part,
+                    });
+                }
+                let mut parts = parts.into_iter();
+                let q = parts.next().expect("three parts");
+                let k = parts.next().expect("three parts");
+                let v = parts.next().expect("three parts");
+                Ok((q, k, v))
+            }
+            Self::Split { to_q, to_k, to_v } => {
+                Ok((xs.apply(to_q)?, xs.apply(to_k)?, xs.apply(to_v)?))
+            }
+        }
+    }
+
+    fn to_device(&self, device: &candle_core::Device) -> Result<Self> {
+        match self {
+            Self::Fused {
+                weight,
+                scales,
+                out_dim,
+            } => Ok(Self::Fused {
+                weight: weight.to_device(device)?,
+                scales: [
+                    scales[0]
+                        .as_ref()
+                        .map(|s| s.to_device(device))
+                        .transpose()?,
+                    scales[1]
+                        .as_ref()
+                        .map(|s| s.to_device(device))
+                        .transpose()?,
+                    scales[2]
+                        .as_ref()
+                        .map(|s| s.to_device(device))
+                        .transpose()?,
+                ],
+                out_dim: *out_dim,
+            }),
+            Self::Split { to_q, to_k, to_v } => Ok(Self::Split {
+                to_q: to_q.to_device(device)?,
+                to_k: to_k.to_device(device)?,
+                to_v: to_v.to_device(device)?,
+            }),
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Fused { weight, scales, .. } => {
+                tensor_bytes(weight)
+                    + scales
+                        .iter()
+                        .filter_map(|s| s.as_ref().map(tensor_bytes))
+                        .sum::<usize>()
+            }
+            Self::Split { to_q, to_k, to_v } => {
+                flux2_linear_bytes(to_q) + flux2_linear_bytes(to_k) + flux2_linear_bytes(to_v)
+            }
+        }
+    }
+}
+
 /// Separate Q/K/V attention for double-stream blocks (diffusers format).
 #[derive(Debug, Clone)]
 struct DoubleAttention {
-    to_q: Flux2Linear,
-    to_k: Flux2Linear,
-    to_v: Flux2Linear,
+    qkv: QkvProjections,
     to_out: Flux2Linear,
     norm_q: RmsNorm,
     norm_k: RmsNorm,
@@ -1094,9 +1261,11 @@ impl DoubleAttention {
     fn new_img(dim: usize, num_heads: usize, widen: Flux2Fp8Widen, vb: VarBuilder) -> Result<Self> {
         let head_dim = dim / num_heads;
         Ok(Self {
-            to_q: flux2_linear_no_bias(dim, dim, widen, vb.pp("to_q"))?,
-            to_k: flux2_linear_no_bias(dim, dim, widen, vb.pp("to_k"))?,
-            to_v: flux2_linear_no_bias(dim, dim, widen, vb.pp("to_v"))?,
+            qkv: QkvProjections::new(
+                flux2_linear_no_bias(dim, dim, widen, vb.pp("to_q"))?,
+                flux2_linear_no_bias(dim, dim, widen, vb.pp("to_k"))?,
+                flux2_linear_no_bias(dim, dim, widen, vb.pp("to_v"))?,
+            )?,
             to_out: flux2_linear_no_bias(dim, dim, widen, vb.pp("to_out").pp("0"))?,
             norm_q: RmsNorm::new(vb.get(head_dim, "norm_q.weight")?, 1e-6),
             norm_k: RmsNorm::new(vb.get(head_dim, "norm_k.weight")?, 1e-6),
@@ -1108,9 +1277,11 @@ impl DoubleAttention {
     fn new_txt(dim: usize, num_heads: usize, widen: Flux2Fp8Widen, vb: VarBuilder) -> Result<Self> {
         let head_dim = dim / num_heads;
         Ok(Self {
-            to_q: flux2_linear_no_bias(dim, dim, widen, vb.pp("add_q_proj"))?,
-            to_k: flux2_linear_no_bias(dim, dim, widen, vb.pp("add_k_proj"))?,
-            to_v: flux2_linear_no_bias(dim, dim, widen, vb.pp("add_v_proj"))?,
+            qkv: QkvProjections::new(
+                flux2_linear_no_bias(dim, dim, widen, vb.pp("add_q_proj"))?,
+                flux2_linear_no_bias(dim, dim, widen, vb.pp("add_k_proj"))?,
+                flux2_linear_no_bias(dim, dim, widen, vb.pp("add_v_proj"))?,
+            )?,
             to_out: flux2_linear_no_bias(dim, dim, widen, vb.pp("to_add_out"))?,
             norm_q: RmsNorm::new(vb.get(head_dim, "norm_added_q.weight")?, 1e-6),
             norm_k: RmsNorm::new(vb.get(head_dim, "norm_added_k.weight")?, 1e-6),
@@ -1120,34 +1291,28 @@ impl DoubleAttention {
 
     fn qkv(&self, xs: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
         let (b, l, _) = xs.dims3()?;
+        let (q, k, v) = self.qkv.project(xs)?;
         // Normalize BEFORE the transpose. The reshape of a projection output
         // is contiguous, which is what candle's fused RMSNorm kernel requires
         // (`candle-nn/src/layer_norm.rs:202-210`); the transposed view took
         // the ~9-kernel strided fallback for every one of these. RMSNorm
         // normalizes the LAST dim, `head_dim` in both layouts, so the
         // arithmetic is BFL's own (`flux2/model.py:752-755`).
-        let q = xs
-            .apply(&self.to_q)?
+        let q = q
             .reshape((b, l, self.num_heads, ()))?
             .apply(&self.norm_q)?
             .transpose(1, 2)?;
-        let k = xs
-            .apply(&self.to_k)?
+        let k = k
             .reshape((b, l, self.num_heads, ()))?
             .apply(&self.norm_k)?
             .transpose(1, 2)?;
-        let v = xs
-            .apply(&self.to_v)?
-            .reshape((b, l, self.num_heads, ()))?
-            .transpose(1, 2)?;
+        let v = v.reshape((b, l, self.num_heads, ()))?.transpose(1, 2)?;
         Ok((q, k, v))
     }
 
     fn to_device(&self, device: &candle_core::Device) -> Result<Self> {
         Ok(Self {
-            to_q: self.to_q.to_device(device)?,
-            to_k: self.to_k.to_device(device)?,
-            to_v: self.to_v.to_device(device)?,
+            qkv: self.qkv.to_device(device)?,
             to_out: self.to_out.to_device(device)?,
             norm_q: rms_norm_to_device(&self.norm_q, device)?,
             norm_k: rms_norm_to_device(&self.norm_k, device)?,
@@ -1157,9 +1322,7 @@ impl DoubleAttention {
 }
 
 fn double_attention_bytes(attention: &DoubleAttention) -> usize {
-    flux2_linear_bytes(&attention.to_q)
-        + flux2_linear_bytes(&attention.to_k)
-        + flux2_linear_bytes(&attention.to_v)
+    attention.qkv.bytes()
         + flux2_linear_bytes(&attention.to_out)
         + rms_norm_bytes(&attention.norm_q)
         + rms_norm_bytes(&attention.norm_k)
@@ -2938,6 +3101,131 @@ mod tests {
         let per_row = Tensor::zeros((2, 3, 4), DType::F32, &device).unwrap();
         assert!(batchable_positional_embedding(&shared));
         assert!(!batchable_positional_embedding(&per_row));
+    }
+
+    /// One `[3*dim, dim]` GEMM narrowed into three must equal three GEMMs.
+    ///
+    /// BFL ships the fused form (`flux2/model.py:384`); mold loads the
+    /// diffusers split one and concatenates at load. A rank-0 FP8 output scale
+    /// has to stay on the NARROWED slice — if fusing quietly moved it onto the
+    /// concatenated weight, every component would get the first one's scale,
+    /// which is the failure this asserts against.
+    #[test]
+    fn fused_qkv_matches_three_projections() {
+        let dev = candle_core::Device::Cpu;
+        let (in_dim, out_dim) = (4usize, 6usize);
+        let weight = |salt: f64| {
+            Tensor::arange(0f32, (in_dim * out_dim) as f32, &dev)
+                .unwrap()
+                .affine(0.031, salt)
+                .unwrap()
+                .sin()
+                .unwrap()
+                .reshape((out_dim, in_dim))
+                .unwrap()
+        };
+        let xs = Tensor::arange(0f32, (2 * 3 * in_dim) as f32, &dev)
+            .unwrap()
+            .affine(0.017, -0.3)
+            .unwrap()
+            .reshape((2, 3, in_dim))
+            .unwrap();
+
+        // Plain BF16-shaped linears: fusing must be exact.
+        let split = [weight(0.1), weight(0.7), weight(1.3)]
+            .map(|w| Flux2Linear::Standard(candle_nn::Linear::new(w, None)));
+        let fused =
+            QkvProjections::new(split[0].clone(), split[1].clone(), split[2].clone()).unwrap();
+        assert!(
+            matches!(fused, QkvProjections::Fused { .. }),
+            "three bias-free standard linears must fuse"
+        );
+        let (q, k, v) = fused.project(&xs).unwrap();
+        for (got, linear) in [&q, &k, &v].into_iter().zip(&split) {
+            let want = xs.apply(linear).unwrap();
+            let diff = (got - &want)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            assert!(diff < 1e-6, "the fused projection diverged by {diff}");
+        }
+
+        // Widened FP8 with a DIFFERENT scale per component.
+        let fp8 = |salt: f64, scale: f32| {
+            let w = weight(salt).to_dtype(DType::F8E4M3).unwrap();
+            let (weight, scale) =
+                widen_fp8_weight(&w, Some(Tensor::new(scale, &dev).unwrap()), DType::F32).unwrap();
+            Flux2Linear::Fp8Widened {
+                weight,
+                scale,
+                bias: None,
+            }
+        };
+        let scaled = [fp8(0.1, 0.25), fp8(0.7, 0.5), fp8(1.3, 2.0)];
+        let fused =
+            QkvProjections::new(scaled[0].clone(), scaled[1].clone(), scaled[2].clone()).unwrap();
+        assert!(
+            matches!(fused, QkvProjections::Fused { .. }),
+            "widened FP8 layers must fuse"
+        );
+        let (q, k, v) = fused.project(&xs).unwrap();
+        for (got, linear) in [&q, &k, &v].into_iter().zip(&scaled) {
+            let want: Vec<f32> = linear
+                .forward(&xs)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            let got: Vec<f32> = got.flatten_all().unwrap().to_vec1().unwrap();
+            assert_eq!(got, want, "a per-component scale must ride its own slice");
+        }
+    }
+
+    /// An arm whose weights cannot be concatenated stays split rather than
+    /// being fused wrongly — the per-forward FP8 slab must stay packed, and
+    /// NVFP4 lives on the CPU behind a lazy dequant.
+    #[test]
+    fn an_unfusable_projection_stays_split() {
+        let dev = candle_core::Device::Cpu;
+        let w = Tensor::from_vec(vec![1.0f32; 8], (2, 4), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let packed = || Flux2Linear::Fp8 {
+            weight: w.clone(),
+            scale: None,
+            bias: None,
+        };
+        let projections = QkvProjections::new(packed(), packed(), packed()).unwrap();
+        assert!(
+            matches!(projections, QkvProjections::Split { .. }),
+            "a per-forward FP8 layer must not be fused"
+        );
+
+        // And a mismatched output width is left alone rather than silently
+        // producing a fused weight nobody can narrow correctly.
+        let wide = Flux2Linear::Standard(candle_nn::Linear::new(
+            Tensor::from_vec(vec![1.0f32; 12], (3, 4), &dev).unwrap(),
+            None,
+        ));
+        let narrow = || {
+            Flux2Linear::Standard(candle_nn::Linear::new(
+                Tensor::from_vec(vec![1.0f32; 8], (2, 4), &dev).unwrap(),
+                None,
+            ))
+        };
+        let projections = QkvProjections::new(narrow(), wide, narrow()).unwrap();
+        assert!(
+            matches!(projections, QkvProjections::Split { .. }),
+            "components of different widths must not be fused"
+        );
     }
 
     #[test]
