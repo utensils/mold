@@ -882,7 +882,7 @@ describe("LibraryPage", () => {
 
     const options = vi.mocked(requestConfirm).mock.calls[0]![0];
     expect(options).toMatchObject({ danger: true, confirmLabel: "Delete" });
-    expect(options.typedPhrase).toBeUndefined();
+    expect("typedPhrase" in options).toBe(false);
     expect(deleteMock).toHaveBeenCalledWith("cat.png");
     expect(deleteMock).toHaveBeenCalledWith("dog.png");
   });

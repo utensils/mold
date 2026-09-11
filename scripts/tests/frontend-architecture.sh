@@ -99,7 +99,9 @@ for duplicate in \
   web/src/components/create/EstimateBadge.vue \
   desktop/src/components/generate/EstimateBadge.vue \
   web/src/components/ReferenceCropModal.vue \
-  desktop/src/components/generate/ReferenceCropModal.vue; do
+  desktop/src/components/generate/ReferenceCropModal.vue \
+  web/src/components/shell/ConfirmDialog.vue \
+  desktop/src/components/shell/ConfirmDialog.vue; do
   test ! -e "$duplicate" || fail "$duplicate duplicates studio domain logic"
 done
 

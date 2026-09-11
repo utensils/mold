@@ -11,7 +11,7 @@ import { computed, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import QueueEntryDrawer from "../jobs/QueueEntryDrawer.vue";
-import ConfirmDialog from "../shell/ConfirmDialog.vue";
+import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
 import { useGenerationStore, jobPhase, jobProgress, type Job } from "../../stores/generation";
 import { type HostView } from "../../stores/hosts";
 import {

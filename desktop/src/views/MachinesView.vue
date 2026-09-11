@@ -13,7 +13,7 @@ import { useRoute, useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import ConnectMachineModal from "../components/machines/ConnectMachineModal.vue";
 import PodCostMeter from "../components/machines/PodCostMeter.vue";
-import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
+import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
 import { countPhrase } from "../composables/useShellSubtitle";
 import { HOST_RECONNECTING_LABEL } from "@studio/lib/hostConnectivity";
 import { ipc, type DiscoveredHost, type SavedHost } from "../lib/ipc";

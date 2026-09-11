@@ -33,7 +33,7 @@ import LibraryChipRow from "../components/library/LibraryChipRow.vue";
 import LibraryHeader from "../components/library/LibraryHeader.vue";
 import TrashBanner from "../components/library/TrashBanner.vue";
 import TrashTileActions from "../components/library/TrashTileActions.vue";
-import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
+import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";

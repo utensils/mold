@@ -21,7 +21,7 @@ import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import Icon from "@ui/components/Icon.vue";
 import Tooltip from "@ui/components/Tooltip.vue";
-import ConfirmDialog from "../shell/ConfirmDialog.vue";
+import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
 import CatalogDetailDrawer from "./CatalogDetailDrawer.vue";
 import DownloadTargetDialog from "./DownloadTargetDialog.vue";
 import ModelTableRow from "./ModelTableRow.vue";

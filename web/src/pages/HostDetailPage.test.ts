@@ -1308,7 +1308,7 @@ describe("HostDetailPage — library", () => {
     expect(options.body).toBe(
       "Delete 2 prints in the trash on Studio forever? This can't be undone.",
     );
-    expect(options.typedPhrase).toBeUndefined();
+    expect("typedPhrase" in options).toBe(false);
     expect(emptyTrashCall).toHaveBeenCalledWith({
       baseUrl: "http://192.168.1.20:7680",
       apiKey: "secret",

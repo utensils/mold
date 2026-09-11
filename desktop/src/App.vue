@@ -10,7 +10,7 @@ import Sidebar from "./components/shell/Sidebar.vue";
 import StatusBar from "./components/shell/StatusBar.vue";
 import Toasts from "./components/shell/Toasts.vue";
 import CommandPalette from "./components/shell/CommandPalette.vue";
-import ConfirmDialog from "./components/shell/ConfirmDialog.vue";
+import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
 import ContextMenu from "./components/shell/ContextMenu.vue";
 import UpdateBanner from "./components/shell/UpdateBanner.vue";
 import LicenseAcceptanceDialog from "@studio/components/LicenseAcceptanceDialog.vue";
