@@ -549,8 +549,79 @@ pub fn ram_snapshot() -> RamSnapshot {
     ram_snapshot_from_system().with_zfs_arc_credit(crate::zfs_arc::evictable_arc_credit())
 }
 
-/// Build a single `RamSnapshot` using `sysinfo`. Refreshes only memory and
-/// the current process — cheap enough to run at 1 Hz (~200 µs).
+/// The ONE process-wide `sysinfo::System` the RAM sampler owns.
+///
+/// It is built memory-only and **must never gain a process table**. A
+/// per-call `System::new_with_specifics(..with_processes(..))` walks all of
+/// `/proc` on every construction, and `ProcessesToUpdate::Some(&[pid])` still
+/// `read_dir`s `/proc` on Linux — so the "cheap enough at 1 Hz" claim this
+/// function used to carry was false by three orders of magnitude on a
+/// 128-core host. RSS comes from [`process_rss_bytes`] instead, which is O(1).
+fn shared_system() -> &'static Mutex<System> {
+    static SYSTEM: std::sync::OnceLock<Mutex<System>> = std::sync::OnceLock::new();
+    SYSTEM.get_or_init(|| {
+        Mutex::new(System::new_with_specifics(
+            RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
+        ))
+    })
+}
+
+/// How many processes the shared sampler `System` is tracking. Always zero —
+/// the test that reads it is the pin on "the sampler never walks /proc".
+#[cfg(test)]
+pub(crate) fn shared_system_process_count() -> usize {
+    let sys = shared_system()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    sys.processes().len()
+}
+
+/// This process's resident set size in bytes, in O(1).
+///
+/// Linux exposes it as the second field of `/proc/self/statm`, in pages; one
+/// small read and one parse, with no directory walk anywhere. Other hosts fall
+/// back to the per-PID `sysinfo` probe (on macOS that is a `task_info` call,
+/// not a process enumeration).
+pub(crate) fn process_rss_bytes() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(bytes) = statm_resident_bytes() {
+            return bytes;
+        }
+    }
+    sysinfo_process_rss_bytes()
+}
+
+/// Parse `resident` (field 2, in pages) out of `/proc/self/statm`.
+#[cfg(target_os = "linux")]
+fn statm_resident_bytes() -> Option<u64> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let resident_pages: u64 = statm.split_ascii_whitespace().nth(1)?.parse().ok()?;
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let page_size = u64::try_from(page_size).ok().filter(|size| *size > 0)?;
+    Some(resident_pages.saturating_mul(page_size))
+}
+
+/// The per-PID `sysinfo` reading of this process's RSS. The fallback for
+/// non-Linux hosts, and the oracle the Linux reader is tested against.
+///
+/// This one DOES build its own `System`: it is not on the 1 Hz path.
+pub(crate) fn sysinfo_process_rss_bytes() -> u64 {
+    let pid = Pid::from_u32(std::process::id());
+    let mut sys = System::new_with_specifics(
+        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing().with_memory()),
+    );
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_memory(),
+    );
+    sys.process(pid).map(|p| p.memory()).unwrap_or(0)
+}
+
+/// Build a single `RamSnapshot` using `sysinfo`. Refreshes host memory on the
+/// shared memory-only `System` and reads this process's RSS in O(1) — no
+/// process table is built or walked, so this is genuinely cheap at 1 Hz.
 ///
 /// `reclaimable_zfs_arc` is `None` here on purpose: this is the reading for
 /// RSS-only probes (`used_by_mold` before/after an unload), which have no
@@ -572,22 +643,18 @@ pub(crate) fn ram_snapshot_from_system() -> RamSnapshot {
 pub(crate) fn ram_snapshot_from_system_with_available(
     sample_available: impl FnOnce(&System) -> Option<u64>,
 ) -> RamSnapshot {
-    let mut sys = System::new_with_specifics(
-        RefreshKind::nothing()
-            .with_memory(sysinfo::MemoryRefreshKind::everything())
-            .with_processes(ProcessRefreshKind::nothing().with_memory()),
-    );
-    sys.refresh_memory();
-    let pid = Pid::from_u32(std::process::id());
-    sys.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[pid]),
-        true,
-        ProcessRefreshKind::nothing().with_memory(),
-    );
-    let total = sys.total_memory();
-    let used = sys.used_memory();
-    let available = sample_available(&sys);
-    let used_by_mold = sys.process(pid).map(|p| p.memory()).unwrap_or(0);
+    let (total, used, available) = {
+        let mut sys = shared_system()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        sys.refresh_memory();
+        (
+            sys.total_memory(),
+            sys.used_memory(),
+            sample_available(&sys),
+        )
+    };
+    let used_by_mold = process_rss_bytes().min(used);
     let used_by_other = used.saturating_sub(used_by_mold);
     RamSnapshot {
         total,

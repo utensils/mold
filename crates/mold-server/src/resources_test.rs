@@ -245,6 +245,83 @@ fn ram_snapshot_satisfies_invariants() {
     );
 }
 
+#[test]
+fn process_rss_reader_agrees_with_sysinfo() {
+    // Touch a few MiB of ballast first so a stale page-size assumption or a
+    // KiB/byte unit slip cannot hide inside the noise.
+    let mut ballast: Vec<u8> = vec![0_u8; 64 << 20];
+    for page in ballast.chunks_mut(4096) {
+        page[0] = 7;
+    }
+    std::hint::black_box(&ballast);
+
+    // The kernel's own answer is the oracle for units and page size:
+    // `/proc/self/status: VmRSS` and `/proc/self/statm` field 2 describe the
+    // same resident set, so the O(1) reader must land on it to within the
+    // pages the two reads are apart.
+    #[cfg(target_os = "linux")]
+    {
+        let low = crate::resources::process_rss_bytes();
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let high = crate::resources::process_rss_bytes();
+        let vm_rss_kb: u64 = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .expect("VmRSS is always present on Linux");
+        let vm_rss = vm_rss_kb * 1024;
+        // Reading /proc/self/status itself grows the heap, so bracket it.
+        // One page of slack on each side; a page-size or KiB/byte slip would
+        // be a factor, not a page.
+        let page = 1_u64 << 12;
+        assert!(
+            vm_rss + page >= low.min(high) && vm_rss <= high.max(low) + page,
+            "statm reader bracket [{low}, {high}] does not contain VmRSS ({vm_rss})"
+        );
+    }
+
+    // And it must agree with the per-PID `sysinfo` probe it replaces. The
+    // tolerance is 25 %, not 5 %, for a measured reason worth keeping: that
+    // probe builds its own `System` and walks /proc, so the sample it takes
+    // is inflated by its own working set (measured ~16 MB of a ~93 MB
+    // process here) — which is exactly why the 1 Hz sampler stopped using it.
+    let before = crate::resources::process_rss_bytes();
+    let theirs = crate::resources::sysinfo_process_rss_bytes();
+    let after = crate::resources::process_rss_bytes();
+    assert!(
+        before > 0 && after > 0 && theirs > 0,
+        "the resident set of a running process is never zero"
+    );
+    let lo = before.min(after) as f64 * 0.75;
+    let hi = before.max(after) as f64 * 1.25;
+    assert!(
+        (theirs as f64) >= lo && (theirs as f64) <= hi,
+        "RSS readers disagree: statm bracket [{before}, {after}] sysinfo={theirs}"
+    );
+}
+
+#[test]
+fn ram_snapshot_does_not_list_other_processes() {
+    // The 1 Hz sampler must never walk /proc. The shared memory-only
+    // `System` is the whole budget: it holds no process table at all,
+    // before or after a snapshot.
+    let ram = crate::resources::ram_snapshot();
+    assert!(ram.total > 0);
+    assert!(ram.used_by_mold > 0, "RSS must still be reported");
+    assert_eq!(
+        crate::resources::shared_system_process_count(),
+        0,
+        "sampling must not populate the process table"
+    );
+    let _ = crate::resources::ram_snapshot_from_system();
+    assert_eq!(
+        crate::resources::shared_system_process_count(),
+        0,
+        "the shared sampler System must never hold a process table"
+    );
+}
+
 fn raw_uuid(hex: &str) -> [u8; 16] {
     assert_eq!(hex.len(), 32);
     let mut bytes = [0_u8; 16];
