@@ -22,10 +22,11 @@ import type { StyleMenuModel } from "../lib/styleMenu";
  * Nothing here may reach a store, a router or a shell — `studio/` stays
  * browser-safe and application-shell independent
  * (`scripts/tests/frontend-architecture.sh`), so the availability tag, the
- * refusal reason and the source glyph are all INJECTED by the host. The two
- * availability rules that exist today (desktop's primary-host-keyed "N hosts"
- * and the phone's "N machines") stay where they are rather than being
- * reconciled behind this component's back.
+ * refusal reason and the source glyph are all INJECTED by the host. The rule
+ * behind the availability tag is now ONE shared rule,
+ * `@studio/lib/modelAvailability`, but it still arrives as a function: the
+ * menu cannot reach a machine list, and each surface spells reachability and
+ * the "is this even a fleet" guard differently.
  */
 const props = withDefaults(
   defineProps<{
@@ -50,7 +51,8 @@ const props = withDefaults(
     emptyLabel?: string | null;
     /** Non-null marks the row unpickable and explains why, inline. */
     disabledReason?: ((model: M) => string | null) | null;
-    /** The host's own multi-machine rule; null renders nothing at all. */
+    /** `@studio/lib/modelAvailability`, bound by the host to its own
+     *  reachable machines; null renders nothing at all. */
     availabilityTag?: ((model: M) => string | null) | null;
     /** Finger-sized rows and body text, for the phone's sheet. */
     touch?: boolean;

@@ -101,19 +101,3 @@ export const MOBILE_AUTO_ROUTING_HINT =
   "Auto sends each print to the least busy machine that already has the model.";
 export const MOBILE_CAPABLE_ROUTING_HINT =
   "Most capable sends it to the strongest GPU that has the model (CUDA before Metal, then VRAM).";
-
-/**
- * Per-model availability for the union picker: which connected machines hold
- * this model. Quiet when every reachable machine has it — the tag exists to
- * say where a model is, not to repeat what is everywhere.
- */
-export function mobileModelAvailabilityTag(
-  hostIds: readonly string[],
-  hosts: readonly MobileHost[],
-): string | null {
-  const reachable = mobileRoutingHosts(hosts);
-  const known = reachable.filter((host) => hostIds.includes(host.id));
-  if (known.length === 0 || known.length === reachable.length) return null;
-  if (known.length === 1) return known[0]!.name;
-  return `${known.length} machines`;
-}

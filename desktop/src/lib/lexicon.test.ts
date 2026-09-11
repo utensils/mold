@@ -442,6 +442,25 @@ describe("lexicon — view copy and assistive labels", () => {
     }
   });
 
+  // The availability tag under a style row is ONE rule for all three surfaces
+  // (`@studio/lib/modelAvailability`), and the word for a machine is machine.
+  // Desktop's retired copy said "2 hosts", which no scan looked at because it
+  // lived in a .ts module rather than a template.
+  it("counts machines under a style row, never hosts", () => {
+    // Comments out first — they discuss the retired rule by name, and a
+    // backtick in prose would otherwise read as a template literal.
+    const rule = read("../../../studio/lib/modelAvailability.ts")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    // Every literal the module can put on screen: "..." , '...' and `...`.
+    const emitted = rule.match(/"[^"\n]*"|'[^'\n]*'|`[^`]*`/g) ?? [];
+    expect(emitted.length).toBeGreaterThan(0);
+    for (const literal of emitted) {
+      expect(/\bhosts?\b/i.test(literal), literal).toBe(false);
+    }
+    expect(emitted.some((literal) => literal.includes("machines"))).toBe(true);
+  });
+
   it("refuses a clip in the words of a style", () => {
     expect(generateViewSource).toContain('"Choose a style first."');
     expect(generateViewSource).not.toContain("Choose an installed model before generating.");

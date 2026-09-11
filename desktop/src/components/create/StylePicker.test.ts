@@ -14,6 +14,7 @@ import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import type { ModelEntry } from "../../lib/api/types";
 import { apiJsonTo } from "../../lib/api/client";
+import { PLATFORM_UI } from "../../lib/platform";
 
 /*
  * The composer's Style chip IS the picker. These cover the rows it may offer
@@ -586,5 +587,83 @@ describe("StylePicker — the menu holds one section", () => {
     await wrapper.get('[data-test="style-chip"]').trigger("click");
     await wrapper.get('[data-test="browse-catalog"]').trigger("click");
     expect(routerPush).toHaveBeenLastCalledWith("/models?type=mesh");
+  });
+});
+
+/*
+ * The availability tag is `@studio/lib/modelAvailability`'s rule now, injected
+ * by `ModelPicker` over the machines this Mac can actually reach. Desktop used
+ * to key it on the primary and to count a machine that was unreachable.
+ */
+describe("StylePicker — which machines have the style", () => {
+  /** The picker force-refreshes every ready machine's inventory when it opens. */
+  function inventory(byUrl: Record<string, ModelEntry[]>) {
+    vi.mocked(apiJsonTo).mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve(byUrl[target.baseUrl] ?? []),
+    );
+  }
+
+  afterEach(() => {
+    vi.mocked(apiJsonTo).mockImplementation(() => Promise.resolve([]));
+  });
+
+  function machine(id: string, label: string, status: "ready" | "error" | "connecting") {
+    useHostsStore().extras.push({
+      id,
+      label,
+      url: `http://${id}:7680`,
+      apiKey: null,
+      status,
+      error: null,
+      instanceId: null,
+    });
+  }
+
+  function thisMac() {
+    const connection = useConnectionStore();
+    connection.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "k" };
+    connection.status = "ready";
+    useModelStore().all = [model];
+  }
+
+  async function openTag() {
+    const wrapper = mountPicker(useGenerateFormStore().form);
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    await flushPromises();
+    const tag = wrapper.find('[data-test="model-availability"]');
+    return tag.exists() ? tag.text() : null;
+  }
+
+  it("names the one reachable machine that has the style", async () => {
+    thisMac();
+    machine("hal9000-7680", "HAL 9000", "ready");
+    inventory({ "http://127.0.0.1:7680": [model] });
+    // The built-in engine is named like any other machine — there is no home
+    // rule any more, so holding the style alone is worth saying.
+    expect(await openTag()).toBe(PLATFORM_UI.deviceLabel);
+  });
+
+  it("stays quiet when every reachable machine has the style", async () => {
+    thisMac();
+    machine("hal9000-7680", "HAL 9000", "ready");
+    inventory({ "http://127.0.0.1:7680": [model], "http://hal9000-7680:7680": [model] });
+    expect(await openTag()).toBeNull();
+  });
+
+  it("does not count a machine it cannot reach", async () => {
+    thisMac();
+    machine("hal9000-7680", "HAL 9000", "error");
+    machine("bender-7680", "bender", "connecting");
+    inventory({ "http://127.0.0.1:7680": [model] });
+    // This Mac is the only reachable machine, so there is nothing to point at.
+    expect(await openTag()).toBeNull();
+  });
+
+  it("counts machines, never hosts", async () => {
+    thisMac();
+    machine("hal9000-7680", "HAL 9000", "ready");
+    machine("bender-7680", "bender", "ready");
+    inventory({ "http://127.0.0.1:7680": [model], "http://hal9000-7680:7680": [model] });
+    expect(await openTag()).toBe("2 machines");
   });
 });

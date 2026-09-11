@@ -257,6 +257,7 @@ import {
   modelDisplayName,
   modelDisplayNameForId,
 } from "@studio/lib/modelDisplay";
+import { modelAvailabilityTag } from "@studio/lib/modelAvailability";
 import {
   AUTO_TARGET_ID,
   CAPABLE_TARGET_ID,
@@ -1369,6 +1370,20 @@ const missingModelId = computed(() => {
     ? null
     : name;
 });
+/**
+ * Which machines hold a style, for the picker's tag — the shared rule
+ * (`@studio/lib/modelAvailability`), bound to the machines this browser can
+ * reach right now. A single-machine browser has no fleet to talk about, and an
+ * errored machine cannot run the style, so neither is counted.
+ */
+function styleAvailabilityTag(model: { name: string }): string | null {
+  if (!routing.multiHost.value) return null;
+  const reachable = routing.hosts.value
+    .filter((host) => host.status === "ready")
+    .map((host) => ({ id: host.id, label: host.label }));
+  return modelAvailabilityTag(routing.modelOwnerIds(model.name), reachable);
+}
+
 watch(
   [installedModels, modelsLoaded],
   () => {
@@ -4692,6 +4707,7 @@ onBeforeUnmount(() => {
                 :models="composerModels"
                 :model="form.state.value.model"
                 :missing-model="missingModelId"
+                :availability-tag="styleAvailabilityTag"
                 :browse-to="output.browseTo.value"
                 empty-label="No styles ready"
                 @select="selectModel"
@@ -4891,6 +4907,7 @@ onBeforeUnmount(() => {
           :models="composerModels"
           :model="form.state.value.model"
           :missing-model="missingModelId"
+          :availability-tag="styleAvailabilityTag"
           :browse-to="output.browseTo.value"
           empty-label="No styles ready"
           @select="selectModel"

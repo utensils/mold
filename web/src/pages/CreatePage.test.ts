@@ -3913,6 +3913,54 @@ describe("CreatePage host routing", () => {
     expect(submitMock.mock.calls[0]?.[2]).toMatchObject({ hostId: studio.id });
   });
 
+  /*
+   * Web says which machine has a style for the first time, through the same
+   * `@studio/lib/modelAvailability` rule desktop and the phone read. The page
+   * owns the fleet, so the page words the tag and the picker only renders it.
+   */
+  it("names the one ready machine that has a style", async () => {
+    addHost({ url: "http://studio:7680", name: "Studio" });
+    localStorage.setItem("mold.web.generateTarget.v1", AUTO_TARGET_ID);
+    hostModelsMock.mockImplementation(async (host: { id: string }) =>
+      host.id === ORIGIN_HOST_ID ? [flux] : [zimage],
+    );
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const tag = wrapper
+      .getComponent({ name: "CreateStylePicker" })
+      .props("availabilityTag") as (m: { name: string }) => string | null;
+    expect(tag({ name: "z-image:bf16" })).toBe("Studio");
+    expect(tag({ name: "flux2-klein:q4" })).toBe("this server");
+  });
+
+  it("stays quiet when every ready machine has the style", async () => {
+    addHost({ url: "http://studio:7680", name: "Studio" });
+    localStorage.setItem("mold.web.generateTarget.v1", AUTO_TARGET_ID);
+    hostModelsMock.mockResolvedValue([zimage]);
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const tag = wrapper
+      .getComponent({ name: "CreateStylePicker" })
+      .props("availabilityTag") as (m: { name: string }) => string | null;
+    expect(tag({ name: "z-image:bf16" })).toBeNull();
+  });
+
+  it("says nothing at all on a single-machine browser", async () => {
+    hostModelsMock.mockResolvedValue([zimage]);
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const tag = wrapper
+      .getComponent({ name: "CreateStylePicker" })
+      .props("availabilityTag") as (m: { name: string }) => string | null;
+    expect(tag({ name: "z-image:bf16" })).toBeNull();
+  });
+
   it("offers the union of every ready machine's models under Auto", async () => {
     addHost({ url: "http://studio:7680", name: "Studio" });
     localStorage.setItem("mold.web.generateTarget.v1", AUTO_TARGET_ID);
@@ -4616,7 +4664,14 @@ function pageStubs() {
     },
     CreateStylePicker: {
       name: "CreateStylePicker",
-      props: ["models", "model", "browseTo", "emptyLabel", "missingModel"],
+      props: [
+        "models",
+        "model",
+        "browseTo",
+        "emptyLabel",
+        "missingModel",
+        "availabilityTag",
+      ],
       template: "<div data-test='style-picker-stub' />",
     },
     ControlsAside: {

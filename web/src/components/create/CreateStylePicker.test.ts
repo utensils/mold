@@ -179,7 +179,20 @@ describe("CreateStylePicker menu", () => {
     wrapper.unmount();
   });
 
-  it("shows no availability tag on web, which has no rule for one yet", async () => {
+  // The rule is the shared one; this control only forwards what the page
+  // resolved, so a page with no fleet passes nothing and nothing renders.
+  it("renders the availability tag the page supplies", async () => {
+    const wrapper = mountPicker({ availabilityTag: () => "2 machines" });
+    await open(wrapper);
+    expect(
+      document.body
+        .querySelector('[data-test="model-availability"]')
+        ?.textContent?.trim(),
+    ).toBe("2 machines");
+    wrapper.unmount();
+  });
+
+  it("shows no availability tag when the page supplies none", async () => {
     const wrapper = mountPicker();
     await open(wrapper);
     expect(
