@@ -28,14 +28,18 @@ mold server status
   `--size-mm`/`--up-axis`/`--origin` to make the export print-ready; a
   turntable GIF, APNG or WebP (`mold library export <file> --format gif`) is
   a render of it for sharing where no viewer opens a GLB.
-- For a multi-stage 3-D job, inspect `/api/models` for the recipe's
-  `capabilities.mesh.workflow_modes`, then use `/api/mesh-workflows`. The
-  `text_to_mesh` workflow durably chains an image request into Hunyuan3D;
-  `mesh_texture` takes one GLB/OBJ mesh reference and an appearance image.
-  Matting and delight are independent retained stages when enabled.
-  List or inspect jobs, follow `/:id/events`, resume or cancel them, and delete
-  settled workflow data when it is no longer needed. A server restart parks an
-  unfinished workflow without changing its attached child identity.
+- For a multi-stage 3-D job, use `mold mesh-workflow` (or `/api/mesh-workflows`
+  directly), after inspecting `/api/models` for the recipe's
+  `capabilities.mesh.workflow_modes`. The `text_to_mesh` workflow durably
+  chains an image request into Hunyuan3D; `mesh_texture` takes one GLB/OBJ
+  mesh reference and an appearance image; `mesh_roundtrip` rebuilds a supplied
+  mesh. The CLI infers which from what you give it — `--prompt`, `--mesh` with
+  `--image`, or `--mesh` alone — and `--mode` names it outright. Matting and
+  delight are independent retained stages when enabled. List or inspect jobs,
+  follow their events, resume or cancel them, and delete settled workflow data
+  when it is no longer needed. A workflow is durable on ONE machine, so there
+  is no local form. A server restart parks an unfinished workflow without
+  changing its attached child identity.
 - For model selection and current capabilities, use `mold list`, `mold info
 <model>`, or the selected server's `/api/models` data. These live surfaces are
   authoritative; this skill intentionally does not duplicate changing model

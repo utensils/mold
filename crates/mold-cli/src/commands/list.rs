@@ -43,12 +43,24 @@ fn remote_remaining_download_bytes(model: &mold_core::ModelInfoExtended) -> Opti
     )
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run(json: bool) -> Result<()> {
     let ctx = CliContext::new(None);
     let default_model =
         mold_core::manifest::resolve_model_name(&ctx.config().resolved_default_model());
 
-    match ctx.list_models().await? {
+    let catalog = ctx.list_models().await?;
+    if json {
+        // The rows themselves, not a rendering of them: the same
+        // `ModelInfoExtended` documents the API serves, so a script reads one
+        // shape whether it asked this command or the server.
+        let models = match &catalog {
+            ModelCatalogSource::Remote(models) | ModelCatalogSource::Local(models) => models,
+        };
+        println!("{}", serde_json::to_string_pretty(models)?);
+        return Ok(());
+    }
+
+    match catalog {
         ModelCatalogSource::Remote(models) => {
             let downloaded: Vec<_> = models.iter().filter(|m| m.downloaded).collect();
             let available: Vec<_> = models.iter().filter(|m| !m.downloaded).collect();

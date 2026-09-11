@@ -1,0 +1,1165 @@
+//! `mold mesh-workflow` — durable multi-stage 3-D jobs.
+//!
+//! A workflow is not a one-shot render. Every stage — the picture a
+//! text-to-3-D run starts from, its matted and delighted copies, the shape,
+//! the paint — is admitted as its own generation and keeps its own retained
+//! artifact, the job survives a server restart, and a failure resumes from
+//! the first unfinished stage instead of rerunning the whole thing.
+//!
+//! Consequently every verb here is remote. The job's manifest, its media and
+//! its queue rows live in ONE host's data root, so there is no local form to
+//! fall back to and `--local` is refused by name rather than quietly running
+//! something else.
+//!
+//! The request is built exactly as the web and desktop 3-D Studio builds it
+//! (`studio/lib/meshWorkflowAuthoring.ts`): a GLB output pinned at 0x0, one
+//! `kind: "mesh"` reference carrying its format, byte length, coordinates and
+//! provenance, and `batch_size = 1` on every stage. The CLI is the first
+//! surface to expose the whole `mesh` block on a durable workflow — the
+//! Studio authors only texture, texture resolution and delight — so the
+//! octree ladder, the iso-level and the decimation target are flags here.
+
+use std::path::Path;
+
+use anyhow::{bail, Context, Result};
+use colored::Colorize;
+use mold_core::mesh_workflow::{
+    validate_create_mesh_workflow, CreateMeshWorkflowRequest, MeshWorkflowEvent,
+    MeshWorkflowJobDetail, MeshWorkflowJobState, MeshWorkflowJobSummary, MeshWorkflowStageRecord,
+};
+use mold_core::{
+    GenerateRequest, GenerationReference, GenerationReferenceAuthority,
+    GenerationReferenceProvenance, MeshReferenceCoordinates, MeshReferenceFormat,
+    MeshRequestOptions, MeshUpAxis, ModelDefaults, MoldClient, OutputFormat,
+};
+
+use crate::{theme, MeshMattingArg, MeshWorkflowAction, MeshWorkflowModeArg};
+
+/// `mold mesh-workflow create`, resolved from clap.
+pub struct CreateArgs {
+    pub prompt: Option<String>,
+    pub mode: Option<MeshWorkflowModeArg>,
+    pub model: Option<String>,
+    pub image_model: Option<String>,
+    pub image: Option<std::path::PathBuf>,
+    pub mesh: Option<std::path::PathBuf>,
+    pub up_axis: Option<MeshUpAxis>,
+    pub meters_per_unit: Option<f64>,
+    pub texture: bool,
+    pub no_texture: bool,
+    pub texture_resolution: Option<u32>,
+    pub matting: Option<MeshMattingArg>,
+    pub delight: bool,
+    pub octree: Option<u32>,
+    pub threshold: Option<f32>,
+    pub target_faces: Option<u32>,
+    pub seed: Option<u64>,
+    pub follow: bool,
+    pub json: bool,
+    pub local: bool,
+}
+
+pub async fn run(action: MeshWorkflowAction) -> Result<()> {
+    let client = MoldClient::from_env();
+    match action {
+        MeshWorkflowAction::Create {
+            prompt,
+            mode,
+            model,
+            image_model,
+            image,
+            mesh,
+            up_axis,
+            meters_per_unit,
+            texture,
+            no_texture,
+            texture_resolution,
+            matting,
+            delight,
+            octree,
+            threshold,
+            target_faces,
+            seed,
+            follow,
+            json,
+            local,
+        } => {
+            create(
+                &client,
+                CreateArgs {
+                    prompt,
+                    mode,
+                    model,
+                    image_model,
+                    image,
+                    mesh,
+                    up_axis,
+                    meters_per_unit,
+                    texture,
+                    no_texture,
+                    texture_resolution,
+                    matting,
+                    delight,
+                    octree,
+                    threshold,
+                    target_faces,
+                    seed,
+                    follow,
+                    json,
+                    local,
+                },
+            )
+            .await
+        }
+        MeshWorkflowAction::List { json } => list(&client, json).await,
+        MeshWorkflowAction::Show { id, json } => show(&client, &id, json).await,
+        MeshWorkflowAction::Events { id } => {
+            follow_workflow(&client, &id).await?;
+            Ok(())
+        }
+        MeshWorkflowAction::Resume { id } => {
+            client.resume_mesh_workflow(&id).await?;
+            println!("{} resumed {id}", theme::icon_ok());
+            Ok(())
+        }
+        MeshWorkflowAction::Cancel { id } => {
+            client.cancel_mesh_workflow(&id).await?;
+            println!("{} cancelled {id}", theme::icon_ok());
+            Ok(())
+        }
+        MeshWorkflowAction::Delete { id } => {
+            client.delete_mesh_workflow(&id).await?;
+            println!(
+                "{} deleted {id} and the artifacts it retained",
+                theme::icon_ok()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// The refusal a `--local` workflow gets.
+///
+/// Named rather than ignored: a user who reaches for it is asking for
+/// something this command cannot mean, and the answer — a one-shot render —
+/// is a different command, not a different flag.
+pub const LOCAL_REFUSAL: &str =
+    "a 3-D workflow is durable on one machine, so there is no local form of it: \
+its manifest, its stage artifacts and its queue rows live in that server's data root. \
+Render locally with `mold run <model> --format glb`, or point MOLD_HOST at a server.";
+
+/// Which workflow the flags describe.
+///
+/// Inference is by what was SUPPLIED, because each mode needs a different
+/// input and no two of them need the same one: a prompt is a picture to
+/// render, a mesh with an appearance image is a mesh to paint, and a mesh on
+/// its own is a mesh to rebuild. `--mode` names it outright when a script
+/// would rather not depend on that.
+pub fn resolve_mode(args: &CreateArgs) -> Result<MeshWorkflowModeArg> {
+    if let Some(mode) = args.mode {
+        return Ok(mode);
+    }
+    match (
+        args.prompt.is_some(),
+        args.mesh.is_some(),
+        args.image.is_some(),
+    ) {
+        (true, false, _) => Ok(MeshWorkflowModeArg::TextToMesh),
+        (false, true, true) => Ok(MeshWorkflowModeArg::MeshTexture),
+        (false, true, false) => Ok(MeshWorkflowModeArg::MeshRoundtrip),
+        (true, true, _) => bail!(
+            "--prompt starts a text-to-3-D run and --mesh supplies one to work from; \
+             they name different workflows. Pick one, or say which with --mode."
+        ),
+        (false, false, _) => bail!(
+            "nothing to work from: give --prompt to render a picture and reconstruct it, \
+             or --mesh to texture or rebuild a mesh you already have."
+        ),
+    }
+}
+
+async fn create(client: &MoldClient, args: CreateArgs) -> Result<()> {
+    if args.local {
+        bail!("{LOCAL_REFUSAL}");
+    }
+    let mode = resolve_mode(&args)?;
+    refuse_flags_the_mode_cannot_use(mode, &args)?;
+
+    let mesh_model = args
+        .model
+        .clone()
+        .unwrap_or_else(|| mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL.to_string());
+    let mesh_model = mold_core::manifest::resolve_model_name(&mesh_model);
+
+    let models = client
+        .list_models_extended()
+        .await
+        .with_context(|| format!("could not read the models on {}", client.host()))?;
+    let mesh_defaults = defaults_for(&models, &mesh_model)?;
+
+    let request = match mode {
+        MeshWorkflowModeArg::TextToMesh => {
+            let image_model = args
+                .image_model
+                .clone()
+                .unwrap_or_else(|| mold_core::Config::load_or_default().resolved_default_model());
+            let image_model = mold_core::manifest::resolve_model_name(&image_model);
+            let image_defaults = defaults_for(&models, &image_model)?;
+            let mut image_request =
+                stage_request(&image_model, &image_defaults, OutputFormat::Png, args.seed);
+            image_request.prompt = args
+                .prompt
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string();
+            let mut mesh_request =
+                stage_request(&mesh_model, &mesh_defaults, OutputFormat::Glb, args.seed);
+            mesh_request.mesh = Some(mesh_options(&args, texture_for(mode, &args)));
+            CreateMeshWorkflowRequest::TextToMesh {
+                image_request: Box::new(image_request),
+                mesh_request: Box::new(mesh_request),
+            }
+        }
+        MeshWorkflowModeArg::MeshTexture => {
+            let mut request =
+                stage_request(&mesh_model, &mesh_defaults, OutputFormat::Glb, args.seed);
+            let appearance = args.image.as_deref().expect("checked by the mode rules");
+            request.source_image = Some(read_media(appearance)?);
+            request.source_image_name = file_name(appearance);
+            request.mesh = Some(mesh_options(&args, true));
+            request.references = Some(vec![mesh_reference(&args)?]);
+            CreateMeshWorkflowRequest::MeshTexture {
+                texture_request: Box::new(request),
+            }
+        }
+        MeshWorkflowModeArg::MeshRoundtrip => {
+            let mut request =
+                stage_request(&mesh_model, &mesh_defaults, OutputFormat::Glb, args.seed);
+            request.mesh = Some(mesh_options(&args, false));
+            request.references = Some(vec![mesh_reference(&args)?]);
+            CreateMeshWorkflowRequest::MeshRoundtrip {
+                roundtrip_request: Box::new(request),
+            }
+        }
+    };
+
+    // Validate here so an obvious mistake reads as a sentence about the flags
+    // rather than as an HTTP status. The server runs the same function plus
+    // per-recipe validation it alone can do.
+    validate_create_mesh_workflow(&request).map_err(|error| anyhow::anyhow!(error))?;
+
+    let (request, lease) = lease_mesh_upload(client, request, args.mesh.as_deref()).await?;
+    let created = match client.create_mesh_workflow(&request).await {
+        Ok(created) => created,
+        Err(error) => {
+            if let Some(handle) = lease {
+                let _ = client.cancel_reference_upload_session(&handle).await;
+            }
+            return Err(error);
+        }
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&created)?);
+    } else {
+        println!("{} {}", "workflow".bold(), created.job_id);
+        for warning in &created.request_warnings {
+            println!("{} {warning}", theme::icon_warn());
+        }
+        let stages = request.planned_stage_kinds();
+        println!(
+            "  {} {}",
+            "stages".dimmed(),
+            stages
+                .iter()
+                .map(|stage| stage.as_str())
+                .collect::<Vec<_>>()
+                .join(" → ")
+        );
+        if !args.follow {
+            println!(
+                "  {} mold mesh-workflow show {}",
+                "next".dimmed(),
+                created.job_id
+            );
+        }
+    }
+    if args.follow {
+        follow_workflow(client, &created.job_id).await?;
+    }
+    Ok(())
+}
+
+/// Refuse a flag the chosen mode cannot honour, by name.
+///
+/// Each of these would otherwise be dropped silently or refused by the
+/// server in wording about a request field the user never typed.
+fn refuse_flags_the_mode_cannot_use(mode: MeshWorkflowModeArg, args: &CreateArgs) -> Result<()> {
+    match mode {
+        MeshWorkflowModeArg::TextToMesh => {
+            if args
+                .prompt
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                bail!("a text-to-3-D workflow needs --prompt");
+            }
+            if args.mesh.is_some() {
+                bail!("a text-to-3-D workflow renders its own picture; --mesh belongs to --mode mesh_texture or mesh_roundtrip");
+            }
+            if args.image.is_some() {
+                bail!("a text-to-3-D workflow renders its own picture; --image belongs to --mode mesh_texture");
+            }
+        }
+        MeshWorkflowModeArg::MeshTexture => {
+            if args.mesh.is_none() {
+                bail!("texturing a mesh needs --mesh");
+            }
+            if args.image.is_none() {
+                bail!("texturing a mesh needs --image: the appearance the paint stage reads");
+            }
+            if args.prompt.is_some() {
+                bail!("the Hunyuan3D family reads no prompt, so a texture run takes none");
+            }
+            if args.no_texture {
+                bail!("--no-texture leaves a texture-only workflow with nothing to do; use --mode mesh_roundtrip to rebuild geometry");
+            }
+        }
+        MeshWorkflowModeArg::MeshRoundtrip => {
+            if args.mesh.is_none() {
+                bail!("rebuilding a mesh needs --mesh");
+            }
+            if args.image.is_some() {
+                bail!("a roundtrip rebuilds geometry only; --image belongs to --mode mesh_texture");
+            }
+            if args.prompt.is_some() {
+                bail!("the Hunyuan3D family reads no prompt, so a roundtrip takes none");
+            }
+            if args.texture {
+                bail!("a roundtrip reconstructs geometry and cannot paint it; texture the result with --mode mesh_texture");
+            }
+        }
+    }
+    if args.texture_resolution.is_some() && !texture_for(mode, args) {
+        bail!("--texture-resolution needs --texture; it has no effect on a geometry-only run");
+    }
+    Ok(())
+}
+
+/// Whether this run paints.
+///
+/// `mesh_texture` is texturing by definition, a roundtrip never paints, and
+/// a text-to-3-D run is geometry-only unless asked — the same opt-in
+/// `mold run --texture` uses, because the paint bundle is a separate
+/// download and a request that assumes it is refused rather than answered
+/// with bare geometry.
+fn texture_for(mode: MeshWorkflowModeArg, args: &CreateArgs) -> bool {
+    match mode {
+        MeshWorkflowModeArg::MeshTexture => true,
+        MeshWorkflowModeArg::MeshRoundtrip => false,
+        MeshWorkflowModeArg::TextToMesh => args.texture && !args.no_texture,
+    }
+}
+
+/// The `mesh` block, built from the flags that name its controls.
+///
+/// Absent stays absent: the engine's own defaults answer for an omitted
+/// octree resolution, iso-level or decimation target, and `mold` records the
+/// resolved values on the print rather than inventing them here.
+pub fn mesh_options(args: &CreateArgs, texture: bool) -> MeshRequestOptions {
+    MeshRequestOptions {
+        octree_resolution: args.octree,
+        threshold: args.threshold,
+        target_faces: args.target_faces,
+        texture: Some(texture),
+        texture_resolution: args.texture_resolution.filter(|_| texture),
+        matting: args.matting.map(MeshMattingArg::mode),
+        delight: args.delight.then_some(true),
+    }
+}
+
+/// One stage's request: the Studio's `requestFor`, in Rust.
+///
+/// A GLB stage is pinned to 0x0 because the mesh recipes are canvasless —
+/// there is no picture to size — and every stage carries `batch_size = 1`,
+/// which the workflow contract requires.
+fn stage_request(
+    model: &str,
+    defaults: &ModelDefaults,
+    output: OutputFormat,
+    seed: Option<u64>,
+) -> GenerateRequest {
+    let glb = output == OutputFormat::Glb;
+    GenerateRequest {
+        mesh_workflow: None,
+        offload: None,
+        mesh: None,
+        video_only: None,
+        title: None,
+        tags: None,
+        collection: None,
+        source_fit: None,
+        hdr_exr_dir: None,
+        hdr_exr_full_float: false,
+        guidance_overrides: None,
+        sample_shift: None,
+        distill_strength_high: None,
+        distill_strength_low: None,
+        prompt: String::new(),
+        negative_prompt: None,
+        model: model.to_string(),
+        width: if glb { 0 } else { defaults.default_width },
+        height: if glb { 0 } else { defaults.default_height },
+        steps: defaults.default_steps,
+        guidance: defaults.default_guidance,
+        seed,
+        batch_size: 1,
+        output_format: Some(output),
+        embed_metadata: None,
+        scheduler: None,
+        cfg_plus: None,
+        source_image: None,
+        source_image_name: None,
+        edit_images: None,
+        reference_weight: None,
+        references: None,
+        strength: 0.75,
+        mask_image: None,
+        control_image: None,
+        control_model: None,
+        control_scale: 1.0,
+        expand: None,
+        save_to_gallery: None,
+        original_prompt: None,
+        prompt_transform: None,
+        batch_id: None,
+        batch_index: None,
+        batch_count: None,
+        lora: None,
+        frames: None,
+        fps: None,
+        upscale_model: None,
+        gif_preview: false,
+        enable_audio: None,
+        audio_file: None,
+        audio_file_path: None,
+        source_video: None,
+        source_video_path: None,
+        extend_video: None,
+        extend_video_path: None,
+        extend_overlap_frames: None,
+        keyframes: None,
+        pipeline: None,
+        ic_lora_control: None,
+        loras: None,
+        retake_range: None,
+        spatial_upscale: None,
+        temporal_upscale: None,
+        placement: None,
+        id_image: None,
+        id_image_name: None,
+        id_weight: None,
+        id_start_step: None,
+        id_images: None,
+        id_image_names: None,
+        true_cfg: None,
+        cfg_start_step: None,
+    }
+}
+
+fn defaults_for(models: &[mold_core::ModelInfoExtended], name: &str) -> Result<ModelDefaults> {
+    models
+        .iter()
+        .find(|model| model.info.name == name)
+        .map(|model| model.defaults.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model named '{name}' on this server. Run `mold list` to see what is there, \
+                 or `mold pull {name}` to install it."
+            )
+        })
+}
+
+/// The container a supplied mesh is in, from its extension.
+pub fn mesh_format_of(path: &Path) -> Result<MeshReferenceFormat> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("glb") | Some("gltf") => Ok(MeshReferenceFormat::Glb),
+        Some("obj") => Ok(MeshReferenceFormat::Obj),
+        _ => bail!(
+            "--mesh takes a .glb or .obj file; {} is neither",
+            path.display()
+        ),
+    }
+}
+
+/// The MIME type that container travels as.
+pub fn mesh_mime_type(format: MeshReferenceFormat) -> &'static str {
+    match format {
+        MeshReferenceFormat::Glb => "model/gltf-binary",
+        MeshReferenceFormat::Obj => "model/obj",
+    }
+}
+
+fn file_name(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+}
+
+fn read_media(path: &Path) -> Result<Vec<u8>> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("could not read {}", path.display()))?;
+    anyhow::ensure!(!bytes.is_empty(), "{} is empty", path.display());
+    Ok(bytes)
+}
+
+/// The one mesh reference a supplied-mesh workflow carries.
+///
+/// Inline to begin with: the lease path, when the host offers one, rewrites
+/// the authority after the bytes have streamed. The digest is computed either
+/// way, because it is what binds the upload session to this exact file.
+fn mesh_reference(args: &CreateArgs) -> Result<GenerationReference> {
+    let path = args.mesh.as_deref().expect("checked by the mode rules");
+    let format = mesh_format_of(path)?;
+    let bytes = read_media(path)?;
+    let byte_length = bytes.len() as u64;
+    anyhow::ensure!(
+        byte_length <= mold_core::validation::MESH_REFERENCE_MAX_BYTES,
+        "{} is {} bytes; a mesh reference may be at most {} bytes",
+        path.display(),
+        byte_length,
+        mold_core::validation::MESH_REFERENCE_MAX_BYTES
+    );
+    let sha256 = sha256_hex(&bytes);
+    Ok(GenerationReference::Mesh {
+        media: GenerationReferenceAuthority::Inline { data: bytes },
+        provenance: GenerationReferenceProvenance {
+            name: file_name(path),
+            sha256: Some(sha256),
+            crop: None,
+        },
+        mime_type: mesh_mime_type(format).to_string(),
+        format,
+        byte_length,
+        coordinates: MeshReferenceCoordinates {
+            up_axis: args.up_axis.unwrap_or(MeshUpAxis::Y),
+            meters_per_unit: args.meters_per_unit.unwrap_or(1.0),
+        },
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Stream a supplied mesh through a request-bound upload lease when the host
+/// offers one, instead of carrying it as base64 in the request body.
+///
+/// The Studio's rule, verbatim: lease when the host advertises
+/// `reference_uploads.available` AND this client is authenticated. Without a
+/// key there is no identity to bind a session to, and a host that advertises
+/// nothing is an older one that takes validated inline references. Returns
+/// the session handle so a failed create can release the lease rather than
+/// leaving it to expire.
+async fn lease_mesh_upload(
+    client: &MoldClient,
+    request: CreateMeshWorkflowRequest,
+    mesh_path: Option<&Path>,
+) -> Result<(CreateMeshWorkflowRequest, Option<String>)> {
+    let Some(path) = mesh_path else {
+        return Ok((request, None));
+    };
+    let Ok(capabilities) = client.capabilities().await else {
+        return Ok((request, None));
+    };
+    if !capabilities.reference_uploads.available || !client.has_api_key() {
+        return Ok((request, None));
+    }
+
+    let (mut inner, rebuild): (
+        GenerateRequest,
+        fn(GenerateRequest) -> CreateMeshWorkflowRequest,
+    ) = match request {
+        CreateMeshWorkflowRequest::MeshTexture { texture_request } => {
+            (*texture_request, |request| {
+                CreateMeshWorkflowRequest::MeshTexture {
+                    texture_request: Box::new(request),
+                }
+            })
+        }
+        CreateMeshWorkflowRequest::MeshRoundtrip { roundtrip_request } => {
+            (*roundtrip_request, |request| {
+                CreateMeshWorkflowRequest::MeshRoundtrip {
+                    roundtrip_request: Box::new(request),
+                }
+            })
+        }
+        // A text-to-3-D run supplies no media at all.
+        other => return Ok((other, None)),
+    };
+
+    let format = mesh_format_of(path)?;
+    // The session is bound to a payload-free request: every authority is
+    // `descriptor` while the scope hash is computed, and the bytes arrive
+    // afterwards under the slot handle the host hands back.
+    let descriptor_references = inner
+        .references
+        .as_ref()
+        .map(|references| {
+            references
+                .iter()
+                .map(|reference| match reference.clone() {
+                    GenerationReference::Mesh {
+                        provenance,
+                        mime_type,
+                        format,
+                        byte_length,
+                        coordinates,
+                        ..
+                    } => GenerationReference::Mesh {
+                        media: GenerationReferenceAuthority::Descriptor,
+                        provenance,
+                        mime_type,
+                        format,
+                        byte_length,
+                        coordinates,
+                    },
+                    other => other,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut scoped = inner.clone();
+    scoped.references = Some(descriptor_references.clone());
+
+    let session = client
+        .create_reference_upload_session(&mold_core::ReferenceUploadSessionRequest {
+            request: scoped,
+            upload_references: vec![1],
+        })
+        .await
+        .context("could not open a reference-upload session for the mesh")?;
+    let handle = session.session_handle.clone();
+    let slot = session
+        .uploads
+        .iter()
+        .find(|slot| slot.reference == 1)
+        .map(|slot| slot.handle.clone())
+        .ok_or_else(|| anyhow::anyhow!("the host opened a session without a slot for the mesh"))?;
+
+    if let Err(error) = client
+        .upload_reference_file(&slot, path, mesh_mime_type(format))
+        .await
+    {
+        let _ = client.cancel_reference_upload_session(&handle).await;
+        return Err(error.context("uploading the mesh failed"));
+    }
+
+    inner.references = Some(
+        descriptor_references
+            .into_iter()
+            .map(|reference| match reference {
+                GenerationReference::Mesh {
+                    provenance,
+                    mime_type,
+                    format,
+                    byte_length,
+                    coordinates,
+                    ..
+                } => GenerationReference::Mesh {
+                    media: GenerationReferenceAuthority::Upload {
+                        handle: slot.clone(),
+                    },
+                    provenance,
+                    mime_type,
+                    format,
+                    byte_length,
+                    coordinates,
+                },
+                other => other,
+            })
+            .collect(),
+    );
+    Ok((rebuild(inner), Some(handle)))
+}
+
+async fn list(client: &MoldClient, json: bool) -> Result<()> {
+    let listing = client.list_mesh_workflows().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&listing)?);
+        return Ok(());
+    }
+    if listing.jobs.is_empty() {
+        println!(
+            "{} No 3-D workflows on {}.",
+            theme::icon_neutral(),
+            client.host()
+        );
+        return Ok(());
+    }
+    let id_width = crate::ui::col_width(listing.jobs.iter().map(|job| job.id.len()), 2, 2);
+    let mode_width =
+        crate::ui::col_width(listing.jobs.iter().map(|job| mode_label(job).len()), 4, 2);
+    println!(
+        "{:<id_width$} {:<mode_width$} {:<10} {:<9} {}",
+        "ID".bold(),
+        "MODE".bold(),
+        "STATE".bold(),
+        "STAGE".bold(),
+        "OUTPUT".bold(),
+    );
+    println!("{}", "─".repeat(id_width + mode_width + 34).dimmed());
+    for job in &listing.jobs {
+        // Pad the plain text first: ANSI codes break `{:<N}`.
+        println!(
+            "{:<id_width$} {:<mode_width$} {} {:<9} {}",
+            job.id,
+            mode_label(job),
+            colored_state(job.state, 10),
+            format!("{}/{}", job.current_stage, job.stage_count),
+            job.output_filename.as_deref().unwrap_or("—"),
+        );
+    }
+    Ok(())
+}
+
+fn mode_label(job: &MeshWorkflowJobSummary) -> String {
+    serde_json::to_value(job.mode)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn colored_state(state: MeshWorkflowJobState, width: usize) -> String {
+    let padded = format!("{:<width$}", state.as_str());
+    match state {
+        MeshWorkflowJobState::Completed => padded.green().to_string(),
+        MeshWorkflowJobState::Failed => padded.red().to_string(),
+        MeshWorkflowJobState::Cancelled | MeshWorkflowJobState::Paused => {
+            padded.yellow().to_string()
+        }
+        _ => padded,
+    }
+}
+
+async fn show(client: &MoldClient, id: &str, json: bool) -> Result<()> {
+    let detail = client.get_mesh_workflow(id).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&detail)?);
+        return Ok(());
+    }
+    print_detail(&detail);
+    Ok(())
+}
+
+fn print_detail(detail: &MeshWorkflowJobDetail) {
+    let summary = &detail.summary;
+    println!("{} {}", "workflow".bold(), summary.id);
+    println!("  {:<10} {}", "mode".dimmed(), mode_label(summary));
+    println!(
+        "  {:<10} {}",
+        "state".dimmed(),
+        colored_state(summary.state, 0)
+    );
+    println!(
+        "  {:<10} {} of {}",
+        "stage".dimmed(),
+        summary.current_stage,
+        summary.stage_count
+    );
+    if let Some(output) = &summary.output_filename {
+        println!("  {:<10} {output}", "output".dimmed());
+    }
+    if let Some(error) = &summary.error {
+        println!("  {:<10} {}", "error".dimmed(), error.red());
+    }
+    if detail.stages.is_empty() {
+        return;
+    }
+    println!();
+    for stage in &detail.stages {
+        print_stage(stage);
+    }
+}
+
+fn print_stage(stage: &MeshWorkflowStageRecord) {
+    println!(
+        "  {} {:<9} {}",
+        format!("{}.", stage.index).dimmed(),
+        stage.kind.as_str(),
+        stage.state.as_str()
+    );
+    if let Some(error) = &stage.error {
+        println!("      {}", error.red());
+    }
+    for artifact in &stage.artifacts {
+        println!(
+            "      {} {} ({})",
+            artifact.role.dimmed(),
+            artifact.relative_path,
+            crate::ui::format_disk_size(artifact.byte_length)
+        );
+    }
+}
+
+/// Follow one workflow's event stream, printing a line per stage transition,
+/// and exit non-zero when it settles as failed or cancelled.
+async fn follow_workflow(client: &MoldClient, id: &str) -> Result<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let printer = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                MeshWorkflowEvent::Snapshot { job } => {
+                    println!(
+                        "{} {} stage {} of {}",
+                        theme::icon_neutral(),
+                        job.summary.state.as_str(),
+                        job.summary.current_stage,
+                        job.summary.stage_count
+                    );
+                }
+                MeshWorkflowEvent::StageStarted { stage_index, kind } => {
+                    println!(
+                        "{} {} {}",
+                        theme::icon_neutral(),
+                        stage_index,
+                        kind.as_str()
+                    );
+                }
+                MeshWorkflowEvent::StageProgress {
+                    stage_index,
+                    kind,
+                    current,
+                    total,
+                } => {
+                    println!(
+                        "  {} {} {current}/{total}",
+                        stage_index,
+                        kind.as_str().dimmed()
+                    );
+                }
+                MeshWorkflowEvent::StageCompleted {
+                    stage_index, kind, ..
+                } => {
+                    println!(
+                        "{} {} {} done",
+                        theme::icon_ok(),
+                        stage_index,
+                        kind.as_str()
+                    );
+                }
+                MeshWorkflowEvent::StateChanged { state, error } => {
+                    if let Some(error) = error {
+                        println!("{} {} — {error}", theme::icon_fail(), state.as_str());
+                    } else {
+                        println!("{} {}", theme::icon_neutral(), state.as_str());
+                    }
+                }
+            }
+        }
+    });
+    let outcome = client.stream_mesh_workflow_events(id, tx).await?;
+    let _ = printer.await;
+    match outcome.state {
+        MeshWorkflowJobState::Completed => {
+            println!(
+                "{} {}",
+                theme::icon_ok(),
+                outcome.output_filename.as_deref().unwrap_or("completed")
+            );
+            Ok(())
+        }
+        MeshWorkflowJobState::Failed => bail!(
+            "workflow {id} failed: {}",
+            outcome.error.as_deref().unwrap_or("no reason recorded")
+        ),
+        MeshWorkflowJobState::Cancelled => bail!("workflow {id} was cancelled"),
+        other => {
+            println!("{} {} — still {}", theme::icon_warn(), id, other.as_str());
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args() -> CreateArgs {
+        CreateArgs {
+            prompt: None,
+            mode: None,
+            model: None,
+            image_model: None,
+            image: None,
+            mesh: None,
+            up_axis: None,
+            meters_per_unit: None,
+            texture: false,
+            no_texture: false,
+            texture_resolution: None,
+            matting: None,
+            delight: false,
+            octree: None,
+            threshold: None,
+            target_faces: None,
+            seed: None,
+            follow: false,
+            json: false,
+            local: false,
+        }
+    }
+
+    /// Each mode needs a different input, so what was supplied names it.
+    #[test]
+    fn the_supplied_inputs_name_the_workflow() {
+        let text = CreateArgs {
+            prompt: Some("a ceramic fox".into()),
+            ..args()
+        };
+        assert_eq!(
+            resolve_mode(&text).unwrap(),
+            MeshWorkflowModeArg::TextToMesh
+        );
+
+        let texture = CreateArgs {
+            mesh: Some("chair.glb".into()),
+            image: Some("albedo.png".into()),
+            ..args()
+        };
+        assert_eq!(
+            resolve_mode(&texture).unwrap(),
+            MeshWorkflowModeArg::MeshTexture
+        );
+
+        let roundtrip = CreateArgs {
+            mesh: Some("chair.glb".into()),
+            ..args()
+        };
+        assert_eq!(
+            resolve_mode(&roundtrip).unwrap(),
+            MeshWorkflowModeArg::MeshRoundtrip
+        );
+
+        // An explicit --mode wins over whatever was supplied.
+        let named = CreateArgs {
+            mesh: Some("chair.glb".into()),
+            mode: Some(MeshWorkflowModeArg::MeshTexture),
+            ..args()
+        };
+        assert_eq!(
+            resolve_mode(&named).unwrap(),
+            MeshWorkflowModeArg::MeshTexture
+        );
+    }
+
+    /// Two inputs that name two different workflows are a question, not a
+    /// default — and neither input at all says what to supply.
+    #[test]
+    fn contradictory_or_absent_inputs_are_refused_by_name() {
+        let both = CreateArgs {
+            prompt: Some("a fox".into()),
+            mesh: Some("chair.glb".into()),
+            ..args()
+        };
+        let message = resolve_mode(&both).unwrap_err().to_string();
+        assert!(message.contains("--prompt"), "{message}");
+        assert!(message.contains("--mesh"), "{message}");
+
+        let neither = resolve_mode(&args()).unwrap_err().to_string();
+        assert!(neither.contains("--prompt"), "{neither}");
+        assert!(neither.contains("--mesh"), "{neither}");
+    }
+
+    /// A flag the mode cannot honour is named rather than dropped.
+    #[test]
+    fn a_mode_refuses_the_flags_it_cannot_honour() {
+        let roundtrip_painting = CreateArgs {
+            mesh: Some("chair.glb".into()),
+            texture: true,
+            ..args()
+        };
+        let message = refuse_flags_the_mode_cannot_use(
+            MeshWorkflowModeArg::MeshRoundtrip,
+            &roundtrip_painting,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("mesh_texture"), "{message}");
+
+        let texture_without_appearance = CreateArgs {
+            mesh: Some("chair.glb".into()),
+            ..args()
+        };
+        let message = refuse_flags_the_mode_cannot_use(
+            MeshWorkflowModeArg::MeshTexture,
+            &texture_without_appearance,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("--image"), "{message}");
+
+        let resolution_without_texture = CreateArgs {
+            prompt: Some("a fox".into()),
+            texture_resolution: Some(2048),
+            ..args()
+        };
+        let message = refuse_flags_the_mode_cannot_use(
+            MeshWorkflowModeArg::TextToMesh,
+            &resolution_without_texture,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("--texture-resolution"), "{message}");
+    }
+
+    /// A texture-only run paints by definition; a roundtrip never does; a
+    /// text-to-3-D run is geometry unless asked.
+    #[test]
+    fn texturing_follows_the_mode_and_the_opt_in() {
+        assert!(texture_for(MeshWorkflowModeArg::MeshTexture, &args()));
+        assert!(!texture_for(MeshWorkflowModeArg::MeshRoundtrip, &args()));
+        assert!(!texture_for(MeshWorkflowModeArg::TextToMesh, &args()));
+        assert!(texture_for(
+            MeshWorkflowModeArg::TextToMesh,
+            &CreateArgs {
+                texture: true,
+                ..args()
+            }
+        ));
+    }
+
+    /// The mesh block carries only what was named; the engine answers for
+    /// the rest.
+    #[test]
+    fn the_mesh_block_carries_only_the_named_controls() {
+        let bare = mesh_options(&args(), false);
+        assert_eq!(bare.octree_resolution, None);
+        assert_eq!(bare.threshold, None);
+        assert_eq!(bare.target_faces, None);
+        assert_eq!(bare.texture, Some(false));
+        assert_eq!(bare.delight, None);
+
+        let full = mesh_options(
+            &CreateArgs {
+                octree: Some(320),
+                threshold: Some(0.55),
+                target_faces: Some(40_000),
+                texture_resolution: Some(4096),
+                matting: Some(MeshMattingArg::On),
+                delight: true,
+                ..args()
+            },
+            true,
+        );
+        assert_eq!(full.octree_resolution, Some(320));
+        assert_eq!(full.target_faces, Some(40_000));
+        assert_eq!(full.texture_resolution, Some(4096));
+        assert_eq!(full.matting, Some(mold_core::MeshMattingMode::On));
+        assert_eq!(full.delight, Some(true));
+    }
+
+    /// A GLB stage is canvasless: 0x0 and one output, which is what the
+    /// workflow contract validates.
+    #[test]
+    fn a_glb_stage_is_pinned_to_a_single_canvasless_output() {
+        let defaults = ModelDefaults {
+            default_steps: 30,
+            default_guidance: 5.0,
+            default_width: 1024,
+            default_height: 1024,
+            description: String::new(),
+            ..Default::default()
+        };
+        let mesh = stage_request("hunyuan3d-2.1:fp16", &defaults, OutputFormat::Glb, Some(7));
+        assert_eq!((mesh.width, mesh.height), (0, 0));
+        assert_eq!(mesh.output_format, Some(OutputFormat::Glb));
+        assert_eq!(mesh.batch_size, 1);
+        assert_eq!(mesh.seed, Some(7));
+        assert!(mesh.prompt.is_empty());
+
+        let image = stage_request("flux-schnell:q8", &defaults, OutputFormat::Png, Some(7));
+        assert_eq!((image.width, image.height), (1024, 1024));
+        assert_eq!(image.steps, 30);
+    }
+
+    /// The container comes from the file, and both are declared on the wire.
+    #[test]
+    fn a_supplied_mesh_declares_its_container_and_its_mime_type() {
+        assert_eq!(
+            mesh_format_of(Path::new("chair.GLB")).unwrap(),
+            MeshReferenceFormat::Glb
+        );
+        assert_eq!(
+            mesh_format_of(Path::new("chair.obj")).unwrap(),
+            MeshReferenceFormat::Obj
+        );
+        assert!(mesh_format_of(Path::new("chair.stl")).is_err());
+        assert_eq!(
+            mesh_mime_type(MeshReferenceFormat::Glb),
+            "model/gltf-binary"
+        );
+        assert_eq!(mesh_mime_type(MeshReferenceFormat::Obj), "model/obj");
+    }
+
+    /// A roundtrip request built from the flags passes the same validation
+    /// the server runs, so a mistake reads as a sentence about the flags.
+    #[test]
+    fn a_built_roundtrip_request_satisfies_the_workflow_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let mesh_path = dir.path().join("chair.glb");
+        std::fs::write(&mesh_path, b"glTF binary").unwrap();
+        let built = CreateArgs {
+            mesh: Some(mesh_path),
+            ..args()
+        };
+        let defaults = ModelDefaults {
+            default_steps: 30,
+            default_guidance: 5.0,
+            default_width: 1024,
+            default_height: 1024,
+            description: String::new(),
+            ..Default::default()
+        };
+        let mut request =
+            stage_request("hunyuan3d-2.1:fp16", &defaults, OutputFormat::Glb, Some(42));
+        request.mesh = Some(mesh_options(&built, false));
+        request.references = Some(vec![mesh_reference(&built).unwrap()]);
+        let workflow = CreateMeshWorkflowRequest::MeshRoundtrip {
+            roundtrip_request: Box::new(request),
+        };
+        assert_eq!(validate_create_mesh_workflow(&workflow), Ok(()));
+        assert_eq!(
+            workflow
+                .planned_stage_kinds()
+                .iter()
+                .map(|stage| stage.as_str())
+                .collect::<Vec<_>>(),
+            ["shape", "finalize"]
+        );
+        assert_eq!(workflow.mode_str(), "mesh_roundtrip");
+    }
+
+    /// `--local` is refused by name: there is no local form of a durable
+    /// workflow, and the honest alternative is a different command.
+    #[test]
+    fn a_local_workflow_is_refused_by_name() {
+        assert!(LOCAL_REFUSAL.contains("durable on one machine"));
+        assert!(LOCAL_REFUSAL.contains("mold run"));
+    }
+}

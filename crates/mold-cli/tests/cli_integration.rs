@@ -1307,3 +1307,563 @@ fn metal_memory_cli_refuses_unprivileged_mutation_before_config() {
         .stderr(predicate::str::contains("requires root"));
     assert!(!missing_home.exists());
 }
+
+// ── mold mesh-workflow ────────────────────────────────────────────────────
+
+/// The models listing every `mesh-workflow create` reads for stage defaults.
+fn models_listing() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "name": "hunyuan3d-2.1:fp16",
+            "family": "hunyuan3d",
+            "size_gb": 12.0,
+            "is_loaded": false,
+            "last_used": null,
+            "hf_repo": "tencent/Hunyuan3D-2.1",
+            "downloaded": true,
+            "default_steps": 30,
+            "default_guidance": 5.0,
+            "default_width": 1024,
+            "default_height": 1024,
+            "description": "Hunyuan3D 2.1 shape"
+        },
+        {
+            "name": "flux-schnell:q8",
+            "family": "flux",
+            "size_gb": 12.0,
+            "is_loaded": false,
+            "last_used": null,
+            "hf_repo": "black-forest-labs/FLUX.1-schnell",
+            "downloaded": true,
+            "default_steps": 4,
+            "default_guidance": 0.0,
+            "default_width": 1024,
+            "default_height": 1024,
+            "description": "FLUX Schnell"
+        }
+    ])
+}
+
+fn mesh_workflow_summary(id: &str, state: &str) -> serde_json::Value {
+    serde_json::json!({
+        "contract_version": 1,
+        "id": id,
+        "state": state,
+        "mode": "mesh_roundtrip",
+        "stage_count": 2,
+        "current_stage": 2,
+        "output_filename": "mold-h3-1700000000000.glb",
+        "created_at_ms": 1_700_000_000_000i64,
+        "updated_at_ms": 1_700_000_000_001i64
+    })
+}
+
+/// A roundtrip run puts the mode tag, a canvasless GLB stage and one inline
+/// mesh reference on the wire — the shape the 3-D Studio submits.
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_workflow_create_submits_the_studios_own_request_shape() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(models_listing()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/mesh-workflows"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+            "job_id": "mw-1"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mesh = env.home.join("chair.glb");
+    std::fs::write(&mesh, b"glTF binary bytes").unwrap();
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args([
+            "mesh-workflow",
+            "create",
+            "--model",
+            "hunyuan3d-2.1:fp16",
+            "--mesh",
+        ])
+        .arg(&mesh)
+        .args(["--octree", "320", "--target-faces", "40000"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mw-1"))
+        .stdout(predicate::str::contains("shape"));
+
+    let posted = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.url.path() == "/api/mesh-workflows")
+        .expect("the workflow was submitted");
+    let body: serde_json::Value = serde_json::from_slice(&posted.body).unwrap();
+    assert_eq!(body["mode"], "mesh_roundtrip");
+    let request = &body["roundtrip_request"];
+    assert_eq!(request["width"], 0);
+    assert_eq!(request["height"], 0);
+    assert_eq!(request["output_format"], "glb");
+    assert_eq!(request["batch_size"], 1);
+    assert_eq!(request["prompt"], "");
+    assert_eq!(request["mesh"]["texture"], false);
+    assert_eq!(request["mesh"]["octree_resolution"], 320);
+    assert_eq!(request["mesh"]["target_faces"], 40000);
+    let reference = &request["references"][0];
+    assert_eq!(reference["kind"], "mesh");
+    assert_eq!(reference["format"], "glb");
+    assert_eq!(reference["mime_type"], "model/gltf-binary");
+    assert_eq!(reference["byte_length"], 17);
+    assert_eq!(reference["coordinates"]["up_axis"], "y");
+    assert_eq!(reference["provenance"]["name"], "chair.glb");
+    assert!(reference["media"]["data"].is_string());
+}
+
+/// A workflow is durable on one machine, so `--local` is refused by name
+/// rather than quietly rendering something else.
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_workflow_create_refuses_local_by_name() {
+    let env = TestEnv::new();
+    let mesh = env.home.join("chair.glb");
+    std::fs::write(&mesh, b"glTF").unwrap();
+    env.cmd()
+        .env("MOLD_HOST", "http://127.0.0.1:1")
+        .args(["mesh-workflow", "create", "--mesh"])
+        .arg(&mesh)
+        .arg("--local")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("durable on one machine"))
+        .stderr(predicate::str::contains("mold run"));
+}
+
+/// Two inputs naming two different workflows is a question, and it is asked
+/// before anything reaches the network.
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_workflow_create_refuses_contradictory_inputs_before_any_request() {
+    use wiremock::MockServer;
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    let mesh = env.home.join("chair.glb");
+    std::fs::write(&mesh, b"glTF").unwrap();
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["mesh-workflow", "create", "--prompt", "a fox", "--mesh"])
+        .arg(&mesh)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--mode"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// The listing, the detail, and the three lifecycle verbs.
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_workflow_list_show_and_lifecycle_talk_to_the_server() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/mesh-workflows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jobs": [mesh_workflow_summary("mw-1", "completed")]
+        })))
+        .mount(&server)
+        .await;
+    let mut detail = mesh_workflow_summary("mw-1", "completed");
+    detail["request"] = serde_json::json!({
+        "mode": "mesh_roundtrip",
+        "roundtrip_request": {
+            "prompt": "",
+            "model": "hunyuan3d-2.1:fp16",
+            "width": 0,
+            "height": 0,
+            "steps": 30,
+            "guidance": 5.0,
+            "batch_size": 1,
+            "strength": 0.75,
+            "control_scale": 1.0,
+            "hdr_exr_full_float": false,
+            "gif_preview": false,
+            "output_format": "glb"
+        }
+    });
+    detail["stages"] = serde_json::json!([
+        {
+            "index": 0,
+            "kind": "shape",
+            "state": "completed",
+            "artifacts": [{
+                "role": "final_glb",
+                "relative_path": "stage-0/mesh.glb",
+                "media_type": "model/gltf-binary",
+                "sha256": "abc",
+                "byte_length": 2048
+            }]
+        },
+        { "index": 1, "kind": "finalize", "state": "completed", "artifacts": [] }
+    ]);
+    Mock::given(method("GET"))
+        .and(path("/api/mesh-workflows/mw-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(detail))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/mesh-workflows/mw-1/resume"))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/mesh-workflows/mw-1/cancel"))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/mesh-workflows/mw-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["mesh-workflow", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mw-1"))
+        .stdout(predicate::str::contains("mesh_roundtrip"));
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["mesh-workflow", "show", "mw-1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("final_glb"))
+        .stdout(predicate::str::contains("stage-0/mesh.glb"))
+        .stdout(predicate::str::contains("mold-h3-1700000000000.glb"));
+
+    for verb in ["resume", "cancel", "delete"] {
+        env.cmd()
+            .env("MOLD_HOST", server.uri())
+            .args(["mesh-workflow", verb, "mw-1"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("mw-1"));
+    }
+}
+
+/// Deleting an unsettled workflow surfaces the SERVER's own wording, which is
+/// the sentence that says what to do instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_workflow_delete_surfaces_the_servers_refusal() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/mesh-workflows/mw-2"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": "cancel or wait for the mesh workflow before deleting it"
+        })))
+        .mount(&server)
+        .await;
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["mesh-workflow", "delete", "mw-2"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cancel or wait"));
+}
+
+// ── mold search ───────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn search_renders_the_hosts_page_and_names_the_install_command() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/catalog/search"))
+        .and(query_param("q", "flux"))
+        .and(query_param("kind", "lora"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [{
+                "id": "cv:827325",
+                "name": "Flux Skin Texture",
+                "author": "someone",
+                "family": "flux",
+                "kind": "lora",
+                "size_bytes": 167_938_890u64,
+                "download_count": 2_400_000u64,
+                "installed": false
+            }],
+            "page": 1,
+            "page_size": 20,
+            "total": 1,
+            "provider_errors": [
+                { "source": "civitai", "message": "rate limited", "retry_after_seconds": 30 }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["search", "flux", "--kind", "lora"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cv:827325"))
+        .stdout(predicate::str::contains("Flux Skin Texture"))
+        .stdout(predicate::str::contains("2.4M"))
+        .stdout(predicate::str::contains("mold pull <id>"))
+        // A failed provider is a warning beside the rows, on stderr, so a
+        // piped search still carries only results.
+        .stderr(predicate::str::contains("civitai"))
+        .stderr(predicate::str::contains("rate limited"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn search_json_prints_the_page_verbatim() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/catalog/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [{
+                "id": "hf:black-forest-labs/FLUX.1-dev",
+                "name": "FLUX.1 [dev]",
+                "family": "flux",
+                "kind": "checkpoint"
+            }],
+            "page": 1,
+            "page_size": 20,
+            "total": 1
+        })))
+        .mount(&server)
+        .await;
+
+    let result = env
+        .cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["search", "flux", "--json"])
+        .assert()
+        .success();
+    let page: serde_json::Value =
+        serde_json::from_slice(&result.get_output().stdout).expect("valid JSON page");
+    assert_eq!(page["entries"][0]["id"], "hf:black-forest-labs/FLUX.1-dev");
+    assert_eq!(page["total"], 1);
+}
+
+/// The host's own refusal of a sort it does not accept is what the user reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn search_surfaces_an_unknown_filter_from_the_host() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/catalog/search"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("unknown family: nonesuch"))
+        .mount(&server)
+        .await;
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["search", "flux", "--family", "nonesuch"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown family: nonesuch"));
+}
+
+// ── mold downloads ────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn downloads_list_shows_active_queued_and_finished_rows() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/downloads"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "active_jobs": [{
+                "id": "dl-1",
+                "model": "flux-dev:q4",
+                "status": "active",
+                "files_done": 1,
+                "files_total": 4,
+                "bytes_done": 500,
+                "bytes_total": 1000,
+                "current_file": "transformer.gguf"
+            }],
+            "queued": [{
+                "id": "dl-2",
+                "model": "sdxl-turbo:fp16",
+                "status": "queued",
+                "files_done": 0,
+                "files_total": 0,
+                "bytes_done": 0,
+                "bytes_total": 0
+            }],
+            "history": []
+        })))
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["downloads", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dl-1"))
+        .stdout(predicate::str::contains("flux-dev:q4"))
+        .stdout(predicate::str::contains("50%"))
+        .stdout(predicate::str::contains("transformer.gguf"))
+        .stdout(predicate::str::contains("dl-2"));
+}
+
+/// A 409 names the download already doing the work rather than failing.
+#[tokio::test(flavor = "multi_thread")]
+async fn downloads_add_reports_a_conflict_as_the_job_already_running() {
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/downloads"))
+        .and(body_json(serde_json::json!({ "model": "flux-dev:q4" })))
+        .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+            "id": "dl-7",
+            "position": 3
+        })))
+        .mount(&server)
+        .await;
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["downloads", "add", "flux-dev:q4"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already in the queue"))
+        .stdout(predicate::str::contains("dl-7"));
+}
+
+/// A catalog id belongs to the other download door, and nothing is sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn downloads_add_refuses_a_catalog_id_and_points_at_pull() {
+    use wiremock::MockServer;
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["downloads", "add", "cv:827325"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("mold pull cv:827325"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn downloads_cancel_deletes_the_job_by_id() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/downloads/dl-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["downloads", "cancel", "dl-1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dl-1"));
+}
+
+/// The watcher opens with the server's snapshot, then prints one line per
+/// event until the stream ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn downloads_watch_opens_with_the_snapshot_and_follows_the_queue() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    let body = format!(
+        "event: download\ndata: {}\n\nevent: download\ndata: {}\n\nevent: download\ndata: {}\n\n",
+        serde_json::json!({
+            "type": "snapshot",
+            "listing": { "active_jobs": [], "queued": [], "history": [] }
+        }),
+        serde_json::json!({
+            "type": "started", "id": "dl-1", "files_total": 2, "bytes_total": 1048576
+        }),
+        serde_json::json!({ "type": "job_done", "id": "dl-1", "model": "flux-dev:q4" }),
+    );
+    Mock::given(method("GET"))
+        .and(path("/api/downloads/stream"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["downloads", "watch"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("0 transferring"))
+        .stdout(predicate::str::contains("started dl-1"))
+        .stdout(predicate::str::contains("flux-dev:q4 ready"));
+}
+
+// ── mold list --json ──────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_json_prints_the_rows_the_api_serves() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(models_listing()))
+        .mount(&server)
+        .await;
+
+    let result = env
+        .cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["list", "--json"])
+        .assert()
+        .success();
+    let rows: serde_json::Value =
+        serde_json::from_slice(&result.get_output().stdout).expect("valid JSON rows");
+    assert_eq!(rows[0]["name"], "hunyuan3d-2.1:fp16");
+    assert_eq!(rows[0]["default_steps"], 30);
+}

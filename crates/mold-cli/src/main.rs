@@ -235,10 +235,22 @@ struct MeshArgs {
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
-enum MeshMattingArg {
+pub enum MeshMattingArg {
     Auto,
     On,
     Off,
+}
+
+impl MeshMattingArg {
+    /// The wire policy this flag names. One place, so `mold run` and
+    /// `mold mesh-workflow` cannot spell the same three words differently.
+    pub fn mode(self) -> mold_core::MeshMattingMode {
+        match self {
+            Self::Auto => mold_core::MeshMattingMode::Auto,
+            Self::On => mold_core::MeshMattingMode::On,
+            Self::Off => mold_core::MeshMattingMode::Off,
+        }
+    }
 }
 
 impl MeshArgs {
@@ -253,11 +265,7 @@ impl MeshArgs {
             target_faces: self.target_faces,
             texture: self.texture,
             texture_resolution: self.texture_resolution,
-            matting: self.matting.map(|value| match value {
-                MeshMattingArg::Auto => mold_core::MeshMattingMode::Auto,
-                MeshMattingArg::On => mold_core::MeshMattingMode::On,
-                MeshMattingArg::Off => mold_core::MeshMattingMode::Off,
-            }),
+            matting: self.matting.map(MeshMattingArg::mode),
             delight: self.delight,
         }
     }
@@ -1360,6 +1368,249 @@ impl From<GeometryArgs> for mold_core::MeshGeometryOptions {
     }
 }
 
+/// `mold mesh-workflow` — durable multi-stage 3-D jobs on one machine.
+///
+/// A mesh workflow is the only 3-D path that keeps each stage's output as its
+/// own retained artifact and survives a restart, so every verb here is remote
+/// by construction: the job lives in ONE host's data root and there is no
+/// local queue to fall back to.
+#[derive(clap::Subcommand)]
+pub enum MeshWorkflowAction {
+    /// Start a durable 3-D workflow
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow create --prompt \"a ceramic fox\" --texture --follow
+  mold mesh-workflow create --mesh chair.glb --image chair-albedo.png
+  mold mesh-workflow create --mesh chair.glb --octree 320 --target-faces 40000
+
+The mode is inferred from what you give it: a prompt starts a text-to-3-D
+run, a mesh with an appearance image textures that mesh, and a mesh on its own
+is reconstructed through the 2.1 shape VAE. Name it with --mode to be
+explicit.")]
+    Create {
+        /// Text-to-3-D prompt. Its presence selects the text_to_mesh mode.
+        #[arg(long, value_name = "TEXT")]
+        prompt: Option<String>,
+
+        /// Workflow shape, when you would rather not rely on inference.
+        #[arg(long, value_enum)]
+        mode: Option<MeshWorkflowModeArg>,
+
+        /// The 3-D model every stage after the picture uses.
+        #[arg(long, short = 'm', value_name = "MODEL",
+              add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        model: Option<String>,
+
+        /// The image model that renders the picture a text-to-3-D run starts
+        /// from. Defaults to your configured default model.
+        #[arg(long, value_name = "MODEL",
+              add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        image_model: Option<String>,
+
+        /// Appearance image for a texture-only run.
+        #[arg(long, short = 'i', value_name = "PATH", value_hint = ValueHint::FilePath)]
+        image: Option<std::path::PathBuf>,
+
+        /// Source mesh (.glb or .obj) for a texture-only or roundtrip run.
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+        mesh: Option<std::path::PathBuf>,
+
+        /// Which world axis points up in the supplied mesh (default y).
+        #[arg(long, value_name = "y|z", help_heading = "3D")]
+        up_axis: Option<mold_core::MeshUpAxis>,
+
+        /// Scale of the supplied mesh, in metres per unit (default 1).
+        #[arg(long, value_name = "M", help_heading = "3D")]
+        meters_per_unit: Option<f64>,
+
+        /// Generate PBR textures as well as geometry.
+        #[arg(long, help_heading = "3D", conflicts_with = "no_texture")]
+        texture: bool,
+
+        /// Geometry only, even where texturing is the mode's default.
+        #[arg(long, help_heading = "3D")]
+        no_texture: bool,
+
+        /// Edge length of the generated texture atlas.
+        #[arg(long, value_name = "N", help_heading = "3D")]
+        texture_resolution: Option<u32>,
+
+        /// Background removal before 3-D conditioning.
+        #[arg(long, value_enum, help_heading = "3D")]
+        matting: Option<MeshMattingArg>,
+
+        /// Remove baked lighting and highlights before shape and paint.
+        #[arg(long, help_heading = "3D")]
+        delight: bool,
+
+        /// Resolution of the query grid the occupancy field is evaluated on.
+        #[arg(long, value_name = "N", help_heading = "3D")]
+        octree: Option<u32>,
+
+        /// Iso-level at which the surface is extracted. `--mesh-threshold`
+        /// is accepted too, so the flag `mold run` uses reads the same here.
+        #[arg(long, alias = "mesh-threshold", value_name = "T", help_heading = "3D")]
+        threshold: Option<f32>,
+
+        /// Decimate the mesh to approximately this many triangles.
+        #[arg(long, value_name = "N", help_heading = "3D")]
+        target_faces: Option<u32>,
+
+        /// Seed used by every stage of the workflow.
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
+
+        /// Follow the workflow's stages until it settles.
+        #[arg(long)]
+        follow: bool,
+
+        /// Print the accepted job as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Accepted so the refusal explains itself: a workflow is durable on
+        /// one machine and has no local form.
+        #[arg(long, hide = true)]
+        local: bool,
+    },
+    /// List the 3-D workflows on the server
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow list
+  mold mesh-workflow list --json")]
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one workflow with its stages and retained artifacts
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow show WORKFLOW-ID
+  mold mesh-workflow show WORKFLOW-ID --json")]
+    Show {
+        /// Workflow id as shown by `mold mesh-workflow list`
+        #[arg(value_name = "ID")]
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Follow one workflow's stages until it settles
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow events WORKFLOW-ID")]
+    Events {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Resume a paused or failed workflow from its first unfinished stage
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow resume WORKFLOW-ID")]
+    Resume {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Cancel a queued or running workflow
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow cancel WORKFLOW-ID")]
+    Cancel {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Delete a settled workflow and the artifacts it retained
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow delete WORKFLOW-ID")]
+    Delete {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+}
+
+/// The three workflow shapes, spelled the way the wire spells them.
+///
+/// `text_to_mesh` rather than clap's default `text-to-mesh`, because this is
+/// the `mode` tag on `POST /api/mesh-workflows` and the same word
+/// `capabilities.mesh.workflow_modes` advertises. The kebab spelling stays
+/// accepted as an alias so a typed guess still works.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshWorkflowModeArg {
+    /// Render a picture, then reconstruct it.
+    #[value(name = "text_to_mesh", alias = "text-to-mesh")]
+    TextToMesh,
+    /// Texture a mesh you supply, using an appearance image.
+    #[value(name = "mesh_texture", alias = "mesh-texture")]
+    MeshTexture,
+    /// Rebuild a mesh you supply through the 2.1 shape VAE.
+    #[value(name = "mesh_roundtrip", alias = "mesh-roundtrip")]
+    MeshRoundtrip,
+}
+
+/// `mold downloads` — the server's model download queue.
+#[derive(clap::Subcommand)]
+pub enum DownloadsAction {
+    /// Show what is transferring, waiting, and recently finished
+    #[command(after_long_help = "\
+Examples:
+  mold downloads list
+  mold downloads list --json")]
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Queue a model download on the server
+    #[command(after_long_help = "\
+Examples:
+  mold downloads add flux-dev:q4
+  mold downloads add pulid-flux --accept-license insightface-antelopev2
+
+Takes a model name from `mold list`. A catalog id (cv:… or hf:…) is a
+different door; pull one of those with `mold pull` instead.")]
+    Add {
+        /// Model name to download
+        #[arg(add = ArgValueCandidates::new(commands::run::complete_model_name))]
+        model: String,
+
+        /// Record acceptance of a third-party model license before pulling.
+        /// Repeat the flag for a bundle covered by more than one agreement.
+        #[arg(long, value_name = "ID", action = clap::ArgAction::Append)]
+        accept_license: Vec<String>,
+    },
+    /// Cancel one queued or transferring download
+    #[command(after_long_help = "\
+Examples:
+  mold downloads cancel DOWNLOAD-ID")]
+    Cancel {
+        /// Download id as shown by `mold downloads list`
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Follow the download queue until you stop it
+    #[command(after_long_help = "\
+Examples:
+  mold downloads watch
+  mold downloads watch --json")]
+    Watch {
+        /// Print one JSON event per line instead of progress lines
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub enum CatalogSourceArg {
+    Hf,
+    Civitai,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub enum CatalogSortArg {
+    Downloads,
+    Recent,
+    Rating,
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
@@ -2194,8 +2445,104 @@ Files shared between models (e.g. VAE, CLIP) are kept until no model references 
     },
 
     /// List locally available models — shows installed models with disk usage, plus models available to pull
-    #[command(alias = "ls")]
-    List,
+    #[command(
+        alias = "ls",
+        after_long_help = "\
+Examples:
+  mold list
+  mold list --json"
+    )]
+    List {
+        /// Print the rows as JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Search the Hugging Face and Civitai catalogs for models to pull
+    #[command(after_long_help = "\
+Examples:
+  mold search flux
+  mold search \"anime style\" --kind lora --sort recent
+  mold search sdxl --source civitai --page 2 --json
+
+The search runs on MOLD_HOST when one answers, so it sees any Hugging Face or
+Civitai credentials that machine has stored. With no server reachable it runs
+here instead, using HF_TOKEN and CIVITAI_TOKEN from the environment.
+
+Install a result with `mold pull <id>`.")]
+    Search {
+        /// What to look for
+        #[arg(value_name = "QUERY")]
+        query: Option<String>,
+
+        /// Restrict to one model family (see `mold list` for the names in use)
+        #[arg(long, value_name = "FAMILY")]
+        family: Option<String>,
+
+        /// Restrict to one kind, such as `checkpoint` or `lora`
+        #[arg(long, value_name = "KIND")]
+        kind: Option<String>,
+
+        /// Restrict to one catalog
+        #[arg(long, value_enum)]
+        source: Option<CatalogSourceArg>,
+
+        /// Result ordering (default downloads)
+        #[arg(long, value_enum)]
+        sort: Option<CatalogSortArg>,
+
+        /// Page of results, from 1
+        #[arg(long, value_name = "N")]
+        page: Option<u32>,
+
+        /// Results per page, 1 to 100
+        #[arg(long, value_name = "N")]
+        page_size: Option<u32>,
+
+        /// Include mature-content results (default), or leave them out
+        #[arg(long, overrides_with = "no_nsfw")]
+        nsfw: bool,
+
+        /// Leave mature-content results out
+        #[arg(long)]
+        no_nsfw: bool,
+
+        /// Print the page as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect the model download queue on a running server
+    #[command(after_long_help = "\
+Examples:
+  mold downloads list
+  mold downloads add flux-dev:q4
+  mold downloads watch
+
+Talks to the server at MOLD_HOST (MOLD_API_KEY when configured). A download
+queue belongs to one machine, so there is no local fallback: `mold pull`
+is the command that also works without a server.")]
+    Downloads {
+        #[command(subcommand)]
+        action: DownloadsAction,
+    },
+
+    /// Create and follow durable multi-stage 3-D workflows
+    #[command(after_long_help = "\
+Examples:
+  mold mesh-workflow create --prompt \"a ceramic fox\" --texture --follow
+  mold mesh-workflow create --mesh chair.glb --image chair-albedo.png
+  mold mesh-workflow list
+  mold mesh-workflow show WORKFLOW-ID
+
+Unlike a one-shot `mold run` against a 3-D model, a workflow keeps every
+stage's output as its own retained artifact, reports stage-by-stage progress,
+and can be resumed after a restart. It is durable on ONE machine, so every
+verb here talks to MOLD_HOST.")]
+    MeshWorkflow {
+        #[command(subcommand)]
+        action: MeshWorkflowAction,
+    },
 
     /// Show disk usage overview for models, output, logs, and shared components
     #[command(after_long_help = "\
@@ -3352,8 +3699,47 @@ async fn run() -> anyhow::Result<()> {
         Commands::Rm { models, force } => {
             commands::rm::run(&models, force).await?;
         }
-        Commands::List => {
-            commands::list::run().await?;
+        Commands::List { json } => {
+            commands::list::run(json).await?;
+        }
+        Commands::Search {
+            query,
+            family,
+            kind,
+            source,
+            sort,
+            page,
+            page_size,
+            nsfw,
+            no_nsfw,
+            json,
+        } => {
+            commands::search::run(commands::search::SearchArgs {
+                query,
+                family,
+                kind,
+                source,
+                sort,
+                page,
+                page_size,
+                // Absent means "the host's default", which is to include
+                // them; only an explicit --no-nsfw puts `false` on the wire.
+                include_nsfw: if no_nsfw {
+                    Some(false)
+                } else if nsfw {
+                    Some(true)
+                } else {
+                    None
+                },
+                json,
+            })
+            .await?;
+        }
+        Commands::Downloads { action } => {
+            commands::downloads::run(action).await?;
+        }
+        Commands::MeshWorkflow { action } => {
+            commands::mesh_workflow::run(action).await?;
         }
         Commands::Stats { json } => {
             commands::stats::run(json)?;
