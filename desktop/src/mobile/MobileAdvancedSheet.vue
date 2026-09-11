@@ -44,7 +44,6 @@ const { onKeydown } = useSheetFocus({
   onClose: () => emit("close"),
   onBeforeClose: resetDrag,
 });
-
 </script>
 
 <template>
