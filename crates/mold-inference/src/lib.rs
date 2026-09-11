@@ -179,6 +179,9 @@ pub use progress::{
     is_inference_cancelled, InferenceCancellationToken, InferenceCancelled, ProgressEvent,
     ProgressPhase,
 };
+/// How a GGUF-backed still's activations are shaped on a given backend, for
+/// the execution fingerprint. See `quantized_linear::gguf_activation_dtype`.
+pub use quantized_linear::{gguf_activation_width_for_backend, GgufActivationWidth};
 pub use qwen_image::QwenImageEngine;
 pub use sd15::SD15Engine;
 pub use sd3::SD3Engine;

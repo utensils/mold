@@ -3369,8 +3369,11 @@ mod tests {
             authority.quantization(),
             mold_inference::H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq { .. }
         ));
-        let semantic =
-            crate::execution_plan::ExecutionSemanticConfig::from_frozen(&engine_config).unwrap();
+        let semantic = crate::execution_plan::ExecutionSemanticConfig::from_frozen(
+            &engine_config,
+            GpuBackend::Cuda,
+        )
+        .unwrap();
         assert_eq!(
             semantic.h3_factory_authority_sha256.as_deref(),
             Some(authority.identity_sha256())

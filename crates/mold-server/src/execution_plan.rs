@@ -495,6 +495,32 @@ pub struct ExecutionSemanticConfig {
     /// to what they were before this existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wan_step_cache: Option<SemanticWanStepCache>,
+    /// Whether this render's transformer may survive into the next one.
+    ///
+    /// It changes no pixel, and it is here for the OTHER thing the
+    /// equivalence class buys: a render that reloads a 33 GB checkpoint and
+    /// one that does not have wildly different wall clocks, so sharing a
+    /// learned-timing bucket makes both estimates wrong. Resolved rather than
+    /// read from the variable, for the same reason `conv_backend` is — the
+    /// DEFAULT is what changed, and a default is invisible to a value.
+    ///
+    /// `None` for every non-flux family, so their fingerprints are
+    /// byte-identical to what they were before this existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flux_transformer_residency: Option<SemanticFluxTransformerResidency>,
+    /// The width a GGUF FLUX transformer feeds its quantized kernels.
+    ///
+    /// `None` for every family whose GGUF path does not take the flux dtype
+    /// rule, which is every family but these two.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantized_activation_dtype: Option<SemanticQuantizedActivationDType>,
+    /// How an undistilled FLUX.2 base render shapes its CFG forwards.
+    ///
+    /// `None` outside flux2. Every build resolves `Sequential` today; the
+    /// field exists now so that when batching lands it is a visible change of
+    /// equivalence class rather than a silent one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flux2_cfg_batching: Option<SemanticFlux2CfgBatching>,
     pub vae_tiling: SemanticVaeTiling,
     pub vae_dtype: SemanticVaeDType,
     pub runtime: Vec<RuntimeSemanticSetting>,
@@ -515,6 +541,47 @@ pub enum SemanticWanStepCache {
     /// Engaged. The threshold is carried in millionths so the value is exact
     /// and `Eq`, which a bare `f64` could not be.
     Threshold { micros: u64 },
+}
+
+/// How a FLUX still decides whether its transformer stays GPU-resident.
+///
+/// There are deliberately TWO variants rather than the three the outcome enum
+/// inside the engine has. `MOLD_FLUX_KEEP_TRANSFORMER=1` and an unset
+/// variable now resolve to the same execution — the budget decides either way,
+/// because #276's "an explicit keep must still yield to a card that cannot
+/// afford it" is exactly what the budget expresses for everybody — so a third
+/// class here would be a distinction the engine cannot make. The raw value is
+/// still carried in `runtime`, so a fleet can tell the two apart when it cares.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticFluxTransformerResidency {
+    /// `device::still_transformer_residency` decides per render.
+    Budgeted,
+    /// `MOLD_FLUX_KEEP_TRANSFORMER=0` — the transformer is dropped before
+    /// every VAE decode whatever the card has room for.
+    DropRequested,
+}
+
+/// The activation width a GGUF-backed FLUX transformer runs at.
+///
+/// This is the field the campaign's F32→BF16 flip needed: a GGUF component's
+/// `EffectiveComponentDType` is `QuantizedNative`, which says how the WEIGHTS
+/// are stored and nothing at all about the dtype the kernels are fed. Two
+/// renders whose activations differ in width are different numerics, different
+/// bandwidth and different step latency, and before this they hashed alike.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticQuantizedActivationDType {
+    F32,
+    Bf16,
+}
+
+/// Whether an undistilled FLUX.2 base render runs its two classifier-free
+/// guidance branches as one batch-2 forward or as two batch-1 forwards.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticFlux2CfgBatching {
+    /// One forward over `[uncond, cond]`.
+    Batched,
+    /// Two forwards per step — what every build resolves today.
+    Sequential,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -664,8 +731,14 @@ impl ExecutionEnvironmentDescriptor {
 }
 
 impl ExecutionSemanticConfig {
+    /// `backend` is the accelerator the plan targets. It is a parameter
+    /// rather than a process probe because the GGUF activation width is a
+    /// property of the DEVICE (CUDA's MMQ kernels take bf16; Metal's and the
+    /// CPU's take f32 only), and the planner resolves one descriptor per
+    /// candidate device.
     pub fn from_frozen(
         frozen: &mold_inference::FrozenEngineConfig,
+        backend: GpuBackend,
     ) -> Result<Self, ExecutionPlanError> {
         let mold_inference::FrozenEngineConfig {
             family,
@@ -782,6 +855,36 @@ impl ExecutionSemanticConfig {
                     },
                 )
             },
+            // Residency is a flux-family decision and nothing else reads the
+            // variable, so only these two carry the field.
+            flux_transformer_residency: matches!(family.as_str(), "flux" | "flux2").then(|| {
+                match runtime_environment.value("MOLD_FLUX_KEEP_TRANSFORMER") {
+                    Some("0") => SemanticFluxTransformerResidency::DropRequested,
+                    _ => SemanticFluxTransformerResidency::Budgeted,
+                }
+            }),
+            // Resolved against the plan's own backend plus the process-global
+            // `FORCE_DMMV` switch, both of which the engine reads at the same
+            // moment through the same function.
+            quantized_activation_dtype: matches!(family.as_str(), "flux" | "flux2").then(|| {
+                match mold_inference::gguf_activation_width_for_backend(backend) {
+                    mold_inference::GgufActivationWidth::Bf16 => {
+                        SemanticQuantizedActivationDType::Bf16
+                    }
+                    mold_inference::GgufActivationWidth::F32 => {
+                        SemanticQuantizedActivationDType::F32
+                    }
+                }
+            }),
+            // Only the undistilled FLUX.2 base tier runs a CFG branch at all,
+            // but the field is carried for the whole family: the tier is a
+            // NAME test the engine performs, and recording it per tier here
+            // would be a second authority for that question.
+            flux2_cfg_batching: (family == "flux2").then_some(
+                // WP9 is what flips this; until it lands every FLUX.2 base
+                // render is two batch-1 forwards per step.
+                SemanticFlux2CfgBatching::Sequential,
+            ),
             // Only wan has a step cache, so only wan carries the field; every
             // other family's fingerprint is byte-identical to what it was
             // before this existed.
@@ -3601,7 +3704,7 @@ pub(crate) fn execution_environment_descriptor(
             AttentionBackend::Flash => AttentionKernelClass::Flash,
         },
         code: execution_code_identity(),
-        semantic_config: ExecutionSemanticConfig::from_frozen(engine_config)?,
+        semantic_config: ExecutionSemanticConfig::from_frozen(engine_config, device.backend)?,
         runtime_model_id: runtime_model_id.to_string(),
         runtime_artifact_paths,
         model_family: model_family.to_string(),
@@ -8565,7 +8668,7 @@ mod tests {
         };
         for family in ["flux", "flux2"] {
             let frozen = frozen_config_for_family(family);
-            let semantic = ExecutionSemanticConfig::from_frozen(&frozen).unwrap();
+            let semantic = ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Cuda).unwrap();
             assert_eq!(
                 semantic.conv_backend,
                 Some(expected),
@@ -8575,7 +8678,7 @@ mod tests {
         // A plain still family is untouched: no field at all.
         for family in ["sd15", "sdxl", "qwen-image", "z-image", "minimax-h3"] {
             let frozen = frozen_config_for_family(family);
-            let semantic = ExecutionSemanticConfig::from_frozen(&frozen).unwrap();
+            let semantic = ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Cuda).unwrap();
             assert_eq!(
                 semantic.conv_backend, None,
                 "{family} must keep its pre-existing fingerprint"
@@ -8590,6 +8693,89 @@ mod tests {
                     mold_inference::attention::AttentionPolicy::FastStill
                 ),
                 "{family}'s frozen backend must be the family default"
+            );
+        }
+    }
+
+    /// The three fields WP5 adds, on the two families that carry them and on
+    /// the families that must stay byte-identical without them.
+    #[test]
+    fn the_flux_families_record_residency_activation_width_and_cfg_shape() {
+        for family in ["flux", "flux2"] {
+            let frozen = frozen_config_for_family(family);
+            let cuda = ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Cuda).unwrap();
+            assert_eq!(
+                cuda.flux_transformer_residency,
+                Some(SemanticFluxTransformerResidency::Budgeted),
+                "{family} defaults to the budgeted residency now"
+            );
+            // Resolved against the backend, exactly as the engine resolves it:
+            // CUDA's MMQ kernels take bf16 and Metal's take f32 only.
+            assert_eq!(
+                cuda.quantized_activation_dtype,
+                Some(
+                    match mold_inference::gguf_activation_width_for_backend(GpuBackend::Cuda) {
+                        mold_inference::GgufActivationWidth::Bf16 =>
+                            SemanticQuantizedActivationDType::Bf16,
+                        mold_inference::GgufActivationWidth::F32 =>
+                            SemanticQuantizedActivationDType::F32,
+                    }
+                )
+            );
+            let metal = ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Metal).unwrap();
+            assert_eq!(
+                metal.quantized_activation_dtype,
+                Some(SemanticQuantizedActivationDType::F32),
+                "Metal's quantized kernels are f32-only"
+            );
+
+            // The CFG shape is carried by flux2 alone; every build resolves
+            // Sequential until WP9 lands.
+            let expected_cfg = (family == "flux2").then_some(SemanticFlux2CfgBatching::Sequential);
+            assert_eq!(cuda.flux2_cfg_batching, expected_cfg);
+        }
+
+        for family in ["sd15", "sdxl", "qwen-image", "z-image", "wan", "minimax-h3"] {
+            let frozen = frozen_config_for_family(family);
+            let semantic = ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Cuda).unwrap();
+            assert_eq!(semantic.flux_transformer_residency, None);
+            assert_eq!(semantic.quantized_activation_dtype, None);
+            assert_eq!(
+                semantic.flux2_cfg_batching, None,
+                "{family} must keep its pre-existing fingerprint"
+            );
+        }
+    }
+
+    /// `MOLD_FLUX_KEEP_TRANSFORMER=0` is the one value that changes the
+    /// resolved residency class. `1` resolves to `Budgeted` like unset,
+    /// because with the new precedence the two are the same execution — the
+    /// raw value is still carried in `runtime`, so nothing is lost.
+    #[test]
+    fn an_explicit_keep_transformer_opt_out_is_its_own_residency_class() {
+        let resolved = |value: Option<&str>| {
+            let mut frozen = frozen_config_for_family("flux");
+            if let Some(value) = value {
+                frozen.runtime_environment =
+                    mold_inference::runtime_env::FrozenRuntimeEnvironment::from_values([(
+                        "MOLD_FLUX_KEEP_TRANSFORMER".to_string(),
+                        Some(value.to_string()),
+                    )]);
+            }
+            ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Cuda)
+                .unwrap()
+                .flux_transformer_residency
+        };
+
+        assert_eq!(
+            resolved(Some("0")),
+            Some(SemanticFluxTransformerResidency::DropRequested)
+        );
+        for value in [None, Some("1")] {
+            assert_eq!(
+                resolved(value),
+                Some(SemanticFluxTransformerResidency::Budgeted),
+                "value={value:?}"
             );
         }
     }
@@ -8667,6 +8853,12 @@ mod tests {
                 // `the_flux_families_carry_a_resolved_convolution_backend`.
                 conv_backend: None,
                 wan_step_cache: None,
+                // The three WP5 fields, absent — which is what a plain image
+                // family still produces, and what keeps this fixture's encoded
+                // bytes and hash exactly what they were.
+                flux_transformer_residency: None,
+                quantized_activation_dtype: None,
+                flux2_cfg_batching: None,
                 vae_tiling: SemanticVaeTiling::Auto,
                 vae_dtype: SemanticVaeDType::Auto,
                 runtime: vec![RuntimeSemanticSetting {

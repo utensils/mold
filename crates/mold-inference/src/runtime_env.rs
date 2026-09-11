@@ -154,6 +154,19 @@ impl FrozenRuntimeEnvironment {
         }
         self
     }
+    /// Build a snapshot from explicit values rather than from the process.
+    ///
+    /// For callers that need to ask what a named configuration RESOLVES to
+    /// without mutating the environment the rest of the process is reading —
+    /// `mold-server`'s fingerprint tests being the case this exists for.
+    /// Names outside [`ENGINE_SHAPING_VARIABLES`] are retained as given;
+    /// classification still happens where a snapshot is consumed.
+    pub fn from_values(values: impl IntoIterator<Item = (String, Option<String>)>) -> Self {
+        Self {
+            values: values.into_iter().collect(),
+        }
+    }
+
     fn capture() -> Self {
         Self {
             values: ENGINE_SHAPING_VARIABLES

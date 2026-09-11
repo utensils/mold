@@ -6,8 +6,9 @@ use mold_server::execution_plan::{
     resolve_execution_plans, AttentionKernelClass, CanonicalRuntimeValue, ComponentLoadStrategy,
     ComponentRole, DeterminismClass, DeviceArchitectureClass, DeviceFact, EngineLoadStrategyClass,
     ExecutionSemanticConfig, OffloadMode, PlannedDType, QuantizationVariant,
-    SemanticAttentionBackend, SemanticAttentionChunk, SemanticComponentPlacement, SemanticVaeDType,
-    SemanticVaeTiling,
+    SemanticAttentionBackend, SemanticAttentionChunk, SemanticComponentPlacement,
+    SemanticConvBackend, SemanticFlux2CfgBatching, SemanticFluxTransformerResidency,
+    SemanticQuantizedActivationDType, SemanticVaeDType, SemanticVaeTiling, SemanticWanStepCache,
 };
 use std::io::Write;
 use std::path::Path;
@@ -447,6 +448,31 @@ fn every_frozen_semantic_field_and_runtime_input_is_differential() {
         "vae tiling"
     );
     assert_semantic_change!(|value| value.vae_dtype = SemanticVaeDType::F32, "vae dtype");
+    // The resolved fields. Each is an `Option` that is absent for families
+    // that do not have the question, so the differential is `None` against
+    // `Some(..)` — which is exactly the case a `skip_serializing_if` field
+    // could silently drop out of the hash.
+    assert_semantic_change!(
+        |value| value.conv_backend = Some(SemanticConvBackend::Cudnn),
+        "conv backend"
+    );
+    assert_semantic_change!(
+        |value| value.wan_step_cache = Some(SemanticWanStepCache::Threshold { micros: 100_000 }),
+        "wan step cache"
+    );
+    assert_semantic_change!(
+        |value| value.flux_transformer_residency =
+            Some(SemanticFluxTransformerResidency::DropRequested),
+        "flux transformer residency"
+    );
+    assert_semantic_change!(
+        |value| value.quantized_activation_dtype = Some(SemanticQuantizedActivationDType::F32),
+        "quantized activation dtype"
+    );
+    assert_semantic_change!(
+        |value| value.flux2_cfg_batching = Some(SemanticFlux2CfgBatching::Batched),
+        "flux2 cfg batching"
+    );
 
     assert_eq!(
         base.semantic_config.runtime.len(),

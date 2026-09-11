@@ -99,6 +99,44 @@ pub(crate) fn gguf_activation_dtype(
     }
 }
 
+/// The width a GGUF-backed still's activations run at, without naming a
+/// candle type.
+///
+/// `mold-server` needs this for the execution fingerprint and deliberately
+/// names no candle type, so the answer crosses the crate boundary as its own
+/// enum rather than as a `DType`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GgufActivationWidth {
+    /// Candle's quantized kernels consuming and returning f32 — Metal, CPU,
+    /// and CUDA under `FORCE_DMMV`.
+    F32,
+    /// CUDA's MMQ path fed and answering in bf16: half the bandwidth and the
+    /// tensor cores.
+    Bf16,
+}
+
+/// [`gguf_activation_dtype`] for a whole backend, resolved the way the flux
+/// engines resolve it.
+///
+/// The engines pass `crate::device::gpu_dtype(device)` as `requested`, which
+/// is BF16 on CUDA and F32 everywhere else, so this reproduces exactly the
+/// value a render on `backend` would use — including the `FORCE_DMMV`
+/// withdrawal, which is a process-global switch mold itself flips.
+pub fn gguf_activation_width_for_backend(backend: mold_core::GpuBackend) -> GgufActivationWidth {
+    let (device, requested) = match backend {
+        mold_core::GpuBackend::Cuda => (LinearDevice::Cuda, DType::BF16),
+        mold_core::GpuBackend::Metal => (LinearDevice::Metal, DType::F32),
+    };
+    match gguf_activation_dtype(
+        device,
+        requested,
+        crate::quantized_dmmv::force_dmmv_enabled(),
+    ) {
+        DType::BF16 => GgufActivationWidth::Bf16,
+        _ => GgufActivationWidth::F32,
+    }
+}
+
 /// Which implementation a quantized linear resolves to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum QuantizedLinearKind {
