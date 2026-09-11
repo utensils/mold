@@ -8802,7 +8802,7 @@ mod tests {
             "stable file identity must make delete independent of unrelated gallery bytes"
         );
         assert!(
-            crate::gallery_authority::storage_file_count(dir.path()) <= 4,
+            crate::gallery_authority::storage_file_count(dir.path()) <= 5,
             "authority persistence must remain bounded independently of publication count"
         );
 

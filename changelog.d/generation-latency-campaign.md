@@ -28,3 +28,12 @@
   before. The client's SSE reader also stopped rescanning its whole buffer on
   every chunk, and stopped turning a multi-byte character split across a chunk
   boundary into replacement characters.
+- **Publishing a print no longer costs more as the library grows.** The gallery
+  archive authority rewrote its whole index three times per commit — a
+  write-ahead copy, the checkpoint, and a backup — so saving one picture into a
+  library of ten thousand meant tens of megabytes of serialization and I/O. It
+  now appends a delta describing only what changed, and folds the log back into
+  a checkpoint every 256 mutations. Measured on a 10,000-print index, a commit
+  went from 60.5 ms to 4.4 ms. An existing store is read once and upgraded in
+  place, and a crash mid-append drops the torn record whole rather than the
+  prints before it.
