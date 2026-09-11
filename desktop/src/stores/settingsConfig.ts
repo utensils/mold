@@ -40,9 +40,7 @@ export const useSettingsConfigStore = defineStore("settingsConfig", {
      */
     rowsForSection(state) {
       return (id: SectionId): ConfigRow[] => {
-        const order = new Map(
-          schemasForSection(id).map((schema, index) => [schema.key, index]),
-        );
+        const order = new Map(schemasForSection(id).map((schema, index) => [schema.key, index]));
         return state.rows
           .filter((row) => sectionForConfigKey(row.key) === id)
           .sort((a, b) => {
@@ -65,9 +63,7 @@ export const useSettingsConfigStore = defineStore("settingsConfig", {
      */
     rawKeysBySection(): Partial<Record<SectionId, string[]>> {
       return {
-        advanced: this.advancedRows
-          .filter((row) => !schemaFor(row.key))
-          .map((row) => row.key),
+        advanced: this.advancedRows.filter((row) => !schemaFor(row.key)).map((row) => row.key),
         styleDefaults: this.perStyleRows.map((row) => row.key),
       };
     },

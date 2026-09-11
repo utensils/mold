@@ -108,8 +108,17 @@ describe("Settings ▸ Per-style defaults", () => {
 
   it("narrows to the styles the filter names", async () => {
     const config = useSettingsConfigStore();
-    config.rows = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota"]
-      .flatMap(styleRows);
+    config.rows = [
+      "alpha",
+      "beta",
+      "gamma",
+      "delta",
+      "epsilon",
+      "zeta",
+      "eta",
+      "theta",
+      "iota",
+    ].flatMap(styleRows);
     const wrapper = mount(PerStyleDefaultsSection);
     await wrapper.get("[data-test='per-style-filter']").setValue("eta");
     // beta, theta, zeta and eta all carry it.

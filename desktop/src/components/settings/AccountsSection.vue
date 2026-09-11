@@ -53,7 +53,12 @@ async function clear(name: SecretName) {
 
 <template>
   <div>
-    <SettingRow v-for="secret in SECRETS" :key="secret.name" :label="secret.label" :help="secret.help">
+    <SettingRow
+      v-for="secret in SECRETS"
+      :key="secret.name"
+      :label="secret.label"
+      :help="secret.help"
+    >
       <SecretControl
         :present="present[secret.name] === true"
         :placeholder="secret.placeholder"

@@ -76,7 +76,6 @@ const BEHAVIOUR_TOGGLES = [
 function toggleValue(key: (typeof BEHAVIOUR_TOGGLES)[number]["key"]): boolean {
   return prefs[key];
 }
-
 </script>
 
 <template>

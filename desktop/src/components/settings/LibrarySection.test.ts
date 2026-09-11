@@ -72,9 +72,7 @@ describe("Settings ▸ Library", () => {
       },
     ];
     const wrapper = mount(LibrarySection);
-    const labels = wrapper
-      .findAll(".ms-setting-row__label")
-      .map((el) => el.text());
+    const labels = wrapper.findAll(".ms-setting-row__label").map((el) => el.text());
     const app = labels.indexOf("Tag new prints with their title");
     expect(app).toBeGreaterThanOrEqual(0);
     expect(labels[app + 1]).toBe("Tag command-line prints with their title");

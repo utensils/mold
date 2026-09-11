@@ -59,7 +59,10 @@ describe("settingsConfig rowsForSection", () => {
     const config = useSettingsConfigStore();
     config.rows = [row("tui.theme"), row("models_dir")];
     for (const id of ["advanced", "styles", "app"] as const) {
-      expect(config.rowsForSection(id).map((r) => r.key), id).not.toContain("tui.theme");
+      expect(
+        config.rowsForSection(id).map((r) => r.key),
+        id,
+      ).not.toContain("tui.theme");
     }
     expect(config.rowsForSection("styles").map((r) => r.key)).toEqual(["models_dir"]);
   });
