@@ -12,6 +12,9 @@ name = "mold_candle"
 
 [features]
 default = []
+# Developer-only binaries. Never forwarded by a shipping surface, so
+# `[[bin]] required-features` keeps them out of every default build.
+dev-bins = []
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 # See the note on `cudnn` in mold-inference: opt-in, never implied by `cuda`.
 cudnn = ["cuda", "candle/cudnn"]
@@ -71,3 +74,8 @@ tempfile = "3"
 
 [build-dependencies]
 cudaforge = "=0.1.6"
+
+[[bin]]
+name = "gguf_load_bench"
+path = "src/bin/gguf_load_bench.rs"
+required-features = ["dev-bins", "cuda"]

@@ -25,3 +25,18 @@
 - **Parking a text encoder in host RAM costs one copy, not two.** `MOLD_KEEP_TE_RAM=1`
   read the whole checkpoint into an anonymous buffer and then copied every tensor
   out of it, so parking FLUX's 9.79 GB T5 briefly needed twice that.
+- **A GGUF checkpoint loads 8-10x faster on its first load.** Reading a whole
+  22-35 GB checkpoint through its memory mapping is a page fault per 4 KiB, and
+  on ZFS — which is where `$MOLD_HOME` lives on every qualified machine — the
+  kernel serves those one page at a time out of ZFS's own cache, with no
+  readahead: a 21.76 GB Qwen-Image checkpoint took 5,312,908 major faults and
+  26.5 seconds, 0.82 GB/s, for bytes that were already in RAM. mold now reads
+  the tensor payload in contiguous batches across eight threads into a reused
+  page-locked staging buffer and uploads each tensor from there, with two
+  buffers alternating so one is being read while the other is still in flight
+  to the GPU. Measured on 4x L40S with the file's page cache dropped:
+  `flux1-dev-Q8_0` 15.5 s -> 1.6 s, `qwen-image-Q8_0` 26.5 s -> 3.3 s, and
+  `flux2-dev-Q8_0` 41.7 s -> 4.3 s (0.84 -> 8.1 GB/s); already-cached repeats
+  went 6.6 s -> 2.7 s on the same 35 GB file. Host memory is bounded by the
+  buffer pair rather than the checkpoint, macOS and CPU loading is unchanged,
+  and the weights are byte-identical, so renders are too.
