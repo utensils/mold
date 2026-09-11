@@ -349,37 +349,7 @@ export function matchesConfigSearch(
   );
 }
 
-/** DELETE resets only DB-backed preference keys; bootstrap keys live in config.toml. */
-export function canResetConfig(key: string): boolean {
-  if (
-    key.startsWith("expand.") ||
-    key.startsWith("generate.") ||
-    key.startsWith("gallery.") ||
-    key.startsWith("scheduler.") ||
-    key.startsWith("model_prefs.")
-  ) {
-    return true;
-  }
-  if (key.startsWith("models.")) {
-    const field = key.slice(key.lastIndexOf(".") + 1);
-    return [
-      "default_steps",
-      "default_guidance",
-      "default_width",
-      "default_height",
-      "scheduler",
-      "negative_prompt",
-      "lora",
-      "lora_scale",
-    ].includes(field);
-  }
-  return [
-    "default_width",
-    "default_height",
-    "default_steps",
-    "embed_metadata",
-    "default_negative_prompt",
-    "t5_variant",
-    "qwen3_variant",
-  ].includes(key);
-}
+/** DELETE resets only DB-backed preference keys; bootstrap keys live in
+ *  config.toml. The rule is the shared kit's — one mirror of
+ *  `config_keys::effective_surface`, not one per surface. */
+export { canResetConfig } from "@studio/api/config";
