@@ -7,8 +7,9 @@
  * every safe-area inset, with the head row rendered in the body so it can
  * never vanish the way SheetPanel's `full` variant drops its #header slot.
  */
+import { useSheetDismiss } from "./useSheetDismiss";
 import { useMobileBack } from "./useMobileBack";
-import { computed, nextTick, onBeforeUnmount, ref, watch, toRef } from "vue";
+import { nextTick, onBeforeUnmount, ref, watch, toRef } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 
 const props = withDefaults(
@@ -22,7 +23,7 @@ const props = withDefaults(
     testId?: string;
     /** Platform-specific minimum target for the closing control. */
     touchTargetSize?: number;
-    /** Let a downward drag from the top dismiss this read-first sheet. */
+    /** Let a downward drag from the top dismiss the sheet. */
     swipeToDismiss?: boolean;
   }>(),
   {
@@ -30,7 +31,7 @@ const props = withDefaults(
     doneLabel: "Done",
     testId: "mobile-library-sheet",
     touchTargetSize: 46,
-    swipeToDismiss: false,
+    swipeToDismiss: true,
   },
 );
 
@@ -39,27 +40,12 @@ const emit = defineEmits<{ close: [] }>();
 useMobileBack(toRef(props, "open"), () => emit("close"));
 const panel = ref<HTMLElement | null>(null);
 const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-library-sheet");
-const body = ref<HTMLElement | null>(null);
-const dragOffset = ref(0);
-const dragging = ref(false);
 let restoreFocus: HTMLElement | null = null;
-let dragTouchId: number | null = null;
-let dragStartX = 0;
-let dragStartY = 0;
-
-const DISMISS_DISTANCE = 96;
-const panelStyle = computed(() => ({
-  transform: dragOffset.value > 0 ? `translateY(${dragOffset.value}px)` : undefined,
-}));
-const backdropStyle = computed(() => ({
-  opacity: dragOffset.value > 0 ? Math.max(0.24, 1 - dragOffset.value / 320) : undefined,
-}));
-
-function resetDrag(): void {
-  dragTouchId = null;
-  dragOffset.value = 0;
-  dragging.value = false;
-}
+const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
+  useSheetDismiss({
+    enabled: () => props.open && isTop() && props.swipeToDismiss,
+    close: () => emit("close"),
+  });
 
 watch(
   () => props.open,
@@ -92,46 +78,6 @@ onBeforeUnmount(() => {
   resetDrag();
   restoreFocus = null;
 });
-
-function beginDismiss(event: TouchEvent): void {
-  if (
-    !props.swipeToDismiss ||
-    event.touches.length !== 1 ||
-    (body.value?.scrollTop ?? 0) > 0 ||
-    (event.target instanceof Element &&
-      Boolean(event.target.closest("input, textarea, select, button, a, [contenteditable='true']")))
-  ) {
-    resetDrag();
-    return;
-  }
-  const touch = event.touches[0];
-  if (!touch) return;
-  dragTouchId = touch.identifier;
-  dragStartX = touch.clientX;
-  dragStartY = touch.clientY;
-}
-
-function moveDismiss(event: TouchEvent): void {
-  if (dragTouchId === null || event.touches.length !== 1) return;
-  const touch = [...event.touches].find((candidate) => candidate.identifier === dragTouchId);
-  if (!touch) return;
-  const deltaX = touch.clientX - dragStartX;
-  const deltaY = touch.clientY - dragStartY;
-  if (deltaY <= 0 || Math.abs(deltaX) >= deltaY) {
-    dragOffset.value = 0;
-    return;
-  }
-  dragging.value = true;
-  dragOffset.value = Math.min(280, deltaY * 0.82);
-  event.preventDefault();
-}
-
-function finishDismiss(): void {
-  if (dragTouchId === null) return;
-  const dismiss = dragOffset.value >= DISMISS_DISTANCE;
-  resetDrag();
-  if (dismiss) emit("close");
-}
 
 function onKeydown(event: KeyboardEvent): void {
   if (!props.open || !isTop()) return;
@@ -199,7 +145,7 @@ function onKeydown(event: KeyboardEvent): void {
       @touchcancel="resetDrag"
     >
       <span class="mobile-library-sheet-grabber" aria-hidden="true" />
-      <div ref="body" class="mobile-library-sheet-body">
+      <div class="mobile-library-sheet-body">
         <p class="mobile-library-sheet-head" :data-test="`${testId}-head`">{{ title }}</p>
         <slot />
       </div>
