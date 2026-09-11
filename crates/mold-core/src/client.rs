@@ -49,15 +49,30 @@ fn pull_body(
 const REFERENCE_UPLOAD_HANDLE_HEADER: &str = "x-mold-reference-upload";
 const REFERENCE_UPLOAD_SESSION_HEADER: &str = "x-mold-reference-upload-session";
 
+/// How long a client trusts a host's `gallery.persists_outputs` answer.
+///
+/// The figure describes the HOST — its gallery can be disabled, re-enabled, or
+/// the machine replaced behind the same URL — while a `MoldClient` in the
+/// Discord bot or the TUI lives for the whole process. One capabilities GET a
+/// minute is a negligible price for not stranding a long-lived client on a
+/// stale answer.
+const GALLERY_PERSISTS_OUTPUTS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Clone)]
 pub struct MoldClient {
     base_url: String,
     client: Client,
     api_key_configured: bool,
-    /// Memoized `gallery.persists_outputs`. The outer `Option` is "not asked
-    /// yet"; the inner one is the server's own answer, where `None` means an
-    /// older server.
-    gallery_persists_outputs: std::sync::Arc<std::sync::Mutex<Option<Option<bool>>>>,
+    /// Memoized `gallery.persists_outputs` and when it was learned. The outer
+    /// `Option` is "not asked yet"; the inner one is the server's own answer,
+    /// where `None` means an older server.
+    ///
+    /// Bounded rather than permanent: `MoldClient` outlives a single command
+    /// in the Discord bot and the TUI, and the host it points at can be
+    /// restarted, reconfigured, or replaced underneath it.
+    #[allow(clippy::type_complexity)]
+    gallery_persists_outputs:
+        std::sync::Arc<std::sync::Mutex<Option<(Option<bool>, std::time::Instant)>>>,
 }
 
 fn require_direct_singleton(req: &GenerateRequest) -> Result<()> {
@@ -1741,18 +1756,41 @@ impl MoldClient {
     }
 
     /// Whether this host says a saved print reads back from the gallery,
-    /// memoized for the life of the client.
+    /// memoized for [`GALLERY_PERSISTS_OUTPUTS_MAX_AGE`].
     ///
     /// `None` is the honest answer for an older server AND for a host whose
     /// capabilities could not be read at all — either way the caller keeps
     /// taking the inline payload, which every server has always sent.
+    ///
+    /// The answer is a property of the HOST, not of the client, and a
+    /// `MoldClient` in the Discord bot or the TUI lives for the whole process.
+    /// Memoizing it forever meant a host restarted with its gallery disabled
+    /// kept being asked for metadata-only completions by a client that would
+    /// never re-ask. The max age bounds that to one capabilities GET per
+    /// minute per client.
+    /// Age the memo past [`GALLERY_PERSISTS_OUTPUTS_MAX_AGE`] so a test can
+    /// reach the re-probe without sleeping a minute.
+    #[cfg(test)]
+    fn expire_gallery_persists_outputs_memo(&self) {
+        let mut slot = self
+            .gallery_persists_outputs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some((_, learned_at)) = slot.as_mut() {
+            *learned_at = std::time::Instant::now()
+                - (GALLERY_PERSISTS_OUTPUTS_MAX_AGE + std::time::Duration::from_secs(1));
+        }
+    }
+
     async fn gallery_persists_outputs(&self) -> Option<bool> {
-        if let Some(known) = *self
+        if let Some((known, learned_at)) = *self
             .gallery_persists_outputs
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
         {
-            return known;
+            if learned_at.elapsed() < GALLERY_PERSISTS_OUTPUTS_MAX_AGE {
+                return known;
+            }
         }
         let answer = self
             .server_capabilities()
@@ -1762,7 +1800,8 @@ impl MoldClient {
         *self
             .gallery_persists_outputs
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(answer);
+            .unwrap_or_else(|poison| poison.into_inner()) =
+            Some((answer, std::time::Instant::now()));
         answer
     }
 
@@ -2385,6 +2424,11 @@ impl MoldClient {
     }
 
     /// Download a gallery image by filename.
+    ///
+    /// The error names the print and the host: this is the fetch a
+    /// metadata-only completion defers to, so when it fails the render is
+    /// already finished and the one thing the user needs is WHICH file on
+    /// WHICH machine could not be read back.
     pub async fn get_gallery_image(&self, filename: &str) -> Result<Vec<u8>> {
         let resp = self
             .client
@@ -2394,11 +2438,17 @@ impl MoldClient {
                 encode_path_segment(filename)
             ))
             .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
-        Ok(resp.to_vec())
+            .await
+            .with_context(|| {
+                format!("requesting saved print '{filename}' from {}", self.base_url)
+            })?;
+        let resp = error_for_status_with_body(resp).await.with_context(|| {
+            format!(
+                "reading saved print '{filename}' back from {}",
+                self.base_url
+            )
+        })?;
+        Ok(resp.bytes().await?.to_vec())
     }
 
     /// Delete a gallery image on the server.
@@ -7488,5 +7538,42 @@ mod tests {
             }
             other => panic!("expected a progress frame, got {other:?}"),
         }
+    }
+    /// The memo describes the HOST, and a `MoldClient` outlives any one
+    /// command — the Discord bot and the TUI hold one for the whole process.
+    /// Memoizing forever meant a host restarted with its gallery disabled kept
+    /// being asked for metadata-only completions by a client that would never
+    /// re-ask, and every render then failed until the process restarted.
+    #[tokio::test]
+    async fn the_gallery_persistence_memo_is_re_asked_once_it_goes_stale() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mut capabilities = crate::ServerCapabilities::default();
+        capabilities.gallery.persists_outputs = Some(true);
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&capabilities))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        assert_eq!(client.gallery_persists_outputs().await, Some(true));
+        assert_eq!(client.gallery_persists_outputs().await, Some(true));
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "a fresh memo must not re-probe"
+        );
+
+        client.expire_gallery_persists_outputs_memo();
+        assert_eq!(client.gallery_persists_outputs().await, Some(true));
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
+            "a stale memo must ask the host again"
+        );
     }
 }

@@ -1764,11 +1764,18 @@ pub(crate) fn build_sse_completion_message(
     saved: &SavedOutputNames,
     payload: SseCompletionPayload,
 ) -> SseMessage {
-    if payload == SseCompletionPayload::MetadataOnly && saved.output.is_none() {
-        return SseMessage::Error(SseErrorEvent::failed(
-            "generation completed but the output could not be saved for streaming".to_string(),
-        ));
-    }
+    // `MetadataOnly` is a transport preference: the client said it would
+    // fetch the bytes from the gallery rather than receive them inline. If the
+    // save did not happen there is nothing to fetch — but the server is
+    // holding the finished pixels, which is precisely what the inline payload
+    // is for. Falling back to `Full` costs one base64 body; answering `Error`
+    // threw a completed render away, and a long-lived client that had
+    // memoized "this host persists outputs" did it on every render.
+    let payload = if payload == SseCompletionPayload::MetadataOnly && saved.output.is_none() {
+        SseCompletionPayload::Full
+    } else {
+        payload
+    };
     SseMessage::Complete(Box::new(build_sse_complete_event(
         response, img, original, metadata, saved, payload,
     )))
@@ -7515,8 +7522,16 @@ mod tests {
         assert!(metadata_only.metadata.is_some());
     }
 
+    /// A save failure must not become a LOST RENDER.
+    ///
+    /// `MetadataOnly` is an optimization: the client said it would fetch the
+    /// bytes from the gallery instead of receiving them inline. When the save
+    /// did not happen there is nothing to fetch — but the server is holding
+    /// the finished pixels, which is exactly the case the inline payload
+    /// exists for. Answering `Error` there threw away a completed render over
+    /// a transport preference.
     #[test]
-    fn metadata_only_completion_fails_when_the_output_was_not_saved() {
+    fn a_metadata_only_completion_falls_back_to_the_bytes_when_the_save_failed() {
         let response = mold_core::GenerateResponse {
             mesh: None,
             request_warnings: Vec::new(),
@@ -7536,10 +7551,50 @@ mod tests {
             &SavedOutputNames::default(),
             SseCompletionPayload::MetadataOnly,
         );
-        match message {
-            SseMessage::Error(error) => assert!(error.message.contains("could not be saved")),
-            _ => panic!("metadata-only completion without a file must be an SSE error"),
-        }
+        let SseMessage::Complete(event) = message else {
+            panic!("a finished render the server still holds must complete, not fail")
+        };
+        assert!(
+            !event.image.is_empty(),
+            "the fallback must carry the pixels inline — there is no file to fetch"
+        );
+        assert!(
+            event.filename.is_none(),
+            "and it must not name a file that was never written"
+        );
+    }
+
+    /// The fallback is only for the failed save; a saved print still gets the
+    /// lean payload the client asked for.
+    #[test]
+    fn a_saved_metadata_only_completion_still_omits_the_bytes() {
+        let response = mold_core::GenerateResponse {
+            mesh: None,
+            request_warnings: Vec::new(),
+            audio: None,
+            images: vec![fake_image()],
+            video: None,
+            generation_time_ms: 100,
+            model: "flux-dev:q4".to_string(),
+            seed_used: 5,
+            gpu: None,
+        };
+        let message = build_sse_completion_message(
+            &response,
+            &fake_image(),
+            None,
+            None,
+            &SavedOutputNames {
+                output: Some("flux-dev-q4-123.png".to_string()),
+                original: None,
+            },
+            SseCompletionPayload::MetadataOnly,
+        );
+        let SseMessage::Complete(event) = message else {
+            panic!("a saved print completes")
+        };
+        assert!(event.image.is_empty(), "the lean payload stays lean");
+        assert_eq!(event.filename.as_deref(), Some("flux-dev-q4-123.png"));
     }
 
     #[test]
