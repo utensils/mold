@@ -94,6 +94,34 @@ fn large_flux_bf16_should_auto_offload(
         })
 }
 
+/// Extra resident bytes an fp8 FLUX.2 transformer costs when the engine
+/// widens it once at load.
+///
+/// Name-gated the way the `nvfp4` arm beside it is: an estimate runs on the
+/// coordinator and must not read a 9 GB header to answer. `None` availability
+/// means the widen gate cannot be resolved, and an unresolvable gate charges
+/// nothing — today's answer, byte for byte.
+fn flux2_fp8_widen_extra_bytes(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    available_bytes: Option<u64>,
+) -> u64 {
+    let transformer_path = transformer_path_lower(paths);
+    let is_flux2 = transformer_path_looks_flux2(&transformer_path)
+        || hint.is_some_and(|hint| hint.family == ActivationFamily::Flux2Dit);
+    if !is_flux2 || !transformer_path.contains("fp8") || transformer_path_is_gguf(paths) {
+        return 0;
+    }
+    let Some(available) = available_bytes.filter(|bytes| *bytes > 0) else {
+        return 0;
+    };
+    mold_inference::flux2_fp8_widen_extra_resident_bytes(
+        transformer_component_size(paths),
+        available,
+        std::env::var("MOLD_FLUX2_FP8_CACHE").ok().as_deref(),
+    )
+}
+
 fn large_flux2_bf16_should_auto_offload(
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
@@ -2169,6 +2197,19 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     // for an execution that never happens, including on fp8, which cannot park
     // at all. Wan's disposition is `wan_block_offload` and nothing else.
     let block_offload = block_offload && !wan_family;
+    // An fp8 FLUX.2 checkpoint that the engine widens once at load holds TWO
+    // bytes per parameter, not one, and until this charge existed every
+    // server-side estimate priced the file. On a 32 GB card a klein-9B fp8
+    // planned as 9.08 GB, resided as 18.16 GB, and the encoder-variant
+    // selector then found no room for Qwen3 and fell back to a Q8 GGUF or to
+    // the CPU — the F32 encode this campaign exists to remove. The widen gate
+    // and the encoder selector could not see each other; now the planner sees
+    // both.
+    let peak = peak.saturating_add(flux2_fp8_widen_extra_bytes(
+        paths,
+        hint,
+        available_memory_bytes,
+    ));
     let fits_available_memory = available_memory_bytes.map(|available| {
         if qwen_family || wan_family {
             peak <= available
@@ -3446,6 +3487,90 @@ mod fail_closed_tests {
         assert!(
             unreadable_references.activation_memory_bytes > with_references.activation_memory_bytes,
             "unreadable reference headers must retain the cap-based fail-closed estimate"
+        );
+    }
+
+    /// The widen decision must be visible to the planner, because it is the
+    /// planner that decides whether Qwen3 gets a GPU slot.
+    ///
+    /// On a 32 GB card a klein-9B fp8 checkpoint (9.08 GB) resolves `AtLoad`
+    /// and holds 18.16 GB. Priced from its file, the plan then believed there
+    /// was room for a bf16 Qwen3 that in reality could not fit — and the
+    /// encoder-variant selector silently fell back to a Q8 GGUF or to the
+    /// CPU, which is the F32 encode this campaign exists to remove. The two
+    /// decisions could not see each other.
+    #[test]
+    fn an_fp8_flux2_checkpoint_charges_the_widened_bytes_when_it_will_widen() {
+        const FP8_BYTES: u64 = 9_079_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let transformer = dir.path().join("flux2-klein-9b-fp8.safetensors");
+        std::fs::File::create(&transformer)
+            .unwrap()
+            .set_len(FP8_BYTES)
+            .unwrap();
+        let mut model_paths = paths("/unused/transformer.safetensors");
+        model_paths.transformer = transformer;
+        let activation = Some(hint(ActivationFamily::Flux2Dit));
+
+        // A 32 GB card affords three copies at load, so the engine widens and
+        // the estimate must charge the second resident copy.
+        assert_eq!(
+            flux2_fp8_widen_extra_bytes(&model_paths, activation, Some(33_600_000_000)),
+            FP8_BYTES,
+            "a card that will widen must be planned against the widened residency"
+        );
+
+        // A 24 GiB card cannot, so nothing is added and the estimate is
+        // exactly what it was before this charge existed.
+        assert_eq!(
+            flux2_fp8_widen_extra_bytes(&model_paths, activation, Some(24 * 1024 * 1024 * 1024)),
+            0,
+            "a card that keeps the per-forward arm holds one copy, as it always did"
+        );
+
+        // An unresolvable gate charges nothing rather than guessing.
+        assert_eq!(
+            flux2_fp8_widen_extra_bytes(&model_paths, activation, None),
+            0
+        );
+        assert_eq!(
+            flux2_fp8_widen_extra_bytes(&model_paths, activation, Some(0)),
+            0
+        );
+
+        // And the gates: only fp8, only flux2, never a GGUF.
+        let mut bf16 = model_paths.clone();
+        bf16.transformer = dir.path().join("flux2-klein-9b-bf16.safetensors");
+        std::fs::File::create(&bf16.transformer)
+            .unwrap()
+            .set_len(FP8_BYTES)
+            .unwrap();
+        assert_eq!(
+            flux2_fp8_widen_extra_bytes(&bf16, activation, Some(33_600_000_000)),
+            0,
+            "a bf16 checkpoint is never widened"
+        );
+
+        let mut gguf = model_paths.clone();
+        gguf.transformer = dir.path().join("flux2-klein-9b-fp8.gguf");
+        std::fs::File::create(&gguf.transformer)
+            .unwrap()
+            .set_len(FP8_BYTES)
+            .unwrap();
+        assert_eq!(
+            flux2_fp8_widen_extra_bytes(&gguf, activation, Some(33_600_000_000)),
+            0,
+            "a GGUF takes the quantized path, not the FP8 widen"
+        );
+
+        assert_eq!(
+            flux2_fp8_widen_extra_bytes(
+                &model_paths,
+                Some(hint(ActivationFamily::FluxDit)),
+                Some(33_600_000_000)
+            ),
+            FP8_BYTES,
+            "the path name still identifies the family when the hint disagrees"
         );
     }
 

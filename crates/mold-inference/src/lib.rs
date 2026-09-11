@@ -154,6 +154,10 @@ pub use factory::{
     factory_family_availability, FactoryFamilyAvailability, FrozenEngineConfig,
 };
 pub use flux::FluxEngine;
+/// Extra resident bytes a FLUX.2 fp8 checkpoint costs when the engine widens
+/// it once at load, so a server-side estimate charges what the card will
+/// actually hold. See `flux2::transformer`.
+pub use flux2::transformer::flux2_fp8_widen_extra_resident_bytes;
 pub use flux2::Flux2Engine;
 pub use h3_factory::{
     expected_h3_factory_prepared_attempt_identity, expected_h3_factory_prepared_request_identity,

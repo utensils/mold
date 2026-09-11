@@ -519,6 +519,38 @@ pub(crate) fn flux2_fp8_widen_policy(fp8_bytes: u64, usable_free_bytes: u64) -> 
     }
 }
 
+/// Extra RESIDENT bytes the widen decision adds beyond the checkpoint's own
+/// file length, for a server-side estimate.
+///
+/// The widen is decided inside the engine at load, from the card's free VRAM
+/// alone, and until this existed nothing outside knew: `estimate_peak_memory`,
+/// `select_server_load_strategy_for_device` and the preflight guard all
+/// charged the FILE, while a widened checkpoint holds two bytes per parameter
+/// instead of one. On a 32 GB card a klein-9B fp8 then planned as 9.08 GB,
+/// resided as 18.16 GB, and quietly cost Qwen3 its GPU slot — the encoder
+/// variant selector re-measured, found no room, and fell back to a Q8 GGUF or
+/// to the CPU, which is the F32 encode this campaign exists to remove. The
+/// two decisions could not see each other.
+///
+/// Returns the SECOND copy only (`fp8_bytes`), because the first is already
+/// the file length every estimate charges. Zero when the policy resolves to
+/// `PerForward`, so a card that cannot afford the widen is priced exactly as
+/// it is today.
+pub fn flux2_fp8_widen_extra_resident_bytes(
+    fp8_bytes: u64,
+    usable_free_bytes: u64,
+    cache_override: Option<&str>,
+) -> u64 {
+    let resolved = resolve_flux2_fp8_widen(
+        cache_override,
+        flux2_fp8_widen_policy(fp8_bytes, usable_free_bytes),
+    );
+    match resolved {
+        Flux2Fp8Widen::AtLoad => fp8_bytes,
+        Flux2Fp8Widen::PerForward => 0,
+    }
+}
+
 /// `MOLD_FLUX2_FP8_CACHE`: `1` forces the widened arm, `0` forces the
 /// per-forward one, anything else (including unset) defers to the budget.
 ///
