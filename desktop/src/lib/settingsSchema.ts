@@ -513,6 +513,16 @@ export const ENV_KNOB_SCHEMAS: KeySchema[] = [
     needsEngineRestart: true,
   },
   {
+    key: "env.MOLD_RESERVE_VRAM_MB",
+    section: "performance",
+    label: "Graphics memory held back",
+    help: "Megabytes of graphics memory every budget decision leaves alone for the driver, the desktop and the maths libraries' own workspaces — what the card reports free is never quite what the next allocation can take. Leave it empty for this machine's default: 400 on Linux, 600 on Windows, 0 on a Mac, where memory is shared with the system and already has its own headroom. 0 holds nothing back; raising it makes mold stream a large style rather than keep it on the card.",
+    editor: "number",
+    min: 0,
+    max: 65536,
+    needsEngineRestart: true,
+  },
+  {
     key: "env.MOLD_QUEUE_SIZE",
     section: "performance",
     label: "Runtime queue window",

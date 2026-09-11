@@ -72,10 +72,14 @@ describe("settings schema", () => {
   });
 
   // A knob the Performance section offers but `apply_engine_environment` never
-  // copies into the engine's process is a control that silently does nothing.
-  // Read the Rust rather than restating its list here: a list maintained by
-  // hand in two languages is exactly the drift this test exists to catch.
-  it("every env knob is on the Tauri side's ENGINE_ENV_KEYS allowlist", () => {
+  // copies into the engine's process is a control that silently does nothing —
+  // and a variable the bridge copies with no row is a knob the app pretends it
+  // cannot set. The two lists must be EQUAL, not merely nested: asserting one
+  // direction only is how `MOLD_RESERVE_VRAM_MB` stayed engine-shaping,
+  // documented and unofferable for a whole campaign. Read the Rust rather than
+  // restating its list here: a list maintained by hand in two languages is
+  // exactly the drift this test exists to catch.
+  it("the env knobs and the Tauri side's ENGINE_ENV_KEYS are the same set", () => {
     // The path goes through a variable because Vite rewrites a literal first
     // argument to `new URL(..., import.meta.url)` into an asset URL, which
     // readFileSync then refuses as "must be of scheme file".
@@ -83,11 +87,10 @@ describe("settings schema", () => {
     const commands = readFileSync(new URL(commandsPath, import.meta.url), "utf8");
     const block = commands.match(/pub const ENGINE_ENV_KEYS: &\[&str\] = &\[([\s\S]*?)\];/);
     expect(block, "ENGINE_ENV_KEYS not found in commands.rs").not.toBeNull();
-    const allowlisted = new Set([...block![1].matchAll(/"([A-Z0-9_]+)"/g)].map((m) => m[1]));
-    expect(allowlisted.size).toBeGreaterThan(0);
-    for (const knob of ENV_KNOB_SCHEMAS) {
-      expect(allowlisted, knob.key).toContain(knob.key.replace(/^env\./, ""));
-    }
+    const allowlisted = [...block![1].matchAll(/"([A-Z0-9_]+)"/g)].map((m) => m[1]);
+    expect(allowlisted.length).toBeGreaterThan(0);
+    const offered = ENV_KNOB_SCHEMAS.map((knob) => knob.key.replace(/^env\./, ""));
+    expect([...offered].sort()).toEqual([...allowlisted].sort());
   });
 
   // The per-family defaults are the campaign's whole point: a user reading
