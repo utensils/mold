@@ -89,17 +89,49 @@ function errorMessage(error: unknown): string {
 
 // ── The jump nav and the ?section= deep link ───────────────────────────────
 const shell = ref<{ jump: (id: SectionId) => void } | null>(null);
+
+/**
+ * Land a deep link on its section.
+ *
+ * One jump at mount is not enough here: the shell mounts bodies lazily and
+ * the licence, pairing and device panels arrive over the network, so the page
+ * keeps growing ABOVE the target while the smooth scroll is still running and
+ * the scroll lands hundreds of pixels short (measured on hal9000: `y = 97`
+ * for a section that ended up at `y = 3215`). So jump again while the target
+ * is still far from the top — and stop the moment the reader takes over,
+ * because fighting someone's own scroll is worse than landing short.
+ */
+async function jumpToSection(id: SectionId) {
+  let interrupted = false;
+  const stop = () => (interrupted = true);
+  const events = ["wheel", "touchstart", "keydown"] as const;
+  for (const event of events)
+    window.addEventListener(event, stop, { passive: true, once: true });
+  try {
+    await nextTick();
+    for (let attempt = 0; attempt < 6 && !interrupted; attempt += 1) {
+      shell.value?.jump(id);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const top = document
+        .querySelector(`[data-test="section-${id}"]`)
+        ?.getBoundingClientRect().top;
+      if (top !== undefined && Math.abs(top) < 48) return;
+    }
+  } finally {
+    for (const event of events) window.removeEventListener(event, stop);
+  }
+}
+
 // Router-less in tests; the page still renders without a route.
 const route = useRoute();
 watch(
   () => route?.query.section,
-  async (section) => {
+  (section) => {
     if (typeof section !== "string") return;
     // The retired `about` section folded into Updates & about.
     const id = section === "about" ? "updates" : section;
     if (!WEB_SECTIONS.some((candidate) => candidate.id === id)) return;
-    await nextTick();
-    shell.value?.jump(id as SectionId);
+    void jumpToSection(id as SectionId);
   },
   { immediate: true },
 );
@@ -386,7 +418,11 @@ async function removeCivitai() {
 // ── This server ───────────────────────────────────────────────────────────
 const { status } = useStatusPoll();
 const version = computed(() => status.value?.version ?? "—");
-const gitSha = computed(() => status.value?.git_sha ?? "—");
+const gitSha = computed(() => status.value?.git_sha ?? null);
+/** The short sha is what a person reads and types; the whole 40 characters
+ *  ride the row's tooltip, because at phone width they are wider than the
+ *  screen. */
+const gitShaShort = computed(() => gitSha.value?.slice(0, 7) ?? "—");
 const buildDate = computed(() => status.value?.build_date ?? "—");
 const devices = ref<DeviceInfo[] | null>(null);
 const deviceCapabilities = ref<ServerCapabilities | null>(null);
@@ -938,7 +974,9 @@ onBeforeUnmount(() => {
             }}</span>
           </SettingRow>
           <SettingRow label="Build">
-            <span class="settings-value">{{ gitSha }} · {{ buildDate }}</span>
+            <span class="settings-value" :title="gitSha ?? undefined"
+              >{{ gitShaShort }} · {{ buildDate }}</span
+            >
           </SettingRow>
           <SettingRow label="Backend" help="What it computes on.">
             <span class="settings-value">{{ backend }}</span>
@@ -967,6 +1005,26 @@ onBeforeUnmount(() => {
 .settings-page {
   width: 100%;
   box-sizing: border-box;
+}
+
+/*
+ * Below 900px the shell folds its two columns into one, but it keeps the
+ * `align-items: start` / `align-self: start` that hold its sticky nav beside
+ * the page — and in a column flex layout that axis is the HORIZONTAL one, so
+ * both children shrink-wrap to max-content and the whole page scrolls
+ * sideways (measured: a 1,423px nav and a 997px page at an 880px viewport).
+ * Stretching them back to the column width is what lets the chip strip's own
+ * `overflow-x` do its job. This belongs in the kit's own media query — see
+ * the lane report.
+ */
+@media (max-width: 899px) {
+  .settings-page :deep(.ms-settings-shell) {
+    align-items: stretch;
+  }
+  .settings-page :deep(.ms-settings-nav) {
+    align-self: stretch;
+    min-width: 0;
+  }
 }
 
 .settings-body {

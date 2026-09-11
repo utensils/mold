@@ -213,6 +213,7 @@ describe("SettingsPage", () => {
     ) as typeof fetch;
   });
   afterEach(() => {
+    vi.useRealTimers();
     globalThis.fetch = originalFetch;
     theme.value = "safelight-dark";
     matchSystem.value = false;
@@ -302,6 +303,20 @@ describe("SettingsPage", () => {
   });
 
   it("lands on the section named by ?section=", async () => {
+    // The page grows under a deep link while its panels load, so the jump is
+    // retried until the section is at the top — one scroll at mount lands
+    // hundreds of pixels short.
+    const scrollIntoView = vi.fn();
+    const nativeScrollIntoView = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "scrollIntoView",
+    );
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      value: scrollIntoView,
+      writable: true,
+      configurable: true,
+    });
+    vi.useFakeTimers();
     routeState.query = { section: "library" };
     const wrapper = mount(SettingsPage);
     await flushPromises();
@@ -311,6 +326,22 @@ describe("SettingsPage", () => {
         .get('[data-test="settings-nav-library"]')
         .attributes("aria-current"),
     ).toBe("true");
+    expect(scrollIntoView).toHaveBeenCalled();
+    const attempts = scrollIntoView.mock.instances.length;
+
+    await vi.advanceTimersByTimeAsync(400);
+    expect(scrollIntoView.mock.instances.length).toBeGreaterThan(attempts);
+    expect(
+      (scrollIntoView.mock.instances.at(-1) as HTMLElement).dataset.test,
+    ).toBe("section-library");
+    vi.useRealTimers();
+    if (nativeScrollIntoView)
+      Object.defineProperty(
+        Element.prototype,
+        "scrollIntoView",
+        nativeScrollIntoView,
+      );
+    else Reflect.deleteProperty(Element.prototype, "scrollIntoView");
   });
 
   it("folds the retired about deep link into Updates & about", async () => {
