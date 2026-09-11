@@ -495,6 +495,28 @@ impl Qwen3Encoder {
         &self.encoder_paths
     }
 
+    /// Host bytes this encoder's park is holding, or zero.
+    ///
+    /// Read back into the residency decision as `already_parked_bytes`:
+    /// `MemAvailable` already excludes these, so a warm engine that did not
+    /// credit them would be asked whether it could park a SECOND copy and
+    /// would release the one it has.
+    pub fn parked_bytes(&self) -> u64 {
+        let dense: u64 = self
+            .parked_tensors
+            .iter()
+            .flat_map(|map| map.values())
+            .map(|tensor| (tensor.elem_count() * tensor.dtype().size_in_bytes()) as u64)
+            .sum();
+        let quantized: u64 = self
+            .parked_gguf
+            .iter()
+            .flat_map(|(tensors, _)| tensors.values())
+            .map(|tensor| tensor.storage_size_in_bytes() as u64)
+            .sum();
+        dense.saturating_add(quantized)
+    }
+
     /// Whether this encoder is currently parked (CPU-resident, GPU-free), on
     /// either the BF16 or the GGUF path.
     pub fn is_parked(&self) -> bool {

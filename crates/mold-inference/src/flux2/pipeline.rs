@@ -1170,6 +1170,7 @@ impl Flux2Engine {
         encoder_device: &Device,
         encoder_dtype: DType,
         transformer_bytes: u64,
+        already_parked_bytes: u64,
     ) -> super::text_encoder_residency::TextEncoderResidency {
         use super::text_encoder_residency as residency;
         let device = if encoder_device.is_metal() {
@@ -1189,6 +1190,7 @@ impl Flux2Engine {
             pinned_cap_bytes: crate::flux::pinned::pinned_cap_bytes(),
             keep_te_ram: crate::device::keep_te_ram_mode(),
             device,
+            already_parked_bytes,
         })
     }
 
@@ -1689,6 +1691,9 @@ impl Flux2Engine {
                     &encoder_device,
                     encoder_dtype,
                     xformer_component_bytes(&self.base.paths),
+                    self.dev_text_encoder
+                        .as_ref()
+                        .map_or(0, |encoder| encoder.parked_bytes()),
                 );
                 let encoder = self
                     .dev_text_encoder
@@ -2460,6 +2465,7 @@ impl Flux2Engine {
                         &loaded.device,
                         loaded.text_encoder.encoder_paths(),
                         transformer_bytes,
+                        loaded.text_encoder.parked_bytes(),
                     )
                     .parks();
                     if park_mode {

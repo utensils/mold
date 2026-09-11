@@ -274,6 +274,16 @@ pub struct TextEncoderResidencyInputs {
     pub pinned_cap_bytes: u64,
     pub keep_te_ram: KeepTeRamMode,
     pub device: TextEncoderDevice,
+    /// Bytes THIS engine's park is already holding, or zero.
+    ///
+    /// Credited back before the comparison, exactly as the VRAM side adds a
+    /// resident transformer's bytes back. `host_available_bytes` is live
+    /// `MemAvailable`, which already excludes an existing park, so without
+    /// this the warm question becomes "can I park a SECOND copy" — the answer
+    /// flips to no, the prefix is released, `MemAvailable` recovers, and the
+    /// next request parks again. A ~4 s host copy on alternating requests
+    /// forever is worse than never parking.
+    pub already_parked_bytes: u64,
 }
 
 /// Where a text encoder's weights live between requests.
@@ -371,7 +381,13 @@ pub fn decide_text_encoder_residency(inputs: &TextEncoderResidencyInputs) -> Tex
             .saturating_add(floor),
         KeepTeRamMode::Never => unreachable!("handled above"),
     };
-    if inputs.host_available_bytes < required {
+    // The budget is asked against the host as if this engine's own park were
+    // not on it — the `usable_free` convention the VRAM side uses, and the
+    // only way a warm engine asks the same question it answered cold.
+    let spendable = inputs
+        .host_available_bytes
+        .saturating_add(inputs.already_parked_bytes);
+    if spendable < required {
         return TextEncoderResidency::StreamFromMmap;
     }
 
@@ -379,10 +395,7 @@ pub fn decide_text_encoder_residency(inputs: &TextEncoderResidencyInputs) -> Tex
     // paged out at all, so a park that lands exactly on the safety floor is
     // the one that must not also make its bytes unreclaimable.
     let pinned = inputs.encoder_bytes <= inputs.pinned_cap_bytes
-        && inputs
-            .host_available_bytes
-            .saturating_sub(inputs.encoder_bytes)
-            > floor;
+        && spendable.saturating_sub(inputs.encoder_bytes) > floor;
     TextEncoderResidency::HostParked { pinned }
 }
 
@@ -401,6 +414,7 @@ pub fn qwen3_park_residency(
     device: &candle_core::Device,
     encoder_paths: &[std::path::PathBuf],
     transformer_bytes: u64,
+    already_parked_bytes: u64,
 ) -> TextEncoderResidency {
     let encoder_bytes: u64 = encoder_paths
         .iter()
@@ -421,6 +435,7 @@ pub fn qwen3_park_residency(
         pinned_cap_bytes: crate::flux::pinned::pinned_cap_bytes(),
         keep_te_ram: crate::device::keep_te_ram_mode(),
         device: device_class,
+        already_parked_bytes,
     })
 }
 
@@ -450,6 +465,7 @@ mod tests {
             pinned_cap_bytes: host_total / 2,
             keep_te_ram,
             device,
+            already_parked_bytes: 0,
         }
     }
 
@@ -587,6 +603,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The same engine asked twice must give the same answer.
+    ///
+    /// `host_available_bytes` is live `MemAvailable`, which ALREADY excludes
+    /// the bytes this engine parked last request — so without a credit the
+    /// warm question is really "can I park a SECOND copy", the answer flips to
+    /// no, the prefix is unparked, `MemAvailable` recovers, and the next
+    /// request parks again. That is a ~4 s host copy on alternating requests
+    /// forever, which is worse than never parking at all.
+    ///
+    /// The VRAM side has had this right from the start — the resident
+    /// transformer's bytes are added back before the comparison — and
+    /// `parks_across` could not catch it because it models DISTINCT engines
+    /// taking one decision each.
+    #[test]
+    fn an_engine_that_already_parked_does_not_unpark_itself() {
+        const TRANSFORMER: u64 = 33_000_000_000;
+        let prefix = mistral3_prefix_bytes(DType::BF16);
+
+        // The peer review's worked example: 128 GB host, 120 GiB available,
+        // flux2-dev Q8. The cold decision parks.
+        let cold = inputs(
+            128 * GIB,
+            120 * GIB,
+            TRANSFORMER,
+            KeepTeRamMode::Auto,
+            TextEncoderDevice::Cuda,
+        );
+        assert!(decide_text_encoder_residency(&cold).parks());
+
+        // Now the same engine asks again, with the park it just took already
+        // subtracted from MemAvailable by the kernel.
+        let mut warm = cold;
+        warm.host_available_bytes = 120 * GIB - prefix;
+        warm.already_parked_bytes = prefix;
+        assert!(
+            decide_text_encoder_residency(&warm).parks(),
+            "an engine holding its own park must not be told there is no room for it"
+        );
+
+        // The credit is exactly the park, not a blanket pass: an engine
+        // holding a park on a host that has SINCE lost most of its memory to
+        // something else still gives it up.
+        let mut starved = warm;
+        starved.host_available_bytes = 4 * GIB;
+        assert!(
+            !decide_text_encoder_residency(&starved).parks(),
+            "the credit must not survive a host that genuinely ran out"
+        );
+
+        // And an engine holding nothing is unaffected — the cold path is the
+        // one every existing row exercises.
+        let mut cold_again = cold;
+        cold_again.already_parked_bytes = 0;
+        assert_eq!(
+            decide_text_encoder_residency(&cold_again),
+            decide_text_encoder_residency(&cold)
+        );
     }
 
     /// Pinning never widens the park, and it is refused on its own cap.

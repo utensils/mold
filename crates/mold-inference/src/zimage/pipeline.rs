@@ -1726,6 +1726,7 @@ impl ZImageEngine {
                     &loaded.device,
                     loaded.text_encoder.encoder_paths(),
                     zimage_transformer_bytes,
+                    loaded.text_encoder.parked_bytes(),
                 )
                 .parks();
                 if park_mode {

@@ -3580,6 +3580,13 @@ fn build_plan(
                         mold_inference::flux2::text_encoder_residency::host_pinned_cap_bytes(),
                     keep_te_ram: mold_inference::device::keep_te_ram_mode(),
                     device: residency::TextEncoderDevice::Cuda,
+                    // Zero, deliberately. The planner charges the COLD case —
+                    // an engine that already holds a park is a warm hit whose
+                    // bytes `MemAvailable` has already excluded, and which
+                    // this charge is documented not to re-reserve. Passing a
+                    // live figure here would also make the plan depend on
+                    // which worker the job later lands on.
+                    already_parked_bytes: 0,
                 });
             if decision.parks() {
                 prefix
