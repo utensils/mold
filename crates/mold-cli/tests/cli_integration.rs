@@ -159,6 +159,110 @@ async fn library_list_json_is_pure_and_uses_the_same_filtered_page() {
     assert_eq!(json["items"][0]["filename"], "newer.png");
 }
 
+/// A listing teaches the shell what it saw.
+///
+/// Tags, collections, gallery filenames and the machines you talk to all live
+/// on a server, and a completer cannot ask one — so the commands that already
+/// fetch them write `$MOLD_HOME/completion-cache.json`, and the completers
+/// read that. This drives the real binary, so dropping the refresh call in
+/// `commands::library` fails it.
+#[tokio::test]
+async fn library_list_teaches_the_shell_what_it_just_listed() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/gallery"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            library_row("older.png", 1, &["owl"]),
+            library_row("newer.png", 2, &["owl", "night"])
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/gallery/collections"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "id": "c1",
+                "name": "Winter Scenes",
+                "slug": "winter-scenes",
+                "count": 2,
+                "created_at": 1,
+                "updated_at": 2
+            }])),
+        )
+        .mount(&server)
+        .await;
+
+    let cache_path = env.home.join("completion-cache.json");
+    assert!(
+        !cache_path.exists(),
+        "a fresh Mold home carries no completion cache"
+    );
+
+    env.cmd()
+        .env("MOLD_HOST", server.uri())
+        .args(["library", "list"])
+        .assert()
+        .success();
+
+    let cache: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cache_path).expect("the listing writes the cache"))
+            .expect("the cache is JSON");
+    let strings = |key: &str| -> Vec<String> {
+        cache[key]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .map(|value| value.as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    let filenames = strings("filenames");
+    assert!(
+        filenames.contains(&"newer.png".to_string()),
+        "{filenames:?}"
+    );
+    assert!(
+        filenames.contains(&"older.png".to_string()),
+        "{filenames:?}"
+    );
+    let tags = strings("tags");
+    assert!(tags.contains(&"night".to_string()), "{tags:?}");
+    assert!(tags.contains(&"owl".to_string()), "{tags:?}");
+    let collections = strings("collections");
+    assert!(
+        collections.contains(&"Winter Scenes".to_string()),
+        "{collections:?}"
+    );
+    assert!(
+        collections.contains(&"winter-scenes".to_string()),
+        "a NAME-OR-SLUG positional takes either: {collections:?}"
+    );
+    assert_eq!(
+        strings("hosts"),
+        vec![server.uri().trim_end_matches('/').to_string()],
+        "the machine that answered is the one worth completing"
+    );
+}
+
+/// A command that never reaches a server leaves no cache behind, so Tab on a
+/// machine that has only ever failed to connect completes nothing.
+#[tokio::test]
+async fn a_refused_listing_records_no_machine() {
+    let env = TestEnv::new();
+    env.cmd()
+        .env("MOLD_HOST", "http://127.0.0.1:1")
+        .args(["library", "list"])
+        .assert()
+        .failure();
+    assert!(
+        !env.home.join("completion-cache.json").exists(),
+        "an unreachable machine is not a completion candidate"
+    );
+}
+
 #[tokio::test]
 async fn library_tag_add_uses_replay_safe_bulk_mutation_when_advertised() {
     use wiremock::matchers::{method, path};

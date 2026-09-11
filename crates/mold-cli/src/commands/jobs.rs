@@ -81,6 +81,12 @@ struct RetakeArgs {
 
 async fn jobs_list(client: &MoldClient, json: bool) -> Result<()> {
     let listing = client.list_chain_jobs().await?;
+    // Teach the shell the ids this listing just showed: every other `mold
+    // jobs` verb takes one, and a completer cannot ask the server (see
+    // `crate::completion_cache`).
+    crate::completion_cache::record_reached_host(client.host(), |cache| {
+        cache.record_job_ids(listing.jobs.iter().map(|job| job.id.clone()));
+    });
     if json {
         println!("{}", serde_json::to_string_pretty(&listing)?);
         return Ok(());

@@ -152,6 +152,20 @@ async fn library_list(client: &MoldClient, options: ListOptions) -> Result<()> {
         .take(options.limit)
         .collect::<Vec<_>>();
 
+    // The listing is already in hand, so teach the shell what it just saw:
+    // the prints on this page, the tags they carry, and this machine's
+    // collections. A completer cannot ask a server (see
+    // `crate::completion_cache`).
+    crate::completion_cache::record_reached_host(client.host(), |cache| {
+        cache.record_filenames(page.iter().map(|row| row.filename.clone()));
+        cache.record_tags(page.iter().flat_map(|row| row.tags.iter().cloned()));
+        cache.record_collections(
+            collections
+                .iter()
+                .flat_map(|collection| [collection.name.clone(), collection.slug.clone()]),
+        );
+    });
+
     if options.json {
         println!(
             "{}",
@@ -234,6 +248,9 @@ async fn library_tag(client: &MoldClient, action: LibraryTagAction) -> Result<()
         LibraryTagAction::List { json } => {
             require_organize(client).await?;
             let tags = client.list_tags().await?;
+            crate::completion_cache::record_reached_host(client.host(), |cache| {
+                cache.record_tags(tags.iter().map(|tag| tag.name.clone()));
+            });
             if json {
                 println!("{}", serde_json::to_string_pretty(&tags)?);
             } else if tags.is_empty() {
@@ -308,6 +325,12 @@ async fn library_collection(client: &MoldClient, action: LibraryCollectionAction
     match action {
         LibraryCollectionAction::List { json } => {
             let rows = client.list_collections().await?;
+            crate::completion_cache::record_reached_host(client.host(), |cache| {
+                cache.record_collections(
+                    rows.iter()
+                        .flat_map(|row| [row.name.clone(), row.slug.clone()]),
+                );
+            });
             if json {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
             } else if rows.is_empty() {
