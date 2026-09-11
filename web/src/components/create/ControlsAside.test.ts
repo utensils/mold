@@ -312,6 +312,15 @@ describe("ControlsAside", () => {
     );
   });
 
+  it("draws no empty well for the secondary group on a still-picture style", () => {
+    // Seen on plato: More settings opened with a bare rounded box above
+    // Advanced — the secondary aside's chrome with nothing inside it, because
+    // a flux still has no mesh, clip or audio group to show.
+    const wrapper = factory({}, "flux", "secondary");
+    expect(wrapper.find("[data-test='controls-aside']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("keeps one-shot generated audio in the primary settings", async () => {
     const model = {
       name: "ltx-2-19b-distilled:fp8",

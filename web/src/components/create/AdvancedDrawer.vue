@@ -265,7 +265,7 @@ const identityActive = computed(() =>
 const identitySummary = computed(() =>
   identityActive.value
     ? `${identityActive.value} set · strength ${identityWeight.value.toFixed(2)}`
-    : "Model defaults",
+    : "Face reference strength",
 );
 /** The start step must land strictly below the steps this print renders. */
 const identityStartStepMax = computed(() =>

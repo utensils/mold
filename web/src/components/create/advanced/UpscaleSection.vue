@@ -109,7 +109,7 @@ const summary = computed(() => {
     </div>
 
     <div v-else class="up__field">
-      <label class="up__label" for="upscale-model-select">Upscaler model</label>
+      <label class="up__label" for="upscale-model-select">Upscaler</label>
       <select
         id="upscale-model-select"
         class="up__select"
@@ -128,7 +128,7 @@ const summary = computed(() => {
         each print is enlarged {{ factor }}× after it renders.
       </p>
       <p v-else class="up__note" data-test="upscale-factor">
-        scale is set by the checkpoint you pick.
+        scale is set by the upscaler you pick.
       </p>
     </div>
   </AccordionSection>

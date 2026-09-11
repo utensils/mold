@@ -1005,7 +1005,7 @@ describe("AdvancedDrawer identity group", () => {
     ).toBe("");
     expect(wrapper.emitted("update:modelValue")).toBeUndefined();
     expect(wrapper.get("[data-test='section-identity']").text()).toContain(
-      "Model defaults",
+      "Face reference strength",
     );
   });
 

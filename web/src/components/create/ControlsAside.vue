@@ -221,6 +221,15 @@ function setPredictDuration(value: boolean) {
   });
 }
 const showGenerateAudio = computed(() => capabilities.value.offersAudioControl);
+/** The secondary slice has nothing to say for a plain still, and an aside
+ * with only its chrome reads as a broken control. */
+const secondaryEmpty = computed(
+  () =>
+    secondary.value &&
+    !meshProfile.value &&
+    !capabilities.value.supportsVideo &&
+    !showGenerateAudio.value,
+);
 const generateAudio = computed(() => props.modelValue.enableAudio !== false);
 const audioOutputSupported = computed(
   () =>
@@ -344,7 +353,7 @@ function lockLastSeed() {
 </script>
 
 <template>
-  <aside class="controls" data-test="controls-aside">
+  <aside v-if="!secondaryEmpty" class="controls" data-test="controls-aside">
     <div v-if="primary && !canvasless" class="controls__group">
       <div class="controls__label">Shape</div>
       <ShapePicker
