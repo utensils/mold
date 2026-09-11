@@ -51,11 +51,8 @@ export function gpuSnapshotsFromStatus(status: ServerStatus | null | undefined):
   return status ? gpuSnapshotsFromWorkers(status.gpu_info, status.gpus) : [];
 }
 
-export function gpuFleetLabel(gpus: readonly GpuSnapshot[]): string {
-  if (!gpus.length) return "";
-  const names = [...new Set(gpus.map((gpu) => gpu.name))];
-  return names.length === 1 && gpus.length > 1 ? `${gpus.length}× ${names[0]}` : names.join(" + ");
-}
+/** What the cards in a box are called — shared with web through studio. */
+export { gpuFleetLabel } from "@studio/lib/gpuFleetLabel";
 
 /** Aggregate memory for compact cards while preserving per-device rows elsewhere. */
 export function summarizeStatusGpuMemory(

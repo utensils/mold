@@ -12,7 +12,7 @@ import { computed } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import CardSurface from "@ui/components/CardSurface.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
-import StatusDot from "./StatusDot.vue";
+import StatusDot from "@ui/components/StatusDot.vue";
 import { useHostPoll } from "./hostClient";
 import { deriveHostCardGpu, formatGb } from "./machineTelemetry";
 import { HOST_RECONNECTING_LABEL } from "@studio/lib/hostConnectivity";

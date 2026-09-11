@@ -31,7 +31,7 @@ import {
   modelDisplayName,
   modelDisplayNameForId,
 } from "@studio/lib/modelDisplay";
-import StatusDot from "../components/machines/StatusDot.vue";
+import StatusDot from "@ui/components/StatusDot.vue";
 import QueueCard from "../components/machines/QueueCard.vue";
 import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
 import {
