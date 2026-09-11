@@ -188,6 +188,8 @@ vi.mock("../api", async (importOriginal) => {
     cancelDownload: vi.fn(async () => undefined),
     createChainJob: createChainJobMock,
     expandPrompt: expandPromptMock,
+    // The VRAM badge takes its fetch as a prop, so the page names it.
+    fetchGenerationEstimate: vi.fn(async () => ({ peak_memory_bytes: 0 })),
     fetchModels: vi.fn(async () => []),
     fetchQueue: vi.fn(async () => ({ entries: [] })),
     listGallery: vi.fn(async () => galleryListing.value),

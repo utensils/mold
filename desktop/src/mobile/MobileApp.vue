@@ -20,7 +20,8 @@ import {
   scan,
 } from "@tauri-apps/plugin-barcode-scanner";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
-import EstimateBadge from "../components/generate/EstimateBadge.vue";
+import EstimateBadge from "@studio/components/EstimateBadge.vue";
+import { estimateGeneration } from "../lib/api/estimate";
 import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
 import { queueEntryDetailModel, type QueueDetailMetadata } from "@studio/lib/queueEntryDetail";
 import MobileGenerationQueueCard from "./MobileGenerationQueueCard.vue";
@@ -14041,7 +14042,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         />
       </Teleport>
       <div class="mobile-estimate">
-        <EstimateBadge :request="estimateRequest" :target="generationTarget" />
+        <EstimateBadge
+          :request="estimateRequest"
+          :target="generationTarget"
+          :estimate="estimateGeneration"
+        />
       </div>
       <button
         class="primary-button"

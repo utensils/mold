@@ -23,7 +23,7 @@ import { useActivityRows } from "../composables/useActivityRows";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import { useCreateOutputKind } from "../composables/useCreateOutputKind";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
-import EstimateBadge from "../components/create/EstimateBadge.vue";
+import EstimateBadge from "@studio/components/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
 import {
   effectiveNegativeDefault,
@@ -106,6 +106,7 @@ import {
 import {
   deleteGalleryImage,
   expandPrompt,
+  fetchGenerationEstimate,
   imageUrl,
   listGallery,
   upscaleStream,
@@ -4774,7 +4775,11 @@ onBeforeUnmount(() => {
             </div>
           </template>
         </ComposerCard>
-        <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
+        <EstimateBadge
+          :request="estimateRequest"
+          :target="estimateTarget"
+          :estimate="fetchGenerationEstimate"
+        />
 
         <div
           v-if="quickConflictReasons.length"

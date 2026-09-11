@@ -95,7 +95,9 @@ for duplicate in \
   web/src/lib/modelAvailability.ts \
   web/src/lib/styleAvailability.ts \
   desktop/src/lib/styleAvailability.ts \
-  desktop/src/mobile/modelAvailability.ts; do
+  desktop/src/mobile/modelAvailability.ts \
+  web/src/components/create/EstimateBadge.vue \
+  desktop/src/components/generate/EstimateBadge.vue; do
   test ! -e "$duplicate" || fail "$duplicate duplicates studio domain logic"
 done
 
