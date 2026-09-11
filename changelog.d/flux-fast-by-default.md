@@ -84,3 +84,29 @@
   render computed every sine and cosine of every token position with eight bits
   of mantissa. FLUX.2 was already correct here.
 
+- **The FLUX transformer stays on the card when it fits.** Both families used
+  to drop it before every VAE decode and rebuild it on the next render,
+  whatever the GPU had room for — 8.4 s per print for a FLUX.1 Q8 and 34 s for
+  a FLUX.2 Q8 on an idle 46 GB card, and up to ~95 GB of host RAM for a LoRA
+  rebuild. The decision is now a measurement taken per render: the resident
+  checkpoint, the denoise workspace, the VAE decode workspace and an allocator
+  margin against the card's usable free VRAM. A 24 GB card keeps a FLUX.1 Q8
+  tier at 1024x1024 and drops it at 2048x2048; a 46 GB card keeps a FLUX.2 Q8
+  [dev] transformer at 1024x1024 and 1536x1536 and drops it at 2048x2048. The
+  FLUX.2 sequential path — [dev], references, a LoRA, a source image — retains
+  it across renders too, reusing it only when the LoRA stack, the working
+  precision, the GPU and the resolved architecture all match, and releasing it
+  before the text encoder streams whenever the two would not fit together. A
+  prompt-cache hit runs no encoder at all, so repeated prompts and batches
+  render with neither a reload nor an encode. `MOLD_FLUX_KEEP_TRANSFORMER`
+  changes meaning: `0` forces the old drop, and `1` now means the same as the
+  default, because an explicit keep has always had to yield to a card that
+  cannot afford it. The resolved residency, the GGUF activation width and the
+  FLUX.2 CFG shape are recorded in the execution fingerprint, so a render that
+  reloads and one that does not are never filed as the same execution.
+- **A large BF16 FLUX.1 checkpoint no longer streams its blocks on a card that
+  can hold it.** The auto-offload decision was a file-size test with no
+  availability arm, so a 23.8 GB `:bf16` tier paid the documented 3-5x
+  streaming penalty on a 46 GB GPU with room for the whole thing. It now asks
+  the same two-step question its FLUX.2 sibling already asked.
+

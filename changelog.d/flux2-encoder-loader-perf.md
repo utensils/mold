@@ -40,3 +40,25 @@
   went 6.6 s -> 2.7 s on the same 35 GB file. Host memory is bounded by the
   buffer pair rather than the checkpoint, macOS and CPU loading is unchanged,
   and the weights are byte-identical, so renders are too.
+- **Text encoders park in host RAM when the machine can afford it, and
+  `MOLD_KEEP_TE_RAM` becomes tri-state.** The old rule was a flag plus two
+  carve-outs and asked nothing about the host. `auto` (the unset default) now
+  measures it: a park is admitted only when the encoder, the transformer that
+  loads beside it, and a `max(15 % of RAM, 8 GiB)` safety floor all fit in
+  available memory, so a 64 GB desktop keeps streaming exactly as before while
+  a 1.5 TB host parks and page-locks. `1` parks whenever the encoder alone
+  clears the floor and remains the unchanged opt-in for FLUX/SD3's T5 and Wan's
+  UMT5; `0` never parks; Metal never parks, because there the parked copy would
+  sit in the pool the encoder already runs from. FLUX.2 [dev] parks the ~35 GB
+  Mistral3 prefix it streams, filtered to the layers it actually runs — the
+  vision tower, the projector and layers 30-39 the single-file republication
+  also ships are never materialized — and the placement planner charges that
+  park, so two queued [dev] prints on a 128 GB host cannot both be admitted
+  against memory only one of them can have.
+- **Quantized Qwen3 encoders park too.** Flux.2 Klein's and Z-Image's GGUF
+  encoders used to be excluded from the host park and re-read from disk on
+  every cache-miss prompt (3.9 s on Klein). Their `QTensor` bytes now move
+  host-to-device losslessly through the same mechanism Qwen-Image's Qwen2
+  encoder has used since #1044, verified byte-identical rather than merely
+  close.
+

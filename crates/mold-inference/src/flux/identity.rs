@@ -115,9 +115,9 @@ impl ResolvedIdentity {
 ///
 /// That matters at exactly one moment. Every FLUX path that drops the
 /// transformer before VAE decode does it to create decode headroom — the
-/// sequential and offloaded paths always, the eager path unless
-/// `MOLD_FLUX_KEEP_TRANSFORMER` keeps it hot — and those are the constrained
-/// machines that chose those paths in the first place. An adapter still alive
+/// sequential and offloaded paths always, the eager path whenever
+/// `device::still_transformer_residency` does not fit the card — and those are
+/// the constrained machines that chose those paths in the first place. An adapter still alive
 /// there is 0.8–1.7 GB the VAE's conv2d intermediates have to compete with, on
 /// the render that could least afford it.
 pub(crate) struct RenderIdentity<'a> {

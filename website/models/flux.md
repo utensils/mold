@@ -112,6 +112,20 @@ The full-precision `:bf16` tier is the one exception on the attention side: it
 runs through upstream Candle's own attention, which has no backend switch, so
 it stays on the math path.
 
+### The transformer stays on the card when it fits
+
+mold used to drop the transformer before every VAE decode and rebuild it on
+the next render, whatever the card had room for. On a 46 GB GPU that is 8.4
+seconds of disk read per print for a Q8 tier, and with a LoRA stack the
+rebuild peaks at around 95 GB of host RAM.
+
+The decision is now a measurement, taken per render: the resident checkpoint,
+this render's denoise workspace, the VAE decode's workspace and an allocator
+margin against the card's usable free VRAM. A 24 GB card keeps a Q8 tier
+resident at 1024x1024 and drops it at 2048x2048, where the decode alone wants
+around 11 GB; a 46 GB card keeps a BF16 tier. `MOLD_FLUX_KEEP_TRANSFORMER=0`
+forces the old drop if you need the VRAM for something else.
+
 ## VRAM Notes
 
 - Full BF16 (23 GB) auto-offloads on 24 GB cards; blocks stream CPU↔GPU

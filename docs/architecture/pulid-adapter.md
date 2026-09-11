@@ -114,7 +114,7 @@ only while the transformer is**:
 - **Released at the transformer drop point, not at the end of the render.**
   Every path that drops the transformer before VAE decode does it to create
   decode headroom — the sequential and offloaded paths always, the eager path
-  unless `MOLD_FLUX_KEEP_TRANSFORMER` keeps it hot — and those are the
+  whenever the residency budget does not fit the card — and those are the
   constrained machines that took that path in the first place. An adapter still
   resident there hands 0.8–1.7 GB of that headroom straight back to the VAE's
   conv2d intermediates. So the release happens beside the transformer drop,

@@ -116,6 +116,30 @@ reserve. mold now plans for the streamed peak on both sides, so:
 Pinning the encoder to the CPU is still honoured; it is just no longer chosen
 for you on a card that had the room all along.
 
+### A second render of the same prompt reuses what the first built
+
+Two things now survive a render rather than being rebuilt from disk.
+
+The **transformer** stays GPU-resident when the card has room for it beside
+the VAE decode — a 46 GB card keeps a 33 GB Q8 [dev] transformer at 1024x1024
+and 1536x1536 and drops it at 2048x2048, where the decode workspace pushes the
+total over. It is released before the encoder streams whenever the two would
+not fit together, and reused only when the LoRA stack, the working precision,
+the GPU and the resolved architecture all match.
+
+The **encoder prefix** stays in host RAM when the machine can afford it, which
+turns a cache-miss prompt into a host-to-device copy per layer instead of a
+page fault, a dtype conversion and a copy. The park is measured, not a flag:
+the prefix, the transformer that loads beside it, and a `max(15 % of RAM,
+8 GiB)` floor must all fit in available memory, so a 64 GB desktop keeps
+streaming and a 1.5 TB host parks and page-locks. Only the layers the encoder
+actually runs are parked — the vision tower, the projector and layers 30-39
+that the single-file republication also ships are never touched.
+`MOLD_KEEP_TE_RAM=0` opts out; `MOLD_KEEP_TE_RAM=1` parks wherever the encoder
+alone clears the floor.
+
+Klein's Qwen3 encoder takes the same decision, quantized tiers included.
+
 Classic strength-based img2img, masks, ControlNet, LoRA, and batches with
 references are rejected because the checkpoint-native reference protocol does
 not implement those controls. Text-only batches remain supported. This is Dev
