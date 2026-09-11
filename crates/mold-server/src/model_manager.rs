@@ -203,7 +203,11 @@ pub(crate) struct ModelCatalogCache {
 struct ModelCatalogCacheInner {
     /// `config.toml` as parsed, WITHOUT the DB overlay, beside the file
     /// identity it was parsed from.
-    parsed_config_file: Option<(mold_core::config::ConfigFileIdentity, mold_core::Config)>,
+    parsed_config_file: Option<(
+        mold_core::config::ConfigFileIdentity,
+        mold_core::Config,
+        std::time::Instant,
+    )>,
     catalog: Option<CachedCatalog>,
 }
 
@@ -224,6 +228,18 @@ struct CachedCatalog {
 /// is the price; the alternative is walking the whole models directory on
 /// every admission, which is what this replaces.
 const CATALOG_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long a parsed `config.toml` is trusted on identity alone.
+///
+/// `ConfigFileIdentity` is `{len, modified}`, and `modified` is an `Option`:
+/// where the platform does not report an mtime it is `None` for every sample
+/// and the identity degrades to LENGTH ALONE, so a same-length edit
+/// (`flux-dev:q8` -> `flux-dev:q4`, `cuda:0` -> `cuda:1`) stayed invisible
+/// until restart. Coarse mtime on SMB/NFSv3/exFAT/HFS+ adds a same-second
+/// window with the same effect. The catalog half of this cache has always had
+/// a max-age backstop; the parse half had none, so a miss was permanent
+/// rather than brief.
+const CONFIG_FILE_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl ModelCatalogCache {
     /// Discard the memoized filesystem rows. Call after anything that changes
@@ -306,15 +322,19 @@ pub(crate) async fn refresh_config(state: &AppState) -> mold_core::Config {
         let cached = cache
             .parsed_config_file
             .as_ref()
-            .filter(|(cached_identity, _)| identity.is_some_and(|now| now == *cached_identity))
-            .map(|(_, config)| config.clone());
+            .filter(|(cached_identity, _, parsed_at)| {
+                identity.is_some_and(|now| now == *cached_identity)
+                    && parsed_at.elapsed() < CONFIG_FILE_CACHE_MAX_AGE
+            })
+            .map(|(_, config, _)| config.clone());
         match cached {
             Some(config) => config,
             None => {
                 #[cfg(test)]
                 CONFIG_FILE_PARSE_COUNT.with(|count| count.set(count.get() + 1));
                 let parsed = mold_core::Config::load_file_only();
-                cache.parsed_config_file = identity.map(|identity| (identity, parsed.clone()));
+                cache.parsed_config_file =
+                    identity.map(|identity| (identity, parsed.clone(), std::time::Instant::now()));
                 parsed
             }
         }

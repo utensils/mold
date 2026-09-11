@@ -2964,9 +2964,23 @@ fn sweep_stale_reservations(transaction_root: &Path) -> anyhow::Result<()> {
         if !entry.path().is_file() {
             continue;
         }
-        let owner = fs::read(entry.path())
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<ReservationOwner>(&bytes).ok());
+        let bytes = fs::read(entry.path()).ok();
+        // A reservation is created and written without an fsync, so a crash
+        // between the two leaves a zero-length file. Retaining that forever
+        // poisons its gallery name permanently — there is no owner to
+        // finish it and no later pass that can ever reinterpret it. An empty
+        // file carries no claim, so it is swept like any other stale one.
+        // A NON-empty file that will not parse is a different animal and
+        // still fails closed: something wrote a claim we cannot read.
+        if bytes.as_ref().is_some_and(|bytes| bytes.is_empty()) {
+            tracing::warn!(
+                reservation = %entry.path().display(),
+                "sweeping an empty batch reservation left by an interrupted write"
+            );
+            fs::remove_file(entry.path())?;
+            continue;
+        }
+        let owner = bytes.and_then(|bytes| serde_json::from_slice::<ReservationOwner>(&bytes).ok());
         if owner.is_none() {
             tracing::warn!(
                 reservation = %entry.path().display(),
@@ -5500,14 +5514,22 @@ fn reserve_final_name(
             Ok(mut file) => {
                 // Deliberately not fsynced, neither the file nor its
                 // directory. A reservation is a live, flock-guarded
-                // mutual-exclusion token, not crash-recovery state: nothing
-                // reads reservation files at startup, name selection also
-                // rejects a candidate whose final name already exists, and
-                // publication is no-replace — so a reservation that did not
-                // survive a crash cannot produce a collision, while a stale
-                // one that did is pure garbage. `release_reservation` has
-                // always ignored its own directory sync's error for the same
-                // reason. Two fsyncs per print, bought nothing.
+                // mutual-exclusion token, not crash-recovery state: name
+                // selection also rejects a candidate whose final name already
+                // exists, and publication is no-replace — so a reservation
+                // that did not survive a crash cannot produce a collision,
+                // while a stale one that did is pure garbage.
+                // `release_reservation` has always ignored its own directory
+                // sync's error for the same reason. Two fsyncs per print,
+                // bought nothing.
+                //
+                // This comment used to claim that "nothing reads reservation
+                // files at startup". `sweep_stale_reservations` does, and it
+                // decides on their CONTENT — so the two halves have to agree
+                // about what an un-fsynced crash can leave behind. Without a
+                // sync the visible remains can be a ZERO-LENGTH file, which
+                // the sweep must treat as the crash artifact it is rather
+                // than as an unreadable token worth retaining forever.
                 let result: anyhow::Result<()> = (|| {
                     file.write_all(&serde_json::to_vec(owner)?)?;
                     Ok(())
