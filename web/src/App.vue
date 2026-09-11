@@ -8,7 +8,7 @@ import ToastShelf from "@ui/components/ToastShelf.vue";
 import DownloadsPopover from "./components/shell/DownloadsPopover.vue";
 import AppNav from "./components/shell/AppNav.vue";
 import CommandK from "./components/shell/CommandK.vue";
-import ConfirmDialog from "./components/shell/ConfirmDialog.vue";
+import ConfirmHost from "./components/shell/ConfirmHost.vue";
 import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 import LicenseAcceptanceDialog from "@studio/components/LicenseAcceptanceDialog.vue";
 import { dismissToast, runToastAction, useNotifications } from "./lib/toasts";
@@ -209,7 +209,7 @@ const notifications = useNotifications();
     >
       <router-link to="/queue"
         ><span aria-live="polite">{{ liveSummary }}</span
-        ><span>View Queue →</span></router-link
+        ><span>Open the queue →</span></router-link
       >
     </div>
     <router-view />
@@ -236,7 +236,7 @@ const notifications = useNotifications();
       @dismiss="dismissToast"
       @action="runToastAction"
     />
-    <ConfirmDialog />
+    <ConfirmHost />
     <LicenseAcceptanceDialog />
     <CommandK :open="paletteOpen" @close="paletteOpen = false" />
   </div>

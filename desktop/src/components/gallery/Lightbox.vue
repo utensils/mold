@@ -8,7 +8,7 @@ import VideoSoundToggle from "./VideoSoundToggle.vue";
 import AuthedMedia from "./AuthedMedia.vue";
 import CollectionPicker from "../library/CollectionPicker.vue";
 import TagEditor from "../library/TagEditor.vue";
-import ConfirmDialog from "../shell/ConfirmDialog.vue";
+import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
 import {
   fetchGalleryMediaBytes,
   galleryMediaPath,

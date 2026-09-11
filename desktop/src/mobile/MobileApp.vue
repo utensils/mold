@@ -20,7 +20,8 @@ import {
   scan,
 } from "@tauri-apps/plugin-barcode-scanner";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
-import EstimateBadge from "../components/generate/EstimateBadge.vue";
+import EstimateBadge from "@studio/components/EstimateBadge.vue";
+import { estimateGeneration } from "../lib/api/estimate";
 import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
 import { queueEntryDetailModel, type QueueDetailMetadata } from "@studio/lib/queueEntryDetail";
 import MobileGenerationQueueCard from "./MobileGenerationQueueCard.vue";
@@ -481,7 +482,6 @@ import {
 import MobileNavigation from "./MobileNavigation.vue";
 import { type MobileTab } from "./navigation";
 import MobileSourceControls from "./MobileSourceControls.vue";
-import MobileStyleChips from "./MobileStyleChips.vue";
 import MobileTemplates from "./MobileTemplates.vue";
 import SwipeActionRow from "@studio/components/SwipeActionRow.vue";
 import { OwnPrintPreviewWatchers, previewDataUrl } from "@studio/api/ownPrintPreview";
@@ -12358,10 +12358,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             />
           </label>
           <details v-show="caps.promptMode !== 'ignored'" class="mobile-prompt-modifiers">
-            <summary>
-              Prompt extras <span>{{ form.stylePreset || "Optional" }}</span>
-            </summary>
-            <MobileStyleChips v-model="form.stylePreset" />
+            <summary>Prompt extras</summary>
             <MobilePromptTools
               v-if="selectedTarget"
               v-show="caps.promptMode !== 'ignored'"
@@ -14041,7 +14038,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         />
       </Teleport>
       <div class="mobile-estimate">
-        <EstimateBadge :request="estimateRequest" :target="generationTarget" />
+        <EstimateBadge
+          :request="estimateRequest"
+          :target="generationTarget"
+          :estimate="estimateGeneration"
+        />
       </div>
       <button
         class="primary-button"
