@@ -992,12 +992,15 @@ pub(crate) fn durable_media_preflight(
     // refused here by durable media protocol v1, which could not carry them.
     // None of the three was ever an invariant:
     //
-    // * A LoRA is an ordinary request field. `lora.path` names a server-local
-    //   adapter exactly as `model` names a checkpoint, it is persisted with
-    //   the rest of the request, and dispatch re-validates it — a LoRA that
-    //   vanished between admission and replay HOLDS its row by name rather
-    //   than rendering without the adapter. Refusing the pair took out every
-    //   img2img, inpaint, control and video-source render that used one.
+    // * A LoRA names a server-local adapter exactly as `model` names a
+    //   checkpoint, and dispatch re-validates it — a LoRA that vanished
+    //   between admission and replay HOLDS its row by name rather than
+    //   rendering without the adapter. Refusing the pair took out every
+    //   img2img, inpaint, control and video-source render that used one. It
+    //   is carried as its own sealed record rather than in the row's JSON,
+    //   which is why `request_has_extractable_media` must report it: the
+    //   feeder scrubs the adapter off the published request and only a sealed
+    //   set can hand it back.
     // * `hdr_exr_dir` is refused for a better, older reason that has nothing
     //   to do with durability: it names an output directory on the inference
     //   machine and an HTTP client may not choose one. That refusal lives in

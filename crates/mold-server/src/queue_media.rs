@@ -60,10 +60,46 @@ pub const REQUEST_AUTHORITY_JSON_FIELDS: &[&str] = &[
 ];
 
 /// The authoritative predicate for request fields transported by the
-/// encrypted durable-media store. Local-only HDR/LoRA authorities are
-/// intentionally classified separately.
+/// encrypted durable-media store.
+///
+/// It must report every field `extract_request_media` moves off the request
+/// JSON, because that is the same set `scrub_request_media` empties from the
+/// copy the feeder publishes to the scheduler. A field scrubbed out of a
+/// request that sealed no media set is simply GONE: there is nothing left for
+/// the worker to hydrate it back from.
+///
+/// The LoRA stack is the field that taught this. `lora` / `loras` are sealed
+/// as their own records — `downloadable_role` already knows to keep an adapter
+/// path out of the gallery's source-media listing — but the predicate only
+/// asked `has_durable_media_inputs`, which names conditioning media and not
+/// the adapter. So a text-to-image render with `--lora` sealed nothing, was
+/// scrubbed on its way to the GPU worker, and rendered byte-for-byte identical
+/// to the same prompt with no adapter, recording none in its print.
+///
+/// `hdr_exr_dir` is deliberately NOT here: it is refused at the API boundary
+/// by `routes::reject_client_supplied_hdr_output` and again by extraction, so
+/// it never reaches a durable row.
 pub(crate) fn request_has_extractable_media(request: &mold_core::GenerateRequest) -> bool {
-    request.has_durable_media_inputs()
+    // Asked exactly as extraction asks it: `collection` seals a presence
+    // record for a present-but-empty stack too, and the scrub would otherwise
+    // collapse that `Some([])` to `None` with nothing to restore it from.
+    request.has_durable_media_inputs() || request.lora.is_some() || request.loras.is_some()
+}
+
+/// True when publishing this attempt would delete an adapter nothing can hand
+/// back: the request names a LoRA and the row sealed no media set.
+///
+/// Every row admitted since `request_has_extractable_media` learned to count
+/// the LoRA stack seals one, so this can only be a row written by an older
+/// build and still queued or held across the upgrade. It is a warning rather
+/// than a hold because the row is otherwise renderable and holding it would
+/// strand work the operator cannot resume; resubmitting is what applies the
+/// adapter.
+pub(crate) fn lora_would_be_lost_on_publication(
+    request: &mold_core::GenerateRequest,
+    has_sealed_media: bool,
+) -> bool {
+    !has_sealed_media && (request.lora.is_some() || request.loras.is_some())
 }
 
 /// A process-private authority that media extraction cannot make durable.
@@ -2427,6 +2463,134 @@ mod tests {
             serde_json::to_value(&expected).unwrap()
         );
         let _ = request_json;
+    }
+
+    /// One request field carrying exactly the named authority, so the two
+    /// halves of the durable-media contract can be asked about it in
+    /// isolation.
+    fn request_carrying_only(field: &str) -> mold_core::GenerateRequest {
+        let value = match field {
+            "source_image" | "id_image" | "mask_image" | "control_image" | "audio_file"
+            | "source_video" | "extend_video" => serde_json::json!("cGF5bG9hZA=="),
+            "id_images" | "edit_images" => serde_json::json!(["cGF5bG9hZA=="]),
+            "source_image_name" | "id_image_name" => serde_json::json!("private.png"),
+            "audio_file_path" => serde_json::json!("/private/audio.wav"),
+            "source_video_path" => serde_json::json!("/private/source.mp4"),
+            "extend_video_path" => serde_json::json!("/private/extend.mp4"),
+            "id_image_names" => serde_json::json!(["private.png"]),
+            "keyframes" => {
+                serde_json::json!([{ "frame": 0, "image": "a2V5ZnJhbWU=", "name": "k.png" }])
+            }
+            "hdr_exr_dir" => serde_json::json!("/private/exr"),
+            "lora" => serde_json::json!({ "path": "/adapters/one.safetensors", "scale": 0.8 }),
+            "loras" => {
+                serde_json::json!([{ "path": "/adapters/two.safetensors", "scale": 0.8 }])
+            }
+            other => unreachable!("no fixture for authority field {other}"),
+        };
+        let mut json = serde_json::json!({
+            "prompt": "one authority",
+            "model": "mock",
+            "width": 64,
+            "height": 64,
+            "steps": 1
+        });
+        json.as_object_mut()
+            .unwrap()
+            .insert(field.to_string(), value);
+        serde_json::from_value(json).unwrap()
+    }
+
+    /// The two halves of the durable-media contract must name the same set of
+    /// fields.
+    ///
+    /// `scrub_request_media` empties every authority field from the copy the
+    /// feeder publishes to the scheduler, and the ONLY thing that can put one
+    /// back is the encrypted media set the worker hydrates. So a request whose
+    /// sole authority is one of these fields must also be one that
+    /// `request_has_extractable_media` reports — otherwise admission seals
+    /// nothing, the feeder scrubs the field anyway, and the render silently
+    /// proceeds without it.
+    ///
+    /// That is exactly how `--lora` became a no-op over the server path: a
+    /// text-to-image request carrying only an adapter is not "media", so no
+    /// set was sealed, and `ZeroizingGenerateRequest::scrubbed_clone` deleted
+    /// the adapter on its way to the GPU worker. The render matched a no-LoRA
+    /// render byte for byte and the print recorded no adapter.
+    ///
+    /// `hdr_exr_dir` is the one exemption: `routes::reject_client_supplied_hdr_output`
+    /// refuses it at the API boundary and `extract_request_media` refuses it
+    /// again, so it never reaches a durable row to be lost from.
+    #[test]
+    fn every_scrubbed_authority_field_also_makes_a_request_extractable_media() {
+        for field in REQUEST_AUTHORITY_JSON_FIELDS {
+            if *field == "hdr_exr_dir" {
+                continue;
+            }
+            let request = request_carrying_only(field);
+            let before = serde_json::to_value(&request).unwrap();
+            let mut scrubbed = request.clone();
+            mold_core::request_media::scrub_request_media(&mut scrubbed);
+            assert_ne!(
+                serde_json::to_value(&scrubbed).unwrap(),
+                before,
+                "{field} is expected to be scrubbed from the published request"
+            );
+            assert!(
+                request_has_extractable_media(&request),
+                "{field} is scrubbed from the published request, so a request \
+                 carrying only it must seal a media set to restore it from"
+            );
+        }
+    }
+
+    /// The feeder's exact sequence for a text-to-image render with an adapter
+    /// and no conditioning media: seal at admission, deserialize the durable
+    /// row, hydrate, and publish. The adapter must survive it.
+    #[test]
+    fn a_media_free_lora_request_survives_the_durable_round_trip() {
+        let request = request_carrying_only("lora");
+        let expected = serde_json::to_value(&request).unwrap();
+        assert!(
+            request_has_extractable_media(&request),
+            "an adapter is durable authority: nothing else can carry it"
+        );
+
+        let extracted = extract_request_media(
+            "job-solo",
+            request,
+            &ProcessPrivateAuthorities::none(),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !extracted.request_json().contains("safetensors"),
+            "the adapter path never enters the durable JSON"
+        );
+
+        let (request_json, media) = extracted.into_parts();
+        // The feeder deserializes the row, hydrates the sealed set onto it,
+        // and only then publishes the scrubbed copy to the scheduler.
+        let mut hydrated: mold_core::GenerateRequest = serde_json::from_str(&request_json).unwrap();
+        rehydrate_request_media_into("job-solo", &mut hydrated, media).unwrap();
+        assert_eq!(serde_json::to_value(&hydrated).unwrap(), expected);
+    }
+
+    /// A row written by an older build — adapter in the JSON, no sealed set —
+    /// is the one shape that can still lose its LoRA at publication, and it
+    /// must say so in the log rather than render a print that quietly has no
+    /// adapter.
+    #[test]
+    fn an_unsealed_lora_row_is_reported_rather_than_silently_published() {
+        let with_lora = request_carrying_only("lora");
+        assert!(lora_would_be_lost_on_publication(&with_lora, false));
+        assert!(!lora_would_be_lost_on_publication(&with_lora, true));
+
+        let with_stack = request_carrying_only("loras");
+        assert!(lora_would_be_lost_on_publication(&with_stack, false));
+
+        let plain = request_carrying_only("source_image");
+        assert!(!lora_would_be_lost_on_publication(&plain, false));
     }
 
     #[test]

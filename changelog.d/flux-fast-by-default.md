@@ -39,3 +39,12 @@
   boundary; position ids stay F32, because the rotary embedding is built from
   them. `MOLD_FLUX2_QMATMUL=0` restores the per-forward dequantization arm if a
   render comes out wrong.
+- **A `--lora` on a prompt-only render is no longer a silent no-op over the
+  server.** Durable admission seals every request authority it later scrubs off
+  the copy it hands the GPU worker, but the predicate deciding whether to seal
+  anything at all counted only conditioning media — so a text-to-image render
+  with an adapter sealed nothing, lost the adapter on its way to the worker,
+  and produced pixels byte-identical to the same prompt with no LoRA while its
+  print recorded none. Every LoRA-capable family was affected, FLUX.1 and
+  FLUX.2 included; a LoRA beside an image, mask or video source always worked,
+  and `--local` was never affected.

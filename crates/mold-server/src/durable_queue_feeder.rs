@@ -1181,6 +1181,17 @@ async fn feed_available(
                 &mut preparation_request,
                 runtime_authority,
             ));
+        if crate::queue_media::lora_would_be_lost_on_publication(
+            &preparation_request,
+            preparation_lease.is_some(),
+        ) {
+            tracing::warn!(
+                job = %row.id,
+                "durable row names a LoRA but sealed no media set; the adapter cannot be \
+                 restored for this attempt and the render will not use it — resubmit the \
+                 request on this build to apply it"
+            );
+        }
         // Publish only a payload-free copy. Dropping the RAII owner before the
         // staging lease preserves scrub-before-release on success; unwind and
         // cancellation take the same order because locals drop in reverse.

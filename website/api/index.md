@@ -199,7 +199,7 @@ organization control and keep the hard-delete wording.
 `durable_media` is present only while restart-safe encrypted request media is
 actually live (`protocol_version`, `encrypted_at_rest`, `generate_request_media`,
 `identity`, `private_h3`). Absence means unavailable, so a request carrying
-conditioning media is refused with `503 DURABLE_MEDIA_UNAVAILABLE`.
+conditioning media or a LoRA is refused with `503 DURABLE_MEDIA_UNAVAILABLE`.
 
 `expand` reports `configured`, `backend`, `remix`, the manifest `model` local
 expansion resolves (`qwen3-expand` today, so clients stop hard-coding it), and
@@ -491,11 +491,12 @@ the requests that need it, with HTTP 503 `DURABLE_MEDIA_UNAVAILABLE`; a
 media-free request is unaffected. There is no `X-Mold-Operation-Id` header and
 no attached, non-durable fallback.
 
-A LoRA combined with conditioning media is an ordinary durable request: the
-adapter's path and scale are sealed in the encrypted media set beside the media,
-restored before the print is planned, and re-validated when the job is
-dispatched, so an adapter that was moved or deleted in the meantime holds its
-row with a reason naming the file rather than rendering without it.
+A LoRA is an ordinary durable request, with or without conditioning media: the
+adapter's path and scale are sealed in the encrypted media set, restored before
+the print is planned, and re-validated when the job is dispatched, so an adapter
+that was moved or deleted in the meantime holds its row with a reason naming the
+file rather than rendering without it. A request naming a LoRA therefore needs
+the encrypted-media store exactly as one carrying a source image does.
 
 Ordered MiniMax H3 references are durable in the same way: each reference's
 descriptor (kind, probed shape, content `sha256`) stays on the queued request,
