@@ -1033,7 +1033,7 @@ impl FilingOptions {
     /// nothing. `false` does not discard the render — the host publishes the
     /// print and moves it straight to trash, so it stays recoverable until
     /// retention sweeps it.
-    fn save_to_gallery(&self) -> Option<bool> {
+    pub(crate) fn save_to_gallery(&self) -> Option<bool> {
         self.no_save.then_some(false)
     }
 
@@ -5663,23 +5663,51 @@ mod tests {
         );
     }
 
-    /// Every request `mold run` builds — the ordinary one and the HDR chain
-    /// probe that rides the same invocation — reads that one authority, so a
-    /// `--no-save` render cannot half-save.
+    /// EVERY request this crate builds reads that one authority, so nothing
+    /// that can be asked not to save can half-save.
+    ///
+    /// `mold run` builds two (the ordinary request and the HDR chain probe
+    /// that rides the same invocation); `mold runpod run` and the MCP
+    /// generate tools build one each. A new construction site is welcome —
+    /// hard-wiring the field at one is not, which is why this matches the
+    /// expression by exact text rather than counting sites.
     #[test]
-    fn every_request_this_command_builds_reads_the_one_save_authority() {
-        let source = include_str!("generate.rs");
-        let sites: Vec<&str> = source
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.starts_with("save_to_gallery:"))
-            .collect();
-        assert!(sites.len() >= 2, "expected both request sites: {sites:?}");
-        for site in sites {
-            assert_eq!(
-                site, "save_to_gallery: filing.save_to_gallery(),",
-                "a request site that hard-wires the field cannot honour --no-save"
+    fn every_request_this_crate_builds_reads_the_one_save_authority() {
+        const AUTHORITY: &str = "save_to_gallery: filing.save_to_gallery(),";
+        // Every other expression the field is allowed to be given, and why
+        // each still reads that one authority: the MCP mesh tool forwards its
+        // own tool argument INTO the shared image builder, which applies the
+        // authority there; and one test fixture asks the authority for its
+        // default. Anything else — a hard-wired `None`, an explicit
+        // `Some(true)` — fails here.
+        const FORWARDS: &[&str] = &[
+            "save_to_gallery: args.save_to_gallery,",
+            "save_to_gallery: FilingOptions::default().save_to_gallery(),",
+        ];
+        let builders = [
+            ("commands/generate.rs", include_str!("generate.rs"), 2),
+            ("commands/runpod.rs", include_str!("runpod.rs"), 1),
+            ("commands/mcp.rs", include_str!("mcp.rs"), 1),
+        ];
+        for (file, source, least) in builders {
+            let sites: Vec<&str> = source
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("save_to_gallery:"))
+                // A struct FIELD carrying the flag is a declaration, not a
+                // request site; only an initializer names a value.
+                .filter(|line| !line.ends_with("Option<bool>,"))
+                .collect();
+            assert!(
+                sites.iter().filter(|site| **site == AUTHORITY).count() >= least,
+                "{file} should build at least {least} request(s) from the authority: {sites:?}"
             );
+            for site in sites {
+                assert!(
+                    site == AUTHORITY || FORWARDS.contains(&site),
+                    "a site in {file} that hard-wires the field cannot honour --no-save: {site}"
+                );
+            }
         }
     }
 

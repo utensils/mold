@@ -1291,7 +1291,7 @@ impl McpServer {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct GenerateImageArgs {
     prompt: String,
     model: Option<String>,
@@ -1304,6 +1304,11 @@ struct GenerateImageArgs {
     output_format: Option<String>,
     expand: Option<bool>,
     loras: Option<Vec<McpLoraArg>>,
+    /// `false` keeps the render out of the host's Library: it is published
+    /// and moved straight to Trash. Absent or `true` saves it, and only
+    /// `false` ever reaches the wire — see
+    /// `commands::generate::FilingOptions::save_to_gallery`.
+    save_to_gallery: Option<bool>,
 }
 
 /// Arguments for `generate_mesh`.
@@ -1312,7 +1317,7 @@ struct GenerateImageArgs {
 /// there is meaningless here. There is no prompt (the family has no text
 /// encoder), no canvas, no negative prompt, no LoRA, and no output-format
 /// choice, and offering them would advertise knobs the server refuses.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct GenerateMeshArgs {
     /// Base64-encoded PNG or JPEG for a single-view checkpoint.
     image: Option<String>,
@@ -1333,6 +1338,8 @@ struct GenerateMeshArgs {
     target_faces: Option<u32>,
     matting: Option<mold_core::MeshMattingMode>,
     delight: Option<bool>,
+    /// See [`GenerateImageArgs::save_to_gallery`].
+    save_to_gallery: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2780,6 +2787,9 @@ fn build_generate_mesh_request(
             output_format: Some("png".to_string()),
             expand: Some(false),
             loras: None,
+            // Forwarded, not placeholdered: a mesh run that asked not to be
+            // filed must not be filed.
+            save_to_gallery: args.save_to_gallery,
         },
         None,
     )?;
@@ -2811,6 +2821,16 @@ fn build_generate_request(
     if args.prompt.trim().is_empty() {
         return Err("prompt must not be empty".to_string());
     }
+
+    // The ONE authority on what a "don't file this" request puts on the wire,
+    // shared with `mold run --no-save` and `mold runpod run --no-save`: absent
+    // means save, and the only value ever sent is `false`. An explicit `true`
+    // from a tool call is therefore the same request an older host has always
+    // seen.
+    let filing = crate::commands::generate::FilingOptions {
+        no_save: args.save_to_gallery == Some(false),
+        ..crate::commands::generate::FilingOptions::default()
+    };
 
     let output_format = match args.output_format.as_deref().unwrap_or("png") {
         "png" => OutputFormat::Png,
@@ -2889,7 +2909,7 @@ fn build_generate_request(
         control_model: None,
         control_scale: 1.0,
         expand: args.expand,
-        save_to_gallery: None,
+        save_to_gallery: filing.save_to_gallery(),
         original_prompt: None,
         prompt_transform: None,
         batch_id: None,
@@ -3212,7 +3232,7 @@ fn builtin_tool_definitions() -> Value {
     json!([
         {
             "name": "generate_image",
-            "description": "Generate one image with mold. Requires a running mold serve process, unless MOLD_HOST points at a remote mold server. For a brief prompt, call expand_prompt first or set expand: true; the model's prompting guide is readable at mold://prompting/route/<model>.",
+            "description": "Generate one image with mold. Requires a running mold serve process, unless MOLD_HOST points at a remote mold server. For a brief prompt, call expand_prompt first or set expand: true; the model's prompting guide is readable at mold://prompting/route/<model>. Every render is filed in the host's Library; pass save_to_gallery: false to have it trashed there instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3263,6 +3283,11 @@ fn builtin_tool_definitions() -> Value {
                         "type": "boolean",
                         "description": "Ask the mold server to expand the prompt before generation."
                     },
+                    "save_to_gallery": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Set false to keep this render out of the host's Library: it is published and then moved straight to that machine's Trash, so it stays recoverable until retention sweeps it. Omit to save it normally."
+                    },
                     "loras": {
                         "type": "array",
                         "description": "Optional LoRA stack to apply. Each item can be an installed LoRA id from list_loras, a server-side path, or an object with id/path and optional scale.",
@@ -3303,7 +3328,7 @@ fn builtin_tool_definitions() -> Value {
         {
             "name": "generate_mesh",
             "description": format!(
-                "Generate a 3D mesh from one image, or from semantically named front/left/back/right images with a Hunyuan3D 2mv model. There is no prompt; the images are the whole conditioning. The stored artifact is always GLB. Returns a rendered poster plus mesh statistics, and structuredContent.filename names the glTF in the gallery. To get OBJ, an OBJ+PBR ZIP bundle, STL, or PLY, call export_mesh. Defaults: model {}, octree {}, threshold {}.",
+                "Generate a 3D mesh from one image, or from semantically named front/left/back/right images with a Hunyuan3D 2mv model. There is no prompt; the images are the whole conditioning. The stored artifact is always GLB. Returns a rendered poster plus mesh statistics, and structuredContent.filename names the glTF in the gallery. To get OBJ, an OBJ+PBR ZIP bundle, STL, or PLY, call export_mesh. Every render is filed in the host's Library; pass save_to_gallery: false to have it trashed there instead. Defaults: model {}, octree {}, threshold {}.",
                 mold_core::manifest::HUNYUAN3D_DEFAULT_MODEL,
                 mold_core::validation::MESH_DEFAULT_OCTREE_RESOLUTION,
                 mold_core::validation::MESH_DEFAULT_THRESHOLD
@@ -3361,6 +3386,11 @@ fn builtin_tool_definitions() -> Value {
                         "type": "boolean",
                         "default": false,
                         "description": "Remove baked lighting and highlights before shape and PBR generation."
+                    },
+                    "save_to_gallery": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Set false to keep this render out of the host's Library: it is published and then moved straight to that machine's Trash, so it stays recoverable until retention sweeps it. Omit to save it normally."
                     },
                     // The earlier spellings. `additionalProperties: false`
                     // means a schema-validating host refuses anything not
@@ -3464,7 +3494,7 @@ fn builtin_tool_definitions() -> Value {
         },
         {
             "name": "generate_image_async",
-            "description": "Start an image generation job and return immediately with a job id. Use generation_status to poll progress and fetch the completed image.",
+            "description": "Start an image generation job and return immediately with a job id. Use generation_status to poll progress and fetch the completed image. Every render is filed in the host's Library; pass save_to_gallery: false to have it trashed there instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3514,6 +3544,11 @@ fn builtin_tool_definitions() -> Value {
                     "expand": {
                         "type": "boolean",
                         "description": "Ask the mold server to expand the prompt before generation."
+                    },
+                    "save_to_gallery": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Set false to keep this render out of the host's Library: it is published and then moved straight to that machine's Trash, so it stays recoverable until retention sweeps it. Omit to save it normally."
                     },
                     "loras": {
                         "type": "array",
@@ -3760,6 +3795,8 @@ fn handle_protocol_message_for_test(message: Value) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
+    use crate::commands::generate::FilingOptions;
+
     fn tiny_png_b64() -> String {
         let mut bytes = std::io::Cursor::new(Vec::new());
         image::DynamicImage::new_rgba8(2, 2)
@@ -3784,6 +3821,7 @@ mod tests {
             target_faces: None,
             matting: None,
             delight: None,
+            ..Default::default()
         })
         .unwrap_err();
         assert!(bad.contains("valid base64"), "{bad}");
@@ -3802,6 +3840,7 @@ mod tests {
             target_faces: None,
             matting: None,
             delight: None,
+            ..Default::default()
         })
         .unwrap_err();
         assert!(empty.contains("must not be empty"), "{empty}");
@@ -3824,6 +3863,7 @@ mod tests {
             target_faces: Some(50_000),
             matting: Some(mold_core::MeshMattingMode::On),
             delight: Some(true),
+            ..Default::default()
         })
         .expect("a well-formed mesh request builds");
 
@@ -6183,6 +6223,7 @@ mod tests {
                 output_format: Some("png".into()),
                 expand: None,
                 loras: None,
+                ..Default::default()
             },
             Some(vec![
                 LoraWeight {
@@ -6269,6 +6310,7 @@ mod tests {
                 output_format: None,
                 expand: None,
                 loras: None,
+                ..Default::default()
             },
             None,
         )
@@ -6333,7 +6375,7 @@ mod tests {
             control_model: None,
             control_scale: 1.0,
             expand: None,
-            save_to_gallery: None,
+            save_to_gallery: FilingOptions::default().save_to_gallery(),
             original_prompt: None,
             prompt_transform: None,
             batch_id: None,
@@ -6520,6 +6562,51 @@ mod tests {
             trashed_at: None,
             purge_at: None,
         }
+    }
+
+    /// `save_to_gallery` is declared on all three generate tools, and only
+    /// `false` ever reaches the wire.
+    ///
+    /// `additionalProperties: false` means a schema-validating host refuses
+    /// anything not declared here, so a serde-only field would be accepted by
+    /// mold and rejected by the host in front of it. And an explicit `true`
+    /// must NOT go on the wire: saving is the server's default, so sending it
+    /// would change the request body an older host sees while saying nothing.
+    #[test]
+    fn save_to_gallery_is_declared_and_only_false_reaches_the_wire() {
+        let tools = tool_definitions();
+        for name in ["generate_image", "generate_image_async", "generate_mesh"] {
+            let tool = tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("{name} should be advertised"));
+            assert_eq!(
+                tool["inputSchema"]["properties"]["save_to_gallery"]["type"],
+                json!("boolean"),
+                "{name} must declare save_to_gallery"
+            );
+            assert!(
+                tool["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("save_to_gallery: false"),
+                "{name} must say what the flag does"
+            );
+        }
+
+        let wire = |requested: Option<bool>| {
+            let mut value = json!({ "prompt": "a cat", "model": "flux-dev:q8" });
+            if let Some(requested) = requested {
+                value["save_to_gallery"] = json!(requested);
+            }
+            let args: GenerateImageArgs = serde_json::from_value(value).unwrap();
+            build_generate_request(args, None).unwrap().save_to_gallery
+        };
+        assert_eq!(wire(None), None, "absent means save");
+        assert_eq!(wire(Some(true)), None, "an explicit true says nothing new");
+        assert_eq!(wire(Some(false)), Some(false), "only false is sent");
     }
 
     #[test]

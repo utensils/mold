@@ -1,3 +1,9 @@
+// The MCP tool catalogue is one `json!` literal per tool inside one array
+// (`commands::mcp::builtin_tool_definitions`), and `json_internal!` recurses
+// once per token, so the default 128-deep limit is reached by the schemas
+// themselves rather than by anything pathological.
+#![recursion_limit = "512"]
+
 mod catalog_bridge;
 mod commands;
 mod completion_cache;
@@ -520,6 +526,12 @@ Examples:
         /// Keep the pod running after generation (otherwise left warm)
         #[arg(long)]
         keep: bool,
+        /// Keep this render out of the pod's Library: the print is published
+        /// there and moved straight to that machine's Trash, so it stays
+        /// recoverable until retention sweeps it. The image is still written
+        /// to --output-dir on this machine.
+        #[arg(long)]
+        no_save: bool,
         /// Seed
         #[arg(long)]
         seed: Option<u64>,
@@ -3518,6 +3530,7 @@ async fn run() -> anyhow::Result<()> {
                 model,
                 output_dir,
                 keep,
+                no_save,
                 seed,
                 steps,
                 width,
@@ -3553,6 +3566,7 @@ async fn run() -> anyhow::Result<()> {
                     height,
                     create,
                     wait_ready_timeout_secs: wait_timeout,
+                    no_save,
                 };
                 commands::runpod::run_run(opts).await?
             }
@@ -4558,6 +4572,38 @@ mod tests {
         });
         assert!(
             help.contains("recoverable until") || help.contains("trash"),
+            "the help must say the print is recoverable: {help}"
+        );
+    }
+
+    /// `mold runpod run --no-save` reads the same way and says the same
+    /// thing: the pod files the print and trashes it there, while the image
+    /// still lands in `--output-dir` on this machine.
+    #[test]
+    fn runpod_run_no_save_flag() {
+        match parse(&["runpod", "run", "a cat"]).command {
+            Commands::Runpod {
+                action: RunpodAction::Run { no_save, .. },
+            } => assert!(!no_save),
+            _ => panic!("expected runpod run"),
+        }
+        match parse(&["runpod", "run", "a cat", "--no-save"]).command {
+            Commands::Runpod {
+                action: RunpodAction::Run { no_save, .. },
+            } => assert!(no_save),
+            _ => panic!("expected runpod run --no-save"),
+        }
+        let help = on_large_stack(|| {
+            <Cli as clap::CommandFactory>::command()
+                .find_subcommand_mut("runpod")
+                .expect("runpod subcommand")
+                .find_subcommand_mut("run")
+                .expect("runpod run subcommand")
+                .render_long_help()
+                .to_string()
+        });
+        assert!(
+            help.contains("Trash") || help.contains("recoverable"),
             "the help must say the print is recoverable: {help}"
         );
     }
