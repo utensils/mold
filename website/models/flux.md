@@ -160,9 +160,18 @@ actually render, the answer comes down to the checkpoint and the card:
 `MOLD_FLUX_KEEP_TRANSFORMER=0` forces the old drop if you need the VRAM for
 something else. `=1` is accepted and means the same thing as the default: an
 explicit keep has always had to yield to a card that cannot afford it, and the
-budget is now what expresses that for everyone. The residency mold chose is
-recorded in the print's execution fingerprint, so a render that reloaded and
-one that did not are never filed as the same execution.
+budget is now what expresses that for everyone.
+
+What the print's execution fingerprint records is the **request**, not the
+outcome: `0` is its own execution class and unset and `1` share the other, so a
+forced drop is never filed with a budgeted render. It cannot record the outcome
+— that is a per-render measurement against whatever VRAM happened to be free,
+so two prints made by the same command on the same card can legitimately differ
+and are still the same execution. The measurement is reported in the server log
+instead, one line per render, naming which way it went and why: `Transformer
+kept resident: the residency budget fits`, `Transformer dropped before VAE
+decode: the residency budget does not fit this card at this resolution`, or
+`Transformer dropped before VAE decode (MOLD_FLUX_KEEP_TRANSFORMER=0)`.
 
 ### Text encoders
 

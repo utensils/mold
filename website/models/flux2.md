@@ -370,10 +370,13 @@ it either way.
 **A guided Klein Base step is one forward, not two.** Both branches denoise the
 same latent, so they ride one batch-2 forward and every weight is read once for
 the pair — which is what Black Forest Labs' own sampler does. mold falls back
-to two sequential forwards when the negative prompt tokenizes to a different
-length than the positive one, or when the doubled activations would not fit
-beside the weights on this card; the progress line says which ran.
-`--guidance 1` still skips the branch entirely.
+to two sequential forwards when the doubled activations would not fit beside
+the weights on this card; the progress line names which shape ran — `one
+batched forward per step` or `two forwards per step` — and deliberately names
+no cause, because on a real render the budget is the only one. (A batch-2
+forward also needs both branches to be the same length, but every Klein prompt
+is padded to a fixed 512 rows, so that gate now survives only as a structural
+guard and no render reaches it.) `--guidance 1` still skips the branch entirely.
 
 **Smaller operations got out of the way.** The Q/K norms and the affine-less
 LayerNorms now hit candle's fused kernels rather than a ten-operation strided

@@ -12,9 +12,12 @@
   driver invalidates it.
 - **PNG encoding is fast by default.** Saving a 1024² still at zlib level 6 was
   measured at ~1.0 s with the GPU idle. mold now encodes with fdeflate's
-  PNG-tuned ultra-fast deflate: on a 512² photograph 1.7 ms against 59.0 ms,
-  for a 6 % larger file. PNG is lossless under both settings, so no pixel
-  changes; `MOLD_PNG_ENCODING=balanced` restores the smaller files. The
+  PNG-tuned ultra-fast deflate: on a 512² photograph 1.7 ms against 59.0 ms.
+  The file gets bigger — 6 % on that photograph, and 6–11 % across the campaign's
+  measured prints (a 512² SD1.5 still 316,759 → 335,155 B, a 1024² SDXL still
+  1,479,585 → 1,636,155 B). PNG is lossless under both settings, so no pixel
+  changes and the raw-pixel hash is unmoved; `MOLD_PNG_ENCODING=balanced`
+  restores the smaller files. The
   post-generation `malloc_trim(0)` (another ~0.8 s) also moved after the print
   is saved and the completion is sent.
 - **The CLI no longer carries a finished render back as base64.** A streaming

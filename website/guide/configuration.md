@@ -276,7 +276,7 @@ Environment variables take precedence over config file values.
 | `MOLD_MALLOC_TRIM`                  | `1` (Linux/glibc)   | `0` disables the post-generation `malloc_trim(0)` call. Linux-only; reclaims arena pages after large GGUF+LoRA rebuilds. It runs after the print is saved and the completion is queued, so it is off the client's wall clock; the `generation memory delta` log line reports its cost as `trim_ms`.                                                                                                                                                                                                        |
 | `MOLD_PNG_ENCODING`                 | `fast`              | How much CPU a saved PNG is worth. `fast` uses fdeflate's PNG-tuned ultra-fast deflate; `balanced` is zlib level 6, the pre-0.29 behaviour. PNG is lossless either way, so this only trades encode time against file size and never changes a pixel — measured on a 512² photograph: 1.7 ms / 322 KB against 59.0 ms / 304 KB. An unrecognized value is `fast`.                                                                                                                                            |
 | `MOLD_FLUX_DELTA_CACHE`             | `1`                 | `0` disables the CPU-side FLUX LoRA delta cache (~25 GB host RAM on typical FLUX LoRAs). Disabling forces a sub-second `B@A·scale` recompute on each rebuild.                                                                                                                                                                                                                                                                                                                                              |
-| `MOLD_FLUX_KEEP_TRANSFORMER`        | budgeted            | Residency of the FLUX.1 / FLUX.2 transformer across renders. **The default changed**: instead of dropping it before every VAE decode, mold now measures the card — the resident checkpoint, this render's denoise workspace, the decode workspace, and an allocator margin against usable free VRAM — and keeps it when the four fit, which saves a full reload (8.4 s for a FLUX.1 Q8, 34 s for a FLUX.2 Q8) on every warm render. `0` forces the drop even where the budget fits; `1` is accepted and means the same thing as the default, because an explicit keep has always had to yield to a card that cannot afford it and the budget is now what expresses that for everyone. The chosen residency is recorded in the execution fingerprint. |
+| `MOLD_FLUX_KEEP_TRANSFORMER`        | budgeted            | Residency of the FLUX.1 / FLUX.2 transformer across renders. **The default changed**: instead of dropping it before every VAE decode, mold now measures the card — the resident checkpoint, this render's denoise workspace, the decode workspace, and an allocator margin against usable free VRAM — and keeps it when the four fit, which saves a full reload (8.4 s for a FLUX.1 Q8, 34 s for a FLUX.2 Q8) on every warm render. `0` forces the drop even where the budget fits; `1` is accepted and means the same thing as the default, because an explicit keep has always had to yield to a card that cannot afford it and the budget is now what expresses that for everyone. The execution fingerprint records the **request**, not the outcome — `0` is its own execution class and unset/`1` share the other, so a forced drop is never filed with a budgeted render; what the budget actually decided for a given render is a per-render VRAM measurement and is reported in the server log (`Transformer kept resident` / `Transformer dropped before VAE decode`), not in the fingerprint |
 | `MOLD_HOST_RAM_ZFS_ARC`             | on                  | `0` / `false` / `no` / `off` stops counting OpenZFS's evictable ARC as host-RAM headroom. The credit is published beside `MemAvailable` as `host_memory.reclaimable_zfs_arc_bytes`. Turn it off in a container that can read the host's arcstats but is capped by its own cgroup.                                                                                                                                                                                                                          |
 
 ### Durable queue and shutdown
@@ -377,6 +377,37 @@ that merely overran, and 1 for a shutdown triggered by a fatal CUDA error so
 `Restart=on-failure` brings it back. The desktop app's built-in engine never
 does this — it runs inside a process it does not own, so its budget only stops
 it waiting.
+
+### Shared homes and older binaries
+
+A `MOLD_HOME` shared between processes — a scratch or second server beside a
+running one, an NFS/ZFS root two machines mount, a canary beside production —
+must be served by binaries of the **same or a newer** storage format, never a
+mix in which one is newer than another.
+
+mold's on-disk stores (the gallery authority, the durable queue, the metadata
+database) carry a format version and are read forward, not backward: a newer
+binary reads what an older one wrote and upgrades the store to its own version
+the first time it starts against that root, and the upgrade is **in place and
+one-way**. From that moment an older binary still pointed at the same home
+cannot read it, and stopping the newer process does not put it back. The
+symptom is not a startup failure — the older server keeps answering
+`/api/capabilities` and `/api/models` — it is the affected subsystem refusing
+at the point of use, so a gallery read or a publication starts failing while
+the host still looks alive.
+
+Practical rules for a shared home:
+
+- **Upgrade every binary that uses the home together**, oldest first out of
+  service. A canary that shares a production home is a production upgrade.
+- **Give a test or scratch server its own `MOLD_HOME`** (and its own
+  `MOLD_OUTPUT_DIR`). That is the only configuration in which trying a newer
+  build carries no risk to the running one.
+- **Before starting a newer build against a shared home, back up the store**.
+  Rolling forward is supported; rolling back means restoring that backup, and
+  anything published after the upgrade is not in it.
+- Read the release notes for the version you are moving to: a release that
+  changes a store's format says so, and says which subsystem is affected.
 
 ### Upscaling
 

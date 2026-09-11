@@ -180,9 +180,10 @@ save memory.
 Encoding the finished image is not free. A 1024² PNG at zlib level 6 with
 adaptive per-row filtering measured ~1.0 s on the server timeline — with the
 GPU idle. mold now encodes with fdeflate's PNG-tuned ultra-fast deflate by
-default, which on a 512² photograph is 1.7 ms against 59.0 ms for a 6 %
-larger file. PNG is lossless under both, so nothing about the picture changes;
-set `MOLD_PNG_ENCODING=balanced` if you would rather have the smaller file.
+default, which on a 512² photograph is 1.7 ms against 59.0 ms. The file grows
+6–11 % — 6 % on that photograph, 11 % on a 1024² still. PNG is lossless under
+both, so nothing about the picture changes and the pixels hash the same; set
+`MOLD_PNG_ENCODING=balanced` if you would rather have the smaller file.
 
 The post-generation `malloc_trim(0)` (another ~0.8 s on a large render) now
 runs after the print is saved and the completion is sent, so it no longer

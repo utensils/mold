@@ -30,7 +30,10 @@ will not re-render byte-for-byte after it under any setting. `MOLD_ATTN=math`
 and `MOLD_CONV=im2col` are the cross-build determinism contract going forward,
 and every other still family already renders that way in every build. Never
 promise a user that an old seed will reproduce an old picture; re-render and
-compare instead.
+compare instead. Compare RAW PIXELS, never the saved file's hash: mold 0.29
+also changed the default PNG profile (`MOLD_PNG_ENCODING`, `fast` by default,
+`balanced` for the old one), which is lossless but a different deflate, so an
+unchanged picture saves to a different — and 6-11 % larger — file.
 
 The prompt is OPTIONAL, not absent, on a video render that already carries
 visual conditioning — a source image, keyframes, a clip to continue, or a

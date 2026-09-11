@@ -63,11 +63,13 @@
   batch-2 forward and every weight is read once for the pair — Black Forest
   Labs' own sampler does this and mold was following diffusers, which does not.
   A guided base render is now much closer in cost to an unguided one rather
-  than roughly double. mold falls back to the old two forwards when the
-  negative prompt tokenizes to a different length than the positive one, or
-  when the doubled activations would not fit beside the weights on this card;
-  the progress line says which ran. `--guidance 1` still skips the branch
-  entirely.
+  than roughly double. mold falls back to the old two forwards when the doubled
+  activations would not fit beside the weights on this card; the progress line
+  names which shape ran — `one batched forward per step` or `two forwards per
+  step` — and names no cause, because the budget is the only one a real render
+  meets. (Both branches must also be the same length, but every Klein prompt is
+  padded to a fixed 512 rows, so that gate survives only as a structural guard.)
+  `--guidance 1` still skips the branch entirely.
 - **FLUX renders spend far less time in norms, rotary embeddings and the VAE's
   attention.** Candle's fused normalization kernels were being missed
   everywhere in both families — the Q/K norms ran on a transposed view and the
@@ -105,9 +107,13 @@
   a FLUX.2 Q8 on an idle 46 GB card, and up to ~95 GB of host RAM for a LoRA
   rebuild. The decision is now a measurement taken per render: the resident
   checkpoint, the denoise workspace, the VAE decode workspace and an allocator
-  margin against the card's usable free VRAM. A 24 GB card keeps a FLUX.1 Q8
-  tier at 1024x1024 and drops it at 2048x2048; a 46 GB card keeps a FLUX.2 Q8
-  [dev] transformer at 1024x1024 and 1536x1536 and drops it at 2048x2048. The
+  margin against the card's usable free VRAM. FLUX renders are capped at 1.8
+  megapixels (1328x1328 at the square), so across the whole range mold will
+  actually render the answer comes down to the checkpoint and the card: a 24 GB
+  card keeps a FLUX.1 Q8 tier (~12.6 GB) resident and never has room for the
+  BF16 one (~23.8 GB), a 46 GB card keeps the BF16 tier as well, and for FLUX.2
+  a 46 GB card keeps a 33 GB Q8 [dev] transformer where a 24 GB card never does
+  though it does keep a Q8 Klein tier, 4B or 9B. The
   FLUX.2 sequential path — [dev], references, a LoRA, a source image — retains
   it across renders too, reusing it only when the LoRA stack, the working
   precision, the GPU and the resolved architecture all match, and releasing it
@@ -116,9 +122,13 @@
   render with neither a reload nor an encode. `MOLD_FLUX_KEEP_TRANSFORMER`
   changes meaning: `0` forces the old drop, and `1` now means the same as the
   default, because an explicit keep has always had to yield to a card that
-  cannot afford it. The resolved residency, the GGUF activation width and the
-  FLUX.2 CFG shape are recorded in the execution fingerprint, so a render that
-  reloads and one that does not are never filed as the same execution.
+  cannot afford it. The execution fingerprint records the residency you ASKED
+  for — `0` is its own execution class and unset and `1` share the other — so a
+  forced drop is never filed with a budgeted render; the budget's own verdict is
+  a per-render VRAM measurement and is reported in the server log rather than
+  hashed into the plan. The GGUF activation width and the FLUX.2 CFG shape ARE
+  the resolved answers, so two renders that differ in either are never filed as
+  the same execution.
 - **A FLUX identity render no longer fails at the first denoise step.** The
   eager `--id-image` path kept its own copy of the old rule that a quantized
   FLUX transformer runs its state tensors in F32. Once the GGUF path stopped
@@ -129,14 +139,17 @@
   cast and the identity site ask it.
 - **The desktop app's Speed & memory settings cover the new knobs.** Attention
   backend, convolution backend, FLUX transformer residency, the Flux.2
-  quantized fast path and Flux.2 FP8 weight widening join live previews, text
-  encoder parking, tiled VAE decode, block offloading and the queue window, and
-  they say what their automatic setting actually does — the attention and
-  convolution defaults are PER FAMILY, not one answer for every style. Parking
-  text encoders becomes a three-way choice to match the engine. Each row still
-  applies to this device's built-in engine and still needs an engine restart. A
-  test now reads the Tauri side's allowlist so a control the app offers can
-  never be one the engine never receives.
+  quantized fast path, Flux.2 FP8 weight widening, PNG encoding and the
+  graphics memory held back for the driver (`MOLD_RESERVE_VRAM_MB`) join live
+  previews, text encoder parking, tiled VAE decode, block offloading and the
+  queue window, and they say what their automatic setting actually does — the
+  attention and convolution defaults are PER FAMILY, not one answer for every
+  style. Parking text encoders becomes a three-way choice to match the engine.
+  Each row still applies to this device's built-in engine and still needs an
+  engine restart. A test now reads the Tauri side's allowlist and requires the
+  two lists to be the SAME SET, so a control the app offers can never be one
+  the engine never receives — and an engine knob can no longer sit copied but
+  unoffered, which is exactly how the memory reserve went missing.
 
 - **A large BF16 FLUX.1 checkpoint no longer streams its blocks on a card that
   can hold it.** The auto-offload decision was a file-size test with no
