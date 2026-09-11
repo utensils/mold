@@ -104,7 +104,7 @@ describe("web catalog commands", () => {
     expect(rows[0]).toMatchObject({
       id: "install-hf:org/qwen",
       section: "Get it",
-      label: "Install Qwen Image",
+      label: "Get Qwen Image",
     });
     rows[0]!.run();
     expect(installModel).toHaveBeenCalledWith("hf:org/qwen", "Qwen Image");

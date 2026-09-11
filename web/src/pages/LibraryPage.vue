@@ -1622,7 +1622,7 @@ function refresh(): Promise<void> {
   return operation;
 }
 
-// Honest count line: "all hosts" only when remotes are actually connected,
+// Honest count line: "all machines" only when remotes are actually connected,
 // otherwise "this server". Names the unreachable hosts rather than hiding them.
 const scopeLabel = computed(() =>
   remoteHostCount.value > 0 ? "all machines" : "this server",

@@ -44,6 +44,7 @@ vi.mock("../../composables/useDownloads", () => ({
 vi.mock("../../composables/useHostRouting", () => ({
   useHostRouting: () => ({
     hosts: { value: routingState.hosts },
+    queueStatus: { value: null },
     start: vi.fn(),
     stop: vi.fn(),
   }),
@@ -221,6 +222,30 @@ describe("AppNav", () => {
     wrapper.unmount();
   });
 
+  it("leaves a slash alone while a dialog is open — the dialog owns the keyboard", async () => {
+    const wrapper = mountNav(true);
+    const input = wrapper.get('input[type="search"]')
+      .element as HTMLInputElement;
+    const dialog = document.createElement("div");
+    dialog.setAttribute("aria-modal", "true");
+    document.body.appendChild(dialog);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "/" }));
+    await nextTick();
+    expect(document.activeElement).not.toBe(input);
+    dialog.remove();
+    wrapper.unmount();
+  });
+
+  it("stops listening for the slash once the nav is gone", async () => {
+    const wrapper = mountNav(true);
+    const input = wrapper.get('input[type="search"]')
+      .element as HTMLInputElement;
+    wrapper.unmount();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "/" }));
+    await nextTick();
+    expect(document.activeElement).not.toBe(input);
+  });
+
   it("sets the wordmark in lowercase mono, the way the mock does", () => {
     const wrapper = mountNav();
     const words = wrapper.findAll(".brand__word");
@@ -235,7 +260,7 @@ describe("AppNav", () => {
     const wrapper = mountNav();
     const listener = vi.fn();
     window.addEventListener("mold:open-downloads", listener);
-    await wrapper.get('[aria-label="Open downloads"]').trigger("click");
+    await wrapper.get('[data-test="downloads-chip"]').trigger("click");
     window.removeEventListener("mold:open-downloads", listener);
 
     expect(listener).toHaveBeenCalled();

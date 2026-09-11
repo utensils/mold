@@ -87,6 +87,21 @@ function memoryMedia(): TemplateMediaPersistence & {
   };
 }
 
+describe("a template's retired fields", () => {
+  it("never hands a saved stylePreset back to the live form", async () => {
+    // The composer's preset strip is retired; a template saved with one
+    // would restyle the prompt invisibly on every Generate.
+    const persistence = memoryMedia();
+    const saved = await saveGenerationTemplateWithMedia(
+      "Cinematic",
+      makeForm({ stylePreset: "cinematic" }),
+      persistence,
+    );
+    const hydrated = await hydrateGenerationTemplate(saved, persistence);
+    expect(hydrated.form.stylePreset).toBeNull();
+  });
+});
+
 describe("generation templates", () => {
   beforeEach(() => {
     localStorage.clear();

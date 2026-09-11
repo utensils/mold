@@ -67,12 +67,14 @@ watch(
       typeof kind === "string" && allowedKinds.includes(kind as CatalogKind)
         ? (kind as CatalogKind)
         : undefined;
-    if (modality || catalogKind) {
-      cat.setFilter({
-        modality,
-        kind: catalogKind,
-      });
-    }
+    // `?type=` is the ONE kind axis for both shelves: a kind chip narrows
+    // Browse more too, and picking All (or 3-D, which the catalog cannot
+    // filter) releases it — a modality that only ever set and never cleared
+    // left Browse more on video after the chips had moved on.
+    cat.setFilter({
+      modality,
+      ...(catalogKind ? { kind: catalogKind } : {}),
+    });
   },
   { immediate: true },
 );

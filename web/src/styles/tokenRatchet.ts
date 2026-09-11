@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /*
@@ -18,7 +18,13 @@ import { join } from "node:path";
  * after a migration pass, then paste — never raise a number by hand.
  */
 
-const ROOT = "src";
+/** web/ whether the runner started there or at the repo root — `import.meta.url`
+ *  is not a file URL under vitest, so the anchor is found on disk instead. */
+const WEB_DIR = existsSync(join(process.cwd(), "src/styles/tokenRatchet.ts"))
+  ? process.cwd()
+  : join(process.cwd(), "web");
+const ROOT = join(WEB_DIR, "src");
+const ROOT_PREFIX = WEB_DIR + "/";
 const EXTENSIONS = new Set([".vue", ".ts", ".css"]);
 
 const BOUND = "(?<![\\w-])";
@@ -53,6 +59,11 @@ export function* walk(dir: string): Generator<string> {
     if (statSync(path).isDirectory()) yield* walk(path);
     else if (EXTENSIONS.has(path.slice(path.lastIndexOf(".")))) yield path;
   }
+}
+
+/** `src/...`, the key the frozen tables use, whatever the cwd. */
+function tableKey(path: string): string {
+  return path.startsWith(ROOT_PREFIX) ? path.slice(ROOT_PREFIX.length) : path;
 }
 
 export function legacyUses(text: string): number {
@@ -96,9 +107,12 @@ export function measure(): {
   const legacy: Record<string, number> = {};
   const literal: Record<string, number> = {};
   const hex: Record<string, number> = {};
-  for (const file of walk(ROOT)) {
-    if (file.endsWith(".test.ts")) continue;
-    const text = readFileSync(file, "utf8");
+  for (const path of walk(ROOT)) {
+    const file = tableKey(path);
+    // Tests quote what they refuse, and this module IS the pattern list.
+    if (file.endsWith(".test.ts") || file === "src/styles/tokenRatchet.ts")
+      continue;
+    const text = readFileSync(path, "utf8");
     const a = legacyUses(text);
     const b = literalStyles(text);
     const c = hexColours(text);

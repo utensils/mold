@@ -495,7 +495,7 @@ async function handleDelete() {
   if (!m || busy.value) return;
   const modelName = m.name;
   const ok = await requestConfirm({
-    title: "Delete model?",
+    title: "Remove this style?",
     body: `Remove ${modelDisplayName(m)} and its files from disk. Shared components used by other models are kept.`,
     confirmLabel: "Delete",
     danger: true,
@@ -542,7 +542,7 @@ function onRetry() {
       :is="panelComponent"
       v-bind="panelProps"
       :open="open"
-      title="Model details"
+      title="Style details"
       @close="onClose"
     >
       <div
@@ -551,14 +551,14 @@ function onRetry() {
         data-test="detail-loading"
       >
         <div class="md__spinner" aria-hidden="true" />
-        <p class="md__state-msg">loading model details…</p>
+        <p class="md__state-msg">loading style details…</p>
       </div>
       <div
         v-else-if="state === 'error'"
         class="md md--state"
         data-test="detail-error"
       >
-        <div class="md__name">Model details</div>
+        <div class="md__name">Style details</div>
         <p class="md__state-msg">{{ cat.detailError.value?.message }}</p>
         <button
           type="button"
@@ -612,7 +612,7 @@ function onRetry() {
             :nsfw="nsfw"
           />
         </div>
-        <div class="md__name">{{ name || "Untitled model" }}</div>
+        <div class="md__name">{{ name || "Untitled style" }}</div>
         <div
           v-if="exactModelId && exactModelId !== name"
           class="md__id"
@@ -787,7 +787,7 @@ function onRetry() {
               :title="
                 isLoaded
                   ? 'Unload before deleting'
-                  : 'Delete this model from disk'
+                  : 'Remove this style from disk'
               "
               @click="handleDelete"
             >
@@ -837,9 +837,9 @@ function onRetry() {
          can't render — the panel says so and offers a way out instead of
          painting nothing. -->
       <div v-else class="md md--state" data-test="detail-unrenderable">
-        <div class="md__name">Model details</div>
+        <div class="md__name">Style details</div>
         <p class="md__state-msg">
-          This model's details came back in a shape we can't read. Try opening
+          This style's details came back in a shape we can't read. Try opening
           it again, or check the server version.
         </p>
         <button

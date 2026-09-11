@@ -111,17 +111,6 @@ import {
   type MinimaxH3ReferenceDraft,
 } from "@studio/lib/minimaxH3Authoring";
 
-/** The prompt actually sent to the server: the textarea content composed with
- * the active style preset (the shared kit substitutes a "{prompt}" template,
- * otherwise it comma-appends). Never mutates `state.prompt` — the style row is
- * a request-time modifier, not a rewrite of what the user typed. Shared by
- * `toRequest` and the estimate/summary display so both agree. */
-export function promptWithStyle(state: GenerateFormState): string {
-  return composeStyle(state.prompt, state.stylePreset ?? "", {
-    supportsNegativePrompt: false,
-  }).prompt;
-}
-
 const STORAGE_KEY = "mold.generate.form";
 const FORM_VERSION = 3 as const;
 const QWEN_IMAGE_EDIT_FAMILY = "qwen-image-edit";
@@ -1109,6 +1098,9 @@ function load(): GenerateFormState {
         ...defaultForm(),
         ...parsed,
       }),
+      // The preset strip is retired; a draft saved with one would restyle the
+      // prompt invisibly. Reuse already clears it for the same reason.
+      stylePreset: null,
     };
     const camera = normalizeCameraMotionLoraState(
       restored.loras,

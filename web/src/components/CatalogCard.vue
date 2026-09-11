@@ -208,7 +208,7 @@ const pullLabel = computed(() => {
         class="card__select"
         :title="
           selectable
-            ? 'Select model for batch download'
+            ? 'Select this style to get several at once'
             : 'No common download target available'
         "
         @click.stop

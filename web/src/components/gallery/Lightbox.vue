@@ -1335,7 +1335,7 @@ async function performVideoExport(options: VideoExportOptions) {
               class="lb__chip"
               @click="copyText(String(seed))"
             >
-              Copy seed
+              Copy the number
             </button>
             <span v-if="dimensions" class="lb__chip">{{ dimensions }}</span>
             <span class="lb__chip">{{ hostLabel }}</span>
@@ -1359,7 +1359,7 @@ async function performVideoExport(options: VideoExportOptions) {
             <b>Negative:</b> {{ negativePrompt }}
           </p>
           <p v-if="loraLabel" class="lb__mobile-meta">
-            <b>LoRA:</b> {{ loraLabel }}
+            <b>Add-on look:</b> {{ loraLabel }}
           </p>
           <p
             v-if="identityLabel"

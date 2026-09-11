@@ -35,6 +35,8 @@ export const NEVER_A_DESTINATION = [
 export const NEVER_SAID_ON_STYLES_AND_MACHINES: readonly RegExp[] = [
   /\bhost\b/i,
   /\bmodel page\b/i,
+  /\bmodels?\b/i,
+  /\bcheckpoints?\b/i,
   /\bPull\b/,
   /\binstalled\b/i,
   /\bInstall\b/,
@@ -90,12 +92,25 @@ export function templateText(source: string): string {
   const template = source
     .replace(/<script[\s\S]*?<\/script>/g, "")
     .replace(/<style[\s\S]*?<\/style>/g, "");
+  // A tooltip, an accessible name, a placeholder and an alt are read too —
+  // by a person or by a screen reader — so their STATIC values count as text.
+  // Bound ones (`:title="…"`) are expressions, not words, and stay out.
+  const readable = [
+    ...template.matchAll(
+      /(?<![:@\w-])(?:title|aria-label|placeholder|alt)="([^"]*)"/g,
+    ),
+  ]
+    .map((m) => m[1]!)
+    .join(" ");
   return (
-    template
-      // A tag ends at its first `>` OUTSIDE a quoted attribute, so a
-      // `v-if="n > 0"` cannot leave half an attribute behind as "text".
-      .replace(/<(?:[^>"']|"[^"]*"|'[^']*')*>/g, " ")
-      .replace(/\{\{[\s\S]*?\}\}/g, " ")
-      .replace(/\s+/g, " ")
+    (
+      template
+        // A tag ends at its first `>` OUTSIDE a quoted attribute, so a
+        // `v-if="n > 0"` cannot leave half an attribute behind as "text".
+        .replace(/<(?:[^>"']|"[^"]*"|'[^']*')*>/g, " ")
+        .replace(/\{\{[\s\S]*?\}\}/g, " ") +
+      " " +
+      readable
+    ).replace(/\s+/g, " ")
   );
 }

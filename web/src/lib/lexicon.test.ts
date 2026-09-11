@@ -157,6 +157,8 @@ describe("lexicon — the shell", () => {
   it("searches your images, spelled in the wordmark's own case", () => {
     expect(appNav).toContain('placeholder="Search your images…"');
     expect(appNav).not.toContain("Search prompts");
-    expect(templateText(appNav)).not.toMatch(/\bMold\b/);
+    // The wordmark is lowercase mono; the product name in a sentence stays Mold.
+    expect(appNav).not.toMatch(/brand__word[^>]*>\s*Mold\b/);
+    expect(appNav).toMatch(/brand__word[^>]*>\s*mold\b/);
   });
 });

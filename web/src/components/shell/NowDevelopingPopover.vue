@@ -3,22 +3,40 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import LiveActivityList from "@ui/components/LiveActivityList.vue";
 import type { FleetActiveWork } from "@studio/api/activity";
 import { queueSection } from "@studio/lib/queueSections";
+import {
+  queueStatusFor,
+  type QueueStatusIndex,
+} from "@studio/lib/queuePosition";
 
-const props = defineProps<{ rows: FleetActiveWork[] }>();
+const props = withDefaults(
+  defineProps<{
+    rows: FleetActiveWork[];
+    /** The fleet's queue truth, so a held or blocked row counts as needing
+     *  you rather than as being made. */
+    statuses?: QueueStatusIndex | null;
+  }>(),
+  { statuses: null },
+);
 
-/** The chip says what the queue says — "Making 1 · 3 waiting" — from the one
- *  shared classifier, so the header and the Queue page cannot disagree. */
+/** The chip says what the Queue page says — "Making 1 · 3 waiting · 2 need
+ *  you" — through the one shared classifier fed the same status the page
+ *  feeds it, so the header and the page cannot disagree. */
 const chipLabel = computed(() => {
-  let making = 0;
-  let waiting = 0;
+  const counts = { making: 0, waiting: 0, attention: 0 };
   for (const row of props.rows) {
-    const section = queueSection(row.phase, row.stale);
-    if (section === "waiting") waiting += 1;
-    else making += 1;
+    const status = queueStatusFor(props.statuses, row.hostId, row.id);
+    counts[
+      queueSection(
+        status?.state ?? row.phase,
+        row.stale,
+        status?.blockedReason ?? false,
+      )
+    ] += 1;
   }
   const parts: string[] = [];
-  if (making > 0) parts.push(`Making ${making}`);
-  if (waiting > 0) parts.push(`${waiting} waiting`);
+  if (counts.making > 0) parts.push(`Making ${counts.making}`);
+  if (counts.waiting > 0) parts.push(`${counts.waiting} waiting`);
+  if (counts.attention > 0) parts.push(`${counts.attention} need you`);
   return parts.join(" · ");
 });
 const emit = defineEmits<{ select: [row: FleetActiveWork] }>();
@@ -115,7 +133,7 @@ onBeforeUnmount(() => {
   width: 7px;
   height: 7px;
   flex: none;
-  border-radius: 50%; /* literal: a dot is the one circle allowed */
+  border-radius: 50%;
   background: var(--mold-blue);
 }
 .now-developing__panel {

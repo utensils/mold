@@ -92,6 +92,18 @@ describe("the live-work chip's words", () => {
     wrapper.unmount();
   });
 
+  it("files a held row under need-you, as the Queue page does", () => {
+    const held = { ...row(), id: "job-9", key: "origin/job-9", phase: "held" };
+    const wrapper = mount(NowDevelopingPopover, {
+      props: { rows: [row(), held] },
+      attachTo: document.body,
+    });
+    expect(wrapper.get("[data-test='now-developing-trigger']").text()).toBe(
+      "Making 1 · 1 need you",
+    );
+    wrapper.unmount();
+  });
+
   it("drops the half that is zero", () => {
     const wrapper = mount(NowDevelopingPopover, {
       props: { rows: [row()] },

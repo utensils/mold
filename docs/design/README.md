@@ -66,8 +66,9 @@ Rule: **plain words in sans, technical truth in mono, on the same row.**
 Voice markers carried over from the CLI: terse, second person, directive.
 Units stay tight and mono (`14.9 / 24 GB`, `eta 8m12s`, `$1.44/hr`).
 Anything that costs money is stated in money, in `--mold-state-cost`.
-`desktop/src/lib/lexicon.test.ts` pins these words where a rename could leave one
-surface behind: the destinations on the router, the sidebar, the palette and the
+The word tables live in `studio/lib/lexicon.ts`; `desktop/src/lib/lexicon.test.ts`
+and `web/src/lib/lexicon.test.ts` read them and pin these words where a rename
+could leave one surface behind: the destinations on the router, the sidebar, the palette and the
 native menu; the File and Generate menu verbs; the finished-work toasts;
 Settings' section and row labels; the inspector's seed, Detail, guidance, 3-D
 and Add-on-looks labels; the composer's Generate and Write more for me; and the
@@ -162,7 +163,7 @@ Decisions worth keeping:
 | Queue: row          | 38px thumb, title, one-line status, ⋯                                                    | glyph placeholder for images that don't exist yet                        |
 | Table row           | 52px, name+id stacked, mono values, ⋯                                                    | `desktop/src/components/models/ModelTableRow.vue`                        |
 | Meter               | 5–8px, no radius, single fill                                                            | fill = `--mold-state-*` or accent                                        |
-| Dialog              | 480–560px, header / body / footer, `--mold-radius-3`, scrim `--mold-scrim`               | `ui/components/ModalPanel.vue`, desktop `ConfirmDialog` / `RenameDialog` |
+| Dialog              | 480–560px, header / body / footer, `--mold-radius-3`, scrim `--mold-scrim`               | `ui/components/ModalPanel.vue`, `ui/components/ConfirmDialog.vue`, desktop `RenameDialog` |
 | Command palette     | 560px, group column (mono, 60px) + label + key                                           | selected row `--mold-surface-2`                                          |
 | Toast               | 320px, glyph column, title + one line, one action; above the status bar                  | bordered in the state colour when urgent                                 |
 | Explainer           | `•` + 2–3 sentences of plain English, opt-in                                             | `--mold-panel-raised`, never open by default                             |

@@ -76,7 +76,6 @@ const LEGACY_FROZEN: Record<string, number> = {
   "src/pages/ModelsPage.vue": 25,
   "src/pages/NotFoundPage.vue": 1,
   "src/style.css": 41,
-  "src/styles/tokenRatchet.ts": 8,
 };
 
 const LITERAL_FROZEN: Record<string, number> = {

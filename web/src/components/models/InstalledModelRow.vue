@@ -14,7 +14,6 @@ import Tooltip from "@ui/components/Tooltip.vue";
 import type { ModelInfoExtended } from "../../types";
 import { styleDisplayName } from "@studio/lib/styleLabel";
 import { modelKindValue } from "@studio/lib/modelMetadata";
-import { catalogPullLabel, catalogSizeInfo } from "@studio/lib/catalogLabel";
 import { useModelInstallTargets } from "../../composables/useModelInstallTargets";
 import { formatGB } from "../../util/format";
 
@@ -49,13 +48,11 @@ const badgeKind = computed(() => {
   });
   return kind === "checkpoint" ? null : kind;
 });
-/** What sending this style to another machine will cost in bytes. */
-const getLabel = computed(() =>
-  catalogPullLabel(
-    catalogSizeInfo({ size_bytes: props.model.size_gb * 1_000_000_000 }),
-    "Get it",
-  ),
-);
+/** The installed row knows the style's SIZE (its own weights), never the
+ *  FETCH total another machine would download with shared helpers included,
+ *  and a number that understates the send is worse than none — so the verb
+ *  stands alone here; Browse more, which has the recipe, shows the total. */
+const getLabel = "Get it";
 </script>
 
 <template>

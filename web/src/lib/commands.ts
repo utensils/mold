@@ -133,7 +133,7 @@ export function modelCommands(
     },
   ).map((cmd) => ({
     id: cmd.id,
-    section: "Model",
+    section: "Style",
     label: cmd.label,
     hint: cmd.hint,
     keywords: cmd.keywords,

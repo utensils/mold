@@ -315,8 +315,8 @@ describe("CommandK", () => {
     await type(wrapper, "qwen");
 
     const row = items(wrapper).find((i) => i.id === "install-hf:org/qwen");
-    expect(row?.label).toBe("Install Qwen Image");
-    expect(row?.hint).toBe("not installed · hf");
+    expect(row?.label).toBe("Get Qwen Image");
+    expect(row?.hint).toBe("not on this machine · hf");
     expect(row?.section).toBe("Get it");
   });
 

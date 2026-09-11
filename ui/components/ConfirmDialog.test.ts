@@ -52,6 +52,18 @@ describe("ConfirmDialog", () => {
     expect(wrapper.emitted("cancel")).toHaveLength(1);
   });
 
+  it("cancels on Escape from anywhere on the page — it is the top overlay", async () => {
+    // ModalPanel listens on the document and asks the overlay stack whether
+    // it is on top; a confirm that only closes while it holds focus is a trap.
+    const wrapper = mount(ConfirmDialog, {
+      props: { open: true, title: "Delete?" },
+      attachTo: document.body,
+    });
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.emitted("cancel")).toHaveLength(1);
+  });
+
   it("locks both buttons while busy so an in-flight action can't be re-fired", async () => {
     const wrapper = mount(ConfirmDialog, {
       props: { open: true, title: "Delete?", busy: true },

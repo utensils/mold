@@ -7,6 +7,7 @@ import { useRoute, useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Keycap from "@ui/components/Keycap.vue";
+import { overlayDepth } from "@ui/lib/overlayStack";
 import MobileNavSheet from "./MobileNavSheet.vue";
 import NotificationsCenter from "@studio/components/NotificationsCenter.vue";
 import NowDevelopingPopover from "./NowDevelopingPopover.vue";
@@ -107,6 +108,10 @@ function focusSearch(event: KeyboardEvent) {
   if (event.key !== "/") return;
   if (event.metaKey || event.ctrlKey || event.altKey) return;
   if (isEditable(event.target)) return;
+  // An open dialog owns the keyboard: pulling focus to a field behind its
+  // scrim would defeat its Tab trap and scroll lock.
+  if (overlayDepth() > 0 || document.querySelector('[aria-modal="true"]'))
+    return;
   const field = searchInput.value;
   if (!field) return;
   event.preventDefault();
@@ -169,6 +174,7 @@ const menuOpen = ref(false);
 
       <NowDevelopingPopover
         :rows="liveActivity.rows.value"
+        :statuses="routing.queueStatus.value"
         @select="openLiveWork"
       />
 
@@ -191,7 +197,6 @@ const menuOpen = ref(false);
         type="button"
         class="dl-chip"
         :class="{ 'dl-chip--busy': badgeCount > 0 }"
-        aria-label="Open downloads"
         data-test="downloads-chip"
         @click="openDownloads"
       >
@@ -223,6 +228,7 @@ const menuOpen = ref(false);
 
       <NowDevelopingPopover
         :rows="liveActivity.rows.value"
+        :statuses="routing.queueStatus.value"
         @select="openLiveWork"
       />
 
