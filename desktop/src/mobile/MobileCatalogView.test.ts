@@ -1451,11 +1451,39 @@ describe("MobileCatalogView", () => {
       "[data-test='mobile-catalog-target-sheet']",
     )!;
     expect(picker.textContent).toContain("Choose where to install");
+    // The destination picker is a sheet too: dismiss its title without
+    // selecting a machine, then reopen and complete the original action.
+    const heading = picker.querySelector("h2")!;
+    for (const [type, y] of [
+      ["touchstart", 100],
+      ["touchmove", 260],
+      ["touchend", 260],
+    ] as const) {
+      const touch = { identifier: 0, clientX: 100, clientY: y };
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperties(event, {
+        touches: { value: type === "touchend" ? [] : [touch] },
+        changedTouches: { value: [touch] },
+      });
+      heading.dispatchEvent(event);
+    }
+    await flushPromises();
+    expect(document.querySelector("[data-test='mobile-catalog-target-sheet']")).toBeNull();
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+    await pullButton.trigger("click");
+    await flushPromises();
+    const reopenedPicker = document.querySelector<HTMLElement>(
+      "[data-test='mobile-catalog-target-sheet']",
+    )!;
     // A mixed list must not promise a fresh install for the machine that can
     // only be repaired.
-    expect(picker.textContent).toContain("machines that already have it are repaired instead");
+    expect(reopenedPicker.textContent).toContain(
+      "machines that already have it are repaired instead",
+    );
     const options = [
-      ...picker.querySelectorAll<HTMLButtonElement>("[data-test='mobile-catalog-target-option']"),
+      ...reopenedPicker.querySelectorAll<HTMLButtonElement>(
+        "[data-test='mobile-catalog-target-option']",
+      ),
     ];
     // Install targets lead; the owner is offered as a repair.
     expect(options.map((option) => option.dataset.action)).toEqual(["install", "repair"]);

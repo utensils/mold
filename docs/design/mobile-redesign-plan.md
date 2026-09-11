@@ -284,5 +284,5 @@ glyph; the Styles **Filters** sheet (`MobileCatalogFilterSheet.vue`) with 64px
 result rows; Machines cards carrying `machineSentence` and the Add-a-machine
 sheet (`MobileAddMachineSheet.vue`); the Settings pairing card
 (`MobilePairScanCard.vue`); and DevicePanel / LicenseSettingsPanel touch
-density. `useSheetDismiss` is the one drag-to-dismiss implementation behind
-every bottom sheet.
+density. `useSheetFocus` is the one focus, Escape and Tab-trap implementation
+behind every bottom sheet, beside `useSheetDismiss` (#1692) for the drag.

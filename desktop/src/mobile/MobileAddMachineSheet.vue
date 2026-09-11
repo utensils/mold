@@ -52,13 +52,15 @@ const apiKey = defineModel<string>("apiKey", { required: true });
 useMobileBack(toRef(props, "open"), () => emit("close"));
 const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-add-machine");
 const panel = ref<HTMLElement | null>(null);
-const body = ref<HTMLElement | null>(null);
 const discoveredApiKeyInput = ref<HTMLInputElement | null>(null);
 const hostAddressInput = ref<HTMLInputElement | null>(null);
 const hostApiKeyInput = ref<HTMLInputElement | null>(null);
 
 const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
-  useSheetDismiss({ body, onDismiss: () => emit("close") });
+  useSheetDismiss({
+    enabled: () => props.open && isTop(),
+    close: () => emit("close"),
+  });
 
 /* `aria-modal="true"` over a background that is not inert is a promise only
  * this keeps: focus in on open, Tab held inside, Escape out, focus restored. */
@@ -124,7 +126,7 @@ defineExpose({ focusDiscoveredApiKey: () => discoveredApiKeyInput.value?.focus()
           </button>
         </div>
       </header>
-      <div ref="body" class="mobile-sheet-body mobile-add-machine-body">
+      <div class="mobile-sheet-body mobile-add-machine-body">
         <p
           v-if="error"
           class="status-line error-text"

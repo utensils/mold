@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import MobileCatalogFilterSheet from "./MobileCatalogFilterSheet.vue";
+import { useSheetDismiss } from "./useSheetDismiss";
 import { useMobileBack } from "./useMobileBack";
 import {
   computed,
@@ -1295,6 +1296,13 @@ onBeforeUnmount(() => {
   deactivateInteractions();
   mobileDownloads.unregisterConsumer(DOWNLOAD_CONSUMER_ID);
 });
+
+const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
+  useSheetDismiss({
+    enabled: () => targetEntry.value !== null,
+    close: () => closeTargetPicker(),
+    canStart: (target) => Boolean(target.closest("header")),
+  });
 </script>
 
 <template>
@@ -1881,8 +1889,20 @@ onBeforeUnmount(() => {
         aria-labelledby="mobile-catalog-target-title"
         data-test="mobile-catalog-target-sheet"
       >
-        <div class="mobile-catalog-target-backdrop" @click="closeTargetPicker" />
-        <div class="mobile-catalog-target-panel">
+        <div
+          class="mobile-catalog-target-backdrop"
+          :style="backdropStyle"
+          @click="closeTargetPicker"
+        />
+        <div
+          class="mobile-catalog-target-panel"
+          :class="{ 'is-dragging': dragging }"
+          :style="panelStyle"
+          @touchstart="beginDismiss"
+          @touchmove="moveDismiss"
+          @touchend="finishDismiss"
+          @touchcancel="resetDrag"
+        >
           <header>
             <div>
               <h2 id="mobile-catalog-target-title">

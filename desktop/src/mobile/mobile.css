@@ -6648,3 +6648,24 @@ button:disabled {
   min-height: 48px;
   white-space: normal;
 }
+
+/* All phone sheet chrome follows the finger and settles after a short drag. */
+.mobile-crop-sheet-panel,
+.mobile-image-picker-panel,
+.mobile-catalog-target-panel {
+  transition: transform 160ms ease-out;
+}
+
+.mobile-crop-sheet-panel.is-dragging,
+.mobile-image-picker-panel.is-dragging,
+.mobile-catalog-target-panel.is-dragging {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-crop-sheet-panel,
+  .mobile-image-picker-panel,
+  .mobile-catalog-target-panel {
+    transition: none;
+  }
+}

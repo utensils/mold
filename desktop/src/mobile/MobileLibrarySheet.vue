@@ -7,10 +7,10 @@
  * every safe-area inset, with the head row rendered in the body so it can
  * never vanish the way SheetPanel's `full` variant drops its #header slot.
  */
-import { useMobileBack } from "./useMobileBack";
 import { useSheetDismiss } from "./useSheetDismiss";
 import { useSheetFocus } from "./useSheetFocus";
-import { computed, ref, toRef } from "vue";
+import { useMobileBack } from "./useMobileBack";
+import { ref, toRef } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 
 const props = withDefaults(
@@ -24,7 +24,7 @@ const props = withDefaults(
     testId?: string;
     /** Platform-specific minimum target for the closing control. */
     touchTargetSize?: number;
-    /** Let a downward drag from the top dismiss this read-first sheet. */
+    /** Let a downward drag from the top dismiss the sheet. */
     swipeToDismiss?: boolean;
   }>(),
   {
@@ -32,7 +32,7 @@ const props = withDefaults(
     doneLabel: "Done",
     testId: "mobile-library-sheet",
     touchTargetSize: 46,
-    swipeToDismiss: false,
+    swipeToDismiss: true,
   },
 );
 
@@ -41,13 +41,10 @@ const emit = defineEmits<{ close: [] }>();
 useMobileBack(toRef(props, "open"), () => emit("close"));
 const panel = ref<HTMLElement | null>(null);
 const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-library-sheet");
-const body = ref<HTMLElement | null>(null);
-
 const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
   useSheetDismiss({
-    body,
-    enabled: computed(() => props.swipeToDismiss),
-    onDismiss: () => emit("close"),
+    enabled: () => props.open && isTop() && props.swipeToDismiss,
+    close: () => emit("close"),
   });
 
 // Editing sheets may raise the keyboard immediately. Read-first sheets focus
@@ -65,6 +62,7 @@ const { onKeydown } = useSheetFocus({
         ) ?? null)
       : null,
 });
+
 </script>
 
 <template>
@@ -101,7 +99,7 @@ const { onKeydown } = useSheetFocus({
       @touchcancel="resetDrag"
     >
       <span class="mobile-library-sheet-grabber" aria-hidden="true" />
-      <div ref="body" class="mobile-library-sheet-body">
+      <div class="mobile-library-sheet-body">
         <p class="mobile-library-sheet-head" :data-test="`${testId}-head`">{{ title }}</p>
         <slot />
       </div>

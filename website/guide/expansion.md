@@ -110,7 +110,10 @@ per-chunk token budgets. The chunks are evened out rather than filled greedily,
 so a batch of five is asked for three prompts and then two — never four and then
 a lone one, which asks a batch instruction for a single variation and is the
 shape a small local model answers with prose. Missing, duplicate, and
-over-delivered positions are each retried within the chunk's attempt budget: a
+over-delivered positions are retried with a budget of three attempts that make no
+progress per chunk. A response adding a new distinct prompt does not spend that
+budget, so even one new prompt per completion can fill the set. The budget never
+resets within a chunk, limiting each chunk to at most six completions: a
 response carrying more prompts than were asked for may be reasoning rather than
 variations, so none of it is kept and the chunk simply asks again. Mold still
 rejects any final result that is not exactly N distinct, non-empty prompts, and

@@ -13,9 +13,9 @@
  * validity wiring keeps reporting and the Generate flow can read every
  * advanced field; only visibility toggles.
  */
-import { useMobileBack } from "./useMobileBack";
 import { useSheetDismiss } from "./useSheetDismiss";
 import { useSheetFocus } from "./useSheetFocus";
+import { useMobileBack } from "./useMobileBack";
 import { ref, toRef } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 
@@ -30,10 +30,12 @@ const emit = defineEmits<{
 }>();
 useMobileBack(toRef(props, "open"), () => emit("close"));
 const panel = ref<HTMLElement | null>(null);
-const body = ref<HTMLElement | null>(null);
 const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-more-settings");
 const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
-  useSheetDismiss({ body, onDismiss: () => emit("close") });
+  useSheetDismiss({
+    enabled: () => props.open && isTop(),
+    close: () => emit("close"),
+  });
 
 const { onKeydown } = useSheetFocus({
   panel,
@@ -42,6 +44,7 @@ const { onKeydown } = useSheetFocus({
   onClose: () => emit("close"),
   onBeforeClose: resetDrag,
 });
+
 </script>
 
 <template>
@@ -111,7 +114,7 @@ const { onKeydown } = useSheetFocus({
           </button>
         </div>
       </header>
-      <div ref="body" class="mobile-advanced-sheet-body">
+      <div class="mobile-advanced-sheet-body">
         <slot />
       </div>
     </div>

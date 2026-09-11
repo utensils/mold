@@ -65,10 +65,15 @@ status dot, the machine or policy work lands on, and a mono line saying what
 that machine is doing) and the Picture / Short clip / 3-D object control inside
 the header, so neither answer scrolls away as the form grows.
 
-Every bottom sheet — Style, More settings, Library, Filters, Add a machine —
-shares two implementations rather than five copies each.
-`desktop/src/mobile/useSheetDismiss.ts` is the drag: one finger, from a body
-already at its top, never from a control, past 96px of damped travel.
+Every bottom sheet — Style, More settings, Library, Filters, Add a machine,
+image selection, reference crop — shares two implementations.
+`desktop/src/mobile/useSheetDismiss.ts` is the drag: one finger, which claims
+its direction once past an 8px dead zone and keeps it for the whole gesture, so
+a scroll never becomes a dismissal halfway down. It refuses to start on a
+control or a slider, and walks the scroll ancestors of the touched element
+rather than one nominated body — which is what leaves the grabber and the
+header draggable while the list beneath them is scrolled. 96px of damped travel
+closes the sheet.
 `useSheetFocus.ts` is what makes `aria-modal="true"` true over a background
 that is not inert — focus into the panel on open, Tab held inside (including
 the very first Tab, which always arrives with the panel itself focused),

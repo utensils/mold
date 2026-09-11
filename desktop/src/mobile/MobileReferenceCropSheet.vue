@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useSheetDismiss } from "./useSheetDismiss";
 /*
  * Reference crop sheet — the iPhone presentation of the shared
  * @studio ReferenceCropEditor. Like MobileAdvancedSheet (and deliberately NOT
@@ -26,6 +27,14 @@ useMobileBack(
   computed(() => props.open && props.image !== null),
   () => emit("close"),
 );
+
+const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
+  useSheetDismiss({
+    enabled: () => props.open && props.image !== null,
+    close: () => emit("close"),
+    canStart: (target) =>
+      Boolean(target.closest(".mobile-crop-sheet-grabber, .mobile-crop-sheet-head")),
+  });
 </script>
 
 <template>
@@ -39,12 +48,21 @@ useMobileBack(
   >
     <button
       class="mobile-crop-sheet-backdrop"
+      :style="backdropStyle"
       type="button"
       aria-label="Close crop"
       data-test="mobile-crop-sheet-backdrop"
       @click="emit('close')"
     />
-    <div class="mobile-crop-sheet-panel">
+    <div
+      class="mobile-crop-sheet-panel"
+      :class="{ 'is-dragging': dragging }"
+      :style="panelStyle"
+      @touchstart="beginDismiss"
+      @touchmove="moveDismiss"
+      @touchend="finishDismiss"
+      @touchcancel="resetDrag"
+    >
       <span class="mobile-crop-sheet-grabber" aria-hidden="true" />
       <div class="mobile-crop-sheet-body">
         <p class="mobile-crop-sheet-head" data-test="mobile-crop-sheet-head">

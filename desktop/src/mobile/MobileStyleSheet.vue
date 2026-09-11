@@ -20,9 +20,9 @@ import { ref, toRef } from "vue";
 import { useOverlayStack } from "@ui/lib/overlayStack";
 import StyleMenu from "@studio/components/StyleMenu.vue";
 import type { StyleMenuModel } from "@studio/lib/styleMenu";
-import { useMobileBack } from "./useMobileBack";
 import { useSheetDismiss } from "./useSheetDismiss";
 import { useSheetFocus } from "./useSheetFocus";
+import { useMobileBack } from "./useMobileBack";
 
 const props = withDefaults(
   defineProps<{
@@ -58,13 +58,15 @@ const emit = defineEmits<{
 useMobileBack(toRef(props, "open"), () => emit("close"));
 const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-style-sheet");
 const panel = ref<HTMLElement | null>(null);
-const body = ref<HTMLElement | null>(null);
-
 const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
-  useSheetDismiss({ body, onDismiss: () => emit("close") });
+  useSheetDismiss({
+    enabled: () => props.open && isTop(),
+    close: () => emit("close"),
+  });
 
 // The panel, never the filter field: a sheet that raises the keyboard hides
-// the very rows it was opened to show.
+// the very rows it was opened to show. Escape and Tab belong to the top sheet
+// only; StyleMenu's own root owns the arrow walk and Enter inside it.
 const { onKeydown } = useSheetFocus({
   panel,
   open: () => props.open,
@@ -72,6 +74,7 @@ const { onKeydown } = useSheetFocus({
   onClose: () => emit("close"),
   onBeforeClose: resetDrag,
 });
+
 </script>
 
 <template>
@@ -127,7 +130,7 @@ const { onKeydown } = useSheetFocus({
           </button>
         </div>
       </header>
-      <div ref="body" class="mobile-sheet-body">
+      <div class="mobile-sheet-body">
         <StyleMenu
           v-if="open"
           :models="models"

@@ -56,10 +56,12 @@ const includeNsfw = defineModel<boolean>("includeNsfw", { required: true });
 useMobileBack(toRef(props, "open"), () => emit("close"));
 const { isTop } = useOverlayStack(toRef(props, "open"), "mobile-catalog-filters");
 const panel = ref<HTMLElement | null>(null);
-const body = ref<HTMLElement | null>(null);
 
 const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag } =
-  useSheetDismiss({ body, onDismiss: () => emit("close") });
+  useSheetDismiss({
+    enabled: () => props.open && isTop(),
+    close: () => emit("close"),
+  });
 
 /* `aria-modal="true"` over a background that is not inert is a promise only
  * this keeps: focus in on open, Tab held inside, Escape out, focus restored. */
@@ -130,7 +132,7 @@ const { onKeydown } = useSheetFocus({
           </button>
         </div>
       </header>
-      <div ref="body" class="mobile-sheet-body">
+      <div class="mobile-sheet-body">
         <label v-if="hosts.length > 1" class="mobile-catalog-host-picker">
           <span>Browse on</span>
           <select
