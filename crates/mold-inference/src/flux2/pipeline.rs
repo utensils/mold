@@ -2273,6 +2273,9 @@ impl Flux2Engine {
                 .map(|loaded| loaded.dtype)
                 .unwrap_or(DType::BF16),
         );
+        // Resolved before the `loaded` borrow, like the two above: the park
+        // decision needs `self`, and the encode loop needs `&mut loaded`.
+        let encoder_paths_for_park = self.text_encoder_paths();
         let eager_usable_free = {
             let free_now = crate::device::free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             let resident = self
@@ -2387,14 +2390,22 @@ impl Flux2Engine {
                 }
                 tracing::info!("Qwen3 encoding complete");
 
-                // Free GPU VRAM for denoising. With `MOLD_KEEP_TE_RAM=1` and the
-                // BF16 encoder, parameters move to host RAM instead of being
-                // released — saves ~10 s on the next request. GGUF and Metal
-                // flow through the original drop path.
+                // Free GPU VRAM for denoising. Whether the parameters move
+                // to host RAM or are released is `decide_text_encoder_residency`'s
+                // answer, not a flag: a host with room keeps them and the next
+                // cache-miss prompt costs a copy instead of a re-read (3.9 s
+                // to under 1 s on Klein). GGUF parks too now — a quantized
+                // tensor round-trips byte-exact through
+                // `wan::block_offload` — and Metal still does not, because
+                // there the "parked" copy is in the pool the encoder already
+                // runs from.
                 if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
-                    let park_mode = crate::device::keep_te_in_ram()
-                        && !loaded.device.is_metal()
-                        && !loaded.text_encoder.is_quantized;
+                    let park_mode = super::text_encoder_residency::qwen3_park_residency(
+                        &loaded.device,
+                        &encoder_paths_for_park,
+                        transformer_bytes,
+                    )
+                    .parks();
                     if park_mode {
                         loaded.text_encoder.park_to_cpu()?;
                         tracing::info!(

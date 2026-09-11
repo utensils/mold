@@ -66,6 +66,14 @@ pub(crate) struct Qwen3Encoder {
     /// BF16-only: parameters parked on CPU host RAM, ready for fast unpark.
     /// `None` when not parked or when running the GGUF path.
     parked_tensors: Option<HashMap<String, Tensor>>,
+    /// GGUF-only: the quantized checkpoint parked on CPU host RAM.
+    ///
+    /// A separate slot rather than a shared one because the two are different
+    /// kinds of tensor and rebuild through different constructors — but the
+    /// PROPERTY is the same, and since #1044 gave Qwen-Image's Qwen2 encoder
+    /// the same treatment there is no longer any reason for GGUF to be the
+    /// carve-out that re-reads from disk.
+    parked_gguf: Option<super::qwen3_gguf::GgufParked>,
 }
 
 /// Format a user prompt for the Qwen3 chat template used by Z-Image.
@@ -147,6 +155,7 @@ impl Qwen3Encoder {
             dtype,
             bf16_config: *bf16_config,
             parked_tensors: None,
+            parked_gguf: None,
         })
     }
 
@@ -190,6 +199,7 @@ impl Qwen3Encoder {
             dtype: DType::F32, // GGUF dequantizes to F32
             bf16_config: *bf16_config,
             parked_tensors: None,
+            parked_gguf: None,
         })
     }
 
@@ -306,9 +316,18 @@ impl Qwen3Encoder {
             return Ok(());
         }
         if self.is_quantized {
-            // GGUF: device-tied QTensors don't survive a CPU round-trip.
-            // Drop the GPU model; unpark will reload from disk.
-            self.drop_weights();
+            // GGUF parks too. `wan::block_offload::qtensor_to_device`
+            // serializes a quantized tensor through its own bytes and rebuilds
+            // it on the target, so the round trip is byte-exact — the
+            // "device-tied QTensors cannot survive a CPU round-trip" this
+            // replaces was a scoping decision from before #1044 proved
+            // otherwise for Qwen-Image's Qwen2 encoder.
+            let Some(Qwen3Model::Quantized(model)) = self.model.as_ref() else {
+                self.drop_weights();
+                return Ok(());
+            };
+            self.parked_gguf = Some(model.park_to_cpu()?);
+            self.model = None;
             return Ok(());
         }
         let parked = park::load_tensors_to_cpu(&self.encoder_paths)?;
@@ -324,6 +343,13 @@ impl Qwen3Encoder {
         if self.model.is_some() {
             return Ok(());
         }
+        if let Some(parked) = self.parked_gguf.as_ref() {
+            self.model = Some(Qwen3Model::Quantized(GgufQwen3Encoder::from_parked(
+                parked,
+                &self.device,
+            )?));
+            return Ok(());
+        }
         if let Some(parked) = self.parked_tensors.as_ref() {
             let vb = park::varbuilder_from_parked(parked, self.dtype, &self.device);
             self.model = Some(Qwen3Model::BF16(Bf16Qwen3Encoder::load(
@@ -335,10 +361,10 @@ impl Qwen3Encoder {
         self.reload(progress)
     }
 
-    /// Whether this encoder is currently parked (CPU-resident, GPU-free).
-    /// Always `false` for the GGUF path.
+    /// Whether this encoder is currently parked (CPU-resident, GPU-free), on
+    /// either the BF16 or the GGUF path.
     pub fn is_parked(&self) -> bool {
-        self.model.is_none() && self.parked_tensors.is_some()
+        self.model.is_none() && (self.parked_tensors.is_some() || self.parked_gguf.is_some())
     }
 }
 

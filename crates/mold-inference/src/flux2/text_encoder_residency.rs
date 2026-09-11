@@ -386,6 +386,44 @@ pub fn decide_text_encoder_residency(inputs: &TextEncoderResidencyInputs) -> Tex
     TextEncoderResidency::HostParked { pinned }
 }
 
+/// Whether a materialized Qwen3 encoder should stay in host RAM between
+/// requests.
+///
+/// The shared decision, asked with the encoder's own on-disk size — Qwen3 is
+/// MATERIALIZED, unlike the streamed Mistral3, so its file length IS what a
+/// park would hold, in either precision and for GGUF as well as BF16.
+///
+/// Z-Image asks the identical question through this function's twin in its own
+/// pipeline; both read `text_encoder_decide_text_encoder_residency`
+/// so a host can never take opposite decisions for two encoders of the same
+/// size.
+pub fn qwen3_park_residency(
+    device: &candle_core::Device,
+    encoder_paths: &[std::path::PathBuf],
+    transformer_bytes: u64,
+) -> TextEncoderResidency {
+    let encoder_bytes: u64 = encoder_paths
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
+        .sum();
+    let device_class = if device.is_metal() {
+        TextEncoderDevice::Metal
+    } else if device.is_cuda() {
+        TextEncoderDevice::Cuda
+    } else {
+        TextEncoderDevice::Cpu
+    };
+    decide_text_encoder_residency(&TextEncoderResidencyInputs {
+        encoder_bytes,
+        transformer_bytes,
+        host_total_bytes: crate::flux::pinned::total_system_ram_bytes().unwrap_or(0),
+        host_available_bytes: crate::device::available_system_memory_bytes().unwrap_or(0),
+        pinned_cap_bytes: crate::flux::pinned::pinned_cap_bytes(),
+        keep_te_ram: crate::device::keep_te_ram_mode(),
+        device: device_class,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
