@@ -38,7 +38,7 @@ vi.mock("vue-router", () => ({
   useRouter: () => ({ push: pushMock }),
   RouterLink: {
     props: { to: { type: [String, Object], required: true } },
-    template: "<a :href='typeof to === \"string\" ? to : \"\"'><slot /></a>",
+    template: '<a :href=\'typeof to === "string" ? to : ""\'><slot /></a>',
   },
 }));
 
@@ -109,18 +109,6 @@ function deferred<T>() {
     resolve = next;
   });
   return { promise, resolve };
-}
-
-function statusWire(): ServerStatus {
-  return {
-    version: "0.20.0",
-    instance_id: "settings-host",
-    hostname: "settings",
-    models_loaded: [],
-    busy: false,
-    uptime_secs: 1,
-    queue_depth: 0,
-  };
 }
 
 /*
@@ -231,13 +219,12 @@ describe("SettingsPage", () => {
     vi.restoreAllMocks();
   });
 
-
   it("keeps its padded content inside narrow web viewports", () => {
     const wrapper = mount(SettingsPage);
     // The page frame is the shared workspace column; the page's own rule adds
     // nothing that could overflow it.
-    const root = wrapper.get("div.workspace-page.settings-page");
-    expect(root.exists()).toBe(true);
+    // `get` throws when the frame is missing, which is the assertion.
+    wrapper.get("div.workspace-page.settings-page");
 
     const pageRule = settingsPageSource.match(/\.settings-page\s*\{([^}]*)\}/s);
     expect(pageRule).not.toBeNull();
@@ -248,6 +235,8 @@ describe("SettingsPage", () => {
 
   it("persists the theme through the shared lib/theme refs, keeping the tone", async () => {
     const wrapper = mount(SettingsPage);
+    // Section bodies arrive on the shell's own mounted hook, one tick later.
+    await flushPromises();
     // A card names a THEME and nothing else — no option carries a tone.
     const cards = wrapper.findAll('[data-test="theme-select"] [role="radio"]');
     expect(cards.map((card) => card.attributes("data-test"))).toEqual([
@@ -266,6 +255,7 @@ describe("SettingsPage", () => {
 
   it("persists the tone through the shared lib/theme refs, keeping the theme", async () => {
     const wrapper = mount(SettingsPage);
+    await flushPromises();
     const tone = wrapper.get('[data-test="theme-tone"]');
     const system = tone.findAll("button").find((b) => b.text() === "System");
     await system?.trigger("click");
@@ -317,7 +307,9 @@ describe("SettingsPage", () => {
     await flushPromises();
 
     expect(
-      wrapper.get('[data-test="settings-nav-library"]').attributes("aria-current"),
+      wrapper
+        .get('[data-test="settings-nav-library"]')
+        .attributes("aria-current"),
     ).toBe("true");
   });
 
@@ -327,7 +319,9 @@ describe("SettingsPage", () => {
     await flushPromises();
 
     expect(
-      wrapper.get('[data-test="settings-nav-updates"]').attributes("aria-current"),
+      wrapper
+        .get('[data-test="settings-nav-updates"]')
+        .attributes("aria-current"),
     ).toBe("true");
   });
 
@@ -431,11 +425,12 @@ describe("SettingsPage", () => {
       '[data-test="section-generation"] input[type="number"]',
     );
     await steps.setValue(28);
-    await steps.trigger("blur");
+    await steps.trigger("change");
     await flushPromises();
 
     const put = calls.find(
-      ({ url, init }) => url.endsWith("/api/config/default_steps") && init?.method === "PUT",
+      ({ url, init }) =>
+        url.endsWith("/api/config/default_steps") && init?.method === "PUT",
     );
     expect(put?.init?.body).toBe(JSON.stringify({ value: 28 }));
   });
@@ -495,7 +490,9 @@ describe("SettingsPage", () => {
     const machines = wrapper.get('[data-test="section-hosts"]');
     expect(machines.text()).toContain("NVIDIA RTX 3090");
     expect(
-      machines.get("[data-test='device-panel']").attributes("data-device-count"),
+      machines
+        .get("[data-test='device-panel']")
+        .attributes("data-device-count"),
     ).toBe("1");
     // The scheduler lanes belong to the Machines workspace, not here.
     expect(machines.find('[data-test="cpu-utility-lane"]').exists()).toBe(
@@ -518,7 +515,7 @@ describe("SettingsPage", () => {
     expect(wrapper.get("[data-test='device-toggle-0']").text()).toBe("Enable");
   });
 
-  it("renders the Settings title and About rows", () => {
+  it("renders the Settings title and About rows", async () => {
     statusRef.value = {
       version: "9.9.9",
       models_loaded: [],
@@ -526,6 +523,7 @@ describe("SettingsPage", () => {
       uptime_secs: 1,
     };
     const wrapper = mount(SettingsPage);
+    await flushPromises();
 
     expect(wrapper.get("h1").text()).toBe("Settings");
     expect(wrapper.get('[data-test="about-version"]').text()).toBe("9.9.9");
@@ -536,8 +534,9 @@ describe("SettingsPage", () => {
     expect(wrapper.text()).not.toMatch(/equal (project )?owners/i);
   });
 
-  it("falls back to an em dash when the server version is unknown", () => {
+  it("falls back to an em dash when the server version is unknown", async () => {
     const wrapper = mount(SettingsPage);
+    await flushPromises();
     expect(wrapper.get('[data-test="about-version"]').text()).toBe("—");
   });
 
