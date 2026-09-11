@@ -34,23 +34,61 @@ use std::path::Path;
 
 /// Load every tensor in `paths` (safetensors files) onto `Device::Cpu`,
 /// returning a `name → Tensor` map suitable for handing to
-/// `VarBuilder::from_tensors`.
+/// `VarBuilder::from_tensors`. The resulting tensors are owned and survive
+/// after the mapping is released.
 ///
-/// Reads each file via candle's standard `safetensors::load`, which mmaps
-/// internally and copies tensor bytes into a fresh CPU buffer (no lifetime
-/// tied to the mmap). The resulting tensors are owned and survive after
-/// the file handle closes.
+/// ONE copy per tensor, out of a mapping. The previous implementation called
+/// `candle_core::safetensors::load`, whose doc comment here claimed it mmaps:
+/// it does not. It is `std::fs::read` into a `Vec<u8>`
+/// (`candle-core/src/safetensors.rs:408-411`) followed by `view.load(device)`
+/// per tensor (`:413-419`), so parking a 9.79 GB `t5xxl_fp16` allocated a
+/// 9.79 GB anonymous staging buffer and then copied every tensor out of it
+/// again — a transient peak of twice the encoder for a feature whose whole
+/// purpose is to fit the encoder in host RAM.
 ///
 /// Use this when you don't already have the model's tensors in hand and want
 /// to populate the parked state from disk.
 pub(crate) fn load_tensors_to_cpu(paths: &[impl AsRef<Path>]) -> Result<HashMap<String, Tensor>> {
+    load_tensors_to_cpu_filtered(paths, |_| true)
+}
+
+/// [`load_tensors_to_cpu`] over the subset of tensor names `include` accepts.
+///
+/// A filtered-out tensor is never materialized at all — the mapping's pages
+/// for it are never touched. That matters where a checkpoint carries more than
+/// the runtime uses: FLUX.2 [dev]'s single-file Mistral3 republication ships a
+/// vision tower, a projector, and decoder layers 30-39 beside the prefix the
+/// encoder streams, and parking the file whole would charge host RAM for every
+/// byte of them.
+pub(crate) fn load_tensors_to_cpu_filtered(
+    paths: &[impl AsRef<Path>],
+    include: impl Fn(&str) -> bool,
+) -> Result<HashMap<String, Tensor>> {
+    let refs: Vec<&Path> = paths.iter().map(|path| path.as_ref()).collect();
+    // SAFETY: the mapping is consumed inside this call and every tensor is
+    // copied out of it before it is released. Model weights are verified at
+    // download and immutable thereafter — the same contract every other
+    // mmap'd checkpoint in mold takes.
+    let mapped = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&refs) }
+        .with_context(|| {
+            format!(
+                "failed to park-load {}",
+                refs.first()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default()
+            )
+        })?;
     let mut combined: HashMap<String, Tensor> = HashMap::new();
-    for path in paths {
-        let map = candle_core::safetensors::load(path.as_ref(), &Device::Cpu)
-            .with_context(|| format!("failed to park-load {}", path.as_ref().display()))?;
-        // Later shards win on collisions, matching candle's behavior — but
-        // safetensors shards from a single model never collide on tensor names.
-        combined.extend(map);
+    // Later shards win on collisions, matching candle's behavior — but
+    // safetensors shards from a single model never collide on tensor names.
+    for (name, _) in mapped.tensors() {
+        if !include(&name) {
+            continue;
+        }
+        let tensor = mapped
+            .load(&name, &Device::Cpu)
+            .with_context(|| format!("failed to park-load tensor {name}"))?;
+        combined.insert(name, tensor);
     }
     Ok(combined)
 }
@@ -124,6 +162,47 @@ mod tests {
         assert_eq!(w.shape().dims(), &[2, 2]);
         assert!(w.device().is_cpu());
         assert_eq!(w.dtype(), DType::F32);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A filtered-out tensor is not loaded at all.
+    ///
+    /// The filter is the whole point of the mapping: a checkpoint may carry
+    /// far more than the runtime uses, and parking it whole charges host RAM
+    /// for every byte. A filter that merely dropped entries afterwards would
+    /// still have paid for them.
+    #[test]
+    fn a_filtered_out_tensor_is_never_loaded() {
+        let path = temp_safetensors(
+            "filtered",
+            &[
+                ("prefix.weight", vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]),
+                ("vision_tower.weight", vec![9.0, 9.0], vec![2]),
+            ],
+        );
+
+        let visited = std::cell::RefCell::new(Vec::new());
+        let map = load_tensors_to_cpu_filtered(std::slice::from_ref(&path), |name| {
+            visited.borrow_mut().push(name.to_string());
+            name.starts_with("prefix.")
+        })
+        .unwrap();
+
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("prefix.weight"));
+        assert!(
+            !map.contains_key("vision_tower.weight"),
+            "the filter must exclude, not merely reorder"
+        );
+        let visited = visited.into_inner();
+        assert!(
+            visited.contains(&"vision_tower.weight".to_string()),
+            "the filter is asked about every tensor in the header"
+        );
+
+        let unfiltered = load_tensors_to_cpu(std::slice::from_ref(&path)).unwrap();
+        assert_eq!(unfiltered.len(), 2, "the default admits everything");
 
         let _ = std::fs::remove_file(&path);
     }
