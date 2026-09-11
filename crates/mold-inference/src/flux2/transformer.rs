@@ -52,6 +52,20 @@ pub(crate) enum Flux2Linear {
         scale: Option<Tensor>,
         bias: Option<Tensor>,
     },
+    /// An FP8 layer widened ONCE at load, under [`Flux2Fp8Widen::AtLoad`].
+    ///
+    /// `weight` is what [`Flux2Linear::Fp8`]'s forward builds on every call —
+    /// the F8E4M3 slab cast to the working dtype, with a structured (non
+    /// rank-0) `scale_weight` already folded in. A rank-0 scale is retained
+    /// and still rides the matmul OUTPUT, the Qwen-Image FP8 rule, so the two
+    /// arms are the same arithmetic in the same order. The F8 slab is dropped
+    /// at load, so this costs two bytes per parameter at rest rather than
+    /// three, and the per-forward full-size cast disappears.
+    Fp8Widened {
+        weight: Tensor,
+        scale: Option<Tensor>,
+        bias: Option<Tensor>,
+    },
     Nvfp4Streaming {
         /// Packed FP4 nibbles, U8 `[N_full, K/2]` on CPU.
         packed: Tensor,
@@ -83,6 +97,7 @@ impl Flux2Linear {
         in_dim: usize,
         out_dim: usize,
         has_bias: bool,
+        widen: Flux2Fp8Widen,
         vb: VarBuilder,
     ) -> Result<Self> {
         // NVFP4 streaming path: probe for the sub-key the backend emits for
@@ -187,11 +202,24 @@ impl Flux2Linear {
             } else {
                 None
             };
-            Ok(Self::Fp8 {
-                weight,
-                scale,
-                bias,
-            })
+            match widen {
+                Flux2Fp8Widen::PerForward => Ok(Self::Fp8 {
+                    weight,
+                    scale,
+                    bias,
+                }),
+                // The F8 slab is consumed here and never stored: `weight`
+                // moves into the cast and the widened copy is what the layer
+                // keeps.
+                Flux2Fp8Widen::AtLoad => {
+                    let (weight, scale) = widen_fp8_weight(&weight, scale, vb.dtype())?;
+                    Ok(Self::Fp8Widened {
+                        weight,
+                        scale,
+                        bias,
+                    })
+                }
+            }
         } else {
             let bias = if has_bias {
                 Some(vb.get(out_dim, "bias")?)
@@ -210,6 +238,15 @@ impl Flux2Linear {
                 scale,
                 bias,
             } => Ok(Self::Fp8 {
+                weight: weight.to_device(device)?,
+                scale: scale.as_ref().map(|t| t.to_device(device)).transpose()?,
+                bias: bias.as_ref().map(|t| t.to_device(device)).transpose()?,
+            }),
+            Self::Fp8Widened {
+                weight,
+                scale,
+                bias,
+            } => Ok(Self::Fp8Widened {
                 weight: weight.to_device(device)?,
                 scale: scale.as_ref().map(|t| t.to_device(device)).transpose()?,
                 bias: bias.as_ref().map(|t| t.to_device(device)).transpose()?,
@@ -269,6 +306,17 @@ fn flux2_linear_bytes(linear: &Flux2Linear) -> usize {
                 + scale.as_ref().map(tensor_bytes).unwrap_or(0)
                 + bias.as_ref().map(tensor_bytes).unwrap_or(0)
         }
+        Flux2Linear::Fp8Widened {
+            weight,
+            scale,
+            bias,
+        } => {
+            // Already widened: what it holds is what it costs, and `forward`
+            // materializes nothing. No 2x charge, unlike the arm above.
+            tensor_bytes(weight)
+                + scale.as_ref().map(tensor_bytes).unwrap_or(0)
+                + bias.as_ref().map(tensor_bytes).unwrap_or(0)
+        }
         Flux2Linear::Nvfp4Streaming {
             packed,
             block_scales,
@@ -308,26 +356,54 @@ impl Module for Flux2Linear {
                 // dequantized slab. Mirrors the Qwen-Image FP8 rule. Anything
                 // with per-row structure still scales the weight.
                 let scalar_scale = scale.as_ref().filter(|s| s.rank() == 0);
+                // Opt-in, unqualified: keep the weight in F8 and quantize the
+                // activation instead of widening. Only reachable when no
+                // structured scale has to ride the weight — that one needs a
+                // widened copy by definition.
+                if scale.is_none() || scalar_scale.is_some() {
+                    if let Some(out) = fp8_native_gemm(x, weight)? {
+                        let out = out.to_dtype(dtype)?;
+                        let out = match scalar_scale {
+                            Some(s) => out.broadcast_mul(&s.to_dtype(dtype)?)?,
+                            None => out,
+                        };
+                        return match bias {
+                            Some(b) => out.broadcast_add(&b.to_dtype(dtype)?),
+                            None => Ok(out),
+                        };
+                    }
+                }
                 let w = weight.to_dtype(dtype)?;
                 let w = match scale {
                     Some(s) if scalar_scale.is_none() => w.broadcast_mul(&s.to_dtype(dtype)?)?,
                     _ => w,
                 };
-                let w = w.t()?;
-                let out = match *x.dims() {
-                    [b1, b2, m, k] => {
-                        x.reshape((b1 * b2 * m, k))?
-                            .matmul(&w)?
-                            .reshape((b1, b2, m, ()))?
-                    }
-                    [bsize, m, k] => {
-                        x.reshape((bsize * m, k))?
-                            .matmul(&w)?
-                            .reshape((bsize, m, ()))?
-                    }
-                    _ => x.matmul(&w)?,
-                };
+                let out = fp8_matmul(x, &w.t()?)?;
                 let out = match scalar_scale {
+                    Some(s) => out.broadcast_mul(&s.to_dtype(dtype)?)?,
+                    None => out,
+                };
+                match bias {
+                    Some(b) => out.broadcast_add(&b.to_dtype(dtype)?),
+                    None => Ok(out),
+                }
+            }
+            Self::Fp8Widened {
+                weight,
+                scale,
+                bias,
+            } => {
+                let dtype = x.dtype();
+                // `weight` was cast at load, and a structured scale folded in
+                // there; only a rank-0 scale is left, and it rides the output
+                // exactly as the per-forward arm applies it.
+                let w = if weight.dtype() == dtype {
+                    weight.clone()
+                } else {
+                    weight.to_dtype(dtype)?
+                };
+                let out = fp8_matmul(x, &w.t()?)?;
+                let out = match scale {
                     Some(s) => out.broadcast_mul(&s.to_dtype(dtype)?)?,
                     None => out,
                 };
@@ -402,10 +478,233 @@ impl Module for Flux2Linear {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FP8 widen-once policy
+// ---------------------------------------------------------------------------
+
+/// What an FP8 layer does with its weight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Flux2Fp8Widen {
+    /// Widen once at load and drop the F8 slab. Two bytes per parameter at
+    /// rest, no per-forward cast.
+    AtLoad,
+    /// Keep the F8 slab and widen on every forward — one byte per parameter at
+    /// rest, and a full-size cast of every weight on every call. The
+    /// historical behaviour and the fallback whenever the budget is unknown.
+    PerForward,
+}
+
+/// Peak copies of the FP8 checkpoint that widening at load has to fit.
+///
+/// One for the F8 slab, two for its working-dtype copy. The slab is dropped
+/// per layer as the cast consumes it, so the true peak is lower — charging
+/// the whole three keeps the decision on the safe side of a card it would
+/// otherwise OOM halfway through a load.
+const FLUX2_FP8_WIDEN_COPIES: u64 = 3;
+
+/// Whether the FP8 weights can be widened once at load, given what the card
+/// has free before the transformer lands.
+///
+/// Pure so the matrix can be asserted without a GPU. `usable_free_bytes` is
+/// the card's free VRAM less mold's reserve, measured BEFORE any weight is
+/// uploaded, which is why the whole checkpoint is charged rather than a
+/// delta.
+pub(crate) fn flux2_fp8_widen_policy(fp8_bytes: u64, usable_free_bytes: u64) -> Flux2Fp8Widen {
+    let required = fp8_bytes
+        .checked_mul(FLUX2_FP8_WIDEN_COPIES)
+        .and_then(|bytes| bytes.checked_add(ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM));
+    match required {
+        Some(required) if required <= usable_free_bytes => Flux2Fp8Widen::AtLoad,
+        _ => Flux2Fp8Widen::PerForward,
+    }
+}
+
+/// `MOLD_FLUX2_FP8_CACHE`: `1` forces the widened arm, `0` forces the
+/// per-forward one, anything else (including unset) defers to the budget.
+///
+/// Classified like `MOLD_QWEN_FP8_CACHE`, which it mirrors: the choice changes
+/// residency and step latency, so a cached run must not share a fingerprint or
+/// a learned-timing bucket with one that widened every forward.
+pub(crate) fn parse_flux2_fp8_cache(value: Option<&str>) -> Option<Flux2Fp8Widen> {
+    match value.map(str::trim) {
+        Some("1") => Some(Flux2Fp8Widen::AtLoad),
+        Some("0") => Some(Flux2Fp8Widen::PerForward),
+        _ => None,
+    }
+}
+
+/// The env override, else the budget's answer.
+pub(crate) fn resolve_flux2_fp8_widen(env: Option<&str>, budget: Flux2Fp8Widen) -> Flux2Fp8Widen {
+    parse_flux2_fp8_cache(env).unwrap_or(budget)
+}
+
+/// The FP8 checkpoint's size, derived from the config rather than the file.
+///
+/// The decision has to be made before the first weight is read, so this counts
+/// the transformer's parameters and charges one byte each (F8E4M3). A mixed
+/// checkpoint — Comfy-Org's `fp8mixed` leaves the attention projections in
+/// BF16 — has fewer FP8 bytes than this, so the estimate errs toward keeping
+/// today's behaviour, never toward an OOM.
+pub(crate) fn flux2_fp8_checkpoint_bytes(cfg: &Flux2Config) -> u64 {
+    let h = cfg.hidden_size as u64;
+    let mlp = (cfg.hidden_size as f64 * cfg.mlp_ratio) as u64;
+    let mut params = 0u64;
+    // Stems.
+    params += cfg.in_channels as u64 * h;
+    params += cfg.context_in_dim as u64 * h;
+    // Timestep embedder (256 -> h -> h), and the guidance one when present.
+    let embedder = 256 * h + h * h;
+    params += embedder;
+    if cfg.vec_in_dim > 0 {
+        params += cfg.vec_in_dim as u64 * h + h * h;
+    }
+    if cfg.guidance_embed {
+        params += embedder;
+    }
+    // Shared modulation: two 6x for the double streams, one 3x for the single.
+    params += (6 + 6 + 3) * h * h;
+    // Double blocks: two streams, each four square attention projections and a
+    // SwiGLU MLP (h -> 2*mlp, mlp -> h).
+    params += cfg.depth as u64 * 2 * (4 * h * h + 3 * h * mlp);
+    // Single blocks: one fused QKV+MLP projection and one fused output.
+    params += cfg.depth_single_blocks as u64 * (h * (3 * h + 2 * mlp) + (h + mlp) * h);
+    // Final layer.
+    params += h * cfg.in_channels as u64 + 2 * h * h;
+    params * DType::F8E4M3.size_in_bytes() as u64
+}
+
+/// Resolve the widen policy for a load onto `device`.
+///
+/// Kept here, and deliberately small, so the public constructor signature does
+/// not change and no caller has to learn about FP8 at all. Without a readable
+/// VRAM figure — CPU, Metal, a build without NVML — the answer is today's
+/// behaviour.
+fn flux2_fp8_widen_for_load(cfg: &Flux2Config, device: &candle_core::Device) -> Flux2Fp8Widen {
+    let ordinal = match device.location() {
+        candle_core::DeviceLocation::Cuda { gpu_id } => Some(gpu_id),
+        _ => None,
+    };
+    let budget = match ordinal.and_then(crate::device::usable_free_vram_bytes) {
+        Some(free) => flux2_fp8_widen_policy(flux2_fp8_checkpoint_bytes(cfg), free),
+        None => Flux2Fp8Widen::PerForward,
+    };
+    let resolved = resolve_flux2_fp8_widen(
+        crate::runtime_env::value("MOLD_FLUX2_FP8_CACHE").as_deref(),
+        budget,
+    );
+    if resolved == Flux2Fp8Widen::AtLoad {
+        tracing::info!(
+            fp8_bytes = flux2_fp8_checkpoint_bytes(cfg),
+            "flux2: widening FP8 weights once at load"
+        );
+    }
+    resolved
+}
+
+/// Reproduce, once, exactly what [`Flux2Linear::Fp8`]'s forward builds every
+/// call: the F8E4M3 slab cast to `dtype`, with a non-scalar `scale_weight`
+/// folded in. The returned scale is the rank-0 one, which still rides the
+/// matmul output.
+fn widen_fp8_weight(
+    weight: &Tensor,
+    scale: Option<Tensor>,
+    dtype: DType,
+) -> Result<(Tensor, Option<Tensor>)> {
+    let scalar_scale = scale.as_ref().filter(|s| s.rank() == 0).cloned();
+    let widened = weight.to_dtype(dtype)?;
+    let widened = match &scale {
+        Some(s) if scalar_scale.is_none() => widened.broadcast_mul(&s.to_dtype(dtype)?)?,
+        _ => widened,
+    };
+    Ok((widened, scalar_scale))
+}
+
+/// F8E4M3's largest finite magnitude.
+///
+/// ComfyUI clamps the activation to it before the cast
+/// (`comfy/ops.py:872`, `torch.clamp(input, min=-448, max=448)`); anything
+/// past it casts to `inf` and poisons every output element that reads the row.
+pub(crate) const FP8_E4M3_MAX: f64 = 448.0;
+
+/// The clamp half of ComfyUI's activation quantization, pure and testable
+/// without a CUDA device.
+pub(crate) fn clamp_activation_for_fp8(x: &Tensor) -> Result<Tensor> {
+    x.clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
+}
+
+/// `MOLD_FLUX2_FP8_GEMM=1` routes FP8 layers to the fork's cuBLASLt
+/// `(F8E4M3, F8E4M3) -> BF16` GEMM instead of widening the weight.
+///
+/// **Unqualified.** It is off by default and stays off until a ComfyUI
+/// `torch._scaled_mm` parity fixture exists: the quantization of the
+/// ACTIVATION is lossy in a way the widen path is not, and nothing here has
+/// been compared against upstream's output on a real checkpoint.
+fn flux2_fp8_gemm_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled = matches!(
+            crate::runtime_env::value("MOLD_FLUX2_FP8_GEMM")
+                .as_deref()
+                .map(str::trim),
+            Some("1")
+        );
+        if enabled {
+            tracing::warn!(
+                "flux2: MOLD_FLUX2_FP8_GEMM=1 — native FP8 GEMM is UNQUALIFIED \
+                 (no ComfyUI parity fixture); renders may differ from the default path"
+            );
+        }
+        enabled
+    })
+}
+
+/// ComfyUI's activation quantization: clamp into range, cast, make contiguous
+/// (`comfy/ops.py:872-873`).
+fn quantize_activation_to_fp8(x: &Tensor) -> Result<Tensor> {
+    clamp_activation_for_fp8(x)?
+        .to_dtype(DType::F8E4M3)?
+        .contiguous()
+}
+
+/// The native FP8 GEMM, when the flag is on and the request fits it.
+///
+/// `Ok(None)` means "not routed" and the caller widens as usual. The fork
+/// takes `(F8E4M3, F8E4M3) -> BF16` through cuBLASLt only in TN layout
+/// (`candle-core/src/cuda_backend/mod.rs:2684-2691`), which `x.matmul(w.t())`
+/// is, and casts to BF16 itself for anything else.
+fn fp8_native_gemm(x: &Tensor, weight: &Tensor) -> Result<Option<Tensor>> {
+    if !flux2_fp8_gemm_enabled() || !matches!(x.device(), candle_core::Device::Cuda(_)) {
+        return Ok(None);
+    }
+    let quantized = quantize_activation_to_fp8(x)?;
+    Ok(Some(fp8_matmul(&quantized, &weight.t()?)?))
+}
+
+/// The one matmul both FP8 arms use, so a widened layer and a per-forward one
+/// cannot drift in shape handling.
+fn fp8_matmul(x: &Tensor, w_t: &Tensor) -> Result<Tensor> {
+    match *x.dims() {
+        [b1, b2, m, k] => x
+            .reshape((b1 * b2 * m, k))?
+            .matmul(w_t)?
+            .reshape((b1, b2, m, ())),
+        [bsize, m, k] => x
+            .reshape((bsize * m, k))?
+            .matmul(w_t)?
+            .reshape((bsize, m, ())),
+        _ => x.matmul(w_t),
+    }
+}
+
 /// Convenience: load a bias-free Flux2Linear from `vb`. Matches the
 /// `candle_nn::linear_no_bias` ergonomics it replaces.
-fn flux2_linear_no_bias(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Flux2Linear> {
-    Flux2Linear::load_with_bias(in_dim, out_dim, false, vb)
+fn flux2_linear_no_bias(
+    in_dim: usize,
+    out_dim: usize,
+    widen: Flux2Fp8Widen,
+    vb: VarBuilder,
+) -> Result<Flux2Linear> {
+    Flux2Linear::load_with_bias(in_dim, out_dim, false, widen, vb)
 }
 
 // ---------------------------------------------------------------------------
@@ -621,10 +920,10 @@ struct MlpEmbedder {
 }
 
 impl MlpEmbedder {
-    fn new(in_sz: usize, h_sz: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(in_sz: usize, h_sz: usize, widen: Flux2Fp8Widen, vb: VarBuilder) -> Result<Self> {
         // Diffusers names: linear_1 / linear_2
-        let in_layer = flux2_linear_no_bias(in_sz, h_sz, vb.pp("linear_1"))?;
-        let out_layer = flux2_linear_no_bias(h_sz, h_sz, vb.pp("linear_2"))?;
+        let in_layer = flux2_linear_no_bias(in_sz, h_sz, widen, vb.pp("linear_1"))?;
+        let out_layer = flux2_linear_no_bias(h_sz, h_sz, widen, vb.pp("linear_2"))?;
         Ok(Self {
             in_layer,
             out_layer,
@@ -668,8 +967,8 @@ struct Modulation1 {
 }
 
 impl Modulation1 {
-    fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let lin = flux2_linear_no_bias(dim, 3 * dim, vb.pp("linear"))?;
+    fn new(dim: usize, widen: Flux2Fp8Widen, vb: VarBuilder) -> Result<Self> {
+        let lin = flux2_linear_no_bias(dim, 3 * dim, widen, vb.pp("linear"))?;
         Ok(Self { lin })
     }
 
@@ -702,8 +1001,8 @@ struct Modulation2 {
 }
 
 impl Modulation2 {
-    fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let lin = flux2_linear_no_bias(dim, 6 * dim, vb.pp("linear"))?;
+    fn new(dim: usize, widen: Flux2Fp8Widen, vb: VarBuilder) -> Result<Self> {
+        let lin = flux2_linear_no_bias(dim, 6 * dim, widen, vb.pp("linear"))?;
         Ok(Self { lin })
     }
 
@@ -746,9 +1045,9 @@ struct Mlp {
 }
 
 impl Mlp {
-    fn new(in_sz: usize, mlp_sz: usize, vb: VarBuilder) -> Result<Self> {
-        let lin1 = flux2_linear_no_bias(in_sz, mlp_sz * 2, vb.pp("linear_in"))?;
-        let lin2 = flux2_linear_no_bias(mlp_sz, in_sz, vb.pp("linear_out"))?;
+    fn new(in_sz: usize, mlp_sz: usize, widen: Flux2Fp8Widen, vb: VarBuilder) -> Result<Self> {
+        let lin1 = flux2_linear_no_bias(in_sz, mlp_sz * 2, widen, vb.pp("linear_in"))?;
+        let lin2 = flux2_linear_no_bias(mlp_sz, in_sz, widen, vb.pp("linear_out"))?;
         Ok(Self { lin1, lin2, mlp_sz })
     }
 
@@ -792,13 +1091,13 @@ struct DoubleAttention {
 
 impl DoubleAttention {
     /// Load image-side attention from `attn.to_q/k/v`, `attn.to_out.0`, `attn.norm_q/k`.
-    fn new_img(dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
+    fn new_img(dim: usize, num_heads: usize, widen: Flux2Fp8Widen, vb: VarBuilder) -> Result<Self> {
         let head_dim = dim / num_heads;
         Ok(Self {
-            to_q: flux2_linear_no_bias(dim, dim, vb.pp("to_q"))?,
-            to_k: flux2_linear_no_bias(dim, dim, vb.pp("to_k"))?,
-            to_v: flux2_linear_no_bias(dim, dim, vb.pp("to_v"))?,
-            to_out: flux2_linear_no_bias(dim, dim, vb.pp("to_out").pp("0"))?,
+            to_q: flux2_linear_no_bias(dim, dim, widen, vb.pp("to_q"))?,
+            to_k: flux2_linear_no_bias(dim, dim, widen, vb.pp("to_k"))?,
+            to_v: flux2_linear_no_bias(dim, dim, widen, vb.pp("to_v"))?,
+            to_out: flux2_linear_no_bias(dim, dim, widen, vb.pp("to_out").pp("0"))?,
             norm_q: RmsNorm::new(vb.get(head_dim, "norm_q.weight")?, 1e-6),
             norm_k: RmsNorm::new(vb.get(head_dim, "norm_k.weight")?, 1e-6),
             num_heads,
@@ -806,13 +1105,13 @@ impl DoubleAttention {
     }
 
     /// Load text-side attention from `attn.add_q_proj`, `attn.to_add_out`, `attn.norm_added_q/k`.
-    fn new_txt(dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
+    fn new_txt(dim: usize, num_heads: usize, widen: Flux2Fp8Widen, vb: VarBuilder) -> Result<Self> {
         let head_dim = dim / num_heads;
         Ok(Self {
-            to_q: flux2_linear_no_bias(dim, dim, vb.pp("add_q_proj"))?,
-            to_k: flux2_linear_no_bias(dim, dim, vb.pp("add_k_proj"))?,
-            to_v: flux2_linear_no_bias(dim, dim, vb.pp("add_v_proj"))?,
-            to_out: flux2_linear_no_bias(dim, dim, vb.pp("to_add_out"))?,
+            to_q: flux2_linear_no_bias(dim, dim, widen, vb.pp("add_q_proj"))?,
+            to_k: flux2_linear_no_bias(dim, dim, widen, vb.pp("add_k_proj"))?,
+            to_v: flux2_linear_no_bias(dim, dim, widen, vb.pp("add_v_proj"))?,
+            to_out: flux2_linear_no_bias(dim, dim, widen, vb.pp("to_add_out"))?,
             norm_q: RmsNorm::new(vb.get(head_dim, "norm_added_q.weight")?, 1e-6),
             norm_k: RmsNorm::new(vb.get(head_dim, "norm_added_k.weight")?, 1e-6),
             num_heads,
@@ -879,19 +1178,19 @@ struct DoubleStreamBlock {
 }
 
 impl DoubleStreamBlock {
-    fn new(cfg: &Flux2Config, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &Flux2Config, widen: Flux2Fp8Widen, vb: VarBuilder) -> Result<Self> {
         let h_sz = cfg.hidden_size;
         let mlp_sz = (h_sz as f64 * cfg.mlp_ratio) as usize;
         let attn_vb = vb.pp("attn");
         Ok(Self {
             img_norm1: layer_norm(h_sz, &vb)?,
-            img_attn: DoubleAttention::new_img(h_sz, cfg.num_heads, attn_vb.clone())?,
+            img_attn: DoubleAttention::new_img(h_sz, cfg.num_heads, widen, attn_vb.clone())?,
             img_norm2: layer_norm(h_sz, &vb)?,
-            img_mlp: Mlp::new(h_sz, mlp_sz, vb.pp("ff"))?,
-            txt_attn: DoubleAttention::new_txt(h_sz, cfg.num_heads, attn_vb)?,
+            img_mlp: Mlp::new(h_sz, mlp_sz, widen, vb.pp("ff"))?,
+            txt_attn: DoubleAttention::new_txt(h_sz, cfg.num_heads, widen, attn_vb)?,
             txt_norm1: layer_norm(h_sz, &vb)?,
             txt_norm2: layer_norm(h_sz, &vb)?,
-            txt_mlp: Mlp::new(h_sz, mlp_sz, vb.pp("ff_context"))?,
+            txt_mlp: Mlp::new(h_sz, mlp_sz, widen, vb.pp("ff_context"))?,
         })
     }
 
@@ -981,16 +1280,20 @@ struct SingleStreamBlock {
 }
 
 impl SingleStreamBlock {
-    fn new(cfg: &Flux2Config, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &Flux2Config, widen: Flux2Fp8Widen, vb: VarBuilder) -> Result<Self> {
         let h_sz = cfg.hidden_size;
         let mlp_sz = (h_sz as f64 * cfg.mlp_ratio) as usize;
         let head_dim = h_sz / cfg.num_heads;
         let attn_vb = vb.pp("attn");
         // Fused: QKV (3*h_sz) + SwiGLU (2*mlp_sz) → to_qkv_mlp_proj
-        let linear1 =
-            flux2_linear_no_bias(h_sz, h_sz * 3 + mlp_sz * 2, attn_vb.pp("to_qkv_mlp_proj"))?;
+        let linear1 = flux2_linear_no_bias(
+            h_sz,
+            h_sz * 3 + mlp_sz * 2,
+            widen,
+            attn_vb.pp("to_qkv_mlp_proj"),
+        )?;
         // Output: attn (h_sz) + mlp (mlp_sz) → to_out
-        let linear2 = flux2_linear_no_bias(h_sz + mlp_sz, h_sz, attn_vb.pp("to_out"))?;
+        let linear2 = flux2_linear_no_bias(h_sz + mlp_sz, h_sz, widen, attn_vb.pp("to_out"))?;
         Ok(Self {
             linear1,
             linear2,
@@ -1066,13 +1369,14 @@ struct LastLayer {
 }
 
 impl LastLayer {
-    fn new(h_sz: usize, out_c: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(h_sz: usize, out_c: usize, widen: Flux2Fp8Widen, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             norm_final: layer_norm(h_sz, &vb)?,
-            linear: flux2_linear_no_bias(h_sz, out_c, vb.pp("proj_out"))?,
+            linear: flux2_linear_no_bias(h_sz, out_c, widen, vb.pp("proj_out"))?,
             ada_ln_modulation: flux2_linear_no_bias(
                 h_sz,
                 2 * h_sz,
+                widen,
                 vb.pp("norm_out").pp("linear"),
             )?,
         })
@@ -1417,16 +1721,22 @@ impl OffloadedFlux2Transformer {
 
 impl Flux2Transformer {
     pub fn new(cfg: &Flux2Config, vb: VarBuilder) -> Result<Self> {
-        let img_in = flux2_linear_no_bias(cfg.in_channels, cfg.hidden_size, vb.pp("x_embedder"))?;
+        // Resolved once, before the first weight lands, because the budget it
+        // reads is the card's free VRAM ahead of the load.
+        let widen = flux2_fp8_widen_for_load(cfg, vb.device());
+        let img_in =
+            flux2_linear_no_bias(cfg.in_channels, cfg.hidden_size, widen, vb.pp("x_embedder"))?;
         let txt_in = flux2_linear_no_bias(
             cfg.context_in_dim,
             cfg.hidden_size,
+            widen,
             vb.pp("context_embedder"),
         )?;
 
         let time_in = MlpEmbedder::new(
             256,
             cfg.hidden_size,
+            widen,
             vb.pp("time_guidance_embed").pp("timestep_embedder"),
         )?;
 
@@ -1434,6 +1744,7 @@ impl Flux2Transformer {
             Some(MlpEmbedder::new(
                 cfg.vec_in_dim,
                 cfg.hidden_size,
+                widen,
                 vb.pp("vector_in"),
             )?)
         } else {
@@ -1444,6 +1755,7 @@ impl Flux2Transformer {
             Some(MlpEmbedder::new(
                 256,
                 cfg.hidden_size,
+                widen,
                 vb.pp("time_guidance_embed").pp("guidance_embedder"),
             )?)
         } else {
@@ -1451,25 +1763,32 @@ impl Flux2Transformer {
         };
 
         // Shared modulation layers
-        let double_mod_img =
-            Modulation2::new(cfg.hidden_size, vb.pp("double_stream_modulation_img"))?;
-        let double_mod_txt =
-            Modulation2::new(cfg.hidden_size, vb.pp("double_stream_modulation_txt"))?;
-        let single_mod = Modulation1::new(cfg.hidden_size, vb.pp("single_stream_modulation"))?;
+        let double_mod_img = Modulation2::new(
+            cfg.hidden_size,
+            widen,
+            vb.pp("double_stream_modulation_img"),
+        )?;
+        let double_mod_txt = Modulation2::new(
+            cfg.hidden_size,
+            widen,
+            vb.pp("double_stream_modulation_txt"),
+        )?;
+        let single_mod =
+            Modulation1::new(cfg.hidden_size, widen, vb.pp("single_stream_modulation"))?;
 
         let mut double_blocks = Vec::with_capacity(cfg.depth);
         let vb_d = vb.pp("transformer_blocks");
         for idx in 0..cfg.depth {
-            double_blocks.push(DoubleStreamBlock::new(cfg, vb_d.pp(idx))?);
+            double_blocks.push(DoubleStreamBlock::new(cfg, widen, vb_d.pp(idx))?);
         }
 
         let mut single_blocks = Vec::with_capacity(cfg.depth_single_blocks);
         let vb_s = vb.pp("single_transformer_blocks");
         for idx in 0..cfg.depth_single_blocks {
-            single_blocks.push(SingleStreamBlock::new(cfg, vb_s.pp(idx))?);
+            single_blocks.push(SingleStreamBlock::new(cfg, widen, vb_s.pp(idx))?);
         }
 
-        let final_layer = LastLayer::new(cfg.hidden_size, cfg.in_channels, vb.clone())?;
+        let final_layer = LastLayer::new(cfg.hidden_size, cfg.in_channels, widen, vb.clone())?;
         let pe_embedder = EmbedNd::new(cfg.theta, cfg.axes_dim.to_vec());
 
         Ok(Self {
@@ -2005,6 +2324,234 @@ mod tests {
     /// ratio above is measuring conditioning rather than f32 rounding.
     fn on_blind_references_is_distinguishable(residual: f32) -> bool {
         residual > 1e-7
+    }
+
+    /// The widen-at-load budget, over the tiers and the cards that matter.
+    ///
+    /// The pure function takes the checkpoint's FP8 bytes and the card's
+    /// usable free VRAM measured BEFORE the load, and requires three copies
+    /// (the F8 slab, plus two bytes per parameter for its working-dtype copy)
+    /// to fit beside the 2 GB runtime headroom. Every "already spoken for"
+    /// row is the same card with activations, the VAE and a text encoder
+    /// already resident, which is what makes the answer resolution-dependent.
+    #[test]
+    fn fp8_widen_policy_matrix() {
+        const GB: u64 = 1_000_000_000;
+        let klein_4b = flux2_fp8_checkpoint_bytes(&Flux2Config::klein());
+        let klein_9b = flux2_fp8_checkpoint_bytes(&Flux2Config::klein_9b());
+        let dev = flux2_fp8_checkpoint_bytes(&Flux2Config::dev());
+
+        // The estimate has to be the tier the name promises, or every row
+        // below is measuring the wrong number.
+        assert!(
+            (3 * GB..5 * GB).contains(&klein_4b),
+            "klein-4B fp8 estimated at {klein_4b} bytes"
+        );
+        assert!(
+            (8 * GB..10 * GB).contains(&klein_9b),
+            "klein-9B fp8 estimated at {klein_9b} bytes"
+        );
+        assert!(
+            (30 * GB..36 * GB).contains(&dev),
+            "dev fp8 estimated at {dev} bytes"
+        );
+
+        let rows: [(&str, u64, u64, Flux2Fp8Widen); 7] = [
+            (
+                "klein-4B on an idle 24 GB card",
+                klein_4b,
+                23 * GB,
+                Flux2Fp8Widen::AtLoad,
+            ),
+            (
+                "klein-4B on a 24 GB card with 13 GB already spoken for",
+                klein_4b,
+                10 * GB,
+                Flux2Fp8Widen::PerForward,
+            ),
+            (
+                "klein-9B on an idle 24 GB card — three copies never fit",
+                klein_9b,
+                23 * GB,
+                Flux2Fp8Widen::PerForward,
+            ),
+            (
+                "klein-9B on an idle 46 GB L40S at 1024 squared",
+                klein_9b,
+                43 * GB,
+                Flux2Fp8Widen::AtLoad,
+            ),
+            (
+                "klein-9B on the same card at 2048 squared, 18 GB spoken for",
+                klein_9b,
+                27 * GB,
+                Flux2Fp8Widen::PerForward,
+            ),
+            (
+                "dev on an idle 46 GB L40S — 32 GB of weights, three copies is 96",
+                dev,
+                45 * GB,
+                Flux2Fp8Widen::PerForward,
+            ),
+            ("dev on a 141 GB H200", dev, 139 * GB, Flux2Fp8Widen::AtLoad),
+        ];
+        for (what, fp8_bytes, free, want) in rows {
+            assert_eq!(
+                flux2_fp8_widen_policy(fp8_bytes, free),
+                want,
+                "{what}: {fp8_bytes} fp8 bytes against {free} free"
+            );
+        }
+
+        // The boundary itself, so the inequality cannot silently flip.
+        let exact = 3 * klein_4b + ADAPTIVE_OFFLOAD_RUNTIME_HEADROOM;
+        assert_eq!(
+            flux2_fp8_widen_policy(klein_4b, exact),
+            Flux2Fp8Widen::AtLoad,
+            "exactly enough must widen"
+        );
+        assert_eq!(
+            flux2_fp8_widen_policy(klein_4b, exact - 1),
+            Flux2Fp8Widen::PerForward,
+            "one byte short must not"
+        );
+    }
+
+    /// `MOLD_FLUX2_FP8_CACHE` overrides the budget in both directions, and
+    /// anything else defers to it.
+    #[test]
+    fn flux2_fp8_cache_env_overrides_the_budget() {
+        for budget in [Flux2Fp8Widen::AtLoad, Flux2Fp8Widen::PerForward] {
+            assert_eq!(
+                resolve_flux2_fp8_widen(Some("1"), budget),
+                Flux2Fp8Widen::AtLoad
+            );
+            assert_eq!(
+                resolve_flux2_fp8_widen(Some("0"), budget),
+                Flux2Fp8Widen::PerForward
+            );
+            assert_eq!(
+                resolve_flux2_fp8_widen(Some(" 1 "), budget),
+                Flux2Fp8Widen::AtLoad
+            );
+            assert_eq!(resolve_flux2_fp8_widen(None, budget), budget);
+            assert_eq!(resolve_flux2_fp8_widen(Some("yes"), budget), budget);
+            assert_eq!(resolve_flux2_fp8_widen(Some(""), budget), budget);
+        }
+    }
+
+    /// The widened arm is the per-forward arm with its cast hoisted out of the
+    /// loop — same numbers, in the same order, for both scale shapes.
+    ///
+    /// A rank-0 scale rides the matmul OUTPUT in both arms (the Qwen-Image FP8
+    /// rule); a structured one is folded into the weight, which the widened
+    /// arm does once at load and the per-forward arm redoes every call. If
+    /// either moved sides the two would disagree here.
+    #[test]
+    fn widened_arm_matches_per_forward_arm_bitwise() {
+        let dev = candle_core::Device::Cpu;
+        let raw: Vec<f32> = (0..8).map(|i| (i as f32) - 3.5).collect();
+        let weight = Tensor::from_vec(raw, (2, 4), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let bias = Tensor::from_vec(vec![0.125f32, -0.25], 2, &dev).unwrap();
+        let x = Tensor::from_vec(
+            vec![0.5f32, -1.5, 2.0, 0.75, 1.0, 1.0, -1.0, 0.25],
+            (1, 2, 4),
+            &dev,
+        )
+        .unwrap();
+
+        let scales = [
+            ("no scale", None),
+            ("rank-0 scale", Some(Tensor::new(0.25f32, &dev).unwrap())),
+            (
+                "per-output-row scale",
+                Some(Tensor::from_vec(vec![0.5f32, 2.0], (2, 1), &dev).unwrap()),
+            ),
+        ];
+        for (what, scale) in scales {
+            let per_forward = Flux2Linear::Fp8 {
+                weight: weight.clone(),
+                scale: scale.clone(),
+                bias: Some(bias.clone()),
+            };
+            let (widened_weight, widened_scale) =
+                widen_fp8_weight(&weight, scale.clone(), DType::F32).unwrap();
+            let widened = Flux2Linear::Fp8Widened {
+                weight: widened_weight,
+                scale: widened_scale,
+                bias: Some(bias.clone()),
+            };
+
+            let want: Vec<f32> = per_forward
+                .forward(&x)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            let got: Vec<f32> = widened
+                .forward(&x)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            assert_eq!(got, want, "{what}: the widened arm changed the result");
+        }
+    }
+
+    /// A widened layer costs what it holds; an unwidened one is charged twice
+    /// its slab because `forward` materializes the working-dtype copy.
+    #[test]
+    fn a_widened_layer_is_charged_its_real_bytes() {
+        let dev = candle_core::Device::Cpu;
+        let weight = Tensor::from_vec(vec![1.0f32; 8], (2, 4), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let per_forward = Flux2Linear::Fp8 {
+            weight: weight.clone(),
+            scale: None,
+            bias: None,
+        };
+        let (widened_weight, widened_scale) = widen_fp8_weight(&weight, None, DType::BF16).unwrap();
+        let widened = Flux2Linear::Fp8Widened {
+            weight: widened_weight,
+            scale: widened_scale,
+            bias: None,
+        };
+        assert_eq!(
+            flux2_linear_bytes(&per_forward),
+            16,
+            "8 params charged at 2 B"
+        );
+        assert_eq!(
+            flux2_linear_bytes(&widened),
+            16,
+            "8 BF16 params, nothing transient"
+        );
+    }
+
+    /// ComfyUI clamps the activation into F8E4M3's finite range before casting
+    /// (`comfy/ops.py:872`). Without it the cast produces `inf`.
+    #[test]
+    fn fp8_activation_clamp_matches_comfyui_range() {
+        let dev = candle_core::Device::Cpu;
+        let x = Tensor::from_vec(
+            vec![-1000.0f32, -448.0, -1.5, 0.0, 1.5, 448.0, 1000.0],
+            7,
+            &dev,
+        )
+        .unwrap();
+        let got: Vec<f32> = clamp_activation_for_fp8(&x).unwrap().to_vec1().unwrap();
+        assert_eq!(got, vec![-448.0, -448.0, -1.5, 0.0, 1.5, 448.0, 448.0]);
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "a clamped activation casts to a finite F8E4M3"
+        );
     }
 
     #[test]
@@ -2612,7 +3159,7 @@ mod tests {
             Tensor::from_vec(proj_weight, (out_c, h_sz), &dev).unwrap(),
         );
         let vb = VarBuilder::from_tensors(map, DType::F32, &dev);
-        let layer = LastLayer::new(h_sz, out_c, vb).unwrap();
+        let layer = LastLayer::new(h_sz, out_c, Flux2Fp8Widen::PerForward, vb).unwrap();
 
         // xs: all-zeros → norm(xs)=0 → output = 0*(1+scale) + shift = shift.
         let xs = Tensor::zeros((1, 1, h_sz), DType::F32, &dev).unwrap();

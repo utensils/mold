@@ -359,6 +359,8 @@ pub enum RuntimeSemanticVariable {
     FluxDeltaCache,
     FluxKeepTransformer,
     Flux2QMatMul,
+    Flux2Fp8Cache,
+    Flux2Fp8Gemm,
     H3TurboAdapter,
     H3TurboTier,
     Hunyuan3dDecodeChunks,
@@ -833,6 +835,13 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         // per-forward dequant), which changes numerics, transient memory, and
         // step latency — its own execution-equivalence and timing class.
         "MOLD_FLUX2_QMATMUL" => RuntimeSemanticVariable::Flux2QMatMul,
+        // Widening FP8 weights once at load trades VRAM for a per-forward
+        // cast — residency and step latency both move, exactly as they do for
+        // `MOLD_QWEN_FP8_CACHE`.
+        "MOLD_FLUX2_FP8_CACHE" => RuntimeSemanticVariable::Flux2Fp8Cache,
+        // The native FP8 GEMM quantizes the activation; that is a numerics
+        // change, not just a speed one.
+        "MOLD_FLUX2_FP8_GEMM" => RuntimeSemanticVariable::Flux2Fp8Gemm,
         "MOLD_HUNYUAN3D_DECODE_CHUNKS" => RuntimeSemanticVariable::Hunyuan3dDecodeChunks,
         "MOLD_H3_TURBO_ADAPTER" => RuntimeSemanticVariable::H3TurboAdapter,
         "MOLD_H3_TURBO_TIER" => RuntimeSemanticVariable::H3TurboTier,

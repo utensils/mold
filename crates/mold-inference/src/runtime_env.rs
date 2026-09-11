@@ -38,6 +38,16 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     // step latency, so a run on one must never share a fingerprint or a
     // learned-timing bucket with the other.
     "MOLD_FLUX2_QMATMUL",
+    // The FP8 tiers either widen their weights once at load (two bytes per
+    // parameter at rest) or cast the whole slab on every forward. Residency and
+    // step latency both change, so a cached run must not share a fingerprint or
+    // a learned-timing bucket with one that widened every forward — the
+    // `MOLD_QWEN_FP8_CACHE` rule, for the same reason.
+    "MOLD_FLUX2_FP8_CACHE",
+    // Opt-in, unqualified: routing FP8 layers to the native cuBLASLt FP8 GEMM
+    // quantizes the ACTIVATION, which the widen path never does. Different
+    // numerics and different latency.
+    "MOLD_FLUX2_FP8_GEMM",
     // #1174 follow-up: the reviewed MiniMax H3 Turbo LoRA tier is selected by
     // adapter path plus tier id until manifests own it. Both change which
     // adapter runs, which integrator consumes it, and the step count, so both
@@ -221,6 +231,9 @@ mod tests {
             // Selects the FLUX.2 GGUF linear arm; the two differ in numerics,
             // transient memory and step latency.
             "MOLD_FLUX2_QMATMUL",
+            // Selects whether FP8 weights are widened once at load or on every
+            // forward; residency and step latency both differ.
+            "MOLD_FLUX2_FP8_CACHE",
         ] {
             assert!(
                 ENGINE_SHAPING_VARIABLES.contains(&required),
