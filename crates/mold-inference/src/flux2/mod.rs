@@ -3,6 +3,7 @@ mod pipeline;
 pub(crate) mod quantized_transformer;
 pub(crate) mod sampling;
 pub mod single_file;
+pub mod text_encoder_residency;
 pub(crate) mod transformer;
 pub(crate) mod vae;
 

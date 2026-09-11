@@ -33,10 +33,12 @@ const CAPTURE_LAYERS: [usize; 3] = [9, 19, 29];
 
 /// Largest simultaneously resident weight allocation in the streamed encoder:
 /// the 131072 x 5120 token embedding table. Decoder layers are smaller.
+///
+/// Delegates to [`crate::flux2::text_encoder_residency`], which is the single
+/// authority on this encoder's residency arithmetic — admission, the placement
+/// planner, and this engine must not carry two copies of the geometry.
 pub(crate) fn streamed_peak_weight_bytes(dtype: DType) -> u64 {
-    (VOCAB_SIZE as u64)
-        .saturating_mul(HIDDEN_SIZE as u64)
-        .saturating_mul(crate::device::dtype_bytes(dtype) as u64)
+    crate::flux2::text_encoder_residency::mistral3_embed_bytes(dtype)
 }
 
 const SYSTEM_PROMPT: &str = "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation.";

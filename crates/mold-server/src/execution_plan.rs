@@ -3190,6 +3190,17 @@ fn build_plan(
     let mut recurring_host_bytes_by_path: BTreeMap<PathBuf, u64> = BTreeMap::new();
     let gemma_anon_peak_anchor =
         ltx2_cpu_gemma_anon_peak_anchor(context.family, context.artifacts, &placements);
+    // FLUX.2 [dev]'s Mistral3 encoder streams on either side of the placement
+    // decision, so its charge is resolved once here and applied in whichever
+    // arm this plan takes.
+    let mistral_peak_anchor =
+        flux2_mistral_peak_anchor(context.family, context.model, context.artifacts);
+    let mistral_charge = mistral_peak_anchor.as_ref().and_then(|_| {
+        mold_inference::flux2::text_encoder_residency::mistral3_admission_charge_for_gpu(
+            context.model,
+            context.paths,
+        )
+    });
     for (role, path) in context.artifacts {
         let place_cpu = placements.get(role).copied().unwrap_or(false);
         let bytes = context
@@ -3208,10 +3219,16 @@ fn build_plan(
             // that sum it refuses every job while the GPU idles (#1108).
             // Only the encoder's real anonymous heap is irreclaimable, and
             // only the anchor shard carries it.
-            let streams_from_mmap = ltx2_cpu_gemma_streams_from_mmap(context.family, role, path);
+            let streams_from_mmap = ltx2_cpu_gemma_streams_from_mmap(context.family, role, path)
+                || flux2_mistral_streams_from_mmap(context.family, context.model, role, path);
             let host = if streams_from_mmap {
                 if gemma_anon_peak_anchor.as_ref() == Some(role) {
                     mold_inference::ltx2::cpu_gemma_streaming_anon_peak_bytes()
+                } else if mistral_peak_anchor.as_ref() == Some(role) {
+                    // A CPU-placed FLUX.2 encoder runs at F32, and its shards
+                    // stay a reclaimable mapping there exactly as they do on
+                    // the device.
+                    mistral_charge.map_or(bytes, |charge| charge.host_anon_peak)
                 } else {
                     0
                 }
@@ -3263,10 +3280,28 @@ fn build_plan(
             } else {
                 ComponentLoadStrategy::Resident
             };
+            // A GPU-placed FLUX.2 [dev] Mistral3 encoder never holds its
+            // checkpoint either: the shards stay a memory mapping and one
+            // decoder layer at a time reaches the device. The anchor carries
+            // the whole streamed peak; the remaining shards carry nothing.
+            let vram = match (&mistral_charge, mistral_peak_anchor.as_ref() == Some(role)) {
+                (Some(charge), true) => charge.device_peak,
+                (Some(_), false)
+                    if flux2_mistral_streams_from_mmap(
+                        context.family,
+                        context.model,
+                        role,
+                        path,
+                    ) =>
+                {
+                    0
+                }
+                _ => bytes,
+            };
             (
                 ResolvedComponentPlacement::Device(device.id.clone()),
                 strategy,
-                bytes,
+                vram,
                 0,
             )
         };
@@ -3747,6 +3782,49 @@ fn ltx2_cpu_gemma_streams_from_mmap(family: &str, role: &ComponentRole, path: &P
 /// residency is especially wrong on Metal, where that charge is folded back
 /// into the same unified-memory gate. The real transient for every format is
 /// bounded by `BASE_HOST_TRANSIENT`.
+/// Whether a text-encoder artifact is FLUX.2 [dev]'s Mistral3 conditioner,
+/// which STREAMS one decoder layer at a time off a memory mapping rather than
+/// materializing its checkpoint.
+///
+/// Same shape as [`ltx2_cpu_gemma_streams_from_mmap`] and the same reasoning,
+/// but it answers for BOTH placements: the shards are a reclaimable mapping on
+/// the host, and only the layers in flight are ever on the device. Charging the
+/// 36 GB file made the planner declare memory pressure on an idle 46 GB card,
+/// park the encoder to the CPU, and take 78.8 s to encode a prompt with the GPU
+/// at 0 % SM.
+///
+/// `mold_inference::flux2::text_encoder_residency` is the single authority; this
+/// only adds the role gate the planner needs.
+fn flux2_mistral_streams_from_mmap(
+    family: &str,
+    model: &str,
+    role: &ComponentRole,
+    path: &Path,
+) -> bool {
+    matches!(role, ComponentRole::QwenShard(_))
+        && mold_inference::flux2::text_encoder_residency::mistral3_streams_from_mmap(
+            family, model, path,
+        )
+}
+
+/// The one FLUX.2 [dev] Mistral3 shard that carries the streamed encoder's
+/// peak, if this plan has one.
+///
+/// The encoder's working set belongs to the ENCODER, not to any one shard —
+/// BFL publishes it as eight, Comfy-Org as one — so it is attributed to the
+/// lowest-ordered shard exactly as [`ltx2_cpu_gemma_anon_peak_anchor`] does.
+/// Added per shard it would be charged eight times over.
+fn flux2_mistral_peak_anchor(
+    family: &str,
+    model: &str,
+    artifacts: &BTreeMap<ComponentRole, PathBuf>,
+) -> Option<ComponentRole> {
+    artifacts
+        .iter()
+        .find(|(role, path)| flux2_mistral_streams_from_mmap(family, model, role, path))
+        .map(|(role, _)| role.clone())
+}
+
 fn ltx2_transformer_streams_from_mmap(family: &str, role: &ComponentRole, path: &Path) -> bool {
     matches!(family, "ltx2" | "ltx-2" | "ltx2.3")
         && matches!(
@@ -5785,6 +5863,194 @@ mod tests {
             plan.predicted_warm_host_increment_bytes,
             BASE_HOST_TRANSIENT + streaming_heap,
             "the streaming heap is a forward-loop allocation and recurs on a warm hit"
+        );
+    }
+
+    /// A FLUX.2 [dev] fixture: a GGUF transformer, a small VAE, and one
+    /// Mistral3 encoder file whose 36 GB are page cache, not demand.
+    fn flux2_dev_config(
+        root: &Path,
+        model: &str,
+        transformer_bytes: u64,
+        encoder_bytes: u64,
+    ) -> (Config, GenerateRequest) {
+        let transformer = root.join("flux2-dev-transformer.gguf");
+        let vae = root.join("flux2-vae.safetensors");
+        let encoder = root.join("mistral_3_small_flux2_bf16.safetensors");
+        sparse_file(&transformer, transformer_bytes);
+        sparse_file(&vae, GIB / 2);
+        sparse_file(&encoder, encoder_bytes);
+        let mut config = Config::default();
+        config.models.insert(
+            model.to_string(),
+            ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![encoder.display().to_string()]),
+                family: Some("flux2".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let request: GenerateRequest = serde_json::from_str(&format!(
+            r#"{{"prompt":"x","model":"{model}","width":1024,"height":1024,"steps":20,"guidance":4.0}}"#
+        ))
+        .unwrap();
+        (config, request)
+    }
+
+    fn mistral_charge(
+        config: &Config,
+        model: &str,
+    ) -> mold_inference::flux2::text_encoder_residency::StreamedEncoderCharge {
+        let entry = &config.models[model];
+        let paths = mold_core::ModelPaths {
+            transformer: PathBuf::from(entry.transformer.as_deref().unwrap()),
+            transformer_shards: Vec::new(),
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
+            vae: PathBuf::from(entry.vae.as_deref().unwrap()),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: entry
+                .text_encoder_files
+                .iter()
+                .flatten()
+                .map(PathBuf::from)
+                .collect(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        mold_inference::flux2::text_encoder_residency::mistral3_admission_charge_for_gpu(
+            model, &paths,
+        )
+        .expect("a dev Mistral3 encoder streams")
+    }
+
+    /// The 2026-09-11 audit's headline: a 46 GB L40S with nothing else on it
+    /// parked FLUX.2 [dev]'s encoder on the CPU because the planner charged
+    /// its 36 GB file, and the encode then took 78.8 s at F32 with the GPU
+    /// idle. The encoder streams — it is charged its streamed device peak and
+    /// stays on the card.
+    #[test]
+    fn flux2_dev_mistral_streams_on_a_46gb_card_and_is_not_auto_parked() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = flux2_dev_config(root.path(), "flux2-dev:q8", 33 * GIB, 36 * GIB);
+        let plan = resolve_execution_plans(&config, &request, &devices(&[46 * GIB]), false)
+            .expect("a streamed encoder fits beside a Q8 transformer on a 46 GB card")
+            .remove(0);
+
+        let encoder = &plan.components[&ComponentRole::QwenShard(0)];
+        assert!(
+            matches!(encoder.placement, ResolvedComponentPlacement::Device(_)),
+            "a streamed Mistral3 encoder belongs on the GPU"
+        );
+        assert_eq!(
+            encoder.predicted_vram_bytes,
+            mistral_charge(&config, "flux2-dev:q8").device_peak,
+            "charge the streamed peak, never the shard"
+        );
+        assert_eq!(encoder.predicted_host_bytes, 0);
+    }
+
+    /// The same answer on a 24 GB card with a Q4 transformer: the encoder is
+    /// phase-disjoint from the denoise, so streaming it on the GPU is what
+    /// makes both fit.
+    #[test]
+    fn flux2_dev_q4_on_a_24gb_card_streams_the_encoder_on_the_gpu() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = flux2_dev_config(root.path(), "flux2-dev:q4", 11 * GIB, 36 * GIB);
+        let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .expect("a Q4 dev tier admits on a 24 GB card")
+            .remove(0);
+
+        let encoder = &plan.components[&ComponentRole::QwenShard(0)];
+        assert!(
+            matches!(encoder.placement, ResolvedComponentPlacement::Device(_)),
+            "24 GB is still enough for a 3.6 GB streamed encoder phase"
+        );
+        assert_eq!(
+            encoder.predicted_vram_bytes,
+            mistral_charge(&config, "flux2-dev:q4").device_peak
+        );
+    }
+
+    /// An explicit CPU pin is honoured, and it charges the streaming heap the
+    /// CPU arm really allocates — at F32, the dtype `flux2/pipeline.rs` picks
+    /// there — never the 36 GB of shards, which stay a reclaimable mapping on
+    /// the host exactly as they are on the device. Charging the file is an
+    /// outright refusal on a 64 GB desktop.
+    #[test]
+    fn an_explicit_cpu_pin_on_the_mistral_encoder_charges_its_streaming_heap_not_its_file() {
+        let root = TempDir::new().unwrap();
+        let (config, mut request) =
+            flux2_dev_config(root.path(), "flux2-dev:q8", 33 * GIB, 36 * GIB);
+        request.placement = Some(DevicePlacement {
+            text_encoders: DeviceRef::Cpu,
+            advanced: None,
+        });
+
+        let plan = resolve_execution_plans(&config, &request, &devices(&[46 * GIB]), false)
+            .expect("a CPU-pinned Mistral3 encoder keeps FLUX.2 admissible")
+            .remove(0);
+
+        let charge = mistral_charge(&config, "flux2-dev:q8");
+        let encoder = &plan.components[&ComponentRole::QwenShard(0)];
+        assert_eq!(encoder.placement, ResolvedComponentPlacement::Cpu);
+        assert_eq!(
+            encoder.predicted_host_bytes, charge.host_anon_peak,
+            "only the streaming encoder's anonymous heap; the shards are a \
+             reclaimable file mapping"
+        );
+        assert!(
+            charge.host_anon_peak < 10 * GIB,
+            "the heap is bounded; the file is 36 GB"
+        );
+    }
+
+    /// The regression pin. FLUX.1's T5 is COPIED to wherever it is placed, so
+    /// a 9.8 GB encoder beside a resident 12 GB Q8 transformer on a 24 GB card
+    /// is a legitimate park at its real file size. Nothing about the Mistral3
+    /// exemption may reach it.
+    #[test]
+    fn flux_dev_q8_on_a_24gb_card_still_parks_t5() {
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("flux1-dev-Q8_0.gguf");
+        let vae = root.path().join("ae.safetensors");
+        let t5 = root.path().join("t5xxl_fp16.safetensors");
+        sparse_file(&transformer, 12_500_000_000);
+        sparse_file(&vae, 335_000_000);
+        sparse_file(&t5, 9_790_000_000);
+        let mut config = Config::default();
+        config.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                t5_encoder: Some(t5.display().to_string()),
+                family: Some("flux".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"x","model":"flux-dev:q8","width":1024,"height":1024,"steps":20,"guidance":3.5}"#,
+        )
+        .unwrap();
+
+        let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .expect("flux-dev:q8 admits on a 24 GB card")
+            .remove(0);
+        let encoder = &plan.components[&ComponentRole::T5];
+        assert_eq!(encoder.placement, ResolvedComponentPlacement::Cpu);
+        assert_eq!(
+            encoder.predicted_host_bytes, 9_790_000_000,
+            "a copied T5 is charged its bytes"
         );
     }
 

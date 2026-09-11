@@ -3246,6 +3246,26 @@ pub(crate) fn fits_in_memory(
 /// family-specific estimator can price each phase without adding one phase's
 /// work to the other phase's weights.
 pub fn estimate_sequential_phase_weights(paths: &mold_core::ModelPaths) -> (u64, u64) {
+    estimate_sequential_phase_weights_with_encoder_override(paths, None)
+}
+
+/// [`estimate_sequential_phase_weights`] with the encoder phase re-priced.
+///
+/// `encoder_override` replaces the deduplicated encoder file total outright. It
+/// exists for encoders that never materialize their checkpoint: FLUX.2 [dev]'s
+/// Mistral3 conditioner streams one decoder layer at a time off a memory
+/// mapping, so its 36 GB of shards are reclaimable page cache and its real
+/// demand is the ~3.6 GB
+/// [`crate::flux2::text_encoder_residency::mistral3_streamed_device_peak_bytes`]
+/// prices. Charging the file made the planner declare memory pressure on an
+/// idle 46 GB card and park the encoder on the CPU.
+///
+/// `None` keeps today's answer exactly, so every caller without such an encoder
+/// is unchanged.
+pub fn estimate_sequential_phase_weights_with_encoder_override(
+    paths: &mold_core::ModelPaths,
+    encoder_override: Option<u64>,
+) -> (u64, u64) {
     let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
     let same_file = |a: &std::path::Path, b: &std::path::Path| -> bool {
         a == b
@@ -3338,7 +3358,8 @@ pub fn estimate_sequential_phase_weights(paths: &mold_core::ModelPaths) -> (u64,
         .map(|p| encoder_size(p))
         .sum();
 
-    let encoder_total = t5_size + clip_size + clip2_size + text_encoder_size;
+    let encoder_total =
+        encoder_override.unwrap_or(t5_size + clip_size + clip2_size + text_encoder_size);
 
     (encoder_total, transformer_size + vae_size)
 }
@@ -3348,7 +3369,19 @@ pub fn estimate_sequential_phase_weights(paths: &mold_core::ModelPaths) -> (u64,
 /// For Eager: sum of all component files + headroom.
 /// For Sequential: max(encoder_total, transformer + VAE) + headroom.
 pub fn estimate_peak_memory(paths: &mold_core::ModelPaths, strategy: LoadStrategy) -> u64 {
-    let (encoder_weights, inference_weights) = estimate_sequential_phase_weights(paths);
+    estimate_peak_memory_with_encoder_override(paths, strategy, None)
+}
+
+/// [`estimate_peak_memory`] with the encoder phase re-priced; see
+/// [`estimate_sequential_phase_weights_with_encoder_override`]. `None` is
+/// today's answer.
+pub fn estimate_peak_memory_with_encoder_override(
+    paths: &mold_core::ModelPaths,
+    strategy: LoadStrategy,
+    encoder_override: Option<u64>,
+) -> u64 {
+    let (encoder_weights, inference_weights) =
+        estimate_sequential_phase_weights_with_encoder_override(paths, encoder_override);
     match strategy {
         LoadStrategy::Eager => encoder_weights + inference_weights + MEMORY_BUDGET_HEADROOM,
         LoadStrategy::Sequential => {

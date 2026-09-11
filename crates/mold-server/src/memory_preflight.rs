@@ -539,6 +539,7 @@ fn preflight_memory_guard_with_available_and_policy_for_request(
         flux_offload,
         qwen_quantized,
         policy.gemma_competes,
+        streamed_text_encoder_device_charge(model_name, paths),
     );
     // Add the per-request activation budget on top of the file-size peak.
     // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
@@ -565,6 +566,23 @@ fn preflight_memory_guard_with_available_and_policy_for_request(
     )
 }
 
+/// The device charge for a FLUX.2 [dev] Mistral3 encoder, or `None` when the
+/// model's encoder phase is priced from its files.
+///
+/// One derivation, read by both the generic peak and the eager peak, because a
+/// planner that agreed with itself on only one of the two would still declare
+/// memory pressure and park the encoder on the CPU — the 78.8 s encode the
+/// 2026-09-11 audit measured with the GPU at 0 % SM.
+///
+/// BF16 is the dtype FLUX.2 runs a GPU-placed encoder at
+/// (`flux2/pipeline.rs`'s `gpu_dtype`); F16 would price identically.
+fn streamed_text_encoder_device_charge(model_name: &str, paths: &ModelPaths) -> Option<u64> {
+    mold_inference::flux2::text_encoder_residency::mistral3_admission_charge_for_gpu(
+        model_name, paths,
+    )
+    .map(|charge| charge.device_peak)
+}
+
 fn base_peak_memory_for_paths(
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
@@ -572,6 +590,7 @@ fn base_peak_memory_for_paths(
     flux_offload: bool,
     qwen_quantized: bool,
     gemma_competes: bool,
+    encoder_override: Option<u64>,
 ) -> u64 {
     if streaming {
         // LTX-2 also pays for a Gemma 3 12B prompt encoder. Auto placement
@@ -589,7 +608,11 @@ fn base_peak_memory_for_paths(
         return qwen_image_quantized_sequential_peak(paths, hint);
     }
 
-    mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Sequential)
+    mold_inference::device::estimate_peak_memory_with_encoder_override(
+        paths,
+        mold_inference::LoadStrategy::Sequential,
+        encoder_override,
+    )
 }
 
 /// The `MEMORY_BUDGET_HEADROOM` baked into `estimate_peak_memory`, removed
@@ -1821,6 +1844,11 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     let streaming = hint
         .map(|h| h.family.streaming_transformer())
         .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
+    // Derived ONCE and handed to both the generic peak and the eager peak
+    // below: `under_memory_pressure` and the planner's auto-park decision are
+    // computed from `eager_peak`, so re-pricing only the sequential arm would
+    // leave FLUX.2 [dev]'s encoder parked on the CPU anyway.
+    let streamed_encoder_charge = streamed_text_encoder_device_charge(&req.model, paths);
     let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
         && transformer_path_is_gguf(paths);
     // Wan's token grid and per-token slope are properties of the checkpoint,
@@ -1895,6 +1923,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 flux_offload,
                 qwen_quantized,
                 gemma_competes,
+                streamed_encoder_charge,
             );
             let wan = hint.is_some_and(|h| h.family == ActivationFamily::WanVideo);
             if wan {
@@ -2029,9 +2058,12 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 projection.source_image || projection.edit_image_count > 0
             }),
     );
-    let eager_peak =
-        mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager)
-            .saturating_add(activation);
+    let eager_peak = mold_inference::device::estimate_peak_memory_with_encoder_override(
+        paths,
+        mold_inference::LoadStrategy::Eager,
+        streamed_encoder_charge,
+    )
+    .saturating_add(activation);
     let under_memory_pressure = available_memory_bytes
         .is_some_and(|available| eager_peak > available.saturating_mul(9) / 10);
     let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
@@ -4139,5 +4171,141 @@ mod metal_policy_tests {
             .error
             .contains("permission denied"));
         assert_eq!(metal_available_from_sample(None, resident).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod streamed_text_encoder_tests {
+    use super::*;
+    use crate::execution_plan::sparse_admission_test_file;
+    use mold_inference::wan::block_offload::AdmissionPolicy;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn paths(transformer: &Path, vae: &Path, encoders: &[&Path]) -> ModelPaths {
+        ModelPaths {
+            transformer: transformer.to_path_buf(),
+            transformer_shards: Vec::new(),
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
+            vae: vae.to_path_buf(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: encoders.iter().map(|p| PathBuf::from(*p)).collect(),
+            text_tokenizer: None,
+            decoder: None,
+        }
+    }
+
+    fn budget(model: &str, paths: &ModelPaths, available: u64) -> GenerationMemoryBudget {
+        let request: GenerateRequest = serde_json::from_str(&format!(
+            r#"{{"prompt":"x","model":"{model}","width":1024,"height":1024,"steps":20,"guidance":4.0}}"#
+        ))
+        .unwrap();
+        let hint = Some(ActivationHint::from_request(&request, "flux2"));
+        estimate_generation_memory_for_request(
+            &request,
+            paths,
+            hint,
+            GenerationOffloadPolicy::new(false, AdmissionPolicy::Disabled, false),
+            Some(available),
+            false,
+            false,
+        )
+    }
+
+    /// The planner charges FLUX.2 [dev]'s Mistral3 encoder what it STREAMS,
+    /// never what it weighs on disk.
+    ///
+    /// `eager_peak_memory_bytes` is what `under_memory_pressure` and the
+    /// placement planner's auto-park decision both read. With the encoder's
+    /// 36 GB file in it, a completely idle 46 GB L40S looked over-subscribed,
+    /// the encoder was parked on the CPU, FLUX.2 selected F32 there, and the
+    /// 2026-09-11 audit measured a 78.8 s prompt encode with the GPU at 0 % SM
+    /// for its entire duration.
+    #[test]
+    fn flux2_dev_eager_peak_charges_the_streamed_prefix_not_the_encoder_file() {
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("flux2-dev-Q8_0.gguf");
+        let vae = root.path().join("flux2-vae.safetensors");
+        let encoder = root.path().join("mistral_3_small_flux2_bf16.safetensors");
+        sparse_admission_test_file(&transformer, 33 * GIB);
+        sparse_admission_test_file(&vae, GIB / 2);
+        sparse_admission_test_file(&encoder, 36 * GIB);
+        let model_paths = paths(&transformer, &vae, &[&encoder]);
+
+        let charge =
+            mold_inference::flux2::text_encoder_residency::mistral3_admission_charge_for_gpu(
+                "flux2-dev:q8",
+                &model_paths,
+            )
+            .expect("a dev Mistral3 encoder streams");
+        let file_priced = mold_inference::device::estimate_peak_memory(
+            &model_paths,
+            mold_inference::LoadStrategy::Eager,
+        );
+        let streamed = mold_inference::device::estimate_peak_memory_with_encoder_override(
+            &model_paths,
+            mold_inference::LoadStrategy::Eager,
+            Some(charge.device_peak),
+        );
+
+        let answer = budget("flux2-dev:q8", &model_paths, 46 * GIB);
+        assert_eq!(
+            answer.eager_peak_memory_bytes,
+            streamed.saturating_add(answer.activation_memory_bytes),
+            "the eager peak must price the streamed encoder, not its shards"
+        );
+        assert!(
+            file_priced - streamed > 30 * GIB,
+            "the file-priced estimate carries the ~36 GB over-charge this fixes"
+        );
+        assert!(
+            !answer.under_memory_pressure,
+            "an idle 46 GB card is not under pressure for a streamed encoder"
+        );
+    }
+
+    /// The predicate is FLUX.2 [dev]'s alone. Klein conditions on a Qwen3
+    /// encoder the engine materializes, so it keeps its file-size charge and
+    /// the estimate must be byte-for-byte what it always was.
+    #[test]
+    fn a_klein_9b_bf16_encoder_keeps_its_file_size_charge() {
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("flux2-klein-9b-bf16.safetensors");
+        let vae = root.path().join("flux2-vae.safetensors");
+        let encoder = root.path().join("qwen3-4b-bf16.safetensors");
+        sparse_admission_test_file(&transformer, 18 * GIB);
+        sparse_admission_test_file(&vae, GIB / 2);
+        sparse_admission_test_file(&encoder, 8 * GIB);
+        let model_paths = paths(&transformer, &vae, &[&encoder]);
+
+        assert!(
+            mold_inference::flux2::text_encoder_residency::mistral3_admission_charge_for_gpu(
+                "flux2-klein-9b:bf16",
+                &model_paths,
+            )
+            .is_none(),
+            "Klein has no streamed Mistral3 prefix"
+        );
+
+        let answer = budget("flux2-klein-9b:bf16", &model_paths, 46 * GIB);
+        assert_eq!(
+            answer.eager_peak_memory_bytes,
+            mold_inference::device::estimate_peak_memory(
+                &model_paths,
+                mold_inference::LoadStrategy::Eager,
+            )
+            .saturating_add(answer.activation_memory_bytes)
+        );
     }
 }
