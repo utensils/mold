@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { IntegerControl } from "@studio/lib/generated/generationProfileV1";
+import type { IntegerControl } from "./generated/generationProfileV1";
 import { activeQualityPreset, qualityPresets } from "./qualityPresets";
 
 function steps(overrides: Partial<IntegerControl> = {}): IntegerControl {
@@ -30,14 +30,18 @@ describe("qualityPresets", () => {
   });
 
   it("drops a row the ladder cannot distinguish", () => {
-    expect(qualityPresets(steps({ default: 2, recommended: [2, 2, 4] }))).toEqual([
+    expect(
+      qualityPresets(steps({ default: 2, recommended: [2, 2, 4] })),
+    ).toEqual([
       { key: "draft", label: "Draft", steps: 2 },
       { key: "best", label: "Best", steps: 4 },
     ]);
   });
 
   it("offers nothing for a recipe that pins its steps", () => {
-    expect(qualityPresets(steps({ mode: "fixed", default: 4, recommended: [4] }))).toEqual([]);
+    expect(
+      qualityPresets(steps({ mode: "fixed", default: 4, recommended: [4] })),
+    ).toEqual([]);
     expect(qualityPresets(null)).toEqual([]);
   });
 
@@ -50,18 +54,46 @@ describe("qualityPresets", () => {
    * control's bounds — never the raw floor or ceiling.
    */
   it("stands in for a host older than the ladder with the profile's own formula", () => {
-    expect(qualityPresets(steps({ default: 20, recommended: [20] })).map((p) => p.steps)).toEqual([
-      10, 20, 30,
+    expect(
+      qualityPresets(steps({ default: 20, recommended: [20] })).map(
+        (p) => p.steps,
+      ),
+    ).toEqual([10, 20, 30]);
+    const { recommended: _dropped, ...withoutLadder } = steps({
+      default: 4,
+      min: 1,
+      max: 100,
+    });
+    expect(qualityPresets(withoutLadder).map((p) => p.steps)).toEqual([
+      2, 4, 6,
     ]);
-    const { recommended: _dropped, ...withoutLadder } = steps({ default: 4, min: 1, max: 100 });
-    expect(qualityPresets(withoutLadder).map((p) => p.steps)).toEqual([2, 4, 6]);
     // Clamped into the control's bounds, then deduped, exactly as the host does.
-    expect(qualityPresets(steps({ default: 9, min: 8, max: 12, recommended: [9] }))).toEqual([
+    expect(
+      qualityPresets(steps({ default: 9, min: 8, max: 12, recommended: [9] })),
+    ).toEqual([
       { key: "draft", label: "Draft", steps: 8 },
       { key: "good", label: "Good", steps: 9 },
       { key: "best", label: "Best", steps: 12 },
     ]);
-    expect(qualityPresets(steps({ default: 4, min: 4, max: 4, recommended: [4] }))).toEqual([]);
+    expect(
+      qualityPresets(steps({ default: 4, min: 4, max: 4, recommended: [4] })),
+    ).toEqual([]);
+  });
+  /* Named for the two rules web's rail depends on, so a reader looking for
+   * either finds it by name rather than inside the formula test above. */
+  it("an absent recommended ladder falls back to half/default/1.5×", () => {
+    const { recommended: _dropped, ...withoutLadder } = steps({
+      default: 20,
+      min: 1,
+      max: 100,
+    });
+    expect(qualityPresets(withoutLadder).map((p) => p.steps)).toEqual([
+      10, 20, 30,
+    ]);
+  });
+
+  it("a pinned recipe offers no rows", () => {
+    expect(qualityPresets(steps({ mode: "fixed" }))).toEqual([]);
   });
 });
 
