@@ -498,10 +498,27 @@ fn shared_nvml_handle_is_reused_and_reset_on_poison() {
         "reuse costs no initialization"
     );
 
-    // A driver reload invalidates the handle; the next caller must get a new
-    // one rather than a permanently dead one.
+    // A handle that dies immediately after being created is the loop this
+    // gate exists for: re-initializing costs a dlopen plus a driver
+    // enumeration under the global mutex admission waits on, and ungated it
+    // was paid at telemetry's 1 Hz plus once per admission, forever.
     first.poison_for_test();
-    let third = crate::resources::shared_nvml().expect("re-initializes after a poisoned handle");
+    assert!(
+        crate::resources::shared_nvml().is_none(),
+        "a handle poisoned inside the retry window backs off instead of re-initializing"
+    );
+    assert_eq!(
+        crate::resources::shared_nvml_init_attempts(),
+        attempts_before + 1,
+        "the backoff must cost no initialization at all"
+    );
+
+    // Once the window has passed, a genuine driver reload still recovers.
+    // `attempted_at` is when the CURRENT handle was made, so a long-lived
+    // handle killed by a reload is already past the window and recovers on
+    // the very next sample.
+    crate::resources::age_shared_nvml_for_test();
+    let third = crate::resources::shared_nvml().expect("re-initializes once the window has passed");
     assert!(
         !std::sync::Arc::ptr_eq(&first, &third),
         "a poisoned handle is replaced, not reused"
@@ -510,6 +527,38 @@ fn shared_nvml_handle_is_reused_and_reset_on_poison() {
         crate::resources::shared_nvml_init_attempts(),
         attempts_before + 2
     );
+}
+
+/// `FailedToLoadSymbol` is an old driver against a newer wrapper: the library
+/// loaded, the symbol is simply not in it. Re-`dlopen`ing the same file cannot
+/// fix that, so poisoning on it made a permanent mismatch into an
+/// init/call/poison/init loop.
+#[test]
+#[cfg(feature = "nvml")]
+fn a_missing_symbol_is_permanent_and_never_poisons_the_handle() {
+    use nvml_wrapper::error::NvmlError;
+    for permanent in [
+        NvmlError::FailedToLoadSymbol("nvmlDeviceGetMemoryInfo_v2".to_string()),
+        NvmlError::NotFound,
+        NvmlError::NotSupported,
+    ] {
+        assert!(
+            !crate::resources::nvml_error_kills_the_handle(&permanent),
+            "{permanent:?} must not poison the shared handle"
+        );
+    }
+    for fatal in [
+        NvmlError::Uninitialized,
+        NvmlError::DriverNotLoaded,
+        NvmlError::LibraryNotFound,
+        NvmlError::GpuLost,
+        NvmlError::ResetRequired,
+    ] {
+        assert!(
+            crate::resources::nvml_error_kills_the_handle(&fatal),
+            "{fatal:?} means the handle is finished"
+        );
+    }
 }
 
 #[test]

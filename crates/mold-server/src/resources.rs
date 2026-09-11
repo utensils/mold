@@ -295,16 +295,14 @@ pub(crate) mod nvml_source {
         /// or an absent utilization counter say nothing about the handle; a
         /// driver reload, an unloaded driver or a lost GPU say the handle is
         /// finished and the next caller should re-initialize.
+        ///
+        /// `FailedToLoadSymbol` is deliberately NOT in that set. nvml-wrapper
+        /// returns it when the library that loaded fine lacks the symbol —
+        /// an old driver against a newer wrapper — and re-`dlopen`ing the
+        /// same library cannot conjure it. Poisoning on it turned a permanent
+        /// mismatch into an init/call/poison/init loop.
         fn note_error(&self, error: &NvmlError) {
-            if matches!(
-                error,
-                NvmlError::Uninitialized
-                    | NvmlError::DriverNotLoaded
-                    | NvmlError::LibraryNotFound
-                    | NvmlError::FailedToLoadSymbol(_)
-                    | NvmlError::GpuLost
-                    | NvmlError::ResetRequired
-            ) {
+            if super::nvml_error_kills_the_handle(error) {
                 self.poisoned.store(true, Ordering::Relaxed);
             }
         }
@@ -491,10 +489,32 @@ static SHARED_NVML_INIT_ATTEMPTS: std::sync::atomic::AtomicUsize =
 /// One handle now serves all of them.
 ///
 /// The slot is reset when a call observes an error that kills the handle
-/// (`Uninitialized`, `DriverNotLoaded`, `GpuLost`, `ResetRequired`, a symbol
-/// that failed to load), so a driver reload recovers on the next sample
-/// instead of leaving telemetry permanently dead. An absent driver is
-/// memoized for [`NVML_RETRY_AFTER`].
+/// (`Uninitialized`, `DriverNotLoaded`, `LibraryNotFound`, `GpuLost`,
+/// `ResetRequired`), so a driver reload recovers on the next sample instead
+/// of leaving telemetry permanently dead. An absent driver AND a handle that
+/// poisons immediately after being created are both memoized for
+/// [`NVML_RETRY_AFTER`].
+/// Does this NVML error mean the HANDLE is finished, rather than one
+/// device's answer being unavailable?
+///
+/// Only errors a fresh `Nvml::init()` could actually repair belong here.
+/// `FailedToLoadSymbol` deliberately does not: nvml-wrapper returns it when
+/// the library loaded but lacks the symbol, so re-`dlopen`ing the same file
+/// cannot change the outcome and poisoning on it produced an
+/// init/call/poison/init loop.
+#[cfg(feature = "nvml")]
+pub(crate) fn nvml_error_kills_the_handle(error: &nvml_wrapper::error::NvmlError) -> bool {
+    use nvml_wrapper::error::NvmlError;
+    matches!(
+        error,
+        NvmlError::Uninitialized
+            | NvmlError::DriverNotLoaded
+            | NvmlError::LibraryNotFound
+            | NvmlError::GpuLost
+            | NvmlError::ResetRequired
+    )
+}
+
 #[cfg(feature = "nvml")]
 pub(crate) fn shared_nvml() -> Option<Arc<NvmlSource>> {
     let mut slot = SHARED_NVML
@@ -503,6 +523,19 @@ pub(crate) fn shared_nvml() -> Option<Arc<NvmlSource>> {
     if let Some(held) = slot.as_ref() {
         match held.source.as_ref() {
             Some(source) if !source.is_poisoned() => return Some(source.clone()),
+            // A poisoned handle is dead, and replacing it costs an
+            // `Nvml::init()` — a dlopen plus a driver enumeration — performed
+            // while holding this global mutex, which every admission through
+            // `current_process_vram_bytes` waits on. Ungated, a handle that
+            // poisons on first use re-initialized at telemetry's 1 Hz PLUS
+            // once per admission, forever. The same `NVML_RETRY_AFTER` gate
+            // the absent-driver branch has bounds that.
+            //
+            // `attempted_at` is when the CURRENT handle was created, so a
+            // long-lived handle killed by a genuine driver reload still
+            // recovers on the very next sample; only a handle that dies
+            // immediately after being made — the loop — is made to wait.
+            Some(_) if held.attempted_at.elapsed() < NVML_RETRY_AFTER => return None,
             Some(_) => {}
             None if held.attempted_at.elapsed() < NVML_RETRY_AFTER => return None,
             None => {}
@@ -533,6 +566,18 @@ pub(crate) fn reset_shared_nvml_for_test() {
     *SHARED_NVML
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = None;
+}
+
+/// Age the held slot past [`NVML_RETRY_AFTER`], so a test can reach the
+/// recovery branch without sleeping a minute.
+#[cfg(all(test, feature = "nvml"))]
+pub(crate) fn age_shared_nvml_for_test() {
+    let mut slot = SHARED_NVML
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(held) = slot.as_mut() {
+        held.attempted_at = std::time::Instant::now() - (NVML_RETRY_AFTER + Duration::from_secs(1));
+    }
 }
 
 #[cfg(any(feature = "nvml", test))]
