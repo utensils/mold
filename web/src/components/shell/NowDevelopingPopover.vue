@@ -100,7 +100,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--mold-blue);
   border-radius: var(--radius-control);
   background: var(--surface);
-  color: var(--rebate);
+  color: var(--mold-text);
   font-family: var(--f-body);
   font-size: 12px;
   font-weight: 600;

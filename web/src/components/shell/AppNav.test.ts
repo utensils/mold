@@ -340,3 +340,32 @@ describe("mobile nav sheet anchoring", () => {
     expect(host.classes()).toContain("inset-0");
   });
 });
+
+describe("the downloads chip's words", () => {
+  // Two kinds of work, two chips: beside "Making 1 · 3 waiting" the header
+  // says "Getting 1 style ready" while a style is on its way, and only
+  // "Downloads" once nothing is.
+  it("counts the styles on their way, in the lexicon's words", async () => {
+    dlState.activeJobs = [{ id: "a" }];
+    dlState.queued = [{ id: "b" }, { id: "c" }];
+    const wrapper = mountNav();
+    expect(wrapper.get("[data-test='downloads-chip']").text()).toBe(
+      "Getting 3 styles ready",
+    );
+    expect(wrapper.get("[data-test='downloads-chip']").classes()).toContain(
+      "dl-chip--busy",
+    );
+    dlState.activeJobs = [];
+    dlState.queued = [];
+    wrapper.unmount();
+  });
+
+  it("says Downloads when nothing is on its way", () => {
+    const wrapper = mountNav();
+    expect(wrapper.get("[data-test='downloads-chip']").text()).toBe("Downloads");
+    expect(wrapper.get("[data-test='downloads-chip']").classes()).not.toContain(
+      "dl-chip--busy",
+    );
+    wrapper.unmount();
+  });
+});

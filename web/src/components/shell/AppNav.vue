@@ -63,6 +63,13 @@ const badgeCount = computed(
     (downloads.queued?.value.length ?? 0),
 );
 
+/** "Getting 1 style ready" while work is on its way; "Downloads" otherwise. */
+const downloadsLabel = computed(() =>
+  badgeCount.value > 0
+    ? `Getting ${badgeCount.value} style${badgeCount.value === 1 ? "" : "s"} ready`
+    : "Downloads",
+);
+
 function openDownloads() {
   window.dispatchEvent(new CustomEvent("mold:open-downloads"));
 }
@@ -183,14 +190,13 @@ const menuOpen = ref(false);
       <button
         type="button"
         class="dl-chip"
+        :class="{ 'dl-chip--busy': badgeCount > 0 }"
         aria-label="Open downloads"
+        data-test="downloads-chip"
         @click="openDownloads"
       >
         <Icon name="download" :size="15" />
-        <span class="dl-chip__label">Downloads</span>
-        <span v-if="badgeCount > 0" class="dl-badge">
-          <BadgePill tone="accent">{{ badgeCount }}</BadgePill>
-        </span>
+        <span class="dl-chip__label">{{ downloadsLabel }}</span>
       </button>
 
       <NotificationsCenter />
@@ -462,6 +468,13 @@ const menuOpen = ref(false);
 }
 
 /* ── Downloads chip + badge ────────────────────────────────────────── */
+.dl-chip--busy {
+  border-color: var(--mold-warning);
+  color: var(--mold-text);
+}
+.dl-chip--busy :deep(svg) {
+  color: var(--mold-warning);
+}
 .dl-chip {
   position: relative;
   display: flex;
