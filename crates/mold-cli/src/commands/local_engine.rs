@@ -158,6 +158,9 @@ pub(crate) async fn plan_local_batch(
         .filter(|gpu| selected_ordinals.contains(&gpu.ordinal))
         .filter_map(|gpu| {
             Some(mold_server::execution_plan::DeviceFact {
+                total_vram_bytes: mold_server::execution_plan::DeviceFact::sampled_total_vram_bytes(
+                    gpu.total_vram_bytes,
+                ),
                 cuda_peak_baseline: None,
                 id: gpu.stable_id.clone()?,
                 ordinal: gpu.ordinal,

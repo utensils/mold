@@ -80,6 +80,7 @@ fn path(root: &Path, name: &str) -> String {
 
 fn device(id: &str, backend: GpuBackend, architecture: Option<(u16, u16)>) -> DeviceFact {
     DeviceFact {
+        total_vram_bytes: Some(24 * GIB),
         cuda_peak_baseline: None,
         id: id.into(),
         ordinal: id.bytes().last().unwrap_or(b'0').saturating_sub(b'0') as usize,
@@ -469,8 +470,16 @@ fn every_frozen_semantic_field_and_runtime_input_is_differential() {
         |value| value.quantized_activation_dtype = Some(SemanticQuantizedActivationDType::F32),
         "quantized activation dtype"
     );
+    // This fixture IS flux2, and the card it planned against has a total, so
+    // the base already carries a resolved class — flipping to the other one is
+    // the differential, in whichever direction this host's budget landed.
     assert_semantic_change!(
-        |value| value.flux2_cfg_batching = Some(SemanticFlux2CfgBatching::Batched),
+        |value| {
+            value.flux2_cfg_batching = Some(match value.flux2_cfg_batching {
+                Some(SemanticFlux2CfgBatching::Batched) => SemanticFlux2CfgBatching::Sequential,
+                _ => SemanticFlux2CfgBatching::Batched,
+            })
+        },
         "flux2 cfg batching"
     );
 
@@ -494,6 +503,57 @@ fn every_frozen_semantic_field_and_runtime_input_is_differential() {
             base_fingerprint,
             changed.fingerprint(),
             "runtime semantic input {index} was omitted"
+        );
+    }
+}
+
+/// The recorded FLUX.2 CFG class follows the CARD, all the way through the
+/// planner.
+///
+/// The engine decides whether a guided Klein-base step is one batch-2 forward
+/// or two batch-1 forwards by charging the checkpoint, the doubled activations
+/// and its own runtime headroom against the card's TOTAL VRAM. A host that
+/// batches and a host that does not run different arithmetic at different
+/// cost, so their plans must not land in one equivalence class — and before
+/// `DeviceFact` carried a total, every host reported the same class.
+///
+/// Only the total moves here: `available_vram_bytes` is held fixed precisely
+/// because it is the number this gate must NOT depend on.
+#[test]
+fn the_flux2_cfg_class_follows_the_cards_total_vram() {
+    let (_root, config, request) = fixture();
+    let planned = |total: Option<u64>| {
+        let mut card = device("cuda:0", GpuBackend::Cuda, Some((8, 6)));
+        card.total_vram_bytes = total;
+        resolve_execution_plans(&config, &request, &[card], false)
+            .unwrap()
+            .remove(0)
+    };
+
+    let roomy = planned(Some(24 * GIB));
+    assert_eq!(
+        roomy
+            .execution_environment
+            .semantic_config
+            .flux2_cfg_batching,
+        Some(SemanticFlux2CfgBatching::Batched),
+        "a 24 GB card seats this checkpoint's doubled activations"
+    );
+
+    // A card that reports no total at all, and one whose total cannot hold the
+    // batch-2 budget, both keep the historical two forwards.
+    for total in [None, Some(GIB)] {
+        let plan = planned(total);
+        assert_eq!(
+            plan.execution_environment
+                .semantic_config
+                .flux2_cfg_batching,
+            Some(SemanticFlux2CfgBatching::Sequential),
+            "{total:?} cannot be charged a batched step"
+        );
+        assert_ne!(
+            roomy.execution_equivalence_fingerprint, plan.execution_equivalence_fingerprint,
+            "a batched render and a two-forward render are not the same execution"
         );
     }
 }

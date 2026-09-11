@@ -413,6 +413,7 @@ mod tests {
 
     fn device() -> DeviceFact {
         DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: "cuda:0".to_string(),
             ordinal: 0,

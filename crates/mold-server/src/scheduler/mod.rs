@@ -3346,6 +3346,9 @@ impl Coordinator {
                     .iter()
                     .find(|worker| worker_device_id(worker) == device.id.as_str())?;
                 Some(crate::execution_plan::DeviceFact {
+                    total_vram_bytes: crate::execution_plan::DeviceFact::sampled_total_vram_bytes(
+                        worker.gpu.total_vram_bytes,
+                    ),
                     cuda_peak_baseline: worker.wan_context_baseline(),
                     id: device.id.to_string(),
                     ordinal: worker.gpu.ordinal,
@@ -3446,6 +3449,10 @@ impl Coordinator {
                         determinism_class,
                         false,
                         &BTreeMap::new(),
+                        // This synthetic path has no components at all, so
+                        // there is no checkpoint to charge a CFG budget
+                        // against; the honest answer is the historical one.
+                        crate::execution_plan::Flux2CfgBudget::default(),
                     )
                     .expect(
                         "synthetic coordinator-test descriptor classifies every frozen \
@@ -9836,6 +9843,7 @@ mod tests {
             &config,
             &generation.request,
             vec![crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: worker_device_id(&worker),
                 ordinal: 0,
@@ -12751,6 +12759,7 @@ mod tests {
     fn generation_device_facts_apply_ordinal_and_stable_worker_constraints() {
         let facts = vec![
             crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:stable-small".to_string(),
                 ordinal: 0,
@@ -12759,6 +12768,7 @@ mod tests {
                 available_vram_bytes: 8 << 30,
             },
             crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:stable-large".to_string(),
                 ordinal: 1,
@@ -13167,6 +13177,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:exact".into(),
                 ordinal: 0,
@@ -17059,6 +17070,7 @@ mod tests {
         let signature = Coordinator::preparation_refresh_signature(
             &prepared,
             &[crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:1".to_string(),
                 ordinal: 1,
@@ -17155,6 +17167,7 @@ mod tests {
         let (worker, _worker_rx) = test_worker(0);
         let stable_id = worker_device_id(&worker);
         let device = crate::execution_plan::DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: stable_id.clone(),
             ordinal: 0,
@@ -17280,6 +17293,7 @@ mod tests {
         let stable_id1 = worker_device_id(&worker1);
         let devices = vec![
             crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: stable_id0.clone(),
                 ordinal: 0,
@@ -17288,6 +17302,7 @@ mod tests {
                 available_vram_bytes: 24 << 30,
             },
             crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: stable_id1.clone(),
                 ordinal: 1,
@@ -17431,6 +17446,7 @@ mod tests {
             &request,
             vec![
                 crate::execution_plan::DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: stable_id.clone(),
                     ordinal: 0,
@@ -17439,6 +17455,7 @@ mod tests {
                     available_vram_bytes: 24 << 30,
                 },
                 crate::execution_plan::DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: stable_id1.clone(),
                     ordinal: 1,
@@ -17452,6 +17469,7 @@ mod tests {
         .unwrap();
         let device_facts = vec![
             crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: stable_id.clone(),
                 ordinal: 0,
@@ -17460,6 +17478,7 @@ mod tests {
                 available_vram_bytes: 24 << 30,
             },
             crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: stable_id1.clone(),
                 ordinal: 1,
@@ -17631,6 +17650,7 @@ mod tests {
             &request,
             vec![
                 crate::execution_plan::DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: stable_id0.clone(),
                     ordinal: 0,
@@ -17639,6 +17659,7 @@ mod tests {
                     available_vram_bytes: 24 << 30,
                 },
                 crate::execution_plan::DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: stable_id1.clone(),
                     ordinal: 1,

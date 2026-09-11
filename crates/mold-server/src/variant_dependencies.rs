@@ -535,6 +535,7 @@ fn resource_device_facts(state: &AppState) -> Vec<DeviceFact> {
                 worker.gpu.total_vram_bytes,
             );
             Some(DeviceFact {
+                total_vram_bytes: DeviceFact::sampled_total_vram_bytes(worker.gpu.total_vram_bytes),
                 cuda_peak_baseline: worker.wan_context_baseline(),
                 id: device.id,
                 ordinal: device.ordinal,
@@ -574,6 +575,7 @@ fn worker_device_facts_from_startup_sample(state: &AppState) -> Vec<DeviceFact> 
         .workers
         .iter()
         .map(|worker| DeviceFact {
+            total_vram_bytes: DeviceFact::sampled_total_vram_bytes(worker.gpu.total_vram_bytes),
             cuda_peak_baseline: None,
             id: worker_device_id(&worker),
             ordinal: worker.gpu.ordinal,
@@ -3738,6 +3740,7 @@ mod tests {
             &request,
             &config,
             vec![DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
@@ -3768,6 +3771,7 @@ mod tests {
             &config,
             &request,
             &[DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
@@ -3812,6 +3816,7 @@ mod tests {
             &config,
             &request,
             &[DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
@@ -3932,6 +3937,7 @@ mod tests {
             &config,
             &request,
             vec![DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
@@ -3997,6 +4003,7 @@ mod tests {
             &request,
             vec![
                 DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: "cuda:0".to_string(),
                     ordinal: 0,
@@ -4005,6 +4012,7 @@ mod tests {
                     available_vram_bytes: 4_000_000_000,
                 },
                 DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: "cuda:1".to_string(),
                     ordinal: 1,
@@ -4037,6 +4045,7 @@ mod tests {
         config.qwen3_variant = Some("bf16".to_string());
         let low_facts = (0..8)
             .map(|ordinal| DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: format!("cuda:{ordinal}"),
                 ordinal,
@@ -4065,6 +4074,7 @@ mod tests {
             &request,
             &(0..8)
                 .map(|ordinal| DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: format!("cuda:{ordinal}"),
                     ordinal,
@@ -4094,6 +4104,7 @@ mod tests {
             &request,
             (0..8)
                 .map(|ordinal| DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: format!("cuda:{ordinal}"),
                     ordinal,
@@ -4128,6 +4139,7 @@ mod tests {
             &request,
             &config,
             vec![DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
@@ -4561,6 +4573,7 @@ mod tests {
     fn auto_quantized_download_choice_is_bounded_for_arbitrary_device_count() {
         let devices = (0..64)
             .map(|ordinal| DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: format!("cuda:{ordinal}"),
                 ordinal,
@@ -4594,6 +4607,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let variants = mold_core::manifest::known_qwen3_8b_variants();
         let devices = vec![DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: "cuda:0".to_string(),
             ordinal: 0,
@@ -4625,6 +4639,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let variants = mold_core::manifest::known_qwen3_8b_variants();
         let pressured = vec![DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: "cuda:0".to_string(),
             ordinal: 0,
@@ -4665,6 +4680,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let variants = mold_core::manifest::known_qwen3_8b_variants();
         let pressured = vec![DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: "cuda:0".to_string(),
             ordinal: 0,

@@ -514,11 +514,37 @@ pub struct ExecutionSemanticConfig {
     /// rule, which is every family but these two.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantized_activation_dtype: Option<SemanticQuantizedActivationDType>,
-    /// How an undistilled FLUX.2 base render shapes its CFG forwards.
+    /// Whether this host's BUDGET permits an undistilled FLUX.2 base render to
+    /// issue its two classifier-free guidance branches as one batch-2 forward.
     ///
-    /// `None` outside flux2. Every build resolves `Sequential` today; the
-    /// field exists now so that when batching lands it is a visible change of
-    /// equivalence class rather than a silent one.
+    /// `None` outside flux2. Resolved through the engine's OWN gate —
+    /// `mold_inference::flux2::flux2_cfg_batching`, the same pure function
+    /// `flux2::pipeline::resolve_cfg_batching` calls — charged against the
+    /// card's TOTAL VRAM rather than what is free at this instant, which is
+    /// precisely why `DeviceFact` carries the total: the free figure moves
+    /// between planning and execution, so charging it would let the plan and
+    /// the render disagree about which execution this is.
+    ///
+    /// This records the BUDGET decision and nothing else. The engine applies
+    /// three further gates that are properties of the REQUEST, not of the
+    /// host, and none of them is answerable here: the tier test
+    /// (`validation::is_flux2_base_model`) and `guidance > 1.0`, which decide
+    /// whether a CFG branch exists at all, and the equal-token-length test in
+    /// `flux2_cfg_batching_for`, which falls back to two forwards when the
+    /// prompt and the negative prompt encode to different widths — a fact only
+    /// the encoder has, at render time.
+    ///
+    /// That residue is real and deliberately not papered over: no fingerprint
+    /// input carries a prompt. The equivalence descriptor holds no request
+    /// text, and the learned-timing key's shape bucket is
+    /// `{w}x{h}:s{steps}:f{frames}` (`gpu_pool::scheduling_shape_bucket`), so
+    /// two base renders on one host whose prompts happen to tokenize to
+    /// different lengths still share a class. What this field buys is the
+    /// thing that was actually wrong: a card that CAN batch and a card that
+    /// cannot no longer share one. The length residue closes on its own if
+    /// Klein prompts are padded to a fixed encoder width, at which point the
+    /// gate is always true and the budget is the whole answer; nothing here
+    /// changes either way.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flux2_cfg_batching: Option<SemanticFlux2CfgBatching>,
     pub vae_tiling: SemanticVaeTiling,
@@ -578,10 +604,57 @@ pub enum SemanticQuantizedActivationDType {
 /// guidance branches as one batch-2 forward or as two batch-1 forwards.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum SemanticFlux2CfgBatching {
-    /// One forward over `[uncond, cond]`.
+    /// One forward over `[uncond, cond]` — the budget holds the doubled
+    /// activations beside the transformer.
     Batched,
-    /// Two forwards per step — what every build resolves today.
+    /// Two forwards per step. Also the answer whenever the card's total is
+    /// unknown, which is every non-CUDA device and every discovery sample that
+    /// carried no total: two forwards is what such a host has always run
+    /// (`flux2::pipeline::resolve_cfg_batching` returns `Sequential` when it
+    /// cannot read a total), so the unknown case costs no reclassification.
     Sequential,
+}
+
+/// The three byte counts the FLUX.2 CFG budget gate is charged against.
+///
+/// It is a struct rather than three parameters because it travels from the
+/// planner, which knows the checkpoint and the card, to `from_frozen`, which
+/// knows the family — and because `Default` is the honest answer for a caller
+/// that has neither (no total ⇒ `Sequential`, the historical execution).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Flux2CfgBudget {
+    /// Bytes of transformer weights, summed over the checkpoint's shards —
+    /// the same quantity `Flux2Engine::transformer_file_bytes` hands the
+    /// engine's own call.
+    pub transformer_bytes: u64,
+    /// Denoise workspace for a batch-2 forward at this request's canvas.
+    pub activation_bytes_batch2: u64,
+    /// The card's installed VRAM, or `None` where none was sampled.
+    pub device_total_vram_bytes: Option<u64>,
+}
+
+impl Flux2CfgBudget {
+    /// The engine's verdict for this budget.
+    ///
+    /// `mold_inference::flux2::flux2_cfg_batching` is called rather than
+    /// mirrored: the arithmetic includes the engine's own runtime headroom
+    /// constant, and a planner that re-derived it would drift the moment that
+    /// constant moved.
+    fn resolve(self) -> SemanticFlux2CfgBatching {
+        let Some(total) = self.device_total_vram_bytes else {
+            return SemanticFlux2CfgBatching::Sequential;
+        };
+        match mold_inference::flux2::flux2_cfg_batching(
+            self.transformer_bytes,
+            self.activation_bytes_batch2,
+            total,
+        ) {
+            mold_inference::flux2::Flux2CfgBatching::Batched => SemanticFlux2CfgBatching::Batched,
+            mold_inference::flux2::Flux2CfgBatching::Sequential => {
+                SemanticFlux2CfgBatching::Sequential
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -736,9 +809,16 @@ impl ExecutionSemanticConfig {
     /// property of the DEVICE (CUDA's MMQ kernels take bf16; Metal's and the
     /// CPU's take f32 only), and the planner resolves one descriptor per
     /// candidate device.
+    ///
+    /// `flux2_cfg_budget` is likewise a parameter: the CFG gate is charged
+    /// against the CARD and the CHECKPOINT, neither of which a frozen engine
+    /// configuration describes. A caller outside flux2 passes
+    /// `Flux2CfgBudget::default()` — the field is `None` for its family
+    /// anyway.
     pub fn from_frozen(
         frozen: &mold_inference::FrozenEngineConfig,
         backend: GpuBackend,
+        flux2_cfg_budget: Flux2CfgBudget,
     ) -> Result<Self, ExecutionPlanError> {
         let mold_inference::FrozenEngineConfig {
             family,
@@ -881,20 +961,9 @@ impl ExecutionSemanticConfig {
             // NAME test the engine performs, and recording it per tier here
             // would be a second authority for that question.
             //
-            // KNOWN GAP, not a resolved answer: batched CFG has since landed
-            // (`flux2::transformer::flux2_cfg_batching_for`), and this still
-            // reports `Sequential` unconditionally, so a host that batches
-            // shares an equivalence class with one that does not. Resolving it
-            // truthfully needs two inputs the planner does not have here — the
-            // card's TOTAL VRAM, which the engine's gate is deliberately
-            // charged against and which `DeviceFact` does not carry, and the
-            // batch-2 activation figure. Plumbing total VRAM through
-            // `DeviceFact` is the fix; it touches every construction site, so
-            // it belongs with whoever owns that struct rather than being
-            // guessed at from `available_vram_bytes` (a different number, and
-            // one that moves between planning and execution — exactly what
-            // `flux2_cfg_batching`'s doc comment says it must not depend on).
-            flux2_cfg_batching: (family == "flux2").then_some(SemanticFlux2CfgBatching::Sequential),
+            // The VALUE is the engine's own budget verdict — see the field's
+            // doc for what that does and does not settle.
+            flux2_cfg_batching: (family == "flux2").then(|| flux2_cfg_budget.resolve()),
             // Only wan has a step cache, so only wan carries the field; every
             // other family's fingerprint is byte-identical to what it was
             // before this existed.
@@ -1378,7 +1447,36 @@ pub struct DeviceFact {
     pub backend: GpuBackend,
     pub compute_capability: Option<(u16, u16)>,
     pub available_vram_bytes: u64,
+    /// The card's installed VRAM, from the same NVML/CUDA telemetry that fills
+    /// `available_vram_bytes`.
+    ///
+    /// It is a SEPARATE fact rather than a derivation because the two answer
+    /// different questions and only one of them is stable: `available` moves
+    /// between planning and execution as other tenants and this server's own
+    /// cache come and go, while the total does not move at all. An engine gate
+    /// that must reach the same verdict in the planner and in the renderer has
+    /// to be charged against the stable number — see
+    /// `mold_inference::flux2::flux2_cfg_batching`, whose doc says exactly
+    /// that.
+    ///
+    /// `None` where no total was sampled: CPU, a discovery snapshot that never
+    /// carried one, and every `GpuDevice` whose `total_vram_bytes` is the `0`
+    /// sentinel. A gate that needs it falls back to its historical answer
+    /// rather than guessing from `available_vram_bytes`.
+    pub total_vram_bytes: Option<u64>,
     pub cuda_peak_baseline: Option<crate::cuda_peak::CertifiedBaseline>,
+}
+
+impl DeviceFact {
+    /// `total_vram_bytes` from a sampled [`mold_inference::device::GpuDevice`].
+    ///
+    /// That struct carries `0` for "no total was read" rather than an
+    /// `Option` — the CLI's device listing already treats it that way — so
+    /// every construction site normalizes through this one function instead of
+    /// each deciding for itself what a zero-capacity card means.
+    pub fn sampled_total_vram_bytes(sampled: u64) -> Option<u64> {
+        (sampled > 0).then_some(sampled)
+    }
 }
 
 /// The one identity a batch parent's siblings share, filled by whichever of
@@ -2186,6 +2284,9 @@ fn resolve_private_h3_execution_plans(
             determinism_class,
             true,
             &BTreeMap::new(),
+            // MiniMax H3 is not flux2, so the field this budget resolves is
+            // `None` for every plan on this path.
+            Flux2CfgBudget::default(),
         )?;
         let execution_equivalence_fingerprint = execution_environment.fingerprint();
         plans.push(ResolvedExecutionPlan {
@@ -3721,6 +3822,14 @@ fn build_plan(
         determinism_class,
         context.equivalence_cache_only,
         context.pending_artifacts,
+        flux2_cfg_budget(
+            context.family,
+            context.request,
+            device,
+            context.artifacts,
+            context.pending_artifacts,
+            context.engine_config.attention_backend,
+        ),
     ) {
         Ok(environment) => environment,
         Err(error) => return Some(Err(error)),
@@ -3771,6 +3880,7 @@ pub(crate) fn execution_environment_descriptor(
     determinism_class: DeterminismClass,
     equivalence_cache_only: bool,
     pending_artifacts: &BTreeMap<PathBuf, PendingArtifactIdentity>,
+    flux2_cfg_budget: Flux2CfgBudget,
 ) -> Result<ExecutionEnvironmentDescriptor, ExecutionPlanError> {
     let architecture = match (device.backend, device.compute_capability) {
         (GpuBackend::Cuda, Some((major, minor))) => {
@@ -3863,7 +3973,11 @@ pub(crate) fn execution_environment_descriptor(
             AttentionBackend::Flash => AttentionKernelClass::Flash,
         },
         code: execution_code_identity(),
-        semantic_config: ExecutionSemanticConfig::from_frozen(engine_config, device.backend)?,
+        semantic_config: ExecutionSemanticConfig::from_frozen(
+            engine_config,
+            device.backend,
+            flux2_cfg_budget,
+        )?,
         runtime_model_id: runtime_model_id.to_string(),
         runtime_artifact_paths,
         model_family: model_family.to_string(),
@@ -4114,6 +4228,96 @@ fn flux2_mistral_peak_anchor(
         .iter()
         .find(|(role, path)| flux2_mistral_streams_from_mmap(family, model, role, path))
         .map(|(role, _)| role.clone())
+}
+
+/// Transformer weight bytes for this plan, or `None` when the checkpoint
+/// cannot be measured.
+///
+/// The engine charges its CFG budget against
+/// `Flux2Engine::transformer_file_bytes` — the summed size of the transformer
+/// file or its shards — so this sums the same thing over the same roles. A
+/// pending artifact contributes its declared size; a file whose metadata
+/// cannot be read contributes nothing at all, and the whole answer becomes
+/// `None`, because [`artifact_size`]'s 64 MiB unknown-charge is a host-RAM
+/// placeholder and using it here would understate a 9 GB checkpoint by two
+/// orders of magnitude and report `Batched` on a card that cannot.
+fn flux2_transformer_weight_bytes(
+    artifacts: &BTreeMap<ComponentRole, PathBuf>,
+    pending_artifacts: &BTreeMap<PathBuf, PendingArtifactIdentity>,
+) -> Option<u64> {
+    let mut total: u64 = 0;
+    let mut measured = false;
+    for (role, path) in artifacts {
+        if !matches!(
+            role,
+            ComponentRole::Transformer | ComponentRole::TransformerShard(_)
+        ) {
+            continue;
+        }
+        let bytes = match pending_artifacts.get(path) {
+            Some(pending) => pending.bytes,
+            None => std::fs::metadata(path).ok()?.len(),
+        };
+        total = total.saturating_add(bytes);
+        measured = true;
+    }
+    measured.then_some(total)
+}
+
+/// The budget the FLUX.2 CFG gate is charged with for this plan.
+///
+/// Every input is the one the engine itself uses, read from where the planner
+/// can see it:
+///
+/// * the transformer's bytes, summed exactly as the engine sums them;
+/// * a batch-2 denoise workspace from `device`'s FLUX activation budget — the
+///   same estimator [`crate::memory_preflight`] prices every other FLUX render
+///   with, asked for the doubled batch a batched CFG step allocates;
+/// * the card's total VRAM, which is why `DeviceFact` carries it.
+///
+/// The head count is `Flux2Config::dev()`'s, the widest of the three published
+/// FLUX.2 configurations. Heads enter the estimate through the math-attention
+/// score tile and nowhere else, and the planner does not read checkpoint
+/// headers (a plan may be resolved before a byte has landed, and the
+/// equivalence path is forbidden from reading model bytes on the coordinator
+/// thread at all), so the widest is the conservative choice: it can only move
+/// a marginal card toward `Sequential`, which is the class it had before this
+/// field resolved anything. On a build whose flux attention resolves to flash
+/// the term is zero and the head count does not enter at all.
+fn flux2_cfg_budget(
+    family: &str,
+    request: &GenerateRequest,
+    device: &DeviceFact,
+    artifacts: &BTreeMap<ComponentRole, PathBuf>,
+    pending_artifacts: &BTreeMap<PathBuf, PendingArtifactIdentity>,
+    attention_backend: mold_inference::attention::AttentionBackend,
+) -> Flux2CfgBudget {
+    // CUDA is the only backend that can reach a batched step at all:
+    // `resolve_cfg_batching` reads the total through a CUDA ordinal and
+    // answers `Sequential` for every other device location, so charging a
+    // Metal card's unified total here would have the plan claim an execution
+    // the engine never runs.
+    if family != "flux2" || device.backend != GpuBackend::Cuda {
+        return Flux2CfgBudget::default();
+    }
+    let Some(transformer_bytes) = flux2_transformer_weight_bytes(artifacts, pending_artifacts)
+    else {
+        return Flux2CfgBudget::default();
+    };
+    let hint = crate::memory_preflight::ActivationHint::from_request(request, family);
+    Flux2CfgBudget {
+        transformer_bytes,
+        activation_bytes_batch2: mold_inference::device::flux_activation_budget_bytes_for(
+            hint.width,
+            hint.height,
+            2,
+            hint.dtype_bytes,
+            hint.family,
+            mold_inference::flux2::Flux2Config::dev().num_heads as u64,
+            attention_backend,
+        ),
+        device_total_vram_bytes: device.total_vram_bytes,
+    }
 }
 
 fn ltx2_transformer_streams_from_mmap(family: &str, role: &ComponentRole, path: &Path) -> bool {
@@ -5743,10 +5947,14 @@ mod tests {
         (config, request)
     }
 
+    /// Synthetic idle cards: each entry is both what is free and what is
+    /// installed, which is what an idle card reports. Anything that needs the
+    /// two to differ says so at the call site.
     fn devices(free: &[u64]) -> Vec<DeviceFact> {
         free.iter()
             .enumerate()
             .map(|(ordinal, bytes)| DeviceFact {
+                total_vram_bytes: Some(*bytes),
                 cuda_peak_baseline: None,
                 id: format!("cuda:{ordinal}"),
                 ordinal,
@@ -5761,6 +5969,7 @@ mod tests {
         free.iter()
             .enumerate()
             .map(|(ordinal, bytes)| DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: format!("metal:{ordinal}"),
                 ordinal,
@@ -8268,6 +8477,7 @@ mod tests {
         let rebuild = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>| {
             execution_environment_descriptor(
                 &DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: plan.device_id.clone(),
                     ordinal: plan.device_ordinal,
@@ -8288,6 +8498,7 @@ mod tests {
                 plan.determinism_class,
                 false,
                 &BTreeMap::new(),
+                Flux2CfgBudget::default(),
             )
             .expect("rebuild descriptor classifies every frozen engine-shaping variable")
         };
@@ -8716,6 +8927,7 @@ mod tests {
     #[test]
     fn exact_execution_fingerprint_matches_rejected_candidate_contract() {
         let device = DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: "cuda:stable-device".into(),
             ordinal: 2,
@@ -8840,7 +9052,12 @@ mod tests {
         };
         for family in ["flux", "flux2"] {
             let frozen = frozen_config_for_family(family);
-            let semantic = ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Cuda).unwrap();
+            let semantic = ExecutionSemanticConfig::from_frozen(
+                &frozen,
+                GpuBackend::Cuda,
+                Flux2CfgBudget::default(),
+            )
+            .unwrap();
             assert_eq!(
                 semantic.conv_backend,
                 Some(expected),
@@ -8850,7 +9067,12 @@ mod tests {
         // A plain still family is untouched: no field at all.
         for family in ["sd15", "sdxl", "qwen-image", "z-image", "minimax-h3"] {
             let frozen = frozen_config_for_family(family);
-            let semantic = ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Cuda).unwrap();
+            let semantic = ExecutionSemanticConfig::from_frozen(
+                &frozen,
+                GpuBackend::Cuda,
+                Flux2CfgBudget::default(),
+            )
+            .unwrap();
             assert_eq!(
                 semantic.conv_backend, None,
                 "{family} must keep its pre-existing fingerprint"
@@ -8875,7 +9097,12 @@ mod tests {
     fn the_flux_families_record_residency_activation_width_and_cfg_shape() {
         for family in ["flux", "flux2"] {
             let frozen = frozen_config_for_family(family);
-            let cuda = ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Cuda).unwrap();
+            let cuda = ExecutionSemanticConfig::from_frozen(
+                &frozen,
+                GpuBackend::Cuda,
+                Flux2CfgBudget::default(),
+            )
+            .unwrap();
             assert_eq!(
                 cuda.flux_transformer_residency,
                 Some(SemanticFluxTransformerResidency::Budgeted),
@@ -8894,22 +9121,34 @@ mod tests {
                     }
                 )
             );
-            let metal = ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Metal).unwrap();
+            let metal = ExecutionSemanticConfig::from_frozen(
+                &frozen,
+                GpuBackend::Metal,
+                Flux2CfgBudget::default(),
+            )
+            .unwrap();
             assert_eq!(
                 metal.quantized_activation_dtype,
                 Some(SemanticQuantizedActivationDType::F32),
                 "Metal's quantized kernels are f32-only"
             );
 
-            // The CFG shape is carried by flux2 alone; every build resolves
-            // Sequential until WP9 lands.
+            // The CFG shape is carried by flux2 alone. A default budget
+            // knows no card total, which is the `Sequential` fallback;
+            // `flux2_cfg_batching_field_follows_the_engine_gate` covers the
+            // resolved values.
             let expected_cfg = (family == "flux2").then_some(SemanticFlux2CfgBatching::Sequential);
             assert_eq!(cuda.flux2_cfg_batching, expected_cfg);
         }
 
         for family in ["sd15", "sdxl", "qwen-image", "z-image", "wan", "minimax-h3"] {
             let frozen = frozen_config_for_family(family);
-            let semantic = ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Cuda).unwrap();
+            let semantic = ExecutionSemanticConfig::from_frozen(
+                &frozen,
+                GpuBackend::Cuda,
+                Flux2CfgBudget::default(),
+            )
+            .unwrap();
             assert_eq!(semantic.flux_transformer_residency, None);
             assert_eq!(semantic.quantized_activation_dtype, None);
             assert_eq!(
@@ -8917,6 +9156,189 @@ mod tests {
                 "{family} must keep its pre-existing fingerprint"
             );
         }
+    }
+
+    /// The recorded CFG class is the ENGINE's verdict, not a constant and not
+    /// a second derivation of it.
+    ///
+    /// A host that batches and a host that runs two forwards per step have
+    /// different numerics, different step latency and different peak memory;
+    /// sharing one equivalence class lets a batched render's learned timings
+    /// price a sequential one. The three cases below are the three the gate
+    /// itself has: the budget holds, the budget does not, and there is no
+    /// budget to charge.
+    #[test]
+    fn flux2_cfg_batching_field_follows_the_engine_gate() {
+        // Klein-9B at Q8_0, the tier this decision was measured on.
+        const KLEIN_9B_Q8_BYTES: u64 = 9_500_000_000;
+
+        let frozen = frozen_config_for_family("flux2");
+        let recorded = |budget: Flux2CfgBudget| {
+            ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Cuda, budget)
+                .unwrap()
+                .flux2_cfg_batching
+        };
+        // Priced exactly as `flux2_cfg_budget` prices it: a 1024² canvas at
+        // the doubled batch a batched CFG step allocates.
+        let activation = mold_inference::device::flux_activation_budget_bytes_for(
+            1024,
+            1024,
+            2,
+            2,
+            mold_inference::device::ActivationFamily::Flux2Dit,
+            mold_inference::flux2::Flux2Config::dev().num_heads as u64,
+            mold_inference::attention::AttentionBackend::Math,
+        );
+        let on_card = |total: Option<u64>| Flux2CfgBudget {
+            transformer_bytes: KLEIN_9B_Q8_BYTES,
+            activation_bytes_batch2: activation,
+            device_total_vram_bytes: total,
+        };
+
+        // A 24 GB card holds the checkpoint, the doubled activations and the
+        // engine's runtime headroom with room to spare.
+        assert_eq!(
+            recorded(on_card(Some(24 * GIB))),
+            Some(SemanticFlux2CfgBatching::Batched),
+            "a 24 GB card running klein-9b Q8 batches its CFG branches"
+        );
+
+        // A card whose whole capacity is the weights plus one batch-2
+        // workspace has nothing left for the runtime headroom the gate also
+        // charges, so the engine runs two forwards and so does the record.
+        let exactly_weights_and_activations = KLEIN_9B_Q8_BYTES.saturating_add(activation);
+        assert_eq!(
+            recorded(on_card(Some(exactly_weights_and_activations))),
+            Some(SemanticFlux2CfgBatching::Sequential),
+            "a card that cannot seat the doubled activations runs two forwards"
+        );
+
+        // No sampled total — CPU, Metal, a discovery snapshot that carried
+        // none — is the historical two forwards, never a guess from what
+        // happens to be free.
+        assert_eq!(
+            recorded(on_card(None)),
+            Some(SemanticFlux2CfgBatching::Sequential),
+            "an unknown card total falls back to the historical execution"
+        );
+
+        // And the differential that matters: for the same three byte counts
+        // the field agrees with the engine's own function, including at the
+        // exact boundary, so the two cannot drift when the headroom constant
+        // moves.
+        for total in [
+            24 * GIB,
+            exactly_weights_and_activations,
+            KLEIN_9B_Q8_BYTES,
+            u64::MAX,
+        ] {
+            let engine = match mold_inference::flux2::flux2_cfg_batching(
+                KLEIN_9B_Q8_BYTES,
+                activation,
+                total,
+            ) {
+                mold_inference::flux2::Flux2CfgBatching::Batched => {
+                    SemanticFlux2CfgBatching::Batched
+                }
+                mold_inference::flux2::Flux2CfgBatching::Sequential => {
+                    SemanticFlux2CfgBatching::Sequential
+                }
+            };
+            assert_eq!(
+                recorded(on_card(Some(total))),
+                Some(engine),
+                "the recorded class must be the engine's own verdict at {total} bytes"
+            );
+        }
+
+        // Every other family asks no such question whatever the card holds.
+        for family in ["flux", "sdxl", "wan"] {
+            let frozen = frozen_config_for_family(family);
+            assert_eq!(
+                ExecutionSemanticConfig::from_frozen(
+                    &frozen,
+                    GpuBackend::Cuda,
+                    on_card(Some(24 * GIB)),
+                )
+                .unwrap()
+                .flux2_cfg_batching,
+                None,
+                "{family} carries no CFG-shape field"
+            );
+        }
+    }
+
+    /// The budget the planner charges is built from the card and the
+    /// checkpoint in front of it — and from nothing at all when either is
+    /// missing.
+    #[test]
+    fn the_flux2_cfg_budget_reads_the_card_and_the_checkpoint() {
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("flux2-klein-base-9b-Q8_0.gguf");
+        sparse_file(&transformer, 9 * GIB);
+        let shard = root.path().join("flux2-klein-base-9b-Q8_0-00002.gguf");
+        sparse_file(&shard, GIB / 2);
+        let artifacts = BTreeMap::from([
+            (ComponentRole::Transformer, transformer.clone()),
+            (ComponentRole::TransformerShard(1), shard),
+            (ComponentRole::Vae, root.path().join("vae.safetensors")),
+        ]);
+        let pending = BTreeMap::new();
+        let request = request(None);
+        let card = &devices(&[24 * GIB])[0];
+        let backend = mold_inference::attention::AttentionBackend::Math;
+
+        let budget = flux2_cfg_budget("flux2", &request, card, &artifacts, &pending, backend);
+        assert_eq!(
+            budget.transformer_bytes,
+            9 * GIB + GIB / 2,
+            "every transformer shard is charged, exactly as the engine sums its files"
+        );
+        assert_eq!(budget.device_total_vram_bytes, Some(24 * GIB));
+        assert!(budget.activation_bytes_batch2 > 0);
+
+        // A card with no sampled total, a non-CUDA card, another family, and a
+        // checkpoint whose bytes cannot be measured each fall back to the
+        // budget that resolves `Sequential` — never to a guess.
+        let mut unknown_total = card.clone();
+        unknown_total.total_vram_bytes = None;
+        assert_eq!(
+            flux2_cfg_budget(
+                "flux2",
+                &request,
+                &unknown_total,
+                &artifacts,
+                &pending,
+                backend,
+            )
+            .device_total_vram_bytes,
+            None
+        );
+        assert_eq!(
+            flux2_cfg_budget(
+                "flux2",
+                &request,
+                &metal_devices(&[24 * GIB])[0],
+                &artifacts,
+                &pending,
+                backend,
+            ),
+            Flux2CfgBudget::default(),
+            "Metal never reaches a batched step, so it is charged no budget"
+        );
+        assert_eq!(
+            flux2_cfg_budget("flux", &request, card, &artifacts, &pending, backend),
+            Flux2CfgBudget::default(),
+        );
+        let absent = BTreeMap::from([(
+            ComponentRole::Transformer,
+            root.path().join("never-downloaded.gguf"),
+        )]);
+        assert_eq!(
+            flux2_cfg_budget("flux2", &request, card, &absent, &pending, backend),
+            Flux2CfgBudget::default(),
+            "an unmeasurable checkpoint must not be charged the 64 MiB unknown-artifact stub"
+        );
     }
 
     /// `MOLD_FLUX_KEEP_TRANSFORMER=0` is the one value that changes the
@@ -8934,9 +9356,13 @@ mod tests {
                         Some(value.to_string()),
                     )]);
             }
-            ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Cuda)
-                .unwrap()
-                .flux_transformer_residency
+            ExecutionSemanticConfig::from_frozen(
+                &frozen,
+                GpuBackend::Cuda,
+                Flux2CfgBudget::default(),
+            )
+            .unwrap()
+            .flux_transformer_residency
         };
 
         assert_eq!(

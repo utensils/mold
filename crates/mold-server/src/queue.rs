@@ -4163,6 +4163,9 @@ pub(crate) fn build_observed_dispatch(
                     crate::scheduler::worker_device_id(worker) == device.id.as_str()
                 })?;
                 Some(crate::execution_plan::DeviceFact {
+                    total_vram_bytes: crate::execution_plan::DeviceFact::sampled_total_vram_bytes(
+                        worker.gpu.total_vram_bytes,
+                    ),
                     cuda_peak_baseline: None,
                     id: device.id.to_string(),
                     ordinal: worker.gpu.ordinal,

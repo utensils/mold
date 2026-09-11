@@ -3372,6 +3372,7 @@ mod tests {
         let semantic = crate::execution_plan::ExecutionSemanticConfig::from_frozen(
             &engine_config,
             GpuBackend::Cuda,
+            crate::execution_plan::Flux2CfgBudget::default(),
         )
         .unwrap();
         assert_eq!(

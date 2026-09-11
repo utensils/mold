@@ -2964,6 +2964,9 @@ impl ProductionStageExecutor {
                     && !worker.fatal_cuda_error.load(Ordering::SeqCst)
             })
             .map(|worker| crate::execution_plan::DeviceFact {
+                total_vram_bytes: crate::execution_plan::DeviceFact::sampled_total_vram_bytes(
+                    worker.gpu.total_vram_bytes,
+                ),
                 cuda_peak_baseline: None,
                 id: crate::scheduler::worker_device_id(&worker),
                 ordinal: worker.gpu.ordinal,

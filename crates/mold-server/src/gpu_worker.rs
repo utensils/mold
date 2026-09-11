@@ -10898,6 +10898,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:00000000000000000000000000000001".to_string(),
                 ordinal: 0,
@@ -11041,6 +11042,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: device_id.clone(),
                 ordinal: 0,
@@ -11175,6 +11177,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: device_id.clone(),
                 ordinal: 0,
@@ -11296,6 +11299,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: device_id.clone(),
                 ordinal: 0,
