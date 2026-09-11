@@ -196,15 +196,11 @@ pub(crate) struct GgufT5Encoder {
 impl GgufT5Encoder {
     /// Load from a GGUF file using GGUF standard tensor naming.
     pub fn load(path: &Path, device: &Device) -> Result<Self> {
-        let mut file = std::fs::File::open(path)?;
-        let content = gguf_file::Content::read(&mut file)?;
-
-        // Load all tensors into a HashMap
-        let mut tensors: HashMap<String, Arc<QTensor>> = HashMap::new();
-        for name in content.tensor_infos.keys() {
-            let tensor = content.tensor(&mut file, name, device)?;
-            tensors.insert(name.clone(), Arc::new(tensor));
-        }
+        // Off the mapping, not through a per-tensor staging buffer: see
+        // `mold_candle::gguf_mmap`.
+        let map = mold_candle::gguf_mmap::GgufMmap::open(path)?;
+        let content = map.content();
+        let tensors: HashMap<String, Arc<QTensor>> = map.load_all(device, &mut |_, _| {})?;
 
         let get = |name: &str| -> Result<Arc<QTensor>> {
             tensors

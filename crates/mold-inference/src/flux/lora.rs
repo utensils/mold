@@ -990,19 +990,14 @@ pub(crate) fn gguf_lora_var_builder(
     progress: &ProgressReporter,
     delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
 ) -> Result<mold_candle::quantized::VarBuilder> {
-    use candle_core::quantized::{gguf_file, QTensor};
+    use candle_core::quantized::QTensor;
     use std::sync::Arc;
 
     if specs.is_empty() {
         bail!("gguf_lora_var_builder called with no LoraSpecs — caller must provide at least one");
     }
 
-    // Load GGUF tensors
-    let mut file = std::fs::File::open(transformer_path)?;
-    let content = gguf_file::Content::read(&mut file)?;
-
-    let total_tensors = content.tensor_infos.len();
-    let mut data: HashMap<String, Arc<QTensor>> = HashMap::with_capacity(total_tensors);
+    let map = mold_candle::gguf_mmap::GgufMmap::open(transformer_path)?;
 
     // Build patch index (same as safetensors LoRA path) — accumulate
     // patches from every adapter into the same map. The downstream
@@ -1018,24 +1013,14 @@ pub(crate) fn gguf_lora_var_builder(
         n = specs.len(),
     ));
 
-    // Phase 1: Load ALL tensors via normal GGUF path (same as from_gguf).
-    // This uses the exact same CUDA allocation as the non-LoRA path.
-    let gguf_bytes_total: u64 = std::fs::metadata(transformer_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    progress.weight_load("FLUX transformer (GGUF)", 0, gguf_bytes_total);
-    for (i, tensor_name) in content.tensor_infos.keys().enumerate() {
-        let qtensor = content.tensor(&mut file, tensor_name, device)?;
-        data.insert(tensor_name.clone(), Arc::new(qtensor));
-        // Approximate progress based on tensor count (GGUF has no per-tensor byte info)
-        let approx_bytes = gguf_bytes_total * (i as u64 + 1) / total_tensors as u64;
-        progress.weight_load(
-            "FLUX transformer (GGUF)",
-            approx_bytes.min(gguf_bytes_total),
-            gguf_bytes_total,
-        );
-    }
-    drop(file); // close GGUF file
+    // Phase 1: Load ALL tensors off the mapping — the exact same CUDA
+    // allocation as the non-LoRA path, and now the same transport. The counter
+    // reports each tensor's real payload rather than the tensor-count
+    // approximation this replaced, because the map knows every size up front.
+    let mut data: HashMap<String, Arc<QTensor>> = map.load_all(device, &mut |done, total| {
+        progress.weight_load("FLUX transformer (GGUF)", done, total)
+    })?;
+    drop(map);
 
     // Phase 2: Patch LoRA-affected tensors in-place.
     // For each target: dequantize the GPU QTensor to F32 on CPU, apply LoRA

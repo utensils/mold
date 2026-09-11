@@ -2,7 +2,6 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::flux;
-use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -1461,7 +1460,12 @@ impl FluxEngine {
         );
 
         let flux_model = if is_quantized {
-            let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
+            let vb = crate::weight_loader::load_transformers_gguf_var_builder(
+                &transformer_path,
+                &device,
+                "FLUX transformer (GGUF)",
+                &self.base.progress,
+            )?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else {
             let flux_vb = flux_transformer_var_builder(flux_safetensors_var_builder(
@@ -2121,7 +2125,12 @@ impl FluxEngine {
                     gpu_dtype,
                     &self.base.progress,
                 )?;
-                let vb = mold_candle::quantized::VarBuilder::from_gguf(&transformer_path, &device)?;
+                let vb = crate::weight_loader::load_gguf_var_builder(
+                    &transformer_path,
+                    &device,
+                    "FLUX transformer (GGUF)",
+                    &self.base.progress,
+                )?;
                 FluxTransformer::QuantizedBypass(
                     crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
                         &flux_cfg,
@@ -2149,7 +2158,12 @@ impl FluxEngine {
                 )
             }
         } else if is_quantized {
-            let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
+            let vb = crate::weight_loader::load_transformers_gguf_var_builder(
+                &transformer_path,
+                &device,
+                "FLUX transformer (GGUF)",
+                &self.base.progress,
+            )?;
             FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
         } else if has_lora {
             // LoRA without offload (GPU has enough VRAM for full model)
@@ -2635,9 +2649,11 @@ impl FluxEngine {
                             loaded.dtype,
                             progress,
                         )?;
-                        let vb = mold_candle::quantized::VarBuilder::from_gguf(
+                        let vb = crate::weight_loader::load_gguf_var_builder(
                             &transformer_path,
                             &loaded.device,
+                            "FLUX transformer (GGUF)",
+                            progress,
                         )?;
                         FluxTransformer::QuantizedBypass(
                             crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
@@ -2662,9 +2678,11 @@ impl FluxEngine {
                         )
                     }
                 } else if loaded.is_quantized {
-                    let vb = quantized_var_builder::VarBuilder::from_gguf(
+                    let vb = crate::weight_loader::load_transformers_gguf_var_builder(
                         &transformer_path,
                         &loaded.device,
+                        "FLUX transformer (GGUF)",
+                        progress,
                     )?;
                     FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
                 } else if has_lora {

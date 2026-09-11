@@ -715,17 +715,13 @@ pub(crate) fn gguf_lora_var_builder_flux2(
     progress: &ProgressReporter,
     _delta_cache: Option<Arc<Mutex<LoraDeltaCache>>>,
 ) -> Result<mold_candle::quantized::VarBuilder> {
-    use candle_core::quantized::{gguf_file, QTensor};
+    use candle_core::quantized::QTensor;
 
     if specs.is_empty() {
         bail!("gguf_lora_var_builder_flux2 called with no LoraSpecs");
     }
 
-    let mut file = std::fs::File::open(transformer_path)?;
-    let content = gguf_file::Content::read(&mut file)?;
-
-    let total_tensors = content.tensor_infos.len();
-    let mut data: HashMap<String, Arc<QTensor>> = HashMap::with_capacity(total_tensors);
+    let map = mold_candle::gguf_mmap::GgufMmap::open(transformer_path)?;
 
     let (patches, skipped) = build_patches(specs, Flux2KeySpace::Bfl);
     let patched_keys = patches.len();
@@ -736,21 +732,13 @@ pub(crate) fn gguf_lora_var_builder_flux2(
         n = specs.len(),
     ));
 
-    let gguf_bytes_total: u64 = std::fs::metadata(transformer_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    progress.weight_load("Flux.2 transformer (GGUF)", 0, gguf_bytes_total);
-    for (i, tensor_name) in content.tensor_infos.keys().enumerate() {
-        let qtensor = content.tensor(&mut file, tensor_name, device)?;
-        data.insert(tensor_name.clone(), Arc::new(qtensor));
-        let approx_bytes = gguf_bytes_total * (i as u64 + 1) / total_tensors as u64;
-        progress.weight_load(
-            "Flux.2 transformer (GGUF)",
-            approx_bytes.min(gguf_bytes_total),
-            gguf_bytes_total,
-        );
-    }
-    drop(file);
+    // Phase 1: every tensor, straight off the mapping. Real payload bytes
+    // rather than the tensor-count approximation this replaced — the map knows
+    // each tensor's size, so the counter no longer has to guess.
+    let mut data: HashMap<String, Arc<QTensor>> = map.load_all(device, &mut |done, total| {
+        progress.weight_load("Flux.2 transformer (GGUF)", done, total)
+    })?;
+    drop(map);
 
     let on_gpu = device.is_cuda() || device.is_metal();
     let mut applied = 0usize;

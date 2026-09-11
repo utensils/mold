@@ -40,6 +40,10 @@ candle = { package = "candle-core-mold", git = "https://github.com/utensils/cand
 candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "bf2cd29a791dbc053df826b4377d092c3809d17f" }
 candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "bf2cd29a791dbc053df826b4377d092c3809d17f" }
 half = "2"
+# Already in the lock file through candle-core at exactly this version, so the
+# Nix vendor set gains nothing. It MUST stay the version candle resolves to:
+# two copies of `Mmap` would be two distinct types across the seam.
+memmap2 = { version = "0.9.3", features = ["stable_deref_trait"] }
 # Already vendored transitively through candle-core, so this adds no new crates
 # to the Nix vendor set. `float8` must resolve to the same version candle uses
 # or `F8E4M3` would be a different type than its tensors hold.

@@ -17,6 +17,42 @@ use std::path::Path;
 
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressReporter};
 
+/// Load a GGUF checkpoint into mold's own quantized `VarBuilder`, from a
+/// memory mapping and with a byte counter.
+///
+/// The two GGUF loader entry points below exist so a call site names its stage
+/// label once and gets both the mapping and the progress bar. See
+/// [`mold_candle::gguf_mmap`] for why the mapping matters: the reader loop it
+/// replaced copied every byte of the checkpoint into a fresh anonymous buffer
+/// before uploading it, measured at 0.96 GB/s on a 33 GB file.
+pub(crate) fn load_gguf_var_builder(
+    path: &Path,
+    device: &Device,
+    component: &str,
+    progress: &ProgressReporter,
+) -> Result<mold_candle::quantized::VarBuilder> {
+    mold_candle::quantized::VarBuilder::from_gguf_with_progress(path, device, &mut |done, total| {
+        progress.weight_load(component, done, total)
+    })
+    .map_err(Into::into)
+}
+
+/// [`load_gguf_var_builder`] for the consumers that take
+/// `candle-transformers`' own quantized `VarBuilder`.
+pub(crate) fn load_transformers_gguf_var_builder(
+    path: &Path,
+    device: &Device,
+    component: &str,
+    progress: &ProgressReporter,
+) -> Result<candle_transformers::quantized_var_builder::VarBuilder> {
+    mold_candle::gguf_mmap::transformers_var_builder_from_gguf_mmap(
+        path,
+        device,
+        &mut |done, total| progress.weight_load(component, done, total),
+    )
+    .map_err(Into::into)
+}
+
 /// VarBuilder backend for FP8 safetensors that preserves native dtypes.
 ///
 /// Loads tensors at their on-disk dtype: F8E4M3 weights stay F8E4M3 on GPU,

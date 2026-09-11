@@ -228,19 +228,37 @@ pub(crate) struct GgufQwen3Encoder {
     blocks: Vec<Qwen3Block>,
 }
 
+/// The checkpoint as the architecture half consumes it.
+type GgufCheckpoint = (
+    HashMap<String, Arc<QTensor>>,
+    HashMap<String, gguf_file::Value>,
+);
+
+/// Read every tensor off one memory mapping, with the header metadata the
+/// architecture half needs.
+fn read_tensors(path: &Path, device: &Device) -> Result<GgufCheckpoint> {
+    let map = mold_candle::gguf_mmap::GgufMmap::open(path)?;
+    let metadata = map.content().metadata.clone();
+    let tensors = map.load_all(device, &mut |_, _| {})?;
+    Ok((tensors, metadata))
+}
+
 impl GgufQwen3Encoder {
     /// Load from a GGUF file.
+    ///
+    /// Split in two so the transport and the architecture are separable: the
+    /// read is one memory mapping (see `mold_candle::gguf_mmap`), and
+    /// [`Self::from_tensors`] is the part that knows llama.cpp's naming.
     pub fn load(path: &Path, device: &Device) -> Result<Self> {
-        let mut file = std::fs::File::open(path)?;
-        let content = gguf_file::Content::read(&mut file)?;
+        let (tensors, metadata) = read_tensors(path, device)?;
+        Self::from_tensors(tensors, &metadata, device)
+    }
 
-        // Load all tensors
-        let mut tensors: HashMap<String, Arc<QTensor>> = HashMap::new();
-        for name in content.tensor_infos.keys() {
-            let tensor = content.tensor(&mut file, name, device)?;
-            tensors.insert(name.clone(), Arc::new(tensor));
-        }
-
+    fn from_tensors(
+        tensors: HashMap<String, Arc<QTensor>>,
+        metadata: &HashMap<String, gguf_file::Value>,
+        device: &Device,
+    ) -> Result<Self> {
         let get = |name: &str| -> Result<Arc<QTensor>> {
             tensors
                 .get(name)
@@ -255,10 +273,9 @@ impl GgufQwen3Encoder {
         let embedding = candle_nn::Embedding::new(emb_weights, d_model);
 
         // Read layer count from metadata, default to 36 (Qwen3-4B)
-        let n_layers = content
-            .metadata
+        let n_layers = metadata
             .get("qwen3.block_count")
-            .or_else(|| content.metadata.get("llama.block_count"))
+            .or_else(|| metadata.get("llama.block_count"))
             .and_then(|v| match v {
                 gguf_file::Value::U32(n) => Some(*n as usize),
                 _ => None,

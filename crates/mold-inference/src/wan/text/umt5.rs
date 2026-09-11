@@ -22,7 +22,7 @@
 //! zero vector for padding, not T5 outputs for pad tokens.
 
 use anyhow::{anyhow, Context, Result};
-use candle_core::quantized::{gguf_file, QTensor};
+use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Module, Tensor, D};
 use candle_nn::VarBuilder;
 use candle_transformers::models::with_tracing::QMatMul;
@@ -476,14 +476,11 @@ impl UMt5Encoder {
     /// threading.
     pub fn from_gguf(path: &Path, device: &Device) -> Result<Self> {
         let config = UMt5Config::xxl();
-        let mut file = std::fs::File::open(path)
+        // Off the mapping, not through a per-tensor staging buffer: see
+        // `mold_candle::gguf_mmap`.
+        let map = mold_candle::gguf_mmap::GgufMmap::open(path)
             .with_context(|| format!("UMT5: cannot open GGUF at {}", path.display()))?;
-        let content = gguf_file::Content::read(&mut file)?;
-        let mut tensors: HashMap<String, Arc<QTensor>> = HashMap::new();
-        for name in content.tensor_infos.keys() {
-            let tensor = content.tensor(&mut file, name, device)?;
-            tensors.insert(name.clone(), Arc::new(tensor));
-        }
+        let tensors: HashMap<String, Arc<QTensor>> = map.load_all(device, &mut |_, _| {})?;
         let get = |name: &str| -> Result<Arc<QTensor>> {
             tensors
                 .get(name)

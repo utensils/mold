@@ -4,7 +4,6 @@ use candle_transformers::models::z_image::{
     calculate_shift, postprocess_image, AutoEncoderKL, Config, FlowMatchEulerDiscreteScheduler,
     SchedulerConfig, VaeConfig,
 };
-use mold_candle::quantized as quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -736,8 +735,12 @@ impl ZImageEngine {
                     )?,
                 )));
             }
-            let qvb =
-                quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
+            let qvb = crate::weight_loader::load_gguf_var_builder(
+                &self.base.paths.transformer,
+                device,
+                "Z-Image transformer (GGUF)",
+                &self.base.progress,
+            )?;
             // Keep GGUF weights quantized at runtime instead of inflating them
             // into a dense map. Dequantizing the whole checkpoint turns the
             // 3.4 GB Q4_K file into ~24 GB resident on Metal (F32) — mold
