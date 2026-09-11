@@ -55,7 +55,11 @@ import { toast } from "../lib/toasts";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import type { ModelInfoExtended, ServerCapabilities } from "../types";
-import { listKnownHosts, originHost } from "../lib/hostRegistry";
+import {
+  HOSTS_CHANGED_EVENT,
+  listKnownHosts,
+  originHost,
+} from "../lib/hostRegistry";
 import { autoTagTitle } from "../lib/fileUnder";
 import { subscribeToDeviceSnapshots } from "../lib/deviceEvents";
 import {
@@ -400,7 +404,13 @@ const serverSummary = computed(() =>
   [`mold ${version.value}`, backend.value].filter((part) => part).join(" · "),
 );
 
-const licenceHosts = computed(() => listKnownHosts());
+/* The registry lives in localStorage and announces its own edits; a machine
+ * added from another tab must appear in this picker without a reload. */
+const knownHosts = ref(listKnownHosts());
+function refreshKnownHosts() {
+  knownHosts.value = listKnownHosts();
+}
+const licenceHosts = computed(() => knownHosts.value);
 const licenceHostId = ref(originHost().id);
 const licenceTarget = computed(() => {
   const host =
@@ -457,6 +467,7 @@ onMounted(() => {
   // Bootstrap even when the server predates `/api/events`; the subscription
   // is an invalidation accelerator, not the source of initial truth.
   void loadDevicePanel();
+  window.addEventListener(HOSTS_CHANGED_EVENT, refreshKnownHosts);
   deviceEventsAbort = new AbortController();
   subscribeToDeviceSnapshots(
     { baseUrl: host.url, apiKey: host.apiKey ?? null },
@@ -466,6 +477,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener(HOSTS_CHANGED_EVENT, refreshKnownHosts);
   devicePanelRequestGeneration += 1;
   configSequence += 1;
   deviceEventsAbort?.abort();

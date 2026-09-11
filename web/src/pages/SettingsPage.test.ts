@@ -13,7 +13,7 @@ import SettingsPage from "./SettingsPage.vue";
 import settingsPageSource from "./SettingsPage.vue?raw";
 import { matchSystem, theme } from "../lib/theme";
 import { resetNotifications, useNotifications } from "../lib/toasts";
-import { originHost } from "../lib/hostRegistry";
+import { HOSTS_STORAGE_KEY, originHost } from "../lib/hostRegistry";
 import { AUTO_TAG_SETTING_WEB } from "@studio/lib/fileUnder";
 import { autoTagTitle, reloadAutoTagTitle } from "../lib/fileUnder";
 import {
@@ -433,6 +433,33 @@ describe("SettingsPage", () => {
         url.endsWith("/api/config/default_steps") && init?.method === "PUT",
     );
     expect(put?.init?.body).toBe(JSON.stringify({ value: 28 }));
+  });
+
+  it("offers a machine picker for licences only when more than one is known", async () => {
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
+    expect(wrapper.find('[data-test="licence-machine"]').exists()).toBe(false);
+    wrapper.unmount();
+
+    localStorage.setItem(
+      HOSTS_STORAGE_KEY,
+      JSON.stringify([
+        { id: "plato", name: "plato", url: "http://plato.example:7680" },
+      ]),
+    );
+    const withPeer = mount(SettingsPage);
+    await flushPromises();
+    const picker = withPeer.get('[data-test="licence-machine"]');
+    expect(picker.findAll("option").map((option) => option.text())).toContain(
+      "plato",
+    );
+    // Acceptance is stored on the machine you pick, so the panel is told
+    // which one that is.
+    await picker.setValue("plato");
+    await flushPromises();
+    expect(withPeer.get('[data-test="section-licenses"]').text()).toContain(
+      "plato",
+    );
   });
 
   it("controls the origin server GPU from the Machines section", async () => {
