@@ -201,7 +201,7 @@ a literal.
 | Design concept                                                                                                                                  | Code                                                                                                                        |
 | ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Tokens: six complete theme maps + the theme-invariant set; a fenced legacy bridge keeps the `--desk/--bath/…` names alive for web and the phone | `ui/tokens.css` (single source, consumed by `web/` and `desktop/`)                                                          |
-| Shell metrics, control heights, semantic surfaces, `--mold-state-*`                                                                             | `ui/mold-desktop.css`                                                                                                       |
+| Shell metrics, control heights, semantic surfaces, `--mold-state-*` (desktop and web; the phone reads the fallbacks)                             | `ui/mold-desktop.css`                                                                                                       |
 | Theme contract (`ThemeId`, `THEME_FAMILY_META`, `toneChoice`, `migrateLegacyTheme`, `applyTheme`)                                               | `ui/theme.ts`, re-exported by `desktop/src/lib/theme.ts` and consumed by `web/src/lib/theme.ts`                             |
 | Desktop Tailwind layer (`bg-panel`, `text-fg-dim`, `rounded-control`, `text-micro`…)                                                            | `desktop/src/styles/tokens.css` + `base.css`; `tokens.legacy.test.ts` refuses the retired vocabulary                        |
 | Shared kit: shimmer, pulse, `.ms-toolbar-button`, `.ms-group-label`, `.ms-card-edge`, `.ms-lib-upscaled`                                        | `ui/kit.css`                                                                                                                |
@@ -216,7 +216,7 @@ a literal.
 | New image: the Starters and Recent tabs beside Settings                                                                                         | `desktop/src/components/create/{inspectorTabs.ts,StarterList.vue,RecentPrints.vue}`                                         |
 | My images: scopes, the chip row, the trash banner, History as a column                                                                          | `desktop/src/components/library/{LibraryHeader,LibraryChipRow,CollectionsShelf,TrashBanner,BulkBar,HistoryDrawer}.vue`      |
 | Styles: the one column axis (`--model-row-columns`) and the pinned download banner                                                              | `desktop/src/components/models/{InstalledTab,ModelTableRow,CatalogTab,DownloadsTray}.vue`                                   |
-| Settings: the jump nav's sections and rows                                                                                                      | `desktop/src/lib/settingsSchema.ts`, `components/settings/{AppearanceCard,StylesDiskSection}.vue`                           |
+| Settings: the one schema, the jump-nav shell, the rows, controls, per-style disclosure and theme cards (web and desktop)                           | `studio/lib/settingsSchema.ts`, `studio/api/config.ts`, `studio/components/settings/`                                       |
 | Context menu: one row, root list and submenu alike                                                                                              | `desktop/src/components/shell/{ContextMenu,ContextMenuItem}.vue`, `stores/contextMenu.ts`                                   |
 | Fonts (one sans + one mono per theme, OFL)                                                                                                      | `ui/fonts/` (app-bundled; `fonts.legacy.css` carries only the Safelight pair for the embedded web bundle)                   |
 
@@ -255,6 +255,18 @@ inside their owning frame, speak the lexicon, and keep copy terse and emoji-free
 - **Refresh stays in My images.** The primary bucket is SSE-live, but a
   connected remote's gallery is polled, so the toolbar keeps one explicit way to
   ask every machine again.
+
+- **Web Settings folds the jump nav into a chip strip below 900px.** A browser page
+  has no fixed second pane, so the 200px nav column becomes a horizontally scrolling
+  strip of section chips above the page; search, scroll-spy and `?section=` behave
+  the same. The desktop keeps the column.
+- **Per-style defaults are one collapsed row per style.** The mock shows eight curated
+  rows and no raw key list; a machine reports `models.<style>.<field>` for every tuned
+  style (104 rows on a thirteen-style box), so the section shows one disclosure per
+  style — friendly name over mono id, `N overrides` — and the eight fields open inside
+  it, each led by the inspector's word (Detail, Width, Words to avoid…) over the
+  engine's field name. Every other engine key has a plain-words row; the raw
+  "Server-provided configuration key." row exists only for a key newer than the client.
 
 - **A print says how long it took, in one spelling everywhere.**
   `OutputMetadata.generation_time_ms` (additive; the gallery row fills it for

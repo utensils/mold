@@ -319,7 +319,9 @@ the phone keep Create / Library / Models until their own redesign.
   sections — **Look**, **Defaults for new images**, **Write more for me**,
   **Machines**, **Styles & disk**, **Style licences**, **My images & trash**,
   **Saving pictures & clips**, **Phone pairing**, **Speed & memory**,
-  **Accounts & tokens**, **Profiles**, **Advanced**, and **Updates & about**.
+  **Accounts & tokens**, **Cloud GPUs**, **Per-style defaults**, **Profiles**,
+  **Advanced**, and **Updates & about**. The web studio renders the same
+  sections from the same schema, minus Saving pictures & clips.
   Typing in the search field narrows the nav and the page together, and nothing
   is hidden behind an accordion. Look holds the five themes and the **Light or dark
   system appearance** toggle; Machines keeps this device, its API key, and the
