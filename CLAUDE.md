@@ -289,6 +289,30 @@ Every `main()` calls `mold_db::config_sync::install_config_post_load_hook()`, wh
 
 `mold config set <key> <val>` routes by key prefix (`expand.*` → DB, `models_dir` → TOML). `mold config where <key>` prints the surface. `mold config list --json` tags each row `[db]` / `[file]` / `[env]`. Multi-profile: `settings` and `model_prefs` are keyed on `(profile, key)`; active profile resolves `MOLD_PROFILE` → `settings.profile.active` → `"default"`.
 
+## Gallery archive authority storage
+
+Storage version 3 (the append-only delta log) is a property of the
+`$MOLD_HOME`, not of the process, so WRITING it is opt-in: `gallery.authority_log`
+(`MOLD_GALLERY_AUTHORITY_LOG`), resolved once in `run_server` before anything
+opens a gallery. READING v3 is unconditional. The switch exists because a mold
+older than 0.29 reads v2 only and refuses to publish against a v3 store — one
+new process starting used to upgrade the store in place and lock every older
+binary out of the home, with the backup rewritten at v3 too so there was
+nothing to roll back to. The upgrade now writes a separate
+`gallery-authority-v3` directory and leaves the v2 store frozen intact;
+`authority_dir` resolves a store by the presence of its MARKER rather than by
+name, which is also what lets it still find and repair a store an earlier build
+upgraded in place. Two writers of different versions on one home keep SEPARATE
+indexes that drift — that is the stated cost of the switch, not a defect, and
+the docs say to enable it only where every binary is new enough. Fresh
+initialization takes the same directory rule as the upgrade
+(`write_fresh_store_v3`, marker last): a home that opts in before it has any
+store must not get v3 bytes under the `-v2` name. `mold system
+gallery-authority status|downgrade` is the operator door — read-only status,
+and an idempotent downgrade that replays the log, rewrites at v2, parks the v3
+directory, verifies by reading back, and refuses on a pending mutation or a
+torn tail.
+
 ## Durable gallery source media
 
 Durable queue uploads do not die with their queue row. Publication first pins

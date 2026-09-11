@@ -2593,7 +2593,13 @@ mod tests {
             load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default()))
                 .unwrap();
         let mut index = initial.index;
-        let v2_generation = publish(dir.path(), &guard, &mut index, initial.generation, "old.png");
+        let v2_generation = publish(
+            dir.path(),
+            &guard,
+            &mut index,
+            initial.generation,
+            "old.png",
+        );
         let v2_dir = legacy_authority_dir(dir.path());
         let v2_before: Vec<(String, Vec<u8>)> = fs::read_dir(&v2_dir)
             .unwrap()
@@ -2624,7 +2630,11 @@ mod tests {
                 .version,
             STORAGE_VERSION
         );
-        assert_eq!(authority_dir(dir.path()), v3_dir, "and it is now the live one");
+        assert_eq!(
+            authority_dir(dir.path()),
+            v3_dir,
+            "and it is now the live one"
+        );
 
         // ...and every byte of the v2 store is untouched, so an older mold
         // sharing this home keeps publishing and a rollback needs no repair.
@@ -2756,10 +2766,15 @@ mod tests {
         assert!(v3.is_dir(), "a fresh v3 store needs its own directory");
         assert_eq!(authority_dir(dir.path()), v3);
         assert_eq!(
-            read_checkpoint_at(&v3.join(CHECKPOINT_FILE)).unwrap().version,
+            read_checkpoint_at(&v3.join(CHECKPOINT_FILE))
+                .unwrap()
+                .version,
             STORAGE_VERSION
         );
-        assert_eq!(read_marker(dir.path()).unwrap().unwrap().version, STORAGE_VERSION);
+        assert_eq!(
+            read_marker(dir.path()).unwrap().unwrap().version,
+            STORAGE_VERSION
+        );
         assert_eq!(read_mutation_log(dir.path(), 0).unwrap().records.len(), 1);
         assert_eq!(generation, 1);
 

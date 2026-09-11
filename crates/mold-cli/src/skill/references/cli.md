@@ -562,6 +562,37 @@ For published CUDA images, use Mold's live distribution resolver rather than
 guessing an architecture tag. Its current contract includes B200/B300 → `:<version>-sm100`; Grace Hopper and Grace Blackwell are unsupported. B200 support
 is simulated until hardware-qualified.
 
+## Gallery archive-authority storage
+
+The gallery archive authority records what this host has published. Storage
+version 3 (an append-only delta log, so publishing costs the same on a large
+library as on a small one) is OPT-IN via `gallery.authority_log`, because a
+mold older than 0.29 reads version 2 only and refuses to publish against a
+version-3 store — turning it on is a decision about every binary sharing that
+`$MOLD_HOME`. Reading a version-3 store never needs the switch.
+
+`mold system gallery-authority status` inspects THIS machine, ignoring
+`MOLD_HOST`:
+
+```bash
+mold system gallery-authority status --json
+mold system gallery-authority status --output-dir /storage/mold/output
+```
+
+`mold system gallery-authority downgrade` folds a version-3 store back to
+version 2 so an older binary can publish against the home again. Run it with
+the NEWER build, while no server is writing to that output directory, before
+rolling one back:
+
+```bash
+mold system gallery-authority downgrade --output-dir /storage/mold/output
+```
+
+It is idempotent, verifies the result by reading it back, parks the retired
+version-3 directory rather than deleting it, and refuses if a mutation is
+pending or the log tail is torn — start `mold serve` once with a
+version-3-capable build to let recovery resolve those, stop it, then downgrade.
+
 ## macOS Metal memory
 
 Wan is performance-qualified on Apple Metal for the 1.3B BF16 and 5B Q8/FP16
