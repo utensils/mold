@@ -3347,6 +3347,31 @@ button:disabled {
   object-fit: contain;
 }
 
+/* Still images own two-finger gestures in both native WebViews. The outer
+   viewport never moves; the inner plane tracks the fingers and is clipped to
+   the same stage that already contains the unzoomed print. */
+.gallery-viewer-image-viewport,
+.gallery-viewer-image-transform {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+}
+
+.gallery-viewer-image-viewport {
+  overflow: hidden;
+  touch-action: none;
+}
+
+.gallery-viewer-image-transform {
+  transform-origin: center;
+  will-change: transform;
+}
+
+.gallery-viewer-stage.is-image-zoomed .gallery-viewer-nav {
+  pointer-events: none;
+  opacity: 0;
+}
+
 .gallery-viewer-placeholder {
   filter: brightness(0.55);
 }

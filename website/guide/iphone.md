@@ -267,6 +267,9 @@ partial cleanup.
 Tap a tile to open the full-screen viewer:
 
 - images are shown uncropped;
+- pinch an image with two fingers to zoom around the point between them, then
+  drag with one finger to inspect it; pinching back to the original size
+  restores the left/right gallery swipe;
 - generated images open this same viewer when tapped;
 - videos stream from their owning host with native playback and seeking;
 - **Upscale…** enlarges an image, while **Framewise upscale…** queues a durable
