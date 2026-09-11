@@ -235,6 +235,38 @@ describe("mobile generation status containment", () => {
     );
   });
 
+  it("shows a running print at 64px with a 7px meter and its mono batch line", () => {
+    const thumb = css.match(/\.mobile-generation-job-thumb\s*\{([^}]*)\}/s);
+    expect(thumb?.[1]).toMatch(/width:\s*64px/);
+    expect(thumb?.[1]).toMatch(/height:\s*64px/);
+
+    // The place-in-line square is a finger target where the picture will be.
+    const position = css.match(/\.mobile-generation-job-position\s*\{([^}]*)\}/s);
+    expect(Number(position?.[1]?.match(/width:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(position?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+
+    // Which one of the batch, and where: technical truth, so mono.
+    const meta = css.match(/\.mobile-generation-job-meta\s*\{([^}]*)\}/s);
+    expect(meta?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+    expect(meta?.[1]).toMatch(/font-size:\s*var\(--text-edge-code\)/);
+
+    // The meter is the shared kit bar at the phone's height, not a second one.
+    expect(mobileGenerationQueueCard).toContain(':height="7"');
+    expect(mobileGenerationQueueCard).toContain("ProgressBar");
+
+    // What a running print is DOING is a sentence, so it takes plain sans;
+    // mono uppercase stays the code for a waiting, held or settled row.
+    const sentence = css.match(/\.mobile-generation-job-sentence\s*\{([^}]*)\}/s);
+    expect(sentence?.[1]).toMatch(/font-family:\s*var\(--font-body\)/);
+    expect(sentence?.[1]).toMatch(/font-size:\s*var\(--text-body\)/);
+    expect(sentence?.[1]).toMatch(/color:\s*var\(--mold-text-2\)/);
+    expect(sentence?.[1]).not.toMatch(/text-transform:\s*uppercase/);
+    // It is a sentence, so it wraps. The mono lines beside it truncate, and
+    // inheriting that turned "Denoising (50 steps) · 19/50" into "Denoising…".
+    expect(sentence?.[1]).toMatch(/white-space:\s*normal/);
+    expect(sentence?.[1]).not.toMatch(/text-overflow:\s*ellipsis/);
+  });
+
   it("bounds shared and swipeable activity surfaces before truncating detail", () => {
     expect(liveActivityComponent).toMatch(
       /\.live-activity-surface\s*\{[^}]*width:\s*100%\s*;[^}]*min-width:\s*0\s*;[^}]*box-sizing:\s*border-box\s*;/s,
@@ -429,11 +461,8 @@ describe("mobile safe areas", () => {
   });
 
   it("renders catalog filters as balanced equal-width tiles", () => {
-    const containers = css.match(
-      /\.mobile-catalog-media,\s*\.mobile-catalog-sources\s*\{([^}]*)\}/s,
-    );
     const media = [...css.matchAll(/\.mobile-catalog-media\s*\{([^}]*)\}/gs)].find((rule) =>
-      rule[1]?.includes("grid-template-columns"),
+      rule[1]?.includes("overflow-x"),
     );
     const sources = [...css.matchAll(/\.mobile-catalog-sources\s*\{([^}]*)\}/gs)].find((rule) =>
       rule[1]?.includes("grid-template-columns"),
@@ -445,9 +474,16 @@ describe("mobile safe areas", () => {
       /\.mobile-catalog-media button\[aria-pressed="true"\],\s*\.mobile-catalog-sources button\[aria-pressed="true"\]\s*\{([^}]*)\}/s,
     );
 
-    expect(media?.[1]).toMatch(/grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
+    // Four media choices never fit a 393pt row as equal tiles — they wrapped to
+    // a second row and pushed the results down. One strip that scrolls instead.
+    expect(media?.[1]).toMatch(/display:\s*flex/);
+    expect(media?.[1]).toMatch(/flex-wrap:\s*nowrap/);
+    expect(media?.[1]).toMatch(/overflow-x:\s*auto/);
+    expect(media?.[1]).toMatch(/gap:\s*8px/);
+    expect(css).toMatch(/\.mobile-catalog-media button\s*\{[^}]*flex:\s*none/s);
+    // The catalog sources are three and stay three equal tiles in the sheet.
     expect(sources?.[1]).toMatch(/grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
-    expect(containers?.[1]).toMatch(/gap:\s*8px/);
+    expect(sources?.[1]).toMatch(/gap:\s*8px/);
     expect(buttons?.[1]).toMatch(/min-width:\s*0/);
     expect(buttons?.[1]).toMatch(/border:\s*1px solid var\(--mold-border-control\)/);
     expect(buttons?.[1]).toMatch(/background:\s*var\(--mold-bg\)/);
@@ -883,6 +919,46 @@ describe("iOS type vocabulary", () => {
     );
     expect(legends?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
     expect(legends?.[1]).toMatch(/text-transform:\s*uppercase/);
+  });
+
+  it("says a disclosure line in the same plain sans as every other row label", () => {
+    // The type pass that made `.field > span` sans reached the form rows and
+    // stopped; the source-media disclosure kept the mono utility face, so the
+    // one sentence on Make that is plain words read as a machine token.
+    const summary = css.match(
+      /\.mobile-native-disclosure > summary,\s*\n\.mobile-disclosure-button\s*\{([^}]*)\}/s,
+    );
+    expect(summary?.[1]).toMatch(/font-family:\s*var\(--font-body\)/);
+    expect(summary?.[1]).toMatch(/font-size:\s*var\(--text-body-lg\)/);
+    expect(summary?.[1]).not.toMatch(/font-family:\s*var\(--font-utility\)/);
+
+    // Its trailing filename summary is the same sans, one step down.
+    const detail = css.match(
+      /\.mobile-native-disclosure > summary small,\s*\n\.mobile-disclosure-summary\s*\{([^}]*)\}/s,
+    );
+    expect(detail?.[1]).toMatch(/font-family:\s*var\(--font-body\)/);
+    expect(detail?.[1]).toMatch(/font-size:\s*var\(--text-caption\)/);
+  });
+
+  it("gives every screen its own large title instead of one wordmark", () => {
+    const title = css.match(/\.mobile-large-title\s*\{([^}]*)\}/s);
+    expect(title?.[1]).toMatch(/font-family:\s*var\(--font-display\)/);
+    expect(title?.[1]).toMatch(/font-size:\s*min\(var\(--text-display\), 28px\)/);
+    expect(title?.[1]).toMatch(/font-weight:\s*700/);
+    // The wordmark named the app on all five screens and answered nothing.
+    expect(css).not.toContain(".mobile-wordmark");
+    expect(mobileAppComponent).not.toContain("mobile-wordmark");
+
+    // One 44pt action per screen, beside the title.
+    const action = css.match(/\.mobile-header-action\s*\{([^}]*)\}/s);
+    expect(Number(action?.[1]?.match(/width:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(Number(action?.[1]?.match(/height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+
+    // Where the next print lands is pinned above the scroll, not in it.
+    const row = css.match(/\.mobile-header-routing\s*\{([^}]*)\}/s);
+    expect(row?.[1]).toMatch(/display:\s*flex/);
+    const note = css.match(/\.mobile-header-routing-note\s*\{([^}]*)\}/s);
+    expect(note?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
   });
 
   it("makes every Back control a 15px sans accent label with a chevron", () => {

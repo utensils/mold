@@ -29,7 +29,8 @@ import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/clie
 import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
 import { remixPrompt } from "../lib/api/remix";
-import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
+import { gpuSnapshotsFromStatus, summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
+import { machineSentence } from "../lib/machineSentence";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { filterRestrictedModels, modelAccessRestrictionFor } from "@studio/lib/modelAccess";
@@ -198,7 +199,6 @@ import {
   type QueueJobProgress,
 } from "@studio/api/generationSelection";
 import { firstLastFrameRestoreNotice } from "@studio/lib/sourceImageCapability";
-import LiveActivityList from "@ui/components/LiveActivityList.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import ActionBlocker from "@ui/components/ActionBlocker.vue";
 import LicenseAcceptanceDialog from "@studio/components/LicenseAcceptanceDialog.vue";
@@ -374,6 +374,7 @@ import {
   recordMobileHostProbeFailure,
   recordMobileHostStatus,
   remoteHostId,
+  type DiscoveredHost,
   type MobileHost,
   type MobileHostAliasDrop,
 } from "./hosts";
@@ -463,6 +464,9 @@ import MobileSettingsView from "./MobileSettingsView.vue";
 import MobileStyleSheet from "./MobileStyleSheet.vue";
 import MobileSharedParams from "./MobileSharedParams.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import BadgePill from "@ui/components/BadgePill.vue";
+import CardSurface from "@ui/components/CardSurface.vue";
+import MobileAddMachineSheet from "./MobileAddMachineSheet.vue";
 import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
 import {
   outputKindFor,
@@ -572,14 +576,6 @@ interface ActivityRow {
   preparation: Extract<ActivityJobVM, { kind: "print" }>["preparation"];
   /** Matching fresh `/api/activity` lifecycle, when the host has one. */
   live: FleetActiveWork | null;
-}
-
-interface DiscoveredHost {
-  name: string;
-  host: string;
-  port: number;
-  authRequired: boolean;
-  instanceId?: string;
 }
 
 interface GalleryPrint extends MobileGalleryImage {
@@ -705,7 +701,11 @@ function selectMobileTab(next: MobileTab): void {
 const licenseAcceptance = useLicenseAcceptance();
 const mobileContent = ref<HTMLElement | null>(null);
 const catalogView = ref<
-  (RefreshableMobileView & { browseKind(kind: "all" | "image" | "video" | "mesh"): void }) | null
+  | (RefreshableMobileView & {
+      browseKind(kind: "all" | "image" | "video" | "mesh"): void;
+      browseMore(): void;
+    })
+  | null
 >(null);
 const hostDetailView = ref<RefreshableMobileView | null>(null);
 const createHeading = ref<HTMLElement | null>(null);
@@ -751,11 +751,12 @@ const hostDetailId = ref("");
 const hostInput = reactive({ name: "", address: "", apiKey: "" });
 const discovered = ref<DiscoveredHost[]>([]);
 const selectedDiscovered = ref<DiscoveredHost | null>(null);
-const discoveredApiKeyInput = ref<HTMLInputElement | null>(null);
-const hostAddressInput = ref<HTMLInputElement | null>(null);
-const hostApiKeyInput = ref<HTMLInputElement | null>(null);
 const discovering = ref(false);
 const pairing = ref(false);
+/** The Add-a-machine sheet. It opens when ASKED for, never on an empty fleet:
+ *  a fresh install used to land on a form it had no way to fill in yet. */
+const addMachineOpen = ref(false);
+const addMachineSheet = ref<{ focusDiscoveredApiKey: () => void } | null>(null);
 const pairingScannerOpen = ref(false);
 let pairingScannerCancelled = false;
 useMobileBack(pairingScannerOpen, () => {
@@ -1345,6 +1346,10 @@ interface HostTelemetry {
   vramTotalMb: number | null;
   queueDepth: number | null;
   routingLoad: import("@studio/lib/hostRouting").HostRoutingLoad;
+  /** Every card this machine reported, for the plain hardware sentence. */
+  gpus: import("../lib/api/types").GpuSnapshot[];
+  /** How long the machine has been up, as it last reported. */
+  uptimeSeconds: number | null;
   /** Runtime queue capacity is the server's authority for one hot queue page.
    * `null` means a legacy status response; an absent telemetry row means the
    * host has not answered status yet and queue polling must wait. */
@@ -1395,7 +1400,19 @@ function hostVramPercent(id: string): number {
 }
 
 function hostQueueLabel(id: string): string {
-  return String(hostTelemetry[id]?.queueDepth ?? 0);
+  return `${hostTelemetry[id]?.queueDepth ?? 0} waiting`;
+}
+
+/**
+ * "RTX 4090 · CUDA · on your network · up 6 days" — the same sentence the
+ * desktop's machine pane says, so a 4× L40S box can never read as one card in
+ * one place and four in the other. Empty until the machine answers status.
+ */
+function hostMachineSentence(host: MobileHost): string {
+  const telemetry = hostTelemetry[host.id];
+  return machineSentence({ kind: "remote", baseUrl: host.baseUrl }, telemetry?.gpus ?? [], {
+    uptimeSeconds: telemetry?.uptimeSeconds ?? null,
+  });
 }
 
 function captureHostTelemetry(hostId: string, status: ServerStatus): void {
@@ -1405,6 +1422,8 @@ function captureHostTelemetry(hostId: string, status: ServerStatus): void {
     vramTotalMb: memory?.totalMb ?? null,
     queueDepth: status.queue_depth ?? null,
     routingLoad: hostRoutingLoad(status),
+    gpus: gpuSnapshotsFromStatus(status),
+    uptimeSeconds: status.uptime_secs ?? null,
     queueCapacity: status.queue_capacity ?? null,
     queuePaused: status.queue_paused ?? null,
     gpuBackend: status.gpu_info?.backend ?? null,
@@ -1474,6 +1493,30 @@ const headerTargetLabel = computed(() =>
       ? mobileGenerateTargetLabel(selectedHost.value.id, connectedHosts.value)
       : "Remote only",
 );
+/** The screen you are on, in its own words. Make names what it is making. */
+const MOBILE_TAB_TITLE: Record<MobileTab, string> = {
+  generate: "New image",
+  queue: "Queue",
+  gallery: "My images",
+  catalog: "Styles",
+  hosts: "Machines",
+};
+/** The chip's dot must not claim a machine is ready when it is reconnecting.
+ *  Under an automatic policy no one machine answers, so it stays neutral. */
+const headerTargetDot = computed(() => {
+  if (automaticRouting.value) return "";
+  const host = selectedHost.value;
+  if (!host || host.connected === false) return "";
+  return host.stale ? "is-reconnecting" : host.online ? "is-ready" : "is-error";
+});
+/** The mono half of the routing row: what that machine is doing right now. */
+const headerQueueNote = computed(() => {
+  const hostId = automaticRouting.value ? null : selectedHost.value?.id;
+  const telemetry = hostId ? hostTelemetry[hostId] : null;
+  if (!telemetry) return "";
+  const depth = telemetry.queueDepth ?? 0;
+  return depth ? `${depth} waiting` : "free now";
+});
 const developOnNote = computed(() => {
   if (!automaticRouting.value)
     return `Generate on ${selectedHost.value ? mobileGenerateTargetLabel(selectedHost.value.id, connectedHosts.value) : "this machine"}`;
@@ -1912,6 +1955,11 @@ async function browseOutputStyles(
   await nextTick();
   catalogView.value?.browseKind(kind === "still" ? "image" : kind === "clip" ? "video" : "mesh");
 }
+/** The Styles header's `+`: show the shelf that has more on it. */
+function browseMoreStyles(): void {
+  catalogView.value?.browseMore();
+}
+
 const organizationSummary = computed(() => {
   const fields = fileUnderEnabled.value
     ? buildFileUnderRequestFields(
@@ -2925,10 +2973,15 @@ function fleetQueueControlLabel(row: FleetActiveWork): string {
  * is the shared one — web and desktop resolve the same waiting row the same
  * way and only the casing is local.
  */
+/** True while the host is actually working on this print. */
+function activityRowRunning(row: ActivityRow): boolean {
+  return Boolean(row.live) && row.live!.phase !== "queued" && row.live!.phase !== "paused";
+}
+
 function activityRowStatus(row: ActivityRow): string {
-  if (row.live && row.live.phase !== "queued" && row.live.phase !== "paused") {
-    return activeWorkPhaseLabel(row.live).toLocaleUpperCase();
-  }
+  // A running row says what is happening, in the host's own sentence. Only a
+  // waiting, held or settled row answers with a code.
+  if (activityRowRunning(row)) return activeWorkPhaseLabel(row.live!);
   if (row.print.status !== "queued") return jobStatusCode(row.print);
   if (durableHold(row.print)) return "HELD";
   if (activityRowQueuePaused(row)) return "PAUSED";
@@ -2940,6 +2993,46 @@ function activityRowStatus(row: ActivityRow): string {
       preparation: row.preparation,
     }),
   );
+}
+
+/**
+ * What a queue row can SHOW, rather than only name. Every part is optional and
+ * absent whenever the row cannot answer for it: a shared fleet row has a phase
+ * and a count but no pixels, and a queued row has neither.
+ */
+function activityRowProgress(row: ActivityRow): number | null {
+  const total = row.live?.total ?? row.print.total;
+  const current = row.live?.current ?? row.print.step;
+  if (!total || current == null) return null;
+  return Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+}
+
+/** The live latent preview Make already paints, while the print is running.
+ *  Only the denoising phases have one; a queued row has no pixels yet. */
+function activityRowThumbnail(row: ActivityRow): string | null {
+  const running =
+    row.print.status === "denoising" ||
+    row.print.status === "finishing" ||
+    row.print.status === "loading";
+  return running ? (row.print.previewUrl ?? null) : null;
+}
+
+/** "image 2 of 4 · studio-rack". The batch index rides the prepared request;
+ *  an ordinary sibling carries none, so the machine answers alone. */
+function activityRowMeta(row: ActivityRow): string {
+  const index = row.print.request?.batch_index;
+  const count = row.print.request?.batch_count;
+  const place =
+    index != null && count != null && count > 1 ? `image ${index + 1} of ${count}` : null;
+  return [place, row.print.hostLabel].filter(Boolean).join(" · ");
+}
+
+/** A queued row stands its place in line where the picture will be. */
+function activityRowPosition(row: ActivityRow): string | null {
+  if (activityRowThumbnail(row)) return null;
+  if (durableHold(row.print)) return "↓";
+  const place = row.queuePosition ?? row.print.queuePosition;
+  return place ? String(place) : null;
 }
 
 const sharedMobileActivity = computed(() => {
@@ -2997,6 +3090,10 @@ const finishedQueueJobs = computed(() =>
     .filter((job) => job.status === "complete" || job.status === "error")
     .sort((a, b) => b.submittedAtUnixMs - a.submittedAtUnixMs)
     .slice(0, 20),
+);
+/** The three most recent finished prints that actually have a picture. */
+const finishedQueueThumbnails = computed(() =>
+  finishedQueueJobs.value.filter((job) => job.status === "complete" && job.resultUrl).slice(0, 3),
 );
 const queueDetailKey = ref<string | null>(null);
 const queueDetailEntry = computed(() =>
@@ -3115,6 +3212,47 @@ function inspectQueueEntry(key: string): void {
   queueDetailError.value = "";
   queueDetailKey.value = key;
 }
+/**
+ * A machine's own live work, said in the same shape as this phone's prints.
+ * `/api/activity` carries no thumbnail, so a shared row never has one — every
+ * other part of the card is optional and simply absent.
+ */
+function sharedQueueTitle(row: FleetActiveWork): string {
+  return modelLabel(row.model ?? "") || row.hostLabel;
+}
+
+/** A machine's own row answers the same way: a sentence while it works. */
+function sharedQueueRunning(row: FleetActiveWork): boolean {
+  return row.phase !== "queued" && row.phase !== "paused";
+}
+
+function sharedQueueStatus(row: FleetActiveWork): string {
+  const label = activeWorkPhaseLabel(row);
+  return sharedQueueRunning(row) ? label : label.toLocaleUpperCase();
+}
+
+function sharedQueueProgress(row: FleetActiveWork): number | null {
+  if (row.total == null || !row.total || row.current == null) return null;
+  return Math.max(0, Math.min(100, Math.round((row.current / row.total) * 100)));
+}
+
+/** Place in line for a row with nothing to show yet. */
+function sharedQueuePosition(row: FleetActiveWork): string | null {
+  if (sharedQueueProgress(row) !== null) return null;
+  return row.position ? String(row.position) : null;
+}
+
+/** Pause, Resume, or a chain's Cancel — whatever this machine will accept. */
+function sharedQueueRowActions(row: FleetActiveWork): { id: string; label: string }[] {
+  if (!canPauseFleetActivity(row)) return [];
+  return [
+    {
+      id: fleetQueueResumeNeeded(row) ? "fleet-resume" : "fleet-pause",
+      label: fleetQueueControlLabel(row),
+    },
+  ];
+}
+
 function inspectSharedQueueEntry(row: FleetActiveWork): void {
   inspectQueueEntry(`shared:${row.key}`);
 }
@@ -4493,11 +4631,17 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     hostInput.address = "";
     hostInput.apiKey = "";
     selectedDiscovered.value = null;
+    addMachineOpen.value = false;
     await refreshModels();
   } catch (error) {
     const label = hostInput.name.trim() || discoveredName || (address ?? hostInput.address).trim();
     hostError.value = describeTransportError(error, label);
   }
+}
+
+function openAddMachine(): void {
+  hostError.value = "";
+  addMachineOpen.value = true;
 }
 
 async function pickDiscoveredHost(host: DiscoveredHost): Promise<void> {
@@ -4511,7 +4655,7 @@ async function pickDiscoveredHost(host: DiscoveredHost): Promise<void> {
   hostInput.apiKey = "";
   hostError.value = "";
   await nextTick();
-  discoveredApiKeyInput.value?.focus();
+  addMachineSheet.value?.focusDiscoveredApiKey();
 }
 
 function clearDiscoveredHost() {
@@ -11736,11 +11880,25 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       <strong>Settings</strong>
       <span class="mobile-settings-nav-spacer" aria-hidden="true" />
     </header>
+    <!-- Every screen says its own name, and offers the ONE action it has.
+         A wordmark said the app's name on all five and answered nothing. -->
     <header v-else class="mobile-header">
-      <div class="mobile-wordmark">Mold</div>
-      <div class="mobile-header-actions">
-        <div class="host-chip">{{ headerTargetLabel }}</div>
+      <div class="mobile-header-title-row">
+        <h1
+          v-if="tab === 'generate'"
+          ref="createHeading"
+          class="mobile-large-title"
+          tabindex="-1"
+          data-test="mobile-create-heading"
+        >
+          {{ selectedHost ? OUTPUT_KIND_TITLE[selectedOutputKind] : "Connect a machine" }}
+        </h1>
+        <h1 v-else class="mobile-large-title">{{ MOBILE_TAB_TITLE[tab] }}</h1>
+
+        <!-- Make and Queue reach Settings; the other three have an action of
+             their own, and Settings is one tab away. -->
         <button
+          v-if="tab === 'generate' || tab === 'queue'"
           ref="settingsButton"
           class="mobile-settings-button"
           type="button"
@@ -11752,6 +11910,115 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M7 14v6" />
           </svg>
         </button>
+        <div v-else-if="tab === 'gallery'" class="mobile-library-heading-actions">
+          <button
+            v-if="libraryScope === 'trash' && !gallerySelectMode"
+            class="secondary-button mobile-library-select mobile-library-empty-trash"
+            type="button"
+            :class="{ 'is-armed': emptyTrashConfirming }"
+            :disabled="emptyingTrash || trashCount === 0"
+            data-test="mobile-library-empty-trash"
+            @click="emptyTrash"
+            @blur="emptyTrashConfirming = false"
+          >
+            {{ emptyingTrash ? "Emptying…" : emptyTrashConfirming ? "Confirm" : "Empty trash" }}
+          </button>
+          <button
+            v-if="libraryScope === 'collections' && !activeCollection && !gallerySelectMode"
+            class="secondary-button mobile-library-select"
+            type="button"
+            aria-label="New collection"
+            data-test="mobile-library-new-collection"
+            @click="openLibrarySheet({ kind: 'new-collection' })"
+          >
+            <span aria-hidden="true">＋</span>
+          </button>
+          <button
+            v-if="libraryScope !== 'collections' || activeCollection"
+            class="mobile-header-action mobile-header-action--text"
+            type="button"
+            :aria-pressed="gallerySelectMode"
+            data-test="mobile-gallery-select"
+            @click="setGallerySelectMode(!gallerySelectMode)"
+          >
+            {{ gallerySelectMode ? "Done" : "Select" }}
+          </button>
+        </div>
+        <button
+          v-else-if="tab === 'catalog'"
+          type="button"
+          class="mobile-header-action"
+          aria-label="Browse more styles"
+          data-test="mobile-catalog-browse-more"
+          @click="browseMoreStyles"
+        >
+          <span aria-hidden="true">+</span>
+        </button>
+        <button
+          v-else-if="tab === 'hosts' && !hostDetail"
+          type="button"
+          class="mobile-header-action"
+          aria-label="Add a machine"
+          data-test="mobile-add-machine-open"
+          @click="openAddMachine"
+        >
+          <span aria-hidden="true">+</span>
+        </button>
+      </div>
+
+      <!-- Where the next print lands, and what kind it is. Both used to scroll
+           away with the form, so the answer left the screen exactly when the
+           form got long enough to need it. -->
+      <template v-if="tab === 'generate' && selectedHost">
+        <div class="mobile-header-routing">
+          <!-- The chip says where the next print lands; the native picker lies
+               over it, so the chip's own words stay the single answer. -->
+          <div class="mobile-header-routing-chip">
+            <div class="host-chip">
+              <span class="status-dot" :class="headerTargetDot" aria-hidden="true" />{{
+                headerTargetLabel
+              }}
+            </div>
+            <span
+              v-if="connectedHosts.length > 1"
+              class="mobile-header-routing-caret"
+              aria-hidden="true"
+              >▾</span
+            >
+            <select
+              v-if="connectedHosts.length > 1"
+              class="mobile-header-routing-select"
+              :value="generateTarget"
+              aria-label="Machine"
+              data-test="mobile-generate-host"
+              @change="selectGenerateTarget(($event.target as HTMLSelectElement).value)"
+            >
+              <!-- Automatic policies appear only with two or more reachable
+                   machines; with one there is nothing to choose between. -->
+              <option v-if="autoRoutingAvailable" :value="AUTO_TARGET_ID">Auto</option>
+              <option v-if="autoRoutingAvailable" :value="CAPABLE_TARGET_ID">Most capable</option>
+              <option v-for="host in connectedHosts" :key="host.id" :value="host.id">
+                {{ mobileGenerateTargetLabel(host.id, connectedHosts) }}
+              </option>
+            </select>
+          </div>
+          <span class="mobile-header-routing-note">{{ headerQueueNote }}</span>
+        </div>
+        <SegmentedControl
+          class="mobile-output-kinds"
+          :model-value="selectedOutputKind"
+          :options="outputOptions"
+          label="What to make"
+          data-test="mobile-output-kind"
+          @update:model-value="selectOutputKind"
+        />
+      </template>
+      <div v-else-if="tab !== 'generate'" class="mobile-header-routing">
+        <div class="host-chip">
+          <span class="status-dot" :class="headerTargetDot" aria-hidden="true" />{{
+            headerTargetLabel
+          }}
+        </div>
       </div>
     </header>
 
@@ -11782,8 +12049,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         :app-version="appVersion"
         :host="selectedHost ?? null"
         :update-channel="androidNativeRuntime ? 'GitHub APK' : 'TestFlight'"
+        :pairing-scanning="pairingScannerOpen"
         @update="updateSettings"
         @manage-hosts="manageHostsFromSettings"
+        @scan-pairing="scanPairingCode"
       />
       <div
         v-if="pullRefreshAvailable"
@@ -11833,7 +12102,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         </div>
         <div v-if="!selectedHost" class="empty-state">
           <div>
-            <h1 class="section-title">Connect a machine</h1>
             <p>Connect to a machine running Mold to make your first image.</p>
             <button class="primary-button" type="button" @click="tab = 'hosts'">
               Connect a machine
@@ -11842,14 +12110,7 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         </div>
         <template v-else>
           <div class="mobile-create-head">
-            <h1
-              ref="createHeading"
-              class="section-title"
-              tabindex="-1"
-              data-test="mobile-create-heading"
-            >
-              {{ OUTPUT_KIND_TITLE[selectedOutputKind] }}
-            </h1>
+            <p class="section-note">{{ developOnNote }}</p>
             <button
               class="mobile-settings-reset"
               type="button"
@@ -11860,29 +12121,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               ↺ Reset
             </button>
           </div>
-          <p class="section-note">{{ developOnNote }}</p>
           <div
             v-show="androidShortLandscape"
             ref="createReadinessSlot"
             data-test="mobile-inline-readiness"
           />
-          <label v-if="connectedHosts.length > 1" class="field">
-            <span>Machine</span>
-            <select
-              class="control"
-              :value="generateTarget"
-              data-test="mobile-generate-host"
-              @change="selectGenerateTarget(($event.target as HTMLSelectElement).value)"
-            >
-              <!-- Automatic policies appear only with two or more reachable
-                   machines; with one there is nothing to choose between. -->
-              <option v-if="autoRoutingAvailable" :value="AUTO_TARGET_ID">Auto</option>
-              <option v-if="autoRoutingAvailable" :value="CAPABLE_TARGET_ID">Most capable</option>
-              <option v-for="host in connectedHosts" :key="host.id" :value="host.id">
-                {{ mobileGenerateTargetLabel(host.id, connectedHosts) }}
-              </option>
-            </select>
-          </label>
           <p
             v-if="autoRoutingAvailable && automaticRouting"
             class="section-note"
@@ -11890,14 +12133,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           >
             {{ routingHint }}
           </p>
-          <SegmentedControl
-            class="mobile-output-kinds"
-            :model-value="selectedOutputKind"
-            :options="outputOptions"
-            label="What to make"
-            data-test="mobile-output-kind"
-            @update:model-value="selectOutputKind"
-          />
           <p v-if="outputKindNotice" class="section-note" role="status">
             {{ outputKindNotice }}
             <button type="button" class="mobile-text-action" @click="browseOutputStyles()">
@@ -12586,56 +12821,17 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
       </template>
 
       <template v-else-if="!settingsOpen && tab === 'gallery'">
-        <div class="mobile-library-heading">
-          <div>
-            <h1 class="section-title">My images</h1>
-            <p class="section-note" data-test="mobile-library-note">
-              {{
-                gallerySelectMode
-                  ? `${gallerySelection.size} selected`
-                  : libraryScope === "trash"
-                    ? `${trashCount} in trash · Restore or delete forever from Select`
-                    : libraryScope === "collections"
-                      ? `${libraryCollectionCards.length} collection${libraryCollectionCards.length === 1 ? "" : "s"} across your hosts`
-                      : "Prints from every connected host · Pinch to resize · Tap Select for multiple"
-              }}
-            </p>
-          </div>
-          <div class="mobile-library-heading-actions">
-            <button
-              v-if="libraryScope === 'trash' && !gallerySelectMode"
-              class="secondary-button mobile-library-select mobile-library-empty-trash"
-              type="button"
-              :class="{ 'is-armed': emptyTrashConfirming }"
-              :disabled="emptyingTrash || trashCount === 0"
-              data-test="mobile-library-empty-trash"
-              @click="emptyTrash"
-              @blur="emptyTrashConfirming = false"
-            >
-              {{ emptyingTrash ? "Emptying…" : emptyTrashConfirming ? "Confirm" : "Empty trash" }}
-            </button>
-            <button
-              v-if="libraryScope === 'collections' && !activeCollection && !gallerySelectMode"
-              class="secondary-button mobile-library-select"
-              type="button"
-              aria-label="New collection"
-              data-test="mobile-library-new-collection"
-              @click="openLibrarySheet({ kind: 'new-collection' })"
-            >
-              <span aria-hidden="true">＋</span>
-            </button>
-            <button
-              v-if="libraryScope !== 'collections' || activeCollection"
-              class="secondary-button mobile-library-select"
-              type="button"
-              :aria-pressed="gallerySelectMode"
-              data-test="mobile-gallery-select"
-              @click="setGallerySelectMode(!gallerySelectMode)"
-            >
-              {{ gallerySelectMode ? "Done" : "Select" }}
-            </button>
-          </div>
-        </div>
+        <p class="section-note" data-test="mobile-library-note">
+          {{
+            gallerySelectMode
+              ? `${gallerySelection.size} selected`
+              : libraryScope === "trash"
+                ? `${trashCount} in trash · Restore or delete forever from Select`
+                : libraryScope === "collections"
+                  ? `${libraryCollectionCards.length} collection${libraryCollectionCards.length === 1 ? "" : "s"} across your hosts`
+                  : "Prints from every connected host · Pinch to resize · Tap Select for multiple"
+          }}
+        </p>
         <div
           v-if="libraryScope !== 'collections' || activeCollection"
           class="mobile-library-search"
@@ -13395,7 +13591,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           @status="updateHostStatus"
         />
         <template v-else>
-          <h1 class="section-title">Machines</h1>
           <p class="section-note">LAN discovery, Tailscale MagicDNS, or an address</p>
           <!-- One line each: the Create picker offers these only while two or
                more machines are reachable. -->
@@ -13409,44 +13604,55 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           >
             {{ MOBILE_CAPABLE_ROUTING_HINT }}
           </p>
-          <div v-for="host in hosts" :key="host.id" class="host-row">
+          <div
+            v-for="host in hosts"
+            :key="host.id"
+            class="mobile-machine-card"
+            :class="{ 'is-target': host.id === selectedHostId && !automaticRouting }"
+          >
             <button
-              class="host-row-button"
+              class="mobile-machine-open"
               type="button"
               :aria-label="`View ${host.name}`"
               data-test="mobile-host-row"
               @click="showHostDetail(host.id)"
             >
-              <span class="host-row-head">
-                <span>
-                  <span class="host-name">{{ host.name }}</span>
-                  <span class="host-url">{{ host.baseUrl }}</span>
-                </span>
-                <span class="host-row-state">
-                  <span
-                    class="status-dot"
-                    :class="
-                      host.connected !== false
-                        ? host.stale
-                          ? 'is-reconnecting'
-                          : host.online
-                            ? 'is-ready'
-                            : 'is-error'
-                        : ''
-                    "
-                  />
-                  <span class="host-chip" data-test="mobile-host-health">{{
-                    mobileHostHealthLabel(host)
-                  }}</span>
-                  <span aria-hidden="true">›</span>
-                </span>
+              <span class="mobile-machine-head">
+                <span
+                  class="status-dot"
+                  :class="
+                    host.connected !== false
+                      ? host.stale
+                        ? 'is-reconnecting'
+                        : host.online
+                          ? 'is-ready'
+                          : 'is-error'
+                      : ''
+                  "
+                />
+                <span class="host-name">{{ host.name }}</span>
+                <!-- Only a PINNED machine can say this. Under Auto or Most
+                     capable no single machine is where the work lands, and a
+                     pill on one of them would simply be wrong. -->
+                <!-- The health chip stays whatever the routing says: a pinned
+                     machine can be reconnecting, and that is when you look. -->
+                <span class="host-chip" data-test="mobile-host-health">{{
+                  mobileHostHealthLabel(host)
+                }}</span>
+                <BadgePill
+                  v-if="host.id === selectedHostId && !automaticRouting"
+                  tone="accent"
+                  data-test="mobile-machine-target"
+                  >making images here</BadgePill
+                >
+                <span class="mobile-machine-chevron" aria-hidden="true">›</span>
               </span>
+              <!-- What the box IS, in the sentence the desktop already says. -->
+              <span class="mobile-machine-blurb" data-test="mobile-machine-blurb">{{
+                hostMachineSentence(host)
+              }}</span>
             </button>
             <div v-if="host.online" class="host-telemetry" data-test="mobile-host-telemetry">
-              <div class="host-telemetry-row">
-                <span class="host-telemetry-mem">{{ hostMemLabel(host.id) }}</span>
-                <span class="host-telemetry-queue">queue {{ hostQueueLabel(host.id) }}</span>
-              </div>
               <div
                 class="meter host-telemetry-meter"
                 role="meter"
@@ -13456,6 +13662,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 aria-valuemax="100"
               >
                 <span :style="{ width: `${hostVramPercent(host.id)}%` }" />
+              </div>
+              <div class="host-telemetry-row">
+                <span class="host-telemetry-mem">{{ hostMemLabel(host.id) }}</span>
+                <span class="host-telemetry-queue">{{ hostQueueLabel(host.id) }}</span>
               </div>
             </div>
             <div class="row-actions">
@@ -13475,126 +13685,42 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               </button>
             </div>
           </div>
-          <details
-            class="mobile-add-machine"
-            :open="hosts.length === 0"
-            data-test="mobile-add-machine"
-          >
-            <summary>Add a machine</summary>
+          <!-- An empty fleet gets an invitation, not a form: the sheet opens
+               when asked for, and never before. -->
+          <CardSurface v-if="hosts.length === 0" dashed class="mobile-machines-empty">
+            <strong>No machines yet</strong>
+            <p>
+              Scan the pairing code from Mold Studio on your Mac, look for one nearby, or type an
+              address.
+            </p>
             <button
-              class="primary-button mobile-pair-button"
+              class="primary-button"
               type="button"
-              :disabled="pairing"
-              data-test="mobile-scan-pairing"
-              @click="scanPairingCode"
+              data-test="mobile-add-machine-empty"
+              @click="openAddMachine"
             >
-              <span aria-hidden="true">▦</span>
-              {{ pairing ? "Opening camera…" : "Scan pairing code" }}
+              Add a machine
             </button>
-            <p class="mobile-pair-note">On your machine, open Settings → Mobile pairing.</p>
-            <button
-              class="secondary-button"
-              type="button"
-              :disabled="discovering"
-              data-test="mobile-discover-hosts"
-              @click="discoverHosts"
-            >
-              {{ discovering ? "Scanning…" : "Discover nearby" }}
-            </button>
-            <div
-              v-for="host in discovered"
-              :key="`${host.host}:${host.port}`"
-              class="host-row"
-              data-test="mobile-discovered-host"
-            >
-              <div class="host-row-head">
-                <div>
-                  <div class="host-name">{{ host.name }}</div>
-                  <div class="host-url">{{ host.host }}:{{ host.port }}</div>
-                </div>
-                <button class="secondary-button" type="button" @click="pickDiscoveredHost(host)">
-                  Connect
-                </button>
-              </div>
-            </div>
-            <form
-              v-if="selectedDiscovered"
-              style="margin-top: 20px"
-              data-test="mobile-discovered-key-prompt"
-              @submit.prevent="connectHost(hostInput.address, hostInput.name)"
-            >
-              <div class="host-row">
-                <div class="host-name">{{ selectedDiscovered.name }}</div>
-                <div class="host-url">
-                  {{ selectedDiscovered.host }}:{{ selectedDiscovered.port }}
-                </div>
-              </div>
-              <label class="field"
-                ><span>API key</span
-                ><input
-                  ref="discoveredApiKeyInput"
-                  v-model="hostInput.apiKey"
-                  autocapitalize="none"
-                  :spellcheck="false"
-                  enterkeyhint="done"
-                  class="control"
-                  type="password"
-                  placeholder="Required by this machine"
-                  autocomplete="off"
-                  data-test="mobile-discovered-api-key"
-                  required
-              /></label>
-              <p class="section-note">This machine requires its own API key.</p>
-              <div class="mobile-inline-actions">
-                <button class="secondary-button" type="button" @click="clearDiscoveredHost">
-                  Choose another
-                </button>
-                <button class="primary-button" type="submit">Test and save</button>
-              </div>
-            </form>
-            <form v-else class="mobile-host-form" @submit.prevent="connectHost()">
-              <label class="field"
-                ><span>Name</span
-                ><input
-                  v-model="hostInput.name"
-                  enterkeyhint="next"
-                  @keydown.enter.prevent="hostAddressInput?.focus()"
-                  class="control"
-                  placeholder="Studio Mac (optional)"
-                  autocomplete="off"
-              /></label>
-              <label class="field"
-                ><span>Address or MagicDNS name</span
-                ><input
-                  ref="hostAddressInput"
-                  v-model="hostInput.address"
-                  inputmode="url"
-                  :spellcheck="false"
-                  enterkeyhint="next"
-                  @keydown.enter.prevent="hostApiKeyInput?.focus()"
-                  class="control"
-                  placeholder="studio.tailnet.ts.net or 192.168.1.20"
-                  autocapitalize="none"
-                  autocomplete="url"
-                  required
-              /></label>
-              <label class="field"
-                ><span>API key</span
-                ><input
-                  ref="hostApiKeyInput"
-                  v-model="hostInput.apiKey"
-                  autocapitalize="none"
-                  :spellcheck="false"
-                  enterkeyhint="done"
-                  class="control"
-                  type="password"
-                  placeholder="If required"
-                  autocomplete="off"
-              /></label>
-              <button class="primary-button" type="submit">Test and save</button>
-            </form>
-          </details>
+          </CardSurface>
           <p v-if="hostError" class="status-line error-text" role="alert">{{ hostError }}</p>
+          <MobileAddMachineSheet
+            ref="addMachineSheet"
+            v-model:name="hostInput.name"
+            v-model:address="hostInput.address"
+            v-model:api-key="hostInput.apiKey"
+            :open="addMachineOpen"
+            :pairing="pairing"
+            :discovering="discovering"
+            :discovered="discovered"
+            :selected-discovered="selectedDiscovered"
+            @close="addMachineOpen = false"
+            @scan-pairing="scanPairingCode"
+            @discover="discoverHosts"
+            @pick-discovered="pickDiscoveredHost"
+            @clear-discovered="clearDiscoveredHost"
+            @connect-discovered="connectHost(hostInput.address, hostInput.name)"
+            @connect-manual="connectHost()"
+          />
         </template>
       </template>
 
@@ -13609,7 +13735,6 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
         />
       </KeepAlive>
       <section v-show="!settingsOpen && tab === 'queue'" data-test="mobile-queue-view">
-        <div class="mobile-create-head"><h1 class="section-title">Queue</h1></div>
         <p class="section-note">Work continues on your machines when you leave this screen.</p>
         <!-- ONE queue: this session's prints and the machines' own live
                work land in the same list (mockup 1c). -->
@@ -13658,30 +13783,42 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                       :detail="durableHold(entry.local.print)?.error ?? null"
                       :cancelling="entry.local.print.cancelling === true"
                       :aria-label="queuePrintTitle(entry.local.print)"
+                      :thumbnail-url="activityRowThumbnail(entry.local)"
+                      :progress="activityRowProgress(entry.local)"
+                      :meta="activityRowMeta(entry.local)"
+                      :position="activityRowPosition(entry.local)"
+                      :running="activityRowRunning(entry.local)"
+                      :tone="durableHold(entry.local.print) ? 'warning' : 'neutral'"
                       @activate="inspectQueueEntry(entry.key)"
                     />
                   </SwipeActionRow>
                 </div>
-                <LiveActivityList
-                  v-else
-                  :rows="[entry.shared]"
-                  interactive
-                  swipe-actions
-                  :can-swipe="canPauseFleetActivity"
-                  @select="inspectSharedQueueEntry"
-                >
-                  <template #actions="{ row }">
-                    <button
-                      type="button"
-                      data-test="mobile-fleet-queue-control"
-                      :disabled="queueControlHostIds.has(row.hostId)"
-                      :aria-label="`${fleetQueueControlLabel(row)} job on ${row.hostLabel}`"
-                      @click.stop="setFleetJobPaused(row, !fleetQueueResumeNeeded(row))"
-                    >
-                      {{ fleetQueueControlLabel(row) }}
-                    </button>
-                  </template>
-                </LiveActivityList>
+                <!-- A machine's own work is drawn exactly like this phone's.
+                     It rendered as a plain text row beside a card with a
+                     meter, which made the fleet's work read as a lesser kind
+                     of job on the one screen that exists to compare them. -->
+                <div v-else class="mobile-generation-row">
+                  <SwipeActionRow
+                    :actions="sharedQueueRowActions(entry.shared)"
+                    :label="sharedQueueTitle(entry.shared)"
+                    :disabled="queueControlHostIds.has(entry.shared.hostId)"
+                    data-test="mobile-fleet-job"
+                    @act="setFleetJobPaused(entry.shared, !fleetQueueResumeNeeded(entry.shared))"
+                  >
+                    <MobileGenerationQueueCard
+                      :row-test-id="`fleet-job-${entry.shared.key}`"
+                      :title="sharedQueueTitle(entry.shared)"
+                      subtitle=""
+                      :status="sharedQueueStatus(entry.shared)"
+                      :aria-label="sharedQueueTitle(entry.shared)"
+                      :progress="sharedQueueProgress(entry.shared)"
+                      :meta="entry.shared.hostLabel"
+                      :position="sharedQueuePosition(entry.shared)"
+                      :running="sharedQueueRunning(entry.shared)"
+                      @activate="inspectSharedQueueEntry(entry.shared)"
+                    />
+                  </SwipeActionRow>
+                </div>
               </template>
             </section>
           </div>
@@ -13695,6 +13832,24 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
             Finished <span>{{ finishedQueueJobs.length }}</span>
           </h3>
           <p class="section-note">Recent work from this phone. Saved results stay in My images.</p>
+          <!-- Three pictures, because a finished print is a picture and the
+               list of titles above was the only thing that ever said so. -->
+          <div
+            v-if="finishedQueueThumbnails.length"
+            class="mobile-queue-finished-strip"
+            data-test="mobile-queue-finished-strip"
+          >
+            <button
+              v-for="job in finishedQueueThumbnails"
+              :key="`thumb:${job.clientId}`"
+              type="button"
+              class="mobile-queue-finished-tile"
+              :aria-label="queuePrintTitle(job) || modelLabel(job.model)"
+              @click="inspectQueueEntry(`finished:${job.clientId}`)"
+            >
+              <img :src="job.resultUrl ?? ''" alt="" decoding="async" />
+            </button>
+          </div>
           <button
             v-for="job in finishedQueueJobs"
             :key="job.clientId"

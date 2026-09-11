@@ -277,5 +277,12 @@ images scope row is `ui/components/SegmentedControl.vue` in `inline` mode, one
 row with each count beside its name, replacing a radio grid that wrapped onto
 two lines.
 
-Deferred, unchanged: per-screen large titles, the Queue running-job card, Styles
-filter consolidation, Machines cards, DevicePanel density on Settings.
+Shipped since (#1685): per-screen large titles with one 44pt action each and
+Make's routing chip and output-kind control pinned above the scroll; the Queue
+running-job card with its live preview, meter, batch line and place-in-line
+glyph; the Styles **Filters** sheet (`MobileCatalogFilterSheet.vue`) with 64px
+result rows; Machines cards carrying `machineSentence` and the Add-a-machine
+sheet (`MobileAddMachineSheet.vue`); the Settings pairing card
+(`MobilePairScanCard.vue`); and DevicePanel / LicenseSettingsPanel touch
+density. `useSheetDismiss` is the one drag-to-dismiss implementation behind
+every bottom sheet.

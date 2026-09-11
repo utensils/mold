@@ -1118,7 +1118,7 @@ describe("MobileApp generation lifecycle", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await flushPromises();
-    const activity = wrapper.get("[data-test='shared-live-activity']");
+    const activity = wrapper.get("[data-test='mobile-fleet-job']");
     expect(activity.text()).toContain("Studio");
     expect(activity.text()).toContain("flux-dev:q4");
     expect(localStorage.getItem("mold.mobile.live-activity.v1")).not.toContain(target.apiKey);
@@ -1230,7 +1230,7 @@ describe("MobileApp generation lifecycle", () => {
       wrapper = mountMobileApp();
       await flushPromises();
       await wrapper
-        .get("[data-test='live-activity-select-studio-id:generation:foreign-running']")
+        .get("[data-row-test='fleet-job-studio-id:generation:foreign-running']")
         .trigger("click");
       await flushPromises();
       expect(wrapper.get("[data-test='queue-detail-prompt']").text()).toBe(
@@ -1295,21 +1295,8 @@ describe("MobileApp generation lifecycle", () => {
     });
     wrapper = mountMobileApp();
     await flushPromises();
-    const row = wrapper.get(".live-activity-row");
-    const touch = (type: string, x: number, ended = false) => {
-      const event = new Event(type, { bubbles: true, cancelable: true });
-      const point = { clientX: x, clientY: 100 };
-      Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
-      Object.defineProperty(event, "changedTouches", { value: [point] });
-      return event;
-    };
-    row.element.dispatchEvent(touch("touchstart", 260));
-    row.element.dispatchEvent(touch("touchmove", 160));
-    row.element.dispatchEvent(touch("touchend", 160, true));
-    await flushPromises();
-
-    expect(row.classes()).toContain("live-activity-row--actions-open");
-    await row.get("[data-test='mobile-fleet-queue-control']").trigger("click");
+    const row = wrapper.get("[data-test='mobile-fleet-job']");
+    await row.get("[data-test='swipe-action-fleet-pause']").trigger("click");
     await flushPromises();
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/foreign-queued/pause", {
       method: "POST",
@@ -1345,20 +1332,8 @@ describe("MobileApp generation lifecycle", () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
-    const row = wrapper.get(".live-activity-row");
-    const touch = (type: string, x: number, ended = false) => {
-      const event = new Event(type, { bubbles: true, cancelable: true });
-      const point = { clientX: x, clientY: 100 };
-      Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
-      Object.defineProperty(event, "changedTouches", { value: [point] });
-      return event;
-    };
-    row.element.dispatchEvent(touch("touchstart", 260));
-    row.element.dispatchEvent(touch("touchmove", 160));
-    row.element.dispatchEvent(touch("touchend", 160, true));
-    await flushPromises();
-
-    const control = row.get("[data-test='mobile-fleet-queue-control']");
+    const row = wrapper.get("[data-test='mobile-fleet-job']");
+    const control = row.get("[data-test='swipe-action-fleet-resume']");
     expect(control.text()).toBe("Resume");
     await control.trigger("click");
     await flushPromises();
@@ -1398,20 +1373,8 @@ describe("MobileApp generation lifecycle", () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
-    const row = wrapper.get(".live-activity-row");
-    const touch = (type: string, x: number, ended = false) => {
-      const event = new Event(type, { bubbles: true, cancelable: true });
-      const point = { clientX: x, clientY: 100 };
-      Object.defineProperty(event, "touches", { value: ended ? [] : [point] });
-      Object.defineProperty(event, "changedTouches", { value: [point] });
-      return event;
-    };
-    row.element.dispatchEvent(touch("touchstart", 260));
-    row.element.dispatchEvent(touch("touchmove", 160));
-    row.element.dispatchEvent(touch("touchend", 160, true));
-    await flushPromises();
-
-    const control = row.get("[data-test='mobile-fleet-queue-control']");
+    const row = wrapper.get("[data-test='mobile-fleet-job']");
+    const control = row.get("[data-test='swipe-action-fleet-pause']");
     expect(control.text()).toBe("Cancel");
     await control.trigger("click");
     await flushPromises();
@@ -1488,8 +1451,9 @@ describe("MobileApp generation lifecycle", () => {
     await flushPromises();
 
     await fieldControl("Prompt").setValue("My unsent draft");
-    const row = wrapper.get("[data-test='live-activity-select-studio-id:generation:foreign-job']");
-    expect(row.element.tagName).toBe("BUTTON");
+    const row = wrapper.get("[data-row-test='fleet-job-studio-id:generation:foreign-job']");
+    // The shared row is the same activatable card the local rows use.
+    expect(row.attributes("role")).toBe("button");
     await row.trigger("click");
     await flushPromises();
     expect(fieldControl("Prompt").element).toHaveProperty("value", "My unsent draft");
@@ -1570,7 +1534,7 @@ describe("MobileApp generation lifecycle", () => {
 
     const before = currentStyleId();
     const autoChainRow = wrapper.get(
-      "[data-test='live-activity-select-studio-id:generation:foreign-auto-chain']",
+      "[data-row-test='fleet-job-studio-id:generation:foreign-auto-chain']",
     );
     await autoChainRow.trigger("click");
     await flushPromises();
@@ -1621,7 +1585,7 @@ describe("MobileApp generation lifecycle", () => {
     const queueReads = apiJsonTo.mock.calls.filter(([, path]) => path === "/api/queue").length;
 
     await wrapper
-      .get("[data-test='live-activity-select-studio-id:generation:colliding-job-id']")
+      .get("[data-row-test='fleet-job-studio-id:generation:colliding-job-id']")
       .trigger("click");
     await flushPromises();
     await wrapper
@@ -1892,10 +1856,12 @@ describe("MobileApp generation queue", () => {
     window.dispatchEvent(new Event("pageshow"));
     await flushPromises();
 
+    // A RUNNING row says what is happening in the host's own sentence; the
+    // uppercase code is reserved for rows that are waiting, held or settled.
     expect(wrapper.get("[data-test='mobile-generation-status']").text()).toBe(
-      "PREPARING · OPENING MINIMAX H3 CHECKPOINTS",
+      "Preparing · Opening MiniMax H3 checkpoints",
     );
-    expect(wrapper.get(".mobile-generation-job").classes()).toContain(
+    expect(wrapper.get(".mobile-generation-job").classes()).not.toContain(
       "mobile-generation-job--detailed-status",
     );
 
@@ -1917,9 +1883,9 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     expect(wrapper.get("[data-test='mobile-generation-status']").text()).toBe(
-      "ENCODING VIDEO · 15/20",
+      "Encoding video · 15/20",
     );
-    expect(wrapper.get(".mobile-generation-job").classes()).toContain(
+    expect(wrapper.get(".mobile-generation-job").classes()).not.toContain(
       "mobile-generation-job--detailed-status",
     );
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe(
@@ -7577,11 +7543,149 @@ describe("MobileApp foreground resume", () => {
   });
 });
 
+describe("MobileApp queue rows", () => {
+  it("draws a machine's own work the same way as this phone's", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/activity")
+        return Promise.resolve({
+          instance_id: status.instance_id,
+          observed_at_unix_ms: 10,
+          items: [
+            {
+              id: "foreign-running",
+              kind: "generation",
+              phase: "denoising",
+              model: model.name,
+              created_at_unix_ms: 2,
+              updated_at_unix_ms: 9,
+              current: 16,
+              total: 32,
+              can_cancel: true,
+            },
+            {
+              id: "foreign-queued",
+              kind: "generation",
+              phase: "queued",
+              model: model.name,
+              created_at_unix_ms: 1,
+              updated_at_unix_ms: 9,
+              position: 2,
+              can_cancel: true,
+            },
+          ],
+        });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-queue']").trigger("click");
+    await flushPromises();
+
+    // Being made and Waiting must read the same whether the work is this
+    // phone's or the machine's — a plain text row beside a card with a meter
+    // made the machine's own work look like a lesser kind of job.
+    const cards = wrapper.findAll("[data-test='mobile-generation-queue-card']");
+    expect(cards).toHaveLength(2);
+    const running = cards[0]!;
+    expect(running.get("[role='progressbar']").attributes("aria-valuenow")).toBe("50");
+    expect(running.get("[data-test='mobile-generation-job-meta']").text()).toBe("Studio");
+    // A machine's own row has no latent preview to show.
+    expect(running.find("[data-test='mobile-generation-job-thumb']").exists()).toBe(false);
+
+    const queued = cards[1]!;
+    expect(queued.get("[data-test='mobile-generation-job-position']").text()).toBe("2");
+    expect(wrapper.find(".live-activity-row").exists()).toBe(false);
+  });
+});
+
+describe("MobileApp per-screen titles", () => {
+  async function openTab(id: string): Promise<void> {
+    await wrapper!.get(`[data-test='mobile-tab-${id}']`).trigger("click");
+    await flushPromises();
+  }
+
+  it("names the screen you are on, with the one action that screen offers", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const header = () => wrapper!.get(".mobile-header");
+    const title = () => header().get(".mobile-large-title").text();
+    // The wordmark said the app's name on every screen and answered nothing.
+    expect(wrapper.find(".mobile-wordmark").exists()).toBe(false);
+
+    // Make names what it is making, not the app.
+    expect(title()).toMatch(/^New (image|clip|3-D object)$/);
+    expect(header().find("[data-test='mobile-open-settings']").exists()).toBe(true);
+
+    await openTab("queue");
+    expect(title()).toBe("Queue");
+    // Settings must stay reachable from a screen with no action of its own.
+    expect(header().find("[data-test='mobile-open-settings']").exists()).toBe(true);
+
+    await openTab("gallery");
+    expect(title()).toBe("My images");
+    expect(header().get("[data-test='mobile-gallery-select']").text()).toBe("Select");
+
+    await openTab("catalog");
+    expect(title()).toBe("Styles");
+    expect(header().find("[data-test='mobile-catalog-browse-more']").exists()).toBe(true);
+
+    await openTab("hosts");
+    expect(title()).toBe("Machines");
+    expect(header().find("[data-test='mobile-add-machine-open']").exists()).toBe(true);
+  });
+
+  it("pins where the next print lands above the Make scroll, not inside it", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const header = wrapper.get(".mobile-header");
+    // The routing chip and the output-kind control used to scroll away with
+    // the form, so the answer to "where is this going" left the screen.
+    expect(header.find(".host-chip").exists()).toBe(true);
+    expect(header.find("[data-test='mobile-output-kind']").exists()).toBe(true);
+
+    await wrapper.get("[data-test='mobile-tab-queue']").trigger("click");
+    await flushPromises();
+    // Neither belongs to a screen that makes nothing.
+    expect(wrapper.get(".mobile-header").find("[data-test='mobile-output-kind']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("enters Select from the Images header", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openTab("gallery");
+
+    await wrapper.get("[data-test='mobile-gallery-select']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-gallery-select']").text()).toBe("Done");
+  });
+
+  it("sends the Styles + to the shelf that has more to show", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openTab("catalog");
+
+    await wrapper.get("[data-test='mobile-catalog-segment-installed']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-catalog-browse-more']").trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='mobile-catalog-segment-discover']").attributes("aria-pressed"),
+    ).toBe("true");
+  });
+});
+
 describe("MobileApp settings", () => {
   it("opens as a focused destination and returns to the unchanged primary tab", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
-    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await wrapper.get("[data-test='mobile-tab-queue']").trigger("click");
     await flushPromises();
 
     await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
@@ -7593,7 +7697,7 @@ describe("MobileApp settings", () => {
 
     await wrapper.get("[data-test='mobile-settings-back']").trigger("click");
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+    expect(wrapper.get("[data-test='mobile-tab-queue']").attributes("aria-current")).toBe("page");
     expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-open-settings']").element);
   });
 
@@ -8037,7 +8141,7 @@ describe("MobileApp primary navigation", () => {
     },
   );
 
-  it.each(["hosts", "gallery"])("shows only Settings when opened from %s", async (destination) => {
+  it.each(["generate", "queue"])("shows only Settings when opened from %s", async (destination) => {
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get(`[data-test='mobile-tab-${destination}']`).trigger("click");
@@ -10559,7 +10663,7 @@ describe("MobileApp gallery", () => {
     if (!hostsTab) throw new Error("Missing Machines tab");
     await hostsTab.trigger("click");
     const studioRow = wrapper
-      .findAll(".host-row")
+      .findAll(".mobile-machine-card")
       .find((row) => row.find(".host-name").text() === "Studio");
     if (!studioRow) throw new Error("Missing Studio host row");
     await studioRow.get("[data-test='mobile-host-row']").trigger("click");
@@ -10986,7 +11090,7 @@ describe("MobileApp host and catalog coordination", () => {
 
       await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
       const remoteRow = wrapper
-        .findAll(".host-row")
+        .findAll(".mobile-machine-card")
         .find((row) => row.find(".host-name").text() === "Render Box");
       expect(remoteRow?.text()).toContain("v0.19.0");
       expect(remoteRow?.text()).not.toContain("offline");
@@ -11034,7 +11138,7 @@ describe("MobileApp host and catalog coordination", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
     const remoteRow = wrapper
-      .findAll(".host-row")
+      .findAll(".mobile-machine-card")
       .find((row) => row.find(".host-name").text() === "Render Box");
     if (!remoteRow) throw new Error("Missing Render Box host row");
     await remoteRow.get("[data-test='mobile-host-row']").trigger("click");
@@ -11182,8 +11286,69 @@ describe("MobileApp machines telemetry", () => {
 
     const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
     expect(telemetry.get(".host-telemetry-mem").text()).toBe("9.8 / 24.0 GB");
-    expect(telemetry.get(".host-telemetry-queue").text()).toBe("queue 2");
+    expect(telemetry.get(".host-telemetry-queue").text()).toBe("2 waiting");
     expect(telemetry.get(".meter").attributes("aria-valuenow")).toBe("41");
+  });
+
+  it("says what a machine is, and which one is making images right now", async () => {
+    apiJsonTo
+      .mockReset()
+      .mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+        if (path === "/api/status")
+          return Promise.resolve({
+            ...status,
+            uptime_secs: 6 * 86_400,
+            gpu_info: {
+              name: "RTX 4090",
+              vram_total_mb: 24_000,
+              vram_used_mb: 9_840,
+              backend: "cuda",
+            },
+            queue_depth: 3,
+            queue_capacity: 8,
+          } satisfies ServerStatus);
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        return durableApiFallback(path, init, callTarget);
+      });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+
+    // The one sentence the desktop already says about a machine — the phone
+    // showed only a bare URL and left the hardware a mystery.
+    expect(wrapper.get("[data-test='mobile-machine-blurb']").text()).toBe(
+      "RTX 4090 · CUDA · on your network · up 6d 0h",
+    );
+    // One machine is pinned, so the card says so rather than making the queue
+    // the only place the answer lives.
+    expect(wrapper.get("[data-test='mobile-machine-target']").text()).toBe("making images here");
+    // The health chip never goes away for it: a pinned machine can still be
+    // reconnecting, and that is exactly when you look.
+    expect(wrapper.find("[data-test='mobile-host-health']").exists()).toBe(true);
+    expect(wrapper.get("[data-test='mobile-host-telemetry'] .host-telemetry-queue").text()).toBe(
+      "3 waiting",
+    );
+  });
+
+  it("opens the add-machine sheet from the header rather than a buried disclosure", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+
+    const sheet = wrapper.get("[data-test='mobile-add-machine']");
+    expect(sheet.classes()).not.toContain("is-open");
+
+    await wrapper.get("[data-test='mobile-add-machine-open']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-add-machine']").classes()).toContain("is-open");
+    // The whole flow travelled with it: pairing, discovery, and the manual form.
+    expect(sheet.find("[data-test='mobile-scan-pairing']").exists()).toBe(true);
+    expect(sheet.find("[data-test='mobile-discover-hosts']").exists()).toBe(true);
+    expect(sheet.find(".mobile-host-form").exists()).toBe(true);
+
+    await wrapper.get("[data-test='mobile-add-machine-done']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-add-machine']").classes()).not.toContain("is-open");
   });
 
   it("keeps last-good telemetry and capabilities through repeated probe failures, then recovers", async () => {
@@ -11232,7 +11397,7 @@ describe("MobileApp machines telemetry", () => {
     expect(wrapper.get("[data-test='mobile-host-telemetry'] .host-telemetry-mem").text()).toBe(
       "9.8 / 24.0 GB",
     );
-    expect(wrapper.get(".status-dot").classes()).toContain("is-reconnecting");
+    expect(wrapper.get(".mobile-machine-card .status-dot").classes()).toContain("is-reconnecting");
 
     await vi.advanceTimersByTimeAsync(10_000);
     await flushPromises();
@@ -11251,7 +11416,7 @@ describe("MobileApp machines telemetry", () => {
     health = wrapper.get("[data-test='mobile-host-health']");
     expect(health.text()).toBe("v0.19.0");
     expect(wrapper.get("[data-test='mobile-host-telemetry'] .host-telemetry-queue").text()).toBe(
-      "queue 4",
+      "4 waiting",
     );
 
     await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
@@ -11372,7 +11537,7 @@ describe("MobileApp machines telemetry", () => {
 
     const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
     expect(telemetry.get(".host-telemetry-mem").text()).toBe("—");
-    expect(telemetry.get(".host-telemetry-queue").text()).toBe("queue 0");
+    expect(telemetry.get(".host-telemetry-queue").text()).toBe("0 waiting");
   });
 
   it("disconnects without forgetting and reconnects only on request", async () => {
@@ -11466,7 +11631,7 @@ describe("mobile Library pinch-to-resize", () => {
 
     expect(grid.attributes("data-gallery-columns")).toBe("3");
     expect(grid.attributes("style")).toContain("--mobile-gallery-columns: 3");
-    expect(app.get(".mobile-library-heading .section-note").text()).toContain("Pinch to resize");
+    expect(app.get("[data-test='mobile-library-note']").text()).toContain("Pinch to resize");
   });
 
   it("spreading two fingers enlarges the thumbnails and persists the choice", async () => {
@@ -12175,7 +12340,7 @@ describe("MobileApp routing target consistency", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
     const renderRow = wrapper
-      .findAll(".host-row")
+      .findAll(".mobile-machine-card")
       .find((row) => row.find(".host-name").text() === "Render");
     if (!renderRow) throw new Error("Missing Render host row");
     const useForGenerations = renderRow

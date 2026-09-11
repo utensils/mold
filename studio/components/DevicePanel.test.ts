@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import type { DeviceInfo } from "../api/devices";
@@ -655,6 +657,28 @@ describe("DevicePanel", () => {
       wrapper.unmount();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("raises every device control to a finger on a phone, not only the toggle", () => {
+    // The narrow-viewport block rescued `.device-card__toggle` to 44px and
+    // left the blocked-lane action at 28px, which is the control a phone user
+    // most needs: it is how a blocked device explains itself.
+    const source = readFileSync(
+      join(import.meta.dirname, "DevicePanel.vue"),
+      "utf8",
+    );
+    const narrow =
+      source.match(/@media \(max-width: 639px\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+    for (const control of [
+      ".device-card__toggle",
+      ".device-panel__blocked-action",
+    ]) {
+      const rule =
+        narrow.match(new RegExp(`\\${control}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
+      expect(
+        Number(rule.match(/min-height:\s*(\d+)px/)?.[1]),
+      ).toBeGreaterThanOrEqual(44);
     }
   });
 });

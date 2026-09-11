@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import MobileCatalogFilterSheet from "./MobileCatalogFilterSheet.vue";
 import { useMobileBack } from "./useMobileBack";
 import {
   computed,
@@ -29,12 +30,12 @@ import {
   mergeCatalogSummaryDetail,
 } from "../lib/catalogDetail";
 import {
-  CATALOG_KIND_OPTIONS,
-  CATALOG_SORT_OPTIONS,
   type CatalogKindFilter,
   type CatalogSortOption,
+  type CatalogSource,
 } from "../lib/catalogFilters";
 import { catalogFamily, familyLabel, matchesCatalogFamily } from "@studio/lib/modelFamily";
+import { styleDisplayName } from "@studio/lib/styleLabel";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import {
   modelRuntimeNotice,
@@ -78,7 +79,6 @@ import {
 } from "./mobileDownloads";
 
 type MediaType = "all" | "image" | "video" | "mesh";
-type CatalogSource = "all" | "hf" | "civitai" | "installed";
 
 type MobileCatalogEntry = CatalogEntry & {
   hostIds?: string[];
@@ -116,6 +116,7 @@ const FOCUSABLE_SELECTOR = [
 ].join(",");
 
 const query = ref("");
+const filtersOpen = ref(false);
 const mediaType = ref<MediaType>("all");
 const source = ref<CatalogSource>("all");
 // Remembers the last Discover sub-source so toggling Installed → Discover
@@ -538,6 +539,30 @@ function entryTitle(entry: MobileCatalogEntry): string {
   return entry.display_name ?? entry.name;
 }
 
+/**
+ * The style's name in plain words — the SHARED rule StyleMenu and the desktop
+ * picker already use, so one style is not called two different things on two
+ * screens. The row keeps `entry.name` beside it in mono when they differ.
+ */
+/**
+ * What a style you ALREADY have weighs. Only the weights, never the fetch
+ * total: nothing is being fetched on this shelf, and the two numbers mean
+ * different things.
+ */
+function installedWeightLabel(entry: MobileCatalogEntry): string | null {
+  const weights = catalogSizeInfo(entry).weightsBytes;
+  return weights != null ? formatGB(weights) : null;
+}
+
+function entryStyleName(entry: MobileCatalogEntry): string {
+  return styleDisplayName({
+    name: entry.name,
+    family: entry.family,
+    description: entry.description ?? null,
+    display_name: entry.display_name ?? null,
+  });
+}
+
 function entryAccessibilityLabel(entry: MobileCatalogEntry): string {
   const labels = [
     entryTitle(entry),
@@ -811,6 +836,8 @@ defineExpose({
     mediaType.value = value;
     showDiscoverModels();
   },
+  /** The Styles header's one action: everything you have not got yet. */
+  browseMore: showDiscoverModels,
 });
 
 function handleDownloadEvent({
@@ -1088,8 +1115,24 @@ function detailTotalLabel(): string {
   return `${total.complete ? "" : "At least "}${formatGB(total.bytes)}`;
 }
 
-function selectHost(event: Event): void {
-  emit("select-host", (event.target as HTMLSelectElement).value);
+/** How many narrowings the Filters chip is standing in for. The machine and
+ *  the shelf are not filters — they are where and what you are looking at. */
+const activeFilterCount = computed(
+  () =>
+    Number(source.value !== "all" && source.value !== "installed") +
+    Number(kind.value !== "") +
+    Number(family.value !== "") +
+    Number(sort.value !== "downloads") +
+    Number(includeNsfw.value),
+);
+
+/** Six controls are six things to undo by hand. */
+function resetFilters(): void {
+  if (source.value !== "installed") source.value = "all";
+  kind.value = "";
+  family.value = "";
+  sort.value = "downloads";
+  includeNsfw.value = false;
 }
 
 function trapFocus(event: KeyboardEvent, dialog: HTMLElement): void {
@@ -1243,18 +1286,10 @@ onBeforeUnmount(() => {
 <template>
   <section ref="catalogRoot" class="mobile-catalog" aria-labelledby="mobile-catalog-title">
     <header class="mobile-catalog-header">
-      <div>
-        <h1 id="mobile-catalog-title" class="section-title">Styles</h1>
-        <p class="section-note">Find a look for your next picture, clip, or 3-D object</p>
-      </div>
-      <label v-if="hosts.length > 1" class="mobile-catalog-host-picker">
-        <span>Browse on</span>
-        <select :value="selectedHostId" aria-label="Catalog host" @change="selectHost">
-          <option v-for="host in hosts" :key="host.id" :value="host.id">
-            {{ host.name }}{{ host.online ? "" : " · offline" }}
-          </option>
-        </select>
-      </label>
+      <!-- The screen's name is in the shell header; this says what it is for. -->
+      <p id="mobile-catalog-title" class="section-note">
+        Find a look for your next picture, clip, or 3-D object
+      </p>
     </header>
 
     <p
@@ -1335,10 +1370,21 @@ onBeforeUnmount(() => {
           type="search"
           inputmode="search"
           autocomplete="off"
-          aria-label="Search catalog"
-          placeholder="Search models…"
+          aria-label="Search styles"
+          placeholder="Search styles…"
           data-test="mobile-catalog-search"
         />
+        <!-- One chip for six controls, and it says how many are set, so the
+             list never silently hides something you forgot you chose. -->
+        <button
+          type="button"
+          class="mobile-catalog-filter-chip"
+          :aria-pressed="activeFilterCount > 0"
+          data-test="mobile-catalog-filters-open"
+          @click="filtersOpen = true"
+        >
+          Filters<span v-if="activeFilterCount"> · {{ activeFilterCount }}</span>
+        </button>
       </div>
 
       <div class="mobile-catalog-segment" role="group" aria-label="Model shelf">
@@ -1376,70 +1422,6 @@ onBeforeUnmount(() => {
                 ]
           }}
         </button>
-      </div>
-
-      <div
-        v-if="source !== 'installed'"
-        class="mobile-catalog-sources"
-        role="group"
-        aria-label="Catalog source"
-      >
-        <button
-          v-for="option in ['all', 'hf', 'civitai'] as const"
-          :key="option"
-          type="button"
-          :aria-pressed="source === option"
-          @click="source = option"
-        >
-          {{ option === "all" ? "All" : option === "hf" ? "HuggingFace" : "Civitai" }}
-        </button>
-      </div>
-
-      <div
-        v-if="source !== 'installed'"
-        class="mobile-catalog-kinds"
-        role="group"
-        aria-label="Model kind"
-        data-test="mobile-catalog-kind-chips"
-      >
-        <button type="button" :aria-pressed="kind === ''" @click="kind = ''">All</button>
-        <button
-          v-for="option in CATALOG_KIND_OPTIONS"
-          :key="option.value"
-          type="button"
-          :aria-pressed="kind === option.value"
-          @click="kind = option.value"
-        >
-          {{ option.label }}
-        </button>
-      </div>
-
-      <div v-if="source !== 'installed'" class="mobile-catalog-filters">
-        <label>
-          <span>Family</span>
-          <select v-model="family" data-test="mobile-catalog-family">
-            <option value="">All families</option>
-            <option v-for="option in familyOptions" :key="option" :value="option">
-              {{ option }}
-            </option>
-          </select>
-        </label>
-        <label>
-          <span>Sort</span>
-          <select v-model="sort" data-test="mobile-catalog-sort">
-            <option
-              v-for="option in CATALOG_SORT_OPTIONS"
-              :key="option.value"
-              :value="option.value"
-            >
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
-        <label class="mobile-catalog-nsfw">
-          <input v-model="includeNsfw" type="checkbox" />
-          <span>Include NSFW</span>
-        </label>
       </div>
 
       <div
@@ -1509,30 +1491,55 @@ onBeforeUnmount(() => {
               <span v-else aria-hidden="true">{{ entry.family.slice(0, 3).toUpperCase() }}</span>
             </span>
             <span class="mobile-catalog-card-body">
-              <span class="mobile-catalog-card-title">{{ entry.display_name ?? entry.name }}</span>
+              <!-- The friendly name leads, the way StyleMenu names a style;
+                   the runnable id follows only when it says something else. -->
+              <span class="mobile-catalog-card-title">{{ entryStyleName(entry) }}</span>
+              <span
+                v-if="entryStyleName(entry) !== entry.name"
+                class="mobile-catalog-card-id"
+                data-test="mobile-catalog-card-id"
+                >{{ entry.name }}</span
+              >
+              <!-- Browsing, the kind is what you are choosing between. On the
+                   Ready-to-use shelf every row is a style you already have. -->
               <ModelMetadataBadges
+                v-if="source !== 'installed' || entry.nsfw"
                 class="mobile-catalog-card-badges"
-                :kind="entry.kind"
+                :kind="source === 'installed' ? null : entry.kind"
                 :family="entry.family"
                 :nsfw="entry.nsfw"
                 :show-modality="false"
               />
               <span class="mobile-catalog-card-meta">
-                {{ entry.author ? `${entry.author} · ` : "" }}{{ familyLabel(entry.family) }}
+                {{ entry.author ? `${entry.author} · ` : "" }}{{ familyLabel(entry.family)
+                }}<template v-if="source === 'installed' && installedWeightLabel(entry)">
+                  · {{ installedWeightLabel(entry) }}</template
+                >
                 <template v-if="entry.download_count">
                   · ↓ {{ formatCount(entry.download_count) }}
                 </template>
               </span>
-              <span v-if="entry.hostLabels?.length" class="mobile-catalog-host-labels">
-                <span v-for="label in entry.hostLabels" :key="label">{{ label }}</span>
-              </span>
-              <span v-if="entry.size_bytes != null" class="mobile-catalog-card-size">
-                {{ catalogSizeLabel(catalogSizeInfo(entry)) }}
-              </span>
             </span>
           </button>
           <span class="mobile-catalog-card-actions">
-            <span v-if="entry.installed" class="mobile-catalog-installed">Installed</span>
+            <!-- Which machines have it, stacked, in mono. -->
+            <span
+              v-if="entry.hostLabels?.length"
+              class="mobile-catalog-card-hosts"
+              data-test="mobile-catalog-card-hosts"
+            >
+              <span v-for="label in entry.hostLabels" :key="label">{{ label }}</span>
+            </span>
+            <span
+              v-if="source !== 'installed' && entry.size_bytes != null"
+              class="mobile-catalog-card-size"
+            >
+              {{ catalogSizeLabel(catalogSizeInfo(entry)) }}
+            </span>
+            <!-- On the Ready-to-use shelf the shelf itself says "installed". -->
+            <span v-if="entry.installed && source !== 'installed'" class="mobile-catalog-installed"
+              >Installed</span
+            >
             <!-- Downloadable, not runnable on the machine that would hold it.
                  Said before the pull, never as a toast after it. -->
             <span
@@ -1558,6 +1565,7 @@ onBeforeUnmount(() => {
               {{ pullButtonLabel(entry) }}
             </button>
           </span>
+          <span class="mobile-catalog-card-chevron" aria-hidden="true">›</span>
         </li>
       </ul>
 
@@ -1938,5 +1946,21 @@ onBeforeUnmount(() => {
         </div>
       </section>
     </Teleport>
+
+    <MobileCatalogFilterSheet
+      v-model:source="source"
+      v-model:kind="kind"
+      v-model:family="family"
+      v-model:sort="sort"
+      v-model:include-nsfw="includeNsfw"
+      :open="filtersOpen"
+      :hosts="hosts"
+      :selected-host-id="selectedHostId"
+      :discover="source !== 'installed'"
+      :family-options="familyOptions"
+      @close="filtersOpen = false"
+      @reset="resetFilters"
+      @select-host="emit('select-host', $event)"
+    />
   </section>
 </template>

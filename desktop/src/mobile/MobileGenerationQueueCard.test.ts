@@ -37,4 +37,118 @@ describe("MobileGenerationQueueCard", () => {
 
     expect(view.emitted("activate")).toHaveLength(2);
   });
+
+  it("shows the picture being made, how far along, and which one of the batch", () => {
+    const view = mount(MobileGenerationQueueCard, {
+      props: {
+        title: "Neon arcade, long exposure",
+        subtitle: "FLUX · studio-rack",
+        status: "Adding detail",
+        thumbnailUrl: "blob:preview",
+        progress: 64,
+        meta: "image 2 of 4 · studio-rack",
+      },
+    });
+
+    // The live latent preview already exists on Make; the queue had no idea.
+    expect(view.get("[data-test='mobile-generation-job-thumb'] img").attributes("src")).toBe(
+      "blob:preview",
+    );
+    expect(view.get("[role='progressbar']").attributes("aria-valuenow")).toBe("64");
+    expect(view.get("[data-test='mobile-generation-job-meta']").text()).toBe(
+      "image 2 of 4 · studio-rack",
+    );
+    expect(view.classes()).toContain("mobile-generation-job--active");
+  });
+
+  it("leaves out every part it was given nothing for", () => {
+    const view = mount(MobileGenerationQueueCard, {
+      props: { title: "Waiting print", subtitle: "FLUX · plato", status: "QUEUED" },
+    });
+
+    expect(view.find("[data-test='mobile-generation-job-thumb']").exists()).toBe(false);
+    expect(view.find("[role='progressbar']").exists()).toBe(false);
+    expect(view.find("[data-test='mobile-generation-job-meta']").exists()).toBe(false);
+    expect(view.classes()).not.toContain("mobile-generation-job--active");
+  });
+
+  it("stands a waiting print's place in line where the picture would be", () => {
+    const view = mount(MobileGenerationQueueCard, {
+      props: { title: "Second print", subtitle: "FLUX · plato", status: "QUEUED", position: "2" },
+    });
+
+    // A queued row has no pixels yet, so the glyph square says its place.
+    const glyph = view.get("[data-test='mobile-generation-job-position']");
+    expect(glyph.text()).toBe("2");
+    expect(view.find("[data-test='mobile-generation-job-thumb']").exists()).toBe(false);
+  });
+
+  it("marks a held print with the tone it was given, without losing the shared shape", () => {
+    const view = mount(MobileGenerationQueueCard, {
+      props: {
+        title: "Held print",
+        subtitle: "LTX · plato",
+        status: "HELD",
+        position: "↓",
+        tone: "warning",
+      },
+    });
+
+    expect(view.classes()).toContain("mobile-generation-job--warning");
+    expect(view.get("[data-test='mobile-generation-status']").text()).toBe("HELD");
+  });
+
+  it("says a machine's own work once, not twice", () => {
+    // A shared fleet row has no prompt, so its title IS the model. Repeating
+    // it as the subtitle made every such row read "flux2-dev:q4 flux2-dev:q4".
+    const view = mount(MobileGenerationQueueCard, {
+      props: { title: "FLUX.2 dev", subtitle: "", status: "DENOISING", progress: 30 },
+    });
+    expect(view.get(".mobile-generation-job-copy p").text()).toBe("FLUX.2 dev");
+    expect(view.find(".mobile-generation-job-copy > span").exists()).toBe(false);
+  });
+
+  it("says what a running print is doing as a sentence, above the meter", () => {
+    const view = mount(MobileGenerationQueueCard, {
+      props: {
+        title: "Neon arcade",
+        subtitle: "",
+        status: "Adding detail · 16/32",
+        running: true,
+        progress: 50,
+        meta: "image 2 of 4 · plato",
+      },
+    });
+
+    // Plain words about what is happening belong in sans, in the sentence the
+    // host actually sent — not shouted back as a machine code.
+    const sentence = view.get("[data-test='mobile-generation-status']");
+    expect(sentence.text()).toBe("Adding detail · 16/32");
+    expect(sentence.classes()).toContain("mobile-generation-job-sentence");
+
+    // Mockup order: title, sentence, meter, mono meta.
+    const copy = view.get(".mobile-generation-job-copy").element;
+    const order = [...copy.children].map(
+      (child) => child.getAttribute("data-test") ?? child.tagName,
+    );
+    expect(order).toEqual([
+      "P",
+      "mobile-generation-status",
+      "mobile-generation-job-meter",
+      "mobile-generation-job-meta",
+    ]);
+    // A running row's long sentence has its own line already.
+    expect(view.classes()).not.toContain("mobile-generation-job--detailed-status");
+  });
+
+  it("keeps the uppercase code for a row that is not running", () => {
+    const view = mount(MobileGenerationQueueCard, {
+      props: { title: "Waiting print", subtitle: "FLUX · plato", status: "QUEUED #1" },
+    });
+
+    const code = view.get("[data-test='mobile-generation-status']");
+    expect(code.text()).toBe("QUEUED #1");
+    // It stays the trailing machine-truth column, not a sentence in the copy.
+    expect(code.element.closest(".mobile-generation-job-action")).not.toBeNull();
+  });
 });

@@ -226,9 +226,17 @@ function progress(row: FleetActiveWork): number | null {
 .live-activity-surface:is(button) {
   cursor: pointer;
 }
-.live-activity-surface:is(button):hover {
+/* A finger never hovers, and on iOS the state sticks to the last row tapped.
+   Press feedback is what a touch device gets instead. */
+.live-activity-surface:is(button):active {
   border-color: color-mix(in srgb, var(--mold-blue) 36%, var(--mold-border));
-  background: color-mix(in srgb, var(--mold-blue) 7%, var(--mold-surface));
+  background: color-mix(in srgb, var(--mold-blue) 11%, var(--mold-surface));
+}
+@media (hover: hover) {
+  .live-activity-surface:is(button):hover {
+    border-color: color-mix(in srgb, var(--mold-blue) 36%, var(--mold-border));
+    background: color-mix(in srgb, var(--mold-blue) 7%, var(--mold-surface));
+  }
 }
 .live-activity-dot {
   width: 7px;
