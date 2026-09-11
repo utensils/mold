@@ -29,7 +29,6 @@ const emit = defineEmits<{ open: [] }>();
     type="button"
     class="shape-chip"
     data-test="shape-chip"
-    aria-haspopup="dialog"
     title="Shape and size"
     :disabled="disabled"
     @click="emit('open')"

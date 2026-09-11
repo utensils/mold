@@ -7,9 +7,9 @@
  * pins its passes offers no rows at all (the profile's own note under the
  * Detail slider stays the whole explanation).
  *
- * Timing belongs to the machine, not to this component. `estimateFor` is
- * asked per row and a `null` answer renders nothing — a row is then its name
- * and its pass count, never an invented duration.
+ * Timing belongs to the machine, not to this component: a row is its name
+ * and its pass count, never an invented duration. (The mock's `~3s` waits on
+ * a per-pass estimate the host does not advertise yet.)
  */
 import type { QualityPreset } from "@studio/lib/qualityPresets";
 
@@ -18,11 +18,9 @@ withDefaults(
     presets: QualityPreset[];
     /** The pass count in the form; the row that matches it is the live one. */
     steps: number;
-    /** The machine's own estimate for a row, or null where it has none. */
-    estimateFor?: ((steps: number) => string | null) | null;
     disabled?: boolean;
   }>(),
-  { estimateFor: null, disabled: false },
+  { disabled: false },
 );
 
 const emit = defineEmits<{ select: [steps: number] }>();
@@ -49,11 +47,7 @@ const emit = defineEmits<{ select: [steps: number] }>();
       @click="emit('select', preset.steps)"
     >
       <span class="quality__label">{{ preset.label }}</span>
-      <span class="quality__meta">
-        <template v-if="estimateFor?.(preset.steps)"
-          >{{ estimateFor(preset.steps) }} · </template
-        >{{ preset.steps }} passes
-      </span>
+      <span class="quality__meta">{{ preset.steps }} passes</span>
     </button>
   </div>
 </template>

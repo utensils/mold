@@ -34,12 +34,14 @@ describe("ShapeChip", () => {
     expect(wrapper.get("[data-test='shape-chip']").text()).toContain("Source");
   });
 
-  it("advertises the dialog it opens and asks for it on click", async () => {
+  it("asks the page for the Shape group on click, claiming no popup of its own", async () => {
+    // At 900px and above the page only scrolls the rail's Shape group into
+    // view, so the chip cannot honestly promise a dialog.
     const wrapper = mount(ShapeChip, {
       props: { label: "Square", sublabel: "1024" },
     });
     const chip = wrapper.get("[data-test='shape-chip']");
-    expect(chip.attributes("aria-haspopup")).toBe("dialog");
+    expect(chip.attributes("aria-haspopup")).toBeUndefined();
     await chip.trigger("click");
     expect(wrapper.emitted("open")).toHaveLength(1);
   });

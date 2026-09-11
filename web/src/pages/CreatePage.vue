@@ -400,14 +400,7 @@ const showMask = ref(false);
  * LONGER than the wide one.
  */
 type RailSheet =
-  | "all"
-  | "shape"
-  | "source"
-  | "loras"
-  | "seed"
-  | "starters"
-  | "fileUnder"
-  | "advanced";
+  "all" | "source" | "loras" | "seed" | "starters" | "fileUnder" | "advanced";
 const railSheet = ref<RailSheet | null>(null);
 /** Saved recipes, counted for the Starters row: read on mount and again
  * whenever the sheet that edits them closes. */
@@ -421,7 +414,6 @@ onMounted(refreshStarterCount);
 const railSheetFromAll = ref(false);
 const RAIL_SHEET_TITLE: Record<RailSheet, string> = {
   all: "Settings",
-  shape: "Shape and size",
   source: "Start from a photo",
   loras: "Add-on looks",
   seed: "Repeat this look",
@@ -666,14 +658,14 @@ const submitStatus = computed(
     composerError.value ?? preprocessingStatus.value ?? placementStatus.value,
 );
 
-function onTemplatesPointerDown(event: PointerEvent) {
+function onRecentMenuPointerDown(event: PointerEvent) {
   const target = event.target as HTMLElement | null;
   if (!target?.closest("[data-test='recent-context-menu']")) {
     closeRecentContextMenu();
   }
 }
 
-function onTemplatesKeydown(event: KeyboardEvent) {
+function onRecentMenuKeydown(event: KeyboardEvent) {
   if (recentContextMenu.value && event.key === "Escape") {
     event.preventDefault();
     closeRecentContextMenu(true);
@@ -4955,8 +4947,8 @@ onMounted(async () => {
   window.addEventListener("mold:new-print", onNewPrint);
   window.addEventListener("dragover", onWindowDragOver);
   window.addEventListener("drop", onWindowDrop);
-  document.addEventListener("pointerdown", onTemplatesPointerDown);
-  document.addEventListener("keydown", onTemplatesKeydown);
+  document.addEventListener("pointerdown", onRecentMenuPointerDown);
+  document.addEventListener("keydown", onRecentMenuKeydown);
   startAutoRefresh();
 });
 
@@ -4971,8 +4963,8 @@ onBeforeUnmount(() => {
   stopAutoRefresh();
   phoneQuery?.removeEventListener?.("change", syncPhone);
   window.removeEventListener("mold:new-print", onNewPrint);
-  document.removeEventListener("pointerdown", onTemplatesPointerDown);
-  document.removeEventListener("keydown", onTemplatesKeydown);
+  document.removeEventListener("pointerdown", onRecentMenuPointerDown);
+  document.removeEventListener("keydown", onRecentMenuKeydown);
 });
 </script>
 

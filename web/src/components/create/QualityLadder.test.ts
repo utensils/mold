@@ -64,24 +64,16 @@ describe("QualityLadder", () => {
   });
 
   /*
-   * Timing is the HOST's answer, and only for a machine that has one. The
-   * ladder never invents a duration: handed nothing, it says nothing, and a
-   * row is then just its name and its pass count.
+   * Timing is the HOST's answer, and the host does not advertise a per-pass
+   * estimate yet, so the ladder never invents a duration: a row is its name
+   * and its pass count.
    */
-  it("shows a time only where the estimator has one", () => {
-    const wrapper = factory({
-      estimateFor: (steps: number) => (steps === 8 ? "~3s" : null),
-    });
-    expect(wrapper.get("[data-test='quality-row-draft']").text()).toContain(
-      "~3s · 8 passes",
+  it("names a row and its pass count, and invents no duration", () => {
+    const wrapper = factory();
+    expect(wrapper.get("[data-test='quality-row-good']").text()).toContain(
+      "28 passes",
     );
-    const good = wrapper.get("[data-test='quality-row-good']").text();
-    expect(good).toContain("28 passes");
-    expect(good).not.toContain("~");
-  });
-
-  it("says nothing at all without an estimator", () => {
-    expect(factory().text()).not.toContain("~");
+    expect(wrapper.text()).not.toContain("~");
   });
 
   it("renders nothing for a recipe whose passes are pinned", () => {

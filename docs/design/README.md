@@ -149,24 +149,24 @@ Decisions worth keeping:
 
 ## 4 · Component vocabulary
 
-| Component           | Anatomy                                                                                  | Tokens / kit                                                             |
-| ------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Nav row             | 36px, icon 18px, label sans 13px, trailing count/dot                                     | selected: accent tint + `inset 0 0 0 1px accent`                         |
-| Segmented control   | 2px padded track, items 26px; `inline` puts a mono count beside the label                | `ui/components/SegmentedControl.vue`                                     |
-| Toolbar button      | 26px, 1px border, sans 12px; hover → `--mold-border-focus`                               | `.ms-toolbar-button` (`--on`, `--accent`, `--danger`, `--danger-hover`)  |
-| Group / table label | mono `--mold-fs-micro`, tracked, dim; uppercase is the caller's call                     | `.ms-group-label`                                                        |
-| Primary action      | 32px, accent fill, `--mold-on-accent` ink, mono shortcut. One word, `white-space:nowrap` | `--mold-radius-2`                                                        |
-| Chip (filter/tag)   | 24px, 1px border, mono count at 70%                                                      | active: accent tint + inset ring                                         |
-| Chip (slider)       | 28px composer chip: plain label, an 84px bare track, mono readout (`97f · 4.0s`)         | Length; same track ink as `SliderRow`, snapped to the family frame grid  |
-| Machine card        | dot · mono name · sentence · meter · two mono readouts                                   | target machine gets a 1px accent border                                  |
-| Queue: active card  | 52px thumb, sentence status, meter + pause/stop, "What's this?"                          | `--mold-panel-raised` + inset accent ring                                |
-| Queue: row          | 38px thumb, title, one-line status, ⋯                                                    | glyph placeholder for images that don't exist yet                        |
-| Table row           | 52px, name+id stacked, mono values, ⋯                                                    | `desktop/src/components/models/ModelTableRow.vue`                        |
-| Meter               | 5–8px, no radius, single fill                                                            | fill = `--mold-state-*` or accent                                        |
+| Component           | Anatomy                                                                                  | Tokens / kit                                                                              |
+| ------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Nav row             | 36px, icon 18px, label sans 13px, trailing count/dot                                     | selected: accent tint + `inset 0 0 0 1px accent`                                          |
+| Segmented control   | 2px padded track, items 26px; `inline` puts a mono count beside the label                | `ui/components/SegmentedControl.vue`                                                      |
+| Toolbar button      | 26px, 1px border, sans 12px; hover → `--mold-border-focus`                               | `.ms-toolbar-button` (`--on`, `--accent`, `--danger`, `--danger-hover`)                   |
+| Group / table label | mono `--mold-fs-micro`, tracked, dim; uppercase is the caller's call                     | `.ms-group-label`                                                                         |
+| Primary action      | 32px, accent fill, `--mold-on-accent` ink, mono shortcut. One word, `white-space:nowrap` | `--mold-radius-2`                                                                         |
+| Chip (filter/tag)   | 24px, 1px border, mono count at 70%                                                      | active: accent tint + inset ring                                                          |
+| Chip (slider)       | 28px composer chip: plain label, an 84px bare track, mono readout (`97f · 4.0s`)         | Length; same track ink as `SliderRow`, snapped to the family frame grid                   |
+| Machine card        | dot · mono name · sentence · meter · two mono readouts                                   | target machine gets a 1px accent border                                                   |
+| Queue: active card  | 52px thumb, sentence status, meter + pause/stop, "What's this?"                          | `--mold-panel-raised` + inset accent ring                                                 |
+| Queue: row          | 38px thumb, title, one-line status, ⋯                                                    | glyph placeholder for images that don't exist yet                                         |
+| Table row           | 52px, name+id stacked, mono values, ⋯                                                    | `desktop/src/components/models/ModelTableRow.vue`                                         |
+| Meter               | 5–8px, no radius, single fill                                                            | fill = `--mold-state-*` or accent                                                         |
 | Dialog              | 480–560px, header / body / footer, `--mold-radius-3`, scrim `--mold-scrim`               | `ui/components/ModalPanel.vue`, `ui/components/ConfirmDialog.vue`, desktop `RenameDialog` |
-| Command palette     | 560px, group column (mono, 60px) + label + key                                           | selected row `--mold-surface-2`                                          |
-| Toast               | 320px, glyph column, title + one line, one action; above the status bar                  | bordered in the state colour when urgent                                 |
-| Explainer           | `•` + 2–3 sentences of plain English, opt-in                                             | `--mold-panel-raised`, never open by default                             |
+| Command palette     | 560px, group column (mono, 60px) + label + key                                           | selected row `--mold-surface-2`                                                           |
+| Toast               | 320px, glyph column, title + one line, one action; above the status bar                  | bordered in the state colour when urgent                                                  |
+| Explainer           | `•` + 2–3 sentences of plain English, opt-in                                             | `--mold-panel-raised`, never open by default                                              |
 
 ## 5 · Imagery
 
@@ -213,7 +213,7 @@ a literal.
 | New image: the inspector's groups (no style field — see the row below)                                                                             | `desktop/src/components/create/InspectorPanel.vue`, `lib/qualityPresets.ts`, `lib/meshDetailLadder.ts`                      |
 | The ONE style menu — family groups, plain name over mono `id · size · on GPU`, filter, ↑/↓, the not-here row, Browse more (shared by all surfaces) | `studio/components/StyleMenu.vue`, `studio/lib/{styleMenu,styleLabel,modelSource}.ts`                                       |
 | New image: the composer's Style chip and the popover it opens upward around that menu                                                              | `desktop/src/components/create/{StylePicker,ModelPicker}.vue`, `composables/useStylePicker.ts`                              |
-| Web Create: the Style card's chip and the teleported popover around that same menu                                                                 | `web/src/components/create/CreateStylePicker.vue` (hosted by `ui/components/Popover.vue`)                                   |
+| Web Create: the composer's 28px style chip and the teleported popover around that same menu                                                        | `web/src/components/create/CreateStylePicker.vue` (hosted by `ui/components/Popover.vue`)                                   |
 | Web Create: the composer's chip row (style, shape, Make) and the sticky dock                                                                       | `web/src/pages/CreatePage.vue`, `web/src/components/create/{ComposerCard,ShapeChip,MakeChip}.vue`                           |
 | Web Create: the 320px settings column — machine card, quality ladder, the two sliders, the disclosure rows — drawn once for both widths            | `web/src/components/create/{RailSurface,MachineCard,QualityLadder,ControlsAside,DisclosureList,DisclosureRow}.vue`          |
 | Web Create: the result's Download · Copy link · Make 4 variations bar, and the print address it copies                                             | `web/src/components/create/ResultCanvas.vue`, `web/src/lib/libraryLinks.ts`                                                 |
