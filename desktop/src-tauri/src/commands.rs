@@ -85,6 +85,7 @@ pub const ENGINE_ENV_KEYS: &[&str] = &[
     "MOLD_VAE_TILED",
     "MOLD_OFFLOAD",
     "MOLD_ATTN",
+    "MOLD_PNG_ENCODING",
     "MOLD_QUEUE_SIZE",
 ];
 

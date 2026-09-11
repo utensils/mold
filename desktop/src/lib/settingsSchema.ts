@@ -424,6 +424,18 @@ export const ENV_KNOB_SCHEMAS: KeySchema[] = [
     needsEngineRestart: true,
   },
   {
+    key: "env.MOLD_PNG_ENCODING",
+    section: "performance",
+    label: "PNG encoding",
+    help: "How much CPU a saved PNG is worth. fast uses fdeflate's PNG-tuned ultra-fast deflate; balanced is zlib level 6. PNG is lossless either way — this only trades encode time against file size, never a pixel.",
+    editor: "select",
+    options: [
+      { value: "", label: "fast (default)" },
+      { value: "balanced", label: "balanced (smaller files)" },
+    ],
+    needsEngineRestart: true,
+  },
+  {
     key: "env.MOLD_OFFLOAD",
     section: "performance",
     label: "Block-level offloading",

@@ -269,6 +269,10 @@ mod tests {
             // reduction, so it changes wall clock, but it cannot change a
             // pixel. Wall clock alone is not execution identity.
             "MOLD_FLUX_DEBUG_NONFINITE",
+            // PNG is lossless under every profile, so the encoding choice
+            // trades wall clock against file size and changes no pixel. Two
+            // renders that disagree on it ARE interchangeable.
+            "MOLD_PNG_ENCODING",
             "MOLD_QWEN_DEBUG",
             "MOLD_SD3_DEBUG",
             "MOLD_STEP_PREVIEW",
