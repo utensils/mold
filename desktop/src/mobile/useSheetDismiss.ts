@@ -39,7 +39,7 @@ export interface SheetDismissOptions {
   /** The scrolling body. A drag only begins while it is at its top. */
   body: Ref<HTMLElement | null>;
   /** Read-first sheets opt out entirely; omitted means always draggable. */
-  enabled?: Ref<boolean>;
+  enabled?: Ref<boolean> | undefined;
   /** Called once, on release, when the panel fell far enough. */
   onDismiss: () => void;
 }
@@ -120,5 +120,13 @@ export function useSheetDismiss(options: SheetDismissOptions): SheetDismiss {
     if (dismiss) options.onDismiss();
   }
 
-  return { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDismiss, resetDrag };
+  return {
+    dragging,
+    panelStyle,
+    backdropStyle,
+    beginDismiss,
+    moveDismiss,
+    finishDismiss,
+    resetDrag,
+  };
 }

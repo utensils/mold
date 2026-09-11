@@ -4467,6 +4467,125 @@ button:disabled {
   width: 100%;
 }
 
+/* A machine card: what the box is, in one sentence, over its own load. The
+   list used to say a name and a URL and leave the hardware a mystery. */
+.mobile-machines-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mobile-machines-head > .section-title {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The one trailing action a screen is allowed. */
+.mobile-header-action {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  place-items: center;
+  border: 0;
+  border-radius: var(--mold-radius-2);
+  background: transparent;
+  color: var(--mold-blue);
+  font-family: var(--font-body);
+  font-size: 22px;
+  line-height: 1;
+}
+
+.mobile-machine-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  background: var(--mold-bg);
+}
+
+.mobile-machine-card.is-target {
+  border-color: var(--mold-blue);
+  background: var(--mold-surface, var(--mold-bg-deep));
+}
+
+.mobile-machine-open {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  flex-direction: column;
+  gap: 6px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.mobile-machine-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.mobile-machine-head > .host-name {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-utility);
+  font-size: var(--text-body);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-machine-head > .badge-pill,
+.mobile-machine-head > .host-chip {
+  margin-left: auto;
+}
+
+.mobile-machine-chevron {
+  flex: none;
+  color: var(--mold-text-faint, var(--mold-text-dim));
+}
+
+/* The hardware sentence: plain words, so plain sans. */
+.mobile-machine-blurb {
+  color: var(--mold-text-2);
+  font-family: var(--font-body);
+  font-size: var(--text-caption);
+  line-height: 1.45;
+}
+
+.mobile-machine-card > .host-telemetry {
+  margin-top: 0;
+}
+
+.mobile-machine-card > .host-telemetry .host-telemetry-row {
+  margin-top: 6px;
+  margin-bottom: 0;
+}
+
+.mobile-machine-card > .row-actions {
+  margin-top: 0;
+}
+
+.mobile-machines-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  text-align: left;
+}
+
+.mobile-machines-empty p {
+  margin: 0;
+  color: var(--mold-text-dim);
+  font-size: var(--text-caption);
+  line-height: 1.45;
+}
+
 .mobile-detail {
   max-width: 680px;
   margin: 0 auto;
@@ -5905,26 +6024,16 @@ button:disabled {
   padding-bottom: 8px;
 }
 
-/* Pairing is primary on first launch; saved machines lead on later visits. */
-.mobile-add-machine {
-  margin-block: 20px;
-  padding: 16px;
-  border: 1px solid var(--mold-border);
-  border-radius: 12px;
-  background: var(--mold-surface);
-}
-.mobile-host-form {
+/* Adding a machine is a sheet now, so the flow's own spacing is all that is
+   left here — the pairing button leads, the manual form trails. */
+.mobile-host-form,
+.mobile-discovered-form {
   margin-top: 20px;
 }
 
-.mobile-add-machine > summary {
-  min-height: var(--mobile-touch-target, 44px);
-  align-content: center;
-  font-weight: 600;
-  cursor: pointer;
-}
-.mobile-add-machine[open] > summary {
-  margin-bottom: 12px;
+.mobile-add-machine-body > .secondary-button,
+.mobile-add-machine-body > .primary-button {
+  width: 100%;
 }
 
 /* In landscape the IME can leave less than 150px. Give that space to the

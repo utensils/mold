@@ -10559,7 +10559,7 @@ describe("MobileApp gallery", () => {
     if (!hostsTab) throw new Error("Missing Machines tab");
     await hostsTab.trigger("click");
     const studioRow = wrapper
-      .findAll(".host-row")
+      .findAll(".mobile-machine-card")
       .find((row) => row.find(".host-name").text() === "Studio");
     if (!studioRow) throw new Error("Missing Studio host row");
     await studioRow.get("[data-test='mobile-host-row']").trigger("click");
@@ -10986,7 +10986,7 @@ describe("MobileApp host and catalog coordination", () => {
 
       await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
       const remoteRow = wrapper
-        .findAll(".host-row")
+        .findAll(".mobile-machine-card")
         .find((row) => row.find(".host-name").text() === "Render Box");
       expect(remoteRow?.text()).toContain("v0.19.0");
       expect(remoteRow?.text()).not.toContain("offline");
@@ -11034,7 +11034,7 @@ describe("MobileApp host and catalog coordination", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
     const remoteRow = wrapper
-      .findAll(".host-row")
+      .findAll(".mobile-machine-card")
       .find((row) => row.find(".host-name").text() === "Render Box");
     if (!remoteRow) throw new Error("Missing Render Box host row");
     await remoteRow.get("[data-test='mobile-host-row']").trigger("click");
@@ -11182,8 +11182,69 @@ describe("MobileApp machines telemetry", () => {
 
     const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
     expect(telemetry.get(".host-telemetry-mem").text()).toBe("9.8 / 24.0 GB");
-    expect(telemetry.get(".host-telemetry-queue").text()).toBe("queue 2");
+    expect(telemetry.get(".host-telemetry-queue").text()).toBe("2 waiting");
     expect(telemetry.get(".meter").attributes("aria-valuenow")).toBe("41");
+  });
+
+  it("says what a machine is, and which one is making pictures right now", async () => {
+    apiJsonTo
+      .mockReset()
+      .mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+        if (path === "/api/status")
+          return Promise.resolve({
+            ...status,
+            uptime_secs: 6 * 86_400,
+            gpu_info: {
+              name: "RTX 4090",
+              vram_total_mb: 24_000,
+              vram_used_mb: 9_840,
+              backend: "cuda",
+            },
+            queue_depth: 3,
+            queue_capacity: 8,
+          } satisfies ServerStatus);
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        return durableApiFallback(path, init, callTarget);
+      });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+
+    // The one sentence the desktop already says about a machine — the phone
+    // showed only a bare URL and left the hardware a mystery.
+    expect(wrapper.get("[data-test='mobile-machine-blurb']").text()).toBe(
+      "RTX 4090 · CUDA · on your network · up 6d 0h",
+    );
+    // One machine is pinned, so the card says so rather than making the queue
+    // the only place the answer lives.
+    expect(wrapper.get("[data-test='mobile-machine-target']").text()).toBe("making pictures here");
+    // The health chip never goes away for it: a pinned machine can still be
+    // reconnecting, and that is exactly when you look.
+    expect(wrapper.find("[data-test='mobile-host-health']").exists()).toBe(true);
+    expect(wrapper.get("[data-test='mobile-host-telemetry'] .host-telemetry-queue").text()).toBe(
+      "3 waiting",
+    );
+  });
+
+  it("opens the add-machine sheet from the header rather than a buried disclosure", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+
+    const sheet = wrapper.get("[data-test='mobile-add-machine']");
+    expect(sheet.classes()).not.toContain("is-open");
+
+    await wrapper.get("[data-test='mobile-add-machine-open']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-add-machine']").classes()).toContain("is-open");
+    // The whole flow travelled with it: pairing, discovery, and the manual form.
+    expect(sheet.find("[data-test='mobile-scan-pairing']").exists()).toBe(true);
+    expect(sheet.find("[data-test='mobile-discover-hosts']").exists()).toBe(true);
+    expect(sheet.find(".mobile-host-form").exists()).toBe(true);
+
+    await wrapper.get("[data-test='mobile-add-machine-done']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-add-machine']").classes()).not.toContain("is-open");
   });
 
   it("keeps last-good telemetry and capabilities through repeated probe failures, then recovers", async () => {
@@ -11251,7 +11312,7 @@ describe("MobileApp machines telemetry", () => {
     health = wrapper.get("[data-test='mobile-host-health']");
     expect(health.text()).toBe("v0.19.0");
     expect(wrapper.get("[data-test='mobile-host-telemetry'] .host-telemetry-queue").text()).toBe(
-      "queue 4",
+      "4 waiting",
     );
 
     await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
@@ -11372,7 +11433,7 @@ describe("MobileApp machines telemetry", () => {
 
     const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
     expect(telemetry.get(".host-telemetry-mem").text()).toBe("—");
-    expect(telemetry.get(".host-telemetry-queue").text()).toBe("queue 0");
+    expect(telemetry.get(".host-telemetry-queue").text()).toBe("0 waiting");
   });
 
   it("disconnects without forgetting and reconnects only on request", async () => {
@@ -12175,7 +12236,7 @@ describe("MobileApp routing target consistency", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
     const renderRow = wrapper
-      .findAll(".host-row")
+      .findAll(".mobile-machine-card")
       .find((row) => row.find(".host-name").text() === "Render");
     if (!renderRow) throw new Error("Missing Render host row");
     const useForGenerations = renderRow

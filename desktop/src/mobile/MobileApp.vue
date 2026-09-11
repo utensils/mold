@@ -29,7 +29,8 @@ import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/clie
 import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
 import { remixPrompt } from "../lib/api/remix";
-import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
+import { gpuSnapshotsFromStatus, summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
+import { machineSentence } from "../lib/machineSentence";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { filterRestrictedModels, modelAccessRestrictionFor } from "@studio/lib/modelAccess";
@@ -374,6 +375,7 @@ import {
   recordMobileHostProbeFailure,
   recordMobileHostStatus,
   remoteHostId,
+  type DiscoveredHost,
   type MobileHost,
   type MobileHostAliasDrop,
 } from "./hosts";
@@ -463,6 +465,9 @@ import MobileSettingsView from "./MobileSettingsView.vue";
 import MobileStyleSheet from "./MobileStyleSheet.vue";
 import MobileSharedParams from "./MobileSharedParams.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import BadgePill from "@ui/components/BadgePill.vue";
+import CardSurface from "@ui/components/CardSurface.vue";
+import MobileAddMachineSheet from "./MobileAddMachineSheet.vue";
 import { useLastUsedStylesStore } from "@studio/stores/lastUsedStyles";
 import {
   outputKindFor,
@@ -572,14 +577,6 @@ interface ActivityRow {
   preparation: Extract<ActivityJobVM, { kind: "print" }>["preparation"];
   /** Matching fresh `/api/activity` lifecycle, when the host has one. */
   live: FleetActiveWork | null;
-}
-
-interface DiscoveredHost {
-  name: string;
-  host: string;
-  port: number;
-  authRequired: boolean;
-  instanceId?: string;
 }
 
 interface GalleryPrint extends MobileGalleryImage {
@@ -751,11 +748,12 @@ const hostDetailId = ref("");
 const hostInput = reactive({ name: "", address: "", apiKey: "" });
 const discovered = ref<DiscoveredHost[]>([]);
 const selectedDiscovered = ref<DiscoveredHost | null>(null);
-const discoveredApiKeyInput = ref<HTMLInputElement | null>(null);
-const hostAddressInput = ref<HTMLInputElement | null>(null);
-const hostApiKeyInput = ref<HTMLInputElement | null>(null);
 const discovering = ref(false);
 const pairing = ref(false);
+/** The Add-a-machine sheet. It opens when ASKED for, never on an empty fleet:
+ *  a fresh install used to land on a form it had no way to fill in yet. */
+const addMachineOpen = ref(false);
+const addMachineSheet = ref<{ focusDiscoveredApiKey: () => void } | null>(null);
 const pairingScannerOpen = ref(false);
 let pairingScannerCancelled = false;
 useMobileBack(pairingScannerOpen, () => {
@@ -1345,6 +1343,10 @@ interface HostTelemetry {
   vramTotalMb: number | null;
   queueDepth: number | null;
   routingLoad: import("@studio/lib/hostRouting").HostRoutingLoad;
+  /** Every card this machine reported, for the plain hardware sentence. */
+  gpus: import("../lib/api/types").GpuSnapshot[];
+  /** How long the machine has been up, as it last reported. */
+  uptimeSeconds: number | null;
   /** Runtime queue capacity is the server's authority for one hot queue page.
    * `null` means a legacy status response; an absent telemetry row means the
    * host has not answered status yet and queue polling must wait. */
@@ -1395,7 +1397,19 @@ function hostVramPercent(id: string): number {
 }
 
 function hostQueueLabel(id: string): string {
-  return String(hostTelemetry[id]?.queueDepth ?? 0);
+  return `${hostTelemetry[id]?.queueDepth ?? 0} waiting`;
+}
+
+/**
+ * "RTX 4090 · CUDA · on your network · up 6 days" — the same sentence the
+ * desktop's machine pane says, so a 4× L40S box can never read as one card in
+ * one place and four in the other. Empty until the machine answers status.
+ */
+function hostMachineSentence(host: MobileHost): string {
+  const telemetry = hostTelemetry[host.id];
+  return machineSentence({ kind: "remote", baseUrl: host.baseUrl }, telemetry?.gpus ?? [], {
+    uptimeSeconds: telemetry?.uptimeSeconds ?? null,
+  });
 }
 
 function captureHostTelemetry(hostId: string, status: ServerStatus): void {
@@ -1405,6 +1419,8 @@ function captureHostTelemetry(hostId: string, status: ServerStatus): void {
     vramTotalMb: memory?.totalMb ?? null,
     queueDepth: status.queue_depth ?? null,
     routingLoad: hostRoutingLoad(status),
+    gpus: gpuSnapshotsFromStatus(status),
+    uptimeSeconds: status.uptime_secs ?? null,
     queueCapacity: status.queue_capacity ?? null,
     queuePaused: status.queue_paused ?? null,
     gpuBackend: status.gpu_info?.backend ?? null,
@@ -4490,11 +4506,17 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     hostInput.address = "";
     hostInput.apiKey = "";
     selectedDiscovered.value = null;
+    addMachineOpen.value = false;
     await refreshModels();
   } catch (error) {
     const label = hostInput.name.trim() || discoveredName || (address ?? hostInput.address).trim();
     hostError.value = describeTransportError(error, label);
   }
+}
+
+function openAddMachine(): void {
+  hostError.value = "";
+  addMachineOpen.value = true;
 }
 
 async function pickDiscoveredHost(host: DiscoveredHost): Promise<void> {
@@ -4508,7 +4530,7 @@ async function pickDiscoveredHost(host: DiscoveredHost): Promise<void> {
   hostInput.apiKey = "";
   hostError.value = "";
   await nextTick();
-  discoveredApiKeyInput.value?.focus();
+  addMachineSheet.value?.focusDiscoveredApiKey();
 }
 
 function clearDiscoveredHost() {
@@ -13394,7 +13416,18 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           @status="updateHostStatus"
         />
         <template v-else>
-          <h1 class="section-title">Machines</h1>
+          <div class="mobile-machines-head">
+            <h1 class="section-title">Machines</h1>
+            <button
+              type="button"
+              class="mobile-header-action"
+              aria-label="Add a machine"
+              data-test="mobile-add-machine-open"
+              @click="openAddMachine"
+            >
+              <span aria-hidden="true">+</span>
+            </button>
+          </div>
           <p class="section-note">LAN discovery, Tailscale MagicDNS, or an address</p>
           <!-- One line each: the Create picker offers these only while two or
                more machines are reachable. -->
@@ -13408,44 +13441,55 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
           >
             {{ MOBILE_CAPABLE_ROUTING_HINT }}
           </p>
-          <div v-for="host in hosts" :key="host.id" class="host-row">
+          <div
+            v-for="host in hosts"
+            :key="host.id"
+            class="mobile-machine-card"
+            :class="{ 'is-target': host.id === selectedHostId && !automaticRouting }"
+          >
             <button
-              class="host-row-button"
+              class="mobile-machine-open"
               type="button"
               :aria-label="`View ${host.name}`"
               data-test="mobile-host-row"
               @click="showHostDetail(host.id)"
             >
-              <span class="host-row-head">
-                <span>
-                  <span class="host-name">{{ host.name }}</span>
-                  <span class="host-url">{{ host.baseUrl }}</span>
-                </span>
-                <span class="host-row-state">
-                  <span
-                    class="status-dot"
-                    :class="
-                      host.connected !== false
-                        ? host.stale
-                          ? 'is-reconnecting'
-                          : host.online
-                            ? 'is-ready'
-                            : 'is-error'
-                        : ''
-                    "
-                  />
-                  <span class="host-chip" data-test="mobile-host-health">{{
-                    mobileHostHealthLabel(host)
-                  }}</span>
-                  <span aria-hidden="true">›</span>
-                </span>
+              <span class="mobile-machine-head">
+                <span
+                  class="status-dot"
+                  :class="
+                    host.connected !== false
+                      ? host.stale
+                        ? 'is-reconnecting'
+                        : host.online
+                          ? 'is-ready'
+                          : 'is-error'
+                      : ''
+                  "
+                />
+                <span class="host-name">{{ host.name }}</span>
+                <!-- Only a PINNED machine can say this. Under Auto or Most
+                     capable no single machine is where the work lands, and a
+                     pill on one of them would simply be wrong. -->
+                <!-- The health chip stays whatever the routing says: a pinned
+                     machine can be reconnecting, and that is when you look. -->
+                <span class="host-chip" data-test="mobile-host-health">{{
+                  mobileHostHealthLabel(host)
+                }}</span>
+                <BadgePill
+                  v-if="host.id === selectedHostId && !automaticRouting"
+                  tone="accent"
+                  data-test="mobile-machine-target"
+                  >making pictures here</BadgePill
+                >
+                <span class="mobile-machine-chevron" aria-hidden="true">›</span>
               </span>
+              <!-- What the box IS, in the sentence the desktop already says. -->
+              <span class="mobile-machine-blurb" data-test="mobile-machine-blurb">{{
+                hostMachineSentence(host)
+              }}</span>
             </button>
             <div v-if="host.online" class="host-telemetry" data-test="mobile-host-telemetry">
-              <div class="host-telemetry-row">
-                <span class="host-telemetry-mem">{{ hostMemLabel(host.id) }}</span>
-                <span class="host-telemetry-queue">queue {{ hostQueueLabel(host.id) }}</span>
-              </div>
               <div
                 class="meter host-telemetry-meter"
                 role="meter"
@@ -13455,6 +13499,10 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                 aria-valuemax="100"
               >
                 <span :style="{ width: `${hostVramPercent(host.id)}%` }" />
+              </div>
+              <div class="host-telemetry-row">
+                <span class="host-telemetry-mem">{{ hostMemLabel(host.id) }}</span>
+                <span class="host-telemetry-queue">{{ hostQueueLabel(host.id) }}</span>
               </div>
             </div>
             <div class="row-actions">
@@ -13474,126 +13522,42 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
               </button>
             </div>
           </div>
-          <details
-            class="mobile-add-machine"
-            :open="hosts.length === 0"
-            data-test="mobile-add-machine"
-          >
-            <summary>Add a machine</summary>
+          <!-- An empty fleet gets an invitation, not a form: the sheet opens
+               when asked for, and never before. -->
+          <CardSurface v-if="hosts.length === 0" dashed class="mobile-machines-empty">
+            <strong>No machines yet</strong>
+            <p>
+              Scan the pairing code from Mold Studio on your Mac, look for one nearby, or type an
+              address.
+            </p>
             <button
-              class="primary-button mobile-pair-button"
+              class="primary-button"
               type="button"
-              :disabled="pairing"
-              data-test="mobile-scan-pairing"
-              @click="scanPairingCode"
+              data-test="mobile-add-machine-empty"
+              @click="openAddMachine"
             >
-              <span aria-hidden="true">▦</span>
-              {{ pairing ? "Opening camera…" : "Scan pairing code" }}
+              Add a machine
             </button>
-            <p class="mobile-pair-note">On your machine, open Settings → Mobile pairing.</p>
-            <button
-              class="secondary-button"
-              type="button"
-              :disabled="discovering"
-              data-test="mobile-discover-hosts"
-              @click="discoverHosts"
-            >
-              {{ discovering ? "Scanning…" : "Discover nearby" }}
-            </button>
-            <div
-              v-for="host in discovered"
-              :key="`${host.host}:${host.port}`"
-              class="host-row"
-              data-test="mobile-discovered-host"
-            >
-              <div class="host-row-head">
-                <div>
-                  <div class="host-name">{{ host.name }}</div>
-                  <div class="host-url">{{ host.host }}:{{ host.port }}</div>
-                </div>
-                <button class="secondary-button" type="button" @click="pickDiscoveredHost(host)">
-                  Connect
-                </button>
-              </div>
-            </div>
-            <form
-              v-if="selectedDiscovered"
-              style="margin-top: 20px"
-              data-test="mobile-discovered-key-prompt"
-              @submit.prevent="connectHost(hostInput.address, hostInput.name)"
-            >
-              <div class="host-row">
-                <div class="host-name">{{ selectedDiscovered.name }}</div>
-                <div class="host-url">
-                  {{ selectedDiscovered.host }}:{{ selectedDiscovered.port }}
-                </div>
-              </div>
-              <label class="field"
-                ><span>API key</span
-                ><input
-                  ref="discoveredApiKeyInput"
-                  v-model="hostInput.apiKey"
-                  autocapitalize="none"
-                  :spellcheck="false"
-                  enterkeyhint="done"
-                  class="control"
-                  type="password"
-                  placeholder="Required by this machine"
-                  autocomplete="off"
-                  data-test="mobile-discovered-api-key"
-                  required
-              /></label>
-              <p class="section-note">This machine requires its own API key.</p>
-              <div class="mobile-inline-actions">
-                <button class="secondary-button" type="button" @click="clearDiscoveredHost">
-                  Choose another
-                </button>
-                <button class="primary-button" type="submit">Test and save</button>
-              </div>
-            </form>
-            <form v-else class="mobile-host-form" @submit.prevent="connectHost()">
-              <label class="field"
-                ><span>Name</span
-                ><input
-                  v-model="hostInput.name"
-                  enterkeyhint="next"
-                  @keydown.enter.prevent="hostAddressInput?.focus()"
-                  class="control"
-                  placeholder="Studio Mac (optional)"
-                  autocomplete="off"
-              /></label>
-              <label class="field"
-                ><span>Address or MagicDNS name</span
-                ><input
-                  ref="hostAddressInput"
-                  v-model="hostInput.address"
-                  inputmode="url"
-                  :spellcheck="false"
-                  enterkeyhint="next"
-                  @keydown.enter.prevent="hostApiKeyInput?.focus()"
-                  class="control"
-                  placeholder="studio.tailnet.ts.net or 192.168.1.20"
-                  autocapitalize="none"
-                  autocomplete="url"
-                  required
-              /></label>
-              <label class="field"
-                ><span>API key</span
-                ><input
-                  ref="hostApiKeyInput"
-                  v-model="hostInput.apiKey"
-                  autocapitalize="none"
-                  :spellcheck="false"
-                  enterkeyhint="done"
-                  class="control"
-                  type="password"
-                  placeholder="If required"
-                  autocomplete="off"
-              /></label>
-              <button class="primary-button" type="submit">Test and save</button>
-            </form>
-          </details>
+          </CardSurface>
           <p v-if="hostError" class="status-line error-text" role="alert">{{ hostError }}</p>
+          <MobileAddMachineSheet
+            ref="addMachineSheet"
+            v-model:name="hostInput.name"
+            v-model:address="hostInput.address"
+            v-model:api-key="hostInput.apiKey"
+            :open="addMachineOpen"
+            :pairing="pairing"
+            :discovering="discovering"
+            :discovered="discovered"
+            :selected-discovered="selectedDiscovered"
+            @close="addMachineOpen = false"
+            @scan-pairing="scanPairingCode"
+            @discover="discoverHosts"
+            @pick-discovered="pickDiscoveredHost"
+            @clear-discovered="clearDiscoveredHost"
+            @connect-discovered="connectHost(hostInput.address, hostInput.name)"
+            @connect-manual="connectHost()"
+          />
         </template>
       </template>
 

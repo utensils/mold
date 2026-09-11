@@ -171,3 +171,12 @@ export function mobileHostMatchesRoute(route: HostRoute, host: MobileHost | unde
     (route.instanceId === undefined || (host.instanceId ?? null) === route.instanceId)
   );
 }
+
+/** A machine the phone found on the network, before anyone has saved it. */
+export interface DiscoveredHost {
+  name: string;
+  host: string;
+  port: number;
+  authRequired: boolean;
+  instanceId?: string;
+}
