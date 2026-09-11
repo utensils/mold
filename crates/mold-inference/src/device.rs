@@ -5509,36 +5509,43 @@ mod tests {
 
     // ── Still transformer residency ──────────────────────────────────────
 
-    /// Decimal GB, the unit every card is advertised in and the one the
-    /// residency rows below are written in.
-    const RESIDENCY_GB: u64 = 1_000_000_000;
+    const MIB: u64 = 1024 * 1024;
 
-    /// What a card of `total` advertised GB leaves a render, after the
-    /// 400 MB the driver context and the display take off the top. This is
-    /// the figure the campaign's "no regression on 24 GB cards" rule is
-    /// measured against.
-    fn usable_free_for(total_gb: u64) -> u64 {
-        total_gb * RESIDENCY_GB - 400 * 1_000_000
+    /// `nvidia-smi` totals for the two cards the campaign is measured on. A
+    /// card advertised as "24 GB" reports BINARY gibibytes, and the matrix
+    /// used to be written in decimal GB — 9.1 % low on a 4090, which moved
+    /// two boundary rows to the wrong side of the comparison.
+    const RTX_4090_TOTAL_MIB: u64 = 24_564;
+    const L40S_TOTAL_MIB: u64 = 46_068;
+
+    /// What a render may spend: the card's own total less the reserve
+    /// `usable_free_vram_bytes` already subtracts, in the SAME units
+    /// `free_vram_bytes` reports.
+    fn usable_free_for_mib(total_mib: u64) -> u64 {
+        total_mib.saturating_sub(400) * MIB
     }
 
-    fn residency_for(
+    /// The largest square a request can actually ask for.
+    ///
+    /// `mold_core::validation::MAX_PIXELS` caps a request at 1.8 MP, so the
+    /// 1536² and 2048² rows this matrix used to assert were unreachable
+    /// through the public API — they exercised arithmetic no user can reach
+    /// while leaving the real ceiling untested.
+    const MAX_SQUARE: u32 = 1_328;
+
+    fn residency_for_backend(
         transformer_bytes: u64,
         width: u32,
         height: u32,
         family: ActivationFamily,
         heads: u64,
         usable_free_bytes: u64,
+        backend: crate::attention::AttentionBackend,
     ) -> TransformerResidency {
         let budget = StillTransformerBudget {
             transformer_bytes,
             activation_bytes: flux_activation_budget_bytes_for(
-                width,
-                height,
-                1,
-                2,
-                family,
-                heads,
-                crate::attention::AttentionBackend::Flash,
+                width, height, 1, 2, family, heads, backend,
             ),
             vae_decode_peak_bytes: flux_vae_decode_peak_bytes(width, height, 2),
             runtime_headroom_bytes: STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
@@ -5546,8 +5553,48 @@ mod tests {
         still_transformer_residency(&budget, UsableFreeVram::Measured(usable_free_bytes))
     }
 
-    /// The plan's 24 GB matrix, plus the 46 GB rows that show the same
-    /// arithmetic keeping a transformer the bigger card has room for.
+    /// Every row, on BOTH attention backends.
+    ///
+    /// The matrix hardcoded `Flash`, which is what an sm89 `h3-cuda` build
+    /// runs — but sm86, sm100, sm120 and Metal run the math arm, whose score
+    /// tile is a real term in the budget. A row that flips between the two is
+    /// a row that is wrong on most of the shipped artifacts.
+    fn residency_on_both_backends(
+        transformer_bytes: u64,
+        width: u32,
+        height: u32,
+        family: ActivationFamily,
+        heads: u64,
+        usable_free_bytes: u64,
+    ) -> TransformerResidency {
+        let flash = residency_for_backend(
+            transformer_bytes,
+            width,
+            height,
+            family,
+            heads,
+            usable_free_bytes,
+            crate::attention::AttentionBackend::Flash,
+        );
+        let math = residency_for_backend(
+            transformer_bytes,
+            width,
+            height,
+            family,
+            heads,
+            usable_free_bytes,
+            crate::attention::AttentionBackend::Math,
+        );
+        assert_eq!(
+            flash.keeps(),
+            math.keeps(),
+            "the {width}x{height} row for a {transformer_bytes}-byte transformer disagrees \
+             between the flash and math arms; the shipped artifacts do not all run flash"
+        );
+        flash
+    }
+
+    /// The residency matrix, in the units the hardware reports.
     ///
     /// Sizes are the shipped checkpoints: FLUX.1 dev Q8_0 ~12.6 GB and BF16
     /// ~23.8 GB, FLUX.2 dev Q8_0 ~33 GB, Klein-4B Q8 ~4.3 GB and Klein-9B Q8
@@ -5561,127 +5608,159 @@ mod tests {
         const KLEIN_4B_Q8: u64 = 4_300_000_000;
         const KLEIN_9B_Q8: u64 = 9_500_000_000;
 
-        let twenty_four = usable_free_for(24);
-        let forty_six = usable_free_for(46);
+        let rtx_4090 = usable_free_for_mib(RTX_4090_TOTAL_MIB);
+        let l40s = usable_free_for_mib(L40S_TOTAL_MIB);
 
-        // flux-dev Q8 at 1024² keeps on a 24 GB card — the whole point of the
-        // change: today it drops unconditionally.
+        // flux-dev Q8 at 1024² keeps on a 24 GiB card — the whole point of the
+        // change: before it dropped unconditionally.
         assert!(
-            residency_for(
+            residency_on_both_backends(
                 FLUX1_Q8,
                 1024,
                 1024,
                 ActivationFamily::FluxDit,
                 24,
-                twenty_four
+                rtx_4090
             )
             .keeps(),
-            "a 12.6 GB Q8 transformer plus a 1024² decode fits 24 GB"
+            "a 12.6 GB Q8 transformer plus a 1024² decode fits a 24 GiB card"
         );
-        // …and drops at 2048², where the decode workspace alone is ~11 GB.
-        let big = residency_for(
+
+        // THE BOUNDARY ROW, and the one that needs hardware to settle. At the
+        // 1.8 MP ceiling the budget says a 24 GiB card keeps a Q8 transformer
+        // (~18.6 GB of 25.3 GB), and that is exactly the configuration #276
+        // reported as a VAE-decode OOM. Either the decode anchors are low at
+        // this size or #276's card had less free than nominal; only a render
+        // can say which, and until one does this row records what the model
+        // claims rather than asserting the model is right.
+        let ceiling = residency_on_both_backends(
             FLUX1_Q8,
-            2048,
-            2048,
+            MAX_SQUARE,
+            MAX_SQUARE,
             ActivationFamily::FluxDit,
             24,
-            twenty_four,
+            rtx_4090,
         );
-        assert!(!big.keeps(), "2048² must take the #276 drop path");
         assert!(
-            big.shortfall_bytes() > 0,
+            ceiling.keeps(),
+            "the budget currently keeps flux1-Q8 at the 1.8 MP ceiling on a 24 GiB card — \
+             if a render OOMs here, the decode anchors are what must move"
+        );
+
+        // The Drop arm at a size a request can actually reach: BF16 on 24 GiB.
+        let dropped = residency_on_both_backends(
+            FLUX1_BF16,
+            1024,
+            1024,
+            ActivationFamily::FluxDit,
+            24,
+            rtx_4090,
+        );
+        assert!(!dropped.keeps(), "23.8 GB of weights cannot hold 24 GiB");
+        assert!(
+            dropped.shortfall_bytes() > 0,
             "a drop names how far short it is"
         );
-
-        // flux-dev BF16: drops on 24 GB, resident on 46.
-        assert!(!residency_for(
+        // …and the same checkpoint is resident on the bigger card.
+        assert!(residency_on_both_backends(
             FLUX1_BF16,
             1024,
             1024,
             ActivationFamily::FluxDit,
             24,
-            twenty_four
-        )
-        .keeps());
-        assert!(residency_for(
-            FLUX1_BF16,
-            1024,
-            1024,
-            ActivationFamily::FluxDit,
-            24,
-            forty_six
+            l40s
         )
         .keeps());
 
-        // flux2-dev Q8: never on 24 GB; kept on 46 at 1024² and 1536², and
-        // dropped at 2048² where the decode pushes it over.
-        assert!(!residency_for(
+        // flux2-dev Q8: never on 24 GiB, kept on an L40S at 1024² and at the
+        // 1.8 MP ceiling. There is deliberately no Drop row for it on the
+        // bigger card — at every shape a request can reach, it fits, and the
+        // 2048² row that used to assert otherwise was unreachable.
+        assert!(!residency_on_both_backends(
             FLUX2_DEV_Q8,
             1024,
             1024,
             ActivationFamily::Flux2Dit,
             48,
-            twenty_four
+            rtx_4090
         )
         .keeps());
-        for (width, height) in [(1024, 1024), (1536, 1536)] {
+        for (width, height) in [(1024, 1024), (MAX_SQUARE, MAX_SQUARE)] {
             assert!(
-                residency_for(
+                residency_on_both_backends(
                     FLUX2_DEV_Q8,
                     width,
                     height,
                     ActivationFamily::Flux2Dit,
                     48,
-                    forty_six
+                    l40s
                 )
                 .keeps(),
-                "flux2-dev Q8 at {width}x{height} fits a 46 GB card"
+                "flux2-dev Q8 at {width}x{height} fits an L40S"
             );
         }
-        assert!(
-            !residency_for(
-                FLUX2_DEV_Q8,
-                2048,
-                2048,
-                ActivationFamily::Flux2Dit,
-                48,
-                forty_six
-            )
-            .keeps(),
-            "a 2048² decode beside a 33 GB transformer does not fit 46 GB"
-        );
 
-        // Klein keeps everywhere, which is the tier people run locally.
+        // Klein keeps everywhere, which is the tier people run locally —
+        // including at the ceiling, on the smaller card, on both backends.
         for transformer in [KLEIN_4B_Q8, KLEIN_9B_Q8] {
-            assert!(
-                residency_for(
-                    transformer,
-                    1024,
-                    1024,
-                    ActivationFamily::Flux2Dit,
-                    32,
-                    twenty_four
-                )
-                .keeps(),
-                "Klein Q8 at {transformer} bytes must stay resident on 24 GB"
-            );
+            for (width, height) in [(1024, 1024), (MAX_SQUARE, MAX_SQUARE)] {
+                assert!(
+                    residency_on_both_backends(
+                        transformer,
+                        width,
+                        height,
+                        ActivationFamily::Flux2Dit,
+                        32,
+                        rtx_4090
+                    )
+                    .keeps(),
+                    "Klein Q8 at {transformer} bytes, {width}x{height}, must stay resident \
+                     on a 24 GiB card"
+                );
+            }
         }
+    }
+
+    /// The matrix's shapes are ones a request can actually carry.
+    ///
+    /// Pins the premise of the rewrite: `MAX_PIXELS` is what makes 1536² and
+    /// 2048² untestable through the public API, so a matrix written in those
+    /// sizes proves nothing about what users reach.
+    #[test]
+    fn the_matrix_shapes_are_admissible_through_the_public_api() {
+        let pixels = u64::from(MAX_SQUARE) * u64::from(MAX_SQUARE);
+        assert!(
+            pixels <= mold_core::validation::MAX_PIXELS,
+            "{MAX_SQUARE}² is {pixels} pixels, over the {} cap",
+            mold_core::validation::MAX_PIXELS
+        );
+        // And it really is the ceiling on the /16 grid both families pack to.
+        let next = u64::from(MAX_SQUARE + 16) * u64::from(MAX_SQUARE + 16);
+        assert!(
+            next > mold_core::validation::MAX_PIXELS,
+            "a larger square would still be admissible; the matrix is not at the ceiling"
+        );
+        let retired: u64 = 2048 * 2048;
+        assert!(
+            retired > mold_core::validation::MAX_PIXELS,
+            "the rows this matrix replaced were unreachable, which is why they were replaced"
+        );
     }
 
     /// A measured card with almost nothing free drops regardless of the
     /// checkpoint — the 2-LoRA observation #276 was written against.
     #[test]
     fn a_card_with_three_gigabytes_free_drops_every_still_transformer() {
-        let answer = residency_for(
+        let answer = residency_on_both_backends(
             12_600_000_000,
             1024,
             1024,
             ActivationFamily::FluxDit,
             24,
-            3 * RESIDENCY_GB,
+            3 * 1024 * MIB,
         );
         assert!(!answer.keeps());
-        assert!(answer.shortfall_bytes() > 10 * RESIDENCY_GB);
+        assert!(answer.shortfall_bytes() > 10 * 1024 * MIB);
     }
 
     /// A card MEASURED at zero free is the most pressured reading there is.
@@ -5693,10 +5772,10 @@ mod tests {
     /// `an_unmeasurable_accelerator_drops_and_only_a_cpu_keeps`.
     #[test]
     fn a_card_measured_at_zero_free_drops_the_transformer() {
-        assert!(!residency_for(
+        assert!(!residency_on_both_backends(
             33_000_000_000,
-            2048,
-            2048,
+            1024,
+            1024,
             ActivationFamily::Flux2Dit,
             48,
             0
