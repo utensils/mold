@@ -775,21 +775,47 @@ fn enable_v3_writing(root: &Path) {
 
 /// Whether the operator has opted this PROCESS in to writing version 3.
 ///
-/// Resolved once, from the config the server loaded, so a request cannot see
-/// a different answer from the startup recovery that prepared the store.
-/// Absent means off — every surface that never sets it (the forced-local CLI,
-/// the TUI, a test) writes v2.
-static AUTHORITY_LOG_REQUESTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// Resolved ONCE per process, and — this is the part that was wrong —
+/// resolved wherever the first authority open happens, not only in the server
+/// entry point. `run_server` used to be the sole writer of this flag, so a
+/// forced-local `mold run`, the TUI, and every other CLI publication path
+/// arrived with it false and committed VERSION 2 into a home the operator had
+/// explicitly switched to version 3. On a host that also uses the CLI that is
+/// not an edge case, it is every day: the setting was silently reverted by the
+/// next local render, and the two stores then diverged in the direction the
+/// operator least expected.
+///
+/// A `OnceLock` rather than an atomic because "resolved once" is the actual
+/// contract: a request must never see a different answer from the startup
+/// recovery that prepared the store. `set_authority_log_requested` still wins
+/// when the server installs it first, which it does, before any gallery opens.
+static AUTHORITY_LOG_REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// Install the resolved `gallery.authority_log` decision. Called once, from
-/// server startup, before any gallery is opened.
+/// Install the resolved `gallery.authority_log` decision. Called from server
+/// startup, before any gallery is opened. A no-op if the answer was already
+/// resolved, which keeps "one answer per process" true either way.
 pub(crate) fn set_authority_log_requested(requested: bool) {
-    AUTHORITY_LOG_REQUESTED.store(requested, std::sync::atomic::Ordering::Relaxed);
+    let _ = AUTHORITY_LOG_REQUESTED.set(requested);
+}
+
+/// The effective `gallery.authority_log` for a loaded config.
+///
+/// One function so the server entry point and the lazy path below cannot
+/// disagree about what the switch means.
+pub(crate) fn authority_log_from_config(config: &mold_core::Config) -> bool {
+    config.gallery.effective_authority_log()
 }
 
 fn authority_log_requested() -> bool {
-    AUTHORITY_LOG_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
+    *AUTHORITY_LOG_REQUESTED.get_or_init(|| {
+        // Tests must not read the developer's own `~/.mold/config.toml`: a
+        // machine that had opted in would silently change what every
+        // authority test exercises. An explicit `set_` still works.
+        if cfg!(test) {
+            return false;
+        }
+        authority_log_from_config(&mold_core::Config::load_or_default())
+    })
 }
 
 fn v3_writing_enabled(root: &Path) -> bool {
@@ -3029,6 +3055,24 @@ mod tests {
     /// home where both formats were written — the one case the switch exists
     /// to manage — an operator could not tell that a second index existed at
     /// all, let alone which one was ahead.
+    /// The switch must mean the same thing to every publication path, not
+    /// just to `run_server`.
+    ///
+    /// It used to be written only by the server entry point, so a forced-local
+    /// `mold run` or the TUI opened a v3-enabled home with the flag false and
+    /// committed version 2 into it — silently reverting the operator's setting
+    /// on the next local render. Both sides now read one function.
+    #[test]
+    fn the_switch_is_one_decision_read_from_the_config() {
+        let mut config = mold_core::Config::default();
+        assert!(
+            !authority_log_from_config(&config),
+            "default is off; writing v3 is always a decision"
+        );
+        config.gallery.authority_log = true;
+        assert!(authority_log_from_config(&config));
+    }
+
     #[test]
     fn storage_status_reports_both_stores_and_their_generations() {
         let dir = tempfile::tempdir().unwrap();

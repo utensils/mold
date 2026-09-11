@@ -363,7 +363,7 @@ pub async fn run_server(
     // than 0.29 cannot read a v3 store at all. Installed here, before
     // anything opens a gallery, so a request can never see a different answer
     // from the startup recovery that prepared the store.
-    let authority_log = config.gallery.effective_authority_log();
+    let authority_log = gallery_authority::authority_log_from_config(&config);
     gallery_authority::set_authority_log_requested(authority_log);
     if authority_log {
         info!("gallery archive authority: writing storage version 3 (gallery.authority_log)");
