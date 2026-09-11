@@ -5253,6 +5253,31 @@ fn preflight_planned_memory_guard_with_eviction_using(
             return Err(err);
         }
 
+        // Retained residency first: an engine holding a transformer
+        // speculatively can hand it back without being destroyed, keeping its
+        // prompt cache and warm shell, and it is residency the eviction below
+        // cannot reach at all — a retaining engine is `ModelResidency::Gpu`
+        // and `evict_lru_parked_except` skips exactly those. Without this a
+        // queue wedges: two workers each holding a 35 GB FLUX.2 transformer
+        // left a third request blocked on memory for 18 minutes with nothing
+        // able to reclaim it.
+        let reclaimed = {
+            let mut cache = cache_lock.lock().unwrap_or_else(|e| e.into_inner());
+            cache.release_retained_residency_except(Some(cache_key))
+        };
+        if let Some((reclaimed_name, freed)) = reclaimed {
+            tracing::info!(
+                gpu = ordinal,
+                target_model = %model_name,
+                reclaimed_model = %reclaimed_name,
+                freed_mb = freed / 1024 / 1024,
+                "released a retained transformer to preserve admitted execution plan"
+            );
+            #[cfg(feature = "cuda")]
+            device::post_drop_free_vram_bytes(ordinal).map_err(device_memory_api_error)?;
+            continue;
+        }
+
         let evicted = {
             let mut cache = cache_lock.lock().unwrap_or_else(|e| e.into_inner());
             cache.evict_lru_parked_except(Some(cache_key))

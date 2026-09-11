@@ -194,6 +194,13 @@ pub struct Flux2Engine {
 /// error — the lesson `QwenImageEngine::active_lora_fingerprint` records.
 pub(crate) struct RetainedFlux2Transformer {
     transformer: super::transformer::Flux2TransformerWrapper,
+    /// Device bytes these weights occupy.
+    ///
+    /// Carried on the slot rather than re-derived, because the cache asks for
+    /// it through `&self` long after the paths that knew it are out of scope —
+    /// and because the figure must be the one the residency budget was
+    /// decided against, not a fresh `stat` of a file that may have moved.
+    device_bytes: u64,
     /// The GPU this was built on. A multi-GPU host leases whichever device is
     /// free, and candle tensors are bound to their ordinal.
     ordinal: usize,
@@ -2179,6 +2186,7 @@ impl Flux2Engine {
         if residency.keeps() {
             self.retained_transformer = Some(RetainedFlux2Transformer {
                 transformer,
+                device_bytes: xformer_size,
                 ordinal: self.base.gpu_ordinal,
                 dtype: gpu_dtype,
                 lora_fingerprint,
@@ -2814,6 +2822,23 @@ impl InferenceEngine for Flux2Engine {
         result
     }
 
+    fn resident_vram_bytes(&self) -> Option<u64> {
+        // Only the SEQUENTIAL path's retained slot. An eager engine's
+        // transformer lives in `base.loaded` and was already measured by the
+        // cache's `vram_load_delta`, so reporting it here would double it.
+        let retained = self.retained_transformer.as_ref()?;
+        Some(retained.device_bytes)
+    }
+
+    fn release_retained_residency(&mut self) -> u64 {
+        let freed = self
+            .retained_transformer
+            .as_ref()
+            .map_or(0, |retained| retained.device_bytes);
+        self.retained_transformer = None;
+        freed
+    }
+
     fn unload(&mut self) {
         self.base.unload();
         // The retained slot is the one piece of GPU state that does NOT live
@@ -3122,6 +3147,7 @@ mod tests {
             transformer: super::super::transformer::Flux2TransformerWrapper::Quantized(
                 tiny_transformer(&cfg),
             ),
+            device_bytes: 33_000_000_000,
             ordinal: 1,
             dtype: DType::BF16,
             lora_fingerprint: loras.clone(),
@@ -3199,6 +3225,7 @@ mod tests {
             transformer: super::super::transformer::Flux2TransformerWrapper::Quantized(
                 tiny_transformer(&cfg),
             ),
+            device_bytes: 33_000_000_000,
             ordinal: 0,
             dtype: DType::F32,
             lora_fingerprint: Vec::new(),
