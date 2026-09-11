@@ -24,7 +24,7 @@ function factory(
 describe("QualityLadder", () => {
   it("offers the recipe's own ladder as one choice", () => {
     const wrapper = factory();
-    expect(wrapper.get("[role='radiogroup']").exists()).toBe(true);
+    expect(wrapper.find("[role='radiogroup']").exists()).toBe(true);
     const rows = wrapper.findAll("[data-test^='quality-row-']");
     expect(rows.map((row) => row.text())).toEqual([
       expect.stringContaining("Draft"),

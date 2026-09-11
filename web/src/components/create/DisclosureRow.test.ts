@@ -73,7 +73,7 @@ describe("DisclosureList", () => {
         ].join(""),
       },
     });
-    expect(wrapper.get("[data-test='disclosure-list']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='disclosure-list']").exists()).toBe(true);
     expect(wrapper.find("[data-test='row-a']").exists()).toBe(true);
     expect(wrapper.find("[data-test='row-b']").exists()).toBe(true);
   });
