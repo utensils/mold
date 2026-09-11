@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, nextTick, type Component } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import CreatePage from "./CreatePage.vue";
+import createPageSource from "./CreatePage.vue?raw";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   useGenerateForm,
   __testing__ as generateFormTesting,
@@ -228,6 +231,21 @@ vi.mock("../composables/useGenerateStream", async (importOriginal) => ({
 
 /** The default machine's inventory for a test that actually queues a print:
  *  routing is inventory-driven now, so the machine must hold the checkpoint. */
+/** An installed row carrying a real generation profile, so the recipe-driven
+ * rail (the Quality ladder's rungs) has something to read. */
+function modelWithRecipe(name: string, family: string): ModelInfoExtended {
+  return {
+    ...installedModelRow(name, family),
+    generation_profile: {
+      schema_version: 1,
+      profile_id: family,
+      profile_hash: `${family}-recipe`,
+      default_recipe_id: "default",
+      recipes: [sdxlRecipe()],
+    },
+  } as unknown as ModelInfoExtended;
+}
+
 function installedModelRow(name: string, family: string) {
   return {
     name,
@@ -487,8 +505,91 @@ describe("CreatePage layout and behavior", () => {
       "workspace-page",
     );
     expect(wrapper.get("[data-test='generate-workspace']").classes()).toContain(
-      "min-[900px]:grid-cols-[minmax(0,1fr)_300px]",
+      "min-[900px]:grid-cols-[minmax(0,1fr)_320px]",
     );
+  });
+
+  /*
+   * The mock's Scroll rule: one scroll context, and Generate never leaves the
+   * viewport. `position: sticky` is SILENTLY INERT inside an
+   * `overflow: hidden|auto|scroll` ancestor, so the ancestor audit is an
+   * assertion rather than a thing someone remembers to do.
+   */
+  it("sticks the composer to the bottom with nothing clipping it", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.getComponent({ name: "ComposerCard" }).classes()).toContain(
+      "composer--sticky",
+    );
+
+    expect(createPageSource).toContain("position: sticky");
+    // Every ancestor between the composer and the page root, wherever its rule
+    // is written: `.workspace-page` is global, the rest are scoped here.
+    for (const [source, selector] of [
+      [webStyleSource, ".workspace-page"],
+      [createPageSource, ".create-page"],
+      [createPageSource, ".create-result"],
+      [createPageSource, ".rail-sheet"],
+    ] as const) {
+      const rule = scopedRule(source, selector);
+      // `.create-page` carries no rule of its own; the others must be found,
+      // or this audit would pass by never looking at anything.
+      if (rule === null) {
+        expect(selector).toBe(".create-page");
+        continue;
+      }
+      expect(rule).not.toMatch(/overflow(-[xy])?:\s*(hidden|auto|scroll)/);
+    }
+  });
+
+  it("docks the composer below 900px and reserves its measured height", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.getComponent({ name: "ComposerCard" }).classes()).toContain(
+      "composer--docked",
+    );
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("prompt", vi.fn());
+  });
+
+  /* The rail is the mock's, in the mock's order: the connection first, because
+   * a browser has no local GPU of its own to fall back on. */
+  it("leads the rail with the machine card", async () => {
+    hostModelsMock.mockResolvedValue([modelWithRecipe("sdxl:fp16", "sdxl")]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const rail = wrapper.get("[data-test='create-rail']");
+    const first = rail.element.firstElementChild as HTMLElement;
+    expect(first.getAttribute("data-test")).toBe("create-machine-card");
+    const order = [
+      "create-machine-card",
+      "quality-ladder",
+      "controls-reset",
+      "controls-stub",
+      "create-disclosures",
+    ].map((test) => wrapper.get(`[data-test='${test}']`).element);
+    for (let index = 1; index < order.length; index += 1) {
+      expect(
+        order[index - 1]!.compareDocumentPosition(order[index]!) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+    // The routing picker left the bottom of the settings list for the card.
+    expect(
+      wrapper
+        .get("[data-test='create-machine-card']")
+        .findComponent({ name: "HostRoutingPicker" })
+        .exists(),
+    ).toBe(true);
   });
 
   it("applies settings selected from recovered Now developing work", async () => {
@@ -718,7 +819,15 @@ describe("CreatePage layout and behavior", () => {
     expect(streamSelectMock).toHaveBeenCalledWith("stale-error");
   });
 
-  it("orders compact Create as result, prompt, controls, actions, then recent", async () => {
+  /*
+   * Under 900px the settings column leaves the page — the mock's Width rule —
+   * so narrow Create is kind strip, picture, machine row, docked composer,
+   * Recent, and nothing else. The old phone path rendered the style picker,
+   * the whole rail, the source wells and the identity well INLINE inside the
+   * composer AND kept a second Advanced sheet, which is why the narrow page
+   * measured longer than the wide one.
+   */
+  it("orders compact Create as result, machine row, docked composer, then recent", async () => {
     vi.stubGlobal(
       "matchMedia",
       vi.fn(() => ({
@@ -732,17 +841,13 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.find("[data-test='phone-create-title']").exists()).toBe(
       true,
     );
-    expect(wrapper.find("[data-test='phone-create-controls']").exists()).toBe(
-      true,
-    );
     await flushPromises();
     const canvas = wrapper.find("[data-test='result-canvas']").exists()
       ? wrapper.get("[data-test='result-canvas']").element
       : wrapper.get("[data-test='cold-start-stub']").element;
     const markers = [
       "phone-create-title",
-      "style-picker-stub",
-      "controls-stub",
+      "phone-machine-row",
       "composer-submit",
       "recent-grid",
     ].map((test) => wrapper.get(`[data-test='${test}']`).element);
@@ -759,6 +864,48 @@ describe("CreatePage layout and behavior", () => {
     vi.stubGlobal("prompt", vi.fn());
   });
 
+  it("opens exactly one rail surface below 900px", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs: pageStubs() },
+    });
+    await flushPromises();
+    // Nothing from the rail is inline on the page.
+    expect(wrapper.find("[data-test='create-rail']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='controls-stub']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(
+      false,
+    );
+
+    await wrapper.get("[data-test='phone-open-rail']").trigger("click");
+    expect(wrapper.findAll("[data-test='create-rail-sheet']")).toHaveLength(1);
+    expect(wrapper.find("[data-test='controls-stub']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='create-disclosures']").exists()).toBe(
+      true,
+    );
+
+    // A row inside the sheet swaps the SAME sheet's body; it never opens a
+    // second one.
+    await wrapper.get("[data-test='disclosure-advanced']").trigger("click");
+    expect(wrapper.findAll("[data-test='create-rail-sheet']")).toHaveLength(1);
+    expect(wrapper.find("[data-test='rail-sheet-back']").exists()).toBe(true);
+    await wrapper.get("[data-test='rail-sheet-back']").trigger("click");
+    expect(wrapper.find("[data-test='create-disclosures']").exists()).toBe(
+      true,
+    );
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("prompt", vi.fn());
+  });
+
   it("keeps the recent gallery visible after refreshes", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
@@ -767,28 +914,28 @@ describe("CreatePage layout and behavior", () => {
     expect(feed.props("limit")).toBe(50);
   });
 
-  it("dismisses the Templates popover with Escape and outside click", async () => {
+  /* Templates left the row beside the print title and became the rail's
+   * Starters disclosure. The contract under test is the dismissal, which the
+   * sheet keeps: Escape and a click outside the panel both close it. */
+  it("dismisses the Starters sheet with Escape and an outside click", async () => {
     const wrapper = mount(CreatePage, {
       attachTo: document.body,
       global: { stubs: pageStubs() },
     });
+    await flushPromises();
 
-    await wrapper.get("[data-test='templates-toggle']").trigger("click");
-    expect(wrapper.find("[data-test='templates-popover']").exists()).toBe(true);
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-    );
+    await wrapper.get("[data-test='disclosure-starters']").trigger("click");
+    expect(wrapper.find("[data-test='templates-panel']").exists()).toBe(true);
+    await wrapper.get(".ms-sheet").trigger("keydown.escape");
     await nextTick();
-    expect(wrapper.find("[data-test='templates-popover']").exists()).toBe(
+    expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(
       false,
     );
 
-    await wrapper.get("[data-test='templates-toggle']").trigger("click");
-    document.body.dispatchEvent(
-      new MouseEvent("pointerdown", { bubbles: true }),
-    );
+    await wrapper.get("[data-test='disclosure-starters']").trigger("click");
+    await wrapper.get(".ms-sheet").trigger("click");
     await nextTick();
-    expect(wrapper.find("[data-test='templates-popover']").exists()).toBe(
+    expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(
       false,
     );
     wrapper.unmount();
@@ -838,12 +985,17 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.imageAttachments[0]?.filename).toBe(entry.filename);
     expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
     expect(form.state.value.upscaleModel).toBe("real-esrgan-x4plus:fp16");
-    const details = wrapper.get(".create-more-settings");
-    expect((details.element as HTMLDetailsElement).open).toBe(true);
-    (details.element as HTMLDetailsElement).open = false;
-    await details.trigger("toggle");
+    // More settings is a disclosure row opening the one sheet now, so the
+    // Upscale reveal lands there instead of in an inline <details>.
+    expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(true);
+    expect(wrapper.findComponent({ name: "AdvancedDrawer" }).exists()).toBe(
+      true,
+    );
+    await wrapper.get(".ms-sheet").trigger("keydown.escape");
     await nextTick();
-    expect((details.element as HTMLDetailsElement).open).toBe(false);
+    expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(
+      false,
+    );
     globalThis.fetch = originalFetch;
   });
 
@@ -1576,8 +1728,13 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a cat";
     await nextTick();
 
+    // The field is inline beside the kind strip now, in the page header,
+    // rather than on a row of its own between the picture and the composer.
     const title = wrapper.get("[data-test='print-title']");
-    expect(title.attributes("placeholder")).toBe("Name (optional)");
+    expect(title.attributes("placeholder")).toBe("Untitled print");
+    expect(wrapper.get(".create-header").element.contains(title.element)).toBe(
+      true,
+    );
     await title.setValue("  Smurf 04  ");
     expect(form.state.value.title).toBe("  Smurf 04  ");
     expect(wrapper.find("[data-test='print-title-error']").exists()).toBe(
@@ -1760,16 +1917,12 @@ describe("CreatePage layout and behavior", () => {
 
     expect(submitMock).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("STG blocks:");
-    if (width >= 900) {
-      expect(
-        (wrapper.get(".create-more-settings").element as HTMLDetailsElement)
-          .open,
-      ).toBe(true);
-    } else {
-      expect(
-        wrapper.getComponent({ name: "AdvancedDrawer" }).props("mobile"),
-      ).toBe(true);
-    }
+    // Both widths reveal the same settings in the same place now: the one
+    // sheet the More settings row opens. There is no second Advanced host.
+    expect(wrapper.findAll("[data-test='create-rail-sheet']")).toHaveLength(1);
+    expect(wrapper.findAllComponents({ name: "AdvancedDrawer" })).toHaveLength(
+      1,
+    );
     wrapper.unmount();
     vi.unstubAllGlobals();
     vi.stubGlobal("prompt", vi.fn());
@@ -2707,6 +2860,8 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.originalPrompt = "an earlier generated print";
     await nextTick();
 
+    // Advanced lives behind the More settings row now, so open it first.
+    await wrapper.get("[data-test='disclosure-advanced']").trigger("click");
     wrapper
       .getComponent({ name: "AdvancedDrawer" })
       .vm.$emit("append-prompt", "cinematic light");
@@ -3308,7 +3463,10 @@ describe("CreatePage layout and behavior", () => {
     ]);
   }
 
-  async function mountFiling(title = "Smurfs") {
+  /* File under is the rail's own disclosure row now, so the group itself is
+   * inside the sheet that row opens. Every filing test that touches a control
+   * opens it first; the ones that only submit do not need to. */
+  async function mountFiling(title = "Smurfs", openGroup = true) {
     filingFleet();
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
@@ -3318,6 +3476,9 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a cat";
     form.state.value.title = title;
     await flushPromises();
+    if (openGroup) {
+      await wrapper.get("[data-test='disclosure-file-under']").trigger("click");
+    }
     return wrapper;
   }
 
@@ -3330,13 +3491,18 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.find("[data-test='file-under-group']").exists()).toBe(false);
   });
 
-  it("renders File under inside the controls region once a host can file", async () => {
-    const wrapper = await mountFiling();
-    // Its home is the controls rail's slot — after the essentials, above the
-    // inline Advanced column (spec §06 web note).
+  it("gives File under its own rail row once a host can file", async () => {
+    const wrapper = await mountFiling("Smurfs", false);
+    // Its home is a bordered disclosure row in the rail, between Starters and
+    // More settings; the group itself opens over the page.
+    const row = wrapper.get("[data-test='disclosure-file-under']");
+    expect(row.text()).toContain("File under");
+    expect(wrapper.find("[data-test='file-under-group']").exists()).toBe(false);
+
+    await row.trigger("click");
     expect(
       wrapper
-        .get("[data-test='controls-stub']")
+        .get("[data-test='create-rail-sheet']")
         .find("[data-test='file-under-group']")
         .exists(),
     ).toBe(true);
@@ -3444,6 +3610,7 @@ describe("CreatePage layout and behavior", () => {
     });
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
+    await wrapper.get("[data-test='disclosure-file-under']").trigger("click");
     const chips = wrapper
       .findAll("[data-test='file-under-tag'], [data-test='file-under-ghost']")
       .map((chip) => chip.text());
@@ -4283,9 +4450,21 @@ describe("CreatePage host routing", () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
-    // AdvancedDrawer is stubbed out entirely here, so finding the well proves
-    // it lives in the primary form.
-    expect(wrapper.find("[data-test='identity-panel']").exists()).toBe(true);
+    // The face is media the person attaches, so it sits with the source wells
+    // in Start from a photo — never among the Advanced knobs, which is where
+    // only its weight and start step belong. AdvancedDrawer is stubbed out
+    // entirely here, so finding the well beside SourceMediaPanel proves it.
+    await wrapper.get("[data-test='disclosure-source']").trigger("click");
+    const sheet = wrapper.get("[data-test='create-rail-sheet']");
+    expect(sheet.find("[data-test='identity-panel']").exists()).toBe(true);
+    const source = sheet.find("[data-test='source-media-panel']");
+    if (source.exists()) {
+      expect(
+        source.element.compareDocumentPosition(
+          sheet.get("[data-test='identity-panel']").element,
+        ) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
   });
 });
 
@@ -4624,6 +4803,28 @@ describe("CreatePage 3-D mesh prints", () => {
   });
 });
 
+/**
+ * The body of one scoped-CSS rule in a single-file component, or null when the
+ * selector has no rule at all. Used to prove the sticky composer's ancestors
+ * never grow an `overflow` — the one thing that makes `position: sticky`
+ * silently do nothing.
+ */
+/* The global sheet is read from disk: a `?raw` import of a `.css` file goes
+ * through Vite's CSS pipeline and does not come back as its own text. */
+const webStyleSource = readFileSync(
+  [
+    resolve(process.cwd(), "src/style.css"),
+    resolve(process.cwd(), "web/src/style.css"),
+  ].find((candidate) => existsSync(candidate)) ?? "src/style.css",
+  "utf8",
+);
+
+function scopedRule(source: string, selector: string): string | null {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`\\n${escaped}\\s*\\{([^}]*)\\}`).exec(source);
+  return match ? (match[1] ?? "") : null;
+}
+
 function pageStubs() {
   return {
     ColdStartGuide: {
@@ -4643,7 +4844,7 @@ function pageStubs() {
         "transformBlockedReason",
       ],
       template:
-        '<div><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="transformBlockedReason" data-test="page-transform-blocked">{{ transformBlockedReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-remix" @click="$emit(\'remix\')">remix</button><button v-if="expanded" data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
+        '<div><slot name="style"/><slot name="shape"/><slot name="count"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="transformBlockedReason" data-test="page-transform-blocked">{{ transformBlockedReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-remix" @click="$emit(\'remix\')">remix</button><button v-if="expanded" data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
       // The page calls these through its template ref on submit / new-print;
       // a stub without them throws an unhandled TypeError mid-run.
       methods: { record: vi.fn(), focus: vi.fn() },
@@ -4677,11 +4878,8 @@ function pageStubs() {
     },
     ControlsAside: {
       name: "ControlsAside",
-      props: ["output", "clipCount"],
-      // The File under group rides the rail's `file-under` slot, so the stub
-      // has to render it for placement to be observable.
-      template:
-        "<aside data-test='controls-stub'><slot name='file-under'/></aside>",
+      props: ["output", "clipCount", "group"],
+      template: "<aside data-test='controls-stub' :data-group='group'></aside>",
     },
     AdvancedDrawer: {
       name: "AdvancedDrawer",
@@ -4714,7 +4912,15 @@ function pageStubs() {
       template: "<div />",
     },
     MaskEditorModal: { name: "MaskEditorModal", template: "<div />" },
-    GenerationTemplatesPanel: { template: "<div />" },
+    GenerationTemplatesPanel: {
+      name: "GenerationTemplatesPanel",
+      template: "<div data-test='templates-panel' />",
+    },
+    LoraPicker: {
+      name: "LoraPicker",
+      props: ["family", "modelValue"],
+      template: "<div data-test='lora-picker' />",
+    },
     RecentGrid: RecentGridStub,
     Lightbox: { template: "<div />" },
     RouterLink: { template: "<a><slot /></a>" },

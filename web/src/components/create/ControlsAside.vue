@@ -1,21 +1,22 @@
 <script setup lang="ts">
 /*
- * Controls aside (Mold Studio Create) — the right rail. width/height stay the
- * persisted source of truth (see `useGenerateForm`); Shape and Resolution are
- * PROJECTIONS of those pixels. Detail (passes) and Stick to my words (guidance)
- * are direct sliders, Seed exposes Random/Fixed (increment stays reachable in
- * Advanced → Output & seed), Batch is a stepper, and the Advanced button
- * surfaces the "N on" badge and opens the drawer.
+ * Controls aside (Mold Studio Create) — the rail's settings. width/height stay
+ * the persisted source of truth (see `useGenerateForm`); Shape and Resolution
+ * are PROJECTIONS of those pixels.
+ *
+ * The rail carries only what a person touches while writing: Shape, Size,
+ * Detail (passes) and Stick to my words. `group` says which slice renders —
+ * `primary` is the rail itself, `seed` is the Repeat-this-look disclosure, and
+ * `secondary` is the mesh / clip / audio groups, which live under More
+ * settings now. Make is the composer's own chip and the machine picker is the
+ * rail's Machine card; neither is repeated here.
  */
 import { computed } from "vue";
-import { useRouter } from "vue-router";
-import { referencesLockBatchSize } from "@studio/lib/sourceMediaPlan";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
-import Stepper from "@ui/components/Stepper.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
@@ -44,8 +45,6 @@ import {
   resolveSourceResolution,
   type SourceDimensions,
 } from "@studio/lib/sourceResolution";
-import HostRoutingPicker from "./HostRoutingPicker.vue";
-import { useHostRouting } from "../../composables/useHostRouting";
 
 const props = withDefaults(
   defineProps<{
@@ -57,6 +56,8 @@ const props = withDefaults(
     canvasIntent?: CanvasIntent;
     /** Count of active advanced fields (drives the badge). */
     advCount?: number;
+    /** Which slice of the rail to render. */
+    group?: "primary" | "secondary" | "seed";
     /** Phone surface: the Advanced sheet button shows here; on tablet+ the
      * Advanced sections render inline in the controls region instead. */
     mobile?: boolean;
@@ -67,6 +68,7 @@ const props = withDefaults(
   }>(),
   {
     advCount: 0,
+    group: "primary",
     mobile: false,
     lastSeed: null,
     model: null,
@@ -74,6 +76,9 @@ const props = withDefaults(
     canvasIntent: "model-default",
   },
 );
+
+const primary = computed(() => props.group === "primary");
+const secondary = computed(() => props.group === "secondary");
 
 const emit = defineEmits<{
   "update:modelValue": [value: GenerateFormState];
@@ -234,38 +239,11 @@ const audioOutputUnavailableReason = computed(() => {
 function setGenerateAudio(value: boolean) {
   patch({ enableAudio: value });
 }
-// Edit families (Qwen image edit) render one print at a time. An ADDITIVE
-// reference is an image prompt broadcast across the batch, so it does not
-// lock — the shared rule mirrors admission rather than repeating it here.
-const batchLocked = computed(
-  () =>
-    capabilities.value.forcesBatchSizeOne ||
-    referencesLockBatchSize(capabilities.value.sourceImageMode, {
-      hasSource: Boolean(props.modelValue.imageAttachments[0]?.base64),
-      referenceCount:
-        capabilities.value.sourceImageMode === "single-or-references" ||
-        capabilities.value.sourceImageMode === "single-and-references"
-          ? (props.modelValue.referenceImages?.length ?? 0)
-          : props.modelValue.imageAttachments.length,
-      lastWrite: props.modelValue.exclusiveWell ?? null,
-    }),
-);
-
 // Reroll: a fresh random seed for the next print without leaving Fixed mode —
 // mirrors the desktop inspector's reroll. Switches to Random so the server
 // draws a new seed each generate.
 function reroll() {
   patch({ seedMode: "random", seed: null });
-}
-
-// Generation target (spec §08 multi-host). The picker owns the routing choice —
-// Auto, Most capable, or a sticky host — and the submit path in CreatePage
-// resolves the same persisted pick through the same singleton, so what the row
-// claims and where the job lands can't drift apart.
-const router = useRouter();
-const routing = useHostRouting();
-function openMachines() {
-  void router?.push("/machines");
 }
 
 const sourceResolution = computed(() =>
@@ -367,21 +345,7 @@ function lockLastSeed() {
 
 <template>
   <aside class="controls" data-test="controls-aside">
-    <div class="controls__head">
-      <span class="controls__kicker">Settings</span>
-      <button
-        type="button"
-        class="controls__reset"
-        data-test="settings-reset"
-        aria-label="Reset to the style's defaults"
-        title="Reset to the style's defaults"
-        @click="emit('reset-settings')"
-      >
-        ↺ Reset
-      </button>
-    </div>
-
-    <div v-if="!canvasless" class="controls__group">
+    <div v-if="primary && !canvasless" class="controls__group">
       <div class="controls__label">Shape</div>
       <ShapePicker
         :model-value="aspectId"
@@ -392,7 +356,7 @@ function lockLastSeed() {
       />
     </div>
 
-    <div v-if="!canvasless" class="controls__group">
+    <div v-if="primary && !canvasless" class="controls__group">
       <div class="controls__label">Size</div>
       <ResolutionSelector
         :model-value="selectedSizeId"
@@ -422,7 +386,7 @@ function lockLastSeed() {
       </p>
     </div>
 
-    <div class="controls__group">
+    <div v-if="primary" class="controls__group">
       <SliderRow
         label="Detail"
         :model-value="modelValue.steps"
@@ -441,7 +405,11 @@ function lockLastSeed() {
     <!-- 3-D geometry. Built entirely from the recipe's advertised `mesh`
          block, so a host that widens the octree ladder or the face bounds
          widens this group with no client release. -->
-    <div v-if="meshProfile" class="controls__group" data-test="mesh-controls">
+    <div
+      v-if="secondary && meshProfile"
+      class="controls__group"
+      data-test="mesh-controls"
+    >
       <div class="controls__label">Mesh</div>
       <SegmentedControl
         v-if="octreeOptions.length > 0"
@@ -528,7 +496,7 @@ function lockLastSeed() {
       </div>
     </div>
 
-    <div v-if="capabilities.supportsVideo" class="controls__group">
+    <div v-if="secondary && capabilities.supportsVideo" class="controls__group">
       <div
         v-if="canPredictDuration"
         class="controls__toggle"
@@ -566,7 +534,7 @@ function lockLastSeed() {
     </div>
 
     <div
-      v-if="showGenerateAudio"
+      v-if="secondary && showGenerateAudio"
       class="controls__group controls__toggle"
       data-test="generate-audio-control"
     >
@@ -587,7 +555,7 @@ function lockLastSeed() {
       </p>
     </div>
 
-    <div class="controls__group">
+    <div v-if="primary" class="controls__group">
       <SliderRow
         label="Stick to my words"
         :model-value="capabilities.fixedGuidance ?? modelValue.guidance"
@@ -612,7 +580,7 @@ function lockLastSeed() {
       </p>
     </div>
 
-    <div class="controls__group">
+    <div v-if="group === 'seed'" class="controls__group">
       <div class="controls__seed-head">
         <span class="controls__label controls__label--inline"
           >Repeat this look</span
@@ -661,31 +629,8 @@ function lockLastSeed() {
       </p>
     </div>
 
-    <div class="controls__group">
-      <div class="controls__batch">
-        <span class="controls__label controls__label--inline">Make</span>
-        <Stepper
-          :model-value="batchLocked ? 1 : modelValue.batchSize"
-          :min="1"
-          :max="batchLocked ? 1 : 10_000"
-          editable
-          label="Batch size"
-          @update:model-value="patch({ batchSize: $event })"
-        />
-      </div>
-      <p v-if="batchLocked" class="controls__hint" data-test="batch-locked">
-        locked to 1 — edit models render one print at a time.
-      </p>
-    </div>
-
-    <!-- "File under" (Create-time Library organization): after the
-         essentials, above Advanced on every width. The page owns the state
-         and the capability gate; the rail owns only its position, so the
-         phone sheet and the tablet+ column can't order it differently. -->
-    <slot name="file-under" />
-
     <button
-      v-if="mobile"
+      v-if="primary && mobile"
       type="button"
       class="controls__advanced"
       data-test="open-advanced"
@@ -697,13 +642,6 @@ function lockLastSeed() {
         >{{ advCount }} on</BadgePill
       >
     </button>
-
-    <HostRoutingPicker
-      :hosts="routing.hosts.value"
-      :target-id="routing.targetId.value"
-      @select="routing.setTarget"
-      @open-machines="openMachines"
-    />
   </aside>
 </template>
 
@@ -714,42 +652,6 @@ function lockLastSeed() {
   border-radius: var(--radius-card-lg);
   box-shadow: inset 0 1px 0 var(--card-hi);
   padding: 18px;
-}
-
-.controls__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 9px;
-  margin-bottom: 16px;
-}
-
-.controls__kicker {
-  font-family: var(--f-mono);
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-
-/* Matches the Advanced card's inline Reset pill so the two read as one
- * family of "put this section back" actions. */
-.controls__reset {
-  border: 1px solid var(--ce);
-  background: transparent;
-  color: var(--ink-2);
-  padding: 4px 11px;
-  border-radius: var(--radius-pill);
-  font-size: 11.5px;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    border-color var(--dur-quick) var(--ease),
-    color var(--dur-quick) var(--ease);
-}
-.controls__reset:hover {
-  border-color: var(--safelight);
-  color: var(--rebate);
 }
 
 .controls__group {
@@ -790,12 +692,6 @@ function lockLastSeed() {
   font-size: 13px;
   padding: 0 12px;
   outline: none;
-}
-
-.controls__batch {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
 }
 
 .controls__mesh-slider {

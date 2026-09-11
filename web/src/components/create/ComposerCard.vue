@@ -202,12 +202,13 @@ watch(
       @keydown="onKeydown"
     />
 
-    <!-- Phone-only insertion point: Create owns model/shape controls, but the
-         prototype places them above the action row. Desktop leaves this slot
-         empty and keeps its separate inspector column. -->
-    <slot name="mobile-controls" />
-
     <div class="composer__actions">
+      <!-- C1 STUB — the chip row's three slots land here at merge. Style is
+           the composer's own control on every width (desktop's pattern), and
+           Shape and Make ride beside it instead of living in the rail. -->
+      <slot name="style" />
+      <slot name="shape" />
+      <slot name="count" />
       <span class="composer__summary" data-test="composer-summary">{{
         summaryLine
       }}</span>

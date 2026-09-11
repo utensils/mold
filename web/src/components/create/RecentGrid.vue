@@ -21,8 +21,15 @@ const props = withDefaults(
     entries: GalleryImage[];
     /** Cap the number of tiles rendered; the rest live in the gallery. */
     limit?: number;
+    /**
+     * Cap the grid to this many ROWS at the current breakpoint. Recent sits
+     * under the sticky composer on Create, where an uncapped strip is the
+     * whole page below the fold; two rows plus the "see all" link is the
+     * mock's shape. Null means the `limit` alone decides.
+     */
+    maxRows?: number | null;
   }>(),
-  { limit: 18 },
+  { limit: 18, maxRows: null },
 );
 
 const emit = defineEmits<{
@@ -38,6 +45,13 @@ const emit = defineEmits<{
 }>();
 
 const shown = computed(() => props.entries.slice(0, props.limit));
+/** The row cap is CSS, not a slice: the column count is a media query, so the
+ * number of tiles that make two rows is only known to the layout. */
+const rowCapStyle = computed(() =>
+  props.maxRows && props.maxRows > 0
+    ? { "--recent-max-rows": String(props.maxRows) }
+    : undefined,
+);
 const overflow = computed(() =>
   Math.max(0, props.entries.length - shown.value.length),
 );
@@ -64,7 +78,13 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
 </script>
 
 <template>
-  <div class="recent" data-test="recent-grid">
+  <div
+    class="recent"
+    :class="{ 'recent--capped': maxRows !== null }"
+    :style="rowCapStyle"
+    data-test="recent-grid"
+    :data-max-rows="maxRows ?? undefined"
+  >
     <div
       v-if="shown.length === 0"
       class="recent__empty"
@@ -128,6 +148,14 @@ function openContextMenu(item: GalleryImage, event: MouseEvent): void {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 10px;
+}
+
+/* Two rows and no more. `grid-auto-rows: 0` collapses everything past the
+ * capped rows; the "See all in My images" link is how the rest is reached. */
+.recent--capped .recent__grid {
+  grid-template-rows: repeat(var(--recent-max-rows, 2), auto);
+  grid-auto-rows: 0;
+  overflow: clip;
 }
 @media (min-width: 480px) {
   .recent__grid {
