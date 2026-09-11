@@ -33,7 +33,7 @@ import { projectResolution } from "../components/create/resolutionProjection";
 import ExpandModal from "../components/ExpandModal.vue";
 import RemixModal from "../components/RemixModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
-import ReferenceCropModal from "../components/ReferenceCropModal.vue";
+import ReferenceCropModal from "@studio/components/ReferenceCropModal.vue";
 import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import MaskEditorModal from "../components/MaskEditorModal.vue";
 import GenerationTemplatesPanel from "../components/GenerationTemplatesPanel.vue";
@@ -158,6 +158,7 @@ import {
 } from "../lib/lastSeed";
 import { useLiveActivity } from "../composables/useLiveActivity";
 import { useOpenLiveWork } from "../composables/useOpenLiveWork";
+import { useOverlayFocus } from "../composables/useOverlayFocus";
 import { ORIGIN_HOST_ID, listHosts } from "../lib/hostRegistry";
 
 import { fetchMergedGallery } from "../lib/multiHostGallery";
@@ -5123,6 +5124,7 @@ onBeforeUnmount(() => {
       :title="`Crop reference ${(h3CropIndex ?? 0) + 1}`"
       :image="h3CropTarget?.image ?? null"
       :crop="h3CropTarget?.crop ?? null"
+      :use-focus="useOverlayFocus"
       @apply="applyH3ReferenceCrop"
       @close="h3CropIndex = null"
     />
