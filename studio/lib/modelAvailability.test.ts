@@ -22,7 +22,9 @@ describe("modelAvailabilityTag", () => {
 
   it("stays quiet when every reachable machine has the model", () => {
     expect(modelAvailabilityTag(["studio", "plato"], fleet)).toBeNull();
-    expect(modelAvailabilityTag(["local", "hal9000-7680", "bender-7680"], withLocal)).toBeNull();
+    expect(
+      modelAvailabilityTag(["local", "hal9000-7680", "bender-7680"], withLocal),
+    ).toBeNull();
   });
 
   it("stays quiet with a single reachable machine, which has nothing to say", () => {
@@ -39,12 +41,18 @@ describe("modelAvailabilityTag", () => {
   });
 
   it("counts machines when several but not all have the model", () => {
-    expect(modelAvailabilityTag(["hal9000-7680", "bender-7680"], withLocal)).toBe("2 machines");
-    expect(modelAvailabilityTag(["local", "bender-7680"], withLocal)).toBe("2 machines");
+    expect(
+      modelAvailabilityTag(["hal9000-7680", "bender-7680"], withLocal),
+    ).toBe("2 machines");
+    expect(modelAvailabilityTag(["local", "bender-7680"], withLocal)).toBe(
+      "2 machines",
+    );
   });
 
   it("ignores ids the caller's reachable list does not contain", () => {
-    expect(modelAvailabilityTag(["studio", "gone-machine"], fleet)).toBe("Studio");
+    expect(modelAvailabilityTag(["studio", "gone-machine"], fleet)).toBe(
+      "Studio",
+    );
   });
 
   it("never says host", () => {
