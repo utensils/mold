@@ -106,18 +106,44 @@ fn is_bfl_native_root_marker(key: &str) -> bool {
         || key.starts_with("final_layer.")
 }
 
+/// The safetensors header's own ceiling, mirrored from the `safetensors`
+/// crate's `MAX_HEADER_SIZE`.
+const MAX_SAFETENSORS_HEADER_BYTES: u64 = 100_000_000;
+
+/// Read the JSON header of a safetensors file, refusing a length the file
+/// cannot possibly hold.
+///
+/// The leading `u64` is accident-controlled: a truncated download, a sparse
+/// placeholder, or any non-safetensors file with a `.safetensors` name yields
+/// an arbitrary length, and allocating it unchecked is an ABORT, not an error
+/// — `handle_alloc_error` takes the whole process down, and this probe runs on
+/// the coordinator's admission path where every planning pass reaches it.
+/// Bounded by the file's own length and by the format's own ceiling, so a
+/// malformed header is a `DetectError` the caller already handles by falling
+/// back to the model-name heuristic.
+fn read_safetensors_header(path: &Path) -> Result<BTreeMap<String, Value>, DetectError> {
+    let mut file = File::open(path)?;
+    let file_len = file.metadata()?.len();
+    let mut len_buf = [0u8; 8];
+    file.read_exact(&mut len_buf)?;
+    let header_len = u64::from_le_bytes(len_buf);
+    if header_len > MAX_SAFETENSORS_HEADER_BYTES || header_len > file_len.saturating_sub(8) {
+        return Err(DetectError::Header(format!(
+            "declared header length {header_len} does not fit a {file_len} byte file"
+        )));
+    }
+    let mut header_buf = vec![0u8; header_len as usize];
+    file.read_exact(&mut header_buf)?;
+    serde_json::from_slice(&header_buf).map_err(|e| DetectError::Header(e.to_string()))
+}
+
 /// Read just the safetensors header, returning every tensor key except the
 /// reserved `__metadata__` entry. Does not touch tensor data.
 fn read_tensor_keys(path: &Path) -> Result<Vec<String>, DetectError> {
-    let mut file = File::open(path)?;
-    let mut len_buf = [0u8; 8];
-    file.read_exact(&mut len_buf)?;
-    let header_len = u64::from_le_bytes(len_buf) as usize;
-    let mut header_buf = vec![0u8; header_len];
-    file.read_exact(&mut header_buf)?;
-    let header: BTreeMap<String, Value> =
-        serde_json::from_slice(&header_buf).map_err(|e| DetectError::Header(e.to_string()))?;
-    Ok(header.into_keys().filter(|k| k != "__metadata__").collect())
+    Ok(read_safetensors_header(path)?
+        .into_keys()
+        .filter(|k| k != "__metadata__")
+        .collect())
 }
 
 /// Header-peek the checkpoint to determine its `hidden_size` (= the
@@ -131,14 +157,7 @@ fn read_tensor_keys(path: &Path) -> Result<Vec<String>, DetectError> {
 /// Returns `Ok(None)` if neither marker is present (caller falls back to
 /// a default config or model-name heuristic). Touches only the JSON header.
 pub fn detect_hidden_size(path: &Path) -> Result<Option<usize>, DetectError> {
-    let mut file = File::open(path)?;
-    let mut len_buf = [0u8; 8];
-    file.read_exact(&mut len_buf)?;
-    let header_len = u64::from_le_bytes(len_buf) as usize;
-    let mut header_buf = vec![0u8; header_len];
-    file.read_exact(&mut header_buf)?;
-    let header: BTreeMap<String, Value> =
-        serde_json::from_slice(&header_buf).map_err(|e| DetectError::Header(e.to_string()))?;
+    let header = read_safetensors_header(path)?;
 
     let first_dim = |key: &str| -> Option<usize> {
         let info = header.get(key)?;
@@ -176,6 +195,46 @@ mod tests {
                 .as_nanos(),
         ));
         p
+    }
+
+    /// A header length the file cannot hold is an ERROR, never an allocation.
+    ///
+    /// `detect_hidden_size` runs on the coordinator for every FLUX.2 plan, and
+    /// a sparse placeholder or a truncated download makes the leading `u64`
+    /// arbitrary. Allocating it calls `handle_alloc_error`, which ABORTS the
+    /// process — a whole server killed by one bad file on disk. The zero-filled
+    /// case below is the one a sparse test fixture produces; the huge-length
+    /// case is what a truncated real checkpoint produces.
+    #[test]
+    fn a_header_length_the_file_cannot_hold_is_refused_rather_than_allocated() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let zeroed = temp_path("zeroed");
+        let mut file = File::create(&zeroed).unwrap();
+        file.seek(SeekFrom::Start(64 * 1024 - 1)).unwrap();
+        file.write_all(&[0]).unwrap();
+        drop(file);
+        assert!(matches!(
+            detect_hidden_size(&zeroed),
+            Err(DetectError::Header(_))
+        ));
+        assert!(matches!(
+            detect_format(&zeroed),
+            Err(DetectError::Header(_)) | Ok(Flux2SingleFileFormat::Unknown)
+        ));
+
+        let truncated = temp_path("truncated");
+        let mut file = File::create(&truncated).unwrap();
+        file.write_all(&u64::MAX.to_le_bytes()).unwrap();
+        file.write_all(b"{}").unwrap();
+        drop(file);
+        assert!(matches!(
+            detect_hidden_size(&truncated),
+            Err(DetectError::Header(_))
+        ));
+
+        let _ = std::fs::remove_file(&zeroed);
+        let _ = std::fs::remove_file(&truncated);
     }
 
     fn write_fixture(path: &Path, keys: &[&str]) {
