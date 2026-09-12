@@ -5640,8 +5640,8 @@ fn ensure_model_ready_sync_inner(
     let planned_engine_config = planned_load.map(|planned| planned.engine_config);
     let mut cache = worker.model_cache.lock().unwrap();
 
-    let cached_requires_reconstruction = cache.get(cache_key).is_some_and(|entry| {
-        cached_engine_requires_reconstruction(
+    let cached_reconstruction_reason = cache.get(cache_key).and_then(|entry| {
+        cached_engine_reconstruction_reason(
             entry.engine.as_ref(),
             planned_mode,
             planned_execution_fingerprint,
@@ -5654,6 +5654,14 @@ fn ensure_model_ready_sync_inner(
             }),
         )
     });
+    let cached_requires_reconstruction = cached_reconstruction_reason.is_some();
+    // Device residency this engine is holding for the NEXT render, asked of
+    // the engine itself. A sequential engine that retains a transformer is
+    // not the load-use-drop engine #282's rule was written for.
+    let cached_retained_residency_bytes = cache
+        .get(cache_key)
+        .and_then(|entry| entry.engine.resident_vram_bytes())
+        .unwrap_or(0);
 
     // Already loaded? A matching engine avoids reconstruction, but an
     // admitted request can have a different activation peak and physical
@@ -5662,6 +5670,29 @@ fn ensure_model_ready_sync_inner(
     let unchanged_cached = cache.get(cache_key).is_some_and(|entry| {
         entry.residency == ModelResidency::Gpu && !cached_requires_reconstruction
     });
+    if !unchanged_cached {
+        // The one line that says why a warm engine is about to be rebuilt or
+        // reloaded. Without it the next line an operator sees is a 35 GB GGUF
+        // read with no stated cause.
+        tracing::debug!(
+            gpu = worker.gpu.ordinal,
+            model = %model_name,
+            cached = cache.get(cache_key).is_some(),
+            residency = ?cache.get(cache_key).map(|entry| entry.residency),
+            reason = ?cached_reconstruction_reason,
+            planned_mode = ?planned_mode,
+            cached_mode = ?cache.get(cache_key).map(|entry| (
+                entry.engine.configured_load_strategy(),
+                entry.engine.configured_block_offload(),
+            )),
+            planned_fingerprint = planned_execution_fingerprint.unwrap_or("<none>"),
+            cached_fingerprint = cache
+                .get(cache_key)
+                .and_then(|entry| entry.engine.configured_execution_fingerprint())
+                .unwrap_or("<none>"),
+            "cached engine does not serve the admitted plan unchanged"
+        );
+    }
     if unchanged_cached {
         cache.touch(cache_key);
         drop(cache);
@@ -5812,12 +5843,34 @@ fn ensure_model_ready_sync_inner(
             .unwrap_or_else(|e| e.into_inner())
             .get(cache_key)
             .is_some_and(|entry| {
-                planned_mode.is_none_or(|mode| mode.matches(entry.engine.as_ref()))
+                planned_mode.is_none_or(|mode| {
+                    mode.matches(entry.engine.as_ref())
+                        || retained_engine_serves_planned_mode(
+                            mode,
+                            entry.engine.configured_load_strategy(),
+                            entry.engine.configured_block_offload(),
+                            entry.engine.resident_vram_bytes().unwrap_or(0),
+                        )
+                })
             });
-        if load_strategy == mold_inference::LoadStrategy::Sequential
-            || cached_requires_reconstruction
-            || !cached_mode_matches
-        {
+        // A SEQUENTIAL strategy meant load-use-drop when #282 wrote this rule:
+        // such an engine held nothing between renders, so there was nothing to
+        // keep and rebuilding it cost only the load it was going to do anyway.
+        // An engine RETAINING a transformer is the case that broke the
+        // equivalence — recreating it destroys exactly the 34 GB it is holding
+        // for this request, and the reload it forces is the 80 s the retention
+        // exists to remove. Reuse it only where nothing else objects; a
+        // sequential engine retaining nothing still takes the old path.
+        let sequential_rebuild = load_strategy == mold_inference::LoadStrategy::Sequential
+            && cached_retained_residency_bytes == 0;
+        if sequential_rebuild || cached_requires_reconstruction || !cached_mode_matches {
+            let reconstruction_reason = cached_reconstruction_reason
+                .map(EngineReconstruction::as_str)
+                .unwrap_or(if sequential_rebuild {
+                    "sequential-load-use-drop"
+                } else {
+                    "planned-mode-differs"
+                });
             let paths = planned_engine_paths
                 .cloned()
                 .or(cached_paths)
@@ -5892,6 +5945,8 @@ fn ensure_model_ready_sync_inner(
             tracing::info!(
                 gpu = worker.gpu.ordinal,
                 model = %model_name,
+                reason = reconstruction_reason,
+                retained_mb = cached_retained_residency_bytes / 1024 / 1024,
                 "recreating cached engine for exact execution plan..."
             );
             let vram_baseline = device::vram_load_baseline(worker.gpu.ordinal);
@@ -6091,17 +6146,92 @@ fn ensure_model_ready_sync_inner(
     Ok(ModelLoadDisposition::Cold)
 }
 
-fn cached_engine_requires_reconstruction(
+/// Why a cached engine cannot serve the admitted plan as it stands.
+///
+/// Named rather than collapsed to a bool because a reconstruction is
+/// expensive and invisible: on FLUX.2 [dev] it re-reads a 35 GB GGUF and
+/// destroys the retained transformer, and two investigations have now stalled
+/// on a log line that said only that it happened.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EngineReconstruction {
+    /// The cached engine was built for a different load strategy or offload
+    /// mode than this plan asks for.
+    PlannedModeDiffers,
+    /// Same model, different execution class.
+    ExecutionFingerprintDiffers,
+    /// The request's own offload policy cannot reuse this engine's paths.
+    OffloadPolicyRequiresFreshEngine,
+}
+
+impl EngineReconstruction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PlannedModeDiffers => "planned-mode-differs",
+            Self::ExecutionFingerprintDiffers => "execution-fingerprint-differs",
+            Self::OffloadPolicyRequiresFreshEngine => "offload-policy-requires-fresh-engine",
+        }
+    }
+}
+
+/// Whether an engine that is RETAINING device residency can serve a plan whose
+/// load strategy differs from the one it was built for.
+///
+/// A load strategy says HOW TO LOAD. An engine holding its transformer across
+/// renders has nothing left to load, so destroying it to satisfy a different
+/// load strategy throws the weights away in order to read them back the
+/// "right" way — 35 GB and 80 s, to arrive at the state it was already in.
+///
+/// It has to be allowed because the strategy is not stable for a warm model:
+/// it is chosen from the device's available VRAM, and a card whose free space
+/// IS this model's own retained transformer reads as roomy, so the identical
+/// request plans `Sequential` cold and `Eager` warm. Both are true statements
+/// about loading; neither is a statement about an engine that is loaded.
+///
+/// Block offload is NOT interchangeable and is compared exactly: it changes
+/// where the weights live during the forward pass, which is a property of the
+/// engine that exists, not of how it was filled.
+fn retained_engine_serves_planned_mode(
+    planned: PlannedEngineMode,
+    cached_load_strategy: Option<mold_inference::LoadStrategy>,
+    cached_block_offload: Option<bool>,
+    retained_residency_bytes: u64,
+) -> bool {
+    retained_residency_bytes > 0
+        && cached_load_strategy.is_some()
+        && cached_block_offload == Some(planned.block_offload)
+}
+
+fn cached_engine_reconstruction_reason(
     engine: &dyn mold_inference::InferenceEngine,
     planned_mode: Option<PlannedEngineMode>,
     planned_execution_fingerprint: Option<&str>,
     offload_policy_requires_fresh_engine: bool,
-) -> bool {
-    planned_mode.is_some_and(|mode| !mode.matches(engine))
-        || planned_execution_fingerprint.is_some_and(|fingerprint| {
+) -> Option<EngineReconstruction> {
+    let retained_serves = planned_mode.is_some_and(|mode| {
+        retained_engine_serves_planned_mode(
+            mode,
+            engine.configured_load_strategy(),
+            engine.configured_block_offload(),
+            engine.resident_vram_bytes().unwrap_or(0),
+        )
+    });
+    if !retained_serves && planned_mode.is_some_and(|mode| !mode.matches(engine)) {
+        return Some(EngineReconstruction::PlannedModeDiffers);
+    }
+    // The execution fingerprint hashes the resolved load strategy, so a warm
+    // engine exempted above would be failed one line later by the same
+    // difference wearing a different name.
+    if !retained_serves
+        && planned_execution_fingerprint.is_some_and(|fingerprint| {
             engine.configured_execution_fingerprint() != Some(fingerprint)
         })
-        || offload_policy_requires_fresh_engine
+    {
+        return Some(EngineReconstruction::ExecutionFingerprintDiffers);
+    }
+    if offload_policy_requires_fresh_engine {
+        return Some(EngineReconstruction::OffloadPolicyRequiresFreshEngine);
+    }
+    None
 }
 
 fn retire_replaced_engine(engine: Box<dyn mold_inference::InferenceEngine>) {
@@ -8415,6 +8545,151 @@ mod tests {
         }
     }
 
+    /// The identical request must reuse the transformer the last one left.
+    ///
+    /// The load strategy is chosen from the device's AVAILABLE VRAM, and a
+    /// card whose free space IS this model's own retained transformer reads as
+    /// roomy — so `flux2-dev:q8` planned `Sequential` on a cold card and
+    /// `Eager` on the warm one, one minute later, for a byte-identical
+    /// request. `PlannedEngineMode::matches` then failed, the worker
+    /// "recreated the cached engine for the exact execution plan", and the
+    /// 33 GB it was holding went back to the card so a fresh engine could read
+    /// the same 35 GB GGUF again: measured 91.7 s cold and 150.5 s warm, when
+    /// the whole point of the retained slot is that the warm one skips the
+    /// load entirely.
+    ///
+    /// Both strategies are true statements about HOW TO LOAD, and neither says
+    /// anything about an engine that is already loaded.
+    #[test]
+    fn a_retaining_engine_serves_a_plan_whose_load_strategy_moved_under_it() {
+        use mold_inference::LoadStrategy;
+
+        const RETAINED: u64 = 33 << 30;
+        let eager_plan = PlannedEngineMode {
+            load_strategy: LoadStrategy::Eager,
+            block_offload: false,
+        };
+
+        // The warm card's plan against the cold card's engine.
+        assert!(
+            retained_engine_serves_planned_mode(
+                eager_plan,
+                Some(LoadStrategy::Sequential),
+                Some(false),
+                RETAINED
+            ),
+            "a retained transformer is not reloaded to satisfy a load strategy"
+        );
+        // And the other direction, which is what the next cold plan looks like.
+        assert!(retained_engine_serves_planned_mode(
+            PlannedEngineMode {
+                load_strategy: LoadStrategy::Sequential,
+                block_offload: false,
+            },
+            Some(LoadStrategy::Eager),
+            Some(false),
+            RETAINED
+        ));
+
+        // Retaining NOTHING is the load-use-drop engine #282's rule was
+        // written for: it still rebuilds.
+        assert!(!retained_engine_serves_planned_mode(
+            eager_plan,
+            Some(LoadStrategy::Sequential),
+            Some(false),
+            0
+        ));
+
+        // Block offload is never interchangeable — it changes where the
+        // weights live during the forward pass.
+        assert!(!retained_engine_serves_planned_mode(
+            eager_plan,
+            Some(LoadStrategy::Eager),
+            Some(true),
+            RETAINED
+        ));
+
+        // An engine that carries no planned mode at all is not a planned
+        // engine and is left to the ordinary rule.
+        assert!(!retained_engine_serves_planned_mode(
+            eager_plan, None, None, RETAINED
+        ));
+    }
+
+    /// The exemption reaches the decision, through the REAL wrapper — and the
+    /// execution fingerprint, which hashes the load strategy, must not fail
+    /// the same engine one line later under a different name.
+    #[test]
+    fn a_retaining_engine_is_not_reconstructed_for_a_moved_load_strategy() {
+        use mold_inference::LoadStrategy;
+
+        const RETAINED: u64 = 33 << 30;
+        let cold = PlannedEngineMode {
+            load_strategy: LoadStrategy::Sequential,
+            block_offload: false,
+        };
+        let warm = PlannedEngineMode {
+            load_strategy: LoadStrategy::Eager,
+            block_offload: false,
+        };
+        let engine = record_planned_engine_mode(
+            Box::new(SequentialRetainingEngine { retained: RETAINED }),
+            cold,
+            "cold-plan-fingerprint",
+        );
+
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                engine.as_ref(),
+                Some(warm),
+                Some("warm-plan-fingerprint"),
+                false,
+            ),
+            None,
+            "the engine holding this request's weights serves this request"
+        );
+
+        // Everything else still rebuilds it.
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                engine.as_ref(),
+                Some(PlannedEngineMode {
+                    load_strategy: LoadStrategy::Eager,
+                    block_offload: true,
+                }),
+                Some("cold-plan-fingerprint"),
+                false,
+            ),
+            Some(EngineReconstruction::PlannedModeDiffers),
+            "block offload is a different forward pass"
+        );
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                engine.as_ref(),
+                Some(warm),
+                Some("warm-plan-fingerprint"),
+                true,
+            ),
+            Some(EngineReconstruction::OffloadPolicyRequiresFreshEngine)
+        );
+
+        // And an engine retaining nothing is unchanged in every direction.
+        let empty = record_planned_engine_mode(
+            Box::new(SequentialRetainingEngine { retained: 0 }),
+            cold,
+            "cold-plan-fingerprint",
+        );
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                empty.as_ref(),
+                Some(warm),
+                Some("cold-plan-fingerprint"),
+                false,
+            ),
+            Some(EngineReconstruction::PlannedModeDiffers)
+        );
+    }
+
     /// The planned wrapper must not hide a retained transformer from the cache.
     ///
     /// EVERY scheduler-V2 job's engine is built, wrapped by
@@ -8825,12 +9100,15 @@ mod tests {
             "old-fingerprint",
         );
 
-        assert!(cached_engine_requires_reconstruction(
-            configured.as_ref(),
-            Some(mode),
-            Some("new-fingerprint"),
-            false,
-        ));
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                configured.as_ref(),
+                Some(mode),
+                Some("new-fingerprint"),
+                false,
+            ),
+            Some(EngineReconstruction::ExecutionFingerprintDiffers)
+        );
     }
 
     #[test]
