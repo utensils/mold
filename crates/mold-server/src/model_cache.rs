@@ -222,8 +222,14 @@ impl ModelCache {
             // against VRAM that was not there, and the evict-to-fit loop had
             // nothing to reclaim. This is the only place the credit can be
             // RAISED; the branch above is the only one that lowers it.
+            //
+            // The LARGER of the two, never the reported one: an EAGER engine
+            // (FLUX.1) keeps its transformer inside a loaded set the delta
+            // measured in full, and reports only the part a release can hand
+            // back — so assigning would lower a correct measurement to its
+            // transformer alone and lose the VAE and encoders beside it.
             cached.residency = ModelResidency::Gpu;
-            cached.vram_bytes = resident;
+            cached.vram_bytes = cached.vram_bytes.max(resident);
         }
         // A restore closes an inference take-window, so it is the authoritative
         // moment at which the engine was most recently used. Without this, the
@@ -633,16 +639,21 @@ impl ModelCache {
             return None;
         }
         // The engine is still here and still loaded in every other sense, so
-        // it keeps its place in the LRU order; only the credit moves.
-        entry.vram_bytes = entry.engine.resident_vram_bytes().unwrap_or(0);
+        // it keeps its place in the LRU order; only the credit moves — and it
+        // moves by what was FREED, not down to what is left retained. An
+        // eager engine still holds the VAE and encoders the load delta
+        // measured beside the transformer that just went back.
+        entry.vram_bytes = entry.vram_bytes.saturating_sub(freed);
         if entry.vram_bytes == 0 && !entry.engine.is_loaded() {
             entry.residency = ModelResidency::Parked;
         }
         tracing::info!(
             model = %candidate,
             freed_mb = freed / 1024 / 1024,
+            still_resident_mb = entry.vram_bytes / 1024 / 1024,
+            for_model = skip.unwrap_or("queued work"),
             reason = "reclaim-retained-residency",
-            "released a retained transformer to admit queued work"
+            "released a retained transformer to make room"
         );
         self.report_size();
         self.debug_check_invariants();
@@ -1147,6 +1158,53 @@ mod tests {
         assert_eq!(second_name, "flux2-klein:bf16");
         assert_eq!(freed, SECOND);
         assert_eq!(cache.active_vram_bytes(), 0);
+    }
+
+    /// An EAGER engine that also retains: the credit is the larger of the two
+    /// measurements, and a release subtracts rather than replaces.
+    ///
+    /// FLUX.1 is this shape. Its transformer lives inside the engine's loaded
+    /// state, so `vram_load_delta` around `load()` measured the whole set —
+    /// transformer, VAE and whatever encoders stayed on the card — while
+    /// `resident_vram_bytes` reports only the part a release can hand back.
+    /// Assigning the reported figure would LOWER a correctly measured entry to
+    /// its transformer alone, and zeroing it after a release would forget the
+    /// VAE that is still there. Neither is true of the sequential FLUX.2 shape
+    /// (`insert` at 0, everything retained), and both readings have to be
+    /// right for both.
+    #[test]
+    fn an_eager_engine_that_also_retains_keeps_the_larger_credit() {
+        const MEASURED_SET: u64 = 19 << 30;
+        const RETAINED_TRANSFORMER: u64 = 12 << 30;
+        let mut cache = ModelCache::new(2);
+
+        // Production's eager insert: the load delta measured the whole set.
+        cache.insert(
+            Box::new(RetainingEngine::new("flux-dev:q8", RETAINED_TRANSFORMER)),
+            MEASURED_SET,
+        );
+        let taken = cache.take("flux-dev:q8").expect("resident");
+        cache.restore(taken);
+
+        assert_eq!(
+            cache.active_vram_bytes(),
+            MEASURED_SET,
+            "a measured eager engine must not be lowered to the part it can release"
+        );
+        assert_eq!(cache.retained_residency_bytes(), RETAINED_TRANSFORMER);
+
+        let (name, freed) = cache
+            .release_retained_residency_except(None)
+            .expect("the transformer is reclaimable");
+        assert_eq!(name, "flux-dev:q8");
+        assert_eq!(freed, RETAINED_TRANSFORMER);
+        assert_eq!(
+            cache.active_vram_bytes(),
+            MEASURED_SET - RETAINED_TRANSFORMER,
+            "the VAE and encoders are still on the card; only the transformer went back"
+        );
+        assert_eq!(cache.retained_residency_bytes(), 0);
+        assert!(cache.contains("flux-dev:q8"), "the engine survives");
     }
 
     /// An ordinary eager engine beside a retaining one is still counted, and

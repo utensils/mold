@@ -3199,6 +3199,65 @@ impl InferenceEngine for FluxEngine {
         result
     }
 
+    /// What this engine is holding on the card that it can hand straight back.
+    ///
+    /// FLUX.1 keeps its transformer across renders whenever the residency
+    /// budget fits and the operator has not asked otherwise, so the same
+    /// question FLUX.2's sequential slot answers applies here — the card can
+    /// be full of a model nobody is rendering. It is a DIFFERENT shape: the
+    /// transformer lives inside `base.loaded` beside the VAE and whatever
+    /// encoders stayed resident, and the cache already measured that whole set
+    /// as `vram_load_delta` around `load()`. So this reports only the part a
+    /// release can actually return — the transformer, its resident LoRA
+    /// matrices, and the PuLID adapter whose residency follows it — and the
+    /// cache takes it as a FLOOR under its own measurement rather than as a
+    /// replacement for it.
+    ///
+    /// `None` while no transformer is resident, so a parked or
+    /// transformer-released engine offers nothing and is never chosen as a
+    /// reclaim target twice.
+    fn resident_vram_bytes(&self) -> Option<u64> {
+        let loaded = self.base.loaded.as_ref()?;
+        loaded.flux_model.as_ref()?;
+        Some(
+            loaded
+                .transformer_resident_bytes
+                .saturating_add(loaded.lora_resident_bytes)
+                .saturating_add(self.identity.resident_bytes()),
+        )
+    }
+
+    /// Hand the transformer back without destroying the engine.
+    ///
+    /// The next render reloads it on demand — `generate`'s eager path already
+    /// rebuilds whenever `flux_model.is_none()`, which is the same door
+    /// `MOLD_FLUX_KEEP_TRANSFORMER=0` and a LoRA-stack change go through — so
+    /// the engine keeps its VAE, its encoders, its prompt cache and its warm
+    /// shell, and only the weights that were being held speculatively go.
+    ///
+    /// The adapter follows the transformer, by the same rule the render's own
+    /// drop site obeys: nothing will use it before the next conditioned
+    /// request, which reloads it anyway.
+    fn release_retained_residency(&mut self) -> u64 {
+        let Some(loaded) = self.base.loaded.as_mut() else {
+            return 0;
+        };
+        if loaded.flux_model.is_none() {
+            return 0;
+        }
+        let freed = loaded
+            .transformer_resident_bytes
+            .saturating_add(loaded.lora_resident_bytes);
+        loaded.flux_model = None;
+        // `active_lora` describes the stack merged into a transformer that no
+        // longer exists; leaving it would let the next render skip a rebuild
+        // it must do.
+        self.active_lora = Vec::new();
+        let adapter = self.identity.resident_bytes();
+        self.release_identity_adapter_unless_transformer_resident();
+        freed.saturating_add(adapter.saturating_sub(self.identity.resident_bytes()))
+    }
+
     fn unload(&mut self) {
         self.base.unload();
         // prompt_cache holds GPU-resident T5/CLIP embedding tensors; clear so

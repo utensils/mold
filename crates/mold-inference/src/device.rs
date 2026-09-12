@@ -6315,6 +6315,48 @@ mod tests {
         }
     }
 
+    /// A pipeline that can KEEP its transformer can also report and release
+    /// it.
+    ///
+    /// The two go together by construction: keeping weights across renders is
+    /// how a card comes to be full of a model nobody is currently rendering,
+    /// and `resident_vram_bytes` / `release_retained_residency` are the only
+    /// way admission can see those bytes and the only way anything can hand
+    /// them back without destroying the engine. Both default to "nothing
+    /// here" on the trait, so a family that keeps and does not report compiles
+    /// perfectly and is invisible.
+    ///
+    /// FLUX.1 was exactly that: `MOLD_FLUX_KEEP_TRANSFORMER` and the residency
+    /// budget have kept its transformer since the campaign began, and it
+    /// implemented neither accessor — so under a tight reserve an 18.8 GB
+    /// retained FLUX.1 transformer could not be released for a following
+    /// klein plan, which the loader then refused (UAT final-2, F4d).
+    #[test]
+    fn a_pipeline_that_can_keep_its_transformer_can_report_and_release_it() {
+        for (family, source) in [
+            ("flux", include_str!("flux/pipeline.rs")),
+            ("flux2", include_str!("flux2/pipeline.rs")),
+        ] {
+            let source = source
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap_or(source);
+            assert!(
+                source.contains("resolve_keep_transformer(")
+                    || source.contains("resolve_flux_keep_transformer("),
+                "{family} is expected to resolve a keep decision at all"
+            );
+            for accessor in ["fn resident_vram_bytes(", "fn release_retained_residency("] {
+                assert!(
+                    source.contains(accessor),
+                    "{family} keeps its transformer across renders but does not implement \
+                     `{accessor}`, so those bytes are invisible to admission and cannot be \
+                     handed back without destroying the engine"
+                );
+            }
+        }
+    }
+
     /// The variable's precedence, for BOTH still families.
     ///
     /// Unset means "ask the budget" rather than "always drop", and an explicit
