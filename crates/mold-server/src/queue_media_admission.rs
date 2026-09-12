@@ -586,6 +586,21 @@ impl DurableMediaAdmission {
                     }
                 }
             }
+            // A LoRA trained for another FLUX.2 tier will never merge, so it
+            // belongs at the DOOR beside the output-format refusal above and
+            // for the identical reason: before this the row was accepted, read
+            // and dequantised a whole GGUF checkpoint, and then failed with
+            // `shape mismatch in add, lhs: [3072, 3072], rhs: [4096, 4096]`.
+            if !private_ingress {
+                if let Some(refusal) =
+                    flux2_lora_tier_refusal(state, &request, family.as_deref()).await
+                {
+                    return Err(ApiError::validation(format!(
+                        "requests[{}]: {refusal}",
+                        offset + 1
+                    )));
+                }
+            }
             validated.push((offset, request, preferred_gpu, reference_scope_sha256));
         }
 
@@ -1138,6 +1153,71 @@ where
         .map_err(|error| ApiError::internal(format!("{label} task failed: {error}")))
 }
 
+/// Why this request's FLUX.2 adapter stack cannot merge into the tier it
+/// names, or `None` when nothing here can say it cannot.
+///
+/// The decision is `mold_core::flux2_lora`'s — the same function the engine
+/// asks at `load_transformer` — so a client can never tell which door refused.
+/// What this adds is the two lookups admission can do and the adapter cannot:
+/// the request's family, and the transformer width the checkpoint resolves to.
+///
+/// Every step degrades to `None` rather than to a refusal, because admission
+/// does not require a model to be installed. `ModelPaths::resolve` is pure
+/// config (it stats nothing), and `resolve_flux2_config` falls back to the
+/// engine's own name heuristic when there is no header to read, so a manifest
+/// tier that has not been downloaded yet still gets the right width — while an
+/// opaque catalog ID, an unknown variant and an absent adapter file all fall
+/// through to the engine gate, which by then holds the header.
+async fn flux2_lora_tier_refusal(
+    state: &AppState,
+    request: &mold_core::GenerateRequest,
+    family: Option<&str>,
+) -> Option<String> {
+    if family != Some("flux2") {
+        return None;
+    }
+    let loras = crate::queue_media::effective_request_loras(request);
+    if loras.is_empty() {
+        return None;
+    }
+    let hidden_size = {
+        let config = state.config.read().await;
+        mold_core::ModelPaths::resolve(&request.model, &config).and_then(|paths| {
+            mold_inference::flux2::pipeline::resolve_flux2_config(
+                &paths.transformer,
+                &request.model,
+            )
+        })
+    }?
+    .hidden_size;
+
+    flux2_lora_tier_refusal_for_stack(&loras, hidden_size)
+}
+
+/// The stack half of [`flux2_lora_tier_refusal`], with no state to read.
+///
+/// The FIRST adapter that cannot merge is the refusal — a stack is refused as
+/// a whole, so naming one is enough and naming it by its file name is what
+/// tells a multi-adapter stack apart.
+fn flux2_lora_tier_refusal_for_stack(
+    loras: &[mold_core::LoraWeight],
+    hidden_size: usize,
+) -> Option<String> {
+    loras.iter().find_map(|lora| {
+        // A `camera-control:` entry is an alias the runtime materializes, not
+        // a file on disk; the tier question does not apply to it.
+        if lora.path.starts_with("camera-control:") {
+            return None;
+        }
+        let path = std::path::Path::new(&lora.path);
+        let label = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(lora.path.as_str());
+        mold_core::flux2_lora::flux2_lora_tier_mismatch_for_file(path, label, hidden_size)
+    })
+}
+
 fn typed_refusal(code: &'static str, message: &'static str) -> ApiError {
     ApiError::with_code(message, code, StatusCode::UNPROCESSABLE_ENTITY)
 }
@@ -1185,6 +1265,91 @@ async fn existing_by_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write a synthetic adapter header of the given width — the safetensors
+    /// length prefix plus the JSON, which is all the probe reads.
+    fn write_lora_fixture(path: &std::path::Path, width: usize) {
+        use std::io::Write;
+        let mut header = serde_json::Map::new();
+        for i in 0..4 {
+            header.insert(
+                format!("transformer.transformer_blocks.{i}.attn.to_q.lora_A.weight"),
+                serde_json::json!({"dtype": "F32", "shape": [32, width], "data_offsets": [0, 4]}),
+            );
+            header.insert(
+                format!("transformer.transformer_blocks.{i}.attn.to_q.lora_B.weight"),
+                serde_json::json!({"dtype": "F32", "shape": [width, 32], "data_offsets": [0, 4]}),
+            );
+        }
+        let json = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(&(json.len() as u64).to_le_bytes()).unwrap();
+        file.write_all(&json).unwrap();
+        file.write_all(&[0u8; 4]).unwrap();
+    }
+
+    fn lora_at(path: &std::path::Path) -> mold_core::LoraWeight {
+        mold_core::LoraWeight {
+            path: path.to_string_lossy().into_owned(),
+            scale: 1.0,
+            expert: None,
+        }
+    }
+
+    /// The door refuses a stack whose adapter was trained for another FLUX.2
+    /// tier, names the adapter by its file name, and lets the right pairing
+    /// through — the same verdict the engine reaches at `load_transformer`,
+    /// from the same `mold_core::flux2_lora` decision, so a client can never
+    /// tell which door refused.
+    #[test]
+    fn a_foreign_tier_adapter_is_refused_at_the_door() {
+        let dir = std::env::temp_dir().join(format!(
+            "mold-admission-lora-tier-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let nine_b = dir.join("flux2-klein-delight-lora.safetensors");
+        write_lora_fixture(&nine_b, 4096);
+
+        let stack = vec![lora_at(&nine_b)];
+        let refusal = flux2_lora_tier_refusal_for_stack(&stack, 3072)
+            .expect("a 9B adapter must be refused on the 4B tier");
+        assert!(
+            refusal.contains("flux2-klein-delight-lora.safetensors"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("4096") && refusal.contains("3072"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("[klein] 9B"), "{refusal}");
+
+        // Its own tier merges.
+        assert_eq!(flux2_lora_tier_refusal_for_stack(&stack, 4096), None);
+
+        // A stack is refused as a whole: one bad adapter behind a good one
+        // still refuses, because a partly applied stack is an image no
+        // adapter produced.
+        let four_b = dir.join("klein-4b.safetensors");
+        write_lora_fixture(&four_b, 3072);
+        let mixed = vec![lora_at(&four_b), lora_at(&nine_b)];
+        assert!(flux2_lora_tier_refusal_for_stack(&mixed, 3072).is_some());
+
+        // An empty stack, an alias the runtime materializes, and an adapter
+        // that is not on disk yet all fall through to the engine gate.
+        assert_eq!(flux2_lora_tier_refusal_for_stack(&[], 3072), None);
+        let alias = vec![mold_core::LoraWeight {
+            path: "camera-control:orbit-left".to_string(),
+            scale: 1.0,
+            expert: None,
+        }];
+        assert_eq!(flux2_lora_tier_refusal_for_stack(&alias, 3072), None);
+        let absent = vec![lora_at(&dir.join("not-downloaded.safetensors"))];
+        assert_eq!(flux2_lora_tier_refusal_for_stack(&absent, 3072), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn v2_receipt_hides_raw_fingerprint_and_is_owner_bound() {
