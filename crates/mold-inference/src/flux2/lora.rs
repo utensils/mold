@@ -629,11 +629,23 @@ fn apply_patch_f32(
             let (offset, size) = patch
                 .resolved_rows
                 .expect("Splat patch must have resolved_rows");
-            let base_rows = base_f32.dim(0)?;
-            if base_rows != size {
+            let (base_dims, delta_dims) = (base_f32.dims(), delta_full.dims());
+            // The row count is the dimension the fused mapping divides, so it
+            // is the one the check was written around — but a delta of the
+            // right HEIGHT and the wrong WIDTH agrees on it and disagrees on
+            // everything else, and used to reach the add below and come back
+            // as candle's anonymous `shape mismatch in add`. The whole shape
+            // is compared, and the slice's bounds with it.
+            let fits = base_dims.len() == 2
+                && delta_dims.len() == 2
+                && base_dims[0] == size
+                && base_dims[1] == delta_dims[1]
+                && offset + size <= delta_dims[0];
+            if !fits {
                 return Err(candle_core::Error::Msg(format!(
-                    "Flux.2 LoRA: fused adapter delta splits into {size}-row slabs but tensor \
-                     '{key}' has {base_rows} rows; the adapter does not match this checkpoint"
+                    "Flux.2 LoRA: fused adapter delta {delta_dims:?} has no {size}-row slab at \
+                     row {offset} shaped like tensor '{key}' {base_dims:?}; the adapter does not \
+                     match this checkpoint"
                 )));
             }
             // Rows [offset..offset+size] of the delta, added to ALL of base.
@@ -645,14 +657,21 @@ fn apply_patch_f32(
             components,
             ..
         } => {
-            let base_rows = base_f32.dim(0)?;
-            let slab = base_rows / components;
-            if slab * components != base_rows || delta_full.dim(0)? != slab {
+            let (base_dims, delta_dims) = (base_f32.dims(), delta_full.dims());
+            let slab = base_dims.first().copied().unwrap_or_default() / (*components).max(1);
+            // One slab of the base is its rows divided `components` ways AND
+            // its own column count. Checking only the rows is what let a delta
+            // of the right height and the wrong width through to the add.
+            let fits = base_dims.len() == 2
+                && delta_dims.len() == 2
+                && slab * components == base_dims[0]
+                && delta_dims[0] == slab
+                && delta_dims[1] == base_dims[1];
+            if !fits {
                 return Err(candle_core::Error::Msg(format!(
-                    "Flux.2 LoRA: per-projection adapter delta has {} rows but tensor '{key}' \
-                     holds {components} slabs of {slab} ({base_rows} rows); the adapter does not \
-                     match this checkpoint",
-                    delta_full.dim(0)?,
+                    "Flux.2 LoRA: per-projection adapter delta {delta_dims:?} is not one of the \
+                     {components} row-slabs of tensor '{key}' {base_dims:?}; the adapter does not \
+                     match this checkpoint"
                 )));
             }
             // The whole delta lands on slab `component`; the others pass
@@ -1377,6 +1396,80 @@ mod tests {
             .to_string();
         assert!(err.contains("img_attn.qkv.weight"), "{err}");
         assert!(err.contains("does not match this checkpoint"), "{err}");
+    }
+
+    /// A delta of the right HEIGHT and the wrong WIDTH is refused by the same
+    /// named error, before any add.
+    ///
+    /// The row count is the dimension the fused mapping divides, so it is the
+    /// one the checks were written around — but a `[4, 4]` delta and a `[4, 8]`
+    /// slab agree on it and disagree on everything else. That reached the
+    /// tensor addition and came back as candle's generic `shape mismatch in
+    /// add`, which is the anonymous two-shape message this whole function
+    /// exists to replace. Both slicing arms are covered because both check a
+    /// row count and then add.
+    #[test]
+    fn a_delta_of_the_right_height_and_the_wrong_width_is_refused_by_name() {
+        let dev = Device::Cpu;
+        let patch = |target: Flux2LoraTarget, resolved_rows| Flux2LoraPatch {
+            a: Tensor::full(1.0f32, (2, 4), &dev).unwrap(),
+            b: Tensor::full(1.0f32, (4, 2), &dev).unwrap(),
+            effective_scale: 1.0,
+            target,
+            lora_path_hash: 0,
+            resolved_rows,
+        };
+        // Four rows — exactly one slab of a 12-row fused tensor, and exactly
+        // the `Splat` slab size below — but four columns against eight.
+        let delta = Tensor::full(2.0f32, (4, 4), &dev).unwrap();
+
+        let slice = patch(
+            Flux2LoraTarget::BaseSlice {
+                candle_key: "double_blocks.0.img_attn.qkv.weight".to_string(),
+                component: 1,
+                components: 3,
+            },
+            None,
+        );
+        let base = Tensor::zeros((12, 8), DType::F32, &dev).unwrap();
+        // The premise: the row count agrees, so only a width check can refuse.
+        assert_eq!(base.dim(0).unwrap() / 3, delta.dim(0).unwrap());
+        let err = apply_patch_f32(&base, &delta, &slice)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("img_attn.qkv.weight"),
+            "names the tensor: {err}"
+        );
+        assert!(err.contains("[4, 4]"), "names the delta's shape: {err}");
+        assert!(err.contains("[12, 8]"), "names the tensor's shape: {err}");
+        assert!(err.contains("does not match this checkpoint"), "{err}");
+        assert!(
+            !err.contains("shape mismatch in add"),
+            "must not be candle's anonymous message: {err}"
+        );
+
+        // The same hole in `Splat`: it checks the base's rows against the
+        // slab size and then adds.
+        let splat = patch(
+            Flux2LoraTarget::Splat {
+                candle_key: "transformer_blocks.0.attn.to_q.weight".to_string(),
+                row_offset: 0,
+                row_size: 0,
+            },
+            Some((0, 4)),
+        );
+        let err = apply_patch_f32(&base.narrow(0, 0, 4).unwrap(), &delta, &splat)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("attn.to_q.weight"), "names the tensor: {err}");
+        assert!(err.contains("[4, 4]"), "names the delta's shape: {err}");
+        assert!(err.contains("[4, 8]"), "names the tensor's shape: {err}");
+        assert!(err.contains("does not match this checkpoint"), "{err}");
+        assert!(
+            !err.contains("shape mismatch in add"),
+            "must not be candle's anonymous message: {err}"
+        );
     }
 
     /// The Kohya fused-QKV direction is the one `Splat` was written for and it
