@@ -11145,6 +11145,48 @@ mod tests {
         assert!(result_rx.try_recv().is_err());
     }
 
+    /// Back to back, same model, real admission: the second request is
+    /// granted off the transformer the first one left on the card.
+    ///
+    /// This is the UAT's row-09b in miniature. The device has almost no free
+    /// VRAM and the only thing on it is this very model's retained
+    /// transformer; the plan is placed because those bytes are the request's
+    /// own, nothing is evicted, and the engine keeps its retained slot — the
+    /// generation that follows reuses the weights instead of reloading them.
+    #[tokio::test]
+    async fn a_repeat_of_the_retaining_model_is_granted_off_its_own_retained_transformer() {
+        const RETAINED: u64 = 20 << 30;
+        let (mut coordinator, worker, worker_rx, _result_rx, _root) =
+            hal9000_vram_blocked_coordinator().await;
+
+        // One gigabyte free on its own does not place this plan — the fixture
+        // exists for exactly that — so a grant below is the credit and
+        // nothing else.
+        retain_on_worker(&worker, "test:q4", RETAINED);
+
+        let _ = coordinator.dispatch_ready().await;
+
+        assert!(
+            granted(&worker_rx),
+            "the request's own retained transformer is capacity it will reuse"
+        );
+        assert!(
+            !coordinator.pending.contains_key("print"),
+            "a granted generation leaves the pending map; it is not blocked on anything"
+        );
+
+        let cache = worker.model_cache.lock().unwrap();
+        assert!(
+            cache.contains("test:q4"),
+            "nothing was evicted to make room for a model that was already there"
+        );
+        assert_eq!(
+            cache.retained_residency_bytes(),
+            RETAINED,
+            "and the transformer is still resident, which is the whole point"
+        );
+    }
+
     /// The 22-minute wedge (UAT final-2, 2026-09-12): a resolver VRAM block
     /// must SURVIVE the plan pass that runs immediately after it.
     ///

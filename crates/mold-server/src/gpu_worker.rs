@@ -8457,6 +8457,94 @@ mod tests {
         assert!(cache.lock().unwrap().contains("hot-cache"));
     }
 
+    /// The other half of the wedge: a request for a DIFFERENT model, on a
+    /// device whose whole free list is inside somebody else's retained
+    /// transformer.
+    ///
+    /// The retained slot is released and the engine SURVIVES — it keeps its
+    /// prompt cache and its warm shell — and no entry is evicted. The eviction
+    /// path could not have reached it at all: a retaining engine is
+    /// `ModelResidency::Gpu` and `evict_lru_parked_except` skips exactly
+    /// those, which is why there was nothing to reclaim and the queue waited
+    /// forever.
+    #[test]
+    fn a_different_model_reclaims_a_retained_transformer_without_evicting_it() {
+        struct RetainingEngine {
+            retained: u64,
+        }
+        impl InferenceEngine for RetainingEngine {
+            fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+                unreachable!("a preflight test never generates")
+            }
+            fn model_name(&self) -> &str {
+                "flux2-dev:q8"
+            }
+            fn is_loaded(&self) -> bool {
+                self.retained > 0
+            }
+            fn load(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn unload(&mut self) {
+                self.retained = 0;
+            }
+            fn resident_vram_bytes(&self) -> Option<u64> {
+                (self.retained > 0).then_some(self.retained)
+            }
+            fn release_retained_residency(&mut self) -> u64 {
+                std::mem::take(&mut self.retained)
+            }
+        }
+
+        const RETAINED: u64 = 34 << 30;
+        let cache = std::sync::Mutex::new(ModelCache::new(3));
+        {
+            let mut guard = cache.lock().unwrap();
+            // Production's insert: a sequential load measured nothing, and the
+            // restore that closes the generation raises the credit.
+            guard.insert(Box::new(RetainingEngine { retained: RETAINED }), 0);
+            let taken = guard.take("flux2-dev:q8").expect("just inserted");
+            guard.restore(taken);
+            assert_eq!(guard.active_vram_bytes(), RETAINED);
+        }
+
+        let attempts = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let seen = attempts.clone();
+        // The guard is satisfied only once the card is no longer holding the
+        // other model's transformer.
+        preflight_planned_memory_guard_with_eviction_using(
+            &cache,
+            "ltx-2.3-22b-distilled:fp8",
+            "ltx-2.3-22b-distilled:fp8",
+            0,
+            None,
+            move |active_vram| {
+                seen.lock().unwrap().push(active_vram);
+                if active_vram == 0 {
+                    Ok(())
+                } else {
+                    Err(crate::routes::ApiError::insufficient_memory(
+                        "the retained transformer is still on the card",
+                    ))
+                }
+            },
+        )
+        .expect("releasing the retained transformer admits the plan");
+
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec![RETAINED, 0],
+            "one refusal against the held bytes, then one pass against a clear card"
+        );
+        let guard = cache.lock().unwrap();
+        assert!(
+            guard.contains("flux2-dev:q8"),
+            "the engine survives the reclaim: only the weights went back"
+        );
+        assert_eq!(guard.retained_residency_bytes(), 0);
+        assert_eq!(guard.active_vram_bytes(), 0);
+    }
+
     #[test]
     fn planned_engine_wrapper_forwards_batch_and_cancellation_contract() {
         struct ContractEngine {
