@@ -200,3 +200,14 @@
   This is a behaviour change for anyone who was unknowingly rendering without
   their adapter — use a diffusers/PEFT or Kohya export of the same LoRA.
 
+
+- **A FLUX.2 LoRA render is no longer refused on a card big enough to load the
+  model eagerly.** The preload gate read the engine's configured load strategy
+  while the render itself is chosen by the request — a LoRA is merged into the
+  transformer as it is built, so a LoRA request always takes the sequential
+  path whatever the strategy says. On a large card the two disagreed and a
+  `flux2-klein` + `--lora` render failed outright with "Flux.2 LoRA requests
+  require a sequential engine load plan", both on the first attempt and on the
+  retry. The gate now asks the same question the render asks and simply defers
+  the preload, so the adapter is applied by the sequential load that follows.
+  Plain FLUX.2 renders and the FLUX.1 LoRA path are unchanged.

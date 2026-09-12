@@ -2961,15 +2961,28 @@ impl InferenceEngine for Flux2Engine {
     fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
         self.pending_placement = req.placement.clone();
         self.pending_loras = effective_flux2_loras(req);
-        let result = if !self.pending_loras.is_empty()
-            && self.base.load_strategy != LoadStrategy::Sequential
-        {
-            Err(anyhow::anyhow!(
-                "Flux.2 LoRA requests require a sequential engine load plan; \
-                 refusing to preload an unadapted transformer"
-            ))
-        } else {
+        // A LoRA is merged into the transformer as it is BUILT, and only
+        // `generate_sequential` builds one per request — so there is nothing
+        // useful to preload here, and an eager preload would put an UNADAPTED
+        // transformer on the card.
+        //
+        // The answer to that is to DEFER, not to refuse. This gate used to
+        // read `load_strategy`, the FIELD, while the render is decided by the
+        // PATH — `uses_sequential_generate_path`, whose LoRA term makes a
+        // LoRA request sequential on any strategy, pinned by
+        // `a_lora_request_takes_the_sequential_generate_path_on_an_eager_engine`.
+        // On a card large enough for an eager plan the two disagreed, and a
+        // Klein LoRA render was refused outright ("requires a sequential
+        // engine load plan") though the engine would have executed it
+        // sequentially with the adapter applied. Deferring is the same answer
+        // `load()` already gives a Sequential strategy and FLUX.2 [dev]:
+        // lazy is a valid load, and the tier's own refusals (dev's
+        // `validate_dev_lora_runtime`) then speak for themselves at render
+        // time instead of being masked by a plan sentence.
+        let result = if self.pending_loras.is_empty() {
             Flux2Engine::load(self)
+        } else {
+            Ok(())
         };
         self.pending_placement = None;
         self.pending_loras.clear();
@@ -3142,8 +3155,19 @@ mod tests {
         path
     }
 
+    /// A LoRA is merged into the transformer as it is BUILT, and only the
+    /// sequential render builds one per request — so the preload has nothing
+    /// useful to do and must DEFER, not refuse.
+    ///
+    /// The gate used to read `load_strategy`, the FIELD, while the render is
+    /// decided by the PATH (`uses_sequential_generate_path`). On a card large
+    /// enough for an eager plan that refused a Klein LoRA render outright,
+    /// twice, with "requires a sequential engine load plan" — a render the
+    /// engine would in fact have executed sequentially with the adapter
+    /// applied. Deferring is the same answer `load()` already gives a
+    /// Sequential strategy and FLUX.2 [dev]: lazy is a valid load.
     #[test]
-    fn lora_request_refuses_eager_preload_before_touching_model_files() {
+    fn lora_request_defers_the_eager_preload_without_touching_model_files() {
         let dir = temp_test_dir("mold-flux2-lora-eager-preload");
         let mut engine = Flux2Engine::new(
             "flux2-klein:bf16".to_string(),
@@ -3154,34 +3178,101 @@ mod tests {
             false,
             None,
         );
-        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
-            "prompt": "portrait",
-            "model": "flux2-klein:bf16",
-            "width": 1024,
-            "height": 1024,
-            "steps": 4,
-            "guidance": 1.0,
-            "batch_size": 1,
-            "loras": [{
-                "path": dir.join("adapter.safetensors"),
-                "scale": 1.0
-            }]
-        }))
-        .unwrap();
+        let request = lora_request(&dir, "flux2-klein:bf16");
 
-        let error = engine.load_for_request(&request).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("LoRA requests require a sequential engine load plan"),
-            "got: {error:#}"
-        );
+        engine
+            .load_for_request(&request)
+            .expect("a Klein LoRA request on an eager plan must be accepted, not refused");
         assert!(engine.pending_loras.is_empty());
         assert!(engine.pending_placement.is_none());
         assert!(
             !engine.is_loaded(),
-            "fail-closed request loading must not retain partial eager components"
+            "the deferred preload must not put an unadapted transformer on the card"
         );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// The linkage the gate above rests on: the render this engine would run
+    /// for a LoRA request is the sequential one, whatever the configured
+    /// strategy says. If this ever stops holding, deferring the preload would
+    /// leave the eager path with no transformer.
+    #[test]
+    fn a_lora_request_takes_the_sequential_generate_path_on_an_eager_engine() {
+        let dir = temp_test_dir("mold-flux2-lora-sequential-path");
+        let mut engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            flux2_model_paths(&dir, "transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+        );
+        let req = test_generate_request();
+        assert!(
+            !engine.uses_sequential_generate_path(&req),
+            "a plain Klein request on an eager plan still renders eagerly"
+        );
+
+        engine.pending_loras = effective_flux2_loras(&lora_request(&dir, "flux2-klein:bf16"));
+        assert!(!engine.pending_loras.is_empty());
+        assert!(
+            engine.uses_sequential_generate_path(&req),
+            "a LoRA request renders sequentially on ANY strategy — the gate in \
+             `load_for_request` defers on exactly this answer"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// A plain request keeps the eager preload it always had: this engine's
+    /// files are missing, so a preload that really ran reports it.
+    #[test]
+    fn plain_request_still_preloads_eagerly() {
+        let dir = temp_test_dir("mold-flux2-plain-eager-preload");
+        let mut engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            flux2_model_paths(&dir, "missing-transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+        );
+
+        let error = engine
+            .load_for_request(&test_generate_request())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not found"),
+            "a plain eager request must still reach the loader; got: {error:#}"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// FLUX.2 [dev] takes the same deferral. Its LoRA refusal is a TIER fact
+    /// (`validate_dev_lora_runtime`, "LoRA loading is not implemented") and
+    /// belongs to the render, not to a preload gate that was reading the
+    /// strategy field and answering with the wrong sentence.
+    #[test]
+    fn flux2_dev_lora_request_defers_the_preload_too() {
+        let dir = temp_test_dir("mold-flux2-dev-lora-preload");
+        let mut engine = Flux2Engine::new(
+            "flux2-dev:bf16".to_string(),
+            flux2_model_paths(&dir, "missing-transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+        );
+
+        engine
+            .load_for_request(&lora_request(&dir, "flux2-dev:bf16"))
+            .expect("the dev tier's LoRA answer belongs to the render, not the preload");
+        assert!(!engine.is_loaded());
 
         fs::remove_dir_all(dir).ok();
     }
@@ -3244,6 +3335,23 @@ mod tests {
             "steps": 4,
             "guidance": 1.0,
             "batch_size": 1
+        }))
+        .unwrap()
+    }
+
+    fn lora_request(dir: &Path, model: &str) -> GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "portrait",
+            "model": model,
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1,
+            "loras": [{
+                "path": dir.join("adapter.safetensors"),
+                "scale": 1.0
+            }]
         }))
         .unwrap()
     }

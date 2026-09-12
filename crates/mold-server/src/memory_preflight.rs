@@ -2828,6 +2828,34 @@ mod fail_closed_tests {
         }
     }
 
+    /// The paths as they are actually installed, because that is what the
+    /// matcher reads. A Klein GGUF tier's FILE is `flux-2-klein-4b-Q8_0.gguf`
+    /// — with a hyphen, so the family token lives only in the model
+    /// directory — and a plan this misses is an Eager engine for a LoRA
+    /// request, which is what the flux2-klein + LoRA row of the perf UAT ran
+    /// into on a 46 GB card.
+    #[test]
+    fn installed_klein_tier_paths_force_sequential_for_lora_requests() {
+        for transformer in [
+            "/storage/mold/models/flux2-klein-q8/flux-2-klein-4b-Q8_0.gguf",
+            "/storage/mold/models/flux2-klein-9b-fp8/transformer.safetensors",
+            "/storage/mold/models/flux2-klein-base-bf16/transformer.safetensors",
+            "/storage/mold/models/flux2-dev-q8/flux-2-dev-Q8_0.gguf",
+        ] {
+            assert_eq!(
+                request_aware_load_strategy(
+                    mold_inference::LoadStrategy::Eager,
+                    &paths(transformer),
+                    None,
+                    true,
+                    false,
+                ),
+                mold_inference::LoadStrategy::Sequential,
+                "{transformer} carries a LoRA and must be planned sequentially"
+            );
+        }
+    }
+
     #[test]
     fn flux2_source_images_force_sequential_engine_plans() {
         assert_eq!(
