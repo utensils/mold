@@ -196,6 +196,7 @@ struct PlannedLoadContract<'a> {
     /// evictable ZFS ARC the same sample counted (#1439) for the refusal.
     available_host_headroom: Option<crate::scheduler::HostHeadroomReply>,
     execution_fingerprint: &'a str,
+    warm_reuse_fingerprint: &'a str,
     request: &'a mold_core::GenerateRequest,
     engine_paths: &'a mold_core::ModelPaths,
     engine_config: &'a mold_inference::FrozenEngineConfig,
@@ -205,6 +206,7 @@ struct PlannedInferenceEngine {
     inner: Box<dyn mold_inference::InferenceEngine>,
     mode: PlannedEngineMode,
     execution_fingerprint: String,
+    warm_reuse_fingerprint: String,
 }
 
 impl mold_inference::InferenceEngine for PlannedInferenceEngine {
@@ -296,6 +298,10 @@ impl mold_inference::InferenceEngine for PlannedInferenceEngine {
         Some(&self.execution_fingerprint)
     }
 
+    fn configured_warm_reuse_fingerprint(&self) -> Option<&str> {
+        Some(&self.warm_reuse_fingerprint)
+    }
+
     fn as_chain_renderer(&mut self) -> Option<&mut dyn mold_inference::chain::ChainStageRenderer> {
         self.inner.as_chain_renderer()
     }
@@ -315,11 +321,13 @@ fn record_planned_engine_mode(
     engine: Box<dyn mold_inference::InferenceEngine>,
     mode: PlannedEngineMode,
     execution_fingerprint: &str,
+    warm_reuse_fingerprint: &str,
 ) -> Box<dyn mold_inference::InferenceEngine> {
     Box::new(PlannedInferenceEngine {
         inner: engine,
         mode,
         execution_fingerprint: execution_fingerprint.to_string(),
+        warm_reuse_fingerprint: warm_reuse_fingerprint.to_string(),
     })
 }
 
@@ -4340,6 +4348,7 @@ fn process_job_with_sink(
         predicted_host_increment_bytes: planned_host_increment_bytes,
         available_host_headroom: planned_host_headroom,
         execution_fingerprint: plan.execution_fingerprint.as_str(),
+        warm_reuse_fingerprint: plan.warm_reuse_fingerprint.as_str(),
         request: &request,
         engine_paths: &plan.engine_paths,
         engine_config: &plan.engine_config,
@@ -5632,6 +5641,7 @@ fn ensure_model_ready_sync_inner(
         )
     });
     let planned_execution_fingerprint = planned_load.map(|planned| planned.execution_fingerprint);
+    let planned_warm_reuse_fingerprint = planned_load.map(|planned| planned.warm_reuse_fingerprint);
     let planned_host_increment_bytes =
         planned_load.map_or(0, |planned| planned.predicted_host_increment_bytes);
     let planned_host_headroom = planned_load.and_then(|planned| planned.available_host_headroom);
@@ -5645,6 +5655,7 @@ fn ensure_model_ready_sync_inner(
             entry.engine.as_ref(),
             planned_mode,
             planned_execution_fingerprint,
+            planned_warm_reuse_fingerprint,
             entry.engine.model_paths().is_some_and(|paths| {
                 crate::model_manager::request_requires_fresh_engine_for_offload_policy(
                     paths,
@@ -5929,6 +5940,8 @@ fn ensure_model_ready_sync_inner(
                         mode,
                         planned_execution_fingerprint
                             .expect("planned engine mode must carry an execution fingerprint"),
+                        planned_warm_reuse_fingerprint
+                            .expect("planned engine mode must carry a warm-reuse fingerprint"),
                     ),
                     None => engine,
                 },
@@ -6120,6 +6133,8 @@ fn ensure_model_ready_sync_inner(
             mode,
             planned_execution_fingerprint
                 .expect("planned engine mode must carry an execution fingerprint"),
+            planned_warm_reuse_fingerprint
+                .expect("planned engine mode must carry a warm-reuse fingerprint"),
         ),
         None => engine,
     };
@@ -6205,6 +6220,7 @@ fn cached_engine_reconstruction_reason(
     engine: &dyn mold_inference::InferenceEngine,
     planned_mode: Option<PlannedEngineMode>,
     planned_execution_fingerprint: Option<&str>,
+    planned_warm_reuse_fingerprint: Option<&str>,
     offload_policy_requires_fresh_engine: bool,
 ) -> Option<EngineReconstruction> {
     let retained_serves = planned_mode.is_some_and(|mode| {
@@ -6218,14 +6234,23 @@ fn cached_engine_reconstruction_reason(
     if !retained_serves && planned_mode.is_some_and(|mode| !mode.matches(engine)) {
         return Some(EngineReconstruction::PlannedModeDiffers);
     }
-    // The execution fingerprint hashes the resolved load strategy, so a warm
+    // The exact fingerprint moves with the resolved load plan, so a warm
     // engine exempted above would be failed one line later by the same
-    // difference wearing a different name.
-    if !retained_serves
-        && planned_execution_fingerprint.is_some_and(|fingerprint| {
+    // difference wearing a different name. It is NORMALISED rather than
+    // skipped (R6-P2-1): the exemption is then exactly as wide as its
+    // justification, and a checkpoint replaced on disk under a warm engine —
+    // which moves `components[].content_fingerprint` and nothing about
+    // loading — still forces the rebuild it always did.
+    let fingerprint_differs = if retained_serves {
+        planned_warm_reuse_fingerprint.is_some_and(|fingerprint| {
+            engine.configured_warm_reuse_fingerprint() != Some(fingerprint)
+        })
+    } else {
+        planned_execution_fingerprint.is_some_and(|fingerprint| {
             engine.configured_execution_fingerprint() != Some(fingerprint)
         })
-    {
+    };
+    if fingerprint_differs {
         return Some(EngineReconstruction::ExecutionFingerprintDiffers);
     }
     if offload_policy_requires_fresh_engine {
@@ -6723,6 +6748,7 @@ fn run_stage_blocking_planned<T, E: std::fmt::Display + std::fmt::Debug>(
             predicted_host_increment_bytes: load.plan.admission_host_demand_bytes(),
             available_host_headroom: None,
             execution_fingerprint: &load.plan.execution_fingerprint,
+            warm_reuse_fingerprint: &load.plan.warm_reuse_fingerprint,
             request: load.request,
             engine_paths: &load.plan.engine_paths,
             engine_config: &load.plan.engine_config,
@@ -8616,14 +8642,22 @@ mod tests {
         ));
     }
 
-    /// The exemption reaches the decision, through the REAL wrapper — and the
-    /// execution fingerprint, which hashes the load strategy, must not fail
-    /// the same engine one line later under a different name.
+    /// The exemption reaches the decision through the REAL wrapper, and it is
+    /// exactly as wide as its justification.
+    ///
+    /// The exact fingerprint moves with the resolved load plan, so a warm
+    /// engine exempted on the mode would be failed one line later by the same
+    /// difference under another name — but SKIPPING that check exempted
+    /// everything else the fingerprint carries (R6-P2-1). It is normalised
+    /// instead: the load plan is hashed away on both sides and nothing else
+    /// is, so a checkpoint replaced on disk under a warm retaining engine —
+    /// the residual R6-P2-1 named — still forces the rebuild it always did.
     #[test]
     fn a_retaining_engine_is_not_reconstructed_for_a_moved_load_strategy() {
         use mold_inference::LoadStrategy;
 
         const RETAINED: u64 = 33 << 30;
+        const SAME_ENGINE: &str = "warm-reuse-identity";
         let cold = PlannedEngineMode {
             load_strategy: LoadStrategy::Sequential,
             block_offload: false,
@@ -8636,17 +8670,36 @@ mod tests {
             Box::new(SequentialRetainingEngine { retained: RETAINED }),
             cold,
             "cold-plan-fingerprint",
+            SAME_ENGINE,
         );
 
+        // The warm plan: a different exact fingerprint (the load plan moved),
+        // the same warm-reuse identity (nothing about the engine did).
         assert_eq!(
             cached_engine_reconstruction_reason(
                 engine.as_ref(),
                 Some(warm),
                 Some("warm-plan-fingerprint"),
+                Some(SAME_ENGINE),
                 false,
             ),
             None,
             "the engine holding this request's weights serves this request"
+        );
+
+        // R6-P2-1: the checkpoint was replaced on disk under the warm engine,
+        // which moves `components[].content_fingerprint` and nothing about
+        // loading — so the warm-reuse identity moves too and it rebuilds.
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                engine.as_ref(),
+                Some(warm),
+                Some("warm-plan-fingerprint"),
+                Some("the-checkpoint-was-replaced"),
+                false,
+            ),
+            Some(EngineReconstruction::ExecutionFingerprintDiffers),
+            "a warm engine is exempted from the LOAD PLAN, not from its own identity"
         );
 
         // Everything else still rebuilds it.
@@ -8658,6 +8711,7 @@ mod tests {
                     block_offload: true,
                 }),
                 Some("cold-plan-fingerprint"),
+                Some(SAME_ENGINE),
                 false,
             ),
             Some(EngineReconstruction::PlannedModeDiffers),
@@ -8668,25 +8722,40 @@ mod tests {
                 engine.as_ref(),
                 Some(warm),
                 Some("warm-plan-fingerprint"),
+                Some(SAME_ENGINE),
                 true,
             ),
             Some(EngineReconstruction::OffloadPolicyRequiresFreshEngine)
         );
 
-        // And an engine retaining nothing is unchanged in every direction.
+        // An engine retaining nothing is unchanged in every direction, and is
+        // still judged on the EXACT fingerprint.
         let empty = record_planned_engine_mode(
             Box::new(SequentialRetainingEngine { retained: 0 }),
             cold,
             "cold-plan-fingerprint",
+            SAME_ENGINE,
         );
         assert_eq!(
             cached_engine_reconstruction_reason(
                 empty.as_ref(),
                 Some(warm),
                 Some("cold-plan-fingerprint"),
+                Some(SAME_ENGINE),
                 false,
             ),
             Some(EngineReconstruction::PlannedModeDiffers)
+        );
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                empty.as_ref(),
+                Some(cold),
+                Some("a-moved-exact-fingerprint"),
+                Some(SAME_ENGINE),
+                false,
+            ),
+            Some(EngineReconstruction::ExecutionFingerprintDiffers),
+            "a non-retaining engine never reaches the normalised comparison"
         );
     }
 
@@ -8724,6 +8793,7 @@ mod tests {
             Box::new(SequentialRetainingEngine { retained: RETAINED }),
             mode,
             "flux2-dev-q8-fingerprint",
+            "flux2-dev-q8-warm-identity",
         );
 
         assert_eq!(
@@ -8831,7 +8901,8 @@ mod tests {
         };
         let unconfigured = FakeSlowEngine::boxed("planned", Duration::ZERO);
         assert!(!mode.matches(unconfigured.as_ref()));
-        let configured = record_planned_engine_mode(unconfigured, mode, "plan-fingerprint");
+        let configured =
+            record_planned_engine_mode(unconfigured, mode, "plan-fingerprint", "warm-identity");
         assert!(mode.matches(configured.as_ref()));
         assert_eq!(
             configured.configured_execution_fingerprint(),
@@ -9074,6 +9145,7 @@ mod tests {
                 block_offload: false,
             },
             "contract",
+            "contract-warm",
         );
 
         wrapped.set_cancellation_token(mold_inference::InferenceCancellationToken::default());
@@ -9098,6 +9170,7 @@ mod tests {
             FakeSlowEngine::boxed("planned", Duration::ZERO),
             mode,
             "old-fingerprint",
+            "old-warm-identity",
         );
 
         assert_eq!(
@@ -9105,6 +9178,7 @@ mod tests {
                 configured.as_ref(),
                 Some(mode),
                 Some("new-fingerprint"),
+                Some("new-warm-identity"),
                 false,
             ),
             Some(EngineReconstruction::ExecutionFingerprintDiffers)
@@ -9167,6 +9241,7 @@ mod tests {
                 block_offload: false,
             },
             "placement-fingerprint",
+            "placement-warm-identity",
         );
         let mut request: mold_core::GenerateRequest = serde_json::from_str(
             r#"{"prompt":"x","model":"placement-recording","width":512,"height":512,"steps":4,"guidance":1.0}"#,

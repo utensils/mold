@@ -1360,6 +1360,22 @@ pub struct ResolvedExecutionPlan {
     /// Exact, device-qualified worker/lease identity. This remains the
     /// authority for residency, grants, cache reconstruction, and provenance.
     pub execution_fingerprint: String,
+    /// The same identity with the LOAD PLAN normalised away — everything that
+    /// says how and how much to load, and nothing that says what is loaded.
+    ///
+    /// It exists for one question: may a worker's engine that is RETAINING its
+    /// transformer serve this plan? The load strategy is chosen from the
+    /// device's available VRAM, so a card whose free space IS that engine's
+    /// own weights plans differently from a cold one for a byte-identical
+    /// request, and `execution_fingerprint` moves with it. This does not —
+    /// while a replaced checkpoint, a different adapter, a different dtype or
+    /// quantization, a different placement, a different config and a
+    /// different output format all still move it, so they all still
+    /// invalidate the engine.
+    ///
+    /// NEVER use it for residency, grants or provenance: it is deliberately
+    /// blind to the one axis those need.
+    pub warm_reuse_fingerprint: String,
 }
 
 impl ResolvedExecutionPlan {
@@ -2339,6 +2355,9 @@ fn resolve_private_h3_execution_plans(
             execution_environment,
             execution_equivalence_fingerprint,
             execution_fingerprint: evidence.execution_fingerprint().to_string(),
+            // One-shot owner work with no engine to reuse: its warm identity
+            // is its exact one, so the comparison stays exact.
+            warm_reuse_fingerprint: evidence.execution_fingerprint().to_string(),
         });
     }
     if plans.is_empty() {
@@ -3931,6 +3950,15 @@ fn build_plan(
         context.effective_loras,
         memory.block_offload,
     );
+    let warm_reuse_fingerprint = execution_fingerprint(
+        context.model,
+        device,
+        context.effective,
+        &load_plan_independent_components(&components),
+        context.engine_config,
+        context.effective_loras,
+        memory.block_offload,
+    );
     let model_fingerprint =
         model_fingerprint(context.model, context.artifacts, context.pending_artifacts);
     let equivalence_model_fingerprint = equivalence_model_fingerprint(
@@ -4008,6 +4036,7 @@ fn build_plan(
         execution_environment,
         execution_equivalence_fingerprint,
         execution_fingerprint: fingerprint,
+        warm_reuse_fingerprint,
     }))
 }
 
@@ -5647,6 +5676,54 @@ pub fn freeze_chain_model_with_paths(
         config: frozen,
         model_fingerprint,
     })
+}
+
+/// The component plans with the LOAD PLAN canonicalised away.
+///
+/// Four fields, each a statement about how to load rather than about what is
+/// loaded, and each decided by the SAME reading of the device's momentary free
+/// VRAM that decides the engine load strategy:
+///
+/// * `load_strategy` — resident, dropped-and-reloaded, parked, streamed. An
+///   engine that is holding its transformer has already answered this.
+/// * `predicted_vram_bytes` / `predicted_host_bytes` — a forecast about that
+///   loading. A forecast is not an identity.
+/// * `placement` — the planner's RESOLUTION of where a component goes, which
+///   for a text encoder is mold's documented dynamic placement: "text encoders
+///   go to GPU or CPU based on remaining VRAM after the transformer loads",
+///   re-decided by the engine at run time. Measured on one L40S: the identical
+///   `flux2-dev:q8` request resolved `QwenShard(0)` to `Device` on the cold
+///   card and to `Cpu` on the warm one, one minute later.
+///
+/// What a caller AUTHORED is a different question and is not normalised: an
+/// explicit `--device` pin lives in `EffectivePlacement`, which
+/// `execution_fingerprint` hashes separately and which this never touches. So
+/// a request that pinned its encoder still invalidates a warm engine planned
+/// without that pin; only the planner's own VRAM-driven resolution is
+/// forgotten.
+///
+/// Everything else is kept deliberately, and is exactly what must still force
+/// a rebuild: `artifact_path` and `content_fingerprint` (a checkpoint replaced
+/// on disk under a warm engine is the case this narrowing exists to keep),
+/// `dtype`, `quantization`, and the role itself.
+fn load_plan_independent_components(
+    components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
+) -> BTreeMap<ComponentRole, ComponentExecutionPlan> {
+    components
+        .iter()
+        .map(|(role, plan)| {
+            (
+                role.clone(),
+                ComponentExecutionPlan {
+                    load_strategy: ComponentLoadStrategy::Resident,
+                    predicted_vram_bytes: 0,
+                    predicted_host_bytes: 0,
+                    placement: ResolvedComponentPlacement::Cpu,
+                    ..plan.clone()
+                },
+            )
+        })
+        .collect()
 }
 
 fn execution_fingerprint(
@@ -9499,6 +9576,242 @@ mod tests {
             thread.join().unwrap();
         }
         assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    }
+
+    /// The warm-reuse identity forgets the load plan and remembers everything
+    /// else.
+    ///
+    /// R6-P2-1: the retained-engine exemption was skipping the WHOLE execution
+    /// fingerprint, while its justification licensed only the resolved load
+    /// strategy. The fingerprint also hashes component content, dtype,
+    /// quantization, placement, the semantic config and the adapter stack, so
+    /// a checkpoint REPLACED ON DISK under a warm retaining engine would have
+    /// been served stale — the one thing the fingerprint was uniquely placed
+    /// to catch at that seam.
+    #[test]
+    fn the_warm_reuse_identity_forgets_the_load_plan_and_nothing_else() {
+        let device = DeviceFact {
+            total_vram_bytes: None,
+            cuda_peak_baseline: None,
+            id: "cuda:stable-device".into(),
+            ordinal: 2,
+            backend: GpuBackend::Cuda,
+            compute_capability: Some((8, 6)),
+            available_vram_bytes: 24 * GIB,
+        };
+        let effective = EffectivePlacement {
+            components: BTreeMap::from([(
+                ComponentRole::Transformer,
+                ResolvedComponentConstraint::Auto,
+            )]),
+        };
+        let component = ComponentExecutionPlan {
+            role: ComponentRole::Transformer,
+            artifact_path: PathBuf::from("/models/transformer-q8.gguf"),
+            content_fingerprint: ContentFingerprint("the-checkpoint-on-disk".into()),
+            dtype: None,
+            quantization: Some(QuantizationVariant::Q8),
+            placement: ResolvedComponentPlacement::Device("cuda:stable-device".into()),
+            load_strategy: ComponentLoadStrategy::DropReload,
+            predicted_vram_bytes: 34 * GIB,
+            predicted_host_bytes: 2 * GIB,
+        };
+        let engine_config = mold_inference::FrozenEngineConfig {
+            request_offload: None,
+            family: "flux2".into(),
+            artifact_root: PathBuf::from("/models"),
+            is_schnell: Some(false),
+            is_turbo: None,
+            scheduler: None,
+            t5_variant: None,
+            qwen3_variant: Some("q8".into()),
+            qwen2_variant: None,
+            qwen2_text_encoder_mode: None,
+            ltx2_gemma_variant: None,
+            umt5_variant: None,
+            selected_t5_path: None,
+            selected_qwen3_paths: Vec::new(),
+            selected_qwen2_path: None,
+            selected_gemma_paths: Vec::new(),
+            selected_umt5_path: None,
+            identity_assets: None,
+            ip_adapter_assets: None,
+            paint_assets: None,
+            matting_asset: None,
+            delight_paths: None,
+            h3_factory_authority: None,
+            runtime_environment: mold_inference::runtime_env::FrozenRuntimeEnvironment::default(),
+            attention_backend: mold_inference::attention::AttentionBackend::Math,
+            attention_chunk: mold_inference::attention::AttentionChunkPolicy::Auto,
+            vae_tiling: mold_inference::vae_tiling::TiledMode::Auto,
+            vae_dtype: mold_inference::device::VaeDtypePolicy::Auto,
+        };
+
+        let warm_of = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
+                       config: &mold_inference::FrozenEngineConfig,
+                       loras: &[PlannedLora]| {
+            execution_fingerprint(
+                "flux2-dev:q8",
+                &device,
+                &effective,
+                &load_plan_independent_components(components),
+                config,
+                loras,
+                false,
+            )
+        };
+
+        // The cold card's plan.
+        let cold = BTreeMap::from([(ComponentRole::Transformer, component.clone())]);
+        // The warm card's plan for the byte-identical request: the same
+        // checkpoint, loaded differently because the free VRAM moved.
+        let warm = BTreeMap::from([(
+            ComponentRole::Transformer,
+            ComponentExecutionPlan {
+                load_strategy: ComponentLoadStrategy::Resident,
+                predicted_vram_bytes: 31 * GIB,
+                predicted_host_bytes: 0,
+                ..component.clone()
+            },
+        )]);
+        assert_ne!(
+            execution_fingerprint(
+                "flux2-dev:q8",
+                &device,
+                &effective,
+                &cold,
+                &engine_config,
+                &[],
+                false
+            ),
+            execution_fingerprint(
+                "flux2-dev:q8",
+                &device,
+                &effective,
+                &warm,
+                &engine_config,
+                &[],
+                false
+            ),
+            "the exact identity moves with the load plan — that is what it is for"
+        );
+        assert_eq!(
+            warm_of(&cold, &engine_config, &[]),
+            warm_of(&warm, &engine_config, &[]),
+            "and the warm identity does not, which is the whole exemption"
+        );
+
+        // THE RESIDUAL R6-P2-1 NAMED: the same plan against a checkpoint that
+        // was replaced on disk. It must still rebuild.
+        let replaced = BTreeMap::from([(
+            ComponentRole::Transformer,
+            ComponentExecutionPlan {
+                content_fingerprint: ContentFingerprint("a-different-checkpoint".into()),
+                ..component.clone()
+            },
+        )]);
+        assert_ne!(
+            warm_of(&cold, &engine_config, &[]),
+            warm_of(&replaced, &engine_config, &[]),
+            "a checkpoint replaced under a warm engine still invalidates it"
+        );
+
+        // So does everything else the exemption was never argued for.
+        for (label, altered) in [
+            (
+                "a different artifact path",
+                ComponentExecutionPlan {
+                    artifact_path: PathBuf::from("/models/other-transformer-q8.gguf"),
+                    ..component.clone()
+                },
+            ),
+            (
+                "a different quantization",
+                ComponentExecutionPlan {
+                    quantization: Some(QuantizationVariant::Q4),
+                    ..component.clone()
+                },
+            ),
+            (
+                "a different dtype",
+                ComponentExecutionPlan {
+                    dtype: Some(PlannedDType::Bf16),
+                    ..component.clone()
+                },
+            ),
+        ] {
+            let map = BTreeMap::from([(ComponentRole::Transformer, altered)]);
+            assert_ne!(
+                warm_of(&cold, &engine_config, &[]),
+                warm_of(&map, &engine_config, &[]),
+                "{label} must still rebuild a warm engine"
+            );
+        }
+
+        // The planner's OWN resolution of placement travels with the load
+        // plan: on the warm card this request resolved its text encoder to
+        // `Cpu` where the cold one resolved it to `Device`, from the same
+        // free-VRAM reading that moved the load strategy.
+        let reparked = BTreeMap::from([(
+            ComponentRole::Transformer,
+            ComponentExecutionPlan {
+                placement: ResolvedComponentPlacement::Cpu,
+                ..component.clone()
+            },
+        )]);
+        assert_eq!(
+            warm_of(&cold, &engine_config, &[]),
+            warm_of(&reparked, &engine_config, &[]),
+        );
+
+        // What the CALLER authored is a different question, and it is not
+        // normalised: an explicit device pin lives in `EffectivePlacement`.
+        let pinned = EffectivePlacement {
+            components: BTreeMap::from([(
+                ComponentRole::Transformer,
+                ResolvedComponentConstraint::Cpu,
+            )]),
+        };
+        assert_ne!(
+            execution_fingerprint(
+                "flux2-dev:q8",
+                &device,
+                &effective,
+                &load_plan_independent_components(&cold),
+                &engine_config,
+                &[],
+                false,
+            ),
+            execution_fingerprint(
+                "flux2-dev:q8",
+                &device,
+                &pinned,
+                &load_plan_independent_components(&cold),
+                &engine_config,
+                &[],
+                false,
+            ),
+            "an authored placement constraint still invalidates a warm engine"
+        );
+
+        let mut other_config = engine_config.clone();
+        other_config.attention_backend = mold_inference::attention::AttentionBackend::Flash;
+        assert_ne!(
+            warm_of(&cold, &engine_config, &[]),
+            warm_of(&cold, &other_config, &[]),
+            "the semantic config still invalidates a warm engine"
+        );
+
+        let adapter = [PlannedLora {
+            path: PathBuf::from("/models/loras/style.safetensors"),
+            scale_bits: (0.8f64).to_bits(),
+            content_fingerprint: ContentFingerprint("adapter-content".into()),
+        }];
+        assert_ne!(
+            warm_of(&cold, &engine_config, &[]),
+            warm_of(&cold, &engine_config, &adapter),
+            "the adapter stack still invalidates a warm engine"
+        );
     }
 
     #[test]

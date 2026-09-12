@@ -3556,6 +3556,7 @@ impl Coordinator {
                         execution_environment: environment,
                         execution_equivalence_fingerprint: equivalence,
                         execution_fingerprint: pending.job.request.model.clone(),
+                        warm_reuse_fingerprint: pending.job.request.model.clone(),
                     }
                 })
                 .collect::<Vec<_>>();

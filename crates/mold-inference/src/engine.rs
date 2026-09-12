@@ -282,6 +282,18 @@ pub trait InferenceEngine: Send + Sync {
         None
     }
 
+    /// The same identity with the LOAD PLAN normalised away — see
+    /// `ResolvedExecutionPlan::warm_reuse_fingerprint`.
+    ///
+    /// It answers ONE question: may this engine, while it is retaining device
+    /// residency, serve a plan whose resolved load strategy moved under it?
+    /// Everything else the exact fingerprint covers — a replaced checkpoint, a
+    /// different adapter, dtype, quantization, placement or config — still
+    /// differs here and still forces a reconstruction.
+    fn configured_warm_reuse_fingerprint(&self) -> Option<&str> {
+        None
+    }
+
     /// Returns a [`ChainStageRenderer`] view of this engine if the family
     /// supports chained video generation. Default is `None` — only LTX-2
     /// distilled overrides this in v1.
