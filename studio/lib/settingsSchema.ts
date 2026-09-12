@@ -400,7 +400,10 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     label: "Faster library bookkeeping",
     help: "Record each change to the picture index as it happens instead of rewriting the whole index every time a picture is saved — much faster once the library is large. A mold older than 0.29 cannot save into a library kept this way, so only turn it on where every copy of mold sharing this folder is new enough; `mold system gallery-authority` reports the format and can put it back.",
     editor: "toggle",
-    needsEngineRestart: true,
+    // `AUTHORITY_LOG_REQUESTED` is a `OnceLock` resolved once per PROCESS, and
+    // the desktop engine is a thread inside the Tauri process, so an engine
+    // restart cannot apply it; only the app restart can.
+    needsAppRestart: true,
   },
   {
     key: "expand.enabled",

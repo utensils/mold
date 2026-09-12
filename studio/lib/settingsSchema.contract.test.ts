@@ -187,6 +187,40 @@ describe("every select option is a value the engine accepts", () => {
  * read rather than restated here: a list maintained by hand in two languages
  * is exactly the drift this test exists to catch.
  */
+const RUNTIME_ENV_RELATIVE = "crates/mold-inference/src/runtime_env.rs";
+
+/**
+ * Which offered env knobs are process-frozen is a fact about the Rust
+ * (`runtime_env.rs` freezes `ENGINE_SHAPING_VARIABLES` in a `OnceLock` on
+ * first use), so the app-restart flag is read off that list rather than
+ * restated by hand: a tenth frozen knob added in Rust and offered here must
+ * fail this test until its row says RESTART APP.
+ */
+describe("the app-restart flag and runtime_env's frozen list", () => {
+  it("agree on every offered env knob, in both directions", () => {
+    const runtimeEnv = readFileSync(repoFile(RUNTIME_ENV_RELATIVE), "utf8");
+    const block = runtimeEnv.match(
+      /pub const ENGINE_SHAPING_VARIABLES: &\[&str\] = &\[([\s\S]*?)\];/,
+    );
+    expect(
+      block,
+      "ENGINE_SHAPING_VARIABLES not found in runtime_env.rs",
+    ).not.toBeNull();
+    const frozen = new Set(
+      [...block![1]!.matchAll(/"([A-Z0-9_]+)"/g)].map((m) => m[1]!),
+    );
+    expect(frozen.size).toBeGreaterThan(0);
+    const offeredFrozen = ENV_KNOB_SCHEMAS.filter((knob) =>
+      frozen.has(knob.key.replace(/^env\./, "")),
+    ).map((knob) => knob.key);
+    const flagged = ENV_KNOB_SCHEMAS.filter(
+      (knob) => knob.needsAppRestart === true,
+    ).map((knob) => knob.key);
+    expect(offeredFrozen.length).toBeGreaterThan(0);
+    expect([...flagged].sort()).toEqual([...offeredFrozen].sort());
+  });
+});
+
 describe("the env knobs and the Tauri side's ENGINE_ENV_KEYS", () => {
   it("are the same set", () => {
     const commands = readFileSync(repoFile(TAURI_COMMANDS_RELATIVE), "utf8");
