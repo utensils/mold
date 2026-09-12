@@ -534,10 +534,16 @@ impl Mistral3Encoder {
             Ok(layer)
         };
 
+        // The prefetch thread's uploads must be complete before the forward
+        // reads them; see `stream_layers`. A page-locked parked prefix makes
+        // the copy a true asynchronous DMA, and nothing else orders it.
+        let device = self.device.clone();
+        let settle = move || -> Result<()> { device.synchronize().map_err(Into::into) };
         let captured = stream_layers(
             last_required_layer(),
             hidden,
             build,
+            settle,
             |layer: &DecoderLayer, hidden: &Tensor| layer.forward(hidden, &mask),
             &CAPTURE_LAYERS,
         )?;
@@ -558,35 +564,49 @@ impl Mistral3Encoder {
 /// [`crate::flux2::text_encoder_residency::mistral3_streamed_device_peak_bytes`]
 /// charges admission.
 ///
-/// Three facts make this safe on CUDA, and none of them is an assumption about
-/// timing:
+/// **`settle` is the contract that makes the second thread safe, and it is not
+/// optional.** It runs on the thread that just built a layer, before that
+/// layer can cross back to the consumer, and its job is to leave NO device
+/// work in flight. The version of this function that shipped in #1712 had no
+/// `settle`: it argued that one shared `Arc<CudaStream>` already orders the
+/// prefetch's uploads against the forward's launches, and deleted the
+/// `device.synchronize()` that used to follow every layer as a call that
+/// "ordered nothing the stream did not already order".
 ///
-/// * Candle's `CudaDevice` is `Clone` and every clone shares ONE
-///   `Arc<CudaStream>` (`candle-core/src/cuda_backend/device.rs:59-70`), so
-///   the prefetch's uploads and the forward's launches are issued onto the
-///   same stream and execute in the order the driver receives them.
-/// * Every cudarc entry point binds the context to the calling thread before
-///   touching the driver (`cudarc-0.19.9/src/driver/safe/core.rs:1538` for
-///   `alloc`, `:1612` for `memcpy_htod`), so a second OS thread needs no
-///   setup of its own.
-/// * `CudaSlice::drop` is stream-ordered (`core.rs:800-819`): with async
-///   allocation it issues `cuMemFreeAsync` on the slice's OWN stream, and
-///   without it, it synchronizes that stream first. So releasing layer `k`
-///   after `k + 1`'s uploads have been issued cannot free memory the stream
-///   is still reading.
+/// On hardware that is false, and the campaign UAT on plato measured it. With
+/// the encoder's prefix parked in PAGE-LOCKED host RAM (`park_prefix(pinned =
+/// true)`), `flux2-dev` produced an entirely NaN conditioning tensor — every
+/// tier, every prompt — and the transformer bailed at denoise step 0. Three
+/// controls, one variable each, on one L40S:
 ///
-/// The two operations touch disjoint allocations — the forward reads layer
-/// `k`'s weights and the state tensor, the prefetch writes fresh
-/// allocations — so the result is bit-identical to the serial loop, which is
-/// what `prefetching_matches_the_serial_stack` pins.
+/// | configuration | layers 0-3 | layer 4 onward |
+/// |---|---|---|
+/// | parked, **pinned**, prefetching | finite | **all NaN** |
+/// | parked, pinned, strictly serial | finite | finite |
+/// | parked, pinned, prefetching + `settle` | finite | finite, and bit-identical to serial |
+/// | parked, **not** pinned, prefetching | finite | finite |
 ///
-/// This replaces a `device.synchronize()` after every layer. Those calls
-/// blocked the host on the GPU without ordering anything the stream did not
-/// already order, which is the whole reason there was nothing to overlap.
-fn stream_layers<Layer, State, Build, Run>(
+/// The reason it had never been seen is the fourth row. A
+/// `cuMemcpyHtoDAsync` out of PAGEABLE host memory is host-blocking — the
+/// driver stages it through its own buffer and synchronizes the stream before
+/// initiating the copy — so every prefetch that existed before the park could
+/// fire was serialising itself against the forward by accident, and the
+/// look-ahead only ever overlapped the page faults and the dtype conversion
+/// that precede the copy. Page-locking the source turns that call into a
+/// genuine asynchronous DMA, the two threads overlap for the first time, and
+/// what the forward reads is not what the prefetch uploaded.
+///
+/// `settle` restores the guarantee explicitly rather than inheriting it from
+/// an allocator detail. It costs the mapped path nothing — that path was
+/// already paying the same stream synchronization inside the pageable copy —
+/// and it keeps the host-side half of the overlap, which is the half worth
+/// having: faulting in and converting 1.2 GB per layer still happens while the
+/// accelerator is busy.
+fn stream_layers<Layer, State, Build, Settle, Run>(
     last_layer: usize,
     initial: State,
     build: Build,
+    settle: Settle,
     mut run: Run,
     capture: &[usize],
 ) -> Result<Vec<State>>
@@ -594,8 +614,16 @@ where
     Layer: Send,
     State: Clone,
     Build: Fn(usize) -> Result<Layer> + Sync,
+    Settle: Fn() -> Result<()> + Sync,
     Run: FnMut(&Layer, &State) -> Result<State>,
 {
+    let build = move |index: usize| -> Result<Layer> {
+        let layer = build(index)?;
+        // On the BUILDING thread, before the layer can be observed by the
+        // consumer: nothing this thread issued may still be in flight.
+        settle()?;
+        Ok(layer)
+    };
     let build = &build;
     let mut state = initial;
     let mut captured = Vec::with_capacity(capture.len());
@@ -796,6 +824,7 @@ mod tests {
                 last_layer,
                 1.0f64,
                 move |index| Ok(CountedLayer::build(index, &build_live, &build_peak)),
+                || Ok(()),
                 |layer: &CountedLayer, state: &f64| advance(layer, state),
                 &capture,
             )
@@ -822,6 +851,7 @@ mod tests {
             last_layer,
             1.0f64,
             move |index| Ok(CountedLayer::build(index, &build_live, &build_peak)),
+            || Ok(()),
             |layer: &CountedLayer, state: &f64| advance(layer, state),
             &CAPTURE_LAYERS,
         )
@@ -851,11 +881,117 @@ mod tests {
                 }
                 Ok(index)
             },
+            || Ok(()),
             |layer: &usize, state: &f64| Ok(state + *layer as f64),
             &[],
         )
         .unwrap_err();
         assert!(error.to_string().contains("synthetic failure"));
+    }
+
+    /// **The prefetch's device work is settled on the thread that issued it,
+    /// before the consumer can see the layer.**
+    ///
+    /// This is the whole fix for the park's NaN conditioning: the second
+    /// thread's host-to-device copies are ordered against the forward only
+    /// because `settle` says so. Asserting it here — rather than trusting a
+    /// comment about CUDA streams — is what makes the guarantee survive the
+    /// next edit. The three things that matter are all checked: `settle` runs
+    /// once per built layer, on the SAME thread that built it, and before
+    /// `run` is entered for that layer.
+    #[test]
+    fn every_built_layer_is_settled_on_its_own_thread_before_it_is_run() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Event {
+            Build(usize, std::thread::ThreadId),
+            Settle(std::thread::ThreadId),
+            Run(usize),
+        }
+        let last_layer = 6usize;
+        let log = Arc::new(std::sync::Mutex::new(Vec::<Event>::new()));
+        let build_log = log.clone();
+        let run_log = log.clone();
+        let settle_log = log.clone();
+        stream_layers(
+            last_layer,
+            0usize,
+            move |index| {
+                build_log
+                    .lock()
+                    .unwrap()
+                    .push(Event::Build(index, std::thread::current().id()));
+                Ok(index)
+            },
+            move || {
+                settle_log
+                    .lock()
+                    .unwrap()
+                    .push(Event::Settle(std::thread::current().id()));
+                Ok(())
+            },
+            move |layer: &usize, state: &usize| {
+                run_log.lock().unwrap().push(Event::Run(*layer));
+                Ok(state + *layer)
+            },
+            &[],
+        )
+        .unwrap();
+
+        let log = log.lock().unwrap();
+        let builds = log.iter().filter(|e| matches!(e, Event::Build(..))).count();
+        let settles = log.iter().filter(|e| matches!(e, Event::Settle(_))).count();
+        assert_eq!(builds, last_layer + 1, "every layer is built once");
+        assert_eq!(
+            settles, builds,
+            "every build is settled — an unsettled prefetch is the NaN"
+        );
+
+        // Same thread, and nothing of that build's between the two: the settle
+        // must be the building thread's own last act.
+        let mut pending: Option<(usize, std::thread::ThreadId)> = None;
+        let mut settled = std::collections::HashSet::new();
+        for event in log.iter() {
+            match event {
+                Event::Build(index, thread) => {
+                    assert!(
+                        pending.is_none(),
+                        "a build began before the previous one settled"
+                    );
+                    pending = Some((*index, *thread));
+                }
+                Event::Settle(thread) => {
+                    let (index, build_thread) =
+                        pending.take().expect("a settle with no build before it");
+                    assert_eq!(
+                        *thread, build_thread,
+                        "layer {index} settled on a different thread than it was built on"
+                    );
+                    settled.insert(index);
+                }
+                Event::Run(index) => assert!(
+                    settled.contains(index),
+                    "layer {index} was run before its own upload was settled"
+                ),
+            }
+        }
+        assert!(pending.is_none(), "a build never settled");
+    }
+
+    /// A failing `settle` fails the stack — it is a real device operation, and
+    /// swallowing its error would hand the forward the unsettled layer the
+    /// error was about.
+    #[test]
+    fn a_failed_settle_fails_the_stack() {
+        let error = stream_layers(
+            5,
+            1.0f64,
+            Ok,
+            || anyhow::bail!("synthetic settle failure"),
+            |layer: &usize, state: &f64| Ok(state + *layer as f64),
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("synthetic settle failure"));
     }
 
     #[test]

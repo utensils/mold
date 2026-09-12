@@ -281,3 +281,17 @@ step` — and names no cause, because the budget is the only one a real render
   admitted immediately and reuses the weights, a different model's request
   releases them at dispatch and keeps the other engine's prompt cache, and
   anything genuinely too large is refused with numbers instead of waiting.
+
+- **FLUX.2 [dev] renders again with the text-encoder park on, which is the
+  default.** Every `flux2-dev` tier — `:q8`, `:q6`, `:q4` and `:fp8` alike —
+  failed with `non-finite prediction at denoise step 0` as soon as the
+  Mistral3 prefix was held in page-locked host RAM, because the streamed
+  encoder builds the next decoder layer on a second thread and nothing made
+  its uploads complete before the forward read them. A pageable copy blocks
+  the calling thread, so every path that existed before the park could fire
+  was serialising the two threads by accident; page-locking the source turned
+  that upload into a real asynchronous transfer and the conditioning tensor
+  came back entirely NaN. The prefetch now settles its own work before the
+  layer is handed on. A parked render and an unparked one are byte-identical
+  again (verified at the same sha256 on an L40S, both `:q8` and `:fp8`), and
+  `MOLD_KEEP_TE_RAM=0` is no longer a workaround anybody needs.
