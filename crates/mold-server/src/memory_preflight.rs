@@ -158,7 +158,11 @@ pub(crate) fn flux2_block_offload_unsupported_reason(
     paths: &ModelPaths,
     request_has_lora: bool,
 ) -> Option<&'static str> {
-    mold_inference::flux2_block_offload_unsupported_reason(&paths.transformer, request_has_lora)
+    mold_inference::flux2_block_offload_unsupported_reason(
+        &paths.transformer,
+        &paths.transformer_shards,
+        request_has_lora,
+    )
 }
 
 fn large_flux2_bf16_should_auto_offload(

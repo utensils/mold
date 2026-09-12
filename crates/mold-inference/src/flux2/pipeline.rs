@@ -401,6 +401,39 @@ enum Flux2OffloadDecision {
     Unsupported(&'static str),
 }
 
+/// Whether this FLUX.2 transformer is a single-file checkpoint the streamed
+/// loader cannot read.
+///
+/// THE predicate, not a copy of one. `is_bfl_native_single_file` and the
+/// planner's `flux2_block_offload_unsupported_reason` both call it, because a
+/// server-side reimplementation is exactly what let `flux2-dev:fp8` be planned
+/// as streamed and then loaded whole: the installed Comfy-Org fp8 checkpoint is
+/// `BflNativeRoot`, the engine's own test accepts that variant alongside
+/// `BflNative` and `Nvfp4`, and the copy matched only `BflNative`. The plan said
+/// stream, the loader refused, and the refusal arrived after a 100 s lease
+/// instead of at submit.
+pub fn flux2_transformer_is_single_file(
+    transformer: &std::path::Path,
+    transformer_shards: &[std::path::PathBuf],
+) -> bool {
+    if !transformer_shards.is_empty() {
+        return false;
+    }
+    let is_safetensors = transformer
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"));
+    if !is_safetensors {
+        return false;
+    }
+    matches!(
+        super::single_file::detect_format(transformer),
+        Ok(super::single_file::Flux2SingleFileFormat::BflNative)
+            | Ok(super::single_file::Flux2SingleFileFormat::BflNativeRoot)
+            | Ok(super::single_file::Flux2SingleFileFormat::Nvfp4)
+    )
+}
+
 /// Why this FLUX.2 checkpoint cannot stream its blocks from host RAM, or
 /// `None` when it can.
 ///
@@ -413,6 +446,7 @@ enum Flux2OffloadDecision {
 /// the refusal said that this tier has no streamed path at all.
 pub fn flux2_block_offload_unsupported_reason(
     transformer: &std::path::Path,
+    transformer_shards: &[std::path::PathBuf],
     has_lora: bool,
 ) -> Option<&'static str> {
     let lower = transformer.to_string_lossy().to_lowercase();
@@ -424,18 +458,11 @@ pub fn flux2_block_offload_unsupported_reason(
              have no block-streaming path",
         );
     }
-    // The engine's own test, on the same file, so the planner can never promise
-    // a streamed load the loader would silently turn into a resident one.
-    let is_bfl_native_single_file = !is_gguf
-        && transformer
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
-        && matches!(
-            super::single_file::detect_format(transformer),
-            Ok(super::single_file::Flux2SingleFileFormat::BflNative)
-        );
-    match flux2_offload_decision_for(true, is_gguf, is_nvfp4, has_lora, is_bfl_native_single_file) {
+    // The engine's own predicate, on the same file, so the planner can never
+    // promise a streamed load the loader would turn into a resident one.
+    let is_single_file =
+        !is_gguf && flux2_transformer_is_single_file(transformer, transformer_shards);
+    match flux2_offload_decision_for(true, is_gguf, is_nvfp4, has_lora, is_single_file) {
         Flux2OffloadDecision::Unsupported(reason) => Some(reason),
         Flux2OffloadDecision::Disabled | Flux2OffloadDecision::Selected => None,
     }
@@ -1257,22 +1284,9 @@ impl Flux2Engine {
     /// non-safetensors path skip this detection. Header-peeks the file
     /// once per load — a few KB read.
     fn is_bfl_native_single_file(&self) -> bool {
-        if !self.base.paths.transformer_shards.is_empty() {
-            return false;
-        }
-        let path = &self.base.paths.transformer;
-        let is_safetensors = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"));
-        if !is_safetensors {
-            return false;
-        }
-        matches!(
-            super::single_file::detect_format(path),
-            Ok(super::single_file::Flux2SingleFileFormat::BflNative)
-                | Ok(super::single_file::Flux2SingleFileFormat::BflNativeRoot)
-                | Ok(super::single_file::Flux2SingleFileFormat::Nvfp4)
+        flux2_transformer_is_single_file(
+            &self.base.paths.transformer,
+            &self.base.paths.transformer_shards,
         )
     }
 
@@ -4079,29 +4093,62 @@ mod tests {
         );
     }
 
-    /// The server reads the engine's answer for the file it will actually load,
-    /// so a plan can never promise a stream the loader turns into a resident
-    /// load.
+    /// The server reads the engine's answer for the file it will actually load.
+    ///
+    /// Every layout `is_bfl_native_single_file` accepts, INCLUDING the
+    /// root-keyed one plato's installed `flux2-dev:fp8` actually is
+    /// (`detect_format` -> `BflNativeRoot`). The planner's copy of this
+    /// predicate matched only `BflNative`, so it answered "this can stream" for
+    /// the one checkpoint in the campaign that provoked the question.
     #[test]
-    fn the_exported_reason_refuses_a_single_file_checkpoint_by_its_header() {
+    fn every_single_file_layout_the_loader_accepts_is_refused_for_streaming() {
         let dir = temp_test_dir("mold-flux2-singlefile-offload");
-        let path = dir.join("flux2_dev_fp8mixed.safetensors");
-        write_bfl_native_single_file_header(&path);
-        let reason = flux2_block_offload_unsupported_reason(&path, false)
-            .expect("a BFL-native single file cannot stream its blocks");
-        assert!(reason.contains("single-file"), "{reason}");
-        let _ = std::fs::remove_file(&path);
+        for (tag, prefix) in [("prefixed", "model.diffusion_model."), ("root", "")] {
+            let path = dir.join(format!("flux2_dev_fp8mixed_{tag}.safetensors"));
+            write_flux2_single_file_header(&path, prefix);
+            assert!(
+                matches!(
+                    super::super::single_file::detect_format(&path),
+                    Ok(super::super::single_file::Flux2SingleFileFormat::BflNative)
+                        | Ok(super::super::single_file::Flux2SingleFileFormat::BflNativeRoot)
+                ),
+                "{tag}: fixture must be a layout the loader takes"
+            );
+            assert!(
+                flux2_transformer_is_single_file(&path, &[]),
+                "{tag}: the shared predicate must see it"
+            );
+            let reason = flux2_block_offload_unsupported_reason(&path, &[], false)
+                .unwrap_or_else(|| panic!("{tag}: a single file cannot stream its blocks"));
+            assert!(reason.contains("single-file"), "{tag}: {reason}");
+        }
+        // Sharded diffusers weights are the layout the streamed loader is for,
+        // and they must keep streaming.
+        let sharded = dir.join("shard-00001.safetensors");
+        write_flux2_single_file_header(&sharded, "");
+        assert!(!flux2_transformer_is_single_file(
+            &sharded,
+            &[sharded.clone(), dir.join("shard-00002.safetensors")]
+        ));
+        assert_eq!(
+            flux2_block_offload_unsupported_reason(
+                &sharded,
+                &[sharded.clone(), dir.join("shard-00002.safetensors")],
+                false
+            ),
+            None
+        );
     }
 
-    /// A minimal BFL-native single-file header: the marker keys
-    /// `single_file::detect_format` looks for, and no tensor data.
-    fn write_bfl_native_single_file_header(path: &std::path::Path) {
+    /// A minimal FLUX.2 single-file header at the given key prefix: the marker
+    /// keys `single_file::detect_format` looks for, and no tensor data.
+    fn write_flux2_single_file_header(path: &std::path::Path, prefix: &str) {
         use std::io::Write;
         let header = serde_json::json!({
-            "model.diffusion_model.img_in.weight": {
+            format!("{prefix}img_in.weight"): {
                 "dtype": "F32", "shape": [6144, 128], "data_offsets": [0, 0]
             },
-            "model.diffusion_model.double_blocks.0.img_attn.to_out.weight": {
+            format!("{prefix}double_blocks.0.img_attn.to_out.weight"): {
                 "dtype": "F32", "shape": [6144, 6144], "data_offsets": [0, 0]
             },
         });
