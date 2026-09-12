@@ -4024,7 +4024,27 @@ impl Coordinator {
                     // A job the plan placed or left unblocked has no block; one
                     // the resolver kept out of the plan altogether keeps the block
                     // the resolver recorded for it.
-                    if snapshot.work.iter().any(|work| work.id.as_str() == id) {
+                    //
+                    // "Kept out of the plan" is about CANDIDATES, not about
+                    // membership: every pending generation becomes a
+                    // `WorkSnapshot`, and one whose resolver refused every
+                    // device arrives with an empty `candidate_placements`, so
+                    // the planner can only answer the untyped
+                    // `NoSchedulableDevice` for it. Reading bare membership as
+                    // "the planner had nothing to say" erased the block
+                    // `record_resolver_vram_block` had recorded moments
+                    // earlier in the same turn — and with it went the reclaim
+                    // (`next_memory_reclaim` needs a live block to start from)
+                    // and the idle bound (`settle_unschedulable_generations`
+                    // reads the block to know the job is memory-short at all).
+                    // That is the 22-minute wedge: 1 529 `queued generation is
+                    // blocked on memory` lines, no eviction, no reclaim, no
+                    // refusal.
+                    if snapshot
+                        .work
+                        .iter()
+                        .any(|work| work.id.as_str() == id && !work.candidate_placements.is_empty())
+                    {
                         pending.memory_block = None;
                     }
                     continue;
@@ -10953,6 +10973,39 @@ mod tests {
         );
         assert!(!granted(&worker_rx));
         assert!(result_rx.try_recv().is_err());
+    }
+
+    /// The 22-minute wedge (UAT final-2, 2026-09-12): a resolver VRAM block
+    /// must SURVIVE the plan pass that runs immediately after it.
+    ///
+    /// `dispatch_ready` settles first — which is where
+    /// `record_resolver_vram_block` records the block and warns — and then
+    /// plans. The planner receives every pending generation as work, and a job
+    /// whose resolver refused every device arrives with ZERO candidate
+    /// placements, so it is neither placed nor typed-blocked and
+    /// `record_memory_blocks` erased the block that had just been recorded.
+    /// Nothing downstream then ran: `next_memory_reclaim` needs a live block to
+    /// start from, and `settle_unschedulable_generations` reads the block to
+    /// decide the job is memory-short at all, so the idle clock reset on every
+    /// tick. On the wedged host that printed `queued generation is blocked on
+    /// memory` 1 529 times over 22 minutes with no eviction, no reclaim and no
+    /// bound.
+    #[tokio::test]
+    async fn a_resolver_vram_block_survives_the_plan_pass_that_follows_it() {
+        let (mut coordinator, _worker, worker_rx, _result_rx, _root) =
+            hal9000_vram_blocked_coordinator().await;
+
+        let _ = coordinator.dispatch_ready().await;
+        assert!(!granted(&worker_rx), "one gigabyte does not place the plan");
+
+        assert!(
+            coordinator.pending["print"].memory_block.is_some(),
+            "the plan pass must not erase the block the resolver just recorded"
+        );
+        assert!(
+            coordinator.next_memory_reclaim().is_some(),
+            "and the idle reclaim must be reachable straight after a plan pass"
+        );
     }
 
     #[tokio::test]
