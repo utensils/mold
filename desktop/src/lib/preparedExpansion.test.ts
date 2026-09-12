@@ -101,11 +101,11 @@ describe("prepared expansion lifecycle", () => {
 
     expect(reasons).toEqual([
       "Source prompt changed after these variations were prepared.",
-      'Model changed from "flux-dev:q8" to "sdxl-base:fp16".',
-      'Model family changed from "flux" to "sdxl".',
+      'Style changed from "flux-dev:q8" to "sdxl-base:fp16".',
+      'Style family changed from "flux" to "sdxl".',
       "Conditioning changed from text-to-image to image-to-video.",
       "Batch changed from 3 to 5.",
-      "Host selection changed from Auto to Most capable.",
+      "Machine selection changed from Auto to Most capable.",
     ]);
     expect(batch.prompts[0]!.text).toBe("edited one");
   });
