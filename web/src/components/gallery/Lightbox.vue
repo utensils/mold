@@ -847,26 +847,6 @@ async function performVideoExport(options: VideoExportOptions) {
                           : "Upscale…"
                       }}
                     </button>
-                    <!-- Mesh transcodes, straight from the host's own
-                         `mesh.export_formats`. -->
-                    <button
-                      v-for="format in meshFileExports"
-                      :key="format"
-                      role="menuitem"
-                      :data-test="`mesh-export-${format}`"
-                      :disabled="exportBusy"
-                      @click="exportMesh(format)"
-                    >
-                      Export as {{ format.toUpperCase() }}…
-                    </button>
-                    <button
-                      v-if="meshAnimationExports.length > 0"
-                      role="menuitem"
-                      data-test="mesh-export-animation"
-                      @click="openMeshAnimationExport"
-                    >
-                      Export turntable…
-                    </button>
                     <button
                       v-for="asset in item.assets ?? []"
                       :key="asset.asset_id"
@@ -1080,6 +1060,36 @@ async function performVideoExport(options: VideoExportOptions) {
               Copy link
             </button>
           </div>
+          <!-- Mesh transcodes, straight from the host's own
+               `mesh.export_formats`. They are the point of a 3-D print, so
+               they sit on the card rather than two clicks deep in the
+               overflow. -->
+          <div
+            v-if="meshFileExports.length > 0 || meshAnimationExports.length > 0"
+            class="lb__pair lb__pair--exports"
+            data-test="mesh-exports"
+          >
+            <button
+              v-for="format in meshFileExports"
+              :key="format"
+              type="button"
+              class="lb__quiet"
+              :data-test="`mesh-export-${format}`"
+              :disabled="exportBusy"
+              @click="exportMesh(format)"
+            >
+              Export as {{ format.toUpperCase() }}…
+            </button>
+            <button
+              v-if="meshAnimationExports.length > 0"
+              type="button"
+              class="lb__quiet"
+              data-test="mesh-export-animation"
+              @click="openMeshAnimationExport"
+            >
+              Export turntable…
+            </button>
+          </div>
           <button
             v-if="canExportVideo"
             class="lb__quiet lb__export"
@@ -1176,24 +1186,6 @@ async function performVideoExport(options: VideoExportOptions) {
                     @click="onUpscale"
                   >
                     {{ isVideoFile ? "Framewise upscale…" : "Upscale…" }}
-                  </button>
-                  <button
-                    v-for="format in meshFileExports"
-                    :key="format"
-                    role="menuitem"
-                    :data-test="`mesh-export-${format}`"
-                    :disabled="exportBusy"
-                    @click="exportMesh(format)"
-                  >
-                    Export as {{ format.toUpperCase() }}…
-                  </button>
-                  <button
-                    v-if="meshAnimationExports.length > 0"
-                    role="menuitem"
-                    data-test="mesh-export-animation"
-                    @click="openMeshAnimationExport"
-                  >
-                    Export turntable…
                   </button>
                   <button
                     v-for="asset in item.assets ?? []"
@@ -1403,6 +1395,11 @@ async function performVideoExport(options: VideoExportOptions) {
               class="lb__quiet"
               :class="{ 'lb__quiet--off': isMeshFile }"
               :disabled="isMeshFile"
+              :title="
+                isMeshFile
+                  ? 'A 3-D mesh cannot condition a render — source images are pixels.'
+                  : undefined
+              "
               @click="onUseSource"
             >
               Use as source
@@ -1424,6 +1421,36 @@ async function performVideoExport(options: VideoExportOptions) {
               @click="item && emit('copy-link', item)"
             >
               Copy link
+            </button>
+          </div>
+          <!-- Mesh transcodes, straight from the host's own
+               `mesh.export_formats`. They are the point of a 3-D print, so
+               they sit on the card rather than two clicks deep in the
+               overflow. -->
+          <div
+            v-if="meshFileExports.length > 0 || meshAnimationExports.length > 0"
+            class="lb__pair lb__pair--exports"
+            data-test="mesh-exports"
+          >
+            <button
+              v-for="format in meshFileExports"
+              :key="format"
+              type="button"
+              class="lb__quiet"
+              :data-test="`mesh-export-${format}`"
+              :disabled="exportBusy"
+              @click="exportMesh(format)"
+            >
+              Export as {{ format.toUpperCase() }}…
+            </button>
+            <button
+              v-if="meshAnimationExports.length > 0"
+              type="button"
+              class="lb__quiet"
+              data-test="mesh-export-animation"
+              @click="openMeshAnimationExport"
+            >
+              Export turntable…
             </button>
           </div>
           <button
@@ -1822,6 +1849,11 @@ async function performVideoExport(options: VideoExportOptions) {
   flex-wrap: wrap;
   gap: 9px;
 }
+/* The mesh exports are a second row under the shared one, not a continuation
+   of it: `.lb__panel` is a gapless column, so the row brings its own lead. */
+.lb__pair--exports {
+  margin-top: 9px;
+}
 .lb__export {
   width: 100%;
   margin-top: 10px;
@@ -1830,7 +1862,6 @@ async function performVideoExport(options: VideoExportOptions) {
   flex: 1 1 5rem;
   min-width: 0;
   min-height: 44px;
-  overflow-wrap: anywhere;
   border: 1px solid var(--ce);
   background: transparent;
   color: var(--ink-2);
@@ -1842,6 +1873,26 @@ async function performVideoExport(options: VideoExportOptions) {
   text-decoration: none;
   cursor: pointer;
   transition: background var(--dur-quick) var(--ease);
+}
+/* "Download" / "Save" is an `<a role="button">`, and an anchor is an inline
+   box: as a flex item it stretched to the row's height but kept its label on
+   the first line, sitting at the top of a 44px row beside two centred
+   `<button>`s. `inline-flex` + centring on both axes makes every child of the
+   row lay its own label out the same way. `flex: 1 1 auto` sizes from the
+   content and `white-space: nowrap` keeps "Use as source" on one line;
+   `.lb__pair`'s `flex-wrap: wrap` still breaks the ROW on a phone, and a label
+   too wide for its line truncates rather than spilling past its border.
+
+   Scoped to the ROW on purpose: `.lb__quiet` is also used as a direct child of
+   `.lb__panel`, which is a COLUMN, and there a `flex-basis` is a height. */
+.lb__pair > .lb__quiet {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
 }
 .lb__quiet:hover {
   background: color-mix(in srgb, var(--rebate) 6%, transparent);

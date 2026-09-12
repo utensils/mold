@@ -196,11 +196,16 @@ describe("MachinesPage", () => {
     expect(opener.attributes("aria-expanded")).toBe("false");
   });
 
+  // The card's door is a stretched `<button>` laid OVER the card, not the
+  // card itself, so Retry is still outside every control — which is what this
+  // guard has asserted since #1648, and what keeps the card's readouts in the
+  // accessibility tree.
   it("keeps Retry keyboard events separate from opening machine details", async () => {
     poll.loading.value = false;
     const w = mountPage();
     const retry = w.get('[data-test="host-retry"]');
     expect(retry.element.closest('[role="button"]')).toBeNull();
+    expect(retry.element.parentElement?.closest("button")).toBeNull();
     await retry.trigger("keydown", { key: "Enter" });
     await retry.trigger("click");
     expect(poll.refresh).toHaveBeenCalledTimes(1);

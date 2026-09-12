@@ -1,5 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, nextTick, type Component } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import CreatePage from "./CreatePage.vue";
@@ -605,8 +605,11 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.width = 1216;
     form.state.value.height = 704;
     await nextTick();
+    // Off the ladder: the chip's own contract is that its sublabel arrives
+    // already marked, and the composer summary beside it carries the same
+    // mark. Two readings of one canvas never disagree.
     expect(wrapper.getComponent({ name: "ShapeChip" }).props("sublabel")).toBe(
-      "1216×704",
+      "≈1216×704",
     );
   });
 
@@ -2229,12 +2232,15 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a cat";
     await nextTick();
 
-    // The field is inline beside the kind strip now, in the page header,
-    // rather than on a row of its own between the picture and the composer.
+    // The field is inline beside the kind strip, and the strip moved out of
+    // the page header onto the left column's own first row (the mock).
     const title = wrapper.get("[data-test='print-title']");
     expect(title.attributes("placeholder")).toBe("Untitled print");
-    expect(wrapper.get(".create-header").element.contains(title.element)).toBe(
+    expect(wrapper.get(".create-kindbar").element.contains(title.element)).toBe(
       true,
+    );
+    expect(wrapper.get(".create-header").element.contains(title.element)).toBe(
+      false,
     );
     await title.setValue("  Smurf 04  ");
     expect(form.state.value.title).toBe("  Smurf 04  ");
@@ -5602,5 +5608,375 @@ describe("CreatePage prompt gate", () => {
     };
     await nextTick();
     expect(blockerText(wrapper)).toBeNull();
+  });
+});
+
+/*
+ * A locked Make chip is a control that must explain itself, and the two locks
+ * are not the same fact: a family that never batches is locked whatever the
+ * request carries, while a reference lock lifts with the pictures that caused
+ * it. One sentence for both would tell an always-one style's user about a
+ * reference picture they never attached.
+ */
+describe("CreatePage Make chip lock", () => {
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  // A narrow case stubs `matchMedia`; unstubbing on the case's last line
+  // leaks the phone layout into every later test when an assertion throws.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // The pairing a person actually sees: a reference attached, the lock ON,
+  // and the sentence that names the reason it is on.
+  it("names the reference pictures when they are what locked it", async () => {
+    const klein = {
+      ...installedModelRow("flux2-klein:bf16", "flux2"),
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "flux2-klein",
+        profile_hash: "klein",
+        default_recipe_id: "default",
+        recipes: [flux2KleinRecipe()],
+      },
+    } as unknown as ModelInfoExtended;
+    hostModelsMock.mockResolvedValue([klein]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux2-klein:bf16";
+    form.state.value.modelFamily = "flux2";
+    await nextTick();
+    const unlocked = wrapper.getComponent({ name: "MakeChip" });
+    expect(unlocked.props("locked")).toBe(false);
+
+    form.state.value.imageAttachments = [];
+    form.state.value.referenceImages = [
+      { kind: "upload", filename: "ref.png", base64: "REF" },
+    ];
+    form.state.value.exclusiveWell = "references";
+    await nextTick();
+    await flushPromises();
+
+    const chip = wrapper.getComponent({ name: "MakeChip" });
+    expect(chip.props("locked")).toBe(true);
+    expect(chip.props("lockedReason")).toBe(
+      "This style makes one print at a time when it works from a reference picture.",
+    );
+  });
+
+  it("says nothing about references for a style that never batches", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("qwen-image-edit:q8", "qwen-image-edit"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "qwen-image-edit:q8";
+    form.state.value.modelFamily = "qwen-image-edit";
+    await nextTick();
+    const chip = wrapper.getComponent({ name: "MakeChip" });
+    expect(chip.props("locked")).toBe(true);
+    expect(chip.props("lockedReason")).toBe(
+      "This style makes one print at a time.",
+    );
+  });
+});
+
+/*
+ * The left column reads top to bottom: kind strip, picture, composer, the work
+ * in flight, then Recent. Queued and running prints used to open the column,
+ * above the picture, so a person who had just pressed Generate watched their
+ * queue scroll away from the prompt box they were still typing in.
+ */
+describe("CreatePage left column order", () => {
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  // A narrow case stubs `matchMedia`; unstubbing on the case's last line
+  // leaks the phone layout into every later test when an assertion throws.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Every marker, in the order the column must render them. */
+  function columnOrder(wrapper: ReturnType<typeof mount>): Element[] {
+    const canvas = wrapper.find("[data-test='result-canvas']").exists()
+      ? wrapper.get("[data-test='result-canvas']").element
+      : wrapper.get("[data-test='cold-start-stub']").element;
+    return [
+      wrapper.get("[data-test='web-output-kind']").element,
+      canvas,
+      wrapper.get("[data-test='composer-submit']").element,
+      wrapper.get("[data-test='activity-stub']").element,
+      wrapper.get("[data-test='recent-grid']").element,
+    ];
+  }
+
+  function assertInOrder(markers: Element[]) {
+    for (let index = 1; index < markers.length; index += 1) {
+      expect(
+        markers[index - 1]!.compareDocumentPosition(markers[index]!) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+  }
+
+  it("puts the work in flight under the prompt box, above Recent", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    assertInOrder(columnOrder(wrapper));
+  });
+
+  /*
+   * The composer's own alerts — a stale expansion with its three buttons, a
+   * held pull, a submit failure — belong to the prompt box, and a growing
+   * queue must not push them a screenful away from it.
+   */
+  it("keeps the composer's own alerts with the composer, above the strip", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("sdxl-base:fp16", "sdxl"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    // Expand, then hand-edit the prompt: the expansion goes stale and its
+    // alert — the only place Re-expand / Generate anyway / Restore live —
+    // renders under the composer.
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "a lighthouse in storm light");
+    await nextTick();
+    wrapper
+      .getComponent({ name: "ComposerCard" })
+      .vm.$emit("update:prompt", "a hand-edited storm lighthouse");
+    await nextTick();
+
+    const alert = wrapper.get(
+      "[data-test='web-quick-expansion-stale']",
+    ).element;
+    const strip = wrapper.get("[data-test='activity-stub']").element;
+    const recent = wrapper.get("[data-test='recent-grid']").element;
+    assertInOrder([
+      wrapper.get("[data-test='composer-submit']").element,
+      alert,
+      strip,
+      recent,
+    ]);
+  });
+
+  it("keeps that order when the column is narrow", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    assertInOrder(columnOrder(wrapper));
+  });
+});
+
+/*
+ * The composer's summary and the rail's shape chips read ONE resolver. The
+ * summary used to run its own legacy `projectResolution` lookup, so a 1216×704
+ * canvas read "Custom" in the composer while the ShapePicker beside it showed
+ * 16:9 lit — two readings of the same canvas, on the same screen.
+ */
+describe("CreatePage composer summary", () => {
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  // A narrow case stubs `matchMedia`; unstubbing on the case's last line
+  // leaks the phone layout into every later test when an assertion throws.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** The real ComposerCard, so the summary is the one a person reads. */
+  function composerStubs() {
+    const { ComposerCard: _dropped, ...stubs } = pageStubs();
+    return stubs;
+  }
+
+  it("names the shape the ShapePicker lit, never 'Custom'", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: composerStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.width = 1216;
+    form.state.value.height = 704;
+    await nextTick();
+
+    const summary = wrapper.get("[data-test='composer-summary']").text();
+    // The legacy lookup knew five ratios and called this one "Custom".
+    expect(summary).not.toContain("Custom");
+    // The chip beside it is the same resolver's answer; the two agree.
+    const family = wrapper.get(".shape-chip__label").text();
+    expect(summary).toContain(`${family} · 1216×704`);
+  });
+
+  it("carries the resolver's own approximate mark, once", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: composerStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.width = 1216;
+    form.state.value.height = 704;
+    await nextTick();
+    const summary = wrapper.get("[data-test='composer-summary']").text();
+    const family = wrapper.get(".shape-chip__label").text();
+    // One mark, from the resolver; ComposerCard appends the size after it.
+    expect(summary.startsWith("≈")).toBe(true);
+    expect(summary).toContain(`≈${family} · 1216×704`);
+    expect(summary.match(/≈/g)).toHaveLength(1);
+  });
+});
+
+/*
+ * The kind strip is the first row of the LEFT column, left-aligned above the
+ * picture (`docs/design/mold-studio-web.dc.html:97-108`), not a chip floating
+ * in the page header beside the h1. The header keeps the title, the notice and
+ * the 3-D workflows link.
+ */
+describe("CreatePage kind strip placement", () => {
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  // A narrow case stubs `matchMedia`; unstubbing on the case's last line
+  // leaks the phone layout into every later test when an assertion throws.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("puts the strip and the print title on the left column's first row", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const workspace = wrapper.get("[data-test='generate-workspace']").element;
+    const kindbar = wrapper.get(".create-kindbar").element;
+    const strip = wrapper.get("[data-test='web-output-kind']").element;
+    const title = wrapper.get("[data-test='print-title-field']").element;
+    const header = wrapper.get(".create-header").element;
+
+    expect(kindbar.contains(strip)).toBe(true);
+    expect(kindbar.contains(title)).toBe(true);
+    expect(header.contains(strip)).toBe(false);
+    expect(workspace.contains(kindbar)).toBe(true);
+
+    // First child of the left column, ahead of the activity strip and canvas.
+    const left = workspace.firstElementChild!;
+    expect(left.firstElementChild).toBe(kindbar);
+  });
+
+  it("keeps the h1, the notice and the 3-D link in the header", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const header = wrapper.get(".create-header").element;
+    expect(
+      header.contains(wrapper.get("[data-test='phone-create-title']").element),
+    ).toBe(true);
+  });
+
+  it("still draws the strip above the picture when the column is narrow", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const strip = wrapper.get("[data-test='web-output-kind']").element;
+    const canvas = wrapper.find("[data-test='result-canvas']").exists()
+      ? wrapper.get("[data-test='result-canvas']").element
+      : wrapper.get("[data-test='cold-start-stub']").element;
+    expect(
+      strip.compareDocumentPosition(canvas) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

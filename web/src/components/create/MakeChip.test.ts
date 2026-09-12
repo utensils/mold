@@ -68,12 +68,71 @@ describe("MakeChip", () => {
     });
     const chip = wrapper.get("[data-test='make-chip']");
     expect(chip.text()).toContain("Make 1");
-    expect(chip.attributes("disabled")).toBeDefined();
-    expect(chip.attributes("title")).toBe(
+    // The hover text says what pressing the chip shows; the popover carries
+    // the reason itself, so the two no longer say the same sentence.
+    expect(chip.attributes("title")).toBe("Why one at a time");
+    wrapper.unmount();
+  });
+
+  /*
+   * A LOCKED chip is not a disabled one. Locked means "this style makes one
+   * at a time, and here is why" — a fact worth reading — so the chip keeps its
+   * caret, still opens, and answers the question instead of dimming and
+   * swallowing the click. Only the hover title said anything, and a hover
+   * title is not an answer on a touch screen.
+   */
+  it("opens and explains itself when locked, with no stepper to offer", async () => {
+    const wrapper = factory({
+      modelValue: 4,
+      locked: true,
+      lockedReason: "Edit models render one print at a time.",
+    });
+    const chip = wrapper.get("[data-test='make-chip']");
+    expect(chip.attributes("disabled")).toBeUndefined();
+    await chip.trigger("click");
+
+    const opened = menu();
+    expect(opened).not.toBeNull();
+    expect(wrapper.findComponent(Stepper).exists()).toBe(false);
+    expect(opened?.textContent).toContain("Make 1");
+    expect(opened?.textContent).toContain(
       "Edit models render one print at a time.",
     );
-    await chip.trigger("click");
-    expect(menu()).toBeNull();
+    // The batch sentence is about a batch; there is no batch here.
+    expect(opened?.textContent).not.toContain("Each one is queued separately");
+    wrapper.unmount();
+  });
+
+  // A screen reader should not be asked "How many to make" by a panel that
+  // offers no count.
+  it("announces the locked panel for the question it answers", async () => {
+    const wrapper = factory({ modelValue: 4, locked: true });
+    await wrapper.get("[data-test='make-chip']").trigger("click");
+    const panel = document.body.querySelector("[role='dialog']");
+    expect(panel?.getAttribute("aria-label")).toBe("Why one at a time");
+    wrapper.unmount();
+  });
+
+  it("keeps the counting panel's own name when it is not locked", async () => {
+    const wrapper = factory();
+    await wrapper.get("[data-test='make-chip']").trigger("click");
+    const panel = document.body.querySelector("[role='dialog']");
+    expect(panel?.getAttribute("aria-label")).toBe("How many to make");
+    wrapper.unmount();
+  });
+
+  it("opens with the count alone when a lock carries no reason", async () => {
+    const wrapper = factory({ modelValue: 4, locked: true });
+    await wrapper.get("[data-test='make-chip']").trigger("click");
+    expect(menu()?.textContent).toContain("Make 1");
+    expect(wrapper.findComponent(Stepper).exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("never writes a count while locked", async () => {
+    const wrapper = factory({ modelValue: 4, locked: true });
+    await wrapper.get("[data-test='make-chip']").trigger("click");
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
     wrapper.unmount();
   });
 

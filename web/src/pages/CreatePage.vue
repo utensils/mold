@@ -58,7 +58,6 @@ import { defaultUpscaler } from "../components/create/advanced/upscalers";
 import { blobToBase64 } from "../lib/base64";
 import { HeldPullOffers } from "../lib/heldPullOffers";
 import Icon from "@ui/components/Icon.vue";
-import { ASPECTS } from "@ui/lib/resolution";
 import {
   effectiveGenerationRecipe,
   recipeIsCanvasless,
@@ -1897,10 +1896,6 @@ function onResetSettings() {
 const projection = computed(() =>
   projectResolution(form.state.value.width, form.state.value.height),
 );
-const aspectLabel = computed(
-  () =>
-    ASPECTS.find((a) => a.id === projection.value.aspectId)?.label ?? "Custom",
-);
 
 const advCount = computed(() =>
   advancedActiveCount({
@@ -1976,10 +1971,28 @@ const shapeChipLabel = computed(() => {
       ?.label ?? shape.badge
   );
 });
+/*
+ * The composer's summary reads the SAME resolver as the chip beside it. It
+ * used to run the legacy `projectResolution` lookup of its own, which knows
+ * only five ratios and answered "Custom" for a 1216×704 canvas while the
+ * rail's ShapePicker showed its nearest family lit — two readings of one
+ * canvas on one screen. `≈` is the resolver's own mark for a lit family that
+ * is only the nearest match; `ComposerCard` appends the pixel size after it
+ * and adds no second mark.
+ */
+const aspectLabel = computed(
+  () => `${outputShape.value.approximate ? "≈" : ""}${shapeChipLabel.value}`,
+);
+
+/* The chip's own contract (`ShapeChip.vue`) is that its sublabel arrives
+ * "already marked `≈` when the resolver called it approximate". It never was,
+ * so an off-ladder canvas read `16:9` on the chip and `≈16:9` in the summary
+ * an inch away. Both readings carry the resolver's mark now. */
 const shapeChipSublabel = computed(() => {
   const { width, height } = form.state.value;
   if (!width || !height) return "";
-  return width === height ? String(width) : `${width}×${height}`;
+  const size = width === height ? String(width) : `${width}×${height}`;
+  return outputShape.value.approximate ? `≈${size}` : size;
 });
 
 /**
@@ -1999,6 +2012,20 @@ const batchLocked = computed(
           : form.state.value.imageAttachments.length,
       lastWrite: form.state.value.exclusiveWell ?? null,
     }),
+);
+
+/*
+ * Why the lock, in the chip's own words. There are two causes and they are
+ * not the same fact: a family that never batches (`forcesBatchSizeOne`) is
+ * locked whatever the request carries, while every other lock comes from the
+ * reference pictures THIS request is carrying and lifts when they do. One
+ * sentence for both would tell an always-one style's user about a reference
+ * picture they never attached.
+ */
+const batchLockedReason = computed(() =>
+  capabilities.value.forcesBatchSizeOne
+    ? "This style makes one print at a time."
+    : "This style makes one print at a time when it works from a reference picture.",
 );
 
 /** Draft / Good / Best from the recipe's own ladder. No rows on a recipe that
@@ -4982,41 +5009,6 @@ onBeforeUnmount(() => {
       >
         {{ output.title.value }}
       </h1>
-      <SegmentedControl
-        wrap
-        :model-value="output.kind.value"
-        :options="output.options"
-        label="Output type"
-        data-test="web-output-kind"
-        @update:model-value="output.selectKind"
-      />
-      <!-- The print's name, inline beside the kind strip: click to edit, Enter
-           or blur commits, Escape reverts. It rides every request as `title`
-           and an invalid one blocks Generate (`validatePrintTitle`). -->
-      <label class="create-title" data-test="print-title-field">
-        <span class="sr-only">Print title</span>
-        <input
-          :value="form.state.value.title ?? ''"
-          type="text"
-          maxlength="160"
-          placeholder="Untitled print"
-          aria-label="Print title"
-          class="create-title__input"
-          data-test="print-title"
-          @input="onTitleInput(($event.target as HTMLInputElement).value)"
-          @focus="enterTitle"
-          @blur="commitTitle"
-          @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
-          @keydown.escape="revertTitle"
-        />
-        <span
-          v-if="titleError"
-          class="create-title__error"
-          role="alert"
-          data-test="print-title-error"
-          >{{ titleError }}</span
-        >
-      </label>
       <p v-if="output.notice.value" role="status" class="text-sm text-ink-2">
         {{ output.notice.value }}
         <router-link
@@ -5036,20 +5028,56 @@ onBeforeUnmount(() => {
       data-test="generate-workspace"
       class="grid gap-6 min-[900px]:grid-cols-[minmax(0,1fr)_320px]"
     >
-      <!-- Left column: activity, the picture, the sticky composer, then
-           everything that scrolls UNDER it. Nothing on this path may set an
-           `overflow` — a `sticky` child is inert inside one. -->
+      <!-- Left column, top to bottom: the kind strip, the picture, the sticky
+           composer, then everything that scrolls UNDER it — the work in
+           flight, then Recent. Nothing on this path may set an `overflow` —
+           a `sticky` child is inert inside one. -->
       <main class="flex min-w-0 flex-col gap-4">
-        <ActivityStrip
-          :jobs="localActivityJobs"
-          :shared="sharedActivityRows"
-          :queue-status="routing.queueStatus.value"
-          @cancel="cancelPrint"
-          @retry="retryPrint"
-          @dismiss="stream.remove"
-          @open="openJob"
-          @shared-open="openLiveWork"
-        />
+        <!-- The kind strip is the first row of the LEFT column, left-aligned
+             above the picture (the mock), with the print's name beside it.
+             `min-width: 0` and nothing else: the row must be free to shrink
+             below its content, or the title field's basis would push the
+             strip out of the column. -->
+        <div class="create-kindbar">
+          <SegmentedControl
+            wrap
+            :model-value="output.kind.value"
+            :options="output.options"
+            label="Output type"
+            data-test="web-output-kind"
+            @update:model-value="output.selectKind"
+          />
+          <!-- The print's name, inline beside the kind strip: click to edit,
+               Enter or blur commits, Escape reverts. It rides every request as
+               `title` and an invalid one blocks Generate
+               (`validatePrintTitle`). -->
+          <label class="create-title" data-test="print-title-field">
+            <span class="sr-only">Print title</span>
+            <input
+              :value="form.state.value.title ?? ''"
+              type="text"
+              maxlength="160"
+              placeholder="Untitled print"
+              aria-label="Print title"
+              class="create-title__input"
+              data-test="print-title"
+              @input="onTitleInput(($event.target as HTMLInputElement).value)"
+              @focus="enterTitle"
+              @blur="commitTitle"
+              @keydown.enter.prevent="
+                ($event.target as HTMLInputElement).blur()
+              "
+              @keydown.escape="revertTitle"
+            />
+            <span
+              v-if="titleError"
+              class="create-title__error"
+              role="alert"
+              data-test="print-title-error"
+              >{{ titleError }}</span
+            >
+          </label>
+        </div>
 
         <section class="create-result" aria-label="Result">
           <div
@@ -5189,7 +5217,7 @@ onBeforeUnmount(() => {
             <MakeChip
               :model-value="form.state.value.batchSize"
               :locked="batchLocked"
-              locked-reason="one at a time"
+              :locked-reason="batchLockedReason"
               @update:model-value="form.state.value.batchSize = $event"
             />
           </template>
@@ -5310,6 +5338,24 @@ onBeforeUnmount(() => {
         >
           {{ singleShotPreservationNote }}
         </div>
+
+        <!-- The work in flight: under the prompt box it came from, and under
+             the prompt box's OWN readouts and alerts — the estimate, a stale
+             expansion with its three buttons, a held pull, a submit failure,
+             the chain cue. A queue grows, and it must not push the alert about
+             what you are typing a screenful away from the box you type in.
+             Above Recent, and inside the same left column: nothing on this
+             path may set an `overflow`. -->
+        <ActivityStrip
+          :jobs="localActivityJobs"
+          :shared="sharedActivityRows"
+          :queue-status="routing.queueStatus.value"
+          @cancel="cancelPrint"
+          @retry="retryPrint"
+          @dismiss="stream.remove"
+          @open="openJob"
+          @shared-open="openLiveWork"
+        />
 
         <section>
           <div class="mb-2 flex items-center justify-between">
@@ -5781,15 +5827,28 @@ onBeforeUnmount(() => {
   gap: 16px;
   margin-bottom: 24px;
 }
-.create-header h1 {
-  flex: 1 1 180px;
-}
-.create-header :deep(.ms-seg) {
-  flex: 0 1 520px;
-  min-width: 0;
-}
 .create-header p {
   flex-basis: 100%;
+}
+/* The 3-D workflows link sat at the header's right edge because the h1 used
+   to carry `flex: 1 1 180px`. That rule was doing two jobs and only one of
+   them left with the kind strip; this keeps the other. */
+.create-header > a {
+  margin-left: auto;
+}
+/* `min-width: 0` so the row can shrink below its content — see the template
+   comment. (This is a SIBLING of the composer, not one of its four
+   `overflow`-free ancestors, which `CreatePage.test.ts` audits by name.) */
+.create-kindbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+.create-kindbar :deep(.ms-seg) {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 /* `min-width: 0` only. An `overflow` here would make the composer's
  * `position: sticky` silently inert — that is the whole rule of this page. */
@@ -5802,7 +5861,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  flex: 1 1 200px;
+  flex: 1 1 220px;
 }
 .create-title__input {
   width: 100%;
@@ -5950,12 +6009,6 @@ onBeforeUnmount(() => {
   font-size: var(--mold-fs-xs);
   padding: 0;
   cursor: pointer;
-}
-
-@media (max-width: 899px) {
-  .create-header :deep(.ms-seg) {
-    flex-basis: 100%;
-  }
 }
 
 .recent-context {
