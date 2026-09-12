@@ -4,9 +4,11 @@ import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
 
 // The section bodies pull in stores and IPC that aren't the subject here —
-// stub them to identifiable markers so this suite tests the SettingsView
-// shell: the jump nav, the always-open lexicon sections, deep links, and the
-// search that narrows both to the sections that match.
+// stub them to identifiable markers. What this suite tests is what the VIEW
+// still owns after the frame moved to the shared kit: which sections a desktop
+// shell renders, which body each one gets, and the `?section=` deep link.
+// The frame's own behaviour (scroll-spy, lazy bodies, search, the settling
+// hold) is pinned in `studio/components/settings/SettingsShell.test.ts`.
 function stub(marker: string) {
   return { default: { template: `<div data-test="${marker}" />` } };
 }
@@ -21,19 +23,35 @@ vi.mock("../components/settings/StylesDiskSection.vue", () => stub("stub-styles"
 vi.mock("../components/settings/LibrarySection.vue", () => stub("stub-library"));
 vi.mock("../components/settings/ExpansionSection.vue", () => stub("stub-expansion"));
 vi.mock("../components/settings/AccountsSection.vue", () => stub("stub-accounts"));
+vi.mock("../components/settings/CloudSection.vue", () => stub("stub-cloud"));
+vi.mock("../components/settings/PerStyleDefaultsSection.vue", () => stub("stub-styleDefaults"));
 vi.mock("../components/settings/ProfilesSection.vue", () => stub("stub-profiles"));
 vi.mock("../components/settings/AdvancedSection.vue", () => stub("stub-advanced"));
 vi.mock("@studio/components/PairingAccessPanel.vue", () => stub("stub-pairing"));
 vi.mock("@studio/components/LicenseSettingsPanel.vue", () => stub("stub-licenses"));
 
 import SettingsView from "./SettingsView.vue";
-import { SECTIONS } from "../lib/settingsSchema";
+import SettingsShell from "@studio/components/settings/SettingsShell.vue";
+import { sectionsForSurface } from "@studio/lib/settingsSchema";
+import { useSettingsConfigStore } from "../stores/settingsConfig";
+
+const DESKTOP_SECTIONS = sectionsForSurface("desktop");
 
 const scrollIntoView = vi.fn();
 Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
   configurable: true,
   value: scrollIntoView,
 });
+
+/** No observer, so the shell mounts every body eagerly — the desktop idiom for
+ *  a suite that cares about the bodies rather than about the scroll. */
+function withoutObserver() {
+  Object.defineProperty(globalThis, "IntersectionObserver", {
+    configurable: true,
+    writable: true,
+    value: undefined,
+  });
+}
 
 async function mountView(section?: string) {
   const pinia = createPinia();
@@ -52,75 +70,19 @@ async function mountView(section?: string) {
   return wrapper;
 }
 
-async function typeSearch(wrapper: Awaited<ReturnType<typeof mountView>>, value: string) {
-  await wrapper.get("[data-test='settings-search']").setValue(value);
-  await flushPromises();
-}
-
-/** A recording IntersectionObserver — the nav highlight is driven by one, the
- *  section bodies are mounted by another, and what this suite cares about is
- *  how often the sections are re-registered and when a body arrives. */
-const observe = vi.fn();
-const unobserve = vi.fn();
-/** Every live observer, so a test can drive the scroll it cannot perform. */
-const observers: { callback: IntersectionObserverCallback; targets: Element[] }[] = [];
-class RecordingObserver {
-  callback: IntersectionObserverCallback;
-  targets: Element[] = [];
-  constructor(callback: IntersectionObserverCallback) {
-    this.callback = callback;
-    observers.push(this);
-  }
-  observe = (el: Element) => {
-    this.targets.push(el);
-    observe(el);
-  };
-  unobserve = (el: Element) => {
-    this.targets = this.targets.filter((t) => t !== el);
-    unobserve(el);
-  };
-  disconnect = vi.fn();
-  takeRecords = () => [];
-  root = null;
-  rootMargin = "";
-  thresholds = [];
-}
-Object.defineProperty(globalThis, "IntersectionObserver", {
-  configurable: true,
-  writable: true,
-  value: RecordingObserver,
-});
-
-/** Scroll the page past every registered section: jsdom lays nothing out, so
- *  the observers have to be driven by hand. */
-async function scrollThroughEverySection() {
-  for (const observer of [...observers]) {
-    const entries = observer.targets.map((target) => ({
-      target,
-      isIntersecting: true,
-      boundingClientRect: { top: 0 } as DOMRectReadOnly,
-    }));
-    observer.callback(entries as never, observer as never);
-  }
-  await flushPromises();
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
-  observers.length = 0;
+  withoutObserver();
 });
 
-describe("SettingsView shell", () => {
-  it("renders every lexicon section open, in nav order, with its body", async () => {
+describe("SettingsView on the shared shell", () => {
+  it("renders the sixteen desktop sections in nav order, each with its body", async () => {
     const wrapper = await mountView();
     const navLabels = wrapper.findAll("nav button").map((b) => b.text());
-    expect(navLabels).toEqual(SECTIONS.map((s) => s.label));
+    expect(navLabels).toEqual(DESKTOP_SECTIONS.map((s) => s.label));
+    expect(navLabels).toHaveLength(16);
     expect(navLabels[0]).toBe("Look");
     expect(navLabels.at(-1)).toBe("Updates & about");
-
-    // Every section is on the page from the start — this is one scrolling
-    // page, not an accordion. The BODIES arrive as the page is scrolled.
-    await scrollThroughEverySection();
 
     for (const id of [
       "app",
@@ -134,6 +96,8 @@ describe("SettingsView shell", () => {
       "pairing",
       "performance",
       "accounts",
+      "cloud",
+      "styleDefaults",
       "profiles",
       "advanced",
       "updates",
@@ -147,72 +111,23 @@ describe("SettingsView shell", () => {
     ).toBe(true);
   });
 
-  it("holds a section's body back until the page is scrolled to it", async () => {
-    // Advanced alone opens three HTTP calls and a live device subscription on
-    // mount, and most launches never scroll to it. The section, its heading
-    // and its summary are there from the start; only the body waits.
+  it("owns its scroll, so the scroll-spy observes the column that moves", async () => {
+    // The desktop pane is a fixed height with its own scroller; with the
+    // default `scroll="page"` the observer root and the sections would move
+    // together and the nav highlight would never change. No unit test can see
+    // that (there is no layout here), which is why the prop itself is pinned.
     const wrapper = await mountView();
-    expect(wrapper.find("[data-test='section-advanced']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(false);
-    expect(wrapper.get("[data-test='section-advanced']").text()).toContain("Advanced");
-
-    await scrollThroughEverySection();
-    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
+    expect(wrapper.findComponent(SettingsShell).props("scroll")).toBe("content");
+    expect(wrapper.findComponent(SettingsShell).props("layout")).toBe("scroll");
   });
 
-  /** A body the search brought up holds unsaved edits; clearing the search
-   *  must not unmount it just because the page has not scrolled there. */
-  it("keeps a body the search mounted once the search is cleared", async () => {
+  it("renders no section the desktop shell does not declare", async () => {
     const wrapper = await mountView();
-    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(false);
-    await wrapper.get("[data-test='settings-search']").setValue("advanced");
-    await flushPromises();
-    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
-    await wrapper.get("[data-test='settings-search']").setValue("");
-    await flushPromises();
-    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
-  });
-
-  it("mounts the body of a section the nav jumps to, since the scroll needs it", async () => {
-    const wrapper = await mountView();
-    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(false);
-    await wrapper.get("[data-test='settings-nav-advanced']").trigger("click");
-    await flushPromises();
-    expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
-  });
-
-  it("mounts every body when the browser has no IntersectionObserver", async () => {
-    const real = globalThis.IntersectionObserver;
-    Object.defineProperty(globalThis, "IntersectionObserver", {
-      configurable: true,
-      writable: true,
-      value: undefined,
-    });
-    try {
-      const wrapper = await mountView();
-      expect(wrapper.find("[data-test='stub-advanced']").exists()).toBe(true);
-      expect(wrapper.find("[data-test='stub-media']").exists()).toBe(true);
-    } finally {
-      Object.defineProperty(globalThis, "IntersectionObserver", {
-        configurable: true,
-        writable: true,
-        value: real,
-      });
+    const declared = new Set(DESKTOP_SECTIONS.map((s) => s.id));
+    for (const section of wrapper.findAll("[data-test^='section-']")) {
+      const id = section.attributes("data-test")!.replace("section-", "");
+      expect(declared.has(id as never), id).toBe(true);
     }
-  });
-
-  it("highlights Look first and jumps to a section from the nav", async () => {
-    const wrapper = await mountView();
-    expect(wrapper.get("[data-test='settings-nav-app']").attributes("aria-current")).toBe("true");
-
-    await wrapper.get("[data-test='settings-nav-library']").trigger("click");
-    expect(wrapper.get("[data-test='settings-nav-library']").attributes("aria-current")).toBe(
-      "true",
-    );
-    expect(
-      wrapper.get("[data-test='settings-nav-app']").attributes("aria-current"),
-    ).toBeUndefined();
-    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
   });
 
   it("jumps to the section named by ?section= (the Library trash banner's deep link)", async () => {
@@ -234,90 +149,37 @@ describe("SettingsView shell", () => {
     }
   });
 
-  it("search narrows the nav and the page to the owning section", async () => {
-    const wrapper = await mountView();
-    await typeSearch(wrapper, "temperature");
-
-    // Write more for me owns expand.temperature — the one section left.
-    expect(wrapper.find("[data-test='section-expansion']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='stub-expansion']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='section-performance']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='section-app']").exists()).toBe(false);
-    expect(wrapper.findAll("nav button").map((b) => b.text())).toEqual(["Write more for me"]);
+  it("ignores a ?section= naming something this shell does not render", async () => {
+    const wrapper = await mountView("nonesuch");
+    expect(wrapper.get("[data-test='settings-nav-app']").attributes("aria-current")).toBe("true");
+    expect(scrollIntoView).not.toHaveBeenCalled();
   });
 
-  it("finds keyword-only sections (Accounts, Look, Phone pairing) that carry no curated key", async () => {
+  it("tells the shell which raw keys each section draws, so search can find them", async () => {
     const wrapper = await mountView();
-    await typeSearch(wrapper, "civitai");
-    expect(wrapper.find("[data-test='stub-accounts']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='section-expansion']").exists()).toBe(false);
-
-    await typeSearch(wrapper, "theme");
-    expect(wrapper.find("[data-test='section-app']").exists()).toBe(true);
-
-    await typeSearch(wrapper, "phone");
-    expect(wrapper.find("[data-test='section-pairing']").exists()).toBe(true);
+    const config = useSettingsConfigStore();
+    config.rows = [
+      {
+        key: "models.some-style.default_steps",
+        value: 28,
+        source: "db",
+        env_var: null,
+        restart_required: false,
+      },
+    ];
+    await flushPromises();
+    await wrapper.get("[data-test='settings-search']").setValue("some-style");
+    await flushPromises();
+    // The style's rows live in Per-style defaults now, so that is the section
+    // its name must reach — not the Advanced list it left.
+    expect(wrapper.findAll("nav button").map((b) => b.text())).toEqual(["Per-style defaults"]);
   });
 
-  it("finds My images & trash for trash / retention searches", async () => {
+  it("says so when the engine exposes no configuration at all", async () => {
     const wrapper = await mountView();
-    await typeSearch(wrapper, "trash");
-    expect(wrapper.find("[data-test='section-library']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='section-expansion']").exists()).toBe(false);
-    await typeSearch(wrapper, "retention");
-    expect(wrapper.find("[data-test='stub-library']").exists()).toBe(true);
-  });
-
-  it("reports when a search matches nothing", async () => {
-    const wrapper = await mountView();
-    await typeSearch(wrapper, "zzznope");
-    expect(wrapper.find("[data-test='no-search-results']").exists()).toBe(true);
-    expect(wrapper.findAll("nav button")).toHaveLength(0);
-  });
-
-  it("finds Styles & disk for a directory setting by key or by label", async () => {
-    const wrapper = await mountView();
-    await typeSearch(wrapper, "models_dir");
-    expect(wrapper.find("[data-test='section-styles']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='no-search-results']").exists()).toBe(false);
-
-    await typeSearch(wrapper, "finished pictures");
-    expect(wrapper.find("[data-test='section-styles']").exists()).toBe(true);
-
-    // Machines keeps its own doorway, findable by the words it still owns.
-    await typeSearch(wrapper, "api key");
-    expect(wrapper.find("[data-test='section-hosts']").exists()).toBe(true);
-  });
-
-  it("does not re-register every section on each keystroke", async () => {
-    const wrapper = await mountView();
-    observe.mockClear();
-    unobserve.mockClear();
-
-    // "styl" narrows to one section. The sections that stayed rendered must
-    // keep the registration they already have: an inline `:ref` arrow is a
-    // new function every render, so Vue unbound and rebound all fourteen and
-    // the nav highlight flickered as the observer re-fired.
-    await typeSearch(wrapper, "s");
-    await typeSearch(wrapper, "st");
-    await typeSearch(wrapper, "sty");
-
-    // Only sections that genuinely left the page are unobserved, and only
-    // ones that genuinely arrived are observed — never the whole set. Counted
-    // over distinct ELEMENTS: each section is registered with two observers
-    // (the nav highlight's band, and the one that mounts bodies ahead of the
-    // scroll), so raw call counts would say nothing about re-registration.
-    const unobserved = new Set(unobserve.mock.calls.map((call) => call[0]));
-    expect(unobserved.size).toBeLessThan(SECTIONS.length);
-    expect(observe).not.toHaveBeenCalled();
-  });
-
-  it("leaves the section card unpadded, so full-bleed rows keep their hairlines", async () => {
-    // The mock's rows carry the inset and their rules span the card; padding
-    // the card would inset every rule instead. Non-row section bodies pad
-    // themselves (see each section component).
-    const wrapper = await mountView();
-    const card = wrapper.get("[data-test='section-generation']").get("div.bg-panel");
-    expect(card.classes().some((c) => /^p[xy]?-/.test(c))).toBe(false);
+    expect(wrapper.text()).not.toContain("doesn't expose configuration");
+    useSettingsConfigStore().available = false;
+    await flushPromises();
+    expect(wrapper.text()).toContain("doesn't expose configuration");
   });
 });

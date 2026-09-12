@@ -980,12 +980,12 @@ describe("GenerateView prepared expansion batches", () => {
     });
   });
 
-  /** A leftover preset (an old template, a stale draft) is not read, not
+  /** A leftover preset key (an old template, a stale draft) is not read, not
    *  written and not a staleness axis: the remix lands regardless. */
   it("remixes Batch 1 in place, leaving a leftover style preset untouched", async () => {
     const form = useGenerateFormStore().form;
     form.batchSize = 1;
-    form.stylePreset = "cinematic";
+    (form as unknown as Record<string, unknown>)["stylePreset"] = "cinematic";
     const pending = deferred<Awaited<ReturnType<typeof remixPrompt>>>();
     vi.mocked(remixPrompt).mockReturnValue(pending.promise);
     const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
@@ -996,7 +996,7 @@ describe("GenerateView prepared expansion batches", () => {
     await flushPromises();
     wrapper.findComponent(ExpandControl).vm.$emit("remix");
     await nextTick();
-    form.stylePreset = "anime";
+    (form as unknown as Record<string, unknown>)["stylePreset"] = "anime";
     pending.resolve({
       source_prompt: "a lighthouse at dusk",
       source_kind: "direct",
@@ -1014,7 +1014,7 @@ describe("GenerateView prepared expansion batches", () => {
     expect(wrapper.findComponent(PreparedExpansionBatch).exists()).toBe(false);
     expect(form.prompt).toBe("one");
     expect(form.batchSize).toBe(1);
-    expect(form.stylePreset).toBe("anime");
+    expect((form as unknown as Record<string, unknown>)["stylePreset"]).toBe("anime");
 
     await wrapper.get('[data-test="generate-button"]').trigger("click");
     await flushPromises();

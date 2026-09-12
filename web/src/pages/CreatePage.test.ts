@@ -1,8 +1,12 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, nextTick, type Component } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import CreatePage from "./CreatePage.vue";
+import createPageSource from "./CreatePage.vue?raw";
+import { saveGenerationTemplate } from "../lib/generationTemplates";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   useGenerateForm,
   __testing__ as generateFormTesting,
@@ -13,7 +17,6 @@ import {
   settleConfirm,
   useNotifications,
 } from "../lib/toasts";
-import { styleHint } from "../lib/stylePresets";
 import { __testing__ as hostRoutingTesting } from "../composables/useHostRouting";
 import { useHostRouting } from "../composables/useHostRouting";
 import { usePullResume } from "../composables/usePullResume";
@@ -31,6 +34,7 @@ import {
   sdxlRecipe,
 } from "@studio/lib/generationProfile.testFixtures";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
+import { resolveOutputShape } from "@studio/lib/outputShape";
 import type {
   GalleryImage,
   GenerateFormState,
@@ -113,7 +117,12 @@ const expandPromptMock = vi.hoisted(() =>
     ),
   })),
 );
-const streamJobsRef = vi.hoisted(() => ({ value: [] as Job[] }));
+// A real ref, so a test can settle or replace a job after mount and watch
+// the canvas follow, the way the live stream does.
+const streamJobsRef = await vi.hoisted(async () => {
+  const { shallowRef } = await import("vue");
+  return shallowRef([] as Job[]);
+});
 const streamCanvasErrorJobIdRef = vi.hoisted(() => ({
   value: null as string | null,
 }));
@@ -188,6 +197,8 @@ vi.mock("../api", async (importOriginal) => {
     cancelDownload: vi.fn(async () => undefined),
     createChainJob: createChainJobMock,
     expandPrompt: expandPromptMock,
+    // The VRAM badge takes its fetch as a prop, so the page names it.
+    fetchGenerationEstimate: vi.fn(async () => ({ peak_memory_bytes: 0 })),
     fetchModels: vi.fn(async () => []),
     fetchQueue: vi.fn(async () => ({ entries: [] })),
     listGallery: vi.fn(async () => galleryListing.value),
@@ -226,6 +237,21 @@ vi.mock("../composables/useGenerateStream", async (importOriginal) => ({
 
 /** The default machine's inventory for a test that actually queues a print:
  *  routing is inventory-driven now, so the machine must hold the checkpoint. */
+/** An installed row carrying a real generation profile, so the recipe-driven
+ * rail (the Quality ladder's rungs) has something to read. */
+function modelWithRecipe(name: string, family: string): ModelInfoExtended {
+  return {
+    ...installedModelRow(name, family),
+    generation_profile: {
+      schema_version: 1,
+      profile_id: family,
+      profile_hash: `${family}-recipe`,
+      default_recipe_id: "default",
+      recipes: [sdxlRecipe()],
+    },
+  } as unknown as ModelInfoExtended;
+}
+
 function installedModelRow(name: string, family: string) {
   return {
     name,
@@ -485,8 +511,202 @@ describe("CreatePage layout and behavior", () => {
       "workspace-page",
     );
     expect(wrapper.get("[data-test='generate-workspace']").classes()).toContain(
-      "min-[900px]:grid-cols-[minmax(0,1fr)_300px]",
+      "min-[900px]:grid-cols-[minmax(0,1fr)_320px]",
     );
+  });
+
+  /*
+   * The mock's Scroll rule: one scroll context, and Generate never leaves the
+   * viewport. `position: sticky` is SILENTLY INERT inside an
+   * `overflow: hidden|auto|scroll` ancestor, so the ancestor audit is an
+   * assertion rather than a thing someone remembers to do.
+   */
+  it("sticks the composer to the bottom with nothing clipping it", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.getComponent({ name: "ComposerCard" }).classes()).toContain(
+      "composer--sticky",
+    );
+
+    expect(createPageSource).toContain("position: sticky");
+    // Every ancestor between the composer and the page root, wherever its rule
+    // is written: `.workspace-page` is global, the rest are scoped here.
+    for (const [source, selector] of [
+      [webStyleSource, ".workspace-page"],
+      [createPageSource, ".create-page"],
+      [createPageSource, ".create-result"],
+      [createPageSource, ".rail-sheet"],
+    ] as const) {
+      const rule = scopedRule(source, selector);
+      // `.create-page` carries no rule of its own; the others must be found,
+      // or this audit would pass by never looking at anything.
+      if (rule === null) {
+        expect(selector).toBe(".create-page");
+        continue;
+      }
+      expect(rule).not.toMatch(/overflow(-[xy])?:\s*(hidden|auto|scroll)/);
+    }
+  });
+
+  it("docks the composer below 900px and reserves its measured height", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.getComponent({ name: "ComposerCard" }).classes()).toContain(
+      "composer--docked",
+    );
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("prompt", vi.fn());
+  });
+
+  /*
+   * The output-shape invariant: the chip, the rail's pills and the badge read
+   * ONE `resolveOutputShape` result, so they cannot disagree. The chip renders
+   * that object's own badge and the pixels the form holds — it never computes
+   * a size, and it is absent on a recipe that renders on no canvas at all.
+   */
+  it("reads the shape chip from the same resolver the rail's pills read", async () => {
+    const model = modelWithRecipe("sdxl:fp16", "sdxl");
+    hostModelsMock.mockResolvedValue([model]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.width = 1024;
+    form.state.value.height = 1024;
+    await nextTick();
+
+    const chip = wrapper.getComponent({ name: "ShapeChip" });
+    const shape = resolveOutputShape({
+      model,
+      family: "sdxl",
+      pipeline: null,
+      width: 1024,
+      height: 1024,
+      source: null,
+      intent: "model-default",
+    });
+    expect(chip.props("label")).toBe(
+      shape.families.find((family) => family.id === shape.selectedFamilyId)!
+        .label,
+    );
+    // A square says its side once, not "1024×1024".
+    expect(chip.props("sublabel")).toBe("1024");
+
+    form.state.value.width = 1216;
+    form.state.value.height = 704;
+    await nextTick();
+    // Off the ladder: the chip's own contract is that its sublabel arrives
+    // already marked, and the composer summary beside it carries the same
+    // mark. Two readings of one canvas never disagree.
+    expect(wrapper.getComponent({ name: "ShapeChip" }).props("sublabel")).toBe(
+      "≈1216×704",
+    );
+  });
+
+  it("writes the batch through the composer's Make chip and locks it for an edit recipe", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+      installedModelRow("qwen-image-edit:q8", "qwen-image-edit"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    await nextTick();
+
+    const chip = wrapper.getComponent({ name: "MakeChip" });
+    expect(chip.props("locked")).toBe(false);
+    chip.vm.$emit("update:modelValue", 4);
+    await nextTick();
+    expect(form.state.value.batchSize).toBe(4);
+
+    // The rail keeps no second stepper — the chip is the one control.
+    expect(wrapper.find("[data-test='controls-stub']").exists()).toBe(true);
+    expect(wrapper.findAllComponents({ name: "MakeChip" })).toHaveLength(1);
+
+    form.state.value.model = "qwen-image-edit:q8";
+    form.state.value.modelFamily = "qwen-image-edit";
+    await nextTick();
+    expect(wrapper.getComponent({ name: "MakeChip" }).props("locked")).toBe(
+      true,
+    );
+  });
+
+  /* The rail is the mock's, in the mock's order: the connection first, because
+   * a browser has no local GPU of its own to fall back on. */
+  it("leads the rail with the machine card", async () => {
+    hostModelsMock.mockResolvedValue([modelWithRecipe("sdxl:fp16", "sdxl")]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const rail = wrapper.get("[data-test='create-rail']");
+    const first = rail.element.firstElementChild as HTMLElement;
+    expect(first.getAttribute("data-test")).toBe("machine-card");
+    const order = [
+      "machine-card",
+      "quality-ladder",
+      "controls-reset",
+      "controls-stub",
+      "disclosure-list",
+    ].map((test) => wrapper.get(`[data-test='${test}']`).element);
+    for (let index = 1; index < order.length; index += 1) {
+      expect(
+        order[index - 1]!.compareDocumentPosition(order[index]!) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+    // The routing picker left the bottom of the settings list: with only this
+    // server registered the card's Change link is the one doorway to Machines,
+    // and no picker row repeats it.
+    const card = wrapper.get("[data-test='machine-card']");
+    expect(card.get("[data-test='machine-card-change']").text()).toBe("Change");
+    expect(card.findComponent({ name: "HostRoutingPicker" }).exists()).toBe(
+      false,
+    );
+    expect(wrapper.find("[data-test='controls-host']").exists()).toBe(false);
+  });
+
+  it("meters the routed machine's memory from the routing poll", async () => {
+    // The card draws its 5px meter from the same `/api/status` the routers
+    // already read; no second request, and nothing when the host cannot say.
+    hostStatusMock.mockImplementation(async () => ({
+      version: "test",
+      models_loaded: [],
+      busy: false,
+      uptime_secs: 1,
+      queue_depth: 2,
+      gpu_info: {
+        backend: "cuda",
+        name: "NVIDIA L40S",
+        vram_total_mb: 46_080,
+        vram_used_mb: 11_520,
+      },
+    }));
+    hostModelsMock.mockResolvedValue([modelWithRecipe("sdxl:fp16", "sdxl")]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const card = wrapper.get("[data-test='machine-card']");
+    expect(card.get("[data-test='machine-card-memory']").text()).toBe(
+      "12.1 / 48.3 GB",
+    );
+    expect(card.get("[data-test='machine-card-queue']").text()).toBe("queue 2");
+    hostStatusMock.mockImplementation(async () => ({
+      version: "test",
+      models_loaded: [],
+      busy: false,
+      uptime_secs: 1,
+      queue_depth: 0,
+    }));
   });
 
   it("applies settings selected from recovered Now developing work", async () => {
@@ -622,6 +842,84 @@ describe("CreatePage layout and behavior", () => {
     expect(caption).not.toContain("cv:1759168");
   });
 
+  it("keeps the finished print on the canvas after its completion card leaves the stream", async () => {
+    // The stream auto-removes a done job 1.5 s after it settles (that is the
+    // activity strip's rule). Measured on hal9000: the print showed for a
+    // few seconds and the canvas fell back to "Your print develops here",
+    // so Download, Copy link and Make 4 variations were never reachable.
+    // The page pins the last finished job until a newer one runs.
+    const done = {
+      id: "done-2",
+      request: {
+        model: "sdxl:fp16",
+        prompt: "a camera",
+        width: 1024,
+        height: 1024,
+        steps: 25,
+        guidance: 7,
+        batch_size: 1,
+        output_format: "png",
+      },
+      startedAt: 1,
+      controller: new AbortController(),
+      progress: {
+        stage: "complete",
+        step: 25,
+        totalSteps: 25,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: 11_800,
+      },
+      result: {
+        type: "complete",
+        image: "image-bytes",
+        format: "png",
+        seed_used: 42,
+        model: "sdxl:fp16",
+        width: 1024,
+        height: 1024,
+        generation_time_ms: 11_800,
+      },
+      error: null,
+      state: "done",
+      settledAt: Date.now(),
+      chain: null,
+      lastProgressAt: Date.now(),
+      workStarted: true,
+      hostId: null,
+      hostLabel: null,
+      target: null,
+      serverId: "server-2",
+      previewUrl: null,
+      seedVisual: "42",
+    } as Job;
+    hostModelsMock.mockResolvedValue([modelWithRecipe("sdxl:fp16", "sdxl")]);
+    streamJobsRef.value = [done];
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+    expect(canvas.props("mode")).toBe("result");
+
+    streamJobsRef.value = [];
+    await flushPromises();
+    expect(canvas.props("mode")).toBe("result");
+    expect(canvas.props("resultSrc")).toContain("image-bytes");
+
+    // A newer job taking the canvas replaces it.
+    streamJobsRef.value = [
+      {
+        ...done,
+        id: "run-3",
+        startedAt: 2,
+        state: "running",
+        result: null,
+        progress: { ...done.progress, stage: "denoise", step: 3 },
+      } as Job,
+    ];
+    await flushPromises();
+    expect(canvas.props("mode")).toBe("generating");
+  });
+
   it("renders a settled failure only while it has live canvas authority", async () => {
     streamJobsRef.value = [
       {
@@ -716,7 +1014,15 @@ describe("CreatePage layout and behavior", () => {
     expect(streamSelectMock).toHaveBeenCalledWith("stale-error");
   });
 
-  it("orders compact Create as result, prompt, controls, actions, then recent", async () => {
+  /*
+   * Under 900px the settings column leaves the page — the mock's Width rule —
+   * so narrow Create is kind strip, picture, machine row, docked composer,
+   * Recent, and nothing else. The old phone path rendered the style picker,
+   * the whole rail, the source wells and the identity well INLINE inside the
+   * composer AND kept a second Advanced sheet, which is why the narrow page
+   * measured longer than the wide one.
+   */
+  it("orders compact Create as result, machine row, docked composer, then recent", async () => {
     vi.stubGlobal(
       "matchMedia",
       vi.fn(() => ({
@@ -730,18 +1036,13 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.find("[data-test='phone-create-title']").exists()).toBe(
       true,
     );
-    expect(wrapper.find("[data-test='phone-create-controls']").exists()).toBe(
-      true,
-    );
     await flushPromises();
     const canvas = wrapper.find("[data-test='result-canvas']").exists()
       ? wrapper.get("[data-test='result-canvas']").element
       : wrapper.get("[data-test='cold-start-stub']").element;
     const markers = [
       "phone-create-title",
-      "prompt-style-stub",
-      "style-picker-stub",
-      "controls-stub",
+      "phone-machine-row",
       "composer-submit",
       "recent-grid",
     ].map((test) => wrapper.get(`[data-test='${test}']`).element);
@@ -758,6 +1059,44 @@ describe("CreatePage layout and behavior", () => {
     vi.stubGlobal("prompt", vi.fn());
   });
 
+  it("opens exactly one rail surface below 900px", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs: pageStubs() },
+    });
+    await flushPromises();
+    // Nothing from the rail is inline on the page.
+    expect(wrapper.find("[data-test='create-rail']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='controls-stub']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(
+      false,
+    );
+
+    await wrapper.get("[data-test='phone-open-rail']").trigger("click");
+    expect(wrapper.findAll("[data-test='create-rail-sheet']")).toHaveLength(1);
+    expect(wrapper.find("[data-test='controls-stub']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='disclosure-list']").exists()).toBe(true);
+
+    // A row inside the sheet swaps the SAME sheet's body; it never opens a
+    // second one.
+    await wrapper.get("[data-test='disclosure-advanced']").trigger("click");
+    expect(wrapper.findAll("[data-test='create-rail-sheet']")).toHaveLength(1);
+    expect(wrapper.find("[data-test='rail-sheet-back']").exists()).toBe(true);
+    await wrapper.get("[data-test='rail-sheet-back']").trigger("click");
+    expect(wrapper.find("[data-test='disclosure-list']").exists()).toBe(true);
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("prompt", vi.fn());
+  });
+
   it("keeps the recent gallery visible after refreshes", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
@@ -766,28 +1105,33 @@ describe("CreatePage layout and behavior", () => {
     expect(feed.props("limit")).toBe(50);
   });
 
-  it("dismisses the Templates popover with Escape and outside click", async () => {
+  /* Templates left the row beside the print title and became the rail's
+   * Starters disclosure. The contract under test is the dismissal, which the
+   * sheet keeps: Escape and a click outside the panel both close it. */
+  it("dismisses the Starters sheet with Escape and an outside click", async () => {
     const wrapper = mount(CreatePage, {
       attachTo: document.body,
       global: { stubs: pageStubs() },
     });
+    await flushPromises();
 
-    await wrapper.get("[data-test='templates-toggle']").trigger("click");
-    expect(wrapper.find("[data-test='templates-popover']").exists()).toBe(true);
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-    );
+    await wrapper.get("[data-test='disclosure-starters']").trigger("click");
+    expect(wrapper.find("[data-test='templates-panel']").exists()).toBe(true);
+    // Wide: a row opens the web's 452px right drawer (Advanced's and the
+    // style detail's surface), never a viewport-filling sheet for three
+    // lines of Starters. Measured on hal9000 at 1440px: every row's sheet
+    // was 1440px wide.
+    expect(wrapper.find(".ms-sheet").exists()).toBe(false);
+    await wrapper.get(".ms-drawer").trigger("keydown.escape");
     await nextTick();
-    expect(wrapper.find("[data-test='templates-popover']").exists()).toBe(
+    expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(
       false,
     );
 
-    await wrapper.get("[data-test='templates-toggle']").trigger("click");
-    document.body.dispatchEvent(
-      new MouseEvent("pointerdown", { bubbles: true }),
-    );
+    await wrapper.get("[data-test='disclosure-starters']").trigger("click");
+    await wrapper.get(".ms-drawer").trigger("click");
     await nextTick();
-    expect(wrapper.find("[data-test='templates-popover']").exists()).toBe(
+    expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(
       false,
     );
     wrapper.unmount();
@@ -837,12 +1181,17 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.imageAttachments[0]?.filename).toBe(entry.filename);
     expect(form.state.value.sourceFitPolicy).toEqual({ mode: "crop-fill" });
     expect(form.state.value.upscaleModel).toBe("real-esrgan-x4plus:fp16");
-    const details = wrapper.get(".create-more-settings");
-    expect((details.element as HTMLDetailsElement).open).toBe(true);
-    (details.element as HTMLDetailsElement).open = false;
-    await details.trigger("toggle");
+    // More settings is a disclosure row opening the one sheet now, so the
+    // Upscale reveal lands there instead of in an inline <details>.
+    expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(true);
+    expect(wrapper.findComponent({ name: "AdvancedDrawer" }).exists()).toBe(
+      true,
+    );
+    await wrapper.get(".ms-drawer").trigger("keydown.escape");
     await nextTick();
-    expect((details.element as HTMLDetailsElement).open).toBe(false);
+    expect(wrapper.find("[data-test='create-rail-sheet']").exists()).toBe(
+      false,
+    );
     globalThis.fetch = originalFetch;
   });
 
@@ -1114,6 +1463,279 @@ describe("CreatePage layout and behavior", () => {
     });
     return stubs;
   }
+
+  // ── The result's action bar (web mock rule 1: every view is a link) ────
+
+  /** A ResultCanvas stub that fires the bar's three actions. */
+  function actionBarStubs(): Record<string, Component> {
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.ResultCanvas = defineComponent({
+      name: "ResultCanvas",
+      props: ["mode", "canCopyLink", "canMakeVariations", "resultFilename"],
+      template:
+        '<div data-test="result-canvas" :data-mode="mode" :data-can-copy="String(canCopyLink)" :data-can-vary="String(canMakeVariations)">' +
+        '<button data-test="canvas-download" @click="$emit(\'download\')">d</button>' +
+        '<button data-test="canvas-copy-link" @click="$emit(\'copy-link\')">c</button>' +
+        '<button data-test="canvas-make-variations" @click="$emit(\'make-variations\')">v</button>' +
+        "</div>",
+    });
+    return stubs;
+  }
+
+  it("copies the print's Library link, the shape the Library already opens", async () => {
+    const writeText = vi.fn((_text: string) => Promise.resolve());
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    streamJobsRef.value = [finishedCanvasJob()];
+    const wrapper = mount(CreatePage, {
+      global: { stubs: actionBarStubs() },
+    });
+    await flushPromises();
+
+    expect(
+      wrapper.get("[data-test='result-canvas']").attributes("data-can-copy"),
+    ).toBe("true");
+    await wrapper.get("[data-test='canvas-copy-link']").trigger("click");
+    await flushPromises();
+    const link = writeText.mock.calls.at(-1)![0];
+    const url = new URL(link);
+    expect(url.pathname).toBe("/library");
+    expect(url.searchParams.get("print")).toBe(entry.filename);
+    expect(url.searchParams.get("printHost")).toBe(ORIGIN_HOST_ID);
+    vi.unstubAllGlobals();
+    vi.stubGlobal("prompt", vi.fn());
+    wrapper.unmount();
+  });
+
+  /*
+   * Make 4 variations is the picture on the canvas, made again as a batch. The
+   * count rides THAT submission only — the persisted Make is the person's own
+   * choice and an action on a finished print never rewrites it.
+   */
+  it("makes four variations on one submission without touching the saved count", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [finishedCanvasJob()];
+    const wrapper = mount(CreatePage, {
+      global: { stubs: actionBarStubs() },
+    });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = entry.metadata.model;
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.batchSize = 1;
+    await nextTick();
+
+    expect(
+      wrapper.get("[data-test='result-canvas']").attributes("data-can-vary"),
+    ).toBe("true");
+    await wrapper.get("[data-test='canvas-make-variations']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalledTimes(4);
+    for (const call of submitMock.mock.calls) {
+      expect(call[0].batch_size).toBe(1);
+      expect(call[0].batch_count).toBe(4);
+    }
+    expect(form.state.value.batchSize).toBe(1);
+  });
+
+  it("lets a pinned still go when the output kind changes", async () => {
+    // Seen on hal9000: a finished still stayed on the New CLIP canvas after
+    // switching to Short clip, still offering Make 4 variations — which
+    // would have queued four clips of the current form under a still's
+    // action bar. A kind change is a new subject; the pin goes with the old.
+    const still = installedModelRow(entry.metadata.model, "flux");
+    const clip = installedModelRow("wan22-i2v-a14b:q8", "wan");
+    hostModelsMock.mockResolvedValue([still, clip]);
+    streamJobsRef.value = [finishedCanvasJob()];
+    const wrapper = mount(CreatePage, { global: { stubs: actionBarStubs() } });
+    await flushPromises();
+    streamJobsRef.value = [];
+    await flushPromises();
+    const canvas = wrapper.get("[data-test='result-canvas']");
+    expect(canvas.attributes("data-mode")).toBe("result");
+
+    const button = wrapper
+      .get("[data-test='web-output-kind']")
+      .findAll("button")
+      .find((b) => b.text() === "Short clip")!;
+    await button.trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='result-canvas']").attributes("data-mode"),
+    ).toBe("empty");
+  });
+
+  it("downloads a settled print from its host when the canvas holds no bytes", async () => {
+    // Review finding: Download was always offered but returned early without
+    // inline bytes — and a durable completion settles with `image: ""` and
+    // a filename. The page fetches the file from the rendering host.
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [finishedCanvasJob({ image: "" })];
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => ({
+      ok: true,
+      blob: async () => new Blob(["png-bytes"]),
+    }));
+    globalThis.fetch = fetchMock as never;
+    const createObjectURL = vi.fn((_blob: Blob) => "blob:print-1");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    try {
+      const wrapper = mount(CreatePage, {
+        global: { stubs: actionBarStubs() },
+      });
+      await flushPromises();
+      await wrapper.get("[data-test='canvas-download']").trigger("click");
+      await flushPromises();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0]?.[0])).toContain(entry.filename);
+      expect(createObjectURL).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      vi.unstubAllGlobals();
+      vi.stubGlobal("prompt", vi.fn());
+    }
+  });
+
+  it("draws a settled print from its keyless host when the canvas holds no bytes", async () => {
+    // A restored done job (persist strips the base64) and a durable completion
+    // both reach the canvas with no `image`; the old source was
+    // `data:image/png;base64,undefined` — a broken picture on every reload.
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [finishedCanvasJob({ image: undefined })];
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+    expect(canvas.props("mode")).toBe("result");
+    expect(canvas.props("resultSrc")).toBe(
+      `/api/gallery/image/${encodeURIComponent(entry.filename)}`,
+    );
+    expect(String(canvas.props("resultVideoSrc") ?? "")).not.toContain(
+      "undefined",
+    );
+  });
+
+  it("streams a settled print from a keyed machine through the media ticket", async () => {
+    // The same door the Lightbox uses: an <img>/<video> cannot send the key,
+    // so a keyed machine issues a short-lived ticket and the clip can
+    // Range-stream instead of being buffered whole into memory.
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "sk-studio",
+    });
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [
+      { ...finishedCanvasJob({ image: undefined }), hostId: studio.id },
+    ];
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: "t1", expires_at: 1_700_000_000 }),
+    }));
+    globalThis.fetch = fetchMock as never;
+    try {
+      const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+      await flushPromises();
+      const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+      expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+        "http://studio:7680/api/gallery/media-token",
+      );
+      const src = String(canvas.props("resultSrc"));
+      expect(src.startsWith("http://studio:7680/api/gallery/image/")).toBe(
+        true,
+      );
+      expect(src).toContain("media_token=t1");
+      expect(src).toContain("expires=1700000000");
+      expect(src).not.toContain("sk-studio");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("never lets a refused Make 4 leak into the next plain Generate", async () => {
+    // Review finding: the count lived in a page-level ref that `onSubmit`'s
+    // early return (another submission still planning) never cleared, so the
+    // NEXT ordinary Generate queued four prints nobody asked for. The count
+    // rides the call now.
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [finishedCanvasJob()];
+    const planned = await placementPreviewMock.getMockImplementation()!();
+    let release: (value: Record<string, unknown>) => void = () => {};
+    placementPreviewMock.mockImplementationOnce(
+      () =>
+        new Promise<Record<string, unknown>>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const wrapper = mount(CreatePage, {
+      global: { stubs: actionBarStubs() },
+    });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = entry.metadata.model;
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.batchSize = 1;
+    await nextTick();
+
+    // A plain Generate is still planning…
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await nextTick();
+    // …when Make 4 variations is clicked and refused by the in-flight guard.
+    await wrapper.get("[data-test='canvas-make-variations']").trigger("click");
+    release(planned);
+    await flushPromises();
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    expect(submitMock.mock.calls[0]?.[0].batch_count ?? 1).toBe(1);
+
+    submitMock.mockClear();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    expect(submitMock.mock.calls[0]?.[0].batch_count ?? 1).toBe(1);
+  });
+
+  it("offers no variations for a clip, or on a recipe that renders one at a time", async () => {
+    streamJobsRef.value = [
+      finishedCanvasJob({ format: "mp4", video_frames: 81 }),
+    ];
+    const clip = mount(CreatePage, { global: { stubs: actionBarStubs() } });
+    await flushPromises();
+    expect(
+      clip.get("[data-test='result-canvas']").attributes("data-can-vary"),
+    ).toBe("false");
+    clip.unmount();
+
+    // A Qwen edit recipe renders one print at a time, so four would be a
+    // promise the admission gate coerces back to one.
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("qwen-image-edit:q8", "qwen-image-edit"),
+    ]);
+    streamJobsRef.value = [finishedCanvasJob()];
+    const edit = mount(CreatePage, { global: { stubs: actionBarStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "qwen-image-edit:q8";
+    form.state.value.modelFamily = "qwen-image-edit";
+    await nextTick();
+    expect(
+      edit.get("[data-test='result-canvas']").attributes("data-can-vary"),
+    ).toBe("false");
+    edit.unmount();
+  });
 
   it("offers the print actions when the finished render is right-clicked", async () => {
     const originalFetch = globalThis.fetch;
@@ -1428,6 +2050,41 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.batchSize).toBe(4);
   });
 
+  /*
+   * Reset is "reset everything": add-on looks are edited from their own row
+   * rather than the rail, but they are still a setting of this render, and a
+   * Reset that left one attached would send a look the user believed cleared.
+   * The undo puts them back with the rest.
+   */
+  it("clears the add-on looks on reset, and undo restores them", async () => {
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.ControlsAside = defineComponent({
+      name: "ControlsAside",
+      template:
+        "<aside data-test='controls-stub'><button data-test='controls-reset' @click=\"$emit('reset-settings')\">reset</button></aside>",
+    });
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+
+    const form = useGenerateForm();
+    const looks = [
+      { path: "film-grain.safetensors", scale: 0.8, trainedWords: [] },
+    ];
+    form.state.value.prompt = "a lighthouse in a storm";
+    form.state.value.loras = looks;
+
+    await wrapper.get("[data-test='controls-reset']").trigger("click");
+    expect(form.state.value.loras).toEqual([]);
+    expect(form.state.value.prompt).toBe("a lighthouse in a storm");
+
+    const notifications = useNotifications();
+    const settingsToast = notifications.toasts.find((t) =>
+      /settings/i.test(t.text),
+    );
+    runToastAction(settingsToast!.id);
+    expect(form.state.value.loras).toEqual(looks);
+  });
+
   it("returns the canvas authority to the model on reset, and undo restores it (#1166)", async () => {
     const stubs: Record<string, Component> = pageStubs();
     stubs.ControlsAside = defineComponent({
@@ -1575,8 +2232,16 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a cat";
     await nextTick();
 
+    // The field is inline beside the kind strip, and the strip moved out of
+    // the page header onto the left column's own first row (the mock).
     const title = wrapper.get("[data-test='print-title']");
-    expect(title.attributes("placeholder")).toBe("Name (optional)");
+    expect(title.attributes("placeholder")).toBe("Untitled print");
+    expect(wrapper.get(".create-kindbar").element.contains(title.element)).toBe(
+      true,
+    );
+    expect(wrapper.get(".create-header").element.contains(title.element)).toBe(
+      false,
+    );
     await title.setValue("  Smurf 04  ");
     expect(form.state.value.title).toBe("  Smurf 04  ");
     expect(wrapper.find("[data-test='print-title-error']").exists()).toBe(
@@ -1605,6 +2270,41 @@ describe("CreatePage layout and behavior", () => {
     expect(submitMock.mock.calls[0]?.[0]).toMatchObject({
       title: "Valid again",
     });
+  });
+
+  it("puts back a restored title on Escape, not an empty string", async () => {
+    // Review finding: the revert value was only captured on blur, so a title
+    // restored from a saved draft (never blurred) reverted to "" — and that
+    // empty string persisted. The value is captured when the field is
+    // entered.
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.title = "Smurf 04";
+    await nextTick();
+    const title = wrapper.get("[data-test='print-title']");
+    await title.trigger("focus");
+    await title.setValue("Smurf 04 draft");
+    await title.trigger("keydown", { key: "Escape" });
+    expect(form.state.value.title).toBe("Smurf 04");
+  });
+
+  it("counts the saved starters on first paint and after the sheet closes", async () => {
+    // Review finding: the row read 0 until someone opened it, and stayed
+    // stale after a save or delete inside the sheet.
+    saveGenerationTemplate("one", useGenerateForm().state.value);
+    saveGenerationTemplate("two", useGenerateForm().state.value);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const row = wrapper.get("[data-test='disclosure-starters']");
+    expect(row.text()).toContain("2");
+    await row.trigger("click");
+    saveGenerationTemplate("three", useGenerateForm().state.value);
+    await wrapper.get(".ms-drawer").trigger("keydown.escape");
+    await nextTick();
+    expect(wrapper.get("[data-test='disclosure-starters']").text()).toContain(
+      "3",
+    );
   });
 
   it("blocks a submit for an invalid title that never went through the field", async () => {
@@ -1759,16 +2459,12 @@ describe("CreatePage layout and behavior", () => {
 
     expect(submitMock).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("STG blocks:");
-    if (width >= 900) {
-      expect(
-        (wrapper.get(".create-more-settings").element as HTMLDetailsElement)
-          .open,
-      ).toBe(true);
-    } else {
-      expect(
-        wrapper.getComponent({ name: "AdvancedDrawer" }).props("mobile"),
-      ).toBe(true);
-    }
+    // Both widths reveal the same settings in the same place now: the one
+    // sheet the More settings row opens. There is no second Advanced host.
+    expect(wrapper.findAll("[data-test='create-rail-sheet']")).toHaveLength(1);
+    expect(wrapper.findAllComponents({ name: "AdvancedDrawer" })).toHaveLength(
+      1,
+    );
     wrapper.unmount();
     vi.unstubAllGlobals();
     vi.stubGlobal("prompt", vi.fn());
@@ -1821,11 +2517,43 @@ describe("CreatePage layout and behavior", () => {
 
     expect(submitMock).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain(
-      "This checkpoint is image-to-video only. Attach a source image to use as the first frame.",
+      "This style is image-to-video only. Attach a source image to use as the first frame.",
     );
 
     form.state.value.imageAttachments = [
       { kind: "upload", filename: "open.png", base64: "FIRST" },
+    ];
+    await nextTick();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(submitMock).toHaveBeenCalled();
+  });
+
+  // A 3-D style reconstructs a shape from a picture — it is not an
+  // image-to-VIDEO checkpoint, and the advisory must say so.
+  it("holds Generate for a required 3-D style with the mesh-specific advisory", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("hunyuan3d-mini-turbo:fp16", "hunyuan3d"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "hunyuan3d-mini-turbo:fp16";
+    form.state.value.modelFamily = "hunyuan3d";
+    form.state.value.sourceImageCapability = "required";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain(
+      "This style builds from a picture. Attach a source image to give it a shape.",
+    );
+    expect(wrapper.text()).not.toContain("image-to-video");
+
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "reference.png", base64: "REFERENCE" },
     ];
     await nextTick();
     await wrapper.get("[data-test='composer-submit']").trigger("click");
@@ -1860,7 +2588,7 @@ describe("CreatePage layout and behavior", () => {
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).not.toContain("This checkpoint is image-to-video");
+    expect(wrapper.text()).not.toContain("This style is image-to-video");
     expect(submitMock).toHaveBeenCalled();
   });
 
@@ -2523,7 +3251,7 @@ describe("CreatePage layout and behavior", () => {
     expect(submitMock).not.toHaveBeenCalled();
   });
 
-  it("opens prompt expansion while an earlier print is running", async () => {
+  it("rewrites the prompt while an earlier print is running", async () => {
     streamJobsRef.value = [
       {
         id: "already-running",
@@ -2566,13 +3294,12 @@ describe("CreatePage layout and behavior", () => {
     await nextTick();
 
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
-    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
-      true,
-    );
+    await flushPromises();
+    expect(expandPromptMock).toHaveBeenCalledTimes(1);
+    expect(form.state.value.prompt).toBe("north light");
   });
 
-  it("preserves reviewed variations as stale when the model changes", async () => {
+  it("preserves reviewed variations as stale when the style changes", async () => {
     hostModelsMock.mockResolvedValue([
       installedModelRow("flux-dev:q4", "flux"),
     ]);
@@ -2594,13 +3321,19 @@ describe("CreatePage layout and behavior", () => {
     await flushPromises();
 
     expect(submitMock).not.toHaveBeenCalled();
-    expect(wrapper.text()).toContain("Model changed");
+    expect(wrapper.text()).toContain("Style changed");
     expect(
       wrapper.getComponent({ name: "ResultCanvas" }).props("variations"),
     ).toHaveLength(3);
   });
 
-  it("sends the active style as a directive on the main-prompt expand", async () => {
+  /*
+   * The composer preset that once travelled as a natural-language style
+   * directive is retired, so the expansion request carries no look at all —
+   * neither in the prompt nor beside it. The batch-expand payload above is
+   * asserted with `toEqual`, which would fail on a style key.
+   */
+  it("opens the rewrite with no style directive to send", async () => {
     hostModelsMock.mockResolvedValue([
       installedModelRow("sdxl-base:fp16", "sdxl"),
     ]);
@@ -2610,17 +3343,16 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.model = "sdxl-base:fp16";
     form.state.value.modelFamily = "sdxl";
     form.state.value.prompt = "a lighthouse";
-    form.state.value.stylePreset = "cinematic";
     await nextTick();
 
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
+    await flushPromises();
 
-    const modal = wrapper.getComponent({ name: "ExpandModal" });
-    expect(modal.props("open")).toBe(true);
-    // The chip travels as natural language the server weaves into the
-    // expander's system message — never as a literal prompt suffix.
-    expect(modal.props("styleDirective")).toBe(styleHint("cinematic"));
+    const [payload] = expandPromptMock.mock.calls[0] as unknown as [
+      Record<string, unknown>,
+    ];
+    expect(Object.keys(payload)).not.toContain("style");
+    expect(Object.keys(payload)).not.toContain("styleDirective");
   });
 
   it("resolves image-conditioned video expansion without sending source bytes", async () => {
@@ -2637,14 +3369,21 @@ describe("CreatePage layout and behavior", () => {
     await nextTick();
 
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
+    await flushPromises();
 
-    const modal = wrapper.getComponent({ name: "ExpandModal" });
-    expect(modal.props("task")).toBe("image-to-video");
-    expect(JSON.stringify(modal.props())).not.toContain("secret-image-bytes");
+    const [payload] = expandPromptMock.mock.calls[0] as unknown as [
+      Record<string, unknown>,
+    ];
+    expect(payload.task).toBe("image-to-video");
+    expect(JSON.stringify(payload)).not.toContain("secret-image-bytes");
   });
 
-  it("bakes and clears the chip when a quick expansion is applied", async () => {
+  /*
+   * A quick expansion rewrites the prompt and nothing else. The bake-and-clear
+   * that used to move a preset's curated negative into the form went with the
+   * preset; the negative the user typed is theirs, before and after undo.
+   */
+  it("rewrites only the prompt on a quick expansion, and undo puts it back", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     const form = useGenerateForm();
@@ -2652,35 +3391,163 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.modelFamily = "sdxl";
     form.state.value.prompt = "a lighthouse";
     form.state.value.negativePrompt = "text";
-    form.state.value.stylePreset = "cinematic";
     await nextTick();
 
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["storm light over a cinematic coast"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over a cinematic coast");
-    await nextTick();
+    await flushPromises();
 
     expect(form.state.value.prompt).toBe("storm light over a cinematic coast");
-    // Bake-and-clear: the rewrite absorbed the look, so the chip drops — and
-    // the curated negative moves into the form, its only remaining home.
-    expect(form.state.value.stylePreset).toBeNull();
-    expect(form.state.value.negativePrompt).toBe(
-      "text, anime, cartoon, graphic, washed out",
-    );
-    // Applied exactly once — the cleared chip can't merge it again at submit.
-    expect(form.toRequest().negative_prompt).toBe(
-      "text, anime, cartoon, graphic, washed out",
-    );
+    expect(form.state.value.negativePrompt).toBe("text");
+    expect(form.toRequest().negative_prompt).toBe("text");
 
     await wrapper.get("[data-test='composer-undo']").trigger("click");
     await nextTick();
     expect(form.state.value.prompt).toBe("a lighthouse");
-    expect(form.state.value.stylePreset).toBe("cinematic");
     expect(form.state.value.negativePrompt).toBe("text");
   });
 
+  /*
+   * Batch 1 is desktop's "Write more for me": one request for ONE variation,
+   * applied straight to the prompt bed with undo beside it. Web used to open a
+   * dialog with a checkbox, a 1/3/5 count and a family override — a count of
+   * five for a one-print render was a 500 from the machine, and the checkbox
+   * armed a generate-time rewrite whose result never appeared in the composer.
+   */
+  it("rewrites the prompt in place, asking the machine for exactly one version", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    const [payload] = expandPromptMock.mock.calls[0] as unknown as [
+      Record<string, unknown>,
+    ];
+    expect(payload).toMatchObject({
+      prompt: "a lighthouse",
+      model_family: "flux",
+      variations: 1,
+      task: "text-to-image",
+    });
+    expect(form.state.value.prompt).toBe("north light");
+    expect(form.state.value.originalPrompt).toBe("a lighthouse");
+    expect(submitMock).not.toHaveBeenCalled();
+
+    await wrapper.get("[data-test='composer-undo']").trigger("click");
+    await nextTick();
+    expect(form.state.value.prompt).toBe("a lighthouse");
+    expect(form.state.value.originalPrompt).toBeNull();
+  });
+
+  it("keeps no prompt-expansion dialog on the page at all", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.findComponent({ name: "ExpandModal" }).exists()).toBe(false);
+  });
+
+  /*
+   * Desktop's mid-flight guard: a rewrite that lands after the style moved
+   * would install words written for a different checkpoint. Refuse it by
+   * name and leave the composer exactly as the person left it.
+   */
+  it("refuses a rewrite whose style changed while it was running", async () => {
+    let release!: (value: { original: string; expanded: string[] }) => void;
+    expandPromptMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+      installedModelRow("sdxl-base:fp16", "sdxl"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    await nextTick();
+    release({ original: "a lighthouse", expanded: ["north light"] });
+    await flushPromises();
+
+    expect(form.state.value.prompt).toBe("a lighthouse");
+    expect(form.state.value.originalPrompt).toBeNull();
+    expect(wrapper.find("[data-test='composer-undo']").exists()).toBe(false);
+    expect(wrapper.text()).toContain("changed while the rewrite was running");
+  });
+
+  it("names the machine in the composer while the rewrite runs", async () => {
+    let release!: (value: { original: string; expanded: string[] }) => void;
+    expandPromptMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    const composer = wrapper.getComponent({ name: "ComposerCard" });
+    expect(composer.props("running")).toBe(true);
+    expect(composer.props("expansionHostLabel")).toBe("this server");
+    expect(wrapper.get("[data-test='composer-expand-progress']").text()).toBe(
+      "Writing more on this server…",
+    );
+
+    release({ original: "a lighthouse", expanded: ["north light"] });
+    await flushPromises();
+    expect(composer.props("running")).toBe(false);
+  });
+
+  it("states an expansion failure in the composer instead of a dialog", async () => {
+    expandPromptMock.mockRejectedValueOnce(new Error("expander is busy"));
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    expect(form.state.value.prompt).toBe("a lighthouse");
+    expect(wrapper.text()).toContain("expander is busy");
+  });
   it("retires dormant original-prompt provenance when a new prompt is authored", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
@@ -2706,8 +3573,11 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.originalPrompt = "an earlier generated print";
     await nextTick();
 
+    // Add-on looks is the one LoRA door now (More settings has none), so
+    // the trigger phrase comes from the picker inside that row's sheet.
+    await wrapper.get("[data-test='disclosure-loras']").trigger("click");
     wrapper
-      .getComponent({ name: "AdvancedDrawer" })
+      .getComponent({ name: "LoraPicker" })
       .vm.$emit("append-prompt", "cinematic light");
     await nextTick();
 
@@ -2725,12 +3595,12 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a lighthouse";
     await nextTick();
 
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["a lighthouse in storm light"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "a lighthouse in storm light");
-    await nextTick();
+    await flushPromises();
 
     wrapper
       .getComponent({ name: "ComposerCard" })
@@ -2784,7 +3654,7 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.originalPrompt).toBe("root lighthouse idea");
   });
 
-  it("bakes and clears an active style when a Remix is applied", async () => {
+  it("leaves the typed negative alone when a Remix is applied", async () => {
     hostModelsMock.mockResolvedValue([
       installedModelRow("sdxl-base:fp16", "sdxl"),
     ]);
@@ -2795,7 +3665,6 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.modelFamily = "sdxl";
     form.state.value.prompt = "a lighthouse";
     form.state.value.negativePrompt = "text";
-    form.state.value.stylePreset = "cinematic";
     await nextTick();
 
     wrapper.getComponent({ name: "ComposerCard" }).vm.$emit("remix");
@@ -2817,18 +3686,14 @@ describe("CreatePage layout and behavior", () => {
     });
     await nextTick();
 
-    expect(form.state.value.stylePreset).toBeNull();
-    expect(form.state.value.negativePrompt).toBe(
-      "text, anime, cartoon, graphic, washed out",
-    );
+    expect(form.state.value.negativePrompt).toBe("text");
     expect(form.toRequest()).toMatchObject({
       prompt: "storm light over a cinematic coast",
-      negative_prompt: "text, anime, cartoon, graphic, washed out",
+      negative_prompt: "text",
     });
 
     await wrapper.get("[data-test='composer-undo']").trigger("click");
     await nextTick();
-    expect(form.state.value.stylePreset).toBe("cinematic");
     expect(form.state.value.negativePrompt).toBe("text");
   });
 
@@ -2861,10 +3726,12 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.modelFamily = fluxModel.family;
     form.state.value.prompt = "a lighthouse";
     await nextTick();
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["storm light over the harbor"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await flushPromises();
     await nextTick();
     form.applyModelDefaults(catalogModel);
     await nextTick();
@@ -2907,16 +3774,16 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.model = fluxModel.name;
     form.state.value.modelFamily = fluxModel.family;
     form.state.value.prompt = "a lighthouse";
-    form.state.value.stylePreset = "cinematic";
     form.state.value.negativePrompt = "text";
     await nextTick();
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["storm light over the harbor"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await flushPromises();
     await nextTick();
     expect(form.state.value.originalPrompt).toBe("a lighthouse");
-    expect(form.state.value.stylePreset).toBeNull();
     expect(wrapper.find("[data-test='composer-undo']").exists()).toBe(true);
 
     wrapper
@@ -2925,10 +3792,9 @@ describe("CreatePage layout and behavior", () => {
     await nextTick();
 
     // The recalled prompt is the user's own: no banner, no undo, no
-    // provenance, and the chip the bake cleared comes back with its negative.
+    // provenance, and the negative they typed is still theirs.
     expect(form.state.value.prompt).toBe("yesterday's harbour");
     expect(form.state.value.originalPrompt).toBeNull();
-    expect(form.state.value.stylePreset).toBe("cinematic");
     expect(form.state.value.negativePrompt).toBe("text");
     expect(
       wrapper.find("[data-test='web-quick-expansion-stale']").exists(),
@@ -2938,11 +3804,10 @@ describe("CreatePage layout and behavior", () => {
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
     expect(submitMock).toHaveBeenCalledTimes(1);
-    // The re-armed chip applies the look at submit, exactly as it would have
-    // before the expansion ever ran; nothing from the rewrite rides along.
+    // The recalled prompt goes out exactly as recalled; nothing from the
+    // abandoned rewrite rides along.
     const request = submitMock.mock.calls[0]?.[0];
-    expect(request.prompt).toContain("yesterday's harbour");
-    expect(request.prompt).toContain("cinematic");
+    expect(request.prompt).toBe("yesterday's harbour");
     expect(request.original_prompt).toBeUndefined();
     expect(request.prompt_transform).toBeUndefined();
   });
@@ -2970,10 +3835,12 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.modelFamily = fluxModel.family;
     form.state.value.prompt = "a lighthouse";
     await nextTick();
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["storm light over the harbor"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await flushPromises();
     await nextTick();
 
     wrapper
@@ -3021,10 +3888,12 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a lighthouse";
     await nextTick();
 
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["storm light over the harbor"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await flushPromises();
     await nextTick();
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
@@ -3071,10 +3940,12 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a lighthouse";
     await nextTick();
 
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["storm light over the harbor"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await flushPromises();
     useHostRouting().setTarget(ORIGIN_HOST_ID);
     await nextTick();
 
@@ -3094,7 +3965,7 @@ describe("CreatePage layout and behavior", () => {
     });
   });
 
-  it("carries the preset negative when a variation is adopted into the composer", async () => {
+  it("leaves the typed negative alone when a variation is adopted", async () => {
     hostModelsMock.mockResolvedValue([
       installedModelRow("sdxl-base:fp16", "sdxl"),
     ]);
@@ -3105,7 +3976,6 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.modelFamily = "sdxl";
     form.state.value.prompt = "a lighthouse";
     form.state.value.negativePrompt = "text";
-    form.state.value.stylePreset = "cinematic";
     form.state.value.batchSize = 3;
     await nextTick();
 
@@ -3116,13 +3986,8 @@ describe("CreatePage layout and behavior", () => {
     canvas.vm.$emit("use-variation", 0);
     await nextTick();
 
-    // The variation already carries the baked look, so the chip clears — the
-    // curated negative has to come with it.
     expect(form.state.value.prompt).toBe(variations[0]);
-    expect(form.state.value.stylePreset).toBeNull();
-    expect(form.state.value.negativePrompt).toBe(
-      "text, anime, cartoon, graphic, washed out",
-    );
+    expect(form.state.value.negativePrompt).toBe("text");
   });
 
   it("resets to a fresh print on the mold:new-print event, keeping the model", async () => {
@@ -3307,7 +4172,10 @@ describe("CreatePage layout and behavior", () => {
     ]);
   }
 
-  async function mountFiling(title = "Smurfs") {
+  /* File under is the rail's own disclosure row now, so the group itself is
+   * inside the sheet that row opens. Every filing test that touches a control
+   * opens it first; the ones that only submit do not need to. */
+  async function mountFiling(title = "Smurfs", openGroup = true) {
     filingFleet();
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
@@ -3317,6 +4185,9 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a cat";
     form.state.value.title = title;
     await flushPromises();
+    if (openGroup) {
+      await wrapper.get("[data-test='disclosure-file-under']").trigger("click");
+    }
     return wrapper;
   }
 
@@ -3329,13 +4200,18 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.find("[data-test='file-under-group']").exists()).toBe(false);
   });
 
-  it("renders File under inside the controls region once a host can file", async () => {
-    const wrapper = await mountFiling();
-    // Its home is the controls rail's slot — after the essentials, above the
-    // inline Advanced column (spec §06 web note).
+  it("gives File under its own rail row once a host can file", async () => {
+    const wrapper = await mountFiling("Smurfs", false);
+    // Its home is a bordered disclosure row in the rail, between Starters and
+    // More settings; the group itself opens over the page.
+    const row = wrapper.get("[data-test='disclosure-file-under']");
+    expect(row.text()).toContain("File under");
+    expect(wrapper.find("[data-test='file-under-group']").exists()).toBe(false);
+
+    await row.trigger("click");
     expect(
       wrapper
-        .get("[data-test='controls-stub']")
+        .get("[data-test='create-rail-sheet']")
         .find("[data-test='file-under-group']")
         .exists(),
     ).toBe(true);
@@ -3443,6 +4319,7 @@ describe("CreatePage layout and behavior", () => {
     });
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
+    await wrapper.get("[data-test='disclosure-file-under']").trigger("click");
     const chips = wrapper
       .findAll("[data-test='file-under-tag'], [data-test='file-under-ghost']")
       .map((chip) => chip.text());
@@ -3507,6 +4384,12 @@ describe("CreatePage layout and behavior", () => {
 });
 
 // ── Multi-host generation routing (spec §08) ────────────────────────────────
+/** The explicit machine an `/api/expand` call went to (arg 3), or `undefined`
+ *  where the origin's relative dispatch is used. */
+function expandTargetOfCall(index: number): unknown {
+  return (expandPromptMock.mock.calls[index] as unknown as unknown[])?.[2];
+}
+
 describe("CreatePage host routing", () => {
   const flux = {
     name: "flux2-klein:q4",
@@ -3535,6 +4418,18 @@ describe("CreatePage host routing", () => {
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
+    // The expansion mock is module-level: without this, one describe's calls
+    // are still on the list when the next reads `calls[0]`.
+    expandPromptMock.mockClear();
+    expandPromptMock.mockImplementation(
+      async (request: { variations: number }) => ({
+        original: "a lighthouse",
+        expanded: ["north light", "storm light", "harbor light"].slice(
+          0,
+          request.variations,
+        ),
+      }),
+    );
     promptHistoryApiMock.mockReset();
     promptHistoryApiMock.mockResolvedValue({ entries: [] });
     placementPreviewMock.mockReset();
@@ -3660,9 +4555,7 @@ describe("CreatePage host routing", () => {
     await wrapper.get("[data-test='composer-expand']").trigger("click");
     await flushPromises();
 
-    const modal = wrapper.getComponent({ name: "ExpandModal" });
-    expect(modal.props("open")).toBe(true);
-    expect(modal.props("target")).toEqual({
+    expect(expandTargetOfCall(0)).toEqual({
       baseUrl: "http://studio:7680",
       apiKey: "sk-studio",
     });
@@ -3690,9 +4583,9 @@ describe("CreatePage host routing", () => {
     await flushPromises();
 
     // Unknown is never "missing": the route the generation earned is kept.
-    expect(
-      wrapper.getComponent({ name: "ExpandModal" }).props("target"),
-    ).toEqual({ baseUrl: "http://localhost:3000" });
+    expect(expandTargetOfCall(0)).toEqual({
+      baseUrl: "http://localhost:3000",
+    });
   });
 
   it("keeps the print on the generation machine after a rerouted quick expansion", async () => {
@@ -3714,16 +4607,18 @@ describe("CreatePage host routing", () => {
     form.state.value.prompt = "a lighthouse";
     await nextTick();
 
+    expandPromptMock.mockResolvedValueOnce({
+      original: "a lighthouse",
+      expanded: ["storm light over the harbor"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
     await flushPromises();
-    expect(
-      wrapper.getComponent({ name: "ExpandModal" }).props("target"),
-    ).toEqual({ baseUrl: "http://studio:7680", apiKey: "sk-studio" });
+    expect(expandTargetOfCall(0)).toEqual({
+      baseUrl: "http://studio:7680",
+      apiKey: "sk-studio",
+    });
+    expect(form.state.value.prompt).toBe("storm light over the harbor");
 
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over the harbor");
-    await nextTick();
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
 
@@ -3780,9 +4675,8 @@ describe("CreatePage host routing", () => {
     await wrapper.get("[data-test='composer-expand']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
-      false,
-    );
+    expect(expandPromptMock).not.toHaveBeenCalled();
+    expect(form.state.value.prompt).toBe("a lighthouse");
     expect(wrapper.get("[data-test='web-expansion-pull']").text()).toContain(
       "qwen3-expand:q8",
     );
@@ -3811,9 +4705,7 @@ describe("CreatePage host routing", () => {
     await wrapper.get("[data-test='composer-expand']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
-      false,
-    );
+    expect(expandPromptMock).not.toHaveBeenCalled();
     const notice = wrapper.get("[data-test='web-expansion-pull']");
     expect(notice.text()).toContain("qwen3-expand:q8");
     expect(notice.text()).toContain("Studio");
@@ -3976,6 +4868,28 @@ describe("CreatePage host routing", () => {
       (m) => m.name,
     );
     expect(names.sort()).toEqual(["flux2-klein:q4", "z-image:bf16"]);
+  });
+
+  it("names the machine Auto would actually route to, not the first registered one", async () => {
+    // Review finding: under Auto / Most capable no host id matches the target
+    // and the card fell through to `hosts[0]`, so its name, meter and queue
+    // described a machine that may not render the print. The form's style is
+    // only on Studio here, so Auto resolves there.
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    localStorage.setItem("mold.web.generateTarget.v1", AUTO_TARGET_ID);
+    hostModelsMock.mockImplementation(async (host: { id: string }) =>
+      host.id === ORIGIN_HOST_ID ? [flux] : [zimage],
+    );
+    const form = useGenerateForm();
+    form.state.value.model = zimage.name;
+    form.state.value.modelFamily = "zimage";
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.get("[data-test='machine-card-name']").text()).toBe(
+      "Studio",
+    );
+    void studio;
   });
 
   it("shows only the pinned machine's models", async () => {
@@ -4282,9 +5196,21 @@ describe("CreatePage host routing", () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
-    // AdvancedDrawer is stubbed out entirely here, so finding the well proves
-    // it lives in the primary form.
-    expect(wrapper.find("[data-test='identity-panel']").exists()).toBe(true);
+    // The face is media the person attaches, so it sits with the source wells
+    // in Start from a photo — never among the Advanced knobs, which is where
+    // only its weight and start step belong. AdvancedDrawer is stubbed out
+    // entirely here, so finding the well beside SourceMediaPanel proves it.
+    await wrapper.get("[data-test='disclosure-source']").trigger("click");
+    const sheet = wrapper.get("[data-test='create-rail-sheet']");
+    expect(sheet.find("[data-test='identity-panel']").exists()).toBe(true);
+    const source = sheet.find("[data-test='source-media-panel']");
+    if (source.exists()) {
+      expect(
+        source.element.compareDocumentPosition(
+          sheet.get("[data-test='identity-panel']").element,
+        ) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
   });
 });
 
@@ -4385,6 +5311,7 @@ describe("CreatePage 3-D mesh prints", () => {
       queue: { heterogeneous_batch_max_outputs: 64 },
     });
     submitMock.mockClear();
+    expandPromptMock.mockClear();
     routeQuery.value = {};
   });
 
@@ -4570,9 +5497,7 @@ describe("CreatePage 3-D mesh prints", () => {
     expect(useNotifications().toasts.map((item) => item.text)).toContain(
       PROMPT_IGNORED_TRANSFORM_REASON,
     );
-    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
-      false,
-    );
+    expect(expandPromptMock).not.toHaveBeenCalled();
     // The host has no expander at all in this fixture, so the pre-fix path
     // would have raised the pull offer before ever looking at the recipe.
     expect(wrapper.find("[data-test='web-expansion-pull']").exists()).toBe(
@@ -4623,6 +5548,28 @@ describe("CreatePage 3-D mesh prints", () => {
   });
 });
 
+/**
+ * The body of one scoped-CSS rule in a single-file component, or null when the
+ * selector has no rule at all. Used to prove the sticky composer's ancestors
+ * never grow an `overflow` — the one thing that makes `position: sticky`
+ * silently do nothing.
+ */
+/* The global sheet is read from disk: a `?raw` import of a `.css` file goes
+ * through Vite's CSS pipeline and does not come back as its own text. */
+const webStyleSource = readFileSync(
+  [
+    resolve(process.cwd(), "src/style.css"),
+    resolve(process.cwd(), "web/src/style.css"),
+  ].find((candidate) => existsSync(candidate)) ?? "src/style.css",
+  "utf8",
+);
+
+function scopedRule(source: string, selector: string): string | null {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`\\n${escaped}\\s*\\{([^}]*)\\}`).exec(source);
+  return match ? (match[1] ?? "") : null;
+}
+
 function pageStubs() {
   return {
     ColdStartGuide: {
@@ -4637,12 +5584,14 @@ function pageStubs() {
         "busyLabel",
         "disabledReason",
         "expanded",
+        "running",
+        "expansionHostLabel",
         "placeholder",
         "promptOptional",
         "transformBlockedReason",
       ],
       template:
-        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="transformBlockedReason" data-test="page-transform-blocked">{{ transformBlockedReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-remix" @click="$emit(\'remix\')">remix</button><button v-if="expanded" data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
+        '<div><slot name="style"/><slot name="shape"/><slot name="count"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="transformBlockedReason" data-test="page-transform-blocked">{{ transformBlockedReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-remix" @click="$emit(\'remix\')">remix</button><button v-if="expanded" data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button><p v-if="running" role="status" data-test="composer-expand-progress">{{ expansionHostLabel ? (`Writing more on ${expansionHostLabel}\u2026`) : "Writing more on the selected machine\u2026" }}</p></div>',
       // The page calls these through its template ref on submit / new-print;
       // a stub without them throws an unhandled TypeError mid-run.
       methods: { record: vi.fn(), focus: vi.fn() },
@@ -4676,11 +5625,8 @@ function pageStubs() {
     },
     ControlsAside: {
       name: "ControlsAside",
-      props: ["output", "clipCount"],
-      // The File under group rides the rail's `file-under` slot, so the stub
-      // has to render it for placement to be observable.
-      template:
-        "<aside data-test='controls-stub'><slot name='file-under'/></aside>",
+      props: ["output", "clipCount", "group"],
+      template: "<aside data-test='controls-stub' :data-group='group'></aside>",
     },
     AdvancedDrawer: {
       name: "AdvancedDrawer",
@@ -4693,19 +5639,6 @@ function pageStubs() {
       emits: ["cancel", "retry", "dismiss", "open", "shared-open"],
       template: "<div data-test='activity-stub' />",
     },
-    ExpandModal: {
-      name: "ExpandModal",
-      props: [
-        "open",
-        "prompt",
-        "expand",
-        "currentModel",
-        "styleDirective",
-        "task",
-        "target",
-      ],
-      template: "<div />",
-    },
     ImagePickerModal: {
       name: "ImagePickerModal",
       props: ["open"],
@@ -4713,7 +5646,15 @@ function pageStubs() {
       template: "<div />",
     },
     MaskEditorModal: { name: "MaskEditorModal", template: "<div />" },
-    GenerationTemplatesPanel: { template: "<div />" },
+    GenerationTemplatesPanel: {
+      name: "GenerationTemplatesPanel",
+      template: "<div data-test='templates-panel' />",
+    },
+    LoraPicker: {
+      name: "LoraPicker",
+      props: ["family", "modelValue"],
+      template: "<div data-test='lora-picker' />",
+    },
     RecentGrid: RecentGridStub,
     Lightbox: { template: "<div />" },
     RouterLink: { template: "<a><slot /></a>" },
@@ -4773,6 +5714,7 @@ describe("CreatePage prompt gate", () => {
     resetNotifications();
     listCollectionsMock.mockReset().mockResolvedValue([]);
     listTagsMock.mockReset().mockResolvedValue([]);
+    expandPromptMock.mockClear();
     hostCapabilitiesMock.mockReset().mockResolvedValue({});
     routeQuery.value = {};
   });
@@ -4861,5 +5803,373 @@ describe("CreatePage prompt gate", () => {
     };
     await nextTick();
     expect(blockerText(wrapper)).toBeNull();
+  });
+});
+
+/*
+ * A locked Make chip is a control that must explain itself, and the two locks
+ * are not the same fact: a family that never batches is locked whatever the
+ * request carries, while a reference lock lifts with the pictures that caused
+ * it. One sentence for both would tell an always-one style's user about a
+ * reference picture they never attached.
+ */
+describe("CreatePage Make chip lock", () => {
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  // A narrow case stubs `matchMedia`; unstubbing on the case's last line
+  // leaks the phone layout into every later test when an assertion throws.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // The pairing a person actually sees: a reference attached, the lock ON,
+  // and the sentence that names the reason it is on.
+  it("names the reference pictures when they are what locked it", async () => {
+    const klein = {
+      ...installedModelRow("flux2-klein:bf16", "flux2"),
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "flux2-klein",
+        profile_hash: "klein",
+        default_recipe_id: "default",
+        recipes: [flux2KleinRecipe()],
+      },
+    } as unknown as ModelInfoExtended;
+    hostModelsMock.mockResolvedValue([klein]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux2-klein:bf16";
+    form.state.value.modelFamily = "flux2";
+    await nextTick();
+    const unlocked = wrapper.getComponent({ name: "MakeChip" });
+    expect(unlocked.props("locked")).toBe(false);
+
+    form.state.value.imageAttachments = [];
+    form.state.value.referenceImages = [
+      { kind: "upload", filename: "ref.png", base64: "REF" },
+    ];
+    form.state.value.exclusiveWell = "references";
+    await nextTick();
+    await flushPromises();
+
+    const chip = wrapper.getComponent({ name: "MakeChip" });
+    expect(chip.props("locked")).toBe(true);
+    expect(chip.props("lockedReason")).toBe(
+      "This style makes one print at a time when it works from a reference picture.",
+    );
+  });
+
+  it("says nothing about references for a style that never batches", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("qwen-image-edit:q8", "qwen-image-edit"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "qwen-image-edit:q8";
+    form.state.value.modelFamily = "qwen-image-edit";
+    await nextTick();
+    const chip = wrapper.getComponent({ name: "MakeChip" });
+    expect(chip.props("locked")).toBe(true);
+    expect(chip.props("lockedReason")).toBe(
+      "This style makes one print at a time.",
+    );
+  });
+});
+
+/*
+ * The left column reads top to bottom: kind strip, picture, composer, the work
+ * in flight, then Recent. Queued and running prints used to open the column,
+ * above the picture, so a person who had just pressed Generate watched their
+ * queue scroll away from the prompt box they were still typing in.
+ */
+describe("CreatePage left column order", () => {
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  // A narrow case stubs `matchMedia`; unstubbing on the case's last line
+  // leaks the phone layout into every later test when an assertion throws.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Every marker, in the order the column must render them. */
+  function columnOrder(wrapper: ReturnType<typeof mount>): Element[] {
+    const canvas = wrapper.find("[data-test='result-canvas']").exists()
+      ? wrapper.get("[data-test='result-canvas']").element
+      : wrapper.get("[data-test='cold-start-stub']").element;
+    return [
+      wrapper.get("[data-test='web-output-kind']").element,
+      canvas,
+      wrapper.get("[data-test='composer-submit']").element,
+      wrapper.get("[data-test='activity-stub']").element,
+      wrapper.get("[data-test='recent-grid']").element,
+    ];
+  }
+
+  function assertInOrder(markers: Element[]) {
+    for (let index = 1; index < markers.length; index += 1) {
+      expect(
+        markers[index - 1]!.compareDocumentPosition(markers[index]!) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+  }
+
+  it("puts the work in flight under the prompt box, above Recent", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    assertInOrder(columnOrder(wrapper));
+  });
+
+  /*
+   * The composer's own alerts — a stale expansion with its three buttons, a
+   * held pull, a submit failure — belong to the prompt box, and a growing
+   * queue must not push them a screenful away from it.
+   */
+  it("keeps the composer's own alerts with the composer, above the strip", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("sdxl-base:fp16", "sdxl"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    // Expand, then hand-edit the prompt: the expansion goes stale and its
+    // alert — the only place Re-expand / Generate anyway / Restore live —
+    // renders under the composer.
+    // Batch 1 rewrites in place (no dialog): the mocked machine answers
+    // one variation and the composer installs it.
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+    wrapper
+      .getComponent({ name: "ComposerCard" })
+      .vm.$emit("update:prompt", "a hand-edited storm lighthouse");
+    await nextTick();
+
+    const alert = wrapper.get(
+      "[data-test='web-quick-expansion-stale']",
+    ).element;
+    const strip = wrapper.get("[data-test='activity-stub']").element;
+    const recent = wrapper.get("[data-test='recent-grid']").element;
+    assertInOrder([
+      wrapper.get("[data-test='composer-submit']").element,
+      alert,
+      strip,
+      recent,
+    ]);
+  });
+
+  it("keeps that order when the column is narrow", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    assertInOrder(columnOrder(wrapper));
+  });
+});
+
+/*
+ * The composer's summary and the rail's shape chips read ONE resolver. The
+ * summary used to run its own legacy `projectResolution` lookup, so a 1216×704
+ * canvas read "Custom" in the composer while the ShapePicker beside it showed
+ * 16:9 lit — two readings of the same canvas, on the same screen.
+ */
+describe("CreatePage composer summary", () => {
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  // A narrow case stubs `matchMedia`; unstubbing on the case's last line
+  // leaks the phone layout into every later test when an assertion throws.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** The real ComposerCard, so the summary is the one a person reads. */
+  function composerStubs() {
+    const { ComposerCard: _dropped, ...stubs } = pageStubs();
+    return stubs;
+  }
+
+  it("names the shape the ShapePicker lit, never 'Custom'", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: composerStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.width = 1216;
+    form.state.value.height = 704;
+    await nextTick();
+
+    const summary = wrapper.get("[data-test='composer-summary']").text();
+    // The legacy lookup knew five ratios and called this one "Custom".
+    expect(summary).not.toContain("Custom");
+    // The chip beside it is the same resolver's answer; the two agree.
+    const family = wrapper.get(".shape-chip__label").text();
+    expect(summary).toContain(`${family} · 1216×704`);
+  });
+
+  it("carries the resolver's own approximate mark, once", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: composerStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.width = 1216;
+    form.state.value.height = 704;
+    await nextTick();
+    const summary = wrapper.get("[data-test='composer-summary']").text();
+    const family = wrapper.get(".shape-chip__label").text();
+    // One mark, from the resolver; ComposerCard appends the size after it.
+    expect(summary.startsWith("≈")).toBe(true);
+    expect(summary).toContain(`≈${family} · 1216×704`);
+    expect(summary.match(/≈/g)).toHaveLength(1);
+  });
+});
+
+/*
+ * The kind strip is the first row of the LEFT column, left-aligned above the
+ * picture (`docs/design/mold-studio-web.dc.html:97-108`), not a chip floating
+ * in the page header beside the h1. The header keeps the title, the notice and
+ * the 3-D workflows link.
+ */
+describe("CreatePage kind strip placement", () => {
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  // A narrow case stubs `matchMedia`; unstubbing on the case's last line
+  // leaks the phone layout into every later test when an assertion throws.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("puts the strip and the print title on the left column's first row", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const workspace = wrapper.get("[data-test='generate-workspace']").element;
+    const kindbar = wrapper.get(".create-kindbar").element;
+    const strip = wrapper.get("[data-test='web-output-kind']").element;
+    const title = wrapper.get("[data-test='print-title-field']").element;
+    const header = wrapper.get(".create-header").element;
+
+    expect(kindbar.contains(strip)).toBe(true);
+    expect(kindbar.contains(title)).toBe(true);
+    expect(header.contains(strip)).toBe(false);
+    expect(workspace.contains(kindbar)).toBe(true);
+
+    // First child of the left column, ahead of the activity strip and canvas.
+    const left = workspace.firstElementChild!;
+    expect(left.firstElementChild).toBe(kindbar);
+  });
+
+  it("keeps the h1, the notice and the 3-D link in the header", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const header = wrapper.get(".create-header").element;
+    expect(
+      header.contains(wrapper.get("[data-test='phone-create-title']").element),
+    ).toBe(true);
+  });
+
+  it("still draws the strip above the picture when the column is narrow", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const strip = wrapper.get("[data-test='web-output-kind']").element;
+    const canvas = wrapper.find("[data-test='result-canvas']").exists()
+      ? wrapper.get("[data-test='result-canvas']").element
+      : wrapper.get("[data-test='cold-start-stub']").element;
+    expect(
+      strip.compareDocumentPosition(canvas) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

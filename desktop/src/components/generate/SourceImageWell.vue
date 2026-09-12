@@ -57,7 +57,7 @@ import {
 } from "@studio/lib/minimaxH3Authoring";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import MaskEditorModal from "./MaskEditorModal.vue";
-import ReferenceCropModal from "./ReferenceCropModal.vue";
+import ReferenceCropModal from "@studio/components/ReferenceCropModal.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -569,6 +569,7 @@ function setSourceFitMode(e: Event) {
       :title="`Crop reference ${(h3CropIndex ?? 0) + 1}`"
       :image="h3CropTarget?.image ?? null"
       :crop="h3CropTarget?.crop ?? null"
+      teleport
       @apply="applyH3ReferenceCrop"
       @close="h3CropIndex = null"
     />

@@ -617,6 +617,21 @@ describe("ModelDetailDrawer", () => {
       expect(rows).toContain("Hugging Face");
     });
 
+    it("shows a source glyph beside the Source row's value, not instead of it", () => {
+      mockDetail.value = catalogDetail(makeEntry({ source: "civitai" }));
+      const w = mount(ModelDetailDrawer);
+      const sourceRow = w
+        .findAll(".md__row")
+        .find((row) => row.get(".md__row-key").text() === "Source")!;
+      // The value already spells the source out, so the glyph beside it is
+      // decoration, not the sole carrier of the fact — hidden from assistive
+      // tech (aria-hidden) so a screen reader announces "Civitai" once, not
+      // "Civitai Civitai" from the glyph's own <title>.
+      expect(sourceRow.get(".md__row-val-text").text()).toBe("Civitai");
+      const glyph = sourceRow.get("svg[data-source='civitai']");
+      expect(glyph.attributes("aria-hidden")).toBe("true");
+    });
+
     it("renders trained words as chips", () => {
       mockDetail.value = catalogDetail(
         makeEntry({ trained_words: ["ohwx woman", "cinematic glow"] }),

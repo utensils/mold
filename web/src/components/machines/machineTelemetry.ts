@@ -6,6 +6,7 @@
  * renders as an em dash per spec §08 G4 rather than a fabricated zero.
  */
 import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
+import type { GpuSnapshot } from "@studio/lib/gpuFleetLabel";
 import type { ResourceSnapshot, ServerStatus } from "../../types";
 import { formatGB } from "../../util/format";
 
@@ -45,6 +46,24 @@ export interface TelemetryView {
   queue: string;
   uptime: string;
   storageLabel: string | null;
+}
+
+/**
+ * Web's `/api/status` wire as the structural snapshot the shared machine
+ * sentence reads: one entry per card, named, in the order the host reports
+ * them. The wire carries no backend, so the sentence infers it from the card's
+ * marketing name — the same fallback every other surface uses for a host that
+ * predates the field.
+ *
+ * This is an ADAPTER, not a second sentence: the words all come from
+ * `@studio/lib/machineSentence`.
+ */
+export function hostGpuSnapshots(status: ServerStatus | null): GpuSnapshot[] {
+  const workers = status?.gpus ?? [];
+  if (workers.length)
+    return workers.map((gpu) => ({ name: gpu.name, backend: null }));
+  const info = status?.gpu_info;
+  return info ? [{ name: info.name, backend: null }] : [];
 }
 
 export interface HostCardGpuSummary {

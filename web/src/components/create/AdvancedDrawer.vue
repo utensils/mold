@@ -20,7 +20,6 @@ import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import Chip from "@ui/components/Chip.vue";
-import LoraPicker from "../LoraPicker.vue";
 import PlacementPanel from "../PlacementPanel.vue";
 import ExtendVideoControls from "./advanced/ExtendVideoControls.vue";
 import Ltx2VideoControls from "./advanced/Ltx2VideoControls.vue";
@@ -30,7 +29,6 @@ import UpscaleSection from "./advanced/UpscaleSection.vue";
 import type {
   DevicePlacement,
   GenerateFormState,
-  LoraSelection,
   ModelInfoExtended,
   OutputFormat,
   Scheduler,
@@ -70,7 +68,6 @@ import {
   videoFrameGridLabel,
   videoFrameStep,
 } from "@studio/lib/videoDuration";
-import { cameraMotionLoraPath } from "@studio/lib/cameraMotion";
 import {
   isMinimaxH3Identity,
   MINIMAX_H3_MAX_FRAMES,
@@ -122,7 +119,6 @@ const emit = defineEmits<{
   "open-end-frame-picker": [];
   "clear-end-frame": [];
   "open-mask": [];
-  "append-prompt": [phrase: string];
   "canvas-intent": [intent: CanvasIntent];
 }>();
 const host = ref<HTMLElement | { $el?: unknown } | null>(null);
@@ -265,7 +261,7 @@ const identityActive = computed(() =>
 const identitySummary = computed(() =>
   identityActive.value
     ? `${identityActive.value} set · strength ${identityWeight.value.toFixed(2)}`
-    : "Model defaults",
+    : "Face reference strength",
 );
 /** The start step must land strictly below the steps this print renders. */
 const identityStartStepMax = computed(() =>
@@ -337,19 +333,30 @@ const seedModes = [
   { value: "increment", label: "Increment" },
 ] as const;
 
-// ── LoRA / placement passthrough ──────────────────────────────────────
-function setLoras(loras: LoraSelection[]) {
-  const cameraPath = cameraMotionLoraPath(props.modelValue.cameraControl);
-  patch({
-    loras,
-    cameraControl:
-      cameraPath && !loras.some((lora) => lora.path === cameraPath)
-        ? null
-        : props.modelValue.cameraControl,
-  });
-}
+// ── Placement passthrough ─────────────────────────────────────────────
 function setPlacement(placement: DevicePlacement | null) {
   patch({ placement });
+}
+
+// Predict duration came here with the duration slider (ControlsAside's
+// secondary group used to draw both, giving every video recipe two sliders
+// bound to `frames` in the same sheet). The toggle has to live beside the
+// slider it hides, or turning it on leaves a stale slider on screen.
+const canPredictDuration = computed(
+  () =>
+    selectedModel.value?.supports_duration_prediction === true &&
+    selectedModel.value.runtime_ready !== false,
+);
+const predictDuration = computed(
+  () => props.modelValue.predictDuration === true,
+);
+function setPredictDuration(value: boolean) {
+  patch({
+    predictDuration: value,
+    frames: value
+      ? null
+      : (props.modelValue.frames ?? selectedModel.value?.default_frames ?? 25),
+  });
 }
 
 const videoContract = computed(
@@ -631,25 +638,12 @@ function resetAdvanced() {
         </div>
       </AccordionSection>
 
-      <AccordionSection
-        v-if="caps.supportsLora"
-        icon="layers"
-        title="LoRA stack"
-        :summary="`${modelValue.loras.length} active · style adapters`"
-        :open="true"
-        :header-interactive="false"
-        data-test="section-lora"
-      >
-        <LoraPicker
-          :family="family"
-          :model-value="modelValue.loras"
-          @update:model-value="setLoras"
-          @append-prompt="emit('append-prompt', $event)"
-        />
-      </AccordionSection>
+      <!-- No LoRA section: the rail's own "Add-on looks" disclosure row is
+           the single door, and it already shows the active count. A copy here
+           gave the stack two doors and counted it twice on one screen. -->
 
-      <!-- Identity sits beside the LoRA stack because admission refuses the
-           two together; the photo itself is primary form. -->
+      <!-- Identity sits where the LoRA stack used to, because admission
+           refuses the two together; the photo itself is primary form. -->
       <AccordionSection
         v-if="showIdentity"
         icon="image"
@@ -784,11 +778,21 @@ function resetAdvanced() {
           </p>
         </div>
         <div class="adv__field">
-          <label class="adv__label">Seed</label>
+          <!-- The seed in plain words, with the number itself as the mono
+               truth beside the label — the inspector's shape on every shell. -->
+          <div class="adv__seedhead">
+            <span class="adv__label adv__label--inline">Repeat this look</span>
+            <span
+              v-if="modelValue.seed != null"
+              class="adv__seedtruth"
+              data-test="output-seed-readout"
+              >seed {{ modelValue.seed }}</span
+            >
+          </div>
           <SegmentedControl
             :model-value="modelValue.seedMode"
             :options="seedModes"
-            label="Seed mode"
+            label="Repeat this look"
             @update:model-value="patch({ seedMode: $event })"
           />
         </div>
@@ -798,7 +802,7 @@ function resetAdvanced() {
           data-test="output-seed"
           type="number"
           min="0"
-          placeholder="Seed"
+          aria-label="Seed number"
           :value="modelValue.seed ?? ''"
           @input="
             patch({
@@ -817,7 +821,19 @@ function resetAdvanced() {
         :header-interactive="false"
         data-test="section-video"
       >
-        <div class="adv__field">
+        <div
+          v-if="canPredictDuration"
+          class="adv__row"
+          data-test="predict-duration-control"
+        >
+          <span class="adv__label">Predict duration</span>
+          <SwitchToggle
+            :model-value="predictDuration"
+            label="Predict duration from prompt"
+            @update:model-value="setPredictDuration"
+          />
+        </div>
+        <div v-if="!predictDuration || !canPredictDuration" class="adv__field">
           <VideoDurationSlider
             :frames="modelValue.frames ?? selectedModel?.default_frames ?? 25"
             :fps="modelValue.fps ?? selectedModel?.default_fps ?? 24"
@@ -832,6 +848,9 @@ function resetAdvanced() {
             @update:frames="patch({ frames: $event })"
           />
         </div>
+        <p v-else class="adv__hint" data-test="predicted-duration-hint">
+          The host will choose 1–20 seconds from the prompt.
+        </p>
         <div class="adv__field">
           <label class="adv__label">Frames ({{ frameGridLabel }})</label>
           <input
@@ -1012,6 +1031,23 @@ function resetAdvanced() {
   font-size: 12px;
   color: var(--ink-2);
   font-weight: 600;
+  margin-bottom: 8px;
+}
+.adv__seedhead {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.adv__label--inline {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.adv__seedtruth {
+  flex: 0 0 auto;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--ink-3);
   margin-bottom: 8px;
 }
 .adv__select,

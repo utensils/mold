@@ -9,7 +9,7 @@
 import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import MoldHomeCard from "./MoldHomeCard.vue";
-import SettingRow from "./SettingRow.vue";
+import SettingRow from "@studio/components/settings/SettingRow.vue";
 import { ipc } from "../../lib/ipc";
 import { useConnectionStore } from "../../stores/connection";
 import { useToastStore } from "../../stores/toasts";

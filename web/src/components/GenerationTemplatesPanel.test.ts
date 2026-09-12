@@ -16,7 +16,6 @@ function makeForm(
 ): GenerateFormState {
   return {
     version: 3,
-    stylePreset: null,
     prompt: "template prompt",
     negativePrompt: "",
     model: "flux-dev:q4",
@@ -36,7 +35,6 @@ function makeForm(
     scheduler: null,
     cfgPlus: false,
     outputFormat: "png",
-    expand: { enabled: false, variations: 1, familyOverride: null },
     imageAttachments: [],
     maskImage: null,
     controlImage: null,

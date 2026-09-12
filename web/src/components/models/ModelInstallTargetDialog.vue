@@ -31,8 +31,8 @@ const targets = useModelInstallTargets();
       <h2 class="pick__title">
         {{
           targets.pending.value.confirmation
-            ? "Model download required"
-            : "Install"
+            ? "This style has to be downloaded first"
+            : "Get"
         }}
         {{ targets.pending.value.displayName }}
       </h2>
@@ -55,7 +55,7 @@ const targets = useModelInstallTargets();
         >
           <span class="pick__host">{{ target.host.label }}</span>
           <span class="pick__action" :data-action="target.action">
-            {{ target.action === "install" ? "Install" : "Repair" }}
+            {{ target.action === "install" ? "Get it" : "Repair" }}
           </span>
           <Icon name="chevron-right" :size="15" class="pick__chevron" />
         </button>

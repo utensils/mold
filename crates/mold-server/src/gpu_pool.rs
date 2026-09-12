@@ -905,7 +905,9 @@ impl OwnerWork {
             }
             Self::ChainStage(job) => {
                 if let Some(tx) = job.result_tx {
-                    let _ = tx.send(Err(error));
+                    let _ = tx.send(Err(crate::chain_job_runner::StageExecutionError::Failed(
+                        error,
+                    )));
                 }
             }
             Self::PromptExpansion(job) => {

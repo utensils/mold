@@ -16,7 +16,7 @@ import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostsStore } from "../stores/hosts";
 import { useRunPodStore } from "../stores/runpod";
 import { useToastStore } from "../stores/toasts";
-import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
+import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
 import PodCostMeter from "../components/machines/PodCostMeter.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import Icon from "@ui/components/Icon.vue";

@@ -103,8 +103,8 @@ describe("web catalog commands", () => {
     const rows = catalogCommands([entry], { ...ctx, installModel });
     expect(rows[0]).toMatchObject({
       id: "install-hf:org/qwen",
-      section: "Install",
-      label: "Install Qwen Image",
+      section: "Get it",
+      label: "Get Qwen Image",
     });
     rows[0]!.run();
     expect(installModel).toHaveBeenCalledWith("hf:org/qwen", "Qwen Image");

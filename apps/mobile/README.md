@@ -130,7 +130,6 @@ overlay register calls top acts on either.
   the recipe advertising one. iPhone and Android have no OS drag,
   so the picker sheet is the only acquisition path and the desktop
   drop-routing bridge does not apply here.
-  prompt **style** presets compose at submit without rewriting the prompt text.
   A **Title** field above the prompt names the print: the trimmed value rides
   every mobile-built `GenerateRequest` as additive `title` (batch siblings and
   prepared Batch N inherit it), an over-long or control-character title is

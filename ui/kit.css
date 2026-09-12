@@ -146,8 +146,8 @@
    * below, three of them at the last count.
    *
    * Every token read here is in `ui/tokens.css` EXCEPT `--mold-ctl-lg`, which
-   * `ui/mold-desktop.css` owns — web and the phone import this file but not
-   * that one, so its fallback below is load-bearing, not decoration.
+   * `ui/mold-desktop.css` owns — the phone imports this file but not that
+   * one, so its fallback below is load-bearing, not decoration.
    */
   .ms-composer {
     display: flex;

@@ -4,6 +4,8 @@ import { familyLabel } from "../lib/modelFamily";
 import { formatBytes } from "../lib/formatBytes";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/modelDisplay";
 import { styleDisplayName } from "../lib/styleLabel";
+import { modelSource } from "../lib/modelSource";
+import SourceGlyph from "@ui/components/SourceGlyph.vue";
 import type { StyleMenuModel } from "../lib/styleMenu";
 
 /**
@@ -21,9 +23,13 @@ import type { StyleMenuModel } from "../lib/styleMenu";
  *
  * Nothing here may reach a store, a router or a shell — `studio/` stays
  * browser-safe and application-shell independent
- * (`scripts/tests/frontend-architecture.sh`), so the availability tag, the
- * refusal reason and the source glyph are all INJECTED by the host. The rule
- * behind the availability tag is now ONE shared rule,
+ * (`scripts/tests/frontend-architecture.sh`), so the availability tag and the
+ * refusal reason are INJECTED by the host. The source glyph is drawn by the
+ * menu itself from `modelSource(model)` — `studio/` may import `@ui`
+ * (precedent: `MeshWorkflowStudio.vue`, `NotificationsCenter.vue`) — and a
+ * host may still override it through the `glyph` slot, though none of the
+ * three does any more. The rule behind the availability tag is now
+ * ONE shared rule,
  * `@studio/lib/modelAvailability`, but it still arrives as a function: the
  * menu cannot reach a machine list, and each surface spells reachability and
  * the "is this even a fleet" guard differently.
@@ -308,6 +314,12 @@ onMounted(() => {
       @click="pickMissing"
       @mousemove="activeIndex = 0"
     >
+      <!-- No real style to draw a source glyph for — a blank, same-width
+           stand-in keeps this row's name lined up with every other row's. -->
+      <span
+        class="ms-model__glyph ms-model__glyph--spacer"
+        aria-hidden="true"
+      />
       <span class="ms-model__body">
         <span class="ms-model__name" :title="phantomLabel">{{
           phantomLabel
@@ -334,8 +346,11 @@ onMounted(() => {
         @click="pick(model)"
         @mousemove="activeIndex = rowIndexFor(model)"
       >
-        <!-- Desktop fills this with its brand glyphs; web and the phone do not. -->
-        <slot name="glyph" :model="model" />
+        <!-- The menu draws a source glyph per row by default; a host may
+             override with its own (desktop fills this with tone classes). -->
+        <slot name="glyph" :model="model">
+          <SourceGlyph :source="modelSource(model)" class="ms-model__glyph" />
+        </slot>
         <span class="ms-model__body">
           <span
             data-test="model-option-name"
@@ -488,6 +503,18 @@ onMounted(() => {
 .ms-model__body {
   min-width: 0;
   flex: 1;
+}
+/* The default glyph, drawn when a host does not fill the slot itself. */
+.ms-model__glyph {
+  margin-top: 2px;
+  color: var(--mold-text-dim, #9ca3af);
+}
+/* The phantom row draws no glyph — nothing is known to point one at — but
+ * still reserves its width so the row's name lines up with every other. */
+.ms-model__glyph--spacer {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
 }
 /* A style id is one long unbroken token. It WRAPS rather than being cut: the
  * id is the thing a person copies, so an ellipsis makes the row useless. */

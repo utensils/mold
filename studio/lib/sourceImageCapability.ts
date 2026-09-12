@@ -190,6 +190,13 @@ export interface SourceImageValidationInput {
    * floor, exactly like the server's manifest-name resolution.
    */
   model?: string | null;
+  /**
+   * What a render produces, so a Required advisory can name what the
+   * picture is FOR instead of assuming a video's first frame. Absent reads
+   * as `"video"`, the historical (and still by far the most common) meaning
+   * — a caller that does not know the output kind gets today's wording.
+   */
+  outputKind?: "image" | "video" | "mesh";
 }
 
 /**
@@ -219,10 +226,10 @@ export function sourceImageValidationError(
   // that has none.
   if (input.capability === "unsupported") {
     if (input.hasSourceImage) {
-      return "This checkpoint is text-to-video only and does not accept a source image. Remove the image, or pick an image-to-video checkpoint.";
+      return "This style is text-to-video only and does not accept a source image. Remove the image, or pick an image-to-video style.";
     }
     if (input.isExtend) {
-      return "This checkpoint is text-to-video only and cannot continue an existing clip — a continuation is seeded with the source clip's final frame. Pick an image-to-video checkpoint.";
+      return "This style is text-to-video only and cannot continue an existing clip — a continuation is seeded with the source clip's final frame. Pick an image-to-video style.";
     }
   }
   if (
@@ -230,7 +237,13 @@ export function sourceImageValidationError(
     !input.hasSourceImage &&
     !input.isExtend
   ) {
-    return "This checkpoint is image-to-video only. Attach a source image to use as the first frame.";
+    if (input.outputKind === "mesh") {
+      return "This style builds from a picture. Attach a source image to give it a shape.";
+    }
+    if (input.outputKind === "image") {
+      return "This style needs a picture to work from. Attach a source image.";
+    }
+    return "This style is image-to-video only. Attach a source image to use as the first frame.";
   }
   if (!input.hasEndFrame) return null;
   if (!input.hasSourceImage) {
@@ -243,7 +256,7 @@ export function sourceImageValidationError(
     isWanTi2vModel(input.model) &&
     (input.frames as number) < WAN_TI2V_FLF_MIN_FRAMES
   ) {
-    return `This checkpoint pins both endpoints in latent space, so a first/last-frame render needs at least ${WAN_TI2V_FLF_MIN_FRAMES} frames.`;
+    return `This style pins both endpoints in latent space, so a first/last-frame render needs at least ${WAN_TI2V_FLF_MIN_FRAMES} frames.`;
   }
   return null;
 }

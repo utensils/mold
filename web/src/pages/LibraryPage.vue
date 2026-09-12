@@ -451,7 +451,7 @@ function missingHostError(entry: GalleryImage): Error {
   const label =
     (entry as { hostLabel?: string }).hostLabel ??
     (entry as { hostId?: string }).hostId ??
-    "That host";
+    "That machine";
   return new Error(`${label} isn't connected anymore.`);
 }
 
@@ -990,7 +990,7 @@ async function createCollectionFlow(
 ): Promise<{ slug: string; name: string } | null> {
   const host = collectionHomeHost();
   if (!host) {
-    toast("error", "No connected host supports collections yet.");
+    toast("error", "No connected machine supports collections yet.");
     return null;
   }
   const name = (
@@ -1094,7 +1094,10 @@ async function setCoverFromSelection() {
       collection.hosts.some((h) => h.hostId === c.hostId),
     ) ?? null;
   if (!copy) {
-    toast("error", "That print has no copy on a host holding this collection.");
+    toast(
+      "error",
+      "That print has no copy on a machine holding this collection.",
+    );
     return;
   }
   const result = await setCollectionCover(
@@ -1214,7 +1217,10 @@ async function downloadSelected() {
       downloadProgress.value = `Downloading ${index + 1} of ${targets.length}…`;
       try {
         const host = hostById(entry.hostId);
-        if (!host) throw new Error("The media host is no longer connected.");
+        if (!host)
+          throw new Error(
+            "The machine holding that media is no longer connected.",
+          );
         downloadVideoExport(
           await fetchGalleryBlob(host, entry.filename),
           downloadFilename(entry),
@@ -1597,7 +1603,7 @@ async function performRefresh() {
       merged.reachableHostIds.length === 0 &&
       merged.unreachableHostIds.length > 0
     ) {
-      errorMessage.value = "Couldn't reach any host's gallery.";
+      errorMessage.value = "Couldn't reach any machine's gallery.";
     }
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : String(err);
@@ -1616,10 +1622,10 @@ function refresh(): Promise<void> {
   return operation;
 }
 
-// Honest count line: "all hosts" only when remotes are actually connected,
+// Honest count line: "all machines" only when remotes are actually connected,
 // otherwise "this server". Names the unreachable hosts rather than hiding them.
 const scopeLabel = computed(() =>
-  remoteHostCount.value > 0 ? "all hosts" : "this server",
+  remoteHostCount.value > 0 ? "all machines" : "this server",
 );
 const unreachableLabel = computed(() => {
   const names = unreachableHostIds.value
@@ -2742,7 +2748,7 @@ onBeforeUnmount(() => {
         </template>
       </span>
       <span class="gal__flex"></span>
-      <router-link class="gal__banner-link" to="/settings"
+      <router-link class="gal__banner-link" to="/settings?section=library"
         >Change retention · Settings</router-link
       >
       <router-link

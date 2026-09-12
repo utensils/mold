@@ -127,10 +127,10 @@ describe("GenerateView — loading a template refreshes the recipe capabilities"
   });
 
   /**
-   * The desktop composer has no style-preset strip — the word "Style" belongs
-   * to the model. A template saved before that change still carries a preset,
-   * and applying it wholesale reinstated an invisible prompt rewriter: the
-   * words on screen were not the words that were sent.
+   * No composer has a style-preset strip — the word "Style" belongs to the
+   * model. A template saved before that change still carries a preset, and
+   * applying it wholesale reinstated an invisible prompt rewriter: the words
+   * on screen were not the words that were sent.
    */
   it("leaves a pre-redesign template's style preset behind", async () => {
     const template = legacyTemplate(sdxl.name, sdxl.family);
@@ -138,7 +138,7 @@ describe("GenerateView — loading a template refreshes the recipe capabilities"
 
     const form = await loadIntoMeshForm(template);
 
-    expect(form.stylePreset).toBe("");
+    expect("stylePreset" in form).toBe(false);
     expect(buildRequest(form).prompt).toBe("a river at dawn");
   });
 

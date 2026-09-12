@@ -473,7 +473,15 @@ onBeforeUnmount(() => {
   gap: 12px;
   align-items: baseline;
   justify-content: space-between;
+  font-size: var(--mold-fs-sm);
   font-weight: 650;
+}
+/* A sentence beside the plan, not a paragraph of the page: the panel is
+ * mounted on pages whose body copy is 16px (web) and 13px (desktop). */
+.device-panel__lifecycle {
+  margin: 0;
+  color: var(--mold-text-dim, #777);
+  font-size: var(--mold-fs-xs);
 }
 .device-panel__tentative,
 .device-panel__empty {
@@ -493,7 +501,6 @@ onBeforeUnmount(() => {
 .device-card {
   display: grid;
   min-width: 0;
-  min-height: 226px;
   align-content: start;
   gap: 8px;
   padding: 12px;

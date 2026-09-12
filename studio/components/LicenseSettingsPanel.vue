@@ -115,8 +115,8 @@ watch(() => [props.target?.baseUrl, props.target?.apiKey], load);
   <div class="license-settings" data-test="license-settings">
     <div class="license-settings__row">
       <p class="license-settings__lede">
-        Review restricted model terms for {{ hostLabel }}. Acceptance is stored
-        on {{ hostLabel }} only.
+        Some styles need you to accept their terms for {{ hostLabel }}. What you
+        accept is stored on {{ hostLabel }} only.
       </p>
       <slot name="machine" />
     </div>

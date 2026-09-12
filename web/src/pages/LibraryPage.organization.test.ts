@@ -484,7 +484,7 @@ describe("Collections scope", () => {
     const options = vi.mocked(requestConfirm).mock.calls[0]![0];
     expect(options.title).toBe("Delete collection “Smurfs”?");
     expect(options.body).toBe("Its prints stay in the Library.");
-    expect(options.typedPhrase).toBeUndefined();
+    expect("typedPhrase" in options).toBe(false);
     expect(orgApi.deleteCollection).toHaveBeenCalledWith(
       ORIGIN_TARGET,
       "c-smurfs",
@@ -590,7 +590,7 @@ describe("Trash scope", () => {
       confirmLabel: "Delete forever",
       danger: true,
     });
-    expect(options.typedPhrase).toBeUndefined();
+    expect("typedPhrase" in options).toBe(false);
     expect(orgApi.deleteGalleryImageForever).toHaveBeenCalledWith(
       ORIGIN_TARGET,
       "old.png",
@@ -607,7 +607,7 @@ describe("Trash scope", () => {
     expect(options.body).toBe(
       "Delete 1 print in the trash on this server forever? This can't be undone.",
     );
-    expect(options.typedPhrase).toBeUndefined();
+    expect("typedPhrase" in options).toBe(false);
     expect(orgApi.emptyTrash).toHaveBeenCalledWith(ORIGIN_TARGET);
   });
 
@@ -708,7 +708,7 @@ describe("Trash-aware deletes in Prints", () => {
     await flushPromises();
     const options = vi.mocked(requestConfirm).mock.calls[0]![0];
     expect(options.title).toBe("Move all 3 prints to the trash?");
-    expect(options.typedPhrase).toBeUndefined();
+    expect("typedPhrase" in options).toBe(false);
     expect(deleteMock).toHaveBeenCalledTimes(3);
   });
 });

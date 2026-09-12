@@ -452,7 +452,7 @@ async function fanout<T extends { hostId: string }>(
       if (!host) {
         result.failed.push({
           hostId: op.hostId,
-          error: "That host isn't connected anymore.",
+          error: "That machine isn't connected anymore.",
         });
         return;
       }

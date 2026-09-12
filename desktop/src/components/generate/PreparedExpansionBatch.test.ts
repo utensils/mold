@@ -12,7 +12,6 @@ const batch = () =>
       family: "flux",
       task: "text-to-image",
       requestedCount: 3,
-      stylePreset: null,
       selectedHostPolicy: null,
     },
     {
@@ -33,7 +32,6 @@ const largeBatch = () =>
       family: "flux",
       task: "text-to-image",
       requestedCount: 20,
-      stylePreset: null,
       selectedHostPolicy: null,
     },
     {

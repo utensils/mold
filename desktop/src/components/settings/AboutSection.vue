@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
-import SettingRow from "./SettingRow.vue";
+import SettingRow from "@studio/components/settings/SettingRow.vue";
 import { apiJson } from "../../lib/api/client";
 import { ipc, inTauri } from "../../lib/ipc";
 import { openExternal } from "../../lib/openExternal";
@@ -69,7 +69,7 @@ function openPrivacyPolicy(): void {
       </span>
     </SettingRow>
     <SettingRow label="Processing" help="Where generations run.">
-      <span class="font-mono text-sm text-fg-dim">Local + your hosts</span>
+      <span class="font-mono text-sm text-fg-dim">This machine + the machines you add</span>
     </SettingRow>
     <SettingRow label="Core contributors">
       <span class="text-right text-sm text-fg-2">James Brink · Jeffrey Dilley</span>

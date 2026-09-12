@@ -80,16 +80,19 @@ mold run "a cat" --no-expand
 ## Native prepared batches
 
 In the desktop, web, and iPhone Create workspaces, the directly editable Batch
-control also sets the expansion count. Batch 1 keeps the quick **Expand**
-rewrite and undo, with the host route frozen through the next Generate or
-Develop. Batch 2 or greater uses **Prepare N variations** and opens an inline
+control also sets the expansion count. Batch 1 is **Write more for me**: one
+rewrite, written on a machine the composer names while it works, installed
+straight into the prompt with an `expanded · undo` affordance beside it and the
+host route frozen through the next Generate or Develop. A rewrite that arrives
+after the prompt, style, conditioning, or machine changed is refused by name
+rather than replacing what you typed. Batch 2 or greater uses **Prepare N variations** and opens an inline
 review workspace before any generation request is queued. Each prompt can be
 edited or removed; the whole set can be regenerated or discarded. Counts above
 eight start with eight editors and a compact remainder summary; **Review all**
 uses bounded pages so very large batches do not create an equally large screen.
 
-On desktop, a Batch 1 rewrite whose model, family, or host changed is never a
-dead Generate click: an immediate recovery notice can **Re-expand and
+On desktop and in the browser, a Batch 1 rewrite whose model, family, or host
+changed is never a dead Generate click: an immediate recovery notice can **Re-expand and
 generate** from the original prompt on the current route, **Generate expanded
 prompt anyway** as an explicit current-route override, or **Restore original**.
 The notice uses readable model names, larger error copy, and a copy button.

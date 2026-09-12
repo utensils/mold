@@ -318,11 +318,11 @@ describe("LibraryPage", () => {
     vi.useRealTimers();
   });
 
-  it("says 'this server' — not 'all hosts' — when no remotes are connected", async () => {
+  it("says 'this server' — not 'all machines' — when no remotes are connected", async () => {
     const wrapper = await mounted();
     const count = wrapper.get("[data-test='gallery-count']").text();
     expect(count).toContain("this server");
-    expect(count).not.toContain("all hosts");
+    expect(count).not.toContain("all machines");
   });
 
   it("renders every print in the grid by default", async () => {
@@ -882,7 +882,7 @@ describe("LibraryPage", () => {
 
     const options = vi.mocked(requestConfirm).mock.calls[0]![0];
     expect(options).toMatchObject({ danger: true, confirmLabel: "Delete" });
-    expect(options.typedPhrase).toBeUndefined();
+    expect("typedPhrase" in options).toBe(false);
     expect(deleteMock).toHaveBeenCalledWith("cat.png");
     expect(deleteMock).toHaveBeenCalledWith("dog.png");
   });

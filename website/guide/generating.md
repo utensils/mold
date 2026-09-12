@@ -158,10 +158,11 @@ source image selects the closest model-valid size with the source's shape and
 keeps following it across model and pipeline changes until you pick a shape,
 size, or exact dimensions yourself.
 
-On every surface, a **↺ Reset** in the Create settings header restores the
-generation settings to the selected model's defaults (shape, resolution,
-detail, prompt strength, seed, and the Advanced groups) while keeping your
-prompt, model choice, and batch. On the web it is undoable from the toast it
+On every surface, a **↺ Reset** in the Create settings header puts every
+generation setting back to the selected style's defaults: shape, resolution,
+detail, how tight to your words, seed, add-on looks, the source and identity
+photos, and every More-settings group. Only your prompt, title, filing, and
+style stay, and the count returns to one. On the web it is undoable from the toast it
 raises.
 
 ## Identity Photos (PuLID)
@@ -610,8 +611,19 @@ Models auto-pull if not downloaded.
 `/create`, `/library`, `/models`, `/machines`, and `/settings`; retired paths
 such as `/generate` and `/catalog` render Page Not Found:
 
-- The model selector shows human-readable catalog names while preserving
-  `cv:` / `hf:` identifiers internally for requests.
+- The composer sticks to the bottom of the page, so **Generate** never
+  scrolls away. It carries the style chip (human-readable name over the exact
+  id, opening the same list the desktop app uses), the shape chip
+  (`Square · 1024`), and the **Make N** count beside the words they apply to.
+- A finished picture carries its own actions over the canvas: **Download**,
+  **Copy link** (an address that opens that exact print in My images), and
+  **Make 4 variations**.
+- The settings column leads with the machine this tab is talking to (with a
+  **Change** link and a memory meter), then a **Draft / Good / Best** quality
+  ladder built from the style's recommended passes, the two sliders, and
+  plain-language rows for **Start from a photo**, **Add-on looks**, **Repeat
+  this look**, **Starters**, **File under**, and **More settings**. Below
+  900px the column opens as one sheet.
 - Enter submits, Shift+Enter inserts a newline, empty Enter is a no-op.
 - Per-GPU running-job cards stream SSE progress (stage, denoise step N/M, VAE
   decode) and tag the finished image with the GPU ordinal that produced it.
@@ -647,8 +659,8 @@ such as `/generate` and `/catalog` render Page Not Found:
   (`{title-slug}__{model}__s{seed}.{ext}`; the file in the gallery is never
   renamed).
 - **File under** in Create (on hosts that advertise `gallery.organize`) files
-  a print as you make it, between the essentials and Advanced; inside the
-  controls sheet on phones. A titled print offers its own title slug as a
+  a print as you make it, from its own row in the settings column (inside the
+  one settings sheet on phones). A titled print offers its own title slug as a
   dashed, removable tag chip; **Add tag…** suggests the tags your machines
   already use with counts, and the collection row pre-selects (never creates
   ) the collection whose name matches the title, offering None, every merged
@@ -656,25 +668,31 @@ such as `/generate` and `/catalog` render Page Not Found:
   filename the print will land as. The choice rides one shots, every batch
   sibling, and every prepared variation, and **Reuse settings** restores what a
   print was actually filed under.
-  **Settings ▸ Library ▸ Tag new prints with their title** (stored in this
-  browser) turns the title chip off.
+  **Settings ▸ My images & trash ▸ Tag new prints with their title** (stored
+  in this browser) turns the title chip off.
 - Shortcuts: **⌘K** / **Ctrl+K** opens the command palette from anywhere;
-  the print viewer binds **Esc** to close and **←** / **→** to step between
-  prints.
+  in the prompt box **⌘↵** generates and **⌘E** is Write more for me on a Mac,
+  iPhone, or iPad, and **Ctrl+↵** / **Ctrl+E** everywhere else (Ctrl+E is
+  end-of-line on a Mac, so it is never bound there); the keycaps on the composer
+  say which one applies. The print viewer binds **Esc** to close and **←** /
+  **→** to step between prints.
 - Destructive copy stays plain: **Empty trash**, **Delete forever**, and
   **Delete collection** use the app confirm dialog with a danger button and
   never a typed phrase; single and selected Trash are optimistic with a 6 s
   undo toast.
 - Trash retention is a per-host server setting (`gallery.trash_retention_days`,
-  `0` = forever): **Settings ▸ Library** edits the serving host's value and
+  `0` = forever): **Settings ▸ My images & trash** edits the serving host's value and
   **Machines ▸ host** edits any connected host's, next to its
   **Prints in trash: N · Empty trash** row. A host whose `/api/capabilities`
   lacks `gallery.organize` / `gallery.trash` (an older server, or
   `MOLD_DB_DISABLE=1`) shows none of this and keeps the permanent-delete
   wording.
-- Prompt expansion modal offers live preview + variation picker (requires
-  `qwen3-expand` installed on the server).
+- **Write more for me** rewrites the prompt in place, with an `expanded · undo`
+  chip beside it and a live line naming the machine while it writes (requires
+  `qwen3-expand` installed on that machine). There is no expansion dialog and
+  no generate-time expansion setting: the words you send are the words on
+  screen.
 - Prompt, model, size, steps, guidance, and batch persist in `localStorage`.
 - Modal and sheet workflows contain keyboard focus, lock background scrolling,
   close on Escape, and restore focus to the control that opened them. The
-  Templates popover also dismisses on Escape or an outside click.
+  Starters sheet also dismisses on Escape or an outside click.

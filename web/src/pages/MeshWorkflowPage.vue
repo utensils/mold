@@ -136,23 +136,32 @@ function hostStatus(): string {
     :resolve-target="resolveTarget"
     :host-label="selectedHost?.label ?? ''"
   >
+    <!-- The shared picker is a bare chip now (New image's composer row);
+         here it sits in a settings column beside a labelled control, so the
+         column gives it the label the chip no longer carries. -->
     <template #mesh-picker="{ models, selected, select }">
-      <CreateStylePicker
-        :models="pickerModels(models)"
-        :model="selected"
-        browse-to="/models?type=mesh"
-        @select="(model) => select(model.name)"
-        @browse="browseStyles"
-      />
+      <div class="mesh-page__picker" data-test="mesh-style-field">
+        <span class="ms-group-label">3-D style</span>
+        <CreateStylePicker
+          :models="pickerModels(models)"
+          :model="selected"
+          browse-to="/models?type=mesh"
+          @select="(model) => select(model.name)"
+          @browse="browseStyles"
+        />
+      </div>
     </template>
     <template #image-picker="{ models, selected, select }">
-      <CreateStylePicker
-        :models="pickerModels(models)"
-        :model="selected"
-        browse-to="/models?type=image"
-        @select="(model) => select(model.name)"
-        @browse="browseStyles"
-      />
+      <div class="mesh-page__picker" data-test="image-style-field">
+        <span class="ms-group-label">Picture style</span>
+        <CreateStylePicker
+          :models="pickerModels(models)"
+          :model="selected"
+          browse-to="/models?type=image"
+          @select="(model) => select(model.name)"
+          @browse="browseStyles"
+        />
+      </div>
     </template>
     <template #machine="{ busy }">
       <MeshWorkflowHostPicker
@@ -176,6 +185,13 @@ function hostStatus(): string {
 </template>
 
 <style scoped>
+.mesh-page__picker {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
 .mesh-workflow-unavailable {
   display: grid;
   place-content: center;

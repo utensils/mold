@@ -1,67 +1,42 @@
 import { useRouter } from "vue-router";
-import type { FleetActiveWork } from "@studio/api/activity";
-import { findQueueEntryById } from "@studio/api/queuePlan";
-import { selectedQueueGeneration } from "@studio/api/generationSelection";
-import { meshWorkflowRouteFor } from "@studio/lib/meshWorkflowProvenance";
+import { openLiveWorkWith } from "@studio/composables/useOpenLiveWork";
 import type { OutputMetadata } from "../lib/api/types";
 import { useComposerStore } from "../stores/composer";
 import { useHostsStore } from "../stores/hosts";
 import { useToastStore } from "../stores/toasts";
 
-/** Opens server-owned work in the surface that can inspect or resume it. */
+/**
+ * The app's half of opening server-owned work: its machines, its toasts, its
+ * composer, and where a chain row and a download row go. The decision itself
+ * — the chain guard, the queue lookup, the 3-D workflow route — is the shared
+ * `openLiveWorkWith`.
+ */
 export function useOpenLiveWork() {
   const router = useRouter();
   const hosts = useHostsStore();
   const composer = useComposerStore();
   const toasts = useToastStore();
 
-  return async (row: FleetActiveWork) => {
+  return openLiveWorkWith<OutputMetadata>({
+    targetFor: (hostId) => {
+      const host = hosts.all.find((candidate) => candidate.id === hostId);
+      return host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
+    },
+    go: (to) => router.push(to).then(() => undefined),
+    fail: (message) => toasts.push(message, "error"),
+    restore: (selection, hostId) =>
+      composer.set({
+        metadata: selection.metadata,
+        queueSelection: {
+          hostId,
+          jobId: selection.jobId,
+          running: selection.running,
+        },
+      }),
     // A chain job — a long clip the host had to split and stitch, or one the
     // CLI authored — has no client surface to re-enter: scene-by-scene
     // authoring is retired. Its print lands in My images like any other.
-    if (row.kind === "sequence" || row.execution === "chain") {
-      await router.push("/queue");
-      return;
-    }
-    if (row.kind === "generation") {
-      const host = hosts.all.find((candidate) => candidate.id === row.hostId);
-      if (!host?.baseUrl) {
-        toasts.push("That machine is no longer connected", "error");
-        return;
-      }
-      try {
-        const entry = await findQueueEntryById(
-          { baseUrl: host.baseUrl, apiKey: host.apiKey },
-          row.id,
-        );
-        const selection = selectedQueueGeneration<OutputMetadata>(entry ? [entry] : [], row.id);
-        if (!selection) {
-          toasts.push("This host cannot restore settings for that generation", "error");
-          return;
-        }
-        // A 3-D Studio stage is admitted as an ordinary generation, so it
-        // arrives here looking like any other print. New image cannot resume
-        // it: the stages, Cancel, Resume and history live only under
-        // /api/mesh-workflows. Route to the surface that owns the work.
-        const workflow = meshWorkflowRouteFor(selection.metadata, row.hostId);
-        if (workflow) {
-          await router.push(workflow);
-          return;
-        }
-        composer.set({
-          metadata: selection.metadata,
-          queueSelection: {
-            hostId: row.hostId,
-            jobId: selection.jobId,
-            running: selection.running,
-          },
-        });
-        await router.push("/create");
-      } catch (error) {
-        toasts.push(error instanceof Error ? error.message : String(error), "error");
-      }
-      return;
-    }
-    await router.push(row.kind === "download" ? "/models" : `/machines/${row.hostId}`);
-  };
+    chainDestination: () => "/queue",
+    openDownloads: () => "/models",
+  });
 }

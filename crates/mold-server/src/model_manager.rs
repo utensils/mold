@@ -2063,7 +2063,7 @@ pub(crate) async fn ensure_model_ready(
             // First unload the currently active model (if any) to free VRAM.
             if let Some(active_name) = cache.unload_active() {
                 #[cfg(feature = "metrics")]
-                crate::metrics::clear_model_loaded(&active_name);
+                crate::metrics::clear_model_loaded(&active_name.model);
                 tracing::info!(
                     from = %active_name.model,
                     freed_mb = active_name.vram_bytes / 1024 / 1024,
@@ -2328,7 +2328,7 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
         Some(name) => {
             #[cfg(feature = "metrics")]
             {
-                crate::metrics::clear_model_loaded(&name);
+                crate::metrics::clear_model_loaded(&name.model);
                 crate::metrics::record_gpu_memory(0);
             }
             drop(cache);

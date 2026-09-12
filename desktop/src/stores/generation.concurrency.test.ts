@@ -25,6 +25,7 @@ vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
 vi.mock("../lib/notify", () => ({
   notifyGenerated: effectMocks.notifyGenerated,
   notifyGenerationFailed: effectMocks.notifyGenerationFailed,
+  appIsBackground: () => false,
 }));
 vi.mock("../lib/gallery/media", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/gallery/media")>()),
@@ -1064,6 +1065,10 @@ describe("submitBatch connection cap", () => {
   });
 
   it("uses host events as hints and bulk status as the only terminal authority", async () => {
+    const { useLandedPrintsStore } = await import("./landedPrints");
+    const landed = useLandedPrintsStore();
+    const noteLanded = vi.spyOn(landed, "noteLanded").mockImplementation(() => {});
+    const expectCopy = vi.spyOn(landed, "expectCopy").mockImplementation(() => {});
     const store = useGenerationStore();
     useHostsStore().extras = [
       {
@@ -1180,6 +1185,11 @@ describe("submitBatch connection cap", () => {
       originMetadata,
     );
     expect(submitted.jobs[0]!.result?.metadata).toEqual(originMetadata);
+    // The badge counts the print on the machine that MADE it, and the mirror
+    // warns the ledger that this Mac's copy is about to raise its own
+    // `gallery_added` here — one print, one badge, however many copies exist.
+    expect(noteLanded).toHaveBeenCalledWith("hal9000", "finished.png");
+    expect(expectCopy).toHaveBeenCalledWith("finished.png");
     expect(mockSse).not.toHaveBeenCalled();
   });
 

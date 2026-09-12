@@ -445,7 +445,7 @@ async function emitGallerySelection(entries: readonly MergedPrint[]) {
             data-test="picker-tab-gallery"
             @click="tab = 'gallery'"
           >
-            From gallery
+            From My images
           </button>
         </div>
 

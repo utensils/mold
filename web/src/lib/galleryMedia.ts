@@ -274,7 +274,9 @@ interface GalleryMediaTicket {
 /** Thrown when an authenticated host cannot issue the required media ticket. */
 export class MediaUpgradeRequiredError extends Error {
   constructor() {
-    super("Upgrade this Mold host before loading authenticated gallery media.");
+    super(
+      "Upgrade this Mold machine before loading authenticated gallery media.",
+    );
     this.name = "MediaUpgradeRequiredError";
   }
 }

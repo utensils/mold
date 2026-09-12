@@ -12,9 +12,14 @@ import { computed } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import CardSurface from "@ui/components/CardSurface.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
-import StatusDot from "./StatusDot.vue";
+import StatusDot from "@ui/components/StatusDot.vue";
 import { useHostPoll } from "./hostClient";
-import { deriveHostCardGpu, formatGb } from "./machineTelemetry";
+import {
+  deriveHostCardGpu,
+  formatGb,
+  hostGpuSnapshots,
+} from "./machineTelemetry";
+import { machineSentence } from "@studio/lib/machineSentence";
 import { HOST_RECONNECTING_LABEL } from "@studio/lib/hostConnectivity";
 import type { HostEntry } from "../../lib/hostRegistry";
 
@@ -59,14 +64,27 @@ function hostAddress(url: string): string | null {
   }
 }
 
+/*
+ * The one plain sentence about a machine — "4× L40S · CUDA · on your network
+ * at plato:7680" — from `@studio/lib/machineSentence`, so the same box reads
+ * identically here, in the desktop app's Machines list and in its machine
+ * pane. The card used to build its own line and called a 4× L40S box "L40S".
+ *
+ * Every machine a browser can see is `remote`: the tab is not running ON any
+ * of them, so "this device" would be a lie even for the serving origin. The
+ * origin has no URL of its own, so its address is the hostname it reports.
+ */
 const gpuLine = computed(() => {
   const status = poll.status.value;
-  const name = deriveHostCardGpu(status)?.label ?? null;
-  const secondary = props.primary
-    ? (status?.hostname ?? null)
-    : hostAddress(props.host.url);
-  const parts = [name, secondary].filter((p): p is string => !!p);
-  return parts.length ? parts.join(" · ") : "—";
+  const address = props.primary
+    ? (status?.hostname ?? "")
+    : (hostAddress(props.host.url) ?? "");
+  const sentence = machineSentence(
+    { kind: "remote", baseUrl: address },
+    hostGpuSnapshots(status),
+    { address: true },
+  );
+  return sentence || "—";
 });
 
 const memory = computed<{ used: number; total: number } | null>(() => {
@@ -97,8 +115,23 @@ const lastSeenLabel = computed(() => {
   return `last seen ${mins}m ago`;
 });
 
+/*
+ * The Machines page closes an open context menu on `pointerdown` anywhere
+ * outside it, and the `click` that completes that gesture then lands on this
+ * card. Dismissing a menu must dismiss it, not navigate — so the door notes
+ * whether a menu was open when the press began, and refuses that one click.
+ */
+let pressDismissedMenu = false;
+function onDoorPointerDown() {
+  pressDismissedMenu = props.actionsOpen === true;
+}
+
 function open() {
   if (disconnected.value) return;
+  if (pressDismissedMenu) {
+    pressDismissedMenu = false;
+    return;
+  }
   emit("open", props.host.id);
 }
 
@@ -134,27 +167,33 @@ function openContextMenu(event: MouseEvent) {
     <div class="ms-shimmer hc-skel hc-skel--bar" />
   </CardSurface>
 
-  <CardSurface v-else>
+  <CardSurface
+    v-else
+    class="hc-card"
+    :class="{ 'hc-card--open': !disconnected }"
+  >
     <div
       class="hc"
       data-test="host-card"
       @contextmenu.prevent.stop="openContextMenu"
     >
+      <!-- The whole card opens the machine, but the card is not the control:
+           `role="button"` prunes every descendant from the accessibility
+           tree, and this card's whole payload IS its readouts. A real button
+           stretched over the card keeps them announced, gives Enter and Space
+           for free, and leaves Retry / Connect / "…" outside any control. -->
+      <button
+        v-if="!disconnected"
+        type="button"
+        class="hc__door"
+        data-test="host-open"
+        :aria-label="`Open ${host.name}`"
+        @pointerdown="onDoorPointerDown"
+        @click="open"
+      ></button>
       <div class="hc__head">
         <StatusDot :state="dotState" />
-        <button
-          v-if="!disconnected"
-          type="button"
-          class="hc__name hc__open"
-          data-test="host-open"
-          :aria-label="`Open ${host.name}`"
-          @click="open"
-        >
-          <span data-test="host-name">{{ host.name }}</span>
-        </button>
-        <span v-else class="hc__name" data-test="host-name">{{
-          host.name
-        }}</span>
+        <span class="hc__name" data-test="host-name">{{ host.name }}</span>
         <button
           type="button"
           class="hc__actions"
@@ -162,7 +201,9 @@ function openContextMenu(event: MouseEvent) {
           :aria-label="`Actions for ${host.name}`"
           aria-haspopup="menu"
           :aria-expanded="actionsOpen ?? false"
-          @click="openContextMenu"
+          @click.stop="openContextMenu"
+          @keydown.enter.stop
+          @keydown.space.stop
         >
           <Icon name="more" :size="18" />
         </button>
@@ -179,6 +220,8 @@ function openContextMenu(event: MouseEvent) {
             class="hc__retry"
             data-test="host-reconnect"
             @click="reconnect"
+            @keydown.enter.stop
+            @keydown.space.stop
           >
             Connect
           </button>
@@ -203,6 +246,8 @@ function openContextMenu(event: MouseEvent) {
             class="hc__retry"
             data-test="host-retry"
             @click="retry"
+            @keydown.enter.stop
+            @keydown.space.stop
           >
             Retry
           </button>
@@ -227,6 +272,50 @@ function openContextMenu(event: MouseEvent) {
   color: var(--rebate);
 }
 
+/* The door is absolutely placed against the CARD, so the card is what it
+   covers and what its focus ring traces — `.hc` is inset by the card's own
+   padding. `CardSurface` paints its own `--mold-bg` fill, so the hover tint
+   must mix INTO that fill: mixing against `transparent` would replace it with
+   a wash over the page behind, which is deeper than the card in every theme
+   and made a hovered card sink instead of lift. */
+.hc-card--open {
+  position: relative;
+}
+.hc-card--open:hover {
+  background: color-mix(in srgb, var(--mold-text) 4%, var(--mold-bg));
+}
+.hc__door {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  border-radius: inherit;
+  cursor: pointer;
+}
+.hc__door:focus-visible {
+  outline: 2px solid var(--mold-border-focus);
+  outline-offset: 2px;
+}
+/* Everything a person reads sits ABOVE the door so it is never dimmed by it,
+   but passes its clicks THROUGH, or the door would only be the card's margins
+   and a press on the GPU line — the middle of the card — would do nothing.
+   The three real controls take their clicks back. The cost is that the
+   address cannot be selected by dragging across it; navigating instead of
+   selecting was the worse of the two. */
+.hc__head,
+.hc__gpu,
+.hc__row,
+.hc__offline {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+}
+.hc__actions,
+.hc__retry {
+  pointer-events: auto;
+}
+
 .hc__head {
   display: flex;
   flex-wrap: wrap;
@@ -234,23 +323,16 @@ function openContextMenu(event: MouseEvent) {
   gap: 10px;
 }
 
-.hc__actions,
-.hc__open {
+.hc__actions {
+  min-width: 44px;
   min-height: 44px;
+  display: grid;
+  place-items: center;
+  margin-left: auto;
   border: 0;
   background: transparent;
   color: inherit;
   cursor: pointer;
-}
-.hc__open {
-  text-align: left;
-  padding: 0;
-}
-.hc__actions {
-  min-width: 44px;
-  display: grid;
-  place-items: center;
-  margin-left: auto;
 }
 .hc__name {
   flex: 1;
@@ -264,9 +346,10 @@ function openContextMenu(event: MouseEvent) {
   min-width: 0;
   overflow-wrap: anywhere;
   margin-top: 6px;
-  font-family: var(--f-mono);
+  /* Plain words in sans; the meter's readouts below are the mono truth. */
+  font-family: var(--f-body);
   font-size: 0.875rem;
-  color: var(--ink-3);
+  color: var(--ink-2);
 }
 
 .hc__row {

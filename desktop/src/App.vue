@@ -10,7 +10,7 @@ import Sidebar from "./components/shell/Sidebar.vue";
 import StatusBar from "./components/shell/StatusBar.vue";
 import Toasts from "./components/shell/Toasts.vue";
 import CommandPalette from "./components/shell/CommandPalette.vue";
-import ConfirmDialog from "./components/shell/ConfirmDialog.vue";
+import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
 import ContextMenu from "./components/shell/ContextMenu.vue";
 import UpdateBanner from "./components/shell/UpdateBanner.vue";
 import LicenseAcceptanceDialog from "@studio/components/LicenseAcceptanceDialog.vue";
@@ -45,6 +45,7 @@ import { useGalleryStore } from "./stores/gallery";
 import { useHostsStore } from "./stores/hosts";
 import { useHostStatusStore } from "./stores/hostStatus";
 import { useJobsStore } from "./stores/jobs";
+import { useLandedPrintsStore } from "./stores/landedPrints";
 import { useGenerationStore } from "./stores/generation";
 import { useLibraryPrefsStore } from "./stores/libraryPrefs";
 import { useToastStore } from "./stores/toasts";
@@ -81,14 +82,27 @@ const queueTransfer = provideHeldQueueTransfer(
 
 const hostStatus = useHostStatusStore();
 const jobs = useJobsStore();
+const landed = useLandedPrintsStore();
 const libraryPrefs = useLibraryPrefsStore();
 
-// App-wide server-event subscription (live gallery). Re-probe whenever the
-// engine target changes — a different host may not support /api/events.
+// App-wide server-event subscription: the live gallery, and the Dock badge's
+// count of prints that landed anywhere. It follows the FLEET, not this device.
+// Remote-only is a supported configuration — the built-in engine off, or it
+// failed to start — and gating the subscription on `connection.ready` meant no
+// machine got a stream and the badge counted nothing, on machines that were
+// perfectly reachable; this device dropping later tore every remote's stream
+// down with it. Which machines get a stream is `syncHostStreams`'s decision;
+// the capability probe and the old-server poller stay the primary's, and the
+// primary's target changing still re-probes, because a different server may
+// not support /api/events.
 watch(
-  () => [connection.ready, connection.baseUrl] as const,
-  ([ready]) => {
-    if (ready) void events.resubscribe();
+  () =>
+    [
+      hostsStore.all.some((host) => host.status === "ready" && host.baseUrl),
+      connection.baseUrl,
+    ] as const,
+  ([anyReady]) => {
+    if (anyReady) void events.resubscribe();
     else events.unsubscribe();
   },
 );
@@ -134,11 +148,14 @@ async function listenForNotificationActions() {
   openNotificationAction(await ipc.takeNotificationAction().catch(() => null));
 }
 
-// Dock badge mirrors THIS app's active jobs, event-driven (no poll lag) and
-// cleared the moment the last job settles.
+// Dock badge counts prints that landed on ANY connected machine, made by any
+// client, while this app was in the background — and clears the moment the
+// window comes back. It deliberately does not mirror this app's own queue: a
+// long clip left a number nobody could clear, and work another machine did
+// never showed at all.
 watch(
-  () => [generation.pending.length, appPrefs.dockBadge] as const,
-  ([pending, enabled]) => void ipc.setDockBadge(dockBadgeValue(pending, enabled)),
+  () => [landed.count, appPrefs.dockBadge] as const,
+  ([count, enabled]) => void ipc.setDockBadge(dockBadgeValue(count, enabled)),
 );
 
 // Cross-surface notifications. A generation finishing while the user
@@ -377,7 +394,11 @@ function suppressChromeSelection(e: Event) {
 }
 
 function reconcileDurableOnWake() {
-  if (document.visibilityState === "visible") void generation.reconcileDurableAll();
+  if (document.visibilityState !== "visible") return;
+  // The person is looking: whatever landed while they were away has been
+  // announced, so the badge has done its job.
+  landed.markSeen();
+  void generation.reconcileDurableAll();
 }
 
 onMounted(async () => {

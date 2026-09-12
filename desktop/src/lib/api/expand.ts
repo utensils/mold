@@ -7,9 +7,9 @@ export interface ExpandPromptOptions {
   /** Number of prompt candidates to return (server default 1). */
   variations?: number;
   /**
-   * Natural-language style directive (see `styleHint`) the server appends to
-   * the expander's system message so the look is woven into the rewrite —
-   * never the literal preset suffix, and never appended to the prompt text.
+   * Natural-language style directive the server appends to the expander's
+   * system message. No GUI sends one — the composer preset that used to
+   * supply it is retired — but the wire field stays for the MCP tools.
    */
   style?: string;
   /** Resolved generation/conditioning policy. */

@@ -17,7 +17,6 @@
  * Escape in the capture phase (which is why the menu never claimed it).
  */
 import { computed, nextTick, ref, watch } from "vue";
-import { RouterLink } from "vue-router";
 import {
   isModelRuntimeUnavailable,
   RUNTIME_UNAVAILABLE_BADGE,
@@ -25,7 +24,6 @@ import {
 import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import { styleDisplayName } from "@studio/lib/styleLabel";
 import StyleMenu from "@studio/components/StyleMenu.vue";
-import Icon from "@ui/components/Icon.vue";
 import Popover from "@ui/components/Popover.vue";
 import type { ModelInfoExtended } from "../../types";
 
@@ -131,151 +129,135 @@ function browse() {
 </script>
 
 <template>
-  <div class="mp" data-test="create-style-picker">
-    <div class="mp__head">
-      <span class="mp__kicker">Style</span>
-      <RouterLink
-        :to="browseTarget"
-        class="mp__browse"
-        data-test="browse-styles"
+  <Popover
+    v-model:open="open"
+    label="Style"
+    placement="bottom-start"
+    class="style-pop"
+    data-test="create-style-picker"
+  >
+    <template #trigger>
+      <button
+        type="button"
+        class="style-chip"
+        data-test="style-chip"
+        title="Style"
+        :aria-expanded="open"
+        :aria-controls="menuId || undefined"
+        aria-haspopup="listbox"
+        @click="open = !open"
+        @keydown="onChipKeydown"
       >
-        Browse more
-        <Icon name="chevron-right" :size="12" />
-      </RouterLink>
-    </div>
-    <Popover
-      v-model:open="open"
-      label="Style"
-      placement="bottom-start"
-      class="mp__pop"
-    >
-      <template #trigger>
-        <button
-          type="button"
-          class="mp__chip"
-          data-test="style-chip"
-          :aria-expanded="open"
-          :aria-controls="menuId || undefined"
-          aria-haspopup="listbox"
-          @click="open = !open"
-          @keydown="onChipKeydown"
+        <span data-test="selected-model-name" class="style-chip__label">
+          {{ styleName || styleId || "Choose a style" }}
+        </span>
+        <span
+          v-if="styleId && styleId !== styleName"
+          data-test="style-chip-id"
+          class="style-chip__id"
+          >{{ styleId }}</span
         >
-          <Icon name="layers" :size="13" />
-          <span data-test="selected-model-name" class="mp__chip-label">
-            {{ styleName || styleId || "Choose a style" }}
-          </span>
-          <span
-            v-if="styleId && styleId !== styleName"
-            data-test="style-chip-id"
-            class="mp__chip-id"
-            >{{ styleId }}</span
-          >
-          <span class="mp__chip-caret" aria-hidden="true">▼</span>
-        </button>
-      </template>
-      <StyleMenu
-        ref="menu"
-        class="mp__menu"
-        :models="models"
-        :selected="current"
-        :missing-model="missingModel ?? null"
-        :empty-label="emptyLabel ?? 'No styles ready'"
-        :disabled-reason="disabledReason"
-        :availability-tag="availabilityTag ?? null"
-        autofocus-filter
-        @pick="pick"
-        @pick-missing="browse"
-        @browse="browse"
-      />
-    </Popover>
-  </div>
+        <span class="style-chip__caret" aria-hidden="true">▼</span>
+      </button>
+    </template>
+    <StyleMenu
+      ref="menu"
+      class="style-menu"
+      :models="models"
+      :selected="current"
+      :missing-model="missingModel ?? null"
+      :empty-label="emptyLabel ?? 'No styles ready'"
+      :disabled-reason="disabledReason"
+      :availability-tag="availabilityTag ?? null"
+      autofocus-filter
+      @pick="pick"
+      @pick-missing="browse"
+      @browse="browse"
+    />
+  </Popover>
 </template>
 
 <style scoped>
-.mp {
-  background: var(--bench);
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-card-lg);
-  box-shadow: inset 0 1px 0 var(--card-hi);
-  padding: 16px 18px;
+/* One chip in the composer's row (mock: `Photoreal flux-dev:q4 ▼` at 28px
+   beside the shape and count chips). The shared ShapeChip carries the same
+   metrics; the popover host stays because the composer sits in a SCROLLING
+   page and the panel must teleport rather than grow an ancestor. */
+.style-pop {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
 }
-.mp__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
+.style-pop :deep(.ms-popover__trigger) {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
 }
-.mp__kicker {
-  font-family: var(--f-mono);
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-.mp__browse {
+.style-chip {
+  /* literal: the mock's 28px chip row, the one metric between --mold-ctl-sm
+   * (24px, dense icon buttons) and --mold-ctl-md (26px, toolbars). */
+  --composer-chip-h: 28px;
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  font-family: var(--f-mono);
-  font-size: 10px;
-  color: var(--ink-3);
-  text-decoration: none;
-}
-.mp__browse:hover {
-  color: var(--safelight);
-}
-.mp__pop {
-  display: block;
-  width: 100%;
-}
-.mp__pop :deep(.ms-popover__trigger) {
-  display: block;
-  width: 100%;
-}
-.mp__chip {
-  display: flex;
-  width: 100%;
-  box-sizing: border-box;
-  align-items: center;
-  gap: 6px;
-  min-height: 40px;
-  padding: 0 12px;
+  gap: 7px;
+  height: var(--composer-chip-h);
+  max-width: 100%;
+  min-width: 0;
+  padding: 0 10px;
+  white-space: nowrap;
   cursor: pointer;
-  background: var(--bath);
-  border: 1px solid var(--ce);
-  border-radius: var(--radius-control);
-  color: var(--rebate);
-  font-size: 13px;
+  background: var(--mold-surface);
+  border: var(--mold-bw) solid var(--mold-border);
+  border-radius: var(--mold-radius-2);
+  color: var(--mold-text);
+  font-size: var(--mold-fs-xs);
+  font-weight: 500;
   text-align: left;
+  transition:
+    border-color var(--mold-dur-quick) var(--mold-ease-out),
+    color var(--mold-dur-quick) var(--mold-ease-out);
 }
-.mp__chip:hover {
-  border-color: var(--safelight);
+.style-chip:hover {
+  border-color: var(--mold-border-focus);
 }
-.mp__chip-label {
+.style-chip__label {
+  min-width: 0;
+  /* A catalog display name can run to a sentence ("FLUX.1 Schnell Q8 — fast
+   * 4-step, general purpose"); the chip keeps the words that name it and the
+   * menu row carries the rest. */
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.style-chip__id {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-micro);
+  font-weight: 400;
+  color: var(--mold-text-dim);
 }
-.mp__chip-id {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--f-mono);
-  font-size: 11px;
-  color: var(--ink-3);
+@media (max-width: 639px) {
+  /* Three chips on one phone row: the exact id lives in the menu there. */
+  .style-chip__label {
+    max-width: 14ch;
+  }
+  .style-chip__id {
+    display: none;
+  }
 }
-.mp__chip-caret {
-  margin-left: auto;
-  font-size: 10px;
-  color: var(--ink-3);
+.style-chip__caret {
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-text-dim);
 }
 /* The popover panel is already the surface: the menu inside it only needs a
    height bound so a long list scrolls instead of running off the viewport. */
-.mp__menu {
+.style-menu {
   max-height: 22rem;
   overflow-y: auto;
-  min-width: 18rem;
+  /* Sized like desktop's picker menu rather than to its longest catalog
+     sentence, which stretched the panel across the whole viewport. */
+  width: 30rem;
+  max-width: calc(100vw - 32px);
 }
 </style>

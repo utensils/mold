@@ -1,11 +1,21 @@
 import type { HostRoute } from "../stores/hosts";
-import { resolveStyleId, stylePresetLabel } from "./stylePresets";
 import { createUuid } from "@studio/lib/id";
 import type { ExpandContext, ExpandTask } from "@studio/lib/expandTask";
 import { type RemixDimension, type RemixSourceKind } from "@studio/lib/promptTransform";
 import type { PromptTransformProvenance } from "./api/types";
 
-export type HostSelectionPolicy = string | null;
+/*
+ * The stale-reason sentences are ONE rule, shared with web:
+ * `@studio/lib/preparedExpansion`. What stays here is the desktop-only
+ * machinery around them — the `HostRoute`-typed batch, its id, the route
+ * currency check and the request guard.
+ */
+export { hostSelectionLabel, type HostSelectionPolicy } from "@studio/lib/preparedExpansion";
+import type { HostSelectionPolicy } from "@studio/lib/preparedExpansion";
+import {
+  preparedExpansionStaleReasons as sharedPreparedExpansionStaleReasons,
+  quickExpansionStaleReasons as sharedQuickExpansionStaleReasons,
+} from "@studio/lib/preparedExpansion";
 
 export interface PreparedExpansionInputs {
   kind?: "expand" | "remix";
@@ -21,9 +31,6 @@ export interface PreparedExpansionInputs {
   /** Frozen generation facts sent with the rewrite (additive). */
   context?: ExpandContext;
   requestedCount: number;
-  /** Style-preset chip active when the expansion was requested (`null` = none).
-   * Frozen with the batch — prepared work keeps the chip as its indicator. */
-  stylePreset: string | null;
   selectedHostPolicy: HostSelectionPolicy;
 }
 
@@ -51,9 +58,6 @@ export interface QuickExpansionSnapshot {
   model: string;
   family: string;
   task: ExpandTask;
-  /** Chip active when the quick expansion was requested — the bake-and-clear
-   * apply clears the live chip, and undo restores it from here. */
-  stylePreset: string | null;
   selectedHostPolicy: HostSelectionPolicy;
   /** The frozen GENERATION authority — where the print is submitted. */
   route: HostRoute;
@@ -89,13 +93,25 @@ export interface CurrentPreparedExpansionInputs extends PreparedExpansionInputs 
   >;
 }
 
-function modelLabel(name: string, labels?: ReadonlyMap<string, string>): string {
-  return labels?.get(name) ?? name;
-}
-
 // The count-and-normalise rule is the shared studio helper; web and desktop
 // must agree on the messages and on unwrapping a one-string JSON array.
 export { validateExpandedPrompts } from "@studio/lib/expandedPrompts";
+
+/** Specific, stable reasons why reviewed work no longer matches the form. */
+export function preparedExpansionStaleReasons(
+  batch: PreparedExpansionBatch,
+  current: CurrentPreparedExpansionInputs,
+): string[] {
+  return sharedPreparedExpansionStaleReasons(batch, current);
+}
+
+/** Batch 1 gets the same frozen-route guarantees without a review workspace. */
+export function quickExpansionStaleReasons(
+  snapshot: QuickExpansionSnapshot,
+  current: CurrentQuickExpansionInputs,
+): string[] {
+  return sharedQuickExpansionStaleReasons(snapshot, current);
+}
 
 export function createPreparedExpansionBatch(
   inputs: PreparedExpansionInputs,
@@ -122,124 +138,11 @@ function createDurableBatchId(): string {
   return createUuid();
 }
 
-export function hostSelectionLabel(
-  policy: HostSelectionPolicy,
-  hostLabels: ReadonlyMap<string, string> = new Map(),
-): string {
-  if (policy === null) return "Auto";
-  if (policy === "capable") return "Most capable";
-  return hostLabels.get(policy) ?? policy;
-}
-
-/** Legacy chip ids (e.g. "photographic") equal their canonical twin. */
-function canonicalStyle(id: string | null): string | null {
-  return id ? resolveStyleId(id) : null;
-}
-
-/** "Style changed from X to Y." plus removal/addition variants; empty when equal. */
-function styleStaleReason(frozen: string | null, current: string | null): string | null {
-  const frozenStyle = canonicalStyle(frozen);
-  const currentStyle = canonicalStyle(current);
-  if (frozenStyle === currentStyle) return null;
-  if (frozenStyle && currentStyle) {
-    return `Style changed from ${stylePresetLabel(frozenStyle)} to ${stylePresetLabel(currentStyle)}.`;
-  }
-  if (frozenStyle) {
-    return `Style ${stylePresetLabel(frozenStyle)} was removed after these variations were prepared.`;
-  }
-  if (currentStyle) {
-    return `Style ${stylePresetLabel(currentStyle)} was added after these variations were prepared.`;
-  }
-  return null;
-}
-
 function knownInstanceIdsDiffer(
   frozen: string | null | undefined,
   current: string | null | undefined,
 ): boolean {
   return frozen != null && current != null && frozen !== current;
-}
-
-/** Specific, stable reasons why reviewed work no longer matches the form. */
-export function preparedExpansionStaleReasons(
-  batch: PreparedExpansionBatch,
-  current: CurrentPreparedExpansionInputs,
-): string[] {
-  const reasons: string[] = [];
-  if (current.sourcePrompt !== batch.sourcePrompt) {
-    reasons.push("Source prompt changed after these variations were prepared.");
-  }
-  if (current.model !== batch.model) {
-    reasons.push(
-      `Model changed from "${modelLabel(batch.model, current.modelLabels)}" to "${modelLabel(current.model, current.modelLabels)}".`,
-    );
-  }
-  if (current.family !== batch.family) {
-    reasons.push(`Model family changed from "${batch.family}" to "${current.family}".`);
-  }
-  if (current.task !== batch.task) {
-    reasons.push(`Conditioning changed from ${batch.task} to ${current.task}.`);
-  }
-  if (
-    batch.conditioningFingerprint !== undefined &&
-    current.conditioningFingerprint !== batch.conditioningFingerprint
-  ) {
-    reasons.push("Conditioning media changed after these variations were prepared.");
-  }
-  if (
-    batch.kind === "remix" &&
-    JSON.stringify(current.dimensions ?? []) !== JSON.stringify(batch.dimensions ?? [])
-  ) {
-    reasons.push("Remix dimensions changed after these variations were prepared.");
-  }
-  const styleReason = styleStaleReason(batch.stylePreset, current.stylePreset);
-  if (styleReason) reasons.push(styleReason);
-  if (current.requestedCount !== batch.requestedCount) {
-    reasons.push(`Batch changed from ${batch.requestedCount} to ${current.requestedCount}.`);
-  }
-  if (current.selectedHostPolicy !== batch.selectedHostPolicy) {
-    reasons.push(
-      `Host selection changed from ${hostSelectionLabel(batch.selectedHostPolicy, current.hostLabels)} to ${hostSelectionLabel(current.selectedHostPolicy, current.hostLabels)}.`,
-    );
-  }
-  if (!current.readyHostIds.has(batch.route.hostId)) {
-    reasons.push(`${batch.route.label} is no longer reachable.`);
-  } else {
-    const currentTarget = current.hostTargets?.get(batch.route.hostId);
-    if (
-      currentTarget &&
-      (currentTarget.baseUrl !== batch.route.target.baseUrl ||
-        currentTarget.apiKey !== batch.route.target.apiKey ||
-        currentTarget.kind !== batch.route.kind ||
-        knownInstanceIdsDiffer(batch.route.instanceId, currentTarget.instanceId))
-    ) {
-      reasons.push(`${batch.route.label}'s connection details changed.`);
-    }
-  }
-  return reasons;
-}
-
-/** Batch 1 gets the same frozen-route guarantees without showing a review workspace. */
-export function quickExpansionStaleReasons(
-  snapshot: QuickExpansionSnapshot,
-  current: CurrentQuickExpansionInputs,
-): string[] {
-  const reasons: string[] = [];
-  if (current.expandedPrompt !== snapshot.expandedPrompt) {
-    reasons.push("Expanded prompt changed after it was prepared.");
-  }
-  if (current.model !== snapshot.model) {
-    reasons.push(
-      `Model changed from "${modelLabel(snapshot.model, current.modelLabels)}" to "${modelLabel(current.model, current.modelLabels)}".`,
-    );
-  }
-  if (current.family !== snapshot.family) {
-    reasons.push(`Model family changed from "${snapshot.family}" to "${current.family}".`);
-  }
-  if (current.task !== snapshot.task) {
-    reasons.push(`Conditioning changed from ${snapshot.task} to ${current.task}.`);
-  }
-  return reasons;
 }
 
 /** A host-only change releases quick work from its old route without making the prompt stale. */

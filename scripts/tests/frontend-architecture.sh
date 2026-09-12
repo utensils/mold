@@ -95,7 +95,28 @@ for duplicate in \
   web/src/lib/modelAvailability.ts \
   web/src/lib/styleAvailability.ts \
   desktop/src/lib/styleAvailability.ts \
-  desktop/src/mobile/modelAvailability.ts; do
+  desktop/src/mobile/modelAvailability.ts \
+  web/src/components/create/EstimateBadge.vue \
+  desktop/src/components/generate/EstimateBadge.vue \
+  web/src/components/ReferenceCropModal.vue \
+  desktop/src/components/generate/ReferenceCropModal.vue \
+  web/src/components/shell/ConfirmDialog.vue \
+  desktop/src/components/shell/ConfirmDialog.vue \
+  desktop/src/mobile/MobileStyleChips.vue \
+  desktop/src/components/generate/SourceGlyph.vue \
+  web/src/components/ConfigSettingsPanel.vue \
+  web/src/lib/settingsConfig.ts \
+  desktop/src/components/settings/SettingRow.vue \
+  desktop/src/components/settings/ToggleControl.vue \
+  desktop/src/components/settings/SelectControl.vue \
+  desktop/src/components/settings/NumberControl.vue \
+  desktop/src/components/settings/TextControl.vue \
+  desktop/src/components/settings/SliderControl.vue \
+  desktop/src/components/settings/PathControl.vue \
+  desktop/src/components/settings/SecretControl.vue \
+  desktop/src/components/settings/ConfigSettingRow.vue \
+  desktop/src/components/settings/ConfigRowItem.vue \
+  web/src/components/machines/StatusDot.vue; do
   test ! -e "$duplicate" || fail "$duplicate duplicates studio domain logic"
 done
 
@@ -105,6 +126,14 @@ done
 # catalog media-type filter), so guard the string the rule emits.
 if grep -REn --include='*.ts' --include='*.vue' '\$\{[^}]*length\} machines`' web/src desktop/src ui; then
   fail "the availability tag's wording belongs to studio/lib/modelAvailability.ts"
+fi
+
+# Why reviewed prompt work went stale is ONE rule, studio/lib/preparedExpansion.ts,
+# and the surfaces only bind their own form state to it. A path list cannot catch
+# a second copy inside a view, so guard the sentence the rule emits.
+if grep -REn --include='*.ts' --include='*.vue' 'Source prompt changed after these variations were prepared' web/src desktop/src ui |
+  grep -v '\.test\.'; then
+  fail "the stale-reason wording belongs to studio/lib/preparedExpansion.ts"
 fi
 
 echo "frontend-architecture: ok"

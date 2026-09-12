@@ -656,14 +656,14 @@ describe("CommandPalette model search", () => {
     await wrapper.get("input").setValue("qwen");
     await vi.advanceTimersByTimeAsync(300);
     expect(
-      wrapper.findAll("[role='option']").some((o) => o.text().includes("Install Qwen Image")),
+      wrapper.findAll("[role='option']").some((o) => o.text().includes("Get Qwen Image")),
     ).toBe(true);
 
     // Mid-flight for the NEW query the stale row must already be gone —
     // otherwise Enter here queues a model the user is no longer looking at.
     await wrapper.get("input").setValue("wuerstchen");
     expect(
-      wrapper.findAll("[role='option']").some((o) => o.text().includes("Install Qwen Image")),
+      wrapper.findAll("[role='option']").some((o) => o.text().includes("Get Qwen Image")),
     ).toBe(false);
     vi.useRealTimers();
     wrapper.unmount();
@@ -709,11 +709,9 @@ describe("CommandPalette model search", () => {
     await wrapper.get("input").setValue("qwen");
     await vi.advanceTimersByTimeAsync(300);
 
-    const row = wrapper
-      .findAll("[role='option']")
-      .find((o) => o.text().includes("Install Qwen Image"));
+    const row = wrapper.findAll("[role='option']").find((o) => o.text().includes("Get Qwen Image"));
     expect(row).toBeDefined();
-    expect(row!.text()).toContain("not installed · hf");
+    expect(row!.text()).toContain("not on this machine · hf");
 
     await row!.trigger("click");
     await vi.advanceTimersByTimeAsync(0);

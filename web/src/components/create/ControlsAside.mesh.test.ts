@@ -106,6 +106,9 @@ function mountMesh(
       family: "hunyuan3d",
       model,
       advCount: 0,
+      // The geometry controls live under More settings now; the rail itself
+      // keeps only the canvas and the two sliders.
+      group: "secondary" as const,
     },
   });
 }
@@ -238,7 +241,7 @@ describe("ControlsAside 3-D mesh", () => {
     const wrapper = mountMesh();
     const slider = wrapper
       .findAllComponents(SliderRow)
-      .find((c) => c.props("label") === "Iso threshold");
+      .find((c) => c.props("label") === "How tight to the photo");
     expect(slider).toBeTruthy();
     expect(slider!.props("min")).toBe(0);
     expect(slider!.props("max")).toBe(1);
@@ -343,6 +346,7 @@ describe("ControlsAside 3-D mesh", () => {
         family: "hunyuan3d",
         model,
         advCount: 0,
+        group: "secondary" as const,
       },
     });
     expect(wrapper.get("[data-test='mesh-threshold-note']").text()).toContain(
@@ -350,7 +354,7 @@ describe("ControlsAside 3-D mesh", () => {
     );
     const slider = wrapper
       .findAllComponents(SliderRow)
-      .find((c) => c.props("label") === "Iso threshold")!;
+      .find((c) => c.props("label") === "How tight to the photo")!;
     expect(slider.props("disabled")).toBe(true);
   });
 });

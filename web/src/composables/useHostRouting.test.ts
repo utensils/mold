@@ -665,7 +665,7 @@ describe("useHostRouting", () => {
           backend: "cuda",
           name: "NVIDIA RTX 4090",
           vram_total_mb: 24576,
-          vram_used_mb: 0,
+          vram_used_mb: 6144,
         },
       }),
     );
@@ -677,10 +677,13 @@ describe("useHostRouting", () => {
     const remote = routing.hosts.value.find((h) => h.id === studio.id);
     expect(remote?.status).toBe("ready");
     expect(remote?.queueDepth).toBe(5);
+    // Used memory rides along so the Create rail's machine card can draw its
+    // meter from the same poll instead of a second status request.
     expect(remote?.gpu).toEqual({
       backend: "cuda",
       name: "NVIDIA RTX 4090",
       vramTotalMb: 24576,
+      vramUsedMb: 6144,
     });
     expect(routing.multiHost.value).toBe(true);
   });
@@ -2014,6 +2017,7 @@ describe("useHostRouting", () => {
       backend: "cuda",
       name: "NVIDIA B200",
       vramTotalMb: 80 * 1024,
+      vramUsedMb: 0,
     });
     expect(routing.resolve("flux-dev:q4")?.hostId).toBe(ORIGIN_HOST_ID);
   });

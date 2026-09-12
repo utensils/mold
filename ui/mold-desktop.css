@@ -1,5 +1,8 @@
 /*
- * Mold Studio — desktop GUI additions. ADDITIVE ONLY: loads after tokens.css
+ * Mold Studio — desktop GUI additions, consumed by the desktop app AND by
+ * the web SPA (web/src/style.css), so the shared studio components land on
+ * the same metrics on both. The phone deliberately does not load it.
+ * ADDITIVE ONLY: loads after tokens.css
  * and invents no colour. Every value is either a layout metric measured off
  * the mold studio desktop mock or a semantic alias onto a token that already
  * exists. See docs/design/README.md §04 (shell anatomy) and §06 (components).

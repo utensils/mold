@@ -205,6 +205,11 @@ const sourceConditioningError = computed(() =>
         hasEndFrame: hasEndFrame.value,
         frames: caps.value.supportsVideo ? props.modelValue.frames : null,
         model: props.modelValue.model,
+        outputKind: caps.value.canvasless
+          ? "mesh"
+          : caps.value.supportsVideo
+            ? "video"
+            : "image",
       })
     : null,
 );

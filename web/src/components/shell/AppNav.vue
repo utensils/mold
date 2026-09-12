@@ -2,10 +2,12 @@
 /* Browser chrome shares destination names with the menu and command palette.
  * The wide bar wraps for enlarged text; compact navigation opens a sheet.
  * Downloads remains independent from generation activity. */
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
+import Keycap from "@ui/components/Keycap.vue";
+import { overlayDepth } from "@ui/lib/overlayStack";
 import MobileNavSheet from "./MobileNavSheet.vue";
 import NotificationsCenter from "@studio/components/NotificationsCenter.vue";
 import NowDevelopingPopover from "./NowDevelopingPopover.vue";
@@ -62,6 +64,13 @@ const badgeCount = computed(
     (downloads.queued?.value.length ?? 0),
 );
 
+/** "Getting 1 style ready" while work is on its way; "Downloads" otherwise. */
+const downloadsLabel = computed(() =>
+  badgeCount.value > 0
+    ? `Getting ${badgeCount.value} style${badgeCount.value === 1 ? "" : "s"} ready`
+    : "Downloads",
+);
+
 function openDownloads() {
   window.dispatchEvent(new CustomEvent("mold:open-downloads"));
 }
@@ -78,6 +87,39 @@ function submitSearch() {
   const q = query.value.trim();
   void router.push({ name: "library", query: q ? { q } : {} });
 }
+
+/*
+ * `/` focuses the search field, the shortcut the mono keycap beside it
+ * advertises. It is deliberately a BARE slash outside anything editable: a
+ * slash typed into a prompt, a filename or a search box is a slash, and a
+ * chorded one belongs to the browser.
+ */
+const searchInput = ref<HTMLInputElement | null>(null);
+function isEditable(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el || typeof el.closest !== "function") return false;
+  return Boolean(
+    el.closest(
+      "input, textarea, select, [contenteditable]:not([contenteditable='false'])",
+    ),
+  );
+}
+function focusSearch(event: KeyboardEvent) {
+  if (event.key !== "/") return;
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  if (isEditable(event.target)) return;
+  // An open dialog owns the keyboard: pulling focus to a field behind its
+  // scrim would defeat its Tab trap and scroll lock.
+  if (overlayDepth() > 0 || document.querySelector('[aria-modal="true"]'))
+    return;
+  const field = searchInput.value;
+  if (!field) return;
+  event.preventDefault();
+  field.focus();
+  field.select();
+}
+onMounted(() => document.addEventListener("keydown", focusSearch));
+onBeforeUnmount(() => document.removeEventListener("keydown", focusSearch));
 
 const menuOpen = ref(false);
 </script>
@@ -103,7 +145,7 @@ const menuOpen = ref(false);
           height="22"
           class="brand__logo"
         />
-        <span class="brand__word">Mold</span>
+        <span class="brand__word brand-gradient">mold</span>
       </router-link>
 
       <nav class="seg-group" aria-label="Workspaces">
@@ -132,33 +174,34 @@ const menuOpen = ref(false);
 
       <NowDevelopingPopover
         :rows="liveActivity.rows.value"
+        :statuses="routing.queueStatus.value"
         @select="openLiveWork"
       />
 
       <form class="search-box" role="search" @submit.prevent="submitSearch">
         <Icon name="search" :size="14" class="search-icon" />
         <input
+          ref="searchInput"
           v-model="query"
           type="search"
           class="search-input"
-          placeholder="Search prompts…"
-          aria-label="Search prompts"
+          placeholder="Search your images…"
+          aria-label="Search your images"
           autocomplete="off"
           spellcheck="false"
         />
+        <Keycap class="search-key" data-test="search-shortcut">/</Keycap>
       </form>
 
       <button
         type="button"
         class="dl-chip"
-        aria-label="Open downloads"
+        :class="{ 'dl-chip--busy': badgeCount > 0 }"
+        data-test="downloads-chip"
         @click="openDownloads"
       >
         <Icon name="download" :size="15" />
-        <span class="dl-chip__label">Downloads</span>
-        <span v-if="badgeCount > 0" class="dl-badge">
-          <BadgePill tone="accent">{{ badgeCount }}</BadgePill>
-        </span>
+        <span class="dl-chip__label">{{ downloadsLabel }}</span>
       </button>
 
       <NotificationsCenter />
@@ -178,13 +221,14 @@ const menuOpen = ref(false);
           height="20"
           class="brand__logo"
         />
-        <span class="brand__word brand__word--sm">Mold</span>
+        <span class="brand__word brand__word--sm brand-gradient">mold</span>
       </router-link>
 
       <div class="spacer" />
 
       <NowDevelopingPopover
         :rows="liveActivity.rows.value"
+        :statuses="routing.queueStatus.value"
         @select="openLiveWork"
       />
 
@@ -295,9 +339,11 @@ const menuOpen = ref(false);
   display: block;
 }
 
+/* The mock's wordmark: lowercase, mono, gradient-clipped. Mono because the
+ * name is the command you type, and lowercase because that is how you type it. */
 .brand__word {
-  font-family: var(--f-display);
-  font-weight: 800;
+  font-family: var(--f-mono);
+  font-weight: 700;
   font-size: 17px;
   letter-spacing: -0.01em;
 }
@@ -417,7 +463,24 @@ const menuOpen = ref(false);
   color: var(--ink-3);
 }
 
+/* The shortcut hint steps out of the way once you are actually typing —
+ * it has nothing left to tell you then. */
+.search-key {
+  flex: 0 0 auto;
+}
+
+.search-box:focus-within .search-key {
+  visibility: hidden;
+}
+
 /* ── Downloads chip + badge ────────────────────────────────────────── */
+.dl-chip--busy {
+  border-color: var(--mold-warning);
+  color: var(--mold-text);
+}
+.dl-chip--busy :deep(svg) {
+  color: var(--mold-warning);
+}
 .dl-chip {
   position: relative;
   display: flex;

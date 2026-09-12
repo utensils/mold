@@ -1,18 +1,28 @@
 <script setup lang="ts">
 /*
- * Composer card (Mold Studio Create) — the prompt bed. Autogrow textarea,
- * a collapsible Style row (tapping the active preset deselects it), a mono
- * summary line with an inline "expanded · undo" affordance, and the Expand /
- * Generate action row. Generate carries the ⌘↵ keycap; ⌘↵ / Ctrl+↵ inside the
- * textarea submits. The card never rewrites the prompt for style — the active
- * preset is applied at request time by `useGenerateForm.promptWithStyle`.
+ * Composer card (Mold Studio Create) — the prompt bed. Autogrow textarea, a
+ * mono summary line with an inline "expanded · undo" affordance, and the
+ * chip + Write-more / Generate action row. Generate carries the primary
+ * modifier + ↵ keycap, and that chord inside the textarea submits.
+ *
+ * The action row's first three positions are SLOTS — `style`, `shape`,
+ * `count` — because the style picker, the resolved output shape and the batch
+ * count all belong to the form the page owns. The composer decides only where
+ * they sit. Slot content is compiled in the PARENT and never inherits this
+ * component's scoped CSS, so each chip carries its own look.
+ *
+ * Where the composer sits is the page's decision too: `composer--sticky`
+ * parks it at the bottom of the wide column, `composer--docked` fixes it to
+ * the bottom of a narrow one. The card takes neither on its own.
+ *
+ * There is no prompt-preset strip: Style is the style the picture is made
+ * with, and a second "Photoreal" on the same screen meaning a phrase appended
+ * to the prompt is two different things wearing one word.
  */
 import { computed, nextTick, ref, watch } from "vue";
-import Chip from "@ui/components/Chip.vue";
 import Icon from "@ui/components/Icon.vue";
 import Keycap from "@ui/components/Keycap.vue";
 import ActionBlocker from "@ui/components/ActionBlocker.vue";
-import { STYLE_PRESETS, stylePresetById } from "../../lib/stylePresets";
 import {
   PromptCycler,
   caretOnFirstLine,
@@ -20,13 +30,12 @@ import {
 } from "@studio/lib/promptCycler";
 import { OPTIONAL_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
 import type { PromptAuthoringSource } from "@studio/lib/promptProvenance";
+import { primaryModifierPressed, shortcutLabel } from "../../lib/platform";
 
 const props = withDefaults(
   defineProps<{
     /** Prompt text (v-model). */
     prompt: string;
-    /** Active style preset id (v-model:stylePreset). */
-    stylePreset: string | null;
     /** Aspect label for the summary line (e.g. "1:1" or "Custom"). */
     aspectLabel: string;
     width: number;
@@ -35,6 +44,10 @@ const props = withDefaults(
     batchSize: number;
     /** An in-place expansion is undoable (batch = 1 rewrite). */
     expanded?: boolean;
+    /** A rewrite is in flight on a machine right now. */
+    running?: boolean;
+    /** The machine doing that rewriting, named in the live progress line. */
+    expansionHostLabel?: string | null;
     /** Disable submit/expand (e.g. a job is mid-flight). */
     busy?: boolean;
     cancellable?: boolean;
@@ -60,6 +73,8 @@ const props = withDefaults(
   }>(),
   {
     expanded: false,
+    running: false,
+    expansionHostLabel: null,
     busy: false,
     cancellable: false,
     busyLabel: "Planning generation…",
@@ -76,7 +91,6 @@ const emit = defineEmits<{
   /** Tagged with how the text arrived: a ↑/↓ recall replaces the whole
    * prompt and releases any quick expansion, where typing keeps it. */
   "update:prompt": [value: string, source: PromptAuthoringSource];
-  "update:stylePreset": [value: string | null];
   submit: [];
   cancel: [];
   expand: [];
@@ -85,10 +99,6 @@ const emit = defineEmits<{
 }>();
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
-const stylesOpen = ref(false);
-
-const activePreset = computed(() => stylePresetById(props.stylePreset));
-const styleLabel = computed(() => activePreset.value?.name ?? "None");
 
 const summaryLine = computed(() => {
   // A canvasless recipe (a 3-D mesh) renders at no pixel size at all, so the
@@ -97,7 +107,7 @@ const summaryLine = computed(() => {
     props.width > 0 && props.height > 0
       ? `${props.aspectLabel} · ${props.width}×${props.height} · `
       : "";
-  const base = `${canvas}${props.steps} steps`;
+  const base = `${canvas}${props.steps} passes`;
   return props.batchSize > 1 ? `${base} · ×${props.batchSize}` : base;
 });
 
@@ -110,8 +120,23 @@ const promptFieldPlaceholder = computed(
 );
 
 const expandLabel = computed(() =>
-  props.batchSize > 1 ? `Expand to ${props.batchSize}` : "Expand prompt",
+  props.batchSize > 1 ? `Write ${props.batchSize} for me` : "Write more for me",
 );
+// Desktop's `ExpandControl` sentence, word for word: a rewrite runs on a
+// MACHINE, and while it runs the composer says which one rather than a
+// placeless "Expanding…".
+const progressLabel = computed(() => {
+  const machine = props.expansionHostLabel ?? "the selected machine";
+  return props.batchSize > 1
+    ? `Writing ${props.batchSize} versions on ${machine}…`
+    : `Writing more on ${machine}…`;
+});
+// Both chords are the platform's own: ⌘ on Apple, Ctrl elsewhere. The ↵ glyph
+// carries its own span (it is set larger than the modifier), so Generate
+// spells its chord as the bare modifier plus that span.
+// The platform is fixed at import, so these are plain strings.
+const expandChord = shortcutLabel("E");
+const modifierLabel = shortcutLabel("");
 const generateDisabled = computed(
   () => !props.cancellable && (props.busy || Boolean(props.disabledReason)),
 );
@@ -119,7 +144,10 @@ const generateDisabled = computed(
 // unavailable when the recipe reads no prompt — the render itself is fine.
 const transformsDisabled = computed(
   () =>
-    props.busy || !props.prompt.trim() || Boolean(props.transformBlockedReason),
+    props.busy ||
+    props.running ||
+    !props.prompt.trim() ||
+    Boolean(props.transformBlockedReason),
 );
 const transformTitle = computed(
   () => props.transformBlockedReason?.trim() || undefined,
@@ -141,9 +169,19 @@ function onInput(event: Event) {
 }
 
 function onKeydown(event: KeyboardEvent) {
-  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+  if (primaryModifierPressed(event) && event.key === "Enter") {
     event.preventDefault();
     if (!generateDisabled.value) submitOrCancel();
+    return;
+  }
+  // ⌘E (Ctrl+E off a Mac) is desktop's shortcut for the same rewrite, and the
+  // chip carries the keycap — so the keycap has to be true here too.
+  if (
+    primaryModifierPressed(event) &&
+    (event.key === "e" || event.key === "E")
+  ) {
+    event.preventDefault();
+    if (!transformsDisabled.value) emit("expand");
     return;
   }
   const el = event.target as HTMLTextAreaElement;
@@ -169,11 +207,6 @@ function onKeydown(event: KeyboardEvent) {
 function submitOrCancel() {
   if (props.cancellable) emit("cancel");
   else emit("submit");
-}
-
-function pickStyle(id: string) {
-  // Tapping the active preset deselects it (→ null); otherwise select it.
-  emit("update:stylePreset", props.stylePreset === id ? null : id);
 }
 
 // Let the parent focus the prompt bed (⌘K "New print" starts here) and push a
@@ -214,48 +247,11 @@ watch(
       @keydown="onKeydown"
     />
 
-    <div class="composer__style">
-      <button
-        type="button"
-        class="composer__style-head"
-        :aria-expanded="stylesOpen"
-        data-test="style-toggle"
-        @click="stylesOpen = !stylesOpen"
-      >
-        <span class="composer__kicker">Style</span>
-        <Chip :active="!!activePreset" tabindex="-1" data-test="style-active">{{
-          styleLabel
-        }}</Chip>
-        <span class="composer__spacer" />
-        <Icon :name="stylesOpen ? 'chevron-up' : 'chevron-down'" :size="15" />
-      </button>
-      <div v-if="stylesOpen" class="composer__chips" data-test="style-chips">
-        <Chip
-          v-for="preset in STYLE_PRESETS"
-          :key="preset.id"
-          :active="stylePreset === preset.id"
-          :data-test="`style-chip-${preset.id}`"
-          @click="pickStyle(preset.id)"
-          >{{ preset.name }}</Chip
-        >
-      </div>
-    </div>
-
-    <!-- Phone-only insertion point: Create owns model/shape controls, but the
-         prototype places them between Style and the action row. Desktop leaves
-         this slot empty and keeps its separate inspector column. -->
-    <slot name="mobile-controls" />
-
-    <div class="composer__actions">
-      <span class="composer__summary" data-test="composer-summary">{{
-        summaryLine
-      }}</span>
-      <span
-        v-if="transformBlockedReason"
-        class="composer__summary"
-        data-test="composer-transform-blocked"
-        >{{ transformBlockedReason }}</span
-      >
+    <div class="composer__chips" data-test="composer-chips">
+      <slot name="style" />
+      <slot name="shape" />
+      <slot name="count" />
+      <span class="composer__spacer" />
       <button
         v-if="expanded"
         type="button"
@@ -266,7 +262,27 @@ watch(
         <Icon name="sparkle" :size="12" />
         expanded · undo
       </button>
+      <span
+        v-if="transformBlockedReason"
+        class="composer__summary"
+        data-test="composer-transform-blocked"
+        >{{ transformBlockedReason }}</span
+      >
+      <span class="composer__summary" data-test="composer-summary">{{
+        summaryLine
+      }}</span>
+    </div>
+
+    <div class="composer__actions" data-test="composer-actions">
       <span class="composer__spacer" />
+      <span
+        v-if="running"
+        class="composer__progress"
+        data-test="composer-expand-progress"
+        role="status"
+        aria-live="polite"
+        >{{ progressLabel }}</span
+      >
       <button
         type="button"
         class="composer__expand"
@@ -277,6 +293,7 @@ watch(
       >
         <Icon name="sparkle" :size="15" />
         {{ expandLabel }}
+        <Keycap>{{ expandChord }}</Keycap>
       </button>
       <button
         type="button"
@@ -302,7 +319,9 @@ watch(
           :stroke-width="2"
         />
         {{ cancellable ? "Cancel" : "Generate" }}
-        <Keycap on-accent>⌘<span class="composer__return">↵</span></Keycap>
+        <Keycap on-accent
+          >{{ modifierLabel }}<span class="composer__return">↵</span></Keycap
+        >
       </button>
       <span
         v-if="cancellable"
@@ -342,52 +361,48 @@ watch(
   outline: none;
 }
 
-.composer__style {
-  padding-top: 4px;
-}
-
-.composer__style-head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  border: 0;
-  background: transparent;
-  color: var(--ink-2);
-  padding: 4px 0;
-  text-align: left;
-  cursor: pointer;
-}
-
-.composer__kicker {
-  font-family: var(--f-mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-
 .composer__spacer {
   flex: 1;
 }
 
 .composer__chips {
   display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
   flex-wrap: wrap;
-  gap: 7px;
-  margin-top: 9px;
 }
 
 .composer__actions {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-top: 12px;
+  margin-top: 10px;
   flex-wrap: wrap;
 }
 
 .composer__blocker {
   margin-top: 12px;
+}
+
+/* Docked over a phone-width page every row costs a 44px touch target, so the
+ * summary (the chips already say it) and the keyboard hints (no ⌘ on a
+ * phone) leave, and the two transforms share a row. */
+@media (max-width: 639px) {
+  .composer__summary,
+  .composer__expand :deep(.ms-keycap),
+  .composer__generate :deep(.ms-keycap) {
+    display: none;
+  }
+  .composer__chips,
+  .composer__actions {
+    gap: 8px;
+  }
+  .composer__generate {
+    flex: 1 1 100%;
+    justify-content: center;
+    padding: 0 18px;
+  }
 }
 
 .composer__summary {
@@ -409,7 +424,16 @@ watch(
   cursor: pointer;
 }
 
+.composer__progress {
+  min-width: 0;
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-blue);
+}
+
 .composer__expand {
+  /* literal: the mock's 28px chip row — the two prompt transforms stand at
+   * the same height as the Style, Shape and Make chips beside them. */
+  --composer-chip-h: 28px;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -417,7 +441,7 @@ watch(
   background: transparent;
   color: var(--ink-2);
   padding: 0 15px;
-  height: 42px;
+  height: var(--composer-chip-h);
   border-radius: var(--radius-control-lg);
   font-size: 13px;
   font-weight: 600;
@@ -437,7 +461,9 @@ watch(
   background: var(--safelight);
   color: var(--on-accent);
   padding: 0 12px 0 22px;
-  height: 42px;
+  /* The kit has three control heights and the primary action is the tallest
+   * of them; 42px was a fourth height nothing else on the screen used. */
+  height: var(--mold-ctl-lg, 32px);
   border-radius: var(--radius-control-lg);
   font-size: 14px;
   font-weight: 700;

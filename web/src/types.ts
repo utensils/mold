@@ -979,9 +979,9 @@ export interface ExpandRequestWire {
   model_family: string;
   variations: number;
   /**
-   * Natural-language style directive (see `styleHint`) the server appends to
-   * the expander's system message so the look is woven into the rewrite —
-   * never the literal preset suffix, and never appended to the prompt text.
+   * Natural-language style directive the server appends to the expander's
+   * system message. The composer preset that fed it is retired, so no client
+   * sends one any more; the field stays because MCP still does.
    */
   style?: string;
   /** Resolved generation/conditioning policy; no media bytes travel here. */
@@ -1070,12 +1070,6 @@ export interface KeyframeMetadata {
   sha256: string;
 }
 
-export interface ExpandFormState {
-  enabled: boolean;
-  variations: 1 | 3 | 5;
-  familyOverride: string | null;
-}
-
 export interface LoraSelection {
   path: string;
   scale: number;
@@ -1115,10 +1109,6 @@ export interface GenerateFormState {
   title?: string | null;
   /** Root user-authored prompt retained across Expand/Remix and Gallery reuse. */
   originalPrompt?: string | null;
-  /** Active style preset id (see `lib/stylePresets`). `null` = no style. The
-   * preset's extras are appended to the outgoing prompt at request time; the
-   * textarea content (`prompt`) is never rewritten by the style row. */
-  stylePreset: string | null;
   negativePrompt: string;
   /** The selected model's advertised default negative
    * (`default_negative_prompt`, wan today; "" when none). Optional so
@@ -1175,7 +1165,6 @@ export interface GenerateFormState {
   scheduler: Scheduler | null;
   cfgPlus: boolean;
   outputFormat: OutputFormat;
-  expand: ExpandFormState;
   sourceFitPolicy?: SourceFitPolicy;
   imageAttachments: SourceImageState[];
   /**

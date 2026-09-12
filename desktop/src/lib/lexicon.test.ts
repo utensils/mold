@@ -1,5 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import {
+  DESTINATIONS,
+  NEVER_A_DESTINATION,
+  NEVER_SAID_ON_STYLES_AND_MACHINES,
+  templateText,
+} from "@studio/lib/lexicon";
 import routerSource from "../router.ts?raw";
 import sidebarSource from "../components/shell/Sidebar.vue?raw";
 import paletteSource from "../components/shell/CommandPalette.vue?raw";
@@ -26,29 +32,13 @@ import { ENGINE_KEY_SCHEMAS, SECTIONS } from "./settingsSchema";
  * inspector's primary controls, and the Styles/Machines views, so a rename
  * on one surface cannot leave the others behind.
  */
-const DESTINATIONS = ["New image", "Queue", "My images", "Styles", "Machines"] as const;
-
-/** Words that may never be a destination's primary label again. */
-const NEVER_A_DESTINATION = ["Create", "Library", "Models", "Hosts", "Gallery", "Catalog"];
+// The word tables live in studio so web's lexicon test reads the same ones.
 
 // vitest runs from desktop/, so the Rust source is read relative to it.
 const menuSource = readFileSync("src-tauri/src/menu.rs", "utf8");
 
 function quoted(source: string): string[] {
   return [...source.matchAll(/"([^"\n]+)"/g)].map((m) => m[1]!);
-}
-
-/**
- * Template text only: strips the `<script>` block, every tag's attributes,
- * and every `{{ … }}` interpolation, so an identifier, a route path, or a
- * `data-test` hook can never trip a never-say scan of what a person reads.
- */
-function templateText(source: string): string {
-  const template = source.replace(/<script[\s\S]*?<\/script>/g, "");
-  return template
-    .replace(/<[^>]*>/g, " ")
-    .replace(/\{\{[\s\S]*?\}\}/g, " ")
-    .replace(/\s+/g, " ");
 }
 
 describe("lexicon — destinations", () => {
@@ -163,6 +153,8 @@ describe("lexicon — Settings", () => {
       "Phone pairing",
       "Speed & memory",
       "Accounts & tokens",
+      "Cloud GPUs",
+      "Per-style defaults",
       "Profiles",
       "Advanced",
       "Updates & about",
@@ -182,6 +174,7 @@ describe("lexicon — Settings", () => {
       ["default_negative_prompt", "Words to avoid"],
       ["embed_metadata", "Keep the recipe in the file"],
       ["t5_variant", "How FLUX reads your words"],
+      ["umt5_variant", "How Wan reads your words"],
       ["qwen3_variant", "How Flux.2 and Z-Image read your words"],
     ]);
   });
@@ -336,7 +329,7 @@ describe("lexicon — Styles and Machines", () => {
     ["ModelTableRow", "../components/models/ModelTableRow.vue"],
     ["DownloadsTray", "../components/models/DownloadsTray.vue"],
   ];
-  const NEVER_SAID = [/\bhost\b/i, /\bmodel page\b/i, /\bPull\b/, /\binstalled\b/i, /\bInstall\b/];
+  const NEVER_SAID = NEVER_SAID_ON_STYLES_AND_MACHINES;
 
   const sources = new Map(
     surfaces.map(([name, path]) => [name, readFileSync(new URL(path, import.meta.url), "utf8")]),
@@ -393,7 +386,7 @@ describe("lexicon — view copy and assistive labels", () => {
   const lightbox = read("../components/gallery/Lightbox.vue");
   const history = read("../components/library/HistoryDrawer.vue");
   const fileUnder = read("../components/create/FileUnderGroup.vue");
-  const settingsSchemaSource = read("./settingsSchema.ts");
+  const settingsSchemaSource = read("../../../studio/lib/settingsSchema.ts");
   const validationSource = read("./generateValidation.ts");
   const appearance = read("../components/settings/AppearanceCard.vue");
   const chipRow = read("../components/library/LibraryChipRow.vue");
@@ -529,6 +522,42 @@ describe("lexicon — view copy and assistive labels", () => {
       ["HostDetailView", hostDetail, "Models disk used"],
     ] as const) {
       expect(source.includes(banned), `${name}: ${banned}`).toBe(false);
+    }
+  });
+});
+
+/**
+ * `studio/lib/sourceImageCapability.ts` is not a Vue template, so the
+ * template-text scans above never reach its returned sentences — that gap is
+ * how "This checkpoint is image-to-video only…" escaped the lexicon. Scan the
+ * module's own string and template literals against the generic never-say
+ * words (host, model, checkpoint); the Styles-page-specific ones name UI this
+ * module has none of.
+ */
+describe("lexicon — source-image advisory copy", () => {
+  // Vitest runs from `desktop/`, like the native-menu read above.
+  const source = readFileSync("../studio/lib/sourceImageCapability.ts", "utf8");
+
+  it("never says host, model, or checkpoint in a returned sentence", () => {
+    // Doc comments quote identifiers in backticks (`/api/models[].source_image`);
+    // strip every comment first so only code-level literals are read.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const literals = [
+      ...code.matchAll(/"((?:[^"\\]|\\.)*)"/g),
+      ...code.matchAll(/`((?:[^`\\]|\\.)*)`/g),
+    ].map((m) => m[1]!);
+    const sentences = literals.filter((s) => s.length > 20);
+    expect(sentences.length).toBeGreaterThan(0);
+    const genericBanned = NEVER_SAID_ON_STYLES_AND_MACHINES.filter((re) =>
+      [/\bhost\b/i, /\bmodels?\b/i, /\bcheckpoints?\b/i].some(
+        (allowed) => allowed.source === re.source,
+      ),
+    );
+    expect(genericBanned.length).toBeGreaterThan(0);
+    for (const sentence of sentences) {
+      for (const banned of genericBanned) {
+        expect(sentence, String(banned)).not.toMatch(banned);
+      }
     }
   });
 });

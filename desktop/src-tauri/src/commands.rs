@@ -221,7 +221,8 @@ pub async fn get_output_dir(state: tauri::State<'_, AppState>) -> Result<Option<
         .then(|| config.effective_output_dir().to_string_lossy().into_owned()))
 }
 
-/// Dock badge: queue depth while jobs wait, cleared when idle (macOS).
+/// Dock badge: prints that landed on any connected machine while the app was
+/// in the background, cleared when the window comes back (macOS).
 #[tauri::command]
 pub fn set_dock_badge(app: tauri::AppHandle, count: Option<i64>) -> Result<(), String> {
     let window = app
