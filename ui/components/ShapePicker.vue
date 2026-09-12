@@ -101,13 +101,15 @@ function onKeydown(event: KeyboardEvent) {
 
 <style scoped>
 .ms-shape {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(48px, 1fr));
   gap: 7px;
-  flex-wrap: wrap;
 }
 
 .ms-shape__btn {
-  width: 52px;
+  width: auto;
+  min-width: 0;
+  max-width: 72px;
   height: 60px;
   display: flex;
   flex-direction: column;

@@ -1,7 +1,11 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import ShapePicker from "./ShapePicker.vue";
 import { ASPECTS, swatchDims } from "../lib/resolution";
+
+const source = readFileSync(resolve(__dirname, "./ShapePicker.vue"), "utf8");
 
 function make(modelValue = "square", extra: Record<string, unknown> = {}) {
   return mount(ShapePicker, {
@@ -112,5 +116,32 @@ describe("ShapePicker", () => {
     expect(wrapper.find("[role=radiogroup]").attributes("aria-disabled")).toBe(
       "true",
     );
+  });
+});
+
+describe("ShapePicker tile sizing (CSS pin)", () => {
+  /*
+   * Five 52px-wide tiles plus 7px gaps need 288px, but a 320px rail (web's
+   * ControlsAside `.controls`) leaves only 282px inside its 18px padding and
+   * 1px border either side — so a fixed-width flex row wrapped the 9:16 tile
+   * onto a second line. A grid with `auto-fit`/`minmax` lets every tile
+   * shrink to fit instead.
+   */
+  it("lays out .ms-shape as a grid of auto-fit, minmax(48px, 1fr) columns", () => {
+    const block = source.slice(source.indexOf(".ms-shape {"), source.indexOf(".ms-shape__btn {"));
+    expect(block).toMatch(/display:\s*grid/);
+    expect(block).toMatch(
+      /grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(48px,\s*1fr\)\)/,
+    );
+  });
+
+  it("gives .ms-shape__btn no fixed width, so a grid column can shrink it", () => {
+    const start = source.indexOf(".ms-shape__btn {");
+    const end = source.indexOf("}", start);
+    const block = source.slice(start, end);
+    // Excludes `max-width`, which is a legitimate cap on a grid column that
+    // grows wider than the tile should ever be.
+    expect(block).not.toMatch(/(?<!-)width:\s*\d/);
+    expect(block).toMatch(/height:\s*60px/);
   });
 });
