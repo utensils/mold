@@ -24,7 +24,8 @@ vi.mock("../lib/ipc", () => ({
   },
 }));
 
-vi.mock("../lib/notify", () => ({
+vi.mock("../lib/notify", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/notify")>()),
   notifyUpdateAvailable: (...args: unknown[]) => notifyUpdateAvailable(...args),
 }));
 

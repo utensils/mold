@@ -65,7 +65,10 @@ vi.mock("../lib/ipc", () => ({
     forgetRemoteHost: (...a: unknown[]) => forgetRemoteHost(...a),
   },
 }));
-vi.mock("../lib/notify", () => ({ notifyPulled: vi.fn() }));
+vi.mock("../lib/notify", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/notify")>()),
+  notifyPulled: vi.fn(),
+}));
 
 const unloadModel = vi.hoisted(() => vi.fn());
 vi.mock("../lib/api/models", async (importOriginal) => ({

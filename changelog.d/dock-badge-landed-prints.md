@@ -7,5 +7,7 @@
   land while you are watching never badge — the canvas, the toast and the
   sidebar's new-print pill already say so. The app keeps one live event
   connection per ready machine to hear about them; a machine whose server
-  predates that event stream contributes nothing, so the badge is a nudge
-  rather than a ledger. Settings ▸ Look still switches it off.
+  predates that event stream contributes nothing, the count lives only for as
+  long as the app is running, so a quit and relaunch starts it at zero, and a
+  print that is trashed or deleted stops counting. It is a nudge rather than a
+  ledger. Settings ▸ Look still switches it off.
