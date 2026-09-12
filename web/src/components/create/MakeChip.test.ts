@@ -68,12 +68,53 @@ describe("MakeChip", () => {
     });
     const chip = wrapper.get("[data-test='make-chip']");
     expect(chip.text()).toContain("Make 1");
-    expect(chip.attributes("disabled")).toBeDefined();
     expect(chip.attributes("title")).toBe(
       "Edit models render one print at a time.",
     );
+    wrapper.unmount();
+  });
+
+  /*
+   * A LOCKED chip is not a disabled one. Locked means "this style makes one
+   * at a time, and here is why" — a fact worth reading — so the chip keeps its
+   * caret, still opens, and answers the question instead of dimming and
+   * swallowing the click. Only the hover title said anything, and a hover
+   * title is not an answer on a touch screen.
+   */
+  it("opens and explains itself when locked, with no stepper to offer", async () => {
+    const wrapper = factory({
+      modelValue: 4,
+      locked: true,
+      lockedReason: "Edit models render one print at a time.",
+    });
+    const chip = wrapper.get("[data-test='make-chip']");
+    expect(chip.attributes("disabled")).toBeUndefined();
     await chip.trigger("click");
-    expect(menu()).toBeNull();
+
+    const opened = menu();
+    expect(opened).not.toBeNull();
+    expect(wrapper.findComponent(Stepper).exists()).toBe(false);
+    expect(opened?.textContent).toContain("Make 1");
+    expect(opened?.textContent).toContain(
+      "Edit models render one print at a time.",
+    );
+    // The batch sentence is about a batch; there is no batch here.
+    expect(opened?.textContent).not.toContain("Each one is queued separately");
+    wrapper.unmount();
+  });
+
+  it("opens with the count alone when a lock carries no reason", async () => {
+    const wrapper = factory({ modelValue: 4, locked: true });
+    await wrapper.get("[data-test='make-chip']").trigger("click");
+    expect(menu()?.textContent).toContain("Make 1");
+    expect(wrapper.findComponent(Stepper).exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("never writes a count while locked", async () => {
+    const wrapper = factory({ modelValue: 4, locked: true });
+    await wrapper.get("[data-test='make-chip']").trigger("click");
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
     wrapper.unmount();
   });
 

@@ -17,6 +17,10 @@
   It used to open the column above the picture, so pressing Generate pushed the
   prompt box down the page. The column now reads: output kind, picture, prompt
   box, work in flight, Recent.
+- **The Make chip explains itself when a style makes one print at a time.** It
+  used to dim, swallow the click and say why only in a hover tooltip, which a
+  touch screen never shows. It now opens like any other chip and states the
+  count it will make and the reason.
 - **The composer no longer calls a 16:9 canvas "Custom".** The summary under the
   prompt reads the same shape resolver as the Shape chip beside it, so the two
   can never disagree about the canvas, and it marks a nearest-match shape with

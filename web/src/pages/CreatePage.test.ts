@@ -5626,6 +5626,64 @@ describe("CreatePage prompt gate", () => {
  * above the picture, so a person who had just pressed Generate watched their
  * queue scroll away from the prompt box they were still typing in.
  */
+/*
+ * A locked Make chip is a control that must explain itself, and the two locks
+ * are not the same fact: a family that never batches is locked whatever the
+ * request carries, while a reference lock lifts with the pictures that caused
+ * it. One sentence for both would tell an always-one style's user about a
+ * reference picture they never attached.
+ */
+describe("CreatePage Make chip lock", () => {
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  it("names the reference pictures when they are what locked it", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    await nextTick();
+    expect(
+      wrapper.getComponent({ name: "MakeChip" }).props("lockedReason"),
+    ).toBe(
+      "This style makes one print at a time when it works from a reference picture.",
+    );
+  });
+
+  it("says nothing about references for a style that never batches", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("qwen-image-edit:q8", "qwen-image-edit"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "qwen-image-edit:q8";
+    form.state.value.modelFamily = "qwen-image-edit";
+    await nextTick();
+    const chip = wrapper.getComponent({ name: "MakeChip" });
+    expect(chip.props("locked")).toBe(true);
+    expect(chip.props("lockedReason")).toBe(
+      "This style makes one print at a time.",
+    );
+  });
+});
+
 describe("CreatePage left column order", () => {
   beforeEach(async () => {
     hostRoutingTesting.reset();

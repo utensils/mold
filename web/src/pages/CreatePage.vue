@@ -2010,6 +2010,20 @@ const batchLocked = computed(
     }),
 );
 
+/*
+ * Why the lock, in the chip's own words. There are two causes and they are
+ * not the same fact: a family that never batches (`forcesBatchSizeOne`) is
+ * locked whatever the request carries, while every other lock comes from the
+ * reference pictures THIS request is carrying and lifts when they do. One
+ * sentence for both would tell an always-one style's user about a reference
+ * picture they never attached.
+ */
+const batchLockedReason = computed(() =>
+  capabilities.value.forcesBatchSizeOne
+    ? "This style makes one print at a time."
+    : "This style makes one print at a time when it works from a reference picture.",
+);
+
 /** Draft / Good / Best from the recipe's own ladder. No rows on a recipe that
  * pins its steps — the profile's note under Detail is the explanation. */
 const qualityLadder = computed(() => qualityPresets(activeRecipe.value?.steps));
@@ -5198,7 +5212,7 @@ onBeforeUnmount(() => {
             <MakeChip
               :model-value="form.state.value.batchSize"
               :locked="batchLocked"
-              locked-reason="one at a time"
+              :locked-reason="batchLockedReason"
               @update:model-value="form.state.value.batchSize = $event"
             />
           </template>

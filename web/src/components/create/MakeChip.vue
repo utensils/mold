@@ -8,6 +8,13 @@
  * only render one at a time (an edit model) states the one it will make and
  * carries the recipe's own reason, instead of offering a count admission
  * would refuse.
+ *
+ * LOCKED is not DISABLED. A locked chip still opens: "one at a time" is a
+ * fact about the style worth reading, so the popover states the count and the
+ * recipe's reason with no stepper to offer. Dimming the chip and swallowing
+ * the click left a control that looked like it should do something and did
+ * nothing, with only a hover `title` to explain — and a hover title is not an
+ * answer on a touch screen. `disabled` stays a true disabled prop.
  */
 import { computed, ref } from "vue";
 import Popover from "@ui/components/Popover.vue";
@@ -36,14 +43,13 @@ const props = withDefaults(
 const emit = defineEmits<{ "update:modelValue": [value: number] }>();
 
 const open = ref(false);
-const inert = computed(() => props.locked || props.disabled);
 const count = computed(() => (props.locked ? 1 : props.modelValue));
 const title = computed(() =>
   props.locked ? (props.lockedReason ?? undefined) : "How many to make",
 );
 
 function toggle() {
-  if (inert.value) return;
+  if (props.disabled) return;
   open.value = !open.value;
 }
 </script>
@@ -62,7 +68,7 @@ function toggle() {
         data-test="make-chip"
         aria-haspopup="dialog"
         :aria-expanded="open"
-        :disabled="inert"
+        :disabled="disabled"
         :title="title"
         @click="toggle"
       >
@@ -71,15 +77,21 @@ function toggle() {
       </button>
     </template>
     <div class="make-chip__menu" data-test="make-menu">
-      <Stepper
-        :model-value="modelValue"
-        :min="min"
-        :max="max"
-        editable
-        label="How many to make"
-        @update:model-value="emit('update:modelValue', $event)"
-      />
-      <p class="make-chip__note">Each one is queued separately</p>
+      <template v-if="locked">
+        <p class="make-chip__count" data-test="make-locked-count">Make 1</p>
+        <p v-if="lockedReason" class="make-chip__note">{{ lockedReason }}</p>
+      </template>
+      <template v-else>
+        <Stepper
+          :model-value="modelValue"
+          :min="min"
+          :max="max"
+          editable
+          label="How many to make"
+          @update:model-value="emit('update:modelValue', $event)"
+        />
+        <p class="make-chip__note">Each one is queued separately</p>
+      </template>
     </div>
   </Popover>
 </template>
@@ -133,8 +145,18 @@ function toggle() {
   padding: 12px;
 }
 
+/* The locked count is the reading the stepper would have shown, so it keeps
+   the stepper's mono voice rather than becoming another sentence. */
+.make-chip__count {
+  margin: 0;
+  font-family: var(--mold-font-mono);
+  font-size: var(--mold-fs-xs);
+  color: var(--mold-text);
+}
+
 .make-chip__note {
   margin: 0;
+  max-width: 28ch;
   font-size: var(--mold-fs-xs);
   color: var(--mold-text-dim);
 }
