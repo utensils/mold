@@ -44,6 +44,10 @@ const props = withDefaults(
     batchSize: number;
     /** An in-place expansion is undoable (batch = 1 rewrite). */
     expanded?: boolean;
+    /** A rewrite is in flight on a machine right now. */
+    running?: boolean;
+    /** The machine doing that rewriting, named in the live progress line. */
+    expansionHostLabel?: string | null;
     /** Disable submit/expand (e.g. a job is mid-flight). */
     busy?: boolean;
     cancellable?: boolean;
@@ -69,6 +73,8 @@ const props = withDefaults(
   }>(),
   {
     expanded: false,
+    running: false,
+    expansionHostLabel: null,
     busy: false,
     cancellable: false,
     busyLabel: "Planning generation…",
@@ -116,6 +122,15 @@ const promptFieldPlaceholder = computed(
 const expandLabel = computed(() =>
   props.batchSize > 1 ? `Write ${props.batchSize} for me` : "Write more for me",
 );
+// Desktop's `ExpandControl` sentence, word for word: a rewrite runs on a
+// MACHINE, and while it runs the composer says which one rather than a
+// placeless "Expanding…".
+const progressLabel = computed(() => {
+  const machine = props.expansionHostLabel ?? "the selected machine";
+  return props.batchSize > 1
+    ? `Writing ${props.batchSize} versions on ${machine}…`
+    : `Writing more on ${machine}…`;
+});
 // Both chords are the platform's own: ⌘ on Apple, Ctrl elsewhere. The ↵ glyph
 // carries its own span (it is set larger than the modifier), so Generate
 // spells its chord as the bare modifier plus that span.
@@ -129,7 +144,10 @@ const generateDisabled = computed(
 // unavailable when the recipe reads no prompt — the render itself is fine.
 const transformsDisabled = computed(
   () =>
-    props.busy || !props.prompt.trim() || Boolean(props.transformBlockedReason),
+    props.busy ||
+    props.running ||
+    !props.prompt.trim() ||
+    Boolean(props.transformBlockedReason),
 );
 const transformTitle = computed(
   () => props.transformBlockedReason?.trim() || undefined,
@@ -257,6 +275,14 @@ watch(
 
     <div class="composer__actions" data-test="composer-actions">
       <span class="composer__spacer" />
+      <span
+        v-if="running"
+        class="composer__progress"
+        data-test="composer-expand-progress"
+        role="status"
+        aria-live="polite"
+        >{{ progressLabel }}</span
+      >
       <button
         type="button"
         class="composer__expand"
@@ -396,6 +422,12 @@ watch(
   font-size: 10px;
   padding: 0;
   cursor: pointer;
+}
+
+.composer__progress {
+  min-width: 0;
+  font-size: var(--mold-fs-micro);
+  color: var(--mold-blue);
 }
 
 .composer__expand {

@@ -174,7 +174,6 @@ function defaultForm(): GenerateFormState {
     scheduler: null,
     cfgPlus: false,
     outputFormat: "png",
-    expand: { enabled: false, variations: 1, familyOverride: null },
     sourceFitPolicy: defaultSourceFitPolicy(),
     imageAttachments: [],
     referenceImages: [],
@@ -1100,6 +1099,10 @@ function load(): GenerateFormState {
     // The preset strip is retired and the field with it; a draft saved before
     // then would otherwise carry a key nothing on screen can show or clear.
     delete (restored as Record<string, unknown>).stylePreset;
+    // Generate-time expansion is retired with the dialog that armed it: the
+    // machine rewrote the prompt and the words never reached the composer.
+    // A draft saved while that checkbox existed must not arm it again.
+    delete (restored as Record<string, unknown>).expand;
     const camera = normalizeCameraMotionLoraState(
       restored.loras,
       restored.cameraControl,
@@ -1512,7 +1515,6 @@ export function useGenerateForm(): UseGenerateForm {
                 s.controlImage && controlModel ? s.controlScale : undefined,
               ...(firstLastFrames ? { keyframes: firstLastFrames } : {}),
             }),
-        expand: s.expand.enabled || undefined,
         frames:
           capabilities.supportsVideo &&
           !(

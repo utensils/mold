@@ -1067,12 +1067,6 @@ export interface KeyframeMetadata {
   sha256: string;
 }
 
-export interface ExpandFormState {
-  enabled: boolean;
-  variations: 1 | 3 | 5;
-  familyOverride: string | null;
-}
-
 export interface LoraSelection {
   path: string;
   scale: number;
@@ -1168,7 +1162,6 @@ export interface GenerateFormState {
   scheduler: Scheduler | null;
   cfgPlus: boolean;
   outputFormat: OutputFormat;
-  expand: ExpandFormState;
   sourceFitPolicy?: SourceFitPolicy;
   imageAttachments: SourceImageState[];
   /**
