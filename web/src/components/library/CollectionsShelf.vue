@@ -172,7 +172,9 @@ function metaLine(card: CollectionCard): string {
           <Icon name="plus" :size="22" />
         </span>
         <span class="ccard__name">New collection</span>
-        <span class="ccard__meta"><kbd class="ccard__kbd">{{ shiftShortcutLabel("N") }}</kbd></span>
+        <span class="ccard__meta"
+          ><kbd class="ccard__kbd">{{ shiftShortcutLabel("N") }}</kbd></span
+        >
         <span class="ccard__upd"
           >Name it, then add prints from the grid or a selection.</span
         >
