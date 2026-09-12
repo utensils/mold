@@ -481,6 +481,49 @@ fn validate_dev_lora_runtime(config: &Flux2Config, has_lora: bool) -> Result<()>
     Ok(())
 }
 
+/// The label a refusal quotes back for an adapter path — its file name, which
+/// is what the user typed and what a stack of adapters is told apart by.
+fn lora_label(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+}
+
+/// Refuse an adapter trained for a different FLUX.2 tier BEFORE the
+/// transformer loads.
+///
+/// This runs beside `validate_dev_lora_runtime` for the same reason that one
+/// is here: server admission asks the identical question through
+/// `mold_core::flux2_lora`, but it may only know an opaque catalog ID, while
+/// by this point the checkpoint's own header has resolved the config. The
+/// engine is the last authority, and it is the one that must not reach the
+/// merge — a mismatch used to surface as `shape mismatch in add, lhs: [3072,
+/// 3072], rhs: [4096, 4096]` after the whole GGUF checkpoint had been read and
+/// dequantised.
+///
+/// The adapter's header is read here and not at `load_lora_adapters`, which is
+/// further in: `load_transformer` is the one place that holds both the
+/// resolved `Flux2Config` and the pending stack, and it runs before a single
+/// transformer byte is touched on either the GGUF or the BF16 branch.
+fn validate_lora_tier_runtime(config: &Flux2Config, loras: &[LoraWeight]) -> Result<()> {
+    for lora in loras {
+        // A `camera-control:` entry is an alias the runtime materializes, not
+        // a file on disk; the tier question does not apply to it.
+        if lora.path.starts_with("camera-control:") {
+            continue;
+        }
+        if let Some(refusal) = mold_core::flux2_lora::flux2_lora_tier_mismatch_for_file(
+            std::path::Path::new(&lora.path),
+            lora_label(&lora.path),
+            config.hidden_size,
+        ) {
+            bail!("{refusal}");
+        }
+    }
+    Ok(())
+}
+
 impl Flux2Engine {
     /// Create a new Flux2Engine. Does not load models until `load()` is called.
     pub fn new(
@@ -891,6 +934,7 @@ impl Flux2Engine {
         // opaque catalog ID, while the checkpoint header still identifies a
         // 6144-wide Dev transformer.
         validate_dev_lora_runtime(cfg, has_lora)?;
+        validate_lora_tier_runtime(cfg, &self.pending_loras)?;
         if self.is_gguf_transformer() {
             if has_lora {
                 // Dequant→merge→requant on every LoRA-affected GGUF tensor.
@@ -3761,6 +3805,103 @@ mod tests {
             .to_string()
             .contains("LoRA loading is not implemented"));
         assert!(validate_dev_lora_runtime(&Flux2Config::klein(), true).is_ok());
+    }
+
+    /// `mold_core::flux2_lora` cannot depend on this crate, so its tier table
+    /// is a second copy of three numbers. This is the pin that keeps the two
+    /// the same — a new tier or a changed width fails here rather than
+    /// silently teaching the refusal a geometry the engine no longer has.
+    #[test]
+    fn the_core_tier_table_is_the_engines_own() {
+        let engine_widths: Vec<usize> = [
+            Flux2Config::klein(),
+            Flux2Config::klein_9b(),
+            Flux2Config::dev(),
+        ]
+        .iter()
+        .map(|cfg| cfg.hidden_size)
+        .collect();
+        let core_widths: Vec<usize> = mold_core::flux2_lora::FLUX2_TIER_WIDTHS
+            .iter()
+            .map(|(width, _)| *width)
+            .collect();
+        assert_eq!(engine_widths, core_widths);
+        for cfg in [
+            Flux2Config::klein(),
+            Flux2Config::klein_9b(),
+            Flux2Config::dev(),
+        ] {
+            assert!(
+                mold_core::flux2_lora::flux2_tier_for_hidden_size(cfg.hidden_size).is_some(),
+                "every engine config must name a tier, missed {}",
+                cfg.hidden_size
+            );
+        }
+    }
+
+    /// The defect: a 4096-wide adapter handed to the 3072-wide 4B tier used to
+    /// load, build 32 patches, and then die inside the merge with `shape
+    /// mismatch in add, lhs: [3072, 3072], rhs: [4096, 4096]` — after the whole
+    /// GGUF checkpoint had been read and dequantised. It is refused here
+    /// instead, before a transformer byte is touched, and the header is the
+    /// only thing read.
+    #[test]
+    fn a_foreign_tier_lora_is_refused_before_the_transformer_loads() {
+        use std::io::Write;
+
+        let dir = temp_test_dir("mold-flux2-lora-tier");
+        let path = dir.join("flux2-klein-delight-lora.safetensors");
+        let mut header = serde_json::Map::new();
+        for i in 0..8 {
+            for leaf in ["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0"] {
+                header.insert(
+                    format!("transformer.transformer_blocks.{i}.{leaf}.lora_A.weight"),
+                    serde_json::json!({"dtype": "F32", "shape": [32, 4096], "data_offsets": [0, 4]}),
+                );
+                header.insert(
+                    format!("transformer.transformer_blocks.{i}.{leaf}.lora_B.weight"),
+                    serde_json::json!({"dtype": "F32", "shape": [4096, 32], "data_offsets": [0, 4]}),
+                );
+            }
+        }
+        let json = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(&(json.len() as u64).to_le_bytes()).unwrap();
+        file.write_all(&json).unwrap();
+        file.write_all(&[0u8; 4]).unwrap();
+        drop(file);
+
+        let stack = vec![LoraWeight {
+            path: path.to_string_lossy().into_owned(),
+            scale: 1.0,
+            expert: None,
+        }];
+
+        let refusal = validate_lora_tier_runtime(&Flux2Config::klein(), &stack)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.contains("flux2-klein-delight-lora.safetensors"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("4096") && refusal.contains("3072"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("[klein] 9B"), "{refusal}");
+
+        // The tier it was actually trained for still loads.
+        assert!(validate_lora_tier_runtime(&Flux2Config::klein_9b(), &stack).is_ok());
+
+        // An alias the runtime materializes is not a file and is not asked.
+        let alias = vec![LoraWeight {
+            path: "camera-control:orbit-left".to_string(),
+            scale: 1.0,
+            expert: None,
+        }];
+        assert!(validate_lora_tier_runtime(&Flux2Config::klein(), &alias).is_ok());
+
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
