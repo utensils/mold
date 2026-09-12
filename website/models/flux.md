@@ -171,10 +171,11 @@ actually render, the answer comes down to the checkpoint and the card:
   BF16 one (~23.8 GB).
 - **46 GB** keeps the BF16 tier resident as well.
 
-`MOLD_FLUX_KEEP_TRANSFORMER=0` forces the old drop if you need the VRAM for
-something else. `=1` is accepted and means the same thing as the default: an
-explicit keep has always had to yield to a card that cannot afford it, and the
-budget is now what expresses that for everyone.
+`MOLD_FLUX_KEEP_TRANSFORMER=0` (also `off`, `false`, `no`) forces the old drop if
+you need the VRAM for something else. `=1` (also `on`, `true`, `yes`) is accepted
+and means the same thing as the default: an explicit keep has always had to yield
+to a card that cannot afford it, and the budget is now what expresses that for
+everyone. One function answers for FLUX.1 and FLUX.2 alike.
 
 What the print's execution fingerprint records is the **request**, not the
 outcome: `0` is its own execution class and unset and `1` share the other, so a

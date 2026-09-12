@@ -131,7 +131,11 @@ keeps a 33 GB Q8 [dev] transformer resident, a 24 GB card never does, and a
 24 GB card keeps a Q8 Klein tier, 4B or 9B. It is released before the encoder streams
 whenever the two would not fit together, and reused only when the LoRA stack,
 the working precision, the GPU and the resolved architecture all match.
-`MOLD_FLUX_KEEP_TRANSFORMER=0` forces the old drop-every-render behaviour.
+`MOLD_FLUX_KEEP_TRANSFORMER=0` (also `off`, `false`, `no`) forces the old
+drop-every-render behaviour. FLUX.2 resolves it through the same function FLUX.1
+does, so the opt-out means the same thing on both families; when it fires, the
+server logs `Flux.2 transformer dropped before VAE decode
+(MOLD_FLUX_KEEP_TRANSFORMER=0)`.
 
 The **encoder prefix** stays in host RAM when the machine can afford it, which
 turns a cache-miss prompt into a host-to-device copy per layer instead of a

@@ -1016,51 +1016,16 @@ pub(crate) fn effective_loras(req: &mold_core::GenerateRequest) -> Vec<mold_core
 /// [`crate::device::flux_activation_budget_bytes_for`].
 const FLUX1_ATTENTION_HEADS: u64 = 24;
 
-/// What the eager path does with the transformer before VAE decode, and why.
+/// Both still families resolve residency through ONE function, and FLUX.1
+/// reaches it under the name it has always had here.
 ///
-/// The reason travels with the answer because the log line names it: an
-/// operator watching a warm render reload a 12 GB checkpoint every time needs
-/// to know whether the card refused the residency or they asked for the drop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ResidencyDecision {
-    /// The budget fits (or the operator asked for the keep and the budget
-    /// agreed): the transformer survives into the next render.
-    KeepResident,
-    /// The budget does not fit. This is #276's force-drop, generalized: it is
-    /// now the answer for an unset variable too, rather than only an override
-    /// of an explicit `1`.
-    DropForHeadroom,
-    /// `MOLD_FLUX_KEEP_TRANSFORMER=0` — the operator asked for the drop.
-    DropRequested,
-}
-
-/// Resolve the eager path's residency from the variable and the budget.
-///
-/// The default CHANGED here: before this, an unset `MOLD_FLUX_KEEP_TRANSFORMER`
-/// dropped the transformer on every render regardless of the card, so a 46 GB
-/// L40S re-read a 12.6 GB Q8 checkpoint from disk (8.4 s) for every print. The
-/// unset answer is now the budget's.
-///
-/// `1` therefore resolves identically to unset — it is preserved as an
-/// accepted value rather than removed, because #276's whole point was that an
-/// explicit keep must still yield to a card that cannot afford it, and that
-/// override is exactly what [`crate::device::still_transformer_residency`] now
-/// expresses for everyone. `0` is the one value that still changes the answer:
-/// it forces the drop even where the budget fits, which is the opt-out an
-/// operator debugging a memory problem needs.
-pub(crate) fn resolve_flux_keep_transformer(
-    env: Option<&str>,
-    budget: crate::device::TransformerResidency,
-) -> ResidencyDecision {
-    if env == Some("0") {
-        return ResidencyDecision::DropRequested;
-    }
-    if budget.keeps() {
-        ResidencyDecision::KeepResident
-    } else {
-        ResidencyDecision::DropForHeadroom
-    }
-}
+/// It moved to [`crate::device`] beside `still_transformer_residency` when
+/// FLUX.2 was found to be calling the budget directly and never reading
+/// `MOLD_FLUX_KEEP_TRANSFORMER` at all: two families answering the same
+/// question must not answer it in two places.
+pub(crate) use crate::device::{
+    resolve_keep_transformer as resolve_flux_keep_transformer, ResidencyDecision,
+};
 
 /// Loaded FLUX model components, ready for inference.
 /// FLUX transformer and VAE always run on GPU. T5 and CLIP run on GPU or CPU
@@ -4022,51 +3987,6 @@ mod tests {
             "47.6 GB of F32 weights cannot stay resident on a 46 GiB card"
         );
         assert!(by_residency.shortfall_bytes() > 0);
-    }
-
-    /// The variable's precedence, including the part that CHANGED: unset now
-    /// means "ask the budget" rather than "always drop", and `1` means the
-    /// same thing because #276's override — an explicit keep must still yield
-    /// to a card that cannot afford it — is what the budget now expresses for
-    /// everybody. `0` is the one value that overrides a fitting budget.
-    #[test]
-    fn resolve_flux_keep_transformer_env_precedence() {
-        use super::{resolve_flux_keep_transformer, ResidencyDecision};
-        use crate::device::TransformerResidency;
-
-        let fits = TransformerResidency::Keep;
-        let does_not = TransformerResidency::Drop {
-            shortfall_bytes: 4_000_000_000,
-        };
-
-        for env in [None, Some("1")] {
-            assert_eq!(
-                resolve_flux_keep_transformer(env, fits),
-                ResidencyDecision::KeepResident,
-                "env={env:?} with a fitting budget keeps"
-            );
-            assert_eq!(
-                resolve_flux_keep_transformer(env, does_not),
-                ResidencyDecision::DropForHeadroom,
-                "env={env:?} yields to a budget that does not fit (#276)"
-            );
-        }
-
-        assert_eq!(
-            resolve_flux_keep_transformer(Some("0"), fits),
-            ResidencyDecision::DropRequested,
-            "an explicit 0 drops even where the card has room"
-        );
-        assert_eq!(
-            resolve_flux_keep_transformer(Some("0"), does_not),
-            ResidencyDecision::DropRequested
-        );
-
-        // Anything else is not "0", so it reads as the default.
-        assert_eq!(
-            resolve_flux_keep_transformer(Some("true"), fits),
-            ResidencyDecision::KeepResident
-        );
     }
 
     #[test]

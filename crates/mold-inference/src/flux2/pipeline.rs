@@ -2347,8 +2347,19 @@ impl Flux2Engine {
             self.base.gpu_ordinal,
             xformer_resident_size,
         );
-        let residency = crate::device::still_transformer_residency(&budget, usable_free);
-        if residency.keeps() {
+        // The budget is not the whole answer: `MOLD_FLUX_KEEP_TRANSFORMER=0`
+        // is the operator's opt-out, and it is resolved through the SAME
+        // function FLUX.1 uses. Reading the budget alone left an operator on a
+        // card the budget likes — a 46 GB L40S holding a 34 GB [dev]
+        // transformer — with no way to say "don't", which is exactly the state
+        // the variable exists for.
+        let budget_residency = crate::device::still_transformer_residency(&budget, usable_free);
+        let decision = crate::device::resolve_keep_transformer(
+            crate::runtime_env::value("MOLD_FLUX_KEEP_TRANSFORMER").as_deref(),
+            budget_residency,
+        );
+        let keeps = decision == crate::device::ResidencyDecision::KeepResident;
+        if keeps {
             self.retained_transformer = Some(RetainedFlux2Transformer {
                 transformer,
                 device_bytes: xformer_resident_size,
@@ -2363,17 +2374,23 @@ impl Flux2Engine {
         } else {
             drop(transformer);
             self.base.progress.info("Freed Flux.2 transformer");
-            tracing::info!(
-                shortfall_mb = residency.shortfall_bytes() / 1024 / 1024,
-                required_mb = budget.required_bytes() / 1024 / 1024,
-                "Flux.2 transformer dropped before VAE decode: the residency budget does not fit"
-            );
+            match decision {
+                crate::device::ResidencyDecision::DropRequested => tracing::info!(
+                    "Flux.2 transformer dropped before VAE decode \
+                     (MOLD_FLUX_KEEP_TRANSFORMER=0)"
+                ),
+                _ => tracing::info!(
+                    shortfall_mb = budget_residency.shortfall_bytes() / 1024 / 1024,
+                    required_mb = budget.required_bytes() / 1024 / 1024,
+                    "Flux.2 transformer dropped before VAE decode: the residency budget does not fit"
+                ),
+            }
         }
         drop(state);
         drop(txt_emb);
         device.synchronize()?;
         tracing::info!(
-            retained = residency.keeps(),
+            retained = keeps,
             "Flux.2 transformer settled (sequential mode), decoding VAE..."
         );
 
@@ -2851,22 +2868,38 @@ impl Flux2Engine {
             gpu_ordinal_for_budget,
             transformer_bytes,
         );
-        let residency = crate::device::still_transformer_residency(&eager_budget, usable_free);
-        if residency.keeps() {
-            tracing::info!(
+        // Same two authorities as the sequential path above, in the same
+        // order: the budget, then the operator's opt-out.
+        let budget_residency =
+            crate::device::still_transformer_residency(&eager_budget, usable_free);
+        let decision = crate::device::resolve_keep_transformer(
+            crate::runtime_env::value("MOLD_FLUX_KEEP_TRANSFORMER").as_deref(),
+            budget_residency,
+        );
+        match decision {
+            crate::device::ResidencyDecision::KeepResident => tracing::info!(
                 free_mb = free_before_vae / 1024 / 1024,
                 required_mb = eager_budget.required_bytes() / 1024 / 1024,
                 "Flux.2 transformer kept resident: the residency budget fits, so the next render \
                  skips the reload"
-            );
-        } else {
-            loaded.transformer = None;
-            tracing::info!(
-                free_mb = free_before_vae / 1024 / 1024,
-                shortfall_mb = residency.shortfall_bytes() / 1024 / 1024,
-                "Flux.2 transformer dropped before VAE decode: the residency budget does not fit \
-                 this card at this resolution"
-            );
+            ),
+            crate::device::ResidencyDecision::DropRequested => {
+                loaded.transformer = None;
+                tracing::info!(
+                    free_mb = free_before_vae / 1024 / 1024,
+                    "Flux.2 transformer dropped before VAE decode \
+                     (MOLD_FLUX_KEEP_TRANSFORMER=0)"
+                );
+            }
+            crate::device::ResidencyDecision::DropForHeadroom => {
+                loaded.transformer = None;
+                tracing::info!(
+                    free_mb = free_before_vae / 1024 / 1024,
+                    shortfall_mb = budget_residency.shortfall_bytes() / 1024 / 1024,
+                    "Flux.2 transformer dropped before VAE decode: the residency budget does not \
+                     fit this card at this resolution"
+                );
+            }
         }
         // Force CUDA to complete pending operations and release freed memory.
         // Without this, cuMemFree is asynchronous and the freed VRAM may not

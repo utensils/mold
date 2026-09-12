@@ -2162,6 +2162,84 @@ pub fn still_transformer_residency(
     }
 }
 
+/// What the operator asked of `MOLD_FLUX_KEEP_TRANSFORMER`.
+///
+/// Parsed in ONE place so the engines and the execution fingerprint can never
+/// read the same string differently — a render the engine drops on must not be
+/// filed in the budgeted execution class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepTransformerRequest {
+    /// `0` / `off` / `false` / `no`: drop, whatever the card has room for.
+    Drop,
+    /// `1` / `on` / `true` / `yes`: keep where it fits. Identical to unset,
+    /// because #276's rule — an explicit keep must still yield to a card that
+    /// cannot afford it — is exactly what the budget expresses for everybody.
+    Keep,
+    /// Unset, or anything unrecognised: the budget decides.
+    Budget,
+}
+
+/// Read the variable. Case-insensitive, whitespace-trimmed; an unrecognised
+/// value is the default rather than an error, because an engine-shaping
+/// variable is not a place to fail a render over a typo.
+pub fn keep_transformer_request(env: Option<&str>) -> KeepTransformerRequest {
+    match env
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("0" | "off" | "false" | "no") => KeepTransformerRequest::Drop,
+        Some("1" | "on" | "true" | "yes") => KeepTransformerRequest::Keep,
+        _ => KeepTransformerRequest::Budget,
+    }
+}
+
+/// What a still family does with its transformer once denoising is done.
+///
+/// The reason travels with the answer because the log line names it: an
+/// operator watching a warm render reload a 12 GB checkpoint every time needs
+/// to know whether the card refused the residency or they asked for the drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidencyDecision {
+    /// The budget fits (or the operator asked for the keep and the budget
+    /// agreed): the transformer survives into the next render.
+    KeepResident,
+    /// The budget does not fit. This is #276's force-drop, generalized: it is
+    /// the answer for an unset variable too, rather than only an override of
+    /// an explicit `1`.
+    DropForHeadroom,
+    /// The operator asked for the drop.
+    DropRequested,
+}
+
+/// Resolve the residency from the variable and the budget, for EITHER still
+/// family.
+///
+/// This lives beside [`still_transformer_residency`] rather than inside
+/// `flux::pipeline` because both FLUX.1 and FLUX.2 answer the same question
+/// and must answer it the same way. FLUX.2 called the budget directly and
+/// never read the variable at all, so on a card whose budget said "keep" — a
+/// 46 GB L40S holding a 34 GB [dev] transformer — the operator had no way to
+/// say "don't", which is the state `MOLD_FLUX_KEEP_TRANSFORMER=0` exists for.
+///
+/// The default is the BUDGET's: before #276's generalization an unset variable
+/// dropped the transformer on every render regardless of the card, so an L40S
+/// re-read a 12.6 GB Q8 checkpoint (8.4 s) for every print.
+pub fn resolve_keep_transformer(
+    env: Option<&str>,
+    budget: TransformerResidency,
+) -> ResidencyDecision {
+    match keep_transformer_request(env) {
+        KeepTransformerRequest::Drop => ResidencyDecision::DropRequested,
+        KeepTransformerRequest::Keep | KeepTransformerRequest::Budget => {
+            if budget.keeps() {
+                ResidencyDecision::KeepResident
+            } else {
+                ResidencyDecision::DropForHeadroom
+            }
+        }
+    }
+}
+
 /// What a residency decision knows about the card's free VRAM.
 ///
 /// Three states, not an `Option<u64>` and certainly not a `0` sentinel: the
@@ -6168,6 +6246,93 @@ mod tests {
             "the checkpoint-only budget keeps at the ceiling regardless of \
              what else the render is holding, which is why this row was \
              asserting nothing"
+        );
+    }
+
+    /// Every budgeted residency in a still pipeline passes through the
+    /// operator's opt-out before it becomes a decision.
+    ///
+    /// This is a SOURCE contract because that is the shape the defect took:
+    /// `resolve_keep_transformer` was correct, fully tested, and simply not
+    /// called — FLUX.2's two sites read `still_transformer_residency` directly
+    /// and acted on it, so `MOLD_FLUX_KEEP_TRANSFORMER=0` was verified present
+    /// in `/proc/<pid>/environ` while the server logged
+    /// `Flux.2 transformer settled ... retained=true` and kept 34 GB on the
+    /// card. No behavioural test of either function could have caught that;
+    /// only counting the call sites can.
+    #[test]
+    fn both_still_pipelines_resolve_residency_through_the_operator_opt_out() {
+        for (family, source) in [
+            ("flux", include_str!("flux/pipeline.rs")),
+            ("flux2", include_str!("flux2/pipeline.rs")),
+        ] {
+            // Production code only: a test may ask the budget in isolation.
+            let source = source
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap_or(source);
+            let budgets = source.matches("still_transformer_residency(&").count();
+            let resolved = source.matches("resolve_keep_transformer(").count()
+                + source.matches("resolve_flux_keep_transformer(").count();
+            assert!(budgets > 0, "{family} must still ask the budget at all");
+            assert_eq!(
+                budgets, resolved,
+                "{family} asks the residency budget {budgets} time(s) but resolves the \
+                 MOLD_FLUX_KEEP_TRANSFORMER opt-out {resolved} time(s); a budget read \
+                 that is acted on directly is an operator with no way to say 'don't'"
+            );
+        }
+    }
+
+    /// The variable's precedence, for BOTH still families.
+    ///
+    /// Unset means "ask the budget" rather than "always drop", and an explicit
+    /// keep means the same thing, because #276's override — an explicit keep
+    /// must still yield to a card that cannot afford it — is what the budget
+    /// now expresses for everybody. The drop spellings are the one answer that
+    /// overrides a fitting budget, and they are the whole opt-out: FLUX.2 read
+    /// none of them until this moved here.
+    #[test]
+    fn resolve_keep_transformer_env_precedence() {
+        let fits = TransformerResidency::Keep;
+        let does_not = TransformerResidency::Drop {
+            shortfall_bytes: 4_000_000_000,
+        };
+
+        for env in [None, Some("1"), Some("on"), Some("true"), Some("YES")] {
+            assert_eq!(
+                resolve_keep_transformer(env, fits),
+                ResidencyDecision::KeepResident,
+                "env={env:?} with a fitting budget keeps"
+            );
+            assert_eq!(
+                resolve_keep_transformer(env, does_not),
+                ResidencyDecision::DropForHeadroom,
+                "env={env:?} yields to a budget that does not fit (#276)"
+            );
+        }
+
+        for env in [Some("0"), Some("off"), Some("false"), Some(" NO ")] {
+            assert_eq!(
+                resolve_keep_transformer(env, fits),
+                ResidencyDecision::DropRequested,
+                "env={env:?} drops even where the card has room"
+            );
+            assert_eq!(
+                resolve_keep_transformer(env, does_not),
+                ResidencyDecision::DropRequested,
+                "env={env:?}"
+            );
+        }
+
+        // An unrecognised value is the default, never a failed render.
+        assert_eq!(
+            keep_transformer_request(Some("maybe")),
+            KeepTransformerRequest::Budget
+        );
+        assert_eq!(
+            resolve_keep_transformer(Some("maybe"), fits),
+            ResidencyDecision::KeepResident
         );
     }
 

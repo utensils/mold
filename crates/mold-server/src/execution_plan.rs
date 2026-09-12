@@ -942,9 +942,20 @@ impl ExecutionSemanticConfig {
             // Residency is a flux-family decision and nothing else reads the
             // variable, so only these two carry the field.
             flux_transformer_residency: matches!(family.as_str(), "flux" | "flux2").then(|| {
-                match runtime_environment.value("MOLD_FLUX_KEEP_TRANSFORMER") {
-                    Some("0") => SemanticFluxTransformerResidency::DropRequested,
-                    _ => SemanticFluxTransformerResidency::Budgeted,
+                // Read through the engines' OWN parser. A render the engine
+                // drops on must never be filed in the budgeted class, and the
+                // only way to guarantee that is for both to read the string
+                // once, in one place.
+                match mold_inference::device::keep_transformer_request(
+                    runtime_environment.value("MOLD_FLUX_KEEP_TRANSFORMER"),
+                ) {
+                    mold_inference::device::KeepTransformerRequest::Drop => {
+                        SemanticFluxTransformerResidency::DropRequested
+                    }
+                    mold_inference::device::KeepTransformerRequest::Keep
+                    | mold_inference::device::KeepTransformerRequest::Budget => {
+                        SemanticFluxTransformerResidency::Budgeted
+                    }
                 }
             }),
             // Resolved against the plan's own backend plus the process-global
@@ -9579,14 +9590,19 @@ mod tests {
         }
     }
 
-    /// `MOLD_FLUX_KEEP_TRANSFORMER=0` is the one value that changes the
-    /// resolved residency class. `1` resolves to `Budgeted` like unset,
-    /// because with the new precedence the two are the same execution — the
-    /// raw value is still carried in `runtime`, so nothing is lost.
+    /// A requested drop is its own residency class. A requested keep resolves
+    /// to `Budgeted` like unset, because with the current precedence the two
+    /// are the same execution — the raw value is still carried in `runtime`,
+    /// so nothing is lost.
+    ///
+    /// The class is read through `mold_inference::device`'s own parser, so a
+    /// spelling the engine drops on can never be filed as budgeted; and it
+    /// answers for FLUX.2 as well, which until this campaign did not read the
+    /// variable at all.
     #[test]
     fn an_explicit_keep_transformer_opt_out_is_its_own_residency_class() {
-        let resolved = |value: Option<&str>| {
-            let mut frozen = frozen_config_for_family("flux");
+        let resolved_for = |family: &str, value: Option<&str>| {
+            let mut frozen = frozen_config_for_family(family);
             if let Some(value) = value {
                 frozen.runtime_environment =
                     mold_inference::runtime_env::FrozenRuntimeEnvironment::from_values([(
@@ -9603,16 +9619,21 @@ mod tests {
             .flux_transformer_residency
         };
 
-        assert_eq!(
-            resolved(Some("0")),
-            Some(SemanticFluxTransformerResidency::DropRequested)
-        );
-        for value in [None, Some("1")] {
-            assert_eq!(
-                resolved(value),
-                Some(SemanticFluxTransformerResidency::Budgeted),
-                "value={value:?}"
-            );
+        for family in ["flux", "flux2"] {
+            for value in [Some("0"), Some("off"), Some("FALSE")] {
+                assert_eq!(
+                    resolved_for(family, value),
+                    Some(SemanticFluxTransformerResidency::DropRequested),
+                    "{family} value={value:?}"
+                );
+            }
+            for value in [None, Some("1"), Some("on"), Some("anything-else")] {
+                assert_eq!(
+                    resolved_for(family, value),
+                    Some(SemanticFluxTransformerResidency::Budgeted),
+                    "{family} value={value:?}"
+                );
+            }
         }
     }
 

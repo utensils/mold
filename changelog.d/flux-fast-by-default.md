@@ -147,9 +147,12 @@ step` — and names no cause, because the budget is the only one a real render
   before the text encoder streams whenever the two would not fit together. A
   prompt-cache hit runs no encoder at all, so repeated prompts and batches
   render with neither a reload nor an encode. `MOLD_FLUX_KEEP_TRANSFORMER`
-  changes meaning: `0` forces the old drop, and `1` now means the same as the
-  default, because an explicit keep has always had to yield to a card that
-  cannot afford it. The execution fingerprint records the residency you ASKED
+  changes meaning: `0` (also `off`, `false`, `no`) forces the old drop, and `1`
+  (also `on`, `true`, `yes`) now means the same as the default, because an
+  explicit keep has always had to yield to a card that cannot afford it. **Both
+  families read it through one function** — FLUX.2 resolved the budget directly
+  and never read the variable at all, so on a card whose budget said "keep"
+  there was no way to say "don't". The execution fingerprint records the residency you ASKED
   for — `0` is its own execution class and unset and `1` share the other — so a
   forced drop is never filed with a budgeted render; the budget's own verdict is
   a per-render VRAM measurement and is reported in the server log rather than
