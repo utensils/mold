@@ -3039,22 +3039,6 @@ mod tests {
         assert!(again.already_legacy);
     }
 
-    /// The documented remedy must not destroy the half it was called to
-    /// rescue.
-    ///
-    /// On a home where both formats were written — a 0.29 binary publishing
-    /// v3 while an older one kept publishing v2 — the two stores diverge, and
-    /// the v2 one can be AHEAD. `downgrade` replayed the v3 log straight over
-    /// all three v2 checkpoint copies with `atomic_write_bytes`, which bypasses
-    /// the `existing <= generation` guard every other checkpoint write goes
-    /// through, so it silently discarded the newer v2 prints and walked the
-    /// generation backwards.
-    /// The tooling built to manage the divergence has to be able to SEE it.
-    ///
-    /// `storage_status` described only whichever store was active, so on a
-    /// home where both formats were written — the one case the switch exists
-    /// to manage — an operator could not tell that a second index existed at
-    /// all, let alone which one was ahead.
     /// The switch must mean the same thing to every publication path, not
     /// just to `run_server`.
     ///
@@ -3073,6 +3057,12 @@ mod tests {
         assert!(authority_log_from_config(&config));
     }
 
+    /// The tooling built to manage the divergence has to be able to SEE it.
+    ///
+    /// `storage_status` described only whichever store was active, so on a
+    /// home where both formats were written — the one case the switch exists
+    /// to manage — an operator could not tell that a second index existed at
+    /// all, let alone which one was ahead.
     #[test]
     fn storage_status_reports_both_stores_and_their_generations() {
         let dir = tempfile::tempdir().unwrap();
@@ -3110,6 +3100,16 @@ mod tests {
         );
     }
 
+    /// The documented remedy must not destroy the half it was called to
+    /// rescue.
+    ///
+    /// On a home where both formats were written — a 0.29 binary publishing
+    /// v3 while an older one kept publishing v2 — the two stores diverge, and
+    /// the v2 one can be AHEAD. `downgrade` replayed the v3 log straight over
+    /// all three v2 checkpoint copies with `atomic_write_bytes`, which bypasses
+    /// the `existing <= generation` guard every other checkpoint write goes
+    /// through, so it silently discarded the newer v2 prints and walked the
+    /// generation backwards.
     #[test]
     fn downgrade_refuses_when_the_v2_store_is_ahead_of_the_v3_one() {
         let dir = tempfile::tempdir().unwrap();

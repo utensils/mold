@@ -480,20 +480,6 @@ static SHARED_NVML: Mutex<Option<SharedNvmlSlot>> = Mutex::new(None);
 static SHARED_NVML_INIT_ATTEMPTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// The process-wide NVML handle.
-///
-/// `Nvml::init()` dlopens libnvidia-ml and enumerates the driver. It was being
-/// paid on every 1 Hz telemetry tick, on every `discover_telemetry_targets`,
-/// and on every hot-cache admission through
-/// [`current_process_vram_bytes`] — i.e. on the per-request critical path.
-/// One handle now serves all of them.
-///
-/// The slot is reset when a call observes an error that kills the handle
-/// (`Uninitialized`, `DriverNotLoaded`, `LibraryNotFound`, `GpuLost`,
-/// `ResetRequired`), so a driver reload recovers on the next sample instead
-/// of leaving telemetry permanently dead. An absent driver AND a handle that
-/// poisons immediately after being created are both memoized for
-/// [`NVML_RETRY_AFTER`].
 /// Does this NVML error mean the HANDLE is finished, rather than one
 /// device's answer being unavailable?
 ///
@@ -515,6 +501,20 @@ pub(crate) fn nvml_error_kills_the_handle(error: &nvml_wrapper::error::NvmlError
     )
 }
 
+/// The process-wide NVML handle.
+///
+/// `Nvml::init()` dlopens libnvidia-ml and enumerates the driver. It was being
+/// paid on every 1 Hz telemetry tick, on every `discover_telemetry_targets`,
+/// and on every hot-cache admission through
+/// [`current_process_vram_bytes`] — i.e. on the per-request critical path.
+/// One handle now serves all of them.
+///
+/// The slot is reset when a call observes an error that kills the handle
+/// (`Uninitialized`, `DriverNotLoaded`, `LibraryNotFound`, `GpuLost`,
+/// `ResetRequired`), so a driver reload recovers on the next sample instead
+/// of leaving telemetry permanently dead. An absent driver AND a handle that
+/// poisons immediately after being created are both memoized for
+/// [`NVML_RETRY_AFTER`].
 #[cfg(feature = "nvml")]
 pub(crate) fn shared_nvml() -> Option<Arc<NvmlSource>> {
     let mut slot = SHARED_NVML

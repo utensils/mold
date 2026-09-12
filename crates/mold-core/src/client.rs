@@ -1755,19 +1755,6 @@ impl MoldClient {
         self.server_capabilities().await
     }
 
-    /// Whether this host says a saved print reads back from the gallery,
-    /// memoized for [`GALLERY_PERSISTS_OUTPUTS_MAX_AGE`].
-    ///
-    /// `None` is the honest answer for an older server AND for a host whose
-    /// capabilities could not be read at all — either way the caller keeps
-    /// taking the inline payload, which every server has always sent.
-    ///
-    /// The answer is a property of the HOST, not of the client, and a
-    /// `MoldClient` in the Discord bot or the TUI lives for the whole process.
-    /// Memoizing it forever meant a host restarted with its gallery disabled
-    /// kept being asked for metadata-only completions by a client that would
-    /// never re-ask. The max age bounds that to one capabilities GET per
-    /// minute per client.
     /// Age the memo past [`GALLERY_PERSISTS_OUTPUTS_MAX_AGE`] so a test can
     /// reach the re-probe without sleeping a minute.
     #[cfg(test)]
@@ -1782,6 +1769,19 @@ impl MoldClient {
         }
     }
 
+    /// Whether this host says a saved print reads back from the gallery,
+    /// memoized for [`GALLERY_PERSISTS_OUTPUTS_MAX_AGE`].
+    ///
+    /// `None` is the honest answer for an older server AND for a host whose
+    /// capabilities could not be read at all — either way the caller keeps
+    /// taking the inline payload, which every server has always sent.
+    ///
+    /// The answer is a property of the HOST, not of the client, and a
+    /// `MoldClient` in the Discord bot or the TUI lives for the whole process.
+    /// Memoizing it forever meant a host restarted with its gallery disabled
+    /// kept being asked for metadata-only completions by a client that would
+    /// never re-ask. The max age bounds that to one capabilities GET per
+    /// minute per client.
     async fn gallery_persists_outputs(&self) -> Option<bool> {
         if let Some((known, learned_at)) = *self
             .gallery_persists_outputs

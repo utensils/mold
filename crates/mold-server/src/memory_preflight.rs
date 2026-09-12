@@ -3648,7 +3648,7 @@ mod fail_closed_tests {
         );
     }
 
-    /// FLUX.1's predicate gains its flux2 sibling's second step.    /// FLUX.1's predicate gains its flux2 sibling's second step. A 23.8 GB
+    /// FLUX.1's predicate gains its flux2 sibling's second step. A 23.8 GB
     /// BF16 dev streams its blocks on a 24 GB card, as it always has, and
     /// stops streaming them on a card with room for the whole thing — which
     /// it never did before, because the size test had no availability arm at

@@ -3776,6 +3776,11 @@ pub fn estimate_sequential_phase_weights_with_encoder_override(
     (encoder_total, transformer_size + vae_size)
 }
 
+/// Estimate peak memory usage for a model given its component file sizes and loading strategy.
+///
+/// For Eager: sum of all component files + headroom.
+/// For Sequential: max(encoder_total, transformer + VAE) + headroom.
+///
 /// NOTE for FLUX.2 fp8: the widen's second resident copy is NOT charged here.
 /// `flux2_fp8_widen_policy` compares three copies against the card's FREE
 /// VRAM, and this function has no device and no reading — it prices weights
@@ -3784,10 +3789,6 @@ pub fn estimate_sequential_phase_weights_with_encoder_override(
 /// estimate) add `flux2_fp8_widen_extra_bytes` on top, because they are the
 /// ones that can resolve the gate. Charging it unconditionally here would
 /// over-charge every card that will not widen, which refuses renders that fit.
-/// Estimate peak memory usage for a model given its component file sizes and loading strategy.
-///
-/// For Eager: sum of all component files + headroom.
-/// For Sequential: max(encoder_total, transformer + VAE) + headroom.
 pub fn estimate_peak_memory(paths: &mold_core::ModelPaths, strategy: LoadStrategy) -> u64 {
     estimate_peak_memory_with_encoder_override(paths, strategy, None)
 }
