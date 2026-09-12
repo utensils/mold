@@ -793,9 +793,9 @@ jobs:
   # compile in the release workflows.
   cuda-typecheck:
     name: CUDA forced-local typecheck
-    # h3-cuda implies flash-attn: 53 nvcc kernels compiled from scratch on
-    # every run (the restored cache never holds them). Measured 5m10s warm
-    # on a 128-core box; a cold hosted runner needs the same budget `rust` has.
+    # candle's own CUDA kernels are compiled from scratch on every run (the
+    # restored cache never holds them); the flash-attn and fused H3 kernels
+    # are deliberately NOT in this job's feature list — see the run step.
     timeout-minutes: 60
     needs: changes
     if: >-
@@ -848,13 +848,16 @@ jobs:
           shared-key: workspace-default
           save-if: false
       - name: Typecheck the CUDA forced-local and server paths
-        # The SHIPPING feature set minus `cudnn` (cudarc needs the cuDNN
-        # headers at build time and the toolkit action does not ship them;
-        # mold's own crates carry no `cudnn` cfg arm). `h3-cuda` matters: the
-        # private H3 arm guards 300+ cfg sites in mold-server and mold-cli,
-        # and the defect-7 fix on the FLUX campaign broke one of them while a
-        # `cuda`-only typecheck stayed green.
-        run: cargo check -p mold-ai --features h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
+        # Every cfg arm the shipping Linux build enables, spelled as `h3,cuda`
+        # rather than `h3-cuda`: mold's own crates carry no `h3-cuda`-only cfg
+        # site, and `h3-cuda` pulls in flash-attn's 53 nvcc kernels plus the
+        # fused H3 kernel, which a cold 4-vCPU runner could not finish inside
+        # 60 minutes (PR #1713's final run was cancelled at the timeout).
+        # `cudnn` is omitted because cudarc needs the cuDNN headers at build
+        # time and mold's crates carry no `cudnn` cfg arm. The `h3` arm matters:
+        # it guards 300+ cfg sites in mold-server and mold-cli, and a change
+        # broke one of them while a `cuda`-only typecheck stayed green.
+        run: cargo check -p mold-ai --features h3,cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
   metal-check:
     name: Metal forced-local typecheck

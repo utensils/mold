@@ -178,13 +178,24 @@ impl GgufMmap {
         let path = path.as_ref().to_path_buf();
         let mut file = std::fs::File::open(&path)?;
         let content = gguf_file::Content::read(&mut file)?;
-        let mut options = memmap2::MmapOptions::new();
-        #[cfg(target_os = "linux")]
-        if populate {
-            options.populate();
-        }
-        #[cfg(not(target_os = "linux"))]
-        let _ = populate;
+        // Only Linux can ask for a populated mapping, so only Linux mutates
+        // the options; a `mut` binding on the other targets is a warning the
+        // Metal clippy job turns into an error.
+        let options = {
+            #[cfg(target_os = "linux")]
+            {
+                let mut options = memmap2::MmapOptions::new();
+                if populate {
+                    options.populate();
+                }
+                options
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = populate;
+                memmap2::MmapOptions::new()
+            }
+        };
         // SAFETY: the same contract every mmap'd checkpoint in mold takes —
         // the file must not be truncated or rewritten underneath us. Model
         // weights are verified at download and immutable thereafter.
