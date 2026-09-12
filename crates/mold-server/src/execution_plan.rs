@@ -1784,6 +1784,9 @@ pub enum ExecutionPlanError {
         /// compares this against device *total* VRAM: a peak no device could
         /// ever hold is terminal, anything else is transient pressure.
         required_peak_bytes: u64,
+        /// The ceiling THAT rejection's peak was compared against, so a
+        /// scheduler-side refusal prints the pair the decision used.
+        admissible_ceiling_bytes: Option<u64>,
         /// Stable IDs of the devices that were actually considered for this
         /// request. Physical-impossibility classification must not borrow
         /// capacity from a sibling excluded by placement or preparation.
@@ -2399,6 +2402,13 @@ pub(crate) struct DeviceInfeasibility {
     pub(crate) device_id: String,
     pub(crate) predicted_peak_bytes: u64,
     pub(crate) available_bytes: u64,
+    /// The figure the verdict compared `predicted_peak_bytes` against —
+    /// `GenerationMemoryBudget::admissible_ceiling_bytes`, which is 90 % of
+    /// `available_bytes` for every family whose estimate is a heuristic. A
+    /// refusal that prints `available_bytes` instead prints a pair the
+    /// decision never used, which is how "still 0.0 GB short (requires
+    /// 43.00 GB, 46.72 GB available)" reached an operator.
+    pub(crate) admissible_ceiling_bytes: u64,
     /// Family-specific remediation, e.g. an LTX-2 shape that does fit.
     pub(crate) advice: Option<String>,
 }
@@ -2408,6 +2418,7 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
         return ExecutionPlanError::InsufficientVram {
             reason: "no request-eligible device produced a concrete execution plan".to_string(),
             required_peak_bytes: 0,
+            admissible_ceiling_bytes: None,
             eligible_device_ids: Vec::new(),
         };
     }
@@ -2419,22 +2430,35 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
                 .as_ref()
                 .map(|advice| format!(" ({advice})"))
                 .unwrap_or_default();
+            let ceiling = if rejection.admissible_ceiling_bytes < rejection.available_bytes {
+                format!(
+                    "~{:.1} GB admission ceiling (90% of the ~{:.1} GB usable)",
+                    rejection.admissible_ceiling_bytes as f64 / 1_000_000_000.0,
+                    rejection.available_bytes as f64 / 1_000_000_000.0,
+                )
+            } else {
+                format!(
+                    "~{:.1} GB usable",
+                    rejection.admissible_ceiling_bytes as f64 / 1_000_000_000.0,
+                )
+            };
             format!(
-                "{} needs ~{:.1} GB but only ~{:.1} GB is currently available for this request{advice}",
+                "{} needs ~{:.1} GB, over this request's {ceiling}{advice}",
                 rejection.device_id,
                 rejection.predicted_peak_bytes as f64 / 1_000_000_000.0,
-                rejection.available_bytes as f64 / 1_000_000_000.0,
             )
         })
         .collect::<Vec<_>>()
         .join("; ");
+    // The ceiling must belong to the SAME rejection as the peak, or the pair a
+    // refusal prints is two devices' arithmetic spliced together.
+    let cheapest = rejections
+        .iter()
+        .min_by_key(|rejection| rejection.predicted_peak_bytes);
     ExecutionPlanError::InsufficientVram {
         reason,
-        required_peak_bytes: rejections
-            .iter()
-            .map(|rejection| rejection.predicted_peak_bytes)
-            .min()
-            .unwrap_or(0),
+        required_peak_bytes: cheapest.map_or(0, |rejection| rejection.predicted_peak_bytes),
+        admissible_ceiling_bytes: cheapest.map(|rejection| rejection.admissible_ceiling_bytes),
         eligible_device_ids: rejections
             .iter()
             .map(|rejection| rejection.device_id.clone())
@@ -3583,6 +3607,7 @@ fn build_plan(
                 baseline.incremental_peak(memory.peak_memory_bytes)
             }),
             available_bytes: device_budget,
+            admissible_ceiling_bytes: memory.admissible_ceiling_bytes.unwrap_or(device_budget),
             advice,
         });
         return None;
@@ -3612,6 +3637,9 @@ fn build_plan(
             device_id: device.id.clone(),
             predicted_peak_bytes: pending_dependency_peak,
             available_bytes: device.available_vram_bytes,
+            // A pending dependency is compared against the whole device, not
+            // against the request's admission ceiling.
+            admissible_ceiling_bytes: device.available_vram_bytes,
             advice: None,
         });
         return None;
@@ -6495,6 +6523,81 @@ mod tests {
 
     /// A FLUX.2 [dev] fixture: a GGUF transformer, a small VAE, and one
     /// Mistral3 encoder file whose 36 GB are page cache, not demand.
+    /// D7a on hardware (`MOLD_RESERVE_VRAM_MB=22000`): a dense FLUX.2 [dev]
+    /// tier that cannot be resident on the reserve-adjusted budget was
+    /// REFUSED — "still 14.2 GB short (requires 39.37 GB, 25.12 GB available)"
+    /// with no offload line anywhere — where it should have been planned as
+    /// block-streamed automatically. The unit test on the estimator passed, so
+    /// the gap is in the plan, not in the budget.
+    #[test]
+    fn a_dense_flux2_dev_tier_that_cannot_be_resident_is_planned_streamed() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = flux2_dev_dense_config(root.path(), "flux2-dev:fp8", 33 * GIB);
+        let plan = resolve_execution_plans(&config, &request, &devices(&[25 * GIB]), false)
+            .expect("a dense dev tier that does not fit resident must STREAM, not refuse")
+            .remove(0);
+
+        assert_eq!(
+            plan.offload_mode,
+            OffloadMode::Block,
+            "the plan must name the streamed disposition"
+        );
+        assert_eq!(
+            plan.components[&ComponentRole::Transformer].load_strategy,
+            ComponentLoadStrategy::StreamedBlocks,
+        );
+        assert!(
+            plan.predicted_vram_peak_bytes < 25 * GIB,
+            "the streamed working set must fit the budget it was admitted \
+             against, not the resident one ({})",
+            plan.predicted_vram_peak_bytes
+        );
+    }
+
+    /// D7b: the GGUF tier has no streamed path, so it is refused — and the
+    /// refusal has to say that rather than leaving it to be guessed.
+    #[test]
+    fn a_gguf_flux2_dev_tier_is_refused_with_the_reason_it_cannot_stream() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = flux2_dev_config(root.path(), "flux2-dev:q4", 19 * GIB, 36 * GIB);
+        let error = resolve_execution_plans(&config, &request, &devices(&[25 * GIB]), false)
+            .expect_err("a GGUF dev tier cannot stream and does not fit resident");
+        let message = error.to_string();
+        assert!(
+            message.contains("GGUF"),
+            "the refusal must name the format that cannot stream: {message}"
+        );
+    }
+
+    fn flux2_dev_dense_config(
+        root: &Path,
+        model: &str,
+        transformer_bytes: u64,
+    ) -> (Config, GenerateRequest) {
+        let transformer = root.join("flux2_dev_fp8mixed.safetensors");
+        let vae = root.join("flux2-vae.safetensors");
+        let encoder = root.join("mistral_3_small_flux2_bf16.safetensors");
+        sparse_file(&transformer, transformer_bytes);
+        sparse_file(&vae, GIB / 2);
+        sparse_file(&encoder, 36 * GIB);
+        let mut config = Config::default();
+        config.models.insert(
+            model.to_string(),
+            ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![encoder.display().to_string()]),
+                family: Some("flux2".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let request: GenerateRequest = serde_json::from_str(&format!(
+            r#"{{"prompt":"x","model":"{model}","width":1024,"height":1024,"steps":20,"guidance":4.0}}"#
+        ))
+        .unwrap();
+        (config, request)
+    }
+
     fn flux2_dev_config(
         root: &Path,
         model: &str,
@@ -7309,12 +7412,13 @@ mod tests {
             device_id: "cuda:0".into(),
             predicted_peak_bytes: 16_600_000_000,
             available_bytes: 15_000_000_000,
+            admissible_ceiling_bytes: 13_500_000_000,
             advice: Some("retry after the cooldown".into()),
         }]);
 
         assert_eq!(
             error.to_string(),
-            "no device has enough effective VRAM capacity for a safe execution plan: cuda:0 needs ~16.6 GB but only ~15.0 GB is currently available for this request (retry after the cooldown)"
+            "no device has enough effective VRAM capacity for a safe execution plan: cuda:0 needs ~16.6 GB, over this request's ~13.5 GB admission ceiling (90% of the ~15.0 GB usable) (retry after the cooldown)"
         );
     }
 

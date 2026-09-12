@@ -700,7 +700,15 @@ struct MemoryBlock {
     /// The cheapest eligible candidate's demand, what the planner compared.
     required_bytes: u64,
     /// The headroom that demand was compared against.
+    ///
+    /// Physical, and kept fresh by the reclaim's own re-sample. On a DEVICE
+    /// block this is NOT what the verdict used — see
+    /// [`Self::admissible_ceiling_bytes`].
     headroom_bytes: u64,
+    /// The admission ceiling the plan's peak actually exceeded, when the block
+    /// came from a plan. `None` for a host block, whose comparison really is
+    /// against `headroom_bytes`.
+    admissible_ceiling_bytes: Option<u64>,
     /// Evictable ZFS ARC the SAME sample counted into `headroom_bytes`
     /// (#1439); only a host block carries one, and only on ZFS.
     reclaimable_zfs_arc_bytes: Option<u64>,
@@ -841,6 +849,10 @@ struct TransientPlanFailure {
 #[derive(Debug, Clone)]
 struct VramShortfall {
     required_peak_bytes: u64,
+    /// The ceiling that peak was compared against — see
+    /// `execution_plan::DeviceInfeasibility::admissible_ceiling_bytes`. `None`
+    /// only for a refusal that named no device at all.
+    admissible_ceiling_bytes: Option<u64>,
     eligible_device_ids: Vec<String>,
 }
 
@@ -3548,6 +3560,10 @@ impl Coordinator {
                             device_id: device.id.clone(),
                             predicted_peak_bytes: estimate,
                             available_bytes: device.available_vram_bytes,
+                            // The cheapest-estimate pre-filter compares against
+                            // the whole budget; the per-family ceiling belongs
+                            // to a resolved plan, and there is none here.
+                            admissible_ceiling_bytes: device.available_vram_bytes,
                             advice: None,
                         })
                         .collect::<Vec<_>>(),
@@ -3775,6 +3791,9 @@ impl Coordinator {
                 device_id: plan.device_id.clone(),
                 predicted_peak_bytes: demand,
                 available_bytes: plan.admitted_available_vram_bytes,
+                // This gate is the whole admitted budget, not the request's
+                // own admission ceiling: the plan already cleared that.
+                admissible_ceiling_bytes: plan.admitted_available_vram_bytes,
                 advice: None,
             });
             false
@@ -3821,6 +3840,7 @@ impl Coordinator {
             };
             if let crate::execution_plan::ExecutionPlanError::InsufficientVram {
                 required_peak_bytes,
+                admissible_ceiling_bytes,
                 eligible_device_ids,
                 ..
             } = &error
@@ -3834,6 +3854,7 @@ impl Coordinator {
                     &id,
                     &VramShortfall {
                         required_peak_bytes: *required_peak_bytes,
+                        admissible_ceiling_bytes: *admissible_ceiling_bytes,
                         eligible_device_ids: eligible_device_ids.clone(),
                     },
                     &device_facts,
@@ -4070,6 +4091,9 @@ impl Coordinator {
                         kind,
                         required_bytes,
                         headroom_bytes,
+                        // The host ledger really does compare against the
+                        // headroom it prints.
+                        admissible_ceiling_bytes: None,
                         reclaimable_zfs_arc_bytes,
                         reclaim: ReclaimAttempt::NotStarted,
                     });
@@ -4113,9 +4137,11 @@ impl Coordinator {
         match pending.memory_block.as_mut() {
             Some(block) if block.kind == kind => {
                 let moved = block.required_bytes != shortfall.required_peak_bytes
-                    || block.headroom_bytes != device.available_vram_bytes;
+                    || block.headroom_bytes != device.available_vram_bytes
+                    || block.admissible_ceiling_bytes != shortfall.admissible_ceiling_bytes;
                 block.required_bytes = shortfall.required_peak_bytes;
                 block.headroom_bytes = device.available_vram_bytes;
+                block.admissible_ceiling_bytes = shortfall.admissible_ceiling_bytes;
                 moved
             }
             _ => {
@@ -4131,6 +4157,7 @@ impl Coordinator {
                     kind,
                     required_bytes: shortfall.required_peak_bytes,
                     headroom_bytes: device.available_vram_bytes,
+                    admissible_ceiling_bytes: shortfall.admissible_ceiling_bytes,
                     reclaimable_zfs_arc_bytes: None,
                     reclaim: ReclaimAttempt::NotStarted,
                 });
@@ -4164,6 +4191,7 @@ impl Coordinator {
             Some(block) if block.kind == kind => {
                 block.required_bytes = shortfall.required_peak_bytes;
                 block.headroom_bytes = device.available_vram_bytes;
+                block.admissible_ceiling_bytes = shortfall.admissible_ceiling_bytes;
             }
             _ => {
                 tracing::warn!(
@@ -4178,6 +4206,7 @@ impl Coordinator {
                     kind,
                     required_bytes: shortfall.required_peak_bytes,
                     headroom_bytes: device.available_vram_bytes,
+                    admissible_ceiling_bytes: shortfall.admissible_ceiling_bytes,
                     reclaimable_zfs_arc_bytes: None,
                     reclaim: ReclaimAttempt::NotStarted,
                 });
@@ -7337,10 +7366,11 @@ fn memory_shortfall_reason(pending: &PendingGeneration) -> Option<String> {
     if outcome.sample_failed {
         return None;
     }
-    Some(crate::host_reclaim::host_shortfall_message(
+    Some(crate::host_reclaim::shortfall_message(
         outcome,
         block.required_bytes,
         block.headroom_bytes,
+        block.admissible_ceiling_bytes,
         block.reclaimable_zfs_arc_bytes,
     ))
 }
@@ -7991,6 +8021,7 @@ fn classify_generation_plan_failure(
     match &error {
         crate::execution_plan::ExecutionPlanError::InsufficientVram {
             required_peak_bytes,
+            admissible_ceiling_bytes,
             eligible_device_ids,
             ..
         } => {
@@ -8008,6 +8039,7 @@ fn classify_generation_plan_failure(
                     message: error.to_string(),
                     vram_shortfall: Some(VramShortfall {
                         required_peak_bytes: *required_peak_bytes,
+                        admissible_ceiling_bytes: *admissible_ceiling_bytes,
                         eligible_device_ids: eligible_device_ids.clone(),
                     }),
                 })
@@ -11306,7 +11338,15 @@ mod tests {
             error.contains("device memory") && error.contains(&device_id),
             "the refusal names the memory and the device: {error}"
         );
-        assert!(error.contains("still"), "{error}");
+        // A DEVICE refusal names the ceiling the decision used, never a
+        // "still 0.0 GB short" measured against a budget nobody compared
+        // against (defect 7).
+        assert!(error.contains("requires"), "{error}");
+        assert!(
+            error.contains("over the") && error.contains("ceiling"),
+            "{error}"
+        );
+        assert!(!error.contains("0.0 GB"), "{error}");
     }
 
     /// When the reclaim finds nothing to release, the wait is bounded like
@@ -11650,6 +11690,7 @@ mod tests {
                 device_id: "cuda:0".to_string(),
                 predicted_peak_bytes: 9_663_676_416,
                 available_bytes: 2_147_483_648,
+                admissible_ceiling_bytes: 1_932_735_283,
                 advice: None,
             },
         ])
@@ -12639,6 +12680,7 @@ mod tests {
             crate::execution_plan::ExecutionPlanError::InsufficientVram {
                 reason: "metal:0 is currently busy".to_string(),
                 required_peak_bytes: 20 * GIB,
+                admissible_ceiling_bytes: Some(18 * GIB),
                 eligible_device_ids: vec!["metal:0".to_string()],
             },
             &BTreeMap::from([("metal:0".to_string(), 24 * GIB)]),
@@ -12682,6 +12724,7 @@ mod tests {
             crate::execution_plan::ExecutionPlanError::InsufficientVram {
                 reason: "both CUDA lanes are currently busy".to_string(),
                 required_peak_bytes: 18 * GIB,
+                admissible_ceiling_bytes: Some(16 * GIB),
                 eligible_device_ids: vec!["cuda:0".to_string(), "cuda:1".to_string()],
             },
             &BTreeMap::from([
@@ -19176,6 +19219,7 @@ mod tests {
             crate::execution_plan::ExecutionPlanError::InsufficientVram {
                 reason: "larger than every device".to_string(),
                 required_peak_bytes: 33_474_340_818,
+                admissible_ceiling_bytes: Some(21_474_836_480),
                 eligible_device_ids: vec!["cuda:0".to_string()],
             },
             &BTreeMap::from([("cuda:0".to_string(), RTX_4090_TOTAL)]),
@@ -19206,6 +19250,7 @@ mod tests {
                 crate::execution_plan::ExecutionPlanError::InsufficientVram {
                     reason: "currently short of VRAM".to_string(),
                     required_peak_bytes: 12 * GIB,
+                    admissible_ceiling_bytes: Some(10 * GIB),
                     eligible_device_ids: eligible_device_ids
                         .iter()
                         .map(|id| (*id).to_string())

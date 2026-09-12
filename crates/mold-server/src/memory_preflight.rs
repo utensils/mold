@@ -1918,6 +1918,11 @@ pub(crate) struct GenerationMemoryBudget {
     pub(crate) wan_block_offload: bool,
     pub(crate) under_memory_pressure: bool,
     pub(crate) eager_peak_memory_bytes: u64,
+    /// The figure [`Self::fits_available_memory`] compared the peak against:
+    /// the whole budget for the families whose estimate is measured, and 90 %
+    /// of it for every family whose estimate is a heuristic. A refusal must
+    /// print THIS, not the budget it derives from.
+    pub(crate) admissible_ceiling_bytes: Option<u64>,
     pub(crate) fits_available_memory: Option<bool>,
 }
 
@@ -2315,13 +2320,18 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     // and the encoder selector could not see each other; now the planner sees
     // both.
     let peak = peak.saturating_add(fp8_widen_bytes);
-    let fits_available_memory = available_memory_bytes.map(|available| {
+    // ONE expression for the ceiling and for the verdict, so the number a
+    // refusal prints is by construction the number the decision used. Printing
+    // the raw budget instead is how a 43.00 GB plan refused against a 42.05 GB
+    // ceiling came out as "still 0.0 GB short … 46.72 GB available".
+    let admissible_ceiling_bytes = available_memory_bytes.map(|available| {
         if qwen_family || wan_family {
-            peak <= available
+            available
         } else {
-            peak <= available.saturating_mul(9) / 10
+            available.saturating_mul(9) / 10
         }
     });
+    let fits_available_memory = admissible_ceiling_bytes.map(|ceiling| peak <= ceiling);
 
     GenerationMemoryBudget {
         peak_memory_bytes: peak,
@@ -2333,6 +2343,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
         under_memory_pressure,
         eager_peak_memory_bytes: eager_peak,
         fits_available_memory,
+        admissible_ceiling_bytes,
     }
 }
 

@@ -106,20 +106,93 @@ pub(crate) fn host_shortfall_message(
     available_bytes: u64,
     reclaimable_zfs_arc_bytes: Option<u64>,
 ) -> String {
-    let shortfall = required_bytes.saturating_sub(available_bytes);
+    shortfall_message(
+        outcome,
+        required_bytes,
+        available_bytes,
+        None,
+        reclaimable_zfs_arc_bytes,
+    )
+}
+
+/// [`host_shortfall_message`] with the ADMISSION CEILING the decision was
+/// actually made against.
+///
+/// A device refusal is not `required > available`. Admission compares the plan
+/// peak against a ceiling derived from the budget — for every family whose
+/// estimate is a heuristic that is 90 % of it — and the message printed the
+/// raw budget instead. The 2026-09-11 audit caught it three times, twice as the
+/// self-contradicting `still 0.0 GB short (requires 43.00 GB, 46.72 GB
+/// available)`: 46.72 exceeds 43.00, so the message said the request fit and
+/// was refused anyway. Whichever half a reader believed, it could not be acted
+/// on.
+///
+/// `admissible_ceiling_bytes` is `None` for the host ledger, whose comparison
+/// really is against the headroom it prints.
+pub(crate) fn shortfall_message(
+    outcome: &HostReclaimOutcome,
+    required_bytes: u64,
+    available_bytes: u64,
+    admissible_ceiling_bytes: Option<u64>,
+    reclaimable_zfs_arc_bytes: Option<u64>,
+) -> String {
     let arc = match reclaimable_zfs_arc_bytes {
         Some(credit) if credit > 0 => format!(", including {} evictable ZFS ARC", gb2(credit)),
         _ => String::new(),
     };
-    let tail = format!(
-        "still {} short (requires {}, {} available{arc})",
-        gb1(shortfall),
-        gb2(required_bytes),
-        gb2(available_bytes)
-    );
+    let tail = match admissible_ceiling_bytes {
+        Some(ceiling) => {
+            // Name the ceiling, and explain it when it is not simply the
+            // budget: a reader who sees 22.61 against 25.12 must be able to
+            // tell a derate from a second, unexplained memory figure.
+            let ceiling_clause = if ceiling < available_bytes {
+                format!(
+                    "{} admission ceiling (90% of the {} usable on this device{arc})",
+                    gb2(ceiling),
+                    gb2(available_bytes)
+                )
+            } else {
+                format!("{} usable on this device{arc}", gb2(ceiling))
+            };
+            if required_bytes > ceiling {
+                format!(
+                    "requires {}, which is {} over the {ceiling_clause}",
+                    gb2(required_bytes),
+                    over(required_bytes - ceiling),
+                )
+            } else {
+                // Defensive: nothing should reach a shortfall message without
+                // exceeding its own ceiling. Report the pair rather than
+                // inventing a shortfall, which is the defect this replaces.
+                format!(
+                    "requires {}, within the {ceiling_clause} — refused for a                      reason other than this device's free memory",
+                    gb2(required_bytes),
+                )
+            }
+        }
+        None => format!(
+            "still {} short (requires {}, {} available{arc})",
+            gb1(required_bytes.saturating_sub(available_bytes)),
+            gb2(required_bytes),
+            gb2(available_bytes)
+        ),
+    };
     match outcome.release_summary() {
         Some(summary) => format!("{summary}; {tail}"),
         None => tail,
+    }
+}
+
+/// A shortfall is never zero, so it is never printed as `0.0 GB`.
+///
+/// Below a gigabyte the figure is shown in megabytes; a plan that is 52 MB over
+/// its ceiling is 52 MB over, and rounding that to "0.0 GB" is what made the
+/// refusal read as a contradiction.
+fn over(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        gb2(bytes)
+    } else {
+        format!("{} MB", (bytes as f64 / 1_000_000.0).round() as u64)
     }
 }
 
@@ -570,6 +643,120 @@ mod tests {
             .release_summary()
             .expect("one eviction still reports")
             .contains("1 idle model"));
+    }
+
+    /// Defect 7 (2026-09-11 audit, reproduced three times): the refusal printed
+    /// a pair of numbers that was not the pair the decision was made from, and
+    /// then a shortfall of "0.0 GB" — which reads as "it fits and we refused
+    /// anyway".
+    ///
+    /// ```text
+    /// still 0.0 GB short (requires 43.00 GB, 46.72 GB available)
+    /// still 0.0 GB short (requires 24.25 GB, 25.12 GB available)
+    /// ```
+    ///
+    /// Both decisions were made against the ADMISSION CEILING — 90 % of the
+    /// device's usable memory — which the message never printed. A device
+    /// shortfall now names the ceiling it exceeded, what that ceiling is, and a
+    /// shortfall that is never zero.
+    #[test]
+    fn a_device_shortfall_names_the_ceiling_the_decision_actually_used() {
+        let outcome = HostReclaimOutcome::default();
+
+        // E1b: `flux2-dev:q8` + one reference on a 46.72 GB budget.
+        assert_eq!(
+            shortfall_message(
+                &outcome,
+                43_000_000_000,
+                46_720_000_000,
+                Some(42_048_000_000),
+                None,
+            ),
+            "requires 43.00 GB, which is 952 MB over the 42.05 GB admission ceiling \
+             (90% of the 46.72 GB usable on this device)"
+        );
+
+        // D7b: `flux2-dev:q4` on the 24 GB simulation.
+        assert_eq!(
+            shortfall_message(
+                &outcome,
+                24_252_966_880,
+                25_124_316_160,
+                Some(22_611_884_544),
+                None,
+            ),
+            "requires 24.25 GB, which is 1.64 GB over the 22.61 GB admission ceiling \
+             (90% of the 25.12 GB usable on this device)"
+        );
+
+        // D7a: `flux2-dev:fp8` on the same budget — the shortfall is large and
+        // is still measured against the ceiling, not against raw free memory.
+        assert_eq!(
+            shortfall_message(
+                &outcome,
+                39_370_000_000,
+                25_124_316_160,
+                Some(22_611_884_544),
+                None,
+            ),
+            "requires 39.37 GB, which is 16.76 GB over the 22.61 GB admission ceiling \
+             (90% of the 25.12 GB usable on this device)"
+        );
+    }
+
+    /// A ceiling that is the whole budget — the families whose estimate is
+    /// measured rather than heuristic, so admission does not derate it — has no
+    /// 90% clause to explain.
+    #[test]
+    fn an_underated_ceiling_is_named_as_the_budget_it_is() {
+        assert_eq!(
+            shortfall_message(
+                &HostReclaimOutcome::default(),
+                26_000_000_000,
+                24_000_000_000,
+                Some(24_000_000_000),
+                None,
+            ),
+            "requires 26.00 GB, which is 2.00 GB over the 24.00 GB usable on this device"
+        );
+    }
+
+    /// Never "0.0 GB short". A sub-gigabyte shortfall is real and is reported
+    /// in the unit that shows it.
+    #[test]
+    fn a_shortfall_under_a_gigabyte_is_never_printed_as_zero() {
+        let message = shortfall_message(
+            &HostReclaimOutcome::default(),
+            42_100_000_000,
+            46_720_000_000,
+            Some(42_048_000_000),
+            None,
+        );
+        assert!(
+            message.contains("52 MB over"),
+            "a 52 MB shortfall must not round to 0.0 GB: {message}"
+        );
+        assert!(!message.contains("0.0 GB"), "{message}");
+    }
+
+    /// The defensive branch. If a demand ever reaches this message without
+    /// exceeding its own ceiling, the message must not invent a shortfall —
+    /// it reports the pair and says the refusal came from somewhere else.
+    #[test]
+    fn a_demand_that_does_not_exceed_its_ceiling_never_claims_a_shortfall() {
+        let message = shortfall_message(
+            &HostReclaimOutcome::default(),
+            10_000_000_000,
+            46_720_000_000,
+            Some(42_048_000_000),
+            None,
+        );
+        assert!(!message.contains("short"), "{message}");
+        assert!(!message.contains("over the"), "{message}");
+        assert!(
+            message.contains("10.00 GB") && message.contains("42.05 GB"),
+            "{message}"
+        );
     }
 
     /// Nothing reclaimable must not paste an empty clause into the refusal.
