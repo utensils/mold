@@ -3114,11 +3114,21 @@ async fn main() {
         }
         // Clear the line to remove any progress bar artifacts
         eprint!("\r\x1b[2K");
+        // A forced-local render holds this gallery's writer lease; hand it
+        // back rather than leaving a file that says a writer is still here.
+        mold_server::gallery_authority::release_gallery_writer_leases();
         std::process::exit(130); // 128 + SIGINT(2), standard Unix convention
     })
     .ok();
 
-    if let Err(e) = run().await {
+    let outcome = run().await;
+    // Every exit this process controls goes through here. A forced-local
+    // `mold run` publishes through the same gallery archive authority a server
+    // does and takes the same writer lease, and a lease file that outlives its
+    // process makes `mold system gallery-authority downgrade` refuse for a
+    // writer that has already gone.
+    mold_server::gallery_authority::release_gallery_writer_leases();
+    if let Err(e) = outcome {
         // If the command already printed its own diagnostics, just exit.
         if e.downcast_ref::<AlreadyReported>().is_some() {
             std::process::exit(1);

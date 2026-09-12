@@ -22,8 +22,9 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::Linear;
-use mold_candle::quantized_nn::Linear as QuantizedLinear;
 use std::collections::HashMap;
+
+use crate::quantized_linear::QuantizedLinear;
 
 /// Slice a [`LinearLoraAdapter`]'s contribution into a fused output.
 ///
@@ -99,9 +100,18 @@ impl LinearLoraAdapter {
 ///
 /// The Plain↔Quantized split lets the offload path keep using the BF16
 /// `candle_nn::Linear` (it streams base weights CPU↔GPU each step) while
-/// the GGUF path stores `quantized_nn::Linear` permanently on GPU. Both
+/// the GGUF path stores a [`QuantizedLinear`] permanently on GPU. Both
 /// share the same `LinearLoraAdapter` math because adapter weights are
 /// always small dense BF16/F32 tensors regardless of the base.
+///
+/// The quantized arm is [`crate::quantized_linear::QuantizedLinear`] rather
+/// than `mold_candle::quantized_nn::Linear` because the GGUF transformer now
+/// runs at a working dtype the checkpoint does not choose: that type owns the
+/// activation cast boundary, materializes the bias at the kernel dtype, and
+/// hoists a densely stored tensor's dequantization out of the forward. The
+/// adapter math is unaffected — `LinearLoraAdapter::apply` takes its dtype
+/// from the linear's OUTPUT, which the cast boundary has already returned to
+/// the caller's.
 #[derive(Clone, Debug)]
 pub enum LoraLinear {
     Plain(Linear),
@@ -272,6 +282,27 @@ impl LoraRegistry {
     /// Number of (key, stack) entries — useful for progress logging.
     pub(crate) fn len(&self) -> usize {
         self.by_key.len()
+    }
+
+    /// Device bytes every installed adapter is holding.
+    ///
+    /// The bypass registry keeps the A/B matrices RESIDENT beside the
+    /// transformer for the whole render — it is what "adapters resident on
+    /// Cuda(..)" means in the load line — so they are part of what the VAE
+    /// decode has to fit beside. #276 is titled "VAE decode OOM under
+    /// KEEP_TRANSFORMER=1 **+ LoRAs**", and a residency budget that charged
+    /// only the checkpoint file could not see the ingredient the report
+    /// blamed.
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        self.by_key
+            .values()
+            .flat_map(|stack| stack.iter())
+            .map(|adapter| {
+                let bytes =
+                    |tensor: &Tensor| (tensor.elem_count() * tensor.dtype().size_in_bytes()) as u64;
+                bytes(&adapter.down).saturating_add(bytes(&adapter.up))
+            })
+            .sum()
     }
 
     /// True when no adapters are installed for any tensor.
@@ -767,6 +798,64 @@ mod tests {
         assert!(max < 1e-2, "bf16 bypass vs merged: {max}");
     }
 
+    /// The registry reports the device bytes it is holding, summed over
+    /// every adapter in every stack.
+    ///
+    /// `still_transformer_residency` charges this beside the checkpoint, so
+    /// an empty registry must be exactly zero (today's behaviour, unchanged)
+    /// and a two-adapter stack must be the sum of both — not the first, and
+    /// not one key's worth.
+    #[test]
+    fn the_registry_reports_the_device_bytes_its_adapters_hold() {
+        use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
+        use std::collections::HashMap as HM;
+
+        let device = Device::Cpu;
+        assert_eq!(
+            LoraRegistry::new().resident_bytes(),
+            0,
+            "no adapters is no bytes"
+        );
+
+        let h = 16;
+        let rank = 4;
+        let make = |scale: f64, path_hash: u64| {
+            let a = Tensor::zeros((rank, h), DType::F32, &device).unwrap();
+            let b = Tensor::zeros((h, rank), DType::F32, &device).unwrap();
+            let mut layers = HashMap::new();
+            layers.insert(
+                "transformer.transformer_blocks.0.attn.to_q".to_string(),
+                LoraLayer { a, b, alpha: None },
+            );
+            (LoraAdapter { layers, rank }, scale, path_hash)
+        };
+        let (first, first_scale, first_hash) = make(0.5, 0xAB);
+        let (second, second_scale, second_hash) = make(0.75, 0xCD);
+        let specs = [
+            LoraSpec {
+                adapter: &first,
+                scale: first_scale,
+                path_hash: first_hash,
+            },
+            LoraSpec {
+                adapter: &second,
+                scale: second_scale,
+                path_hash: second_hash,
+            },
+        ];
+        let mut linear_out_dims = HM::new();
+        linear_out_dims.insert("double_blocks.0.img_attn.qkv.weight".to_string(), 3 * h);
+        let registry = build_registry(&specs, &linear_out_dims, &device, DType::F32).unwrap();
+
+        // Two adapters, each an F32 (rank x h) down and an (h x rank) up.
+        let per_adapter = 2 * (rank * h) as u64 * DType::F32.size_in_bytes() as u64;
+        assert_eq!(
+            registry.resident_bytes(),
+            2 * per_adapter,
+            "both adapters in the stack are resident, so both are charged"
+        );
+    }
+
     #[test]
     fn test_build_registry_double_block_qkv_into_fused_slice() {
         use crate::flux::lora::{LoraAdapter, LoraLayer, LoraSpec};
@@ -1034,7 +1123,14 @@ mod tests {
         let device = Device::Cpu;
         let weight = Tensor::zeros((4, 4), DType::F32, &device).unwrap();
         let storage = QTensor::quantize(&weight, GgmlDType::F32).unwrap();
-        let inner = QuantizedLinear::from_arc(std::sync::Arc::new(storage), None).unwrap();
+        let inner = QuantizedLinear::new(
+            std::sync::Arc::new(storage),
+            None,
+            &Device::Cpu,
+            DType::F32,
+            false,
+        )
+        .unwrap();
         let q = LoraLinear::quantized(inner);
         let _ = q.inner();
     }

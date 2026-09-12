@@ -6,8 +6,9 @@ use mold_server::execution_plan::{
     resolve_execution_plans, AttentionKernelClass, CanonicalRuntimeValue, ComponentLoadStrategy,
     ComponentRole, DeterminismClass, DeviceArchitectureClass, DeviceFact, EngineLoadStrategyClass,
     ExecutionSemanticConfig, OffloadMode, PlannedDType, QuantizationVariant,
-    SemanticAttentionBackend, SemanticAttentionChunk, SemanticComponentPlacement, SemanticVaeDType,
-    SemanticVaeTiling,
+    SemanticAttentionBackend, SemanticAttentionChunk, SemanticComponentPlacement,
+    SemanticConvBackend, SemanticFlux2CfgBatching, SemanticFluxTransformerResidency,
+    SemanticQuantizedActivationDType, SemanticVaeDType, SemanticVaeTiling, SemanticWanStepCache,
 };
 use std::io::Write;
 use std::path::Path;
@@ -79,6 +80,7 @@ fn path(root: &Path, name: &str) -> String {
 
 fn device(id: &str, backend: GpuBackend, architecture: Option<(u16, u16)>) -> DeviceFact {
     DeviceFact {
+        total_vram_bytes: Some(24 * GIB),
         cuda_peak_baseline: None,
         id: id.into(),
         ordinal: id.bytes().last().unwrap_or(b'0').saturating_sub(b'0') as usize,
@@ -447,6 +449,39 @@ fn every_frozen_semantic_field_and_runtime_input_is_differential() {
         "vae tiling"
     );
     assert_semantic_change!(|value| value.vae_dtype = SemanticVaeDType::F32, "vae dtype");
+    // The resolved fields. Each is an `Option` that is absent for families
+    // that do not have the question, so the differential is `None` against
+    // `Some(..)` — which is exactly the case a `skip_serializing_if` field
+    // could silently drop out of the hash.
+    assert_semantic_change!(
+        |value| value.conv_backend = Some(SemanticConvBackend::Cudnn),
+        "conv backend"
+    );
+    assert_semantic_change!(
+        |value| value.wan_step_cache = Some(SemanticWanStepCache::Threshold { micros: 100_000 }),
+        "wan step cache"
+    );
+    assert_semantic_change!(
+        |value| value.flux_transformer_residency =
+            Some(SemanticFluxTransformerResidency::DropRequested),
+        "flux transformer residency"
+    );
+    assert_semantic_change!(
+        |value| value.quantized_activation_dtype = Some(SemanticQuantizedActivationDType::F32),
+        "quantized activation dtype"
+    );
+    // This fixture IS flux2, and the card it planned against has a total, so
+    // the base already carries a resolved class — flipping to the other one is
+    // the differential, in whichever direction this host's budget landed.
+    assert_semantic_change!(
+        |value| {
+            value.flux2_cfg_batching = Some(match value.flux2_cfg_batching {
+                Some(SemanticFlux2CfgBatching::Batched) => SemanticFlux2CfgBatching::Sequential,
+                _ => SemanticFlux2CfgBatching::Batched,
+            })
+        },
+        "flux2 cfg batching"
+    );
 
     assert_eq!(
         base.semantic_config.runtime.len(),
@@ -468,6 +503,65 @@ fn every_frozen_semantic_field_and_runtime_input_is_differential() {
             base_fingerprint,
             changed.fingerprint(),
             "runtime semantic input {index} was omitted"
+        );
+    }
+}
+
+/// The recorded FLUX.2 CFG class follows the CARD, all the way through the
+/// planner.
+///
+/// The engine decides whether a guided Klein-base step is one batch-2 forward
+/// or two batch-1 forwards by charging the checkpoint, the doubled activations
+/// and its own runtime headroom against the card's TOTAL VRAM. A host that
+/// batches and a host that does not run different arithmetic at different
+/// cost, so their plans must not land in one equivalence class — and before
+/// `DeviceFact` carried a total, every host reported the same class.
+///
+/// Only the total moves here: `available_vram_bytes` is held fixed precisely
+/// because it is the number this gate must NOT depend on. The fixture is
+/// renamed to a klein-base tier and guided past 1, because those are the two
+/// request-side gates a batched step also has to pass — an unguided or
+/// distilled render records `Sequential` on every card by design.
+#[test]
+fn the_flux2_cfg_class_follows_the_cards_total_vram() {
+    let (_root, mut config, mut request) = fixture();
+    let model = "test-flux2-klein-base:bf16";
+    let entry = config.models.remove("test:q4").expect("fixture model");
+    config.models.insert(model.into(), entry);
+    request.model = model.into();
+    request.guidance = 4.0;
+    let planned = |total: Option<u64>| {
+        let mut card = device("cuda:0", GpuBackend::Cuda, Some((8, 6)));
+        card.total_vram_bytes = total;
+        resolve_execution_plans(&config, &request, &[card], false)
+            .unwrap()
+            .remove(0)
+    };
+
+    let roomy = planned(Some(24 * GIB));
+    assert_eq!(
+        roomy
+            .execution_environment
+            .semantic_config
+            .flux2_cfg_batching,
+        Some(SemanticFlux2CfgBatching::Batched),
+        "a 24 GB card seats this checkpoint's doubled activations"
+    );
+
+    // A card that reports no total at all, and one whose total cannot hold the
+    // batch-2 budget, both keep the historical two forwards.
+    for total in [None, Some(GIB)] {
+        let plan = planned(total);
+        assert_eq!(
+            plan.execution_environment
+                .semantic_config
+                .flux2_cfg_batching,
+            Some(SemanticFlux2CfgBatching::Sequential),
+            "{total:?} cannot be charged a batched step"
+        );
+        assert_ne!(
+            roomy.execution_equivalence_fingerprint, plan.execution_equivalence_fingerprint,
+            "a batched render and a two-forward render are not the same execution"
         );
     }
 }

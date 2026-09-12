@@ -307,14 +307,34 @@ impl EstimateStore {
                 } else {
                     bucket.invalidated_count = bucket.invalidated_count.saturating_add(1);
                 }
-                bucket.vram_conservative_bytes = update_conservative_envelope(
-                    bucket.vram_conservative_bytes,
-                    observation.vram_high_water_bytes,
-                );
-                bucket.host_conservative_bytes = update_conservative_envelope(
-                    bucket.host_conservative_bytes,
-                    observation.host_incremental_high_water_bytes,
-                );
+                // A run that DIED did not reach a peak; it reached the card.
+                // Its high water is the memory that was in use when the
+                // allocator refused, which on a single-tenant GPU is the whole
+                // device — so it is a fact about the machine, never about the
+                // shape. Once it is in this envelope, `estimate()` hands it to
+                // admission and to the worker's frozen-plan recheck as
+                // authority, and #1707 is what that looks like: a shape with
+                // nine completions and two OOMs re-planned at ~46.5 GB on a
+                // ~46.1 GB card, refused on every retry, with the 5 % decay
+                // unable to fire because a refusal produces no new sample.
+                //
+                // A bucket with no completion sample is the deliberate
+                // exception, and `failure_only_vram_floor` exists to read
+                // exactly it (#641): with nothing else measured, a failure's
+                // high water is still a lower bound and still better evidence
+                // than the static estimate alone.
+                let envelope_is_evidence =
+                    observation.outcome == EstimateOutcome::Success || bucket.sample_count == 0;
+                if envelope_is_evidence {
+                    bucket.vram_conservative_bytes = update_conservative_envelope(
+                        bucket.vram_conservative_bytes,
+                        observation.vram_high_water_bytes,
+                    );
+                    bucket.host_conservative_bytes = update_conservative_envelope(
+                        bucket.host_conservative_bytes,
+                        observation.host_incremental_high_water_bytes,
+                    );
+                }
                 bucket.last_outcome = observation.outcome;
                 bucket.last_fallback_reason = observation.fallback_reason;
                 bucket.last_invalidated_plan_reason = observation.invalidated_plan_reason;

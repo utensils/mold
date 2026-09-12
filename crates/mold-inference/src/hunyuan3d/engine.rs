@@ -488,8 +488,13 @@ impl Hunyuan3dEngine {
         );
         ensure_quantized_shape_backend(device.is_cuda(), quantized || fp8)?;
         let (dit, vb) = if quantized {
-            let qvb = mold_candle::quantized::VarBuilder::from_gguf(&checkpoint, &device)
-                .with_context(|| format!("load Hunyuan3D GGUF at {}", checkpoint.display()))?;
+            let qvb = crate::weight_loader::load_gguf_var_builder(
+                &checkpoint,
+                &device,
+                "Hunyuan3D shape checkpoint (GGUF)",
+                &self.base.progress,
+            )
+            .with_context(|| format!("load Hunyuan3D GGUF at {}", checkpoint.display()))?;
             let dit = match (&dit20_cfg, &dit21_cfg) {
                 (Some(cfg), None) => ShapeDit::V20(Box::new(
                     Hunyuan3dDit::new_quantized(cfg, qvb.pp(DIT_PREFIX), dtype, false)
@@ -980,8 +985,13 @@ impl Hunyuan3dEngine {
         );
         ensure_quantized_shape_backend(device.is_cuda(), quantized)?;
         let vb = if quantized {
-            let qvb = mold_candle::quantized::VarBuilder::from_gguf(&checkpoint, &device)
-                .with_context(|| format!("load Hunyuan3D GGUF at {}", checkpoint.display()))?;
+            let qvb = crate::weight_loader::load_gguf_var_builder(
+                &checkpoint,
+                &device,
+                "Hunyuan3D shape checkpoint (GGUF)",
+                &self.base.progress,
+            )
+            .with_context(|| format!("load Hunyuan3D GGUF at {}", checkpoint.display()))?;
             dense_components_from_gguf(&qvb, dtype, &device)?
         } else {
             crate::weight_loader::load_safetensors_with_progress(

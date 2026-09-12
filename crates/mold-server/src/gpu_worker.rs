@@ -196,6 +196,7 @@ struct PlannedLoadContract<'a> {
     /// evictable ZFS ARC the same sample counted (#1439) for the refusal.
     available_host_headroom: Option<crate::scheduler::HostHeadroomReply>,
     execution_fingerprint: &'a str,
+    warm_reuse_fingerprint: &'a str,
     request: &'a mold_core::GenerateRequest,
     engine_paths: &'a mold_core::ModelPaths,
     engine_config: &'a mold_inference::FrozenEngineConfig,
@@ -205,6 +206,7 @@ struct PlannedInferenceEngine {
     inner: Box<dyn mold_inference::InferenceEngine>,
     mode: PlannedEngineMode,
     execution_fingerprint: String,
+    warm_reuse_fingerprint: String,
 }
 
 impl mold_inference::InferenceEngine for PlannedInferenceEngine {
@@ -243,6 +245,23 @@ impl mold_inference::InferenceEngine for PlannedInferenceEngine {
         self.inner.unload();
     }
 
+    /// Forwarded, not defaulted — the same rule as
+    /// `install_identity_embedding` below, and for a heavier reason: EVERY
+    /// scheduler-V2 engine is wrapped before it is inserted into the model
+    /// cache, so the cache never sees a bare engine in production. Defaulting
+    /// these two answered "nothing retained, nothing to release" for exactly
+    /// the jobs that retain and can release, which left a 34 GB FLUX.2 [dev]
+    /// transformer uncredited to admission AND unreachable by the reclaim,
+    /// while `is_loaded` (forwarded) kept the entry `ModelResidency::Gpu` so
+    /// the ordinary eviction skipped it as well.
+    fn resident_vram_bytes(&self) -> Option<u64> {
+        self.inner.resident_vram_bytes()
+    }
+
+    fn release_retained_residency(&mut self) -> u64 {
+        self.inner.release_retained_residency()
+    }
+
     fn set_on_progress(&mut self, callback: mold_inference::progress::ProgressCallback) {
         self.inner.set_on_progress(callback);
     }
@@ -279,6 +298,10 @@ impl mold_inference::InferenceEngine for PlannedInferenceEngine {
         Some(&self.execution_fingerprint)
     }
 
+    fn configured_warm_reuse_fingerprint(&self) -> Option<&str> {
+        Some(&self.warm_reuse_fingerprint)
+    }
+
     fn as_chain_renderer(&mut self) -> Option<&mut dyn mold_inference::chain::ChainStageRenderer> {
         self.inner.as_chain_renderer()
     }
@@ -298,11 +321,13 @@ fn record_planned_engine_mode(
     engine: Box<dyn mold_inference::InferenceEngine>,
     mode: PlannedEngineMode,
     execution_fingerprint: &str,
+    warm_reuse_fingerprint: &str,
 ) -> Box<dyn mold_inference::InferenceEngine> {
     Box::new(PlannedInferenceEngine {
         inner: engine,
         mode,
         execution_fingerprint: execution_fingerprint.to_string(),
+        warm_reuse_fingerprint: warm_reuse_fingerprint.to_string(),
     })
 }
 
@@ -1040,6 +1065,7 @@ fn validate_grant_before_acceptance(
                 &config,
                 &job.request,
                 job.prepared_execution_inputs.as_ref(),
+                job.deferred_media.as_ref().map(|media| media.projection()),
             )
         }
         OwnerWork::ChainStage(job) => {
@@ -1055,6 +1081,8 @@ fn validate_grant_before_acceptance(
                 worker.gpu.ordinal,
                 &job.config,
                 &job.stage_req,
+                None,
+                // A chain stage carries its own request, never a sealed set.
                 None,
             )
         }
@@ -1611,6 +1639,10 @@ fn validate_scheduled_generation_before_cuda(
         &config,
         &job.request,
         job.prepared_execution_inputs.as_ref(),
+        // This runs BEFORE `hydrate_dispatch_media`, so `job.request` is the
+        // scrubbed clone and the sealed set is the only place the adapter
+        // stack still exists.
+        job.deferred_media.as_ref().map(|media| media.projection()),
     )
 }
 
@@ -1642,6 +1674,8 @@ fn validate_scheduled_chain_stage_before_cuda(
         worker.gpu.ordinal,
         &job.config,
         &job.stage_req,
+        None,
+        // A chain stage carries its own request, never a sealed set.
         None,
     )
 }
@@ -1760,8 +1794,12 @@ fn process_scheduled_chain_stage(
         work_kind = "chain_stage",
         "dispatched job"
     );
-    let memory_watchdog =
-        ChainStageMemoryWatchdog::start(worker.gpu.ordinal, job.model.clone(), job.id.clone());
+    let memory_watchdog = MemoryWatchdog::start(
+        MemoryWatchdogScope::ChainStage,
+        worker.gpu.ordinal,
+        job.model.clone(),
+        Some(job.id.clone()),
+    );
     struct ActiveGuard<'a>(&'a GpuWorker);
     impl Drop for ActiveGuard<'_> {
         fn drop(&mut self) {
@@ -1876,40 +1914,115 @@ pub(crate) fn trim_malloc_arenas() -> Option<u64> {
     Some(rss_pre_trim)
 }
 
-/// Scheduled chain stages bypass `process_job`, so they need their own memory
-/// heartbeat around model readiness and rendering. A channel-backed stop wakes
-/// the thread immediately for short stages instead of making completion wait
-/// for the one-second sampling interval.
-struct ChainStageMemoryWatchdog {
+/// How far RSS must move before the memory watchdog spends another INFO line.
+const WATCHDOG_HEARTBEAT_RSS_DELTA_BYTES: u64 = 256 * 1024 * 1024;
+/// …and how long a flat RSS may stay silent before the watchdog proves it is
+/// still alive anyway.
+const WATCHDOG_HEARTBEAT_MAX_QUIET: Duration = Duration::from_secs(10);
+/// Sampling interval. The watchdog still *samples* every second — only the
+/// logging is throttled, so a runaway allocation is still attributed to the
+/// second it happened in.
+const WATCHDOG_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Is this sample worth a line? A heartbeat exists to attribute RAM growth to
+/// a phase, so a move of a quarter-gigabyte in either direction is news and a
+/// flat RSS is not — but a long quiet stretch still gets one line so the
+/// absence of news stays distinguishable from a dead thread.
+fn watchdog_should_log(last_logged_rss: u64, rss: u64, quiet: Duration) -> bool {
+    rss.abs_diff(last_logged_rss) >= WATCHDOG_HEARTBEAT_RSS_DELTA_BYTES
+        || quiet >= WATCHDOG_HEARTBEAT_MAX_QUIET
+}
+
+/// Which path a [`MemoryWatchdog`] is watching. The two differ only in what
+/// they are called in the log; the sampling, the throttle, the channel-backed
+/// stop and the deferred trim are identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryWatchdogScope {
+    /// A scheduled chain stage, which bypasses `process_job` entirely.
+    ChainStage,
+    /// An ordinary generation inside `process_job_with_sink`.
+    Generation,
+}
+
+impl MemoryWatchdogScope {
+    fn thread_name(self) -> &'static str {
+        match self {
+            Self::ChainStage => "chain-rss-watchdog",
+            Self::Generation => "rss-watchdog",
+        }
+    }
+
+    fn heartbeat_message(self) -> &'static str {
+        match self {
+            Self::ChainStage => "chain stage rss watchdog",
+            Self::Generation => "rss watchdog",
+        }
+    }
+
+    fn delta_message(self) -> &'static str {
+        match self {
+            Self::ChainStage => "chain stage memory delta",
+            Self::Generation => "generation memory delta",
+        }
+    }
+}
+
+/// A memory heartbeat around model readiness and rendering, plus the
+/// before/after delta and the glibc arena trim that follows it.
+///
+/// A channel-backed stop wakes the thread immediately instead of making
+/// completion wait out the one-second sampling interval — an ordinary
+/// generation used to poll an `AtomicBool` behind `thread::sleep(1s)` and so
+/// paid up to a full second of pure latency after every render.
+///
+/// The report — `malloc_trim(0)` and the `rss_after` sample — runs in `Drop`,
+/// deliberately: the trim measured 0.83 s on a 46 GB render, and doing it
+/// before the print was saved put that on the client's wall clock. Callers
+/// `stop()` the heartbeat where the work ends and let the value die after the
+/// completion is queued.
+struct MemoryWatchdog {
     stop: Option<std::sync::mpsc::Sender<()>>,
     handle: Option<std::thread::JoinHandle<()>>,
     rss_before: u64,
     ordinal: usize,
     model: String,
-    work_id: String,
+    work_id: Option<String>,
+    scope: MemoryWatchdogScope,
 }
 
-impl ChainStageMemoryWatchdog {
-    fn start(ordinal: usize, model: String, work_id: String) -> Self {
+impl MemoryWatchdog {
+    fn start(
+        scope: MemoryWatchdogScope,
+        ordinal: usize,
+        model: String,
+        work_id: Option<String>,
+    ) -> Self {
         let rss_before = crate::resources::ram_snapshot_from_system().used_by_mold;
         let (stop, stopped) = std::sync::mpsc::channel();
         let thread_model = model.clone();
-        let thread_work_id = work_id.clone();
+        let thread_work_id = work_id.clone().unwrap_or_default();
         let handle = std::thread::Builder::new()
-            .name(format!("chain-rss-watchdog-{ordinal}"))
+            .name(format!("{}-{ordinal}", scope.thread_name()))
             .spawn(move || {
                 let start = Instant::now();
+                let mut last_logged_rss = rss_before;
+                let mut last_logged_at = start;
                 while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-                    stopped.recv_timeout(Duration::from_secs(1))
+                    stopped.recv_timeout(WATCHDOG_SAMPLE_INTERVAL)
                 {
                     let rss = crate::resources::ram_snapshot_from_system().used_by_mold;
+                    if !watchdog_should_log(last_logged_rss, rss, last_logged_at.elapsed()) {
+                        continue;
+                    }
+                    last_logged_rss = rss;
+                    last_logged_at = Instant::now();
                     tracing::info!(
                         gpu = ordinal,
                         model = %thread_model,
                         work_id = %thread_work_id,
                         elapsed_s = start.elapsed().as_secs(),
                         rss_mb = rss / 1_000_000,
-                        "chain stage rss watchdog"
+                        message = scope.heartbeat_message()
                     );
                 }
             })
@@ -1917,9 +2030,9 @@ impl ChainStageMemoryWatchdog {
                 tracing::warn!(
                     gpu = ordinal,
                     model = %model,
-                    work_id = %work_id,
+                    work_id = %work_id.clone().unwrap_or_default(),
                     %error,
-                    "could not start chain stage RSS watchdog"
+                    "could not start the RSS watchdog"
                 );
             })
             .ok();
@@ -1930,29 +2043,39 @@ impl ChainStageMemoryWatchdog {
             ordinal,
             model,
             work_id,
+            scope,
         }
     }
-}
 
-impl Drop for ChainStageMemoryWatchdog {
-    fn drop(&mut self) {
+    /// Stop the heartbeat thread without reporting. Idempotent, and cheap —
+    /// the thread is parked in `recv_timeout` and wakes on the send.
+    fn stop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+impl Drop for MemoryWatchdog {
+    fn drop(&mut self) {
+        self.stop();
+        let trim_started = Instant::now();
         let rss_pre_trim = trim_malloc_arenas();
+        let trim_ms = trim_started.elapsed().as_millis();
         let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
         tracing::info!(
             gpu = self.ordinal,
             model = %self.model,
-            work_id = %self.work_id,
+            work_id = %self.work_id.clone().unwrap_or_default(),
             rss_before_mb = self.rss_before / 1_000_000,
             rss_after_mb = rss_after / 1_000_000,
             rss_delta_mb = (rss_after as i64 - self.rss_before as i64) / 1_000_000,
             rss_pre_trim_mb = rss_pre_trim.map(|value| value / 1_000_000).unwrap_or(0),
-            "chain stage memory delta"
+            trim_ms,
+            message = self.scope.delta_message()
         );
     }
 }
@@ -3505,7 +3628,7 @@ fn run_claimed_h3_generation(
                 return reject_claimed_h3_generation_message(job, message);
             }
             release_prepared_and_trim(&mut prepared);
-            record_failure(worker);
+            record_counted_failure(worker, &model_name, &format!("{error:#}"));
             reject_claimed_h3_generation_message(
                 job,
                 format!("generation error: {}", clean_error_message(&error)),
@@ -3619,6 +3742,7 @@ fn finish_claimed_h3_success(
     };
     worker.consecutive_failures.store(0, Ordering::SeqCst);
     crate::gpu_pool::clear_model_cuda_oom(&job.model);
+    crate::gpu_pool::clear_model_specific_failures(&job.model, worker.gpu.ordinal);
     finish_generation_success(job, output.response, image, None, None);
     true
 }
@@ -3932,7 +4056,7 @@ fn settle_identity_extraction_failure(
     // would take the whole machine out of rotation for a minute, telling the
     // person who supplied them an unrelated story about GPU health.
     if !error.user_input {
-        record_failure(worker);
+        record_counted_failure(worker, model_name, &error.message);
     }
     format!("face-identity conditioning failed: {error}")
 }
@@ -4021,16 +4145,27 @@ fn process_job_with_sink(
     // concrete device lease. Hydrate authenticated media now—not while it is
     // queued, preparing dependencies, retrying transport, or waiting for the
     // owner thread—and retain the staging owner for the complete attempt.
-    let hydrated_media_lease = if let Some(deferred) = job.deferred_media.take() {
-        match deferred.hydrate_into(&job_id, &mut job.request) {
-            Ok(lease) => Some(lease),
-            Err(error) => {
-                durable_generation_settlement::fail_hydration_blocking(job, &job_id, error);
-                return false;
-            }
+    // The plan's own stack, so the one adapter no sealed set can hand back —
+    // the per-model config default — reaches the engine that was planned with
+    // it. Derived from the frozen plan rather than carried as a second field:
+    // `h3_private_ingress_grant` recovers the same way at this seam.
+    let planned_loras = job
+        .execution_plan
+        .as_ref()
+        .map(crate::execution_plan::materialized_lora_stack)
+        .unwrap_or_default();
+    let hydrated_media_lease = match crate::queue_media_runtime::hydrate_dispatch_media(
+        &job_id,
+        &mut job.request,
+        job.deferred_media.take(),
+        job.materialized_control_lora.take(),
+        &planned_loras,
+    ) {
+        Ok(lease) => lease,
+        Err(error) => {
+            durable_generation_settlement::fail_hydration_blocking(job, &job_id, error);
+            return false;
         }
-    } else {
-        None
     };
     // The ordered references are bound from THIS hydration, under this lease;
     // no job field carries a reference set across admission or dispatch.
@@ -4239,6 +4374,7 @@ fn process_job_with_sink(
         predicted_host_increment_bytes: planned_host_increment_bytes,
         available_host_headroom: planned_host_headroom,
         execution_fingerprint: plan.execution_fingerprint.as_str(),
+        warm_reuse_fingerprint: plan.warm_reuse_fingerprint.as_str(),
         request: &request,
         engine_paths: &plan.engine_paths,
         engine_config: &plan.engine_config,
@@ -4302,7 +4438,7 @@ fn process_job_with_sink(
             err_msg,
         );
         if count_worker_failure {
-            record_failure(worker);
+            record_counted_failure(worker, &model_name, &format!("{e:#}"));
         }
         return false;
     }
@@ -4387,40 +4523,21 @@ fn process_job_with_sink(
         forward_generation_progress(progress_tx.as_ref(), event);
     }));
 
-    // RSS sample taken just before inference; the post-inference sample below
-    // logs the per-job delta so RAM growth can be attributed to a specific
-    // generation rather than tracked at process granularity.
-    let rss_before = crate::resources::ram_snapshot_from_system().used_by_mold;
-
-    // Watchdog: log RSS every 1s while inference runs so we can see RAM
-    // growth as it happens. The post-inference summary log can't fire when
-    // a runaway allocation crosses the OOM threshold mid-generation, so we
-    // need a heartbeat to attribute the explosion to a specific phase.
-    let watchdog_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let watchdog_handle = {
-        let stop = watchdog_stop.clone();
-        let model = model_name.clone();
-        std::thread::Builder::new()
-            .name(format!("rss-watchdog-{ordinal}"))
-            .spawn(move || {
-                let start = Instant::now();
-                while !stop.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(1000));
-                    if stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let rss = crate::resources::ram_snapshot_from_system().used_by_mold;
-                    tracing::info!(
-                        gpu = ordinal,
-                        model = %model,
-                        elapsed_s = start.elapsed().as_secs(),
-                        rss_mb = rss / 1_000_000,
-                        "rss watchdog"
-                    );
-                }
-            })
-            .expect("failed to spawn RSS watchdog")
-    };
+    // RSS heartbeat while inference runs, so RAM growth can be attributed to a
+    // phase — the post-inference summary cannot fire when a runaway allocation
+    // crosses the OOM threshold mid-generation.
+    //
+    // The value is deliberately left alive past the completion hand-off: its
+    // `Drop` is where `malloc_trim(0)` and the `rss_after` sample happen, and
+    // the trim measured 0.83 s on a 46 GB render. Running it here, before the
+    // print is saved and the SSE complete is queued, put that straight onto
+    // the client's wall clock.
+    let mut memory_watchdog = MemoryWatchdog::start(
+        MemoryWatchdogScope::Generation,
+        ordinal,
+        model_name.clone(),
+        None,
+    );
 
     // Install the identity this lease resolved above, or clear it.
     //
@@ -4450,22 +4567,9 @@ fn process_job_with_sink(
         }
     }));
 
-    watchdog_stop.store(true, Ordering::SeqCst);
-    let _ = watchdog_handle.join();
-
-    let rss_pre_trim = trim_malloc_arenas();
-
-    let rss_after = crate::resources::ram_snapshot_from_system().used_by_mold;
-    let rss_delta = rss_after as i64 - rss_before as i64;
-    tracing::info!(
-        gpu = ordinal,
-        model = %model_name,
-        rss_before_mb = rss_before / 1_000_000,
-        rss_after_mb = rss_after / 1_000_000,
-        rss_delta_mb = rss_delta / 1_000_000,
-        rss_pre_trim_mb = rss_pre_trim.map(|v| v / 1_000_000).unwrap_or(0),
-        "generation memory delta"
-    );
+    // The heartbeat's job is over the moment inference returns; the report it
+    // owns waits for this function's tail, after the completion is queued.
+    memory_watchdog.stop();
 
     // A fatal driver error invalidates every CUDA object owned by this
     // context. Never put the triggering engine back into the cache: doing so
@@ -4534,6 +4638,8 @@ fn process_job_with_sink(
             // Reset failure counter on success.
             worker.consecutive_failures.store(0, Ordering::SeqCst);
             crate::gpu_pool::clear_model_cuda_oom(&model_name);
+            // "Consecutive" means consecutive for the model hold too.
+            crate::gpu_pool::clear_model_specific_failures(&model_name, worker.gpu.ordinal);
 
             // Attach GPU ordinal to response.
             response.gpu = Some(ordinal);
@@ -4764,7 +4870,7 @@ fn process_job_with_sink(
             let err_msg = request.redact_staging_paths(err_msg);
             tracing::warn!(gpu = ordinal, model = %model_name, %err_msg, "generation failed");
             if count_worker_failure {
-                record_failure(worker);
+                record_counted_failure(worker, &model_name, &format!("{e:#}"));
             }
             // A retained job's stream ends with a terminal frame rather than a
             // quiet close: a quiet close leaves the desktop app in `loading`
@@ -5196,6 +5302,95 @@ fn preflight_planned_memory_guard_with_eviction(
     )
 }
 
+/// Park the active model for a swap, and SAY SO.
+///
+/// This is the ordinary, overwhelmingly common way memory comes back on the
+/// swap path, and it was the one release mold never reported. Part G measured
+/// it: 18.8 GB of FLUX.1 left the card in the two seconds between
+/// `dispatched job` and `loading model...` with nothing written, while the two
+/// paths that fire far more rarely — the retained-slot reclaim and the LRU
+/// eviction — each log a line. An operator reading that log can account for
+/// every byte except the biggest one.
+fn unload_active_for_swap(worker: &GpuWorker, for_model: &str) -> bool {
+    let unloaded = worker
+        .model_cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unload_active();
+    let Some(unloaded) = unloaded else {
+        return false;
+    };
+    worker.set_resident_model(None);
+    tracing::info!(
+        gpu = worker.gpu.ordinal,
+        model = %unloaded.model,
+        freed_mb = unloaded.vram_bytes / 1024 / 1024,
+        for_model = %for_model,
+        "released the active model at the swap gate"
+    );
+    true
+}
+
+/// Release another model's retained transformer, once, for a swap gate that
+/// has just refused.
+///
+/// `unload_active` drops the ONE entry the cache calls active, and the
+/// after-drop gates then read the driver with no reclaimable footprint at all
+/// — correctly, because anything still on the card at that point is pressure
+/// rather than credit. What that misses is a SECOND engine that is
+/// GPU-resident because it is retaining a transformer: `evict_lru_parked`
+/// skips it by residency, `unload_active` has already spent its one shot, and
+/// the gate refuses against bytes mold is holding by choice and could hand
+/// back in a moment.
+///
+/// Returns whether anything was released, so the caller retries exactly once
+/// per released engine and refuses with the post-release reading otherwise.
+fn release_another_models_retained_slot(
+    worker: &GpuWorker,
+    cache_key: &str,
+    model_name: &str,
+) -> Result<bool, crate::routes::ApiError> {
+    let reclaimed = {
+        let mut cache = worker
+            .model_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.release_retained_residency_except(Some(cache_key))
+    };
+    let Some((reclaimed_name, freed)) = reclaimed else {
+        return Ok(false);
+    };
+    tracing::info!(
+        gpu = worker.gpu.ordinal,
+        target_model = %model_name,
+        reclaimed_model = %reclaimed_name,
+        freed_mb = freed / 1024 / 1024,
+        "released a retained transformer at the swap gate to make room"
+    );
+    #[cfg(feature = "cuda")]
+    device::post_drop_free_vram_bytes(worker.gpu.ordinal).map_err(device_memory_api_error)?;
+    Ok(true)
+}
+
+/// Run an after-drop swap gate, releasing other models' retained transformers
+/// until it passes or there is nothing left to release.
+fn preflight_after_drop_releasing_retained(
+    worker: &GpuWorker,
+    cache_key: &str,
+    model_name: &str,
+    mut guard: impl FnMut() -> Result<(), crate::routes::ApiError>,
+) -> Result<(), crate::routes::ApiError> {
+    loop {
+        let error = match guard() {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        if !release_another_models_retained_slot(worker, cache_key, model_name)? {
+            return Err(error);
+        }
+    }
+}
+
 fn preflight_planned_memory_guard_with_eviction_using(
     cache_lock: &std::sync::Mutex<crate::model_cache::ModelCache>,
     cache_key: &str,
@@ -5220,6 +5415,31 @@ fn preflight_planned_memory_guard_with_eviction_using(
         // set cannot create credible capacity for this request.
         if active_vram_credit_cap.is_some() {
             return Err(err);
+        }
+
+        // Retained residency first: an engine holding a transformer
+        // speculatively can hand it back without being destroyed, keeping its
+        // prompt cache and warm shell, and it is residency the eviction below
+        // cannot reach at all — a retaining engine is `ModelResidency::Gpu`
+        // and `evict_lru_parked_except` skips exactly those. Without this a
+        // queue wedges: two workers each holding a 35 GB FLUX.2 transformer
+        // left a third request blocked on memory for 18 minutes with nothing
+        // able to reclaim it.
+        let reclaimed = {
+            let mut cache = cache_lock.lock().unwrap_or_else(|e| e.into_inner());
+            cache.release_retained_residency_except(Some(cache_key))
+        };
+        if let Some((reclaimed_name, freed)) = reclaimed {
+            tracing::info!(
+                gpu = ordinal,
+                target_model = %model_name,
+                reclaimed_model = %reclaimed_name,
+                freed_mb = freed / 1024 / 1024,
+                "released a retained transformer to preserve admitted execution plan"
+            );
+            #[cfg(feature = "cuda")]
+            device::post_drop_free_vram_bytes(ordinal).map_err(device_memory_api_error)?;
+            continue;
         }
 
         let evicted = {
@@ -5342,11 +5562,35 @@ fn ensure_model_ready_sync_inner_guarded(
 /// observed peak therefore passed the worker gate and died two minutes later
 /// in CUDA (#641). A zero envelope means no learned evidence and must never
 /// weaken the frozen plan.
+///
+/// `physical_budget_bytes` is the card's capacity minus the driver reserve,
+/// and it is a CEILING ON THE ENVELOPE, never on the frozen plan. The envelope
+/// is learned from observations, and an observation that cannot fit the device
+/// it was taken on is not a measurement of the shape — it is the record of a
+/// run that reached the card. #1707: two OOMs pushed a `flux2-dev:q8` envelope
+/// to 46,554,677,248 bytes on a ~46.1 GB L40S, the recheck refused every retry
+/// with `~46.5 GB no longer fits the current ~46.1 GB`, and the 5 % decay could
+/// not fire because a refusal produces no new sample. Clamping makes the
+/// envelope say the most it honestly can — "all of it" — and leaves a genuine
+/// shortfall to the frozen plan, which this never lowers. Zero means the
+/// capacity could not be read, and an unmeasurable card keeps today's answer.
 pub(crate) fn planned_recheck_peak_bytes(
     predicted_vram_peak_bytes: u64,
     learned_vram_envelope_bytes: u64,
+    physical_budget_bytes: u64,
 ) -> u64 {
-    predicted_vram_peak_bytes.max(learned_vram_envelope_bytes)
+    let envelope = if physical_budget_bytes == 0 {
+        learned_vram_envelope_bytes
+    } else {
+        learned_vram_envelope_bytes.min(physical_budget_bytes)
+    };
+    predicted_vram_peak_bytes.max(envelope)
+}
+
+/// The card's capacity minus the driver reserve, or `0` when it cannot be read.
+pub(crate) fn physical_vram_budget_bytes(gpu: &device::DiscoveredGpu) -> u64 {
+    gpu.total_vram_bytes
+        .saturating_sub(mold_inference::device::reserved_vram_bytes())
 }
 
 /// Reclaim the ordinary retained-engine residency, then prove the exact
@@ -5480,6 +5724,9 @@ pub(crate) fn validate_private_h3_physical_capacity(
         model_name,
         predicted_device_peak_bytes,
         available_device_bytes,
+        // The private H3 gate proves its own allocation-free evidence against a
+        // fresh sample; it carries no separate capacity reading.
+        None,
         crate::memory_preflight::rejection_suggestion(None),
     )?;
     crate::memory_preflight::check_planned_host_budget(
@@ -5505,9 +5752,11 @@ fn ensure_model_ready_sync_inner(
         planned_recheck_peak_bytes(
             planned.predicted_vram_peak_bytes,
             planned.learned_vram_envelope_bytes,
+            physical_vram_budget_bytes(&worker.gpu),
         )
     });
     let planned_execution_fingerprint = planned_load.map(|planned| planned.execution_fingerprint);
+    let planned_warm_reuse_fingerprint = planned_load.map(|planned| planned.warm_reuse_fingerprint);
     let planned_host_increment_bytes =
         planned_load.map_or(0, |planned| planned.predicted_host_increment_bytes);
     let planned_host_headroom = planned_load.and_then(|planned| planned.available_host_headroom);
@@ -5516,11 +5765,12 @@ fn ensure_model_ready_sync_inner(
     let planned_engine_config = planned_load.map(|planned| planned.engine_config);
     let mut cache = worker.model_cache.lock().unwrap();
 
-    let cached_requires_reconstruction = cache.get(cache_key).is_some_and(|entry| {
-        cached_engine_requires_reconstruction(
+    let cached_reconstruction_reason = cache.get(cache_key).and_then(|entry| {
+        cached_engine_reconstruction_reason(
             entry.engine.as_ref(),
             planned_mode,
             planned_execution_fingerprint,
+            planned_warm_reuse_fingerprint,
             entry.engine.model_paths().is_some_and(|paths| {
                 crate::model_manager::request_requires_fresh_engine_for_offload_policy(
                     paths,
@@ -5530,6 +5780,14 @@ fn ensure_model_ready_sync_inner(
             }),
         )
     });
+    let cached_requires_reconstruction = cached_reconstruction_reason.is_some();
+    // Device residency this engine is holding for the NEXT render, asked of
+    // the engine itself. A sequential engine that retains a transformer is
+    // not the load-use-drop engine #282's rule was written for.
+    let cached_retained_residency_bytes = cache
+        .get(cache_key)
+        .and_then(|entry| entry.engine.resident_vram_bytes())
+        .unwrap_or(0);
 
     // Already loaded? A matching engine avoids reconstruction, but an
     // admitted request can have a different activation peak and physical
@@ -5538,6 +5796,29 @@ fn ensure_model_ready_sync_inner(
     let unchanged_cached = cache.get(cache_key).is_some_and(|entry| {
         entry.residency == ModelResidency::Gpu && !cached_requires_reconstruction
     });
+    if !unchanged_cached {
+        // The one line that says why a warm engine is about to be rebuilt or
+        // reloaded. Without it the next line an operator sees is a 35 GB GGUF
+        // read with no stated cause.
+        tracing::debug!(
+            gpu = worker.gpu.ordinal,
+            model = %model_name,
+            cached = cache.get(cache_key).is_some(),
+            residency = ?cache.get(cache_key).map(|entry| entry.residency),
+            reason = ?cached_reconstruction_reason,
+            planned_mode = ?planned_mode,
+            cached_mode = ?cache.get(cache_key).map(|entry| (
+                entry.engine.configured_load_strategy(),
+                entry.engine.configured_block_offload(),
+            )),
+            planned_fingerprint = planned_execution_fingerprint.unwrap_or("<none>"),
+            cached_fingerprint = cache
+                .get(cache_key)
+                .and_then(|entry| entry.engine.configured_execution_fingerprint())
+                .unwrap_or("<none>"),
+            "cached engine does not serve the admitted plan unchanged"
+        );
+    }
     if unchanged_cached {
         cache.touch(cache_key);
         drop(cache);
@@ -5636,21 +5917,22 @@ fn ensure_model_ready_sync_inner(
         }
 
         // Unload active model first.
-        {
-            let mut cache = worker.model_cache.lock().unwrap();
-            if cache.unload_active().is_some() {
-                worker.set_resident_model(None);
-            }
-        }
+        unload_active_for_swap(worker, model_name);
         if let Some(ref paths) = preflight_paths {
             match planned_peak_bytes {
                 Some(predicted_peak_bytes) => {
-                    crate::memory_preflight::preflight_planned_memory_guard_after_drop(
-                        model_name,
-                        worker.incremental_wan_peak(predicted_peak_bytes, cuda_peak_baseline, 0),
-                        worker.gpu.ordinal,
-                        hint,
-                    )
+                    preflight_after_drop_releasing_retained(worker, cache_key, model_name, || {
+                        crate::memory_preflight::preflight_planned_memory_guard_after_drop(
+                            model_name,
+                            worker.incremental_wan_peak(
+                                predicted_peak_bytes,
+                                cuda_peak_baseline,
+                                0,
+                            ),
+                            worker.gpu.ordinal,
+                            hint,
+                        )
+                    })
                 }
                 None => crate::memory_preflight::preflight_memory_guard_after_drop_for_request(
                     model_name,
@@ -5688,12 +5970,34 @@ fn ensure_model_ready_sync_inner(
             .unwrap_or_else(|e| e.into_inner())
             .get(cache_key)
             .is_some_and(|entry| {
-                planned_mode.is_none_or(|mode| mode.matches(entry.engine.as_ref()))
+                planned_mode.is_none_or(|mode| {
+                    mode.matches(entry.engine.as_ref())
+                        || retained_engine_serves_planned_mode(
+                            mode,
+                            entry.engine.configured_load_strategy(),
+                            entry.engine.configured_block_offload(),
+                            entry.engine.resident_vram_bytes().unwrap_or(0),
+                        )
+                })
             });
-        if load_strategy == mold_inference::LoadStrategy::Sequential
-            || cached_requires_reconstruction
-            || !cached_mode_matches
-        {
+        // A SEQUENTIAL strategy meant load-use-drop when #282 wrote this rule:
+        // such an engine held nothing between renders, so there was nothing to
+        // keep and rebuilding it cost only the load it was going to do anyway.
+        // An engine RETAINING a transformer is the case that broke the
+        // equivalence — recreating it destroys exactly the 34 GB it is holding
+        // for this request, and the reload it forces is the 80 s the retention
+        // exists to remove. Reuse it only where nothing else objects; a
+        // sequential engine retaining nothing still takes the old path.
+        let sequential_rebuild = load_strategy == mold_inference::LoadStrategy::Sequential
+            && cached_retained_residency_bytes == 0;
+        if sequential_rebuild || cached_requires_reconstruction || !cached_mode_matches {
+            let reconstruction_reason = cached_reconstruction_reason
+                .map(EngineReconstruction::as_str)
+                .unwrap_or(if sequential_rebuild {
+                    "sequential-load-use-drop"
+                } else {
+                    "planned-mode-differs"
+                });
             let paths = planned_engine_paths
                 .cloned()
                 .or(cached_paths)
@@ -5752,6 +6056,8 @@ fn ensure_model_ready_sync_inner(
                         mode,
                         planned_execution_fingerprint
                             .expect("planned engine mode must carry an execution fingerprint"),
+                        planned_warm_reuse_fingerprint
+                            .expect("planned engine mode must carry a warm-reuse fingerprint"),
                     ),
                     None => engine,
                 },
@@ -5768,6 +6074,8 @@ fn ensure_model_ready_sync_inner(
             tracing::info!(
                 gpu = worker.gpu.ordinal,
                 model = %model_name,
+                reason = reconstruction_reason,
+                retained_mb = cached_retained_residency_bytes / 1024 / 1024,
                 "recreating cached engine for exact execution plan..."
             );
             let vram_baseline = device::vram_load_baseline(worker.gpu.ordinal);
@@ -5879,20 +6187,17 @@ fn ensure_model_ready_sync_inner(
     .map_err(|e| anyhow::anyhow!(e.error))?;
 
     // Unload active model first.
-    {
-        let mut cache = worker.model_cache.lock().unwrap();
-        if cache.unload_active().is_some() {
-            worker.set_resident_model(None);
-        }
-    }
+    unload_active_for_swap(worker, model_name);
     match planned_peak_bytes {
         Some(predicted_peak_bytes) => {
-            crate::memory_preflight::preflight_planned_memory_guard_after_drop(
-                model_name,
-                worker.incremental_wan_peak(predicted_peak_bytes, cuda_peak_baseline, 0),
-                worker.gpu.ordinal,
-                hint,
-            )
+            preflight_after_drop_releasing_retained(worker, cache_key, model_name, || {
+                crate::memory_preflight::preflight_planned_memory_guard_after_drop(
+                    model_name,
+                    worker.incremental_wan_peak(predicted_peak_bytes, cuda_peak_baseline, 0),
+                    worker.gpu.ordinal,
+                    hint,
+                )
+            })
         }
         None => crate::memory_preflight::preflight_memory_guard_after_drop_for_request(
             model_name,
@@ -5941,6 +6246,8 @@ fn ensure_model_ready_sync_inner(
             mode,
             planned_execution_fingerprint
                 .expect("planned engine mode must carry an execution fingerprint"),
+            planned_warm_reuse_fingerprint
+                .expect("planned engine mode must carry a warm-reuse fingerprint"),
         ),
         None => engine,
     };
@@ -5967,17 +6274,102 @@ fn ensure_model_ready_sync_inner(
     Ok(ModelLoadDisposition::Cold)
 }
 
-fn cached_engine_requires_reconstruction(
+/// Why a cached engine cannot serve the admitted plan as it stands.
+///
+/// Named rather than collapsed to a bool because a reconstruction is
+/// expensive and invisible: on FLUX.2 [dev] it re-reads a 35 GB GGUF and
+/// destroys the retained transformer, and two investigations have now stalled
+/// on a log line that said only that it happened.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EngineReconstruction {
+    /// The cached engine was built for a different load strategy or offload
+    /// mode than this plan asks for.
+    PlannedModeDiffers,
+    /// Same model, different execution class.
+    ExecutionFingerprintDiffers,
+    /// The request's own offload policy cannot reuse this engine's paths.
+    OffloadPolicyRequiresFreshEngine,
+}
+
+impl EngineReconstruction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PlannedModeDiffers => "planned-mode-differs",
+            Self::ExecutionFingerprintDiffers => "execution-fingerprint-differs",
+            Self::OffloadPolicyRequiresFreshEngine => "offload-policy-requires-fresh-engine",
+        }
+    }
+}
+
+/// Whether an engine that is RETAINING device residency can serve a plan whose
+/// load strategy differs from the one it was built for.
+///
+/// A load strategy says HOW TO LOAD. An engine holding its transformer across
+/// renders has nothing left to load, so destroying it to satisfy a different
+/// load strategy throws the weights away in order to read them back the
+/// "right" way — 35 GB and 80 s, to arrive at the state it was already in.
+///
+/// It has to be allowed because the strategy is not stable for a warm model:
+/// it is chosen from the device's available VRAM, and a card whose free space
+/// IS this model's own retained transformer reads as roomy, so the identical
+/// request plans `Sequential` cold and `Eager` warm. Both are true statements
+/// about loading; neither is a statement about an engine that is loaded.
+///
+/// Block offload is NOT interchangeable and is compared exactly: it changes
+/// where the weights live during the forward pass, which is a property of the
+/// engine that exists, not of how it was filled.
+fn retained_engine_serves_planned_mode(
+    planned: PlannedEngineMode,
+    cached_load_strategy: Option<mold_inference::LoadStrategy>,
+    cached_block_offload: Option<bool>,
+    retained_residency_bytes: u64,
+) -> bool {
+    retained_residency_bytes > 0
+        && cached_load_strategy.is_some()
+        && cached_block_offload == Some(planned.block_offload)
+}
+
+fn cached_engine_reconstruction_reason(
     engine: &dyn mold_inference::InferenceEngine,
     planned_mode: Option<PlannedEngineMode>,
     planned_execution_fingerprint: Option<&str>,
+    planned_warm_reuse_fingerprint: Option<&str>,
     offload_policy_requires_fresh_engine: bool,
-) -> bool {
-    planned_mode.is_some_and(|mode| !mode.matches(engine))
-        || planned_execution_fingerprint.is_some_and(|fingerprint| {
+) -> Option<EngineReconstruction> {
+    let retained_serves = planned_mode.is_some_and(|mode| {
+        retained_engine_serves_planned_mode(
+            mode,
+            engine.configured_load_strategy(),
+            engine.configured_block_offload(),
+            engine.resident_vram_bytes().unwrap_or(0),
+        )
+    });
+    if !retained_serves && planned_mode.is_some_and(|mode| !mode.matches(engine)) {
+        return Some(EngineReconstruction::PlannedModeDiffers);
+    }
+    // The exact fingerprint moves with the resolved load plan, so a warm
+    // engine exempted above would be failed one line later by the same
+    // difference wearing a different name. It is NORMALISED rather than
+    // skipped (R6-P2-1): the exemption is then exactly as wide as its
+    // justification, and a checkpoint replaced on disk under a warm engine —
+    // which moves `components[].content_fingerprint` and nothing about
+    // loading — still forces the rebuild it always did.
+    let fingerprint_differs = if retained_serves {
+        planned_warm_reuse_fingerprint.is_some_and(|fingerprint| {
+            engine.configured_warm_reuse_fingerprint() != Some(fingerprint)
+        })
+    } else {
+        planned_execution_fingerprint.is_some_and(|fingerprint| {
             engine.configured_execution_fingerprint() != Some(fingerprint)
         })
-        || offload_policy_requires_fresh_engine
+    };
+    if fingerprint_differs {
+        return Some(EngineReconstruction::ExecutionFingerprintDiffers);
+    }
+    if offload_policy_requires_fresh_engine {
+        return Some(EngineReconstruction::OffloadPolicyRequiresFreshEngine);
+    }
+    None
 }
 
 fn retire_replaced_engine(engine: Box<dyn mold_inference::InferenceEngine>) {
@@ -6054,7 +6446,7 @@ pub fn unload_blocking(worker: &GpuWorker) -> anyhow::Result<Option<String>> {
             ),
         }
     }
-    Ok(unloaded)
+    Ok(unloaded.map(|unloaded| unloaded.model))
 }
 
 fn evict_cached_model_blocking(
@@ -6123,6 +6515,31 @@ fn ensure_owner_thread(worker: &GpuWorker) -> anyhow::Result<()> {
         ),
         None => anyhow::bail!("GPU {} owner thread is not initialized", worker.gpu.ordinal),
     }
+}
+
+/// Route a counted failure to the breaker it is actually about.
+///
+/// The device breaker takes a card out of rotation for sixty seconds, which
+/// is the right answer for a card that is wedged or faulting (#245, and the
+/// OOM history behind #276) and the wrong one for a checkpoint that produces
+/// a NaN. Three `flux2-dev:q8` non-finite bails on a single-GPU host left
+/// `/api/devices` reporting `health: "degraded"`, `schedulable: false`,
+/// `unschedulable_reason: "device_degraded"`, and answered the next twelve
+/// requests — for OTHER models — with "no enabled, healthy GPU device is
+/// available".
+///
+/// A failure the ENGINE marked as its own goes to the `(device, model)` hold
+/// instead, which has the same three-strike, sixty-second shape and leaves the
+/// device healthy for every other model. Everything else still counts against
+/// the device, deliberately: a classifier that had to recognise every device
+/// fault would fail open on the one nobody anticipated, and failing open here
+/// means continuing to schedule onto a broken card.
+fn record_counted_failure(worker: &GpuWorker, model_name: &str, message: &str) {
+    if mold_inference::message_is_model_specific_failure(message) {
+        crate::gpu_pool::record_model_specific_failure(model_name, worker.gpu.ordinal);
+        return;
+    }
+    record_failure(worker);
 }
 
 fn record_failure(worker: &GpuWorker) {
@@ -6444,6 +6861,7 @@ fn run_stage_blocking_planned<T, E: std::fmt::Display + std::fmt::Debug>(
             predicted_host_increment_bytes: load.plan.admission_host_demand_bytes(),
             available_host_headroom: None,
             execution_fingerprint: &load.plan.execution_fingerprint,
+            warm_reuse_fingerprint: &load.plan.warm_reuse_fingerprint,
             request: load.request,
             engine_paths: &load.plan.engine_paths,
             engine_config: &load.plan.engine_config,
@@ -6637,7 +7055,7 @@ mod tests {
             .find("install_running_cancellation")
             .expect("attempt cancellation installation");
         let hydrate = body
-            .find("deferred.hydrate_into")
+            .find("queue_media_runtime::hydrate_dispatch_media")
             .expect("lease-bound durable hydration");
         let binding = body
             .find("inference_bindings_for_request")
@@ -6810,6 +7228,7 @@ mod tests {
                         durable_queue_rank: None,
                         request: request.clone(),
                         deferred_media: None,
+                        materialized_control_lora: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx: placeholder_tx,
@@ -6833,6 +7252,7 @@ mod tests {
             model: request.model.clone(),
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: Some(progress_tx),
             result_tx,
@@ -8059,7 +8479,7 @@ mod tests {
         let method = &source[start..end];
         let dispatch = method.find("\"dispatched job\"").expect("dispatch log");
         let watchdog = method
-            .find("ChainStageMemoryWatchdog::start(")
+            .find("MemoryWatchdog::start(")
             .expect("memory watchdog start");
         let render = method
             .find("run_stage_blocking_planned(")
@@ -8227,6 +8647,365 @@ mod tests {
         }
     }
 
+    /// A FLUX.2 [dev] engine as the cache actually receives it.
+    ///
+    /// Faithful to `Flux2Engine`: `load()` on the sequential strategy returns
+    /// without putting anything on the card, the transformer arrives during
+    /// `generate`, `is_loaded` is true while the retained slot is full, and
+    /// `resident_vram_bytes` answers only for that slot.
+    struct SequentialRetainingEngine {
+        retained: u64,
+    }
+
+    impl InferenceEngine for SequentialRetainingEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            unreachable!("the wiring test never renders")
+        }
+        fn model_name(&self) -> &str {
+            "flux2-dev:q8"
+        }
+        fn is_loaded(&self) -> bool {
+            // `EngineBase::is_loaded` answers true for a Sequential STRATEGY
+            // whether or not anything is resident, which is why the cache
+            // classifies such an engine `Gpu` from the moment it is inserted.
+            true
+        }
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn unload(&mut self) {
+            self.retained = 0;
+        }
+        fn resident_vram_bytes(&self) -> Option<u64> {
+            (self.retained > 0).then_some(self.retained)
+        }
+        fn release_retained_residency(&mut self) -> u64 {
+            std::mem::take(&mut self.retained)
+        }
+    }
+
+    /// The identical request must reuse the transformer the last one left.
+    ///
+    /// The load strategy is chosen from the device's AVAILABLE VRAM, and a
+    /// card whose free space IS this model's own retained transformer reads as
+    /// roomy — so `flux2-dev:q8` planned `Sequential` on a cold card and
+    /// `Eager` on the warm one, one minute later, for a byte-identical
+    /// request. `PlannedEngineMode::matches` then failed, the worker
+    /// "recreated the cached engine for the exact execution plan", and the
+    /// 33 GB it was holding went back to the card so a fresh engine could read
+    /// the same 35 GB GGUF again: measured 91.7 s cold and 150.5 s warm, when
+    /// the whole point of the retained slot is that the warm one skips the
+    /// load entirely.
+    ///
+    /// Both strategies are true statements about HOW TO LOAD, and neither says
+    /// anything about an engine that is already loaded.
+    #[test]
+    fn a_retaining_engine_serves_a_plan_whose_load_strategy_moved_under_it() {
+        use mold_inference::LoadStrategy;
+
+        const RETAINED: u64 = 33 << 30;
+        let eager_plan = PlannedEngineMode {
+            load_strategy: LoadStrategy::Eager,
+            block_offload: false,
+        };
+
+        // The warm card's plan against the cold card's engine.
+        assert!(
+            retained_engine_serves_planned_mode(
+                eager_plan,
+                Some(LoadStrategy::Sequential),
+                Some(false),
+                RETAINED
+            ),
+            "a retained transformer is not reloaded to satisfy a load strategy"
+        );
+        // And the other direction, which is what the next cold plan looks like.
+        assert!(retained_engine_serves_planned_mode(
+            PlannedEngineMode {
+                load_strategy: LoadStrategy::Sequential,
+                block_offload: false,
+            },
+            Some(LoadStrategy::Eager),
+            Some(false),
+            RETAINED
+        ));
+
+        // Retaining NOTHING is the load-use-drop engine #282's rule was
+        // written for: it still rebuilds.
+        assert!(!retained_engine_serves_planned_mode(
+            eager_plan,
+            Some(LoadStrategy::Sequential),
+            Some(false),
+            0
+        ));
+
+        // Block offload is never interchangeable — it changes where the
+        // weights live during the forward pass.
+        assert!(!retained_engine_serves_planned_mode(
+            eager_plan,
+            Some(LoadStrategy::Eager),
+            Some(true),
+            RETAINED
+        ));
+
+        // An engine that carries no planned mode at all is not a planned
+        // engine and is left to the ordinary rule.
+        assert!(!retained_engine_serves_planned_mode(
+            eager_plan, None, None, RETAINED
+        ));
+    }
+
+    /// The exemption reaches the decision through the REAL wrapper, and it is
+    /// exactly as wide as its justification.
+    ///
+    /// The exact fingerprint moves with the resolved load plan, so a warm
+    /// engine exempted on the mode would be failed one line later by the same
+    /// difference under another name — but SKIPPING that check exempted
+    /// everything else the fingerprint carries (R6-P2-1). It is normalised
+    /// instead: the load plan is hashed away on both sides and nothing else
+    /// is, so a checkpoint replaced on disk under a warm retaining engine —
+    /// the residual R6-P2-1 named — still forces the rebuild it always did.
+    #[test]
+    fn a_retaining_engine_is_not_reconstructed_for_a_moved_load_strategy() {
+        use mold_inference::LoadStrategy;
+
+        const RETAINED: u64 = 33 << 30;
+        const SAME_ENGINE: &str = "warm-reuse-identity";
+        let cold = PlannedEngineMode {
+            load_strategy: LoadStrategy::Sequential,
+            block_offload: false,
+        };
+        let warm = PlannedEngineMode {
+            load_strategy: LoadStrategy::Eager,
+            block_offload: false,
+        };
+        let engine = record_planned_engine_mode(
+            Box::new(SequentialRetainingEngine { retained: RETAINED }),
+            cold,
+            "cold-plan-fingerprint",
+            SAME_ENGINE,
+        );
+
+        // The warm plan: a different exact fingerprint (the load plan moved),
+        // the same warm-reuse identity (nothing about the engine did).
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                engine.as_ref(),
+                Some(warm),
+                Some("warm-plan-fingerprint"),
+                Some(SAME_ENGINE),
+                false,
+            ),
+            None,
+            "the engine holding this request's weights serves this request"
+        );
+
+        // R6-P2-1: the checkpoint was replaced on disk under the warm engine,
+        // which moves `components[].content_fingerprint` and nothing about
+        // loading — so the warm-reuse identity moves too and it rebuilds.
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                engine.as_ref(),
+                Some(warm),
+                Some("warm-plan-fingerprint"),
+                Some("the-checkpoint-was-replaced"),
+                false,
+            ),
+            Some(EngineReconstruction::ExecutionFingerprintDiffers),
+            "a warm engine is exempted from the LOAD PLAN, not from its own identity"
+        );
+
+        // Everything else still rebuilds it.
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                engine.as_ref(),
+                Some(PlannedEngineMode {
+                    load_strategy: LoadStrategy::Eager,
+                    block_offload: true,
+                }),
+                Some("cold-plan-fingerprint"),
+                Some(SAME_ENGINE),
+                false,
+            ),
+            Some(EngineReconstruction::PlannedModeDiffers),
+            "block offload is a different forward pass"
+        );
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                engine.as_ref(),
+                Some(warm),
+                Some("warm-plan-fingerprint"),
+                Some(SAME_ENGINE),
+                true,
+            ),
+            Some(EngineReconstruction::OffloadPolicyRequiresFreshEngine)
+        );
+
+        // An engine retaining nothing is unchanged in every direction, and is
+        // still judged on the EXACT fingerprint.
+        let empty = record_planned_engine_mode(
+            Box::new(SequentialRetainingEngine { retained: 0 }),
+            cold,
+            "cold-plan-fingerprint",
+            SAME_ENGINE,
+        );
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                empty.as_ref(),
+                Some(warm),
+                Some("cold-plan-fingerprint"),
+                Some(SAME_ENGINE),
+                false,
+            ),
+            Some(EngineReconstruction::PlannedModeDiffers)
+        );
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                empty.as_ref(),
+                Some(cold),
+                Some("a-moved-exact-fingerprint"),
+                Some(SAME_ENGINE),
+                false,
+            ),
+            Some(EngineReconstruction::ExecutionFingerprintDiffers),
+            "a non-retaining engine never reaches the normalised comparison"
+        );
+    }
+
+    /// The planned wrapper must not hide a retained transformer from the cache.
+    ///
+    /// EVERY scheduler-V2 job's engine is built, wrapped by
+    /// `record_planned_engine_mode`, and only then inserted into the model
+    /// cache — so the cache never holds a bare engine in production. The
+    /// wrapper forwarded `is_loaded` and `unload` but defaulted
+    /// `resident_vram_bytes` to `None` and `release_retained_residency` to
+    /// `0`, which is the whole retained-residency feature answering "nothing
+    /// here" for exactly the jobs that have something.
+    ///
+    /// The consequences compound. `restore` cannot raise a credit it is told
+    /// is absent, so `active_vram_bytes` stays at the sequential load's
+    /// measurement of ~0 and admission plans against raw free VRAM.
+    /// `release_retained_residency_except` filters candidates on
+    /// `resident_vram_bytes() > 0`, so it finds none and reclaims nothing.
+    /// And `is_loaded` IS forwarded, so the entry is `ModelResidency::Gpu`
+    /// and `evict_lru_parked_except` skips it too — leaving the LRU capacity
+    /// eviction as the only thing in the process that could ever move those
+    /// 34 GB off the card.
+    ///
+    /// This drives the REAL wrapper over the REAL cache, because a test that
+    /// wraps nothing proves only that the inner engine is correct — which it
+    /// always was.
+    #[test]
+    fn the_planned_wrapper_does_not_hide_a_retained_transformer_from_the_cache() {
+        const RETAINED: u64 = 34 << 30;
+        let mode = PlannedEngineMode {
+            load_strategy: mold_inference::LoadStrategy::Sequential,
+            block_offload: false,
+        };
+        let engine = record_planned_engine_mode(
+            Box::new(SequentialRetainingEngine { retained: RETAINED }),
+            mode,
+            "flux2-dev-q8-fingerprint",
+            "flux2-dev-q8-warm-identity",
+        );
+
+        assert_eq!(
+            engine.resident_vram_bytes(),
+            Some(RETAINED),
+            "the wrapper must answer for the engine it wraps"
+        );
+
+        // Production's sequence: insert priced by the load delta, which for a
+        // sequential engine measured nothing; then the take/restore window
+        // that a generation opens and closes.
+        let mut cache = ModelCache::new(3);
+        cache.insert(engine, 0);
+        let taken = cache.take("flux2-dev:q8").expect("the engine is cached");
+        cache.restore(taken);
+
+        assert_eq!(
+            cache.active_vram_bytes(),
+            RETAINED,
+            "admission plans against this number; zero is what refused the \
+             identical repeat on a card that was holding its weights"
+        );
+        assert_eq!(cache.retained_residency_bytes(), RETAINED);
+
+        let (name, freed) = cache
+            .release_retained_residency_except(None)
+            .expect("a wrapped retaining engine is reclaimable");
+        assert_eq!(name, "flux2-dev:q8");
+        assert_eq!(freed, RETAINED);
+        assert_eq!(cache.active_vram_bytes(), 0);
+        assert!(
+            cache.contains("flux2-dev:q8"),
+            "the engine survives its reclaim, wrapper and all"
+        );
+    }
+
+    /// Every method of the engine trait is answered by the planned wrapper.
+    ///
+    /// A SOURCE contract, because the defect is structural rather than
+    /// behavioural: `PlannedInferenceEngine` is a hand-written decorator over
+    /// a trait with defaults, so a method added to the trait — or, as here, a
+    /// method the decorator was written before — silently degrades to the
+    /// default for every scheduler-V2 job while compiling perfectly. The
+    /// wrapper's own comment on `install_identity_embedding` names this exact
+    /// hazard; two methods had already fallen into it.
+    ///
+    /// A method the wrapper deliberately answers ITSELF (the three
+    /// `configured_*` accessors, which describe the plan and not the inner
+    /// engine) is listed here by name, so choosing not to forward one stays a
+    /// decision somebody wrote down.
+    #[test]
+    fn the_planned_wrapper_answers_every_engine_trait_method() {
+        const ANSWERED_BY_THE_WRAPPER_ITSELF: &[&str] = &[
+            "configured_load_strategy",
+            "configured_block_offload",
+            "configured_execution_fingerprint",
+        ];
+
+        let trait_source = include_str!("../../mold-inference/src/engine.rs");
+        let trait_body = trait_source
+            .split("pub trait InferenceEngine")
+            .nth(1)
+            .expect("the trait is declared in engine.rs")
+            .split("\n}\n")
+            .next()
+            .expect("the trait declaration is closed");
+        let trait_methods = trait_body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("fn "))
+            .filter_map(|rest| rest.split('(').next())
+            .collect::<Vec<_>>();
+        assert!(
+            trait_methods.contains(&"resident_vram_bytes")
+                && trait_methods.contains(&"release_retained_residency"),
+            "the scan found no trait methods: {trait_methods:?}"
+        );
+
+        let wrapper_source = include_str!("gpu_worker.rs");
+        let wrapper_body = wrapper_source
+            .split("impl mold_inference::InferenceEngine for PlannedInferenceEngine {")
+            .nth(1)
+            .expect("the wrapper impl is in this file")
+            .split("\n}\n")
+            .next()
+            .expect("the wrapper impl is closed");
+
+        let missing = trait_methods
+            .iter()
+            .filter(|method| !wrapper_body.contains(&format!("fn {method}(")))
+            .filter(|method| !ANSWERED_BY_THE_WRAPPER_ITSELF.contains(method))
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "PlannedInferenceEngine silently defaults {missing:?} for every \
+             scheduler-V2 job. Forward each to `self.inner`, or list it in \
+             ANSWERED_BY_THE_WRAPPER_ITSELF with a reason."
+        );
+    }
+
     #[test]
     fn planned_engine_wrapper_records_exact_creation_mode() {
         let mode = PlannedEngineMode {
@@ -8235,7 +9014,8 @@ mod tests {
         };
         let unconfigured = FakeSlowEngine::boxed("planned", Duration::ZERO);
         assert!(!mode.matches(unconfigured.as_ref()));
-        let configured = record_planned_engine_mode(unconfigured, mode, "plan-fingerprint");
+        let configured =
+            record_planned_engine_mode(unconfigured, mode, "plan-fingerprint", "warm-identity");
         assert!(mode.matches(configured.as_ref()));
         assert_eq!(
             configured.configured_execution_fingerprint(),
@@ -8342,6 +9122,283 @@ mod tests {
         assert!(cache.lock().unwrap().contains("hot-cache"));
     }
 
+    /// The swap path SAYS it released the active model.
+    ///
+    /// Part G: 18.8 GB of FLUX.1 left the card in the two seconds between
+    /// `dispatched job` and `loading model...` with nothing written — the
+    /// retained-slot reclaim and the LRU eviction each log, and the path that
+    /// does the work in the ordinary case did not. Captured through a real
+    /// subscriber rather than asserted on a return value, because the defect
+    /// was precisely that the value was never turned into a line.
+    #[test]
+    fn the_swap_path_logs_the_active_model_it_released() {
+        #[derive(Clone, Default)]
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedWriter {
+            type Writer = SharedWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        struct Loaded;
+        impl InferenceEngine for Loaded {
+            fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+                unreachable!("a log test never renders")
+            }
+            fn model_name(&self) -> &str {
+                "flux-dev:q8"
+            }
+            fn is_loaded(&self) -> bool {
+                true
+            }
+            fn load(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        const MEASURED: u64 = 18 << 30;
+        let worker = single_worker_pool_with_parked("unused", Duration::ZERO);
+        {
+            let mut cache = worker.model_cache.lock().unwrap();
+            cache.insert_loaded("flux-dev:q8".to_string(), Box::new(Loaded), MEASURED);
+        }
+
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(writer.clone())
+            .finish();
+        let released = {
+            let _subscriber = tracing::subscriber::set_default(subscriber);
+            unload_active_for_swap(&worker, "flux2-klein:q8")
+        };
+
+        assert!(released, "an active engine was there to release");
+        let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("released the active model at the swap gate"),
+            "{output}"
+        );
+        assert!(output.contains("model=flux-dev:q8"), "{output}");
+        assert!(
+            output.contains(&format!("freed_mb={}", MEASURED / 1024 / 1024)),
+            "{output}"
+        );
+        assert!(output.contains("for_model=flux2-klein:q8"), "{output}");
+
+        // Nothing to release says nothing, and says so honestly.
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(writer.clone())
+            .finish();
+        let released = {
+            let _subscriber = tracing::subscriber::set_default(subscriber);
+            unload_active_for_swap(&worker, "flux2-klein:q8")
+        };
+        assert!(!released);
+        let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            !output.contains("released the active model at the swap gate"),
+            "{output}"
+        );
+    }
+
+    /// The SWAP gate reclaims too, not just the planned-budget guard.
+    ///
+    /// `unload_active` drops the ONE entry the cache calls active and the
+    /// after-drop gates then read the driver with no reclaimable footprint —
+    /// correct, because anything still there is pressure rather than credit.
+    /// What it missed is a SECOND engine that is GPU-resident because it is
+    /// RETAINING a transformer: `evict_lru_parked` skips it by residency,
+    /// `unload_active` has spent its one shot, and the gate refused against
+    /// bytes mold was holding by choice — the shape of UAT final-2's F4d,
+    /// where a kept FLUX.1 transformer stood in front of a klein plan under a
+    /// tight reserve.
+    #[test]
+    fn the_swap_gate_releases_another_models_retained_transformer_before_refusing() {
+        struct Retaining(u64);
+        impl InferenceEngine for Retaining {
+            fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+                unreachable!("a swap-gate test never renders")
+            }
+            fn model_name(&self) -> &str {
+                "flux-dev:q8"
+            }
+            fn is_loaded(&self) -> bool {
+                true
+            }
+            fn load(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn resident_vram_bytes(&self) -> Option<u64> {
+                (self.0 > 0).then_some(self.0)
+            }
+            fn release_retained_residency(&mut self) -> u64 {
+                std::mem::take(&mut self.0)
+            }
+        }
+
+        const RETAINED: u64 = 18 << 30;
+        let worker = single_worker_pool_with_parked("unused", Duration::ZERO);
+        {
+            let mut cache = worker.model_cache.lock().unwrap();
+            cache.insert_loaded("flux-dev:q8".to_string(), Box::new(Retaining(RETAINED)), 0);
+        }
+
+        let attempts = Arc::new(Mutex::new(0usize));
+        let seen = attempts.clone();
+        let cache_for_guard = worker.model_cache.clone();
+        preflight_after_drop_releasing_retained(
+            &worker,
+            "flux2-klein:q8",
+            "flux2-klein:q8",
+            || {
+                *seen.lock().unwrap() += 1;
+                let held = cache_for_guard.lock().unwrap().retained_residency_bytes();
+                if held == 0 {
+                    Ok(())
+                } else {
+                    Err(crate::routes::ApiError::insufficient_memory(
+                        "the other model's transformer is still on the card",
+                    ))
+                }
+            },
+        )
+        .expect("releasing the other model's retained slot admits the swap");
+
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            2,
+            "one refusal against the held bytes, then one pass against a clear card"
+        );
+        let cache = worker.model_cache.lock().unwrap();
+        assert!(
+            cache.contains("flux-dev:q8"),
+            "the other engine survives: only the weights it was holding went back"
+        );
+        assert_eq!(cache.retained_residency_bytes(), 0);
+    }
+
+    /// And it refuses honestly when there is nothing left to release, rather
+    /// than looping.
+    #[test]
+    fn the_swap_gate_refuses_once_nothing_is_left_to_release() {
+        let worker = single_worker_pool_with_parked("unused", Duration::ZERO);
+        let attempts = Arc::new(Mutex::new(0usize));
+        let seen = attempts.clone();
+        let error = preflight_after_drop_releasing_retained(&worker, "wanted", "wanted", || {
+            *seen.lock().unwrap() += 1;
+            Err(crate::routes::ApiError::insufficient_memory(
+                "nothing mold holds can help this",
+            ))
+        })
+        .expect_err("an empty cache cannot rescue the gate");
+
+        assert_eq!(*attempts.lock().unwrap(), 1, "asked once, refused once");
+        assert!(error.error.contains("nothing mold holds can help this"));
+    }
+
+    /// The other half of the wedge: a request for a DIFFERENT model, on a
+    /// device whose whole free list is inside somebody else's retained
+    /// transformer.
+    ///
+    /// The retained slot is released and the engine SURVIVES — it keeps its
+    /// prompt cache and its warm shell — and no entry is evicted. The eviction
+    /// path could not have reached it at all: a retaining engine is
+    /// `ModelResidency::Gpu` and `evict_lru_parked_except` skips exactly
+    /// those, which is why there was nothing to reclaim and the queue waited
+    /// forever.
+    #[test]
+    fn a_different_model_reclaims_a_retained_transformer_without_evicting_it() {
+        struct RetainingEngine {
+            retained: u64,
+        }
+        impl InferenceEngine for RetainingEngine {
+            fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+                unreachable!("a preflight test never generates")
+            }
+            fn model_name(&self) -> &str {
+                "flux2-dev:q8"
+            }
+            fn is_loaded(&self) -> bool {
+                self.retained > 0
+            }
+            fn load(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn unload(&mut self) {
+                self.retained = 0;
+            }
+            fn resident_vram_bytes(&self) -> Option<u64> {
+                (self.retained > 0).then_some(self.retained)
+            }
+            fn release_retained_residency(&mut self) -> u64 {
+                std::mem::take(&mut self.retained)
+            }
+        }
+
+        const RETAINED: u64 = 34 << 30;
+        let cache = std::sync::Mutex::new(ModelCache::new(3));
+        {
+            let mut guard = cache.lock().unwrap();
+            // Production's insert: a sequential load measured nothing, and the
+            // restore that closes the generation raises the credit.
+            guard.insert(Box::new(RetainingEngine { retained: RETAINED }), 0);
+            let taken = guard.take("flux2-dev:q8").expect("just inserted");
+            guard.restore(taken);
+            assert_eq!(guard.active_vram_bytes(), RETAINED);
+        }
+
+        let attempts = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let seen = attempts.clone();
+        // The guard is satisfied only once the card is no longer holding the
+        // other model's transformer.
+        preflight_planned_memory_guard_with_eviction_using(
+            &cache,
+            "ltx-2.3-22b-distilled:fp8",
+            "ltx-2.3-22b-distilled:fp8",
+            0,
+            None,
+            move |active_vram| {
+                seen.lock().unwrap().push(active_vram);
+                if active_vram == 0 {
+                    Ok(())
+                } else {
+                    Err(crate::routes::ApiError::insufficient_memory(
+                        "the retained transformer is still on the card",
+                    ))
+                }
+            },
+        )
+        .expect("releasing the retained transformer admits the plan");
+
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec![RETAINED, 0],
+            "one refusal against the held bytes, then one pass against a clear card"
+        );
+        let guard = cache.lock().unwrap();
+        assert!(
+            guard.contains("flux2-dev:q8"),
+            "the engine survives the reclaim: only the weights went back"
+        );
+        assert_eq!(guard.retained_residency_bytes(), 0);
+        assert_eq!(guard.active_vram_bytes(), 0);
+    }
+
     #[test]
     fn planned_engine_wrapper_forwards_batch_and_cancellation_contract() {
         struct ContractEngine {
@@ -8390,6 +9447,7 @@ mod tests {
                 block_offload: false,
             },
             "contract",
+            "contract-warm",
         );
 
         wrapped.set_cancellation_token(mold_inference::InferenceCancellationToken::default());
@@ -8414,14 +9472,19 @@ mod tests {
             FakeSlowEngine::boxed("planned", Duration::ZERO),
             mode,
             "old-fingerprint",
+            "old-warm-identity",
         );
 
-        assert!(cached_engine_requires_reconstruction(
-            configured.as_ref(),
-            Some(mode),
-            Some("new-fingerprint"),
-            false,
-        ));
+        assert_eq!(
+            cached_engine_reconstruction_reason(
+                configured.as_ref(),
+                Some(mode),
+                Some("new-fingerprint"),
+                Some("new-warm-identity"),
+                false,
+            ),
+            Some(EngineReconstruction::ExecutionFingerprintDiffers)
+        );
     }
 
     #[test]
@@ -8480,6 +9543,7 @@ mod tests {
                 block_offload: false,
             },
             "placement-fingerprint",
+            "placement-warm-identity",
         );
         let mut request: mold_core::GenerateRequest = serde_json::from_str(
             r#"{"prompt":"x","model":"placement-recording","width":512,"height":512,"steps":4,"guidance":1.0}"#,
@@ -8699,6 +9763,30 @@ mod tests {
         fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
             Err(anyhow::Error::new(mold_inference::InferenceCancelled)
                 .context("generation aborted"))
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// An engine whose every render fails with a fixed message.
+    struct FailingGenerateEngine {
+        name: String,
+        error: String,
+    }
+
+    impl InferenceEngine for FailingGenerateEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            Err(anyhow::anyhow!("{}", self.error))
         }
 
         fn model_name(&self) -> &str {
@@ -8950,6 +10038,7 @@ mod tests {
             model: request.model.clone(),
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: crate::state::SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -9279,6 +10368,7 @@ mod tests {
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -10148,6 +11238,7 @@ mod tests {
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -10281,6 +11372,7 @@ mod tests {
                     model: request.model.clone(),
                     request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -10867,6 +11959,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:00000000000000000000000000000001".to_string(),
                 ordinal: 0,
@@ -10918,6 +12011,7 @@ mod tests {
                     model: "test:q4".to_string(),
                     request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -11010,6 +12104,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: device_id.clone(),
                 ordinal: 0,
@@ -11144,6 +12239,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: device_id.clone(),
                 ordinal: 0,
@@ -11265,6 +12361,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: device_id.clone(),
                 ordinal: 0,
@@ -11468,6 +12565,7 @@ mod tests {
                     durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -11490,6 +12588,7 @@ mod tests {
                 model: "lifecycle".to_string(),
                 request,
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -11765,6 +12864,7 @@ mod tests {
                     durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -11791,6 +12891,7 @@ mod tests {
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: Some(progress_tx),
                 result_tx,
@@ -11975,6 +13076,7 @@ mod tests {
             model: "mock-model".to_string(),
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -12042,6 +13144,7 @@ mod tests {
             model: "mock-model".to_string(),
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -12062,6 +13165,154 @@ mod tests {
         finish_generation_success(job, fake_response(), fake_image(), None, None);
 
         assert!(journal.list_all().is_empty());
+    }
+
+    /// Run one doomed render of `model` on `worker` and return its message.
+    async fn render_failing_model(
+        worker: &Arc<GpuWorker>,
+        model: &str,
+        error: &str,
+        attempt: usize,
+    ) -> String {
+        worker.model_cache.lock().unwrap().insert_loaded(
+            model.to_string(),
+            Box::new(FailingGenerateEngine {
+                name: model.to_string(),
+                error: error.to_string(),
+            }),
+            123,
+        );
+        let mut request = fake_upscale_job(Config::default(), "unused").request;
+        request.model = model.to_string();
+        request.upscale_model = None;
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(queue_tx);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let worker_for_job = worker.clone();
+        let model_owned = model.to_string();
+        tokio::task::spawn_blocking(move || {
+            let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+            process_job(
+                &worker_for_job,
+                GpuJob {
+                    id: format!("{model_owned}-{attempt}"),
+                    durable_queue_rank: None,
+                    model: model_owned.clone(),
+                    request,
+                    deferred_media: None,
+                    materialized_control_lora: None,
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx,
+                    output_dir: None,
+                    config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+                    metadata_db: Arc::new(None),
+                    gallery_publication_gate:
+                        crate::batch_transaction::GalleryPublicationGate::default(),
+                    queue: queue.clone(),
+                    registry: JobRegistry::new(),
+                    events: crate::events::EventBroadcaster::new(),
+                    execution_plan: None,
+                    prepared_execution_inputs: None,
+                    h3_prepared_attempt: None,
+                    lease: None,
+                    journal: None,
+                },
+                &scheduler_tx,
+                1,
+                None,
+            );
+        })
+        .await
+        .unwrap();
+        match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("a failing engine unexpectedly generated"),
+        }
+    }
+
+    /// A model that renders NaN is not a broken GPU.
+    ///
+    /// Three `flux2-dev:q8` non-finite bails on a single-GPU host used to
+    /// report `health: "degraded"`, `schedulable: false`,
+    /// `unschedulable_reason: "device_degraded"` and answer the next twelve
+    /// requests — for OTHER models — with "no enabled, healthy GPU device is
+    /// available". The failure is the model's, so the hold is the model's.
+    #[tokio::test]
+    async fn three_model_specific_failures_hold_the_model_and_leave_the_device_schedulable() {
+        crate::gpu_pool::clear_model_specific_failures_for_tests();
+        let worker = single_worker_pool_with_parked("parked", Duration::ZERO);
+        let model = "breaker-nonfinite-model";
+        let error = mold_inference::model_specific_error(
+            "non-finite prediction at denoise step 3 (MOLD_FLUX_DEBUG_NONFINITE)",
+        )
+        .to_string();
+
+        for attempt in 0..3 {
+            let message = render_failing_model(&worker, model, &error, attempt).await;
+            assert!(
+                message.contains("non-finite prediction"),
+                "the render fails with its own reason, got: {message}"
+            );
+        }
+
+        assert_eq!(
+            worker.consecutive_failures.load(Ordering::SeqCst),
+            0,
+            "a model's numerical failure must never count against the device"
+        );
+        assert!(
+            !worker.is_degraded(),
+            "the device stays healthy and schedulable"
+        );
+        assert_eq!(
+            crate::gpu_pool::model_specific_hold_ordinals(model),
+            vec![0],
+            "the model is held on the device it failed on"
+        );
+        assert!(
+            crate::gpu_pool::failed_ordinals_for_model("breaker-other-model").is_empty(),
+            "another model must still be routable to this device"
+        );
+        let refusal = crate::gpu_pool::model_specific_hold_message(model, &[0])
+            .expect("the only device holds this model");
+        assert!(
+            refusal.contains(model) && !refusal.contains("healthy GPU device is available"),
+            "the refusal names the model, not the device: {refusal}"
+        );
+
+        crate::gpu_pool::clear_model_specific_failures_for_tests();
+    }
+
+    /// The other half of the same rule: an unmarked failure is still the
+    /// device's, and three of them still degrade it exactly as before.
+    #[tokio::test]
+    async fn three_unmarked_failures_still_degrade_the_device() {
+        crate::gpu_pool::clear_model_specific_failures_for_tests();
+        let worker = single_worker_pool_with_parked("parked", Duration::ZERO);
+        let model = "breaker-cuda-model";
+
+        for attempt in 0..3 {
+            render_failing_model(
+                &worker,
+                model,
+                "DriverError(CUDA_ERROR_INVALID_VALUE, \"invalid argument\")",
+                attempt,
+            )
+            .await;
+        }
+
+        assert_eq!(worker.consecutive_failures.load(Ordering::SeqCst), 3);
+        assert!(
+            worker.is_degraded(),
+            "a device-class failure must still take the card out of rotation"
+        );
+        assert!(
+            crate::gpu_pool::model_specific_hold_ordinals(model).is_empty(),
+            "an unmarked failure is not a model hold"
+        );
+
+        crate::gpu_pool::clear_model_specific_failures_for_tests();
     }
 
     /// A shutdown abort is a deliberate cancellation, not evidence that this
@@ -12096,6 +13347,7 @@ mod tests {
                     model: "cancel-model".to_string(),
                     request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -12165,6 +13417,7 @@ mod tests {
                     durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -12191,6 +13444,7 @@ mod tests {
                     model: "panic-model".to_string(),
                     request: panic_request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -12238,6 +13492,7 @@ mod tests {
                     durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -12262,6 +13517,7 @@ mod tests {
                     model: "panic-model".to_string(),
                     request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -12686,6 +13942,7 @@ mod tests {
                     durable_queue_rank: None,
                     request: job.request.clone(),
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: dummy_tx,
@@ -12964,18 +14221,86 @@ mod tests {
     #[test]
     fn planned_recheck_uses_the_larger_of_static_and_learned_vram() {
         assert_eq!(
-            planned_recheck_peak_bytes(11_548_381_184, 24_884_805_632),
+            planned_recheck_peak_bytes(11_548_381_184, 24_884_805_632, 25_000_000_000),
             24_884_805_632,
             "the learned envelope must win when it is the conservative one"
         );
         assert_eq!(
-            planned_recheck_peak_bytes(24_884_805_632, 0),
+            planned_recheck_peak_bytes(24_884_805_632, 0, 25_000_000_000),
             24_884_805_632,
             "no learned evidence must never weaken the frozen plan"
         );
         assert_eq!(
-            planned_recheck_peak_bytes(20_000_000_000, 12_000_000_000),
+            planned_recheck_peak_bytes(20_000_000_000, 12_000_000_000, 25_000_000_000),
             20_000_000_000
+        );
+    }
+
+    /// #1707: the envelope a FAILED run leaves behind is the card, not the
+    /// shape, and a recheck peak above the card can never clear — so every
+    /// retry is refused until the row ages out.
+    #[test]
+    fn a_learned_envelope_above_the_card_is_clamped_to_it() {
+        const PLATO_L40S_BUDGET: u64 = 46_100_000_000;
+        assert_eq!(
+            planned_recheck_peak_bytes(37_600_000_000, 46_554_677_248, PLATO_L40S_BUDGET),
+            PLATO_L40S_BUDGET,
+            "an envelope that cannot fit the card says at most 'all of it'"
+        );
+        assert_eq!(
+            planned_recheck_peak_bytes(48_000_000_000, 46_554_677_248, PLATO_L40S_BUDGET),
+            48_000_000_000,
+            "a frozen plan above the card is a real refusal and is never lowered"
+        );
+        assert_eq!(
+            planned_recheck_peak_bytes(37_600_000_000, 46_554_677_248, 0),
+            46_554_677_248,
+            "an unmeasurable card keeps today's answer"
+        );
+    }
+
+    /// The refusal must describe what happened. On the 24 GB simulation the
+    /// loader said "memory pressure changed after scheduler admission" with
+    /// nothing else on the card at all.
+    #[test]
+    fn a_peak_above_the_cards_capacity_is_not_reported_as_memory_pressure() {
+        let error = crate::memory_preflight::check_planned_memory_budget(
+            "flux2-dev:q8",
+            37_600_000_000,
+            26_200_000_000,
+            Some(26_200_000_000),
+            "try a smaller variant",
+        )
+        .expect_err("a peak above the card must refuse");
+        assert!(
+            error.error.contains("46.1 GB")
+                || !error
+                    .error
+                    .contains(crate::memory_preflight::ADMISSION_PRESSURE_MARKER),
+            "a card that was never contended must not be reported as contended: {}",
+            error.error
+        );
+        assert!(
+            error.error.contains("37.6 GB") && error.error.contains("26.2 GB"),
+            "the refusal must name the peak and the budget: {}",
+            error.error
+        );
+
+        // Real contention keeps the pressure wording.
+        let error = crate::memory_preflight::check_planned_memory_budget(
+            "flux2-dev:q8",
+            37_600_000_000,
+            26_200_000_000,
+            Some(46_100_000_000),
+            "try a smaller variant",
+        )
+        .expect_err("a peak above what is free must refuse");
+        assert!(
+            error
+                .error
+                .contains(crate::memory_preflight::ADMISSION_PRESSURE_MARKER),
+            "a card with capacity to spare really did lose it to something: {}",
+            error.error
         );
     }
 
@@ -13151,6 +14476,7 @@ mod tests {
                 "ltx2-19b",
                 24 << 30,
                 1 << 30,
+                Some(48u64 << 30),
                 crate::memory_preflight::rejection_suggestion(None),
             )
             .expect_err("device pressure rejects")
@@ -13344,7 +14670,7 @@ mod tests {
             "one implementation, so the MOLD_MALLOC_TRIM gate cannot drift"
         );
         let start = source
-            .find("impl Drop for ChainStageMemoryWatchdog {")
+            .find("impl Drop for MemoryWatchdog {")
             .expect("chain stage watchdog");
         let end = source[start..]
             .find("\nfn fence_chain_stage_render(")
@@ -13398,6 +14724,84 @@ mod tests {
         assert!(
             !quarantine_arms.contains("release_prepared_and_trim("),
             "a quarantined CUDA context must never have its allocator state touched"
+        );
+    }
+
+    #[test]
+    fn memory_watchdog_stop_latency_is_bounded() {
+        // The ordinary-generation watchdog used to poll an `AtomicBool` behind
+        // a one-second `thread::sleep`, so every render paid up to a full
+        // second between "inference returned" and "the worker moved on". A
+        // channel-backed stop wakes the thread immediately.
+        let mut watchdog =
+            MemoryWatchdog::start(MemoryWatchdogScope::Generation, 0, "test".into(), None);
+        // Land mid-interval: a sleep-polled watchdog would still owe ~950 ms.
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        watchdog.stop();
+        let stop_latency = started.elapsed();
+        assert!(
+            stop_latency < Duration::from_millis(100),
+            "stopping the memory watchdog took {stop_latency:?}"
+        );
+        // Stopping twice is a no-op, not a hang or a double-join panic.
+        watchdog.stop();
+        drop(watchdog);
+    }
+
+    #[test]
+    fn memory_watchdog_heartbeat_is_throttled() {
+        let quiet = Duration::from_secs(1);
+        // A steady RSS inside the quiet window says nothing; the 1 Hz INFO
+        // line was pure log volume on a multi-minute render.
+        assert!(!watchdog_should_log(4 << 30, 4 << 30, quiet));
+        assert!(!watchdog_should_log(
+            4 << 30,
+            (4 << 30) + (255 << 20),
+            quiet
+        ));
+        // A quarter-gigabyte move is worth a line immediately, in either
+        // direction — that is what attributes an allocation to a phase.
+        assert!(watchdog_should_log(4 << 30, (4 << 30) + (256 << 20), quiet));
+        assert!(watchdog_should_log(4 << 30, (4 << 30) - (256 << 20), quiet));
+        // And a quiet watchdog still proves it is alive every ten seconds.
+        assert!(watchdog_should_log(
+            4 << 30,
+            4 << 30,
+            WATCHDOG_HEARTBEAT_MAX_QUIET
+        ));
+    }
+
+    #[test]
+    fn the_generation_memory_report_lands_after_the_completion_is_queued() {
+        // `malloc_trim(0)` measured 0.83 s on a 46 GB render. Doing it before
+        // the print is saved and the SSE complete is queued put that straight
+        // onto the client's wall clock; the watchdog's `Drop` runs it after.
+        let source = include_str!("gpu_worker.rs");
+        let start = source
+            .find("fn process_job_with_sink(")
+            .expect("GPU generation owner");
+        let end = source[start..]
+            .find("\nfn finish_generation_success(")
+            .map(|offset| start + offset)
+            .expect("GPU generation owner boundary");
+        let body = &source[start..end];
+        assert!(
+            !body.contains("trim_malloc_arenas()"),
+            "the ordinary generation path must not trim inline; its watchdog reports on drop"
+        );
+        let watchdog = body
+            .find("MemoryWatchdog::start(")
+            .expect("ordinary generation memory watchdog");
+        let stop = body
+            .find("memory_watchdog.stop()")
+            .expect("channel-backed watchdog stop");
+        let finish = body
+            .find("finish_generation_success(")
+            .expect("completion hand-off");
+        assert!(
+            watchdog < stop && stop < finish,
+            "the heartbeat stops before the completion, and the report follows it"
         );
     }
 

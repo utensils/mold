@@ -106,7 +106,11 @@ fn zimage_linear(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<ZImage
         ZImageLinearKind::QMatMul => Ok(ZImageLinear::QMatMul(quantized_nn::linear(
             in_dim, out_dim, vb,
         )?)),
-        ZImageLinearKind::Dequant => {
+        // `Dense` cannot arrive from Z-Image's own two-arm selector (it
+        // answers only QMatMul/Dequant); the dequant arm is the correct
+        // behaviour for a densely stored weight anyway, so this is a mapping
+        // rather than a refusal.
+        ZImageLinearKind::Dequant | ZImageLinearKind::Dense => {
             let weight = vb.get((out_dim, in_dim), "weight")?;
             let bias = vb.get(out_dim, "bias")?.dequantize(vb.device())?;
             Ok(ZImageLinear::Dequant {
@@ -122,7 +126,7 @@ fn zimage_linear_no_bias(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Resul
         ZImageLinearKind::QMatMul => Ok(ZImageLinear::QMatMul(quantized_nn::linear_no_bias(
             in_dim, out_dim, vb,
         )?)),
-        ZImageLinearKind::Dequant => {
+        ZImageLinearKind::Dequant | ZImageLinearKind::Dense => {
             let weight = vb.get((out_dim, in_dim), "weight")?;
             Ok(ZImageLinear::Dequant { weight, bias: None })
         }

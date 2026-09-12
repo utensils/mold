@@ -4,7 +4,6 @@ use candle_transformers::models::z_image::{
     calculate_shift, postprocess_image, AutoEncoderKL, Config, FlowMatchEulerDiscreteScheduler,
     SchedulerConfig, VaeConfig,
 };
-use mold_candle::quantized as quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, LoraWeight, ModelPaths};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -736,8 +735,12 @@ impl ZImageEngine {
                     )?,
                 )));
             }
-            let qvb =
-                quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
+            let qvb = crate::weight_loader::load_gguf_var_builder(
+                &self.base.paths.transformer,
+                device,
+                "Z-Image transformer (GGUF)",
+                &self.base.progress,
+            )?;
             // Keep GGUF weights quantized at runtime instead of inflating them
             // into a dense map. Dequantizing the whole checkpoint turns the
             // 3.4 GB Q4_K file into ~24 GB resident on Metal (F32) — mold
@@ -1645,6 +1648,13 @@ impl ZImageEngine {
             }
         }
 
+        // Resolved before the `loaded` borrow: the park decision reads `self`
+        // and the encode path holds `&mut loaded` across the whole render.
+        let zimage_transformer_bytes: u64 = self
+            .transformer_paths()
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
+            .sum();
         let loaded = self
             .base
             .loaded
@@ -1703,15 +1713,22 @@ impl ZImageEngine {
             )?;
             tracing::info!(token_count = cap_feats.dim(1)?, "text encoding complete");
 
-            // Free GPU VRAM for denoising + VAE decode. With
-            // `MOLD_KEEP_TE_RAM=1` and the BF16 encoder, parameters move
-            // to host RAM instead of being released — saves ~10 s of reload
-            // on the next request. GGUF and Metal flow through the original
-            // drop path (Metal is unified memory, GGUF is device-tied).
+            // Free GPU VRAM for denoising + VAE decode. Whether the
+            // parameters move to host RAM or are released is
+            // `flux2::text_encoder_residency::decide_text_encoder_residency`'s
+            // answer — the SAME function Klein's Qwen3 asks, so a host cannot
+            // take opposite decisions for two encoders of the same size. GGUF
+            // parks too now (a quantized tensor round-trips byte-exact through
+            // `wan::block_offload`); Metal still does not, because there the
+            // "parked" copy is in the pool the encoder already runs from.
             if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
-                let park_mode = crate::device::keep_te_in_ram()
-                    && !loaded.device.is_metal()
-                    && !loaded.text_encoder.is_quantized;
+                let park_mode = crate::flux2::text_encoder_residency::qwen3_park_residency(
+                    &loaded.device,
+                    loaded.text_encoder.encoder_paths(),
+                    zimage_transformer_bytes,
+                    loaded.text_encoder.parked_bytes(),
+                )
+                .parks();
                 if park_mode {
                     loaded.text_encoder.park_to_cpu()?;
                     tracing::info!(

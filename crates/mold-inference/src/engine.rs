@@ -220,6 +220,29 @@ pub trait InferenceEngine: Send + Sync {
     /// Unload model weights to free GPU memory. The engine remains valid and
     /// can be re-loaded by calling `load()` or generating again.
     fn unload(&mut self) {}
+    /// Device bytes this engine is holding that the cache's load-time
+    /// measurement did NOT see, or `None` to keep the measured credit.
+    ///
+    /// The cache prices an engine by `vram_load_delta` around `load()`. That
+    /// is the whole story for an eager engine, and none of it for one whose
+    /// residency is established during `generate` — a FLUX.2 [dev] engine
+    /// takes the sequential path, `load()` returns immediately, and the
+    /// transformer it retains afterwards is 18-35 GB the cache believes is
+    /// zero. Admission then plans against VRAM that is not there, and the
+    /// evict-to-fit loop cannot reclaim what it cannot see.
+    fn resident_vram_bytes(&self) -> Option<u64> {
+        None
+    }
+    /// Release device residency this engine chose to keep, returning the bytes
+    /// freed.
+    ///
+    /// This is the reclaim path for residency the cache cannot evict its way
+    /// out of: the engine stays alive and keeps its prompt cache, but hands
+    /// back the weights it was holding speculatively. Default zero — an
+    /// engine with nothing retained has nothing to give.
+    fn release_retained_residency(&mut self) -> u64 {
+        0
+    }
     /// Set a progress callback for receiving loading/inference status updates.
     /// Default implementation is a no-op for engines that don't support progress.
     fn set_on_progress(&mut self, _callback: ProgressCallback) {}
@@ -256,6 +279,18 @@ pub trait InferenceEngine: Send + Sync {
     /// Scheduler execution-plan fingerprint that governed this engine's
     /// successful load.
     fn configured_execution_fingerprint(&self) -> Option<&str> {
+        None
+    }
+
+    /// The same identity with the LOAD PLAN normalised away — see
+    /// `ResolvedExecutionPlan::warm_reuse_fingerprint`.
+    ///
+    /// It answers ONE question: may this engine, while it is retaining device
+    /// residency, serve a plan whose resolved load strategy moved under it?
+    /// Everything else the exact fingerprint covers — a replaced checkpoint, a
+    /// different adapter, dtype, quantization, placement or config — still
+    /// differs here and still forces a reconstruction.
+    fn configured_warm_reuse_fingerprint(&self) -> Option<&str> {
         None
     }
 

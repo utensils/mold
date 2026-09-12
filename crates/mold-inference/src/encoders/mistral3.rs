@@ -11,6 +11,7 @@
 //! `src/flux2/text_encoder.py` and `src/flux2/sampling.py` in BFL's `flux2`
 //! reference repository.
 
+use crate::flux2::text_encoder_residency as residency;
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Module, Tensor, D};
 use candle_nn::VarBuilder;
@@ -31,12 +32,19 @@ const MAX_LENGTH: usize = 512;
 const PAD_TOKEN_ID: u32 = 11;
 const CAPTURE_LAYERS: [usize; 3] = [9, 19, 29];
 
+/// The progress component name for the whole streamed prefix. One label for
+/// the mapping and for every layer it streams, so the bar advances instead of
+/// jumping from 0 % to 100 % once.
+pub(crate) const STREAMED_ENCODER_COMPONENT: &str = "FLUX.2 [dev] Mistral3 encoder";
+
 /// Largest simultaneously resident weight allocation in the streamed encoder:
 /// the 131072 x 5120 token embedding table. Decoder layers are smaller.
+///
+/// Delegates to [`crate::flux2::text_encoder_residency`], which is the single
+/// authority on this encoder's residency arithmetic — admission, the placement
+/// planner, and this engine must not carry two copies of the geometry.
 pub(crate) fn streamed_peak_weight_bytes(dtype: DType) -> u64 {
-    (VOCAB_SIZE as u64)
-        .saturating_mul(HIDDEN_SIZE as u64)
-        .saturating_mul(crate::device::dtype_bytes(dtype) as u64)
+    crate::flux2::text_encoder_residency::mistral3_embed_bytes(dtype)
 }
 
 const SYSTEM_PROMPT: &str = "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation.";
@@ -294,6 +302,61 @@ fn resolve_lm_prefix(encoder_paths: &[PathBuf]) -> Result<&'static str> {
     );
 }
 
+/// Whether a tensor name belongs to the prefix the encoder actually runs.
+///
+/// The prefix is the token embedding plus decoder layers `0..=last`. Nothing
+/// else may be parked: the single-file republication of this checkpoint ships
+/// a vision tower, a multimodal projector and decoder layers 30-39 beside the
+/// prefix, and a whole-file park would charge host RAM for every byte of them
+/// — roughly a third again on top of the 34.7 GB that IS read. A memory
+/// mapping never pages those in because nothing asks for them; an eager park
+/// would.
+///
+/// `prefix` is the resolved namespace (`language_model.model` or `model`), so
+/// the filter is exact rather than a substring guess.
+pub(crate) fn parked_prefix_tensor(prefix: &str, last_layer: usize, name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('.'))
+    else {
+        return false;
+    };
+    if rest.starts_with("embed_tokens.") {
+        return true;
+    }
+    let Some(rest) = rest.strip_prefix("layers.") else {
+        return false;
+    };
+    let Some((index, _)) = rest.split_once('.') else {
+        return false;
+    };
+    index
+        .parse::<usize>()
+        .is_ok_and(|index| index <= last_layer)
+}
+
+/// The streamed prefix, held in host RAM between requests.
+///
+/// Every tensor is a CPU tensor at the encoder's working dtype, so an encode
+/// is a host-to-device copy per layer instead of a page fault, a dtype
+/// conversion and a copy. `_pinned` holds the page-locked registrations for
+/// the lifetime of the tensors they cover — dropping it unregisters them, so
+/// it must not be replaced with a bare bool.
+pub(crate) struct ParkedPrefix {
+    tensors: std::collections::HashMap<String, Tensor>,
+    _pinned: Vec<crate::flux::pinned::PinnedRegion>,
+}
+
+impl ParkedPrefix {
+    /// Host bytes this park is holding.
+    pub(crate) fn bytes(&self) -> u64 {
+        self.tensors
+            .values()
+            .map(|tensor| (tensor.elem_count() * tensor.dtype().size_in_bytes()) as u64)
+            .sum()
+    }
+}
+
 pub(crate) struct Mistral3Encoder {
     encoder_paths: Vec<PathBuf>,
     /// Resolved at load from the checkpoint's own headers.
@@ -301,6 +364,13 @@ pub(crate) struct Mistral3Encoder {
     tokenizer: Arc<Tokenizer>,
     device: Device,
     dtype: DType,
+    /// The prefix held in host RAM, when the residency budget allowed it.
+    parked: Option<ParkedPrefix>,
+    /// Encodes this shell has completed, which is the evidence
+    /// [`residency::mistral3_prefix_residency`] reads before it will pay for a
+    /// park. Atomic because `encode` takes `&self` and the shell is held
+    /// across threads by the engine cache.
+    encodes: std::sync::atomic::AtomicU32,
 }
 
 impl Mistral3Encoder {
@@ -317,7 +387,88 @@ impl Mistral3Encoder {
             tokenizer,
             device: device.clone(),
             dtype,
+            parked: None,
+            encodes: std::sync::atomic::AtomicU32::new(0),
         })
+    }
+
+    /// Encodes this shell has completed in this process.
+    pub(crate) fn encodes_completed(&self) -> u32 {
+        self.encodes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether this shell was built for `device` at `dtype`.
+    ///
+    /// A retained encoder is keyed on both, because a later request may pin
+    /// the conditioner to a different device (`--device-text-encoders cpu`),
+    /// which also changes the dtype it runs at — and a parked prefix built at
+    /// BF16 on the GPU is not the checkpoint a CPU F32 encode wants.
+    pub(crate) fn matches_placement(&self, device: &Device, dtype: DType) -> bool {
+        self.dtype == dtype && self.device.same_device(device)
+    }
+
+    /// Whether this encoder is holding its prefix in host RAM.
+    pub(crate) fn is_parked(&self) -> bool {
+        self.parked.is_some()
+    }
+
+    /// Host bytes the park is holding, or zero.
+    pub(crate) fn parked_bytes(&self) -> u64 {
+        self.parked.as_ref().map_or(0, ParkedPrefix::bytes)
+    }
+
+    /// Read the prefix into host RAM, page-locking it when asked.
+    ///
+    /// ONE copy per tensor, out of a mapping, through the shared
+    /// `encoders::park` loader — and FILTERED, so the vision tower, the
+    /// projector and layers 30-39 are never touched at all.
+    ///
+    /// `pinned` is the residency decision's own answer, never re-derived here.
+    /// A pin that the driver or the tracker's soft cap declines is a no-op
+    /// rather than an error: the park is still worth having without it.
+    pub(crate) fn park_prefix(&mut self, pinned: bool) -> Result<()> {
+        if self.parked.is_some() {
+            return Ok(());
+        }
+        let prefix = self.lm_prefix;
+        let last_layer = last_required_layer();
+        let tensors =
+            crate::encoders::park::load_tensors_to_cpu_filtered(&self.encoder_paths, |name| {
+                parked_prefix_tensor(prefix, last_layer, name)
+            })?;
+        if tensors.is_empty() {
+            anyhow::bail!(
+                "Mistral3 prefix park found no tensors under `{prefix}` — refusing to park an \
+                 empty set rather than render from one"
+            );
+        }
+        let mut regions = Vec::new();
+        if pinned {
+            let tracker = crate::flux::pinned::PinnedMemoryTracker::new(
+                crate::flux::pinned::pinned_cap_bytes(),
+            );
+            for tensor in tensors.values() {
+                match crate::flux::pinned::try_pin_to_host(tensor, &tracker) {
+                    Ok(Some(region)) => regions.push(region),
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::debug!(%error, "Mistral3 prefix pin declined; parking unpinned");
+                        regions.clear();
+                        break;
+                    }
+                }
+            }
+        }
+        self.parked = Some(ParkedPrefix {
+            tensors,
+            _pinned: regions,
+        });
+        Ok(())
+    }
+
+    /// Release the host park.
+    pub(crate) fn unpark(&mut self) {
+        self.parked = None;
     }
 
     pub fn encode(
@@ -325,6 +476,7 @@ impl Mistral3Encoder {
         prompt: &str,
         target_device: &Device,
         target_dtype: DType,
+        progress: &crate::progress::ProgressReporter,
     ) -> Result<(Tensor, usize)> {
         let formatted = format_prompt(prompt);
         let encoding = self
@@ -338,42 +490,187 @@ impl Mistral3Encoder {
             .map(|index| index < token_count)
             .collect::<Vec<_>>();
 
-        let vb = crate::weight_loader::load_safetensors_with_progress(
-            &self.encoder_paths,
-            self.dtype,
-            &self.device,
-            "FLUX.2 [dev] Mistral3 encoder",
-            &crate::progress::ProgressReporter::default(),
-        )?
-        .pp(self.lm_prefix);
+        // The parked prefix and the mapping produce the SAME weights: the park
+        // is `MmapedSafetensors::multi` plus one CPU load per tensor, which is
+        // what the mapping-backed `VarBuilder` would have done lazily. What
+        // changes is where the bytes come from on the second and later
+        // requests — host RAM, already at the working dtype and optionally
+        // page-locked, instead of a page fault plus a conversion.
+        //
+        // `pp(lm_prefix)` is applied in both arms because the park keeps the
+        // checkpoint's own key namespace, so the two builders are addressed
+        // identically and the layer loop below cannot tell them apart.
+        let vb = match self.parked.as_ref() {
+            Some(parked) => crate::encoders::park::varbuilder_from_parked(
+                &parked.tensors,
+                self.dtype,
+                &self.device,
+            )
+            .pp(self.lm_prefix),
+            None => crate::weight_loader::load_safetensors_with_progress(
+                &self.encoder_paths,
+                self.dtype,
+                &self.device,
+                STREAMED_ENCODER_COMPONENT,
+                &crate::progress::ProgressReporter::default(),
+            )?
+            .pp(self.lm_prefix),
+        };
 
         let input_ids = Tensor::from_vec(tokens, (1, MAX_LENGTH), &self.device)?;
-        let mut hidden = {
+        let hidden = {
             let embedding = candle_nn::embedding(VOCAB_SIZE, HIDDEN_SIZE, vb.pp("embed_tokens"))?;
             embedding.forward(&input_ids)?
         };
-        self.device.synchronize()?;
 
         let mask = causal_padding_mask(&attention, self.dtype, &self.device)?;
         let rotary = Arc::new(RotaryEmbedding::new(self.dtype, &self.device)?);
-        let mut captured = Vec::with_capacity(CAPTURE_LAYERS.len());
-        for layer_index in 0..=*CAPTURE_LAYERS.last().unwrap() {
-            let layer = DecoderLayer::new(rotary.clone(), vb.pp("layers").pp(layer_index))
-                .with_context(|| format!("loading Mistral3 decoder layer {layer_index}"))?;
-            hidden = layer
-                .forward(&hidden, &mask)
-                .with_context(|| format!("running Mistral3 decoder layer {layer_index}"))?;
-            self.device.synchronize()?;
-            drop(layer);
-            if CAPTURE_LAYERS.contains(&layer_index) {
-                captured.push(hidden.clone());
-            }
-        }
+
+        // The streamed prefix, priced exactly as admission prices it, so the
+        // progress bar and the memory plan describe the same thing.
+        let embed_bytes = residency::mistral3_embed_bytes(self.dtype);
+        let layer_bytes = residency::mistral3_layer_bytes(self.dtype);
+        let prefix_bytes = residency::mistral3_prefix_bytes(self.dtype);
+        let built = std::sync::atomic::AtomicU64::new(0);
+        let layers = vb.pp("layers");
+        let build = |index: usize| -> Result<DecoderLayer> {
+            let layer = DecoderLayer::new(rotary.clone(), layers.pp(index))
+                .with_context(|| format!("loading Mistral3 decoder layer {index}"))?;
+            let done = built.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            progress.weight_load(
+                STREAMED_ENCODER_COMPONENT,
+                embed_bytes.saturating_add(done.saturating_mul(layer_bytes)),
+                prefix_bytes,
+            );
+            Ok(layer)
+        };
+
+        // The prefetch thread's uploads must be complete before the forward
+        // reads them; see `stream_layers`. A page-locked parked prefix makes
+        // the copy a true asynchronous DMA, and nothing else orders it.
+        let device = self.device.clone();
+        let settle = move || -> Result<()> { device.synchronize().map_err(Into::into) };
+        let captured = stream_layers(
+            last_required_layer(),
+            hidden,
+            build,
+            settle,
+            |layer: &DecoderLayer, hidden: &Tensor| layer.forward(hidden, &mask),
+            &CAPTURE_LAYERS,
+        )?;
         let output = Tensor::cat(&captured, D::Minus1)?
             .to_device(target_device)?
             .to_dtype(target_dtype)?;
+        // Counted only on success: a failed encode is not evidence that a
+        // 34.7 GB park would have been reused.
+        self.encodes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok((output, token_count))
     }
+}
+
+/// Drive a streamed layer stack with one layer of look-ahead.
+///
+/// `build(k + 1)` runs on a scoped thread while `run` executes layer `k`, so
+/// the host-side work of materializing the next layer — faulting in its
+/// mapped pages, converting its dtype, and issuing its host-to-device copies —
+/// overlaps the layer already on the accelerator instead of following it.
+/// Exactly `MISTRAL3_LOOKAHEAD + 1` layers are ever alive, which is what
+/// [`crate::flux2::text_encoder_residency::mistral3_streamed_device_peak_bytes`]
+/// charges admission.
+///
+/// **`settle` is the contract that makes the second thread safe, and it is not
+/// optional.** It runs on the thread that just built a layer, before that
+/// layer can cross back to the consumer, and its job is to leave NO device
+/// work in flight. The version of this function that shipped in #1712 had no
+/// `settle`: it argued that one shared `Arc<CudaStream>` already orders the
+/// prefetch's uploads against the forward's launches, and deleted the
+/// `device.synchronize()` that used to follow every layer as a call that
+/// "ordered nothing the stream did not already order".
+///
+/// On hardware that is false, and the campaign UAT on plato measured it. With
+/// the encoder's prefix parked in PAGE-LOCKED host RAM (`park_prefix(pinned =
+/// true)`), `flux2-dev` produced an entirely NaN conditioning tensor — every
+/// tier, every prompt — and the transformer bailed at denoise step 0. Three
+/// controls, one variable each, on one L40S:
+///
+/// | configuration | layers 0-3 | layer 4 onward |
+/// |---|---|---|
+/// | parked, **pinned**, prefetching | finite | **all NaN** |
+/// | parked, pinned, strictly serial | finite | finite |
+/// | parked, pinned, prefetching + `settle` | finite | finite, and bit-identical to serial |
+/// | parked, **not** pinned, prefetching | finite | finite |
+///
+/// The reason it had never been seen is the fourth row. A
+/// `cuMemcpyHtoDAsync` out of PAGEABLE host memory is host-blocking — the
+/// driver stages it through its own buffer and synchronizes the stream before
+/// initiating the copy — so every prefetch that existed before the park could
+/// fire was serialising itself against the forward by accident, and the
+/// look-ahead only ever overlapped the page faults and the dtype conversion
+/// that precede the copy. Page-locking the source turns that call into a
+/// genuine asynchronous DMA, the two threads overlap for the first time, and
+/// what the forward reads is not what the prefetch uploaded.
+///
+/// `settle` restores the guarantee explicitly rather than inheriting it from
+/// an allocator detail. It costs the mapped path nothing — that path was
+/// already paying the same stream synchronization inside the pageable copy —
+/// and it keeps the host-side half of the overlap, which is the half worth
+/// having: faulting in and converting 1.2 GB per layer still happens while the
+/// accelerator is busy.
+fn stream_layers<Layer, State, Build, Settle, Run>(
+    last_layer: usize,
+    initial: State,
+    build: Build,
+    settle: Settle,
+    mut run: Run,
+    capture: &[usize],
+) -> Result<Vec<State>>
+where
+    Layer: Send,
+    State: Clone,
+    Build: Fn(usize) -> Result<Layer> + Sync,
+    Settle: Fn() -> Result<()> + Sync,
+    Run: FnMut(&Layer, &State) -> Result<State>,
+{
+    let build = move |index: usize| -> Result<Layer> {
+        let layer = build(index)?;
+        // On the BUILDING thread, before the layer can be observed by the
+        // consumer: nothing this thread issued may still be in flight.
+        settle()?;
+        Ok(layer)
+    };
+    let build = &build;
+    let mut state = initial;
+    let mut captured = Vec::with_capacity(capture.len());
+    let mut current = build(0)?;
+    for index in 0..=last_layer {
+        let (next, output) = std::thread::scope(|scope| -> Result<(Option<Layer>, State)> {
+            let prefetch = (index < last_layer).then(|| scope.spawn(move || build(index + 1)));
+            // Run first: the prefetch is already in flight, and a failure here
+            // must still join the thread before it propagates.
+            let output = run(&current, &state);
+            let next = match prefetch {
+                Some(handle) => Some(handle.join().map_err(|_| {
+                    anyhow::anyhow!("streamed layer {} failed to build", index + 1)
+                })??),
+                None => None,
+            };
+            let output =
+                output.with_context(|| format!("running Mistral3 decoder layer {index}"))?;
+            Ok((next, output))
+        })?;
+        state = output;
+        if capture.contains(&index) {
+            captured.push(state.clone());
+        }
+        // Layer `index` is released HERE, after `index + 1` is already built:
+        // two layers alive at the seam, never three.
+        match next {
+            Some(layer) => current = layer,
+            None => break,
+        }
+    }
+    Ok(captured)
 }
 
 fn causal_padding_mask(attention: &[bool], dtype: DType, device: &Device) -> Result<Tensor> {
@@ -400,6 +697,317 @@ fn causal_padding_mask(attention: &[bool], dtype: DType, device: &Device) -> Res
 mod tests {
     use super::*;
     use candle_core::IndexOp;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The park's filter is what keeps ~12 GB of weights the encoder never runs
+    /// out of host RAM.
+    ///
+    /// The single-file republication of this checkpoint carries a vision tower, a
+    /// multimodal projector, decoder layers 30-39, the final norm and the LM head
+    /// beside the prefix. A memory mapping never pages them in, because nothing
+    /// asks for them; an eager whole-file park would charge every byte. So the
+    /// filter is not an optimization, it is the difference between a 34.7 GB park
+    /// and one half again as large.
+    #[test]
+    fn the_park_filter_never_admits_the_vision_tower_or_the_unused_layers() {
+        let last = last_required_layer();
+        assert_eq!(last, 29, "the prefix is layers 0..=29");
+
+        for prefix in MISTRAL3_LM_PREFIXES {
+            assert!(parked_prefix_tensor(
+                prefix,
+                last,
+                &format!("{prefix}.embed_tokens.weight")
+            ));
+            for layer in [0, 1, 15, 28, 29] {
+                for leaf in [
+                    "input_layernorm.weight",
+                    "self_attn.q_proj.weight",
+                    "mlp.down_proj.weight",
+                ] {
+                    assert!(
+                        parked_prefix_tensor(
+                            prefix,
+                            last,
+                            &format!("{prefix}.layers.{layer}.{leaf}")
+                        ),
+                        "{prefix}.layers.{layer}.{leaf} is part of the prefix"
+                    );
+                }
+            }
+
+            // Everything the encoder never reads.
+            for name in [
+                format!("{prefix}.layers.30.input_layernorm.weight"),
+                format!("{prefix}.layers.39.mlp.down_proj.weight"),
+                format!("{prefix}.norm.weight"),
+                "vision_tower.transformer.layers.0.attention.q_proj.weight".to_string(),
+                "multi_modal_projector.linear_1.weight".to_string(),
+                "lm_head.weight".to_string(),
+            ] {
+                assert!(
+                    !parked_prefix_tensor(prefix, last, &name),
+                    "{name} must never be parked"
+                );
+            }
+        }
+
+        // A name under the OTHER namespace is not this checkpoint's prefix. The
+        // two spellings differ only by a wrapper, and `model.layers.0...` is a
+        // suffix of `language_model.model.layers.0...`, so a substring test would
+        // have accepted both — which is why this is an exact prefix strip.
+        assert!(!parked_prefix_tensor(
+            "language_model.model",
+            last,
+            "model.layers.0.input_layernorm.weight"
+        ));
+        // And a layer index that merely starts with an admitted one is refused.
+        assert!(!parked_prefix_tensor(
+            "model",
+            last,
+            "model.layers.290.input_layernorm.weight"
+        ));
+        assert!(!parked_prefix_tensor(
+            "model",
+            last,
+            "model.layers.30x.weight"
+        ));
+    }
+
+    /// A stand-in for a decoder layer that reports its own residency.
+    ///
+    /// A real two-layer Mistral3 fixture is not a test: one layer of this
+    /// geometry is 1.1 GB, and the dimensions are compile-time constants of
+    /// the checkpoint. What `stream_layers` owns is the SCHEDULE — how many
+    /// layers are alive, in what order they run, and whether the answer
+    /// depends on the overlap — and a synthetic layer exercises all three.
+    struct CountedLayer {
+        index: usize,
+        live: Arc<AtomicUsize>,
+    }
+
+    impl CountedLayer {
+        fn build(index: usize, live: &Arc<AtomicUsize>, peak: &Arc<AtomicUsize>) -> Self {
+            let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            Self {
+                index,
+                live: live.clone(),
+            }
+        }
+    }
+
+    impl Drop for CountedLayer {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// An order-sensitive, non-commutative step, so a schedule that ran two
+    /// layers out of order could not produce the same number.
+    fn advance(layer: &CountedLayer, state: &f64) -> Result<f64> {
+        Ok(state.mul_add(1.5, layer.index as f64 + 1.0).sqrt())
+    }
+
+    fn serial(last_layer: usize, capture: &[usize]) -> Vec<f64> {
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut state = 1.0f64;
+        let mut captured = Vec::new();
+        for index in 0..=last_layer {
+            let layer = CountedLayer::build(index, &live, &peak);
+            state = advance(&layer, &state).unwrap();
+            drop(layer);
+            if capture.contains(&index) {
+                captured.push(state);
+            }
+        }
+        captured
+    }
+
+    /// One layer of look-ahead must not change the answer. The prefetch runs
+    /// on another thread and on CUDA shares the forward's stream, so if the
+    /// schedule could perturb the result it would perturb every render.
+    #[test]
+    fn prefetching_matches_the_serial_stack() {
+        for last_layer in [0usize, 1, 2, 29] {
+            let capture: Vec<usize> = (0..=last_layer).filter(|i| i % 3 == 0).collect();
+            let live = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let (build_live, build_peak) = (live.clone(), peak.clone());
+            let got = stream_layers(
+                last_layer,
+                1.0f64,
+                move |index| Ok(CountedLayer::build(index, &build_live, &build_peak)),
+                || Ok(()),
+                |layer: &CountedLayer, state: &f64| advance(layer, state),
+                &capture,
+            )
+            .unwrap();
+            assert_eq!(
+                got,
+                serial(last_layer, &capture),
+                "look-ahead changed the result at last_layer={last_layer}"
+            );
+        }
+    }
+
+    /// At most `lookahead + 1` layers are ever alive — exactly what
+    /// `flux2::text_encoder_residency::mistral3_streamed_device_peak_bytes`
+    /// charges admission at `MISTRAL3_DEFAULT_LOOKAHEAD`. A driver that held
+    /// three would silently break the budget the planner admitted on.
+    #[test]
+    fn never_more_than_the_charged_look_ahead_is_resident() {
+        let last_layer = last_required_layer();
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let (build_live, build_peak) = (live.clone(), peak.clone());
+        stream_layers(
+            last_layer,
+            1.0f64,
+            move |index| Ok(CountedLayer::build(index, &build_live, &build_peak)),
+            || Ok(()),
+            |layer: &CountedLayer, state: &f64| advance(layer, state),
+            &CAPTURE_LAYERS,
+        )
+        .unwrap();
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            (residency::MISTRAL3_DEFAULT_LOOKAHEAD + 1) as usize,
+            "the streamed encoder holds the running layer and the prefetched one"
+        );
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "every layer is released before the stack returns"
+        );
+    }
+
+    /// A build failure surfaces as an error naming the layer, never a panic
+    /// escaping the scoped thread.
+    #[test]
+    fn a_failed_prefetch_is_reported_not_swallowed() {
+        let error = stream_layers(
+            5,
+            1.0f64,
+            |index| {
+                if index == 3 {
+                    anyhow::bail!("synthetic failure")
+                }
+                Ok(index)
+            },
+            || Ok(()),
+            |layer: &usize, state: &f64| Ok(state + *layer as f64),
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("synthetic failure"));
+    }
+
+    /// **The prefetch's device work is settled on the thread that issued it,
+    /// before the consumer can see the layer.**
+    ///
+    /// This is the whole fix for the park's NaN conditioning: the second
+    /// thread's host-to-device copies are ordered against the forward only
+    /// because `settle` says so. Asserting it here — rather than trusting a
+    /// comment about CUDA streams — is what makes the guarantee survive the
+    /// next edit. The three things that matter are all checked: `settle` runs
+    /// once per built layer, on the SAME thread that built it, and before
+    /// `run` is entered for that layer.
+    #[test]
+    fn every_built_layer_is_settled_on_its_own_thread_before_it_is_run() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Event {
+            Build(usize, std::thread::ThreadId),
+            Settle(std::thread::ThreadId),
+            Run(usize),
+        }
+        let last_layer = 6usize;
+        let log = Arc::new(std::sync::Mutex::new(Vec::<Event>::new()));
+        let build_log = log.clone();
+        let run_log = log.clone();
+        let settle_log = log.clone();
+        stream_layers(
+            last_layer,
+            0usize,
+            move |index| {
+                build_log
+                    .lock()
+                    .unwrap()
+                    .push(Event::Build(index, std::thread::current().id()));
+                Ok(index)
+            },
+            move || {
+                settle_log
+                    .lock()
+                    .unwrap()
+                    .push(Event::Settle(std::thread::current().id()));
+                Ok(())
+            },
+            move |layer: &usize, state: &usize| {
+                run_log.lock().unwrap().push(Event::Run(*layer));
+                Ok(state + *layer)
+            },
+            &[],
+        )
+        .unwrap();
+
+        let log = log.lock().unwrap();
+        let builds = log.iter().filter(|e| matches!(e, Event::Build(..))).count();
+        let settles = log.iter().filter(|e| matches!(e, Event::Settle(_))).count();
+        assert_eq!(builds, last_layer + 1, "every layer is built once");
+        assert_eq!(
+            settles, builds,
+            "every build is settled — an unsettled prefetch is the NaN"
+        );
+
+        // Same thread, and nothing of that build's between the two: the settle
+        // must be the building thread's own last act.
+        let mut pending: Option<(usize, std::thread::ThreadId)> = None;
+        let mut settled = std::collections::HashSet::new();
+        for event in log.iter() {
+            match event {
+                Event::Build(index, thread) => {
+                    assert!(
+                        pending.is_none(),
+                        "a build began before the previous one settled"
+                    );
+                    pending = Some((*index, *thread));
+                }
+                Event::Settle(thread) => {
+                    let (index, build_thread) =
+                        pending.take().expect("a settle with no build before it");
+                    assert_eq!(
+                        *thread, build_thread,
+                        "layer {index} settled on a different thread than it was built on"
+                    );
+                    settled.insert(index);
+                }
+                Event::Run(index) => assert!(
+                    settled.contains(index),
+                    "layer {index} was run before its own upload was settled"
+                ),
+            }
+        }
+        assert!(pending.is_none(), "a build never settled");
+    }
+
+    /// A failing `settle` fails the stack — it is a real device operation, and
+    /// swallowing its error would hand the forward the unsettled layer the
+    /// error was about.
+    #[test]
+    fn a_failed_settle_fails_the_stack() {
+        let error = stream_layers(
+            5,
+            1.0f64,
+            Ok,
+            || anyhow::bail!("synthetic settle failure"),
+            |layer: &usize, state: &f64| Ok(state + *layer as f64),
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("synthetic settle failure"));
+    }
 
     #[test]
     fn prompt_matches_official_flux2_dev_template_and_removes_image_markers() {

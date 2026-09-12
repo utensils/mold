@@ -5487,6 +5487,43 @@ mod tests {
         );
     }
 
+    /// `gallery.persists_outputs` is what lets a client trade the completion
+    /// frame's base64 copy of a whole render for one GET of the file the
+    /// server just wrote. It is `false`, not absent, when there is no output
+    /// directory: absence means an older server, and a client reading it that
+    /// way would start fetching files a keyless-output host never saved.
+    #[tokio::test]
+    async fn capabilities_report_whether_a_print_reads_back_from_the_gallery() {
+        let app = app_with_state(AppState::for_tests());
+        let resp = app
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["gallery"]["persists_outputs"], true);
+
+        let mut disabled = AppState::for_tests();
+        disabled.output_disabled_override = true;
+        let resp = app_with_state(disabled)
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        assert_eq!(
+            body["gallery"]["persists_outputs"], false,
+            "a host that saves nothing must say so rather than go quiet"
+        );
+    }
+
     #[tokio::test]
     async fn capabilities_offer_reference_uploads_only_when_api_key_auth_is_enabled() {
         let keys = std::collections::HashSet::from(["test-key".to_string()]);
@@ -5883,6 +5920,10 @@ mod tests {
             .unwrap()
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            // Prints only. mold's own dotfiles live here too — the gallery
+            // writer lease, which a publishing process holds open — and the
+            // gallery listing ignores them for the same reason.
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
             .count()
     }
 

@@ -26,12 +26,18 @@ private_transformer_capture_marker='mold.minimax-h3.private-uat-transformer-capt
 omitted_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted'
 h3_compiled_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted'
 # The sm89 shipping edge (`h3-cuda`) compiles the global FlashAttention
-# dispatch beside the H3-scoped kernel (#735): global-flash=compiled is
-# accepted exactly when paired with h3-rc=compiled. Standalone global flash —
-# an ordinary build that somehow compiled the developer feature — remains
-# forbidden in published artifacts.
+# dispatch beside the H3-scoped kernel (#735).
 h3_flash_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=compiled'
-forbidden_global_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled'
+# Global FlashAttention WITHOUT the H3-scoped kernel is the shipping shape of
+# every other Linux CUDA compute capability: sm86, sm100 and sm120 name
+# `flash-attn` directly, because FLUX's `FastStill` policy changes rendered
+# bytes on every CUDA build while only the compiled kernel pays that back in
+# speed, and H3's own fused kernel is qualified at sm89 alone
+# (`H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY`). What stays forbidden is the
+# H3-scoped DEVELOPER feature reaching a published artifact, which is the
+# `claim_marker`/`public_qwen_support_marker` pair checked below — never the
+# global dispatch on its own.
+global_flash_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled'
 
 [[ -f "$binary" ]] \
   || { echo "published binary is missing: $binary" >&2; exit 1; }
@@ -44,13 +50,9 @@ provenance_count=0
 grep -aFq "$omitted_marker" "$binary" && provenance_count=$((provenance_count + 1))
 grep -aFq "$h3_compiled_marker" "$binary" && provenance_count=$((provenance_count + 1))
 grep -aFq "$h3_flash_marker" "$binary" && provenance_count=$((provenance_count + 1))
+grep -aFq "$global_flash_marker" "$binary" && provenance_count=$((provenance_count + 1))
 if [[ $provenance_count -ne 1 ]]; then
   echo "published binary lacks unambiguous MiniMax H3 attention provenance" >&2
-  exit 1
-fi
-
-if grep -aFq "$forbidden_global_marker" "$binary"; then
-  echo "published binary reports forbidden global FlashAttention code" >&2
   exit 1
 fi
 

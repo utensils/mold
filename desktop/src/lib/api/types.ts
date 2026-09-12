@@ -198,6 +198,9 @@ export interface ServerCapabilities {
     media_version?: boolean;
     conditional_get?: boolean;
     row_events?: boolean;
+    /** A saved print reads back byte-for-byte from
+     * `GET /api/gallery/image/{filename}`. Absent means an older server. */
+    persists_outputs?: boolean;
   };
   /** Server-enforced model families that are not activated in this build. */
   model_access?: {

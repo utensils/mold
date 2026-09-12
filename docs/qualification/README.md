@@ -100,7 +100,10 @@ generation with sm86. Every workload pins an RTX 3090 UUID with
 together in NVIDIA's active compute process list, requires Mold's CUDA-device
 log, and validates the output media rather than trusting process exit status.
 Image runs use a non-GGUF FLUX model with block offloading so they must select
-and log Mold's math attention backend.
+and log Mold's own attention backend. Since the sm86 artifact compiles
+`flash-attn`, that selection is `Flash`: FLUX's `AttentionPolicy::FastStill`
+takes the kernel wherever it is compiled, so the logged line is the hardware
+evidence that the newly shipped Ampere kernel dispatches on an RTX 3090.
 
 PTX compatibility is one-way: code targeting a compute capability may JIT on
 devices with an equal or greater compute capability, never a lower one. NVIDIA
@@ -270,3 +273,9 @@ fixture in the unit tests exercises validator relationships only and is never
 hardware evidence.
 Use `--allow-failure` only when inspecting a valid failed run; it does not
 convert that run into hardware qualification.
+
+The FLUX fast-by-default campaign (FLUX.1/FLUX.2 performance, residency,
+storage v3 opt-in, issue #1707) is recorded in
+[flux-fast-by-default-2026-09.md](./flux-fast-by-default-2026-09.md): targets
+against measurements on plato's L40S, the ten defects the UAT found on the
+branch and their final state, and what is claimed on unit tests alone.

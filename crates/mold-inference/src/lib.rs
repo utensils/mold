@@ -17,8 +17,13 @@ pub mod error;
 #[cfg(feature = "expand")]
 pub mod expand;
 mod factory;
+pub mod failure_class;
 pub mod flux;
 pub mod flux2;
+/// Opt-in per-step non-finite diagnostics shared by both FLUX families.
+pub(crate) mod flux_debug;
+/// The fused interleaved-RoPE path shared by both FLUX families.
+pub(crate) mod flux_rope;
 mod h3_factory;
 /// Hunyuan3D 2.0 image-to-3D shape generation (#1495).
 pub mod hunyuan3d;
@@ -149,7 +154,19 @@ pub use factory::{
     create_engine, create_engine_with_frozen_config, create_engine_with_pool,
     factory_family_availability, FactoryFamilyAvailability, FrozenEngineConfig,
 };
+pub use failure_class::{
+    is_model_specific_failure, message_is_model_specific_failure, model_specific_error,
+    MODEL_SPECIFIC_FAILURE_MARKER,
+};
 pub use flux::FluxEngine;
+pub use flux2::pipeline::flux2_block_offload_unsupported_reason;
+/// Extra resident bytes a FLUX.2 fp8 checkpoint costs when the engine widens
+/// it once at load, so a server-side estimate charges what the card will
+/// actually hold. See `flux2::transformer`.
+pub use flux2::transformer::{
+    flux2_activation_geometry_for_checkpoint, flux2_fp8_widen_extra_resident_bytes,
+    flux2_fp8_widen_extra_resident_bytes_for_checkpoint,
+};
 pub use flux2::Flux2Engine;
 pub use h3_factory::{
     expected_h3_factory_prepared_attempt_identity, expected_h3_factory_prepared_request_identity,
@@ -175,6 +192,9 @@ pub use progress::{
     is_inference_cancelled, InferenceCancellationToken, InferenceCancelled, ProgressEvent,
     ProgressPhase,
 };
+/// How a GGUF-backed still's activations are shaped on a given backend, for
+/// the execution fingerprint. See `quantized_linear::gguf_activation_dtype`.
+pub use quantized_linear::{gguf_activation_width_for_backend, GgufActivationWidth};
 pub use qwen_image::QwenImageEngine;
 pub use sd15::SD15Engine;
 pub use sd3::SD3Engine;

@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
   ENGINE_KEY_SCHEMAS,
+  ENV_KNOB_SCHEMAS,
   PER_STYLE_FIELDS,
   SECTIONS,
   schemaFor,
@@ -25,26 +26,25 @@ import {
  */
 
 const REGISTRY_RELATIVE = "crates/mold-core/src/config_keys.rs";
+const TAURI_COMMANDS_RELATIVE = "desktop/src-tauri/src/commands.rs";
 
 /* `import.meta.url` is not a file URL in every environment these tests run in
- * (studio's own runner and desktop's both collect this file), so the registry
+ * (studio's own runner and desktop's both collect this file), so a Rust source
  * is found by walking up from the working directory. */
-function registryPath(): string {
+function repoFile(relative: string): string {
   let directory = process.cwd();
   for (;;) {
-    const candidate = resolve(directory, REGISTRY_RELATIVE);
+    const candidate = resolve(directory, relative);
     if (existsSync(candidate)) return candidate;
     const parent = dirname(directory);
     if (parent === directory) {
-      throw new Error(
-        `could not find ${REGISTRY_RELATIVE} above ${process.cwd()}`,
-      );
+      throw new Error(`could not find ${relative} above ${process.cwd()}`);
     }
     directory = parent;
   }
 }
 
-const source = readFileSync(registryPath(), "utf8");
+const source = readFileSync(repoFile(REGISTRY_RELATIVE), "utf8");
 
 /** The body of a `pub const NAME: … = &[ … ];` slice literal. */
 function sliceBody(name: string): string {
@@ -174,5 +174,67 @@ describe("every select option is a value the engine accepts", () => {
     expect(checked).toEqual(
       expect.arrayContaining(["t5_variant", "qwen3_variant", "logging.level"]),
     );
+  });
+});
+
+/*
+ * A knob the Speed & memory section offers but `apply_engine_environment`
+ * never copies into the engine's process is a control that silently does
+ * nothing — and a variable the bridge copies with no row is a knob the app
+ * pretends it cannot set. The two lists must be EQUAL, not merely nested:
+ * asserting one direction only is how `MOLD_RESERVE_VRAM_MB` stayed
+ * engine-shaping, documented and unofferable for a whole campaign. The Rust is
+ * read rather than restated here: a list maintained by hand in two languages
+ * is exactly the drift this test exists to catch.
+ */
+const RUNTIME_ENV_RELATIVE = "crates/mold-inference/src/runtime_env.rs";
+
+/**
+ * Which offered env knobs are process-frozen is a fact about the Rust
+ * (`runtime_env.rs` freezes `ENGINE_SHAPING_VARIABLES` in a `OnceLock` on
+ * first use), so the app-restart flag is read off that list rather than
+ * restated by hand: a tenth frozen knob added in Rust and offered here must
+ * fail this test until its row says RESTART APP.
+ */
+describe("the app-restart flag and runtime_env's frozen list", () => {
+  it("agree on every offered env knob, in both directions", () => {
+    const runtimeEnv = readFileSync(repoFile(RUNTIME_ENV_RELATIVE), "utf8");
+    const block = runtimeEnv.match(
+      /pub const ENGINE_SHAPING_VARIABLES: &\[&str\] = &\[([\s\S]*?)\];/,
+    );
+    expect(
+      block,
+      "ENGINE_SHAPING_VARIABLES not found in runtime_env.rs",
+    ).not.toBeNull();
+    const frozen = new Set(
+      [...block![1]!.matchAll(/"([A-Z0-9_]+)"/g)].map((m) => m[1]!),
+    );
+    expect(frozen.size).toBeGreaterThan(0);
+    const offeredFrozen = ENV_KNOB_SCHEMAS.filter((knob) =>
+      frozen.has(knob.key.replace(/^env\./, "")),
+    ).map((knob) => knob.key);
+    const flagged = ENV_KNOB_SCHEMAS.filter(
+      (knob) => knob.needsAppRestart === true,
+    ).map((knob) => knob.key);
+    expect(offeredFrozen.length).toBeGreaterThan(0);
+    expect([...flagged].sort()).toEqual([...offeredFrozen].sort());
+  });
+});
+
+describe("the env knobs and the Tauri side's ENGINE_ENV_KEYS", () => {
+  it("are the same set", () => {
+    const commands = readFileSync(repoFile(TAURI_COMMANDS_RELATIVE), "utf8");
+    const block = commands.match(
+      /pub const ENGINE_ENV_KEYS: &\[&str\] = &\[([\s\S]*?)\];/,
+    );
+    expect(block, "ENGINE_ENV_KEYS not found in commands.rs").not.toBeNull();
+    const allowlisted = [...block![1]!.matchAll(/"([A-Z0-9_]+)"/g)].map(
+      (m) => m[1]!,
+    );
+    expect(allowlisted.length).toBeGreaterThan(0);
+    const offered = ENV_KNOB_SCHEMAS.map((knob) =>
+      knob.key.replace(/^env\./, ""),
+    );
+    expect([...offered].sort()).toEqual([...allowlisted].sort());
   });
 });

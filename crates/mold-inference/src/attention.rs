@@ -25,6 +25,14 @@
 //!   worth a measured **2.1x** on the Wan DiT (158.4 s -> 75.3 s,
 //!   `wan22-t2v-a14b:q5` 53f at 832x480 on an RTX 4090; see
 //!   `website/models/wan.md`). `MOLD_ATTN=math` is the escape hatch.
+//! * [`AttentionPolicy::FastStill`] — a still whose family chose throughput
+//!   over archived-seed byte stability: `Flash` wherever the kernel is
+//!   compiled in, `Math` otherwise. FLUX.1 and FLUX.2 take it. The #736
+//!   argument is unchanged for every other still family; what changed is that
+//!   for these two the math path costs ~700 GB of score-matrix traffic per
+//!   step at 1024^2, measured against a stable-diffusion.cpp oracle reading
+//!   the same GGUF files at 2.6x mold's rate. `MOLD_ATTN=math` is the escape
+//!   hatch and remains the cross-build determinism contract going forward.
 //!
 //! [`attention_with_bias`] adds an optional additive `[B, H, Q, K]` bias for
 //! callers that must mask keys (Qwen-Image's joint stream when the two batched
@@ -61,6 +69,18 @@ pub enum AttentionPolicy {
     Image,
     /// Video DiTs (Wan, LTX-2). `Flash` wherever the kernel is compiled in.
     Video,
+    /// A still whose family chose throughput over archived-seed byte
+    /// stability: `Flash` wherever the kernel is compiled in, `Math`
+    /// otherwise.
+    ///
+    /// FLUX.1 and FLUX.2 only. This is not a relaxation of #736 — it is the
+    /// same trade the video arm makes, taken for two families where the math
+    /// score matrix dominates the render rather than being a rounding error
+    /// next to the weights. The math path these families fall back to also
+    /// folds the softmax scale into K ([`ScaleOn::Keys`]) rather than
+    /// multiplying the `Q.K^T` matrix, which is the same statement about the
+    /// same bytes made once more.
+    FastStill,
 }
 
 /// Process-frozen override for math-attention query chunking. `Auto` retains
@@ -161,6 +181,7 @@ fn requested_backend_env() -> Option<AttentionBackend> {
             requested = ?requested,
             image_default = ?default_backend_for(AttentionPolicy::Image),
             video_default = ?default_backend_for(AttentionPolicy::Video),
+            fast_still_default = ?default_backend_for(AttentionPolicy::FastStill),
             "attention backend policy resolved"
         );
         requested
@@ -169,11 +190,11 @@ fn requested_backend_env() -> Option<AttentionBackend> {
 
 /// The attention policy a manifest family slug renders under.
 ///
-/// The families listed here are exactly the ones whose call sites pass
-/// `AttentionPolicy::Video` — the Wan DiT and LTX-2's BF16 dispatch. Anything
-/// else, known or not, keeps `Image`, which is the conservative direction: a
-/// family that renders under `Math` but is frozen as `Math` is consistent,
-/// while the reverse is not.
+/// The families listed here are exactly the ones whose call sites pass a
+/// non-`Image` policy — the Wan DiT and LTX-2's BF16 dispatch under `Video`,
+/// FLUX.1 and FLUX.2 under `FastStill`. Anything else, known or not, keeps
+/// `Image`, which is the conservative direction: a family that renders under
+/// `Math` and is frozen as `Math` is consistent, while the reverse is not.
 ///
 /// This exists because `FrozenEngineConfig` records the backend a plan will
 /// execute under, and its fingerprint is what execution-plan equivalence is
@@ -182,6 +203,9 @@ fn requested_backend_env() -> Option<AttentionBackend> {
 pub fn policy_for_family(family: &str) -> AttentionPolicy {
     match family {
         "wan" | "ltx2" | "ltx-2" | "ltx-2.3" => AttentionPolicy::Video,
+        // FLUX.1 and FLUX.2 only. See `AttentionPolicy::FastStill`; the
+        // convolution side mirrors this list in `conv_policy::policy_for_family`.
+        "flux" | "flux2" => AttentionPolicy::FastStill,
         // Hunyuan3D takes the image policy on purpose, not by falling through:
         // its DiT runs 3072 unordered tokens at head dim 64, which is the
         // image families' regime, and its shape VAE cross-attends short query
@@ -286,11 +310,18 @@ pub(crate) fn flash_fallback_warned() -> bool {
 /// kernel would take the `flash_attention_eligible` fallback on every block of
 /// every step and fire the "requested but not compiled" warning for a request
 /// nobody made.
+///
+/// **FastStill: `Flash` wherever the kernel is compiled in**, on the same
+/// guard and for a narrower reason — see [`AttentionPolicy::FastStill`].
 fn default_backend_for(policy: AttentionPolicy) -> AttentionBackend {
     match policy {
         AttentionPolicy::Image => AttentionBackend::Math,
-        AttentionPolicy::Video if AttentionBackend::flash_compiled() => AttentionBackend::Flash,
-        AttentionPolicy::Video => AttentionBackend::Math,
+        AttentionPolicy::Video | AttentionPolicy::FastStill
+            if AttentionBackend::flash_compiled() =>
+        {
+            AttentionBackend::Flash
+        }
+        AttentionPolicy::Video | AttentionPolicy::FastStill => AttentionBackend::Math,
     }
 }
 
@@ -318,9 +349,36 @@ pub fn attention_for(
     v: &Tensor,
     scale: f32,
 ) -> Result<Tensor> {
+    let scale_on = scale_on_for(policy);
     match AttentionBackend::resolve_for(policy) {
-        AttentionBackend::Flash => flash_attention(q, k, v, scale),
-        AttentionBackend::Math => math_attention(q, k, v, scale),
+        AttentionBackend::Flash => flash_attention_scaled(q, k, v, scale, scale_on),
+        AttentionBackend::Math => {
+            math_attention_impl(q, k, v, scale, math_attention_chunk_size(q), scale_on)
+        }
+    }
+}
+
+/// Where the softmax scale is applied on the math path, per policy.
+///
+/// `Scores` is the historical order (`Q.K^T` then `* scale`), kept for every
+/// policy whose bytes must not move. `Keys` folds the factor into K once —
+/// `N*D` multiplies instead of `N*N` per chunk — and is reachable only from
+/// [`AttentionPolicy::FastStill`], whose whole premise is that this family's
+/// archived seeds are already not byte-reproducible across this change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScaleOn {
+    /// Multiply the score matrix after `Q.K^T`.
+    Scores,
+    /// Fold the factor into K once, before the product.
+    Keys,
+}
+
+/// The scale placement a policy's math path uses. Pinned by a unit test
+/// because it is the seed-stability carve-out, not a dispatcher detail.
+pub(crate) fn scale_on_for(policy: AttentionPolicy) -> ScaleOn {
+    match policy {
+        AttentionPolicy::Image | AttentionPolicy::Video => ScaleOn::Scores,
+        AttentionPolicy::FastStill => ScaleOn::Keys,
     }
 }
 
@@ -407,9 +465,22 @@ fn math_attention_biased_impl(
 
 /// Convenience: derive `scale` from `head_dim` and dispatch.
 pub fn attention_default_scale(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
+    attention_default_scale_for(AttentionPolicy::Image, q, k, v)
+}
+
+/// [`attention_default_scale`] under an explicit family policy.
+///
+/// The FLUX call sites take this so an unset `MOLD_ATTN` reaches them as
+/// `FastStill` rather than the image families' `Math`.
+pub fn attention_default_scale_for(
+    policy: AttentionPolicy,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+) -> Result<Tensor> {
     let head_dim = q.dim(D::Minus1)?;
     let scale = 1.0 / (head_dim as f64).sqrt();
-    attention(q, k, v, scale as f32)
+    attention_for(policy, q, k, v, scale as f32)
 }
 
 /// Tracks whether we've already logged chunked math attention selection.
@@ -418,7 +489,14 @@ static CHUNKED_MATH_LOGGED: OnceLock<()> = OnceLock::new();
 /// Hand-rolled SDP — the historical FLUX path. Flattens batch+heads into a
 /// single leading dim to avoid the 4D `matmul` quirks on some backends.
 pub fn math_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
-    math_attention_impl(q, k, v, scale, math_attention_chunk_size(q))
+    math_attention_impl(
+        q,
+        k,
+        v,
+        scale,
+        math_attention_chunk_size(q),
+        ScaleOn::Scores,
+    )
 }
 
 /// Math attention with an explicit query chunk, forced on every device.
@@ -443,7 +521,7 @@ pub fn math_attention_with_chunk(
     scale: f32,
     chunk_size: usize,
 ) -> Result<Tensor> {
-    math_attention_impl(q, k, v, scale, Some(chunk_size.max(1)))
+    math_attention_impl(q, k, v, scale, Some(chunk_size.max(1)), ScaleOn::Scores)
 }
 
 fn math_attention_impl(
@@ -452,6 +530,7 @@ fn math_attention_impl(
     v: &Tensor,
     scale: f32,
     chunk_size: Option<usize>,
+    scale_on: ScaleOn,
 ) -> Result<Tensor> {
     let mut batch_dims = q.dims().to_vec();
     batch_dims.pop();
@@ -459,10 +538,19 @@ fn math_attention_impl(
     let q3 = q.flatten_to(batch_dims.len() - 1)?;
     let k3 = k.flatten_to(batch_dims.len() - 1)?;
     let v3 = v.flatten_to(batch_dims.len() - 1)?;
+    // Fold the factor into K once when the policy allows it. The alternative
+    // multiplies every chunk's `[rows, keys]` score matrix instead — at FLUX
+    // 1024^2 that is 4608 keys times the whole query axis per block, against
+    // `keys * head_dim` here.
+    let (k3, score_scale) = match scale_on {
+        ScaleOn::Scores => (k3, scale),
+        ScaleOn::Keys => ((k3 * f64::from(scale))?, 1.0),
+    };
     let attn = if let Some(chunk_size) = chunk_size {
-        math_attention_chunked_flat(&q3, &k3, &v3, scale, chunk_size)?
+        math_attention_chunked_flat(&q3, &k3, &v3, score_scale, chunk_size)?
     } else {
-        let attn_weights = (q3.matmul(&k3.t()?)? * f64::from(scale))?;
+        let scores = q3.matmul(&k3.t()?)?;
+        let attn_weights = apply_score_scale(scores, score_scale)?;
         candle_nn::ops::softmax_last_dim(&attn_weights)?.matmul(&v3)?
     };
     batch_dims.push(attn.dim(D::Minus2)?);
@@ -516,6 +604,19 @@ fn math_attention_chunk_size(q: &Tensor) -> Option<usize> {
     }
 }
 
+/// Multiply the score matrix, unless the factor was already folded into K.
+///
+/// `1.0` is skipped rather than multiplied: an elementwise pass over the full
+/// `Q x K` matrix that provably cannot change a value is exactly the work the
+/// fold exists to remove.
+fn apply_score_scale(scores: Tensor, scale: f32) -> Result<Tensor> {
+    if scale == 1.0 {
+        Ok(scores)
+    } else {
+        scores * f64::from(scale)
+    }
+}
+
 fn math_attention_chunked_flat(
     q3: &Tensor,
     k3: &Tensor,
@@ -530,7 +631,7 @@ fn math_attention_chunked_flat(
     while start < q_len {
         let len = (q_len - start).min(chunk_size);
         let q_chunk = q3.narrow(1, start, len)?;
-        let attn_weights = (q_chunk.matmul(&k_t)? * f64::from(scale))?;
+        let attn_weights = apply_score_scale(q_chunk.matmul(&k_t)?, scale)?;
         let attn = candle_nn::ops::softmax_last_dim(&attn_weights)?.matmul(v3)?;
         chunks.push(attn);
         start += len;
@@ -555,10 +656,27 @@ fn math_attention_chunked_flat(
 /// run, not a misconfiguration. An eligible tensor goes to the config-specific
 /// [`flash_attention_eligible`].
 pub fn flash_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
+    flash_attention_scaled(q, k, v, scale, ScaleOn::Scores)
+}
+
+/// [`flash_attention`] carrying the policy's math-fallback scale placement.
+///
+/// The fallback has to honour `scale_on`, not the historical default: a
+/// `FastStill` family on CPU, on Metal, or in a build without the kernel must
+/// render the same arithmetic as one whose tensors were simply ineligible,
+/// otherwise the same policy would mean two different things depending on the
+/// artifact.
+fn flash_attention_scaled(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f32,
+    scale_on: ScaleOn,
+) -> Result<Tensor> {
     if !flash_is_eligible(q) {
-        return math_attention(q, k, v, scale);
+        return math_attention_impl(q, k, v, scale, math_attention_chunk_size(q), scale_on);
     }
-    flash_attention_eligible(q, k, v, scale)
+    flash_attention_eligible(q, k, v, scale, scale_on)
 }
 
 /// Eligible tensor and the kernel is compiled in: run FlashAttention v2.
@@ -567,7 +685,13 @@ pub fn flash_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result
 /// crate and Mold share the same `Tensor` type without an out-of-band build
 /// cfg.
 #[cfg(feature = "flash-attn")]
-fn flash_attention_eligible(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
+fn flash_attention_eligible(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f32,
+    _scale_on: ScaleOn,
+) -> Result<Tensor> {
     // FLUX QKV are `[B, H, N, D]`. candle-flash-attn wants `[B, N, H, D]`.
     let q_t = to_flash_layout(q)?;
     let k_t = to_flash_layout(k)?;
@@ -598,9 +722,15 @@ fn to_flash_layout(t: &Tensor) -> Result<Tensor> {
 /// Eligible tensor, but this binary omitted the optional kernel: warn once,
 /// then fall through to math.
 #[cfg(not(feature = "flash-attn"))]
-fn flash_attention_eligible(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tensor> {
+fn flash_attention_eligible(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f32,
+    scale_on: ScaleOn,
+) -> Result<Tensor> {
     warn_flash_fallback_once();
-    math_attention(q, k, v, scale)
+    math_attention_impl(q, k, v, scale, math_attention_chunk_size(q), scale_on)
 }
 
 /// Flash-attention 2 requires CUDA tensors in fp16 or bf16, at a head dim the
@@ -759,8 +889,8 @@ mod tests {
     fn test_chunked_math_attention_matches_full_math() {
         let (q, k, v) = rand_qkv((1, 3, 17, 16));
         let scale = 1.0 / (16f32).sqrt();
-        let full = math_attention_impl(&q, &k, &v, scale, None).unwrap();
-        let chunked = math_attention_impl(&q, &k, &v, scale, Some(5)).unwrap();
+        let full = math_attention_impl(&q, &k, &v, scale, None, ScaleOn::Scores).unwrap();
+        let chunked = math_attention_impl(&q, &k, &v, scale, Some(5), ScaleOn::Scores).unwrap();
 
         assert_eq!(chunked.dims(), full.dims());
         assert!(
@@ -1113,13 +1243,14 @@ mod tests {
         );
     }
 
-    /// The default is `Math` in every build, including one compiled with
-    /// `flash-attn` (#736). Compiling the kernel makes `flash` *available*;
-    /// only an explicit `MOLD_ATTN=flash` turns it on. Pinning this without
-    /// a `cfg` guard is the point: a future artifact that ships the kernel
-    /// must not silently change the image every CUDA user gets for a seed.
+    /// The `Image` default is `Math` in every build, including one compiled
+    /// with `flash-attn` (#736). Compiling the kernel makes `flash`
+    /// *available*; only an explicit `MOLD_ATTN=flash` turns it on for an
+    /// `Image` family. Pinning this without a `cfg` guard is the point: a
+    /// future artifact that ships the kernel must not silently change the
+    /// image every CUDA user gets for a seed.
     #[test]
-    fn default_backend_is_math_regardless_of_feature() {
+    fn image_default_is_math_regardless_of_feature() {
         assert_eq!(
             default_backend_for(AttentionPolicy::Image),
             AttentionBackend::Math
@@ -1156,8 +1287,6 @@ mod tests {
             );
         }
         for family in [
-            "flux",
-            "flux2",
             "sdxl",
             "sd15",
             "sd3",
@@ -1238,10 +1367,13 @@ mod tests {
         assert_eq!(parse_backend_env(None), None);
     }
 
-    /// Opting in still works in both builds: the parser returns `Flash`, and
-    /// the dispatcher (not the parser) decides whether the kernel exists.
+    /// An explicit `MOLD_ATTN=flash` still parses in both builds: the parser
+    /// returns `Flash`, and the dispatcher (not the parser) decides whether
+    /// the kernel exists. The variable is no longer the *only* way to reach
+    /// flash — `Video` and `FastStill` default to it — but it is still the
+    /// only way an `Image` family gets there.
     #[test]
-    fn flash_is_opt_in_via_env() {
+    fn an_explicit_flash_request_parses_in_every_build() {
         assert_eq!(
             parse_backend_env(Some("flash")),
             Some(AttentionBackend::Flash)
@@ -1250,5 +1382,131 @@ mod tests {
             parse_backend_env(Some(" Flash ")),
             Some(AttentionBackend::Flash)
         );
+    }
+
+    /// The flux families chose throughput over archived-seed byte stability,
+    /// so they render under `FastStill` — and nothing else moved with them.
+    /// The mapping is what `FrozenEngineConfig` freezes, so a family listed
+    /// here and dispatched under another policy would describe different
+    /// arithmetic from the one that runs.
+    #[test]
+    fn flux_families_take_the_fast_still_policy() {
+        for family in ["flux", "flux2"] {
+            assert_eq!(
+                policy_for_family(family),
+                AttentionPolicy::FastStill,
+                "{family} renders under the fast-still dispatch"
+            );
+        }
+        for family in ["wan", "ltx2", "ltx-2", "ltx-2.3"] {
+            assert_eq!(policy_for_family(family), AttentionPolicy::Video);
+        }
+        for family in [
+            "sd15",
+            "sdxl",
+            "sd3",
+            "qwen-image",
+            "z-image",
+            "ltx-video",
+            "minimax-h3",
+            "hunyuan3d",
+            "wuerstchen",
+            "unknown",
+        ] {
+            assert_eq!(
+                policy_for_family(family),
+                AttentionPolicy::Image,
+                "{family} must keep the image default"
+            );
+        }
+    }
+
+    /// `FastStill` takes flash wherever the kernel is compiled in, exactly
+    /// like `Video`. Without the kernel it must resolve to `Math` rather than
+    /// a `Flash` that falls back per block and warns about a request nobody
+    /// made — the same load-bearing guard the video arm carries.
+    #[test]
+    fn fast_still_default_is_flash_exactly_when_the_kernel_is_compiled() {
+        let expected = if AttentionBackend::flash_compiled() {
+            AttentionBackend::Flash
+        } else {
+            AttentionBackend::Math
+        };
+        assert_eq!(default_backend_for(AttentionPolicy::FastStill), expected);
+        assert_eq!(
+            AttentionBackend::resolve_for_request(None, AttentionPolicy::FastStill),
+            expected
+        );
+        // `MOLD_ATTN` still outranks it in both directions.
+        assert_eq!(
+            AttentionBackend::resolve_for_request(
+                Some(AttentionBackend::Math),
+                AttentionPolicy::FastStill
+            ),
+            AttentionBackend::Math
+        );
+        assert_eq!(
+            AttentionBackend::resolve_for_request(
+                Some(AttentionBackend::Flash),
+                AttentionPolicy::FastStill
+            ),
+            AttentionBackend::Flash
+        );
+    }
+
+    /// `AttentionBackend::resolve()` is the H3 contract's entry point and
+    /// must keep answering the `Image` question, whatever else moves.
+    #[test]
+    fn the_bare_resolve_still_answers_the_image_policy() {
+        assert_eq!(
+            AttentionBackend::resolve(),
+            AttentionBackend::resolve_for(AttentionPolicy::Image)
+        );
+        assert_eq!(
+            AttentionBackend::resolve_effective(),
+            AttentionBackend::resolve_effective_for(AttentionPolicy::Image)
+        );
+    }
+
+    /// Folding `1/sqrt(d)` into K once is arithmetically the same product as
+    /// scaling the `Q.K^T` matrix afterwards, at a fraction of the elementwise
+    /// work (`N*D` against `N*N`). It is not bit-identical, which is why only
+    /// `FastStill` takes it — `Image` and `Video` keep `ScaleOn::Scores` so
+    /// H3, SD3, Qwen and Wan math bytes do not move.
+    #[test]
+    fn scaled_keys_match_scaled_scores() {
+        for shape in [(1, 2, 33, 16), (2, 3, 128, 64)] {
+            let (q, k, v) = rand_qkv(shape);
+            let scale = 1.0 / (shape.3 as f32).sqrt();
+            for chunk in [None, Some(7usize), Some(1024usize)] {
+                let scores =
+                    math_attention_impl(&q, &k, &v, scale, chunk, ScaleOn::Scores).unwrap();
+                let keys = math_attention_impl(&q, &k, &v, scale, chunk, ScaleOn::Keys).unwrap();
+                assert!(
+                    max_abs_diff(&scores, &keys) < 1e-5,
+                    "scale fold changed the result for {shape:?} chunk {chunk:?}"
+                );
+            }
+        }
+    }
+
+    /// Which policies fold the scale is the whole seed-stability carve-out,
+    /// so it is pinned rather than left to the dispatcher.
+    #[test]
+    fn only_the_fast_still_policy_folds_the_scale_into_the_keys() {
+        assert_eq!(scale_on_for(AttentionPolicy::FastStill), ScaleOn::Keys);
+        assert_eq!(scale_on_for(AttentionPolicy::Image), ScaleOn::Scores);
+        assert_eq!(scale_on_for(AttentionPolicy::Video), ScaleOn::Scores);
+    }
+
+    /// The policy-scoped default-scale helper must agree with the explicit
+    /// one, so a call site that re-points to it changes only the policy.
+    #[test]
+    fn attention_default_scale_for_matches_the_explicit_scale() {
+        let (q, k, v) = rand_qkv((1, 2, 24, 16));
+        let scale = 1.0 / 16f32.sqrt();
+        let implicit = attention_default_scale_for(AttentionPolicy::Image, &q, &k, &v).unwrap();
+        let explicit = attention_for(AttentionPolicy::Image, &q, &k, &v, scale).unwrap();
+        assert!(max_abs_diff(&implicit, &explicit) < 1e-6);
     }
 }

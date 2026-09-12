@@ -1741,6 +1741,7 @@ pub async fn run(
         require_local_request_model_activation(&req, &config)?;
         materialize_local_builtin_control(&mut req, &config).await?;
         materialize_local_builtin_camera_controls(&mut req, &config).await?;
+        materialize_local_ltx2_reference_canvas(&mut req);
     } else {
         // Several photographs and true CFG are additive fields an older server
         // would DROP rather than reject, rendering a print with no face in it
@@ -1918,6 +1919,12 @@ pub async fn run(
         }
     }
     let displayed_guidance = guidance_caps.fixed_scale.unwrap_or(effective_guidance);
+    // Report the canvas the REQUEST carries, not the one resolved before the
+    // materializations ran: a forced-local IC-LoRA control render is snapped
+    // onto its reference grid after the request is built, and printing the
+    // pre-snap figure here would contradict both the snap advisory and the
+    // saved print.
+    let (effective_width, effective_height) = (req.width, req.height);
     if is_h3 {
         status!(
             "{} Generating {}x{} ({} sigma points / {} model evaluations, no CFG)",
@@ -2299,12 +2306,34 @@ where
 
         expert: None,
     }];
-    if let Some(legacy) = request.lora.take() {
-        ordered.push(legacy);
-    }
-    ordered.extend(request.loras.take().unwrap_or_default());
+    ordered.extend(request.take_caller_lora_stack());
     request.loras = Some(ordered);
     Ok(())
+}
+
+/// Snap a forced-local IC-LoRA control render onto the canvas its reference
+/// video can be encoded at.
+///
+/// The server does this in `routes::prepare_generation_inner` after the same
+/// two materializations; without a local counterpart `--local` would render a
+/// canvas the remote path refuses to, and fail inside the VAE after paying
+/// for the Gemma encode. Both read the same two authorities:
+/// `mold_inference::ltx2::reference_video_downscale_factor` for the adapters'
+/// declared factor and `mold_core::validation::materialize_ltx2_reference_canvas`
+/// for the grid.
+fn materialize_local_ltx2_reference_canvas(request: &mut GenerateRequest) {
+    let stack = request.caller_lora_stack();
+    if stack.is_empty() {
+        return;
+    }
+    let Ok(factor) = mold_inference::ltx2::reference_video_downscale_factor(&stack) else {
+        return;
+    };
+    if let Some(advisory) =
+        mold_core::validation::materialize_ltx2_reference_canvas(request, factor as u32)
+    {
+        status!("{} {}", theme::icon_info(), advisory);
+    }
 }
 
 /// Download any built-in `camera-control:<id>` adapter the request names.
@@ -2851,6 +2880,7 @@ async fn generate_remote_inner(
                     let mut local_request = req.clone();
                     materialize_local_builtin_control(&mut local_request, config).await?;
                     materialize_local_builtin_camera_controls(&mut local_request, config).await?;
+                    materialize_local_ltx2_reference_canvas(&mut local_request);
                     generate_local(
                         &local_request,
                         config,
@@ -3270,7 +3300,13 @@ async fn generate_local_batch(
                 let mut engine = None;
                 let _ = event_tx.send(LocalOwnerEvent::Ready(ordinal));
                 while let Ok(Some((index, mut request))) = command_rx.recv() {
-                    mold_server::execution_plan::materialize_request(&execution_plan, &mut request);
+                    // A forced-local render seals nothing, so no overlay is
+                    // pending and the plan's resolved stack is written now.
+                    mold_server::execution_plan::materialize_request(
+                        &execution_plan,
+                        &mut request,
+                        false,
+                    );
                     let result = (|| -> Result<GenerateResponse> {
                         #[cfg(feature = "h3")]
                         if is_h3 {
@@ -5556,10 +5592,68 @@ mod tests {
         assert_eq!(download_calls.load(Ordering::Relaxed), 0);
         assert!(request.lora.is_none());
         let loras = request.loras.unwrap();
+        // The control adapter first, then the caller's stack from ONE well.
+        // A present `loras` is what every reader resolves, so the legacy
+        // singular is dropped rather than concatenated behind it: keeping
+        // both is how a single `--lora` — which `mold run` writes into BOTH
+        // wells for an ltx2 model — was recorded and merged twice.
+        assert_eq!(loras.len(), 2);
         assert_eq!(loras[0].path, adapter_path.to_string_lossy());
         assert_eq!(loras[0].scale, 1.0);
-        assert_eq!(loras[1].path, "/loras/legacy.safetensors");
-        assert_eq!(loras[2].path, "/loras/style.safetensors");
+        assert_eq!(loras[1].path, "/loras/style.safetensors");
+    }
+
+    /// `mold run --lora X` on an ltx2 model fills `lora` AND `loras` with the
+    /// same adapter (`run::resolve_effective_loras_for_family`). The control
+    /// fold must still produce exactly two entries.
+    #[tokio::test]
+    async fn local_control_fold_records_one_caller_lora_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            models_dir: temp.path().display().to_string(),
+            ..Default::default()
+        };
+        let adapter = mold_core::ltx2_control::resolve_control_adapter(
+            mold_core::ltx2_control::Ltx2ControlProfile::Ltx2_19bDistilled,
+            "union",
+        )
+        .unwrap();
+        let manifest = mold_core::manifest::find_manifest(adapter.download_model).unwrap();
+        let adapter_path = temp.path().join(mold_core::manifest::storage_path(
+            manifest,
+            &manifest.files[0],
+        ));
+        std::fs::create_dir_all(adapter_path.parent().unwrap()).unwrap();
+        std::fs::write(&adapter_path, b"installed").unwrap();
+        mold_core::download::write_sha256_marker(&adapter_path, "test").unwrap();
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "test",
+            "model": "ltx-2-19b-distilled:fp8",
+            "width": 960,
+            "height": 576,
+            "steps": 8,
+            "guidance": 3.0,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "source_video_path": "/guide.mp4",
+            "pipeline": "ic-lora",
+            "ic_lora_control": "union",
+            "lora": { "path": "/loras/dolly-in.safetensors", "scale": 1.0 },
+            "loras": [{ "path": "/loras/dolly-in.safetensors", "scale": 1.0 }]
+        }))
+        .unwrap();
+
+        materialize_local_builtin_control_with(&mut request, &config, temp.path(), |_| async {
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .await
+        .unwrap();
+
+        assert!(request.lora.is_none());
+        let loras = request.loras.unwrap();
+        assert_eq!(loras.len(), 2, "the caller's adapter is recorded once");
+        assert_eq!(loras[0].path, adapter_path.to_string_lossy());
+        assert_eq!(loras[1].path, "/loras/dolly-in.safetensors");
     }
 
     #[test]

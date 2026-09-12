@@ -249,6 +249,17 @@ export interface KeySchema {
   step?: number;
   /** Changing this requires an engine restart to take effect. */
   needsEngineRestart?: boolean;
+  /**
+   * Changing this requires restarting the whole APP, not just the engine.
+   *
+   * The desktop build runs the engine as a thread inside the Tauri process and
+   * applies engine settings with `set_var` into that same process, while these
+   * values are read through `runtime_env`, which freezes them in a `OnceLock`
+   * on first use — per PROCESS, not per engine start. Restarting the engine
+   * thread therefore cannot change them, and a row that says "RESTART ENGINE"
+   * for one of them is telling the user something untrue.
+   */
+  needsAppRestart?: boolean;
   /** The running server rejects mutation; edit through the CLI while stopped. */
   liveReadOnly?: boolean;
 }
@@ -382,6 +393,17 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
       value: String(days),
       label: retentionLabel(days),
     })),
+  },
+  {
+    key: "gallery.authority_log",
+    section: "library",
+    label: "Faster library bookkeeping",
+    help: "Record each change to the picture index as it happens instead of rewriting the whole index every time a picture is saved — much faster once the library is large. A mold older than 0.29 cannot save into a library kept this way, so only turn it on where every copy of mold sharing this folder is new enough; `mold system gallery-authority` reports the format and can put it back.",
+    editor: "toggle",
+    // `AUTHORITY_LOG_REQUESTED` is a `OnceLock` resolved once per PROCESS, and
+    // the desktop engine is a thread inside the Tauri process, so an engine
+    // restart cannot apply it; only the app restart can.
+    needsAppRestart: true,
   },
   {
     key: "expand.enabled",
@@ -685,18 +707,90 @@ export const ENV_KNOB_SCHEMAS: KeySchema[] = [
   },
   {
     key: "env.MOLD_KEEP_TE_RAM",
+    needsAppRestart: true,
     section: "performance",
     label: "Park text encoders in RAM",
-    help: "Keep text encoders on CPU between requests instead of reloading from disk — FP16/BF16 everywhere, plus Qwen-Image's quantized GGUF encoder. Costs several GB of the machine's RAM per parked encoder. No effect on Metal (unified memory).",
+    help: "Keep text encoders in the machine's RAM between requests instead of re-reading them from disk — BF16/FP16 and quantized GGUF encoders alike. Automatic covers Flux.2 and Z-Image, measuring this machine and parking only when the encoder, the transformer that loads beside it, and a 15%-of-RAM (minimum 8 GB) safety floor all fit, so a 64 GB desktop keeps streaming. Always is the opt-in every other style reads — FLUX and SD3's T5, Wan's encoder, Qwen-Image's — and parks whenever the encoder alone clears that floor. Costs several GB of the machine's RAM per parked encoder. No effect on Metal (unified memory).",
     editor: "select",
     options: [
-      { value: "", label: "Off (default)" },
-      { value: "1", label: "On" },
+      { value: "", label: "Automatic (default)" },
+      { value: "1", label: "Always, when it fits" },
+      { value: "0", label: "Never" },
+    ],
+    needsEngineRestart: true,
+  },
+  {
+    key: "env.MOLD_ATTN",
+    needsAppRestart: true,
+    section: "performance",
+    label: "Attention backend",
+    help: "Automatic runs FlashAttention-2 for video (Wan, LTX-2) and for FLUX.1 and Flux.2 wherever the build compiled the kernel, and the byte-stable math path for every other image family. Choosing one applies it to every family. Flash needs a CUDA build with flash-attn and a half-precision tensor; anything else falls back to math.",
+    editor: "select",
+    options: [
+      { value: "", label: "Automatic, per family (default)" },
+      { value: "flash", label: "FlashAttention-2 everywhere" },
+      { value: "math", label: "Math everywhere (byte-stable)" },
+    ],
+    needsEngineRestart: true,
+  },
+  {
+    key: "env.MOLD_CONV",
+    needsAppRestart: true,
+    section: "performance",
+    label: "Convolution backend",
+    help: "Automatic runs cuDNN for video (Wan, LTX-2) and for FLUX.1 and Flux.2 VAE encode/decode wherever the build compiled it, and im2col for every other image family. Choosing one applies it to every family. The two sum in a different order, so they do not agree bit-for-bit.",
+    editor: "select",
+    options: [
+      { value: "", label: "Automatic, per family (default)" },
+      { value: "cudnn", label: "cuDNN everywhere" },
+      { value: "im2col", label: "im2col everywhere (byte-stable)" },
+    ],
+    needsEngineRestart: true,
+  },
+  {
+    key: "env.MOLD_FLUX_KEEP_TRANSFORMER",
+    needsAppRestart: true,
+    section: "performance",
+    label: "Keep the FLUX transformer on the card",
+    help: "Automatic measures the card before each VAE decode — the resident checkpoint, this render's denoise workspace, the decode workspace and an allocator margin — and keeps the FLUX.1 / Flux.2 transformer resident when all four fit, saving a full reload on the next render. Always keep means the same as automatic: an explicit keep still yields to a card that cannot afford it. Always drop frees the VRAM and reloads every render.",
+    editor: "select",
+    options: [
+      { value: "", label: "Automatic, budgeted (default)" },
+      { value: "1", label: "Keep when it fits (same as automatic)" },
+      { value: "0", label: "Always drop before VAE decode" },
+    ],
+    needsEngineRestart: true,
+  },
+  {
+    key: "env.MOLD_FLUX2_QMATMUL",
+    needsAppRestart: true,
+    section: "performance",
+    label: "Flux.2 quantized fast path",
+    help: "Flux.2 GGUF tiers run their linears through candle's quantized CUDA kernels by default — the same algorithm FLUX.1 has always rendered correctly through. Turn it off to dequantize each weight per forward instead; slower, and only worth trying if a Flux.2 render comes out black or blank.",
+    editor: "select",
+    options: [
+      { value: "", label: "On (default)" },
+      { value: "0", label: "Off — dequantize per forward" },
+    ],
+    needsEngineRestart: true,
+  },
+  {
+    key: "env.MOLD_FLUX2_FP8_CACHE",
+    needsAppRestart: true,
+    section: "performance",
+    label: "Flux.2 FP8 weight widening",
+    help: "Automatic widens a Flux.2 FP8 checkpoint to the working precision once at load when the card has room for it, instead of casting every weight on every forward — two bytes per parameter at rest for a much faster step. Same arithmetic either way, so the picture does not change. Force either arm if you need the VRAM back or the card's free memory cannot be read.",
+    editor: "select",
+    options: [
+      { value: "", label: "Automatic, budgeted (default)" },
+      { value: "1", label: "Widen once at load" },
+      { value: "0", label: "Widen on every forward" },
     ],
     needsEngineRestart: true,
   },
   {
     key: "env.MOLD_VAE_TILED",
+    needsAppRestart: true,
     section: "performance",
     label: "Tiled VAE decode",
     help: "auto retries with tiling on out-of-memory; force always tiles (slower, tiny VRAM).",
@@ -709,7 +803,20 @@ export const ENV_KNOB_SCHEMAS: KeySchema[] = [
     needsEngineRestart: true,
   },
   {
+    key: "env.MOLD_PNG_ENCODING",
+    section: "performance",
+    label: "PNG encoding",
+    help: "How much CPU a saved PNG is worth. fast uses fdeflate's PNG-tuned ultra-fast deflate; balanced is zlib level 6. PNG is lossless either way — this only trades encode time against file size, never a pixel.",
+    editor: "select",
+    options: [
+      { value: "", label: "fast (default)" },
+      { value: "balanced", label: "balanced (smaller files)" },
+    ],
+    needsEngineRestart: true,
+  },
+  {
     key: "env.MOLD_OFFLOAD",
+    needsAppRestart: true,
     section: "performance",
     label: "Block-level offloading",
     help: "Stream FLUX transformer blocks CPU↔GPU one at a time: ~24 GB → 2–4 GB VRAM, 3–5× slower. Auto-enables under pressure.",
@@ -718,6 +825,17 @@ export const ENV_KNOB_SCHEMAS: KeySchema[] = [
       { value: "", label: "auto (default)" },
       { value: "1", label: "force on" },
     ],
+    needsEngineRestart: true,
+  },
+  {
+    key: "env.MOLD_RESERVE_VRAM_MB",
+    needsAppRestart: true,
+    section: "performance",
+    label: "Graphics memory held back",
+    help: "Megabytes of graphics memory every budget decision leaves alone for the driver, the desktop and the maths libraries' own workspaces — what the card reports free is never quite what the next allocation can take. Leave it empty for this machine's default: 400 on Linux, 600 on Windows, 0 on a Mac, where memory is shared with the system and already has its own headroom. 0 holds nothing back; raising it makes mold stream a large style rather than keep it on the card.",
+    editor: "number",
+    min: 0,
+    max: 65536,
     needsEngineRestart: true,
   },
   {

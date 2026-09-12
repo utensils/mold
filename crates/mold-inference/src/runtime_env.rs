@@ -31,6 +31,23 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_EAGER",
     "MOLD_FLUX_DELTA_CACHE",
     "MOLD_FLUX_KEEP_TRANSFORMER",
+    // Selects the Flux.2 GGUF quantized-linear arm on CUDA: candle's MMQ fast
+    // path (the shipped default — the algorithm stable-diffusion.cpp uses, and
+    // the one FLUX.1 has always rendered correctly through) or the per-forward
+    // dequant escape hatch. The arms differ in numerics, transient memory, and
+    // step latency, so a run on one must never share a fingerprint or a
+    // learned-timing bucket with the other.
+    "MOLD_FLUX2_QMATMUL",
+    // The FP8 tiers either widen their weights once at load (two bytes per
+    // parameter at rest) or cast the whole slab on every forward. Residency and
+    // step latency both change, so a cached run must not share a fingerprint or
+    // a learned-timing bucket with one that widened every forward — the
+    // `MOLD_QWEN_FP8_CACHE` rule, for the same reason.
+    "MOLD_FLUX2_FP8_CACHE",
+    // Opt-in, unqualified: routing FP8 layers to the native cuBLASLt FP8 GEMM
+    // quantizes the ACTIVATION, which the widen path never does. Different
+    // numerics and different latency.
+    "MOLD_FLUX2_FP8_GEMM",
     // #1174 follow-up: the reviewed MiniMax H3 Turbo LoRA tier is selected by
     // adapter path plus tier id until manifests own it. Both change which
     // adapter runs, which integrator consumes it, and the step count, so both
@@ -137,6 +154,19 @@ impl FrozenRuntimeEnvironment {
         }
         self
     }
+    /// Build a snapshot from explicit values rather than from the process.
+    ///
+    /// For callers that need to ask what a named configuration RESOLVES to
+    /// without mutating the environment the rest of the process is reading —
+    /// `mold-server`'s fingerprint tests being the case this exists for.
+    /// Names outside [`ENGINE_SHAPING_VARIABLES`] are retained as given;
+    /// classification still happens where a snapshot is consumed.
+    pub fn from_values(values: impl IntoIterator<Item = (String, Option<String>)>) -> Self {
+        Self {
+            values: values.into_iter().collect(),
+        }
+    }
+
     fn capture() -> Self {
         Self {
             values: ENGINE_SHAPING_VARIABLES
@@ -211,6 +241,12 @@ mod tests {
             "MOLD_RESERVE_VRAM_MB",
             "MOLD_WUERSTCHEN_DECODER_GUIDANCE",
             "MOLD_DEVICE",
+            // Selects the FLUX.2 GGUF linear arm; the two differ in numerics,
+            // transient memory and step latency.
+            "MOLD_FLUX2_QMATMUL",
+            // Selects whether FP8 weights are widened once at load or on every
+            // forward; residency and step latency both differ.
+            "MOLD_FLUX2_FP8_CACHE",
         ] {
             assert!(
                 ENGINE_SHAPING_VARIABLES.contains(&required),
@@ -229,6 +265,14 @@ mod tests {
             // identity. It must never join the engine fingerprint.
             "MOLD_H3_CONDITIONER_CACHE",
             "MOLD_LTX2_DEBUG_TIMINGS",
+            // A per-step diagnostic read: it adds a device sync and a
+            // reduction, so it changes wall clock, but it cannot change a
+            // pixel. Wall clock alone is not execution identity.
+            "MOLD_FLUX_DEBUG_NONFINITE",
+            // PNG is lossless under every profile, so the encoding choice
+            // trades wall clock against file size and changes no pixel. Two
+            // renders that disagree on it ARE interchangeable.
+            "MOLD_PNG_ENCODING",
             "MOLD_QWEN_DEBUG",
             "MOLD_SD3_DEBUG",
             "MOLD_STEP_PREVIEW",

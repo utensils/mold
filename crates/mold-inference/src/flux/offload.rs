@@ -55,12 +55,25 @@ fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
 }
 
 fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
-    // Single dispatch point — FlashAttention / SDPA / math is selected at
-    // process start via `MOLD_ATTN` and the `flash-attn` cargo feature.
-    Ok(crate::attention::attention_default_scale(q, k, v)?)
+    // Single dispatch point — FlashAttention / math is selected at process
+    // start via `MOLD_ATTN` and the `flash-attn` cargo feature, defaulting to
+    // flash for FLUX under `AttentionPolicy::FastStill`.
+    Ok(crate::attention::attention_default_scale_for(
+        crate::attention::AttentionPolicy::FastStill,
+        q,
+        k,
+        v,
+    )?)
 }
 
+/// See `flux::quantized_transformer::apply_rope` — same arithmetic, same F32
+/// round trip, same fused fast path.
 fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
+    let output_dtype = x.dtype();
+    let x = &x.to_dtype(DType::F32)?;
+    if let Some(out) = crate::flux_rope::fused_interleaved_rope(x, freq_cis)? {
+        return Ok(out.to_dtype(output_dtype)?);
+    }
     let dims = x.dims();
     let (b_sz, n_head, seq_len, n_embd) = x.dims4()?;
     let x = x.reshape((b_sz, n_head, seq_len, n_embd / 2, 2))?;
@@ -68,7 +81,9 @@ fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
     let x1 = x.narrow(D::Minus1, 1, 1)?;
     let fr0 = freq_cis.get_on_dim(D::Minus1, 0)?;
     let fr1 = freq_cis.get_on_dim(D::Minus1, 1)?;
-    Ok((fr0.broadcast_mul(&x0)? + fr1.broadcast_mul(&x1)?)?.reshape(dims.to_vec())?)
+    Ok((fr0.broadcast_mul(&x0)? + fr1.broadcast_mul(&x1)?)?
+        .reshape(dims.to_vec())?
+        .to_dtype(output_dtype)?)
 }
 
 fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe: &Tensor) -> Result<Tensor> {
@@ -78,9 +93,16 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe: &Tensor) -> Result<Tensor> 
     Ok(x.transpose(1, 2)?.flatten_from(2)?)
 }
 
+/// FLUX's affine-less LayerNorm, built so it reaches candle's fused kernel.
+///
+/// `LayerNorm::forward` takes `ops::layer_norm` only when a bias is present
+/// (`candle-nn/src/layer_norm.rs:116-122`); `new_no_bias` therefore always
+/// falls to the ten-op sum/div/sqrt sequence. An explicit zero bias is the
+/// same affine and one fused launch.
 fn layer_norm(dim: usize, vb: VarBuilder) -> Result<LayerNorm> {
     let ws = Tensor::ones(dim, vb.dtype(), vb.device())?;
-    Ok(LayerNorm::new_no_bias(ws, 1e-6))
+    let bs = Tensor::zeros(dim, vb.dtype(), vb.device())?;
+    Ok(LayerNorm::new(ws, bs, 1e-6))
 }
 
 // ── Device-transfer helpers ──────────────────────────────────────────────────
@@ -112,12 +134,15 @@ fn lora_linear_to_device(
     }
 }
 
+/// Move a `LayerNorm` to `dev`, materializing a zero bias for a bias-less one
+/// so the moved copy reaches the same fused kernel `layer_norm` builds for.
 fn layer_norm_to_device(ln: &LayerNorm, dev: &Device) -> Result<LayerNorm> {
     let w = ln.weight().to_device(dev)?;
-    match ln.bias() {
-        Some(b) => Ok(LayerNorm::new(w, b.to_device(dev)?, 1e-6)),
-        None => Ok(LayerNorm::new_no_bias(w, 1e-6)),
-    }
+    let b = match ln.bias() {
+        Some(b) => b.to_device(dev)?,
+        None => Tensor::zeros(w.shape(), w.dtype(), dev)?,
+    };
+    Ok(LayerNorm::new(w, b, 1e-6))
 }
 
 fn rms_norm_to_device(rn: &RmsNorm, dev: &Device) -> Result<RmsNorm> {
@@ -445,11 +470,19 @@ impl GpuSelfAttention {
         let qkv = self.qkv.forward(xs)?;
         let (b, l, _khd) = qkv.dims3()?;
         let qkv = qkv.reshape((b, l, 3, self.num_heads, ()))?;
-        let q = qkv.i((.., .., 0))?.transpose(1, 2)?;
-        let k = qkv.i((.., .., 1))?.transpose(1, 2)?;
+        // Norm before transpose so candle's fused RMSNorm kernel is reachable
+        // — see `flux::quantized_transformer::SelfAttention::qkv_split`.
+        let q = qkv
+            .i((.., .., 0))?
+            .contiguous()?
+            .apply(&self.query_norm)?
+            .transpose(1, 2)?;
+        let k = qkv
+            .i((.., .., 1))?
+            .contiguous()?
+            .apply(&self.key_norm)?
+            .transpose(1, 2)?;
         let v = qkv.i((.., .., 2))?.transpose(1, 2)?;
-        let q = q.apply(&self.query_norm)?;
-        let k = k.apply(&self.key_norm)?;
         Ok((q, k, v))
     }
 }
@@ -732,12 +765,19 @@ impl GpuSingleBlock {
         let qkv = x_mod.narrow(D::Minus1, 0, 3 * self.h_sz)?;
         let (b, l, _khd) = qkv.dims3()?;
         let qkv = qkv.reshape((b, l, 3, self.num_heads, ()))?;
-        let q = qkv.i((.., .., 0))?.transpose(1, 2)?;
-        let k = qkv.i((.., .., 1))?.transpose(1, 2)?;
+        // Norm before transpose — see `GpuSelfAttention::qkv_split`.
+        let q = qkv
+            .i((.., .., 0))?
+            .contiguous()?
+            .apply(&self.query_norm)?
+            .transpose(1, 2)?;
+        let k = qkv
+            .i((.., .., 1))?
+            .contiguous()?
+            .apply(&self.key_norm)?
+            .transpose(1, 2)?;
         let v = qkv.i((.., .., 2))?.transpose(1, 2)?;
         let mlp = x_mod.narrow(D::Minus1, 3 * self.h_sz, self.mlp_sz)?;
-        let q = q.apply(&self.query_norm)?;
-        let k = k.apply(&self.key_norm)?;
         let attn = attention(&q, &k, &v, pe)?;
         let output_in = Tensor::cat(&[attn, mlp.gelu()?], 2)?;
         let output = self.linear2.forward(&output_in)?;
@@ -1207,6 +1247,8 @@ impl OffloadedFluxTransformer {
         // Positional encoding
         let pe = {
             let ids = Tensor::cat(&[txt_ids, img_ids], 1)?;
+            // F32 positions — see `flux::quantized_transformer`.
+            let ids = ids.to_dtype(DType::F32)?;
             ids.apply(&self.pe_embedder)?
         };
 

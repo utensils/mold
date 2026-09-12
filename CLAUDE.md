@@ -29,6 +29,7 @@ cargo test -p mold-ai-core --lib <filter>    # single test/module; use the PACKA
 cargo test -p mold-ai-server --features mdns --lib mdns   # feature-gated modules (mdns, pulid, h3) never compile under --workspace
 cargo run -p mold-ai-core --bin generate_prompting_guides -- --check   # CI contract
 cargo +1.93 check -p mold-ai --locked --features preview,discord,expand,tui,metrics,webp,mp4,mdns,pulid   # MSRV gate (weekly msrv.yml, not on the merge path)
+cargo check -p mold-ai --features h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight   # the PR-route cuda-typecheck (needs nvcc); a default-feature build type-checks none of the GPU cfg arms
 cargo run -p mold-ai-core --bin generate_generation_profiles -- --check   # CI contract
 bash scripts/tests/ci-routing-contract.sh                                 # CI contract
 bash scripts/tests/candle-single-identity.sh                              # every candle crate on ONE fork rev
@@ -289,6 +290,76 @@ Every `main()` calls `mold_db::config_sync::install_config_post_load_hook()`, wh
 
 `mold config set <key> <val>` routes by key prefix (`expand.*` → DB, `models_dir` → TOML). `mold config where <key>` prints the surface. `mold config list --json` tags each row `[db]` / `[file]` / `[env]`. Multi-profile: `settings` and `model_prefs` are keyed on `(profile, key)`; active profile resolves `MOLD_PROFILE` → `settings.profile.active` → `"default"`.
 
+## Gallery archive authority storage
+
+Storage version 3 (the append-only delta log) is a property of the
+`$MOLD_HOME`, not of the process, so WRITING it is opt-in: `gallery.authority_log`
+(`MOLD_GALLERY_AUTHORITY_LOG`), resolved once in `run_server` before anything
+opens a gallery. READING v3 is unconditional. The switch exists because a mold
+older than 0.29 reads v2 only and refuses to publish against a v3 store — one
+new process starting used to upgrade the store in place and lock every older
+binary out of the home, with the backup rewritten at v3 too so there was
+nothing to roll back to. The upgrade now writes a separate
+`gallery-authority-v3` directory and leaves the v2 store frozen intact;
+`authority_dir` resolves a store by the presence of its MARKER rather than by
+name, which is also what lets it still find and repair a store an earlier build
+upgraded in place. Two writers of different versions on one home keep SEPARATE
+indexes that drift — that is the stated cost of the switch, not a defect, and
+the docs say to enable it only where every binary is new enough. Fresh
+initialization takes the same directory rule as the upgrade
+(`write_fresh_store_v3`, marker last): a home that opts in before it has any
+store must not get v3 bytes under the `-v2` name. `mold system
+gallery-authority status|downgrade` is the operator door — read-only status,
+and an idempotent downgrade that replays the log, rewrites at v2, parks the v3
+directory, verifies by reading back, and refuses on a pending mutation or a
+torn tail.
+
+**A LIVE WRITER refuses it too, and a commit can never land v3 bytes under the
+v2 name.** Those three guards are crash-recovery conditions, and the
+bookkeeping flock the downgrade takes is held by a server only for the length
+of one commit — so taking it BLOCKING meant waiting for the gap between two
+prints and rewriting the store under a running `mold serve`, whose next
+publication then put a delta and a `{"version":3}` marker into the
+just-rewritten `gallery-authority-v2` and locked every older binary out of the
+home (UAT final-2, D9). Every process that opens the authority for WRITING
+(`load_or_initialize_with_authority_log` AND `commit_snapshot` — the
+publication gate's cache can be installed by `load_existing_read_only`, so a
+commit reaches the store with no recovery of its own) holds a SHARED flock on
+`<output_dir>/.mold-gallery-writer.lease` for the life of the
+process; two servers still share a home, a crash releases it, and a writer that
+cannot take one warns and publishes anyway. **The lease is in the GALLERY ROOT,
+never in `.mold-batch-transactions`, and it is REMOVED on a clean stop.** Every
+mold validates the transaction root as an inventory of DIRECTORIES — a regular
+file it does not recognise is "unrecognized non-directory gallery transaction
+entry" during startup recovery — so 42480db8's lease inside it stopped a
+pre-0.29 binary from STARTING, which is the rollback the interlock exists to
+protect, and it survived SIGTERM and outlived `downgrade` (UAT final-2, E2). The
+gallery root is enumerated only for `.mold-batch-attempt-<64 hex>.lock` and for
+media extensions, so a dotfile there is invisible to every build.
+`release_gallery_writer_leases` (the server's shutdown sequence after the drain,
+its hard-exit path, and the CLI's own exit) releases and UNLINKS — upgrading the
+shared lock to exclusive first, so a second server sharing the home keeps its
+file — and `acquire_writer_lease` re-checks the inode after locking so an
+acquirer racing that unlink cannot end up holding a lock on a detached one. A
+lease file NOBODY holds is stale, which is a leftover and not a refusal:
+`downgrade` takes the lock straight through it and removes the file as its LAST
+step, so the home it hands to an older binary is clean, and it removes
+42480db8's transaction-root lease too (as does startup recovery). `downgrade`
+takes the lease EXCLUSIVE with
+`try_lock` AFTER the bookkeeping flock — the order every writer takes them, so
+nothing waits on a lock another holder is queueing for — and refuses naming
+`mold serve` and the recorded pid (the pid is only quoted when it is ALIVE; a
+dead one means the body is another writer's leftover stamp). `status` reports
+live / stale / none and is READ-ONLY — it describes the stale file rather than
+clearing it. The second
+half stands without the lease: `cached_commit_tail` also requires the marker's
+VERSION to be the one this process writes (the generation can agree across a
+store swap), `recover_storage` routes on whether the RESOLVED store is already
+v3 rather than on its checkpoint's version and re-runs the upgrade beside the
+frozen v2 store, its crash-recovery marker writes stamp the version the store
+IS, and `ensure_v3_store_is_addressable` fails the commit outright rather than
+appending v3 bytes to a v2 store.
+
 ## Durable gallery source media
 
 Durable queue uploads do not die with their queue row. Publication first pins
@@ -339,12 +410,14 @@ reuse remains a client download-and-upload relay.
 ## Key design decisions
 
 1. **Crate boundaries are clean** — `mold-cli` doesn't depend on candle; `mold-server` doesn't depend on clap; `mold-discord` only depends on `mold-core`.
-2. **candle over tch/ort** — pure Rust, no libtorch. Application-owned models and public-API extensions live in `mold-ai-candle`; backend changes that cannot be implemented outside Candle live in the `utensils/candle` fork and are removed as upstream accepts them. **Every candle crate — `candle-core`, `candle-nn`, `candle-transformers`, `candle-flash-attn`, `candle-onnx` — is a direct git dependency on ONE fork revision, in every cargo root (workspace, desktop, mobile).** `candle_core::Tensor` and `Error` are nominal types, so a single crate left on crates.io pulls the upstream-named `candle-core` in beside the fork's `candle-core-mold` and every call site handing a tensor across that seam stops compiling — which is exactly how #1393 broke CUDA for four consecutive `main` merges by moving three crates and leaving `mold-candle`'s `candle-flash-attn` behind (#1399). `[patch.crates-io]` cannot express this (a patch must keep the patched package's name, and the fork's are renamed), so the pin is the whole contract and `scripts/tests/candle-single-identity.sh` enforces it on the PR-visible release-contract route — the `--features flash-attn` compile gate is push-only and cannot warn a PR. `cargo tree -d` must never report candle from two sources.
+2. **candle over tch/ort** — pure Rust, no libtorch. Application-owned models and public-API extensions live in `mold-ai-candle`; backend changes that cannot be implemented outside Candle live in the `utensils/candle` fork and are removed as upstream accepts them. **Every candle crate — `candle-core`, `candle-nn`, `candle-transformers`, `candle-flash-attn`, `candle-onnx` — is a direct git dependency on ONE fork revision, in every cargo root (workspace, desktop, mobile).** `candle_core::Tensor` and `Error` are nominal types, so a single crate left on crates.io pulls the upstream-named `candle-core` in beside the fork's `candle-core-mold` and every call site handing a tensor across that seam stops compiling — which is exactly how #1393 broke CUDA for four consecutive `main` merges by moving three crates and leaving `mold-candle`'s `candle-flash-attn` behind (#1399). `[patch.crates-io]` cannot express this (a patch must keep the patched package's name, and the fork's are renamed), so the pin is the whole contract and `scripts/tests/candle-single-identity.sh` enforces it on the PR-visible release-contract route — which is now the ONLY guard, because the `--features flash-attn` compile gate was switched off with the H3 CUDA server job in 48dbb266 and no CI job compiles that feature any more (`.claude/rules/release-ci.md` has the decision). `cargo tree -d` must never report candle from two sources.
 3. **Single binary** — `mold` includes `serve` via `mold-server` library; GPU flags forward `mold-cli` → `mold-server` → `mold-inference`.
 4. **`tokio::sync::Mutex` + `spawn_blocking`** — single-model-at-a-time fits GPU workloads. `AppState.model_cache` is an LRU sized by `MOLD_MAX_CACHED_MODELS` (default 3, accepted range 1–16) with `ModelResidency { Gpu, Parked }` — eviction removes the entry rather than adding a third state; at most one engine is GPU-resident.
 5. **Nix flake (flake-parts + crane)** — CUDA 12.8 on Linux (default sm_89 Ada; `mold-sm86` for RTX 3090/A40, `mold-sm100` for B200/B300, `mold-sm120` for RTX 50-series; `mkMold` for any), Metal on macOS. B200 is server-only and remains simulated, not hardware-qualified. Devshell sets `CPATH`/`LIBRARY_PATH`/`LD_LIBRARY_PATH` for CUDA compilation **and execution** — a devshell binary gets no RUNPATH, so every library the release feature set links (cuDNN included) must also be on `LD_LIBRARY_PATH`; the `devshell-cuda-load-path` check enforces it (#1510).
 6. **Shell completions** — static via `clap_complete` + dynamic via `CompleteEnv` with `ArgValueCandidates` for model names.
 7. **Lifecycle authority follows scheduler ownership** — `PATCH /api/devices/:id` and every client enable/disable control are available only when `/api/capabilities.devices.lifecycle` is true. Legacy, observe, CPU-fallback, and all-disabled maintenance runtimes remain read-only; never persist a live change they cannot enforce.
+8. **`gallery_authority::commit_snapshot`'s fast path is valid only under the bookkeeping flock, at the marker's own generation.** A commit used to re-read, re-verify and re-parse the whole checkpoint (a serde pass plus a SHA-256 over an index that grows with the gallery) and then read it a second time inside `write_checkpoint`. It now trusts a process-local `AuthorityTail` — the generation and the legacy-evidence epochs — and the three on-disk facts that say the tail still describes the checkpoint: a marker with no pending mutation, whose `committed_generation` is BOTH the caller's expectation and the one this process last wrote, and no unresolved WAL. Any of those failing falls back to the full `recover_storage` read, which is also what a cold process, a foreign writer, or a crash-interrupted mutation gets. The snapshot is serialized ONCE and the same bytes become the marker digest, the WAL, the checkpoint and the backup; `serialize_envelope` builds the envelope by hand so the digest covers the bytes that land, pinned against the serde shape by `the_prebuilt_envelope_matches_the_serde_one`. The same-generation BACKUP is still written on every commit (it is the copy `read_checkpoint` falls back to when `current` is unreadable); only the forensic `previous` is periodic, because `recover_storage` refuses any checkpoint whose generation disagrees with the marker and so can never land on it. **STORAGE_VERSION 3 replaces that whole-snapshot write with an append-only `mutation.log` of DELTAS** — three fsyncs a commit, and bytes proportional to what changed rather than to the size of the library (measured 60.5 ms/commit against 4.4 at 10,000 prints). A record is framed, digested over the bytes that land, and taken on replay only while it is contiguous and intact; the first that is not ends the replay and is truncated, because a log is a sequence and a gap makes its tail meaningless. The checkpoint and its backup are refreshed at COMPACTION (256 records, 8 MiB, or startup), which is also the one-time v2 read-and-upgrade. The delta rests on one contract: **a mutation that edits an entry in place must name it in `exact_names`** — adds and removes come from the key sets, but comparing values would mean serializing every entry, which is the cost the log exists to remove. A process writes v3 only after its own startup recovery has succeeded for that root (`v3_writing_enabled`), because a commit that has not resolved the log's tail could bury a tear under valid-looking bytes; until then it writes v2, which every build still reads.
+9. **The RAM sampler must never build a process-refreshing `System`.** `resources::ram_snapshot_from_system` runs on the 1 Hz telemetry tick, on both memory watchdogs, and four times per job; a per-call `System::new_with_specifics(..with_processes(..))` walks all of `/proc`, and `ProcessesToUpdate::Some(&[pid])` still `read_dir`s it on Linux. One process-wide memory-only `System` answers the host figures and `process_rss_bytes()` (`/proc/self/statm` on Linux, per-PID `sysinfo` elsewhere) answers RSS in O(1). `sysinfo_process_rss_bytes` is the oracle the reader is tested against and is deliberately off the hot path — its own `/proc` walk inflates the sample it takes by its own working set.
 
 ## macOS Metal memory policy
 

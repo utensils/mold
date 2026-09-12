@@ -309,8 +309,20 @@ pub(crate) fn model_unschedulable_message(
     ))
 }
 
+/// The ordinals a plan for `model_name` must not be routed to right now.
+///
+/// Two independent holds answer here: the CUDA-OOM cooldown below, and the
+/// model-specific failure hold above. Both are per-model routing facts with
+/// the same consequence for a candidate plan, so every caller that filtered
+/// on one necessarily wanted the other.
 pub(crate) fn failed_ordinals_for_model(model_name: &str) -> Vec<usize> {
-    failed_ordinals_for_model_at(model_name, Instant::now())
+    let mut ordinals = failed_ordinals_for_model_at(model_name, Instant::now());
+    for held in model_specific_hold_ordinals(model_name) {
+        if !ordinals.contains(&held) {
+            ordinals.push(held);
+        }
+    }
+    ordinals
 }
 
 fn failed_ordinals_for_model_at(model_name: &str, now: Instant) -> Vec<usize> {
@@ -336,6 +348,156 @@ fn failed_ordinals_for_model_at(model_name: &str, now: Instant) -> Vec<usize> {
 
 pub(crate) fn clear_model_cuda_oom(model_name: &str) {
     MODEL_CUDA_OOMS.write().unwrap().remove(model_name);
+}
+
+// ---------------------------------------------------------------------------
+// Model-specific failure holds
+// ---------------------------------------------------------------------------
+
+/// The device breaker's shape — three strikes, sixty seconds — applied to the
+/// `(device, model)` pair instead of to the device.
+///
+/// `GpuWorker::record_failure` degrades the whole card after three consecutive
+/// failures, which is right for a card that is wedged or faulting and wrong
+/// for a checkpoint that produces a NaN: on a single-GPU host three bad
+/// `flux2-dev:q8` renders took every OTHER model out of service for a minute
+/// and answered twelve unrelated requests with "no enabled, healthy GPU
+/// device is available". A failure the ENGINE marked as its own
+/// (`mold_inference::MODEL_SPECIFIC_FAILURE_MARKER`) lands here instead: the
+/// pair is held, the device stays `healthy` and `schedulable`, and every other
+/// model keeps rendering on it.
+const MODEL_FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
+/// Consecutive model-specific failures of one model on one device before that
+/// pair is held. Deliberately the device breaker's own count, so the two read
+/// the same to an operator.
+const MODEL_FAILURE_STRIKES: usize = 3;
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ModelDeviceFailures {
+    consecutive: usize,
+    held_until: Option<Instant>,
+}
+
+static MODEL_DEVICE_FAILURES: LazyLock<
+    RwLock<HashMap<String, BTreeMap<usize, ModelDeviceFailures>>>,
+> = LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Record one model-specific failure of `model_name` on `ordinal`.
+///
+/// Returns whether that pair is now held.
+pub(crate) fn record_model_specific_failure(model_name: &str, ordinal: usize) -> bool {
+    record_model_specific_failure_at(model_name, ordinal, Instant::now())
+}
+
+fn record_model_specific_failure_at(model_name: &str, ordinal: usize, now: Instant) -> bool {
+    let mut states = MODEL_DEVICE_FAILURES.write().unwrap();
+    let entry = states
+        .entry(model_name.to_string())
+        .or_default()
+        .entry(ordinal)
+        .or_default();
+    // An expired hold starts the count again, exactly as `is_degraded` clears
+    // the worker's counter when its cooldown lapses.
+    if entry.held_until.is_some_and(|until| now >= until) {
+        *entry = ModelDeviceFailures::default();
+    }
+    entry.consecutive += 1;
+    if entry.consecutive >= MODEL_FAILURE_STRIKES {
+        entry.held_until = Some(now + MODEL_FAILURE_COOLDOWN);
+        tracing::warn!(
+            model = %model_name,
+            gpu = ordinal,
+            failures = entry.consecutive,
+            cooldown_secs = MODEL_FAILURE_COOLDOWN.as_secs(),
+            "model held on this GPU after consecutive model-specific failures; the device stays \
+             schedulable for every other model"
+        );
+        return true;
+    }
+    false
+}
+
+/// A render that succeeded clears this model's strikes on this device.
+pub(crate) fn clear_model_specific_failures(model_name: &str, ordinal: usize) {
+    let mut states = MODEL_DEVICE_FAILURES.write().unwrap();
+    let Some(devices) = states.get_mut(model_name) else {
+        return;
+    };
+    devices.remove(&ordinal);
+    if devices.is_empty() {
+        states.remove(model_name);
+    }
+}
+
+/// The ordinals currently holding `model_name`, expired holds dropped.
+pub(crate) fn model_specific_hold_ordinals(model_name: &str) -> Vec<usize> {
+    model_specific_hold_ordinals_at(model_name, Instant::now())
+}
+
+fn model_specific_hold_ordinals_at(model_name: &str, now: Instant) -> Vec<usize> {
+    let mut states = MODEL_DEVICE_FAILURES.write().unwrap();
+    let Some(devices) = states.get_mut(model_name) else {
+        return Vec::new();
+    };
+    // An expired hold is not a routing fact any more, and its strikes went
+    // with it — the same lazy clear `is_degraded` performs for the worker.
+    devices.retain(|_, entry| entry.held_until.is_none_or(|until| now < until));
+    let held: Vec<usize> = devices
+        .iter()
+        .filter(|(_, entry)| entry.held_until.is_some())
+        .map(|(ordinal, _)| *ordinal)
+        .collect();
+    if devices.is_empty() {
+        states.remove(model_name);
+    }
+    held
+}
+
+/// The refusal for a model every available device is holding.
+///
+/// `pool_ordinals` is the devices this host actually has. While even one of
+/// them is free of the hold the job is simply routed there, which is why this
+/// answers `None` — a held pair is a routing fact first and a refusal only
+/// when there is nowhere left to route.
+pub(crate) fn model_specific_hold_message(
+    model_name: &str,
+    pool_ordinals: &[usize],
+) -> Option<String> {
+    model_specific_hold_message_at(model_name, pool_ordinals, Instant::now())
+}
+
+fn model_specific_hold_message_at(
+    model_name: &str,
+    pool_ordinals: &[usize],
+    now: Instant,
+) -> Option<String> {
+    if pool_ordinals.is_empty() {
+        return None;
+    }
+    let held = model_specific_hold_ordinals_at(model_name, now);
+    if !pool_ordinals.iter().all(|ordinal| held.contains(ordinal)) {
+        return None;
+    }
+    let remaining = {
+        let states = MODEL_DEVICE_FAILURES.read().unwrap();
+        states
+            .get(model_name)?
+            .values()
+            .filter_map(|entry| entry.held_until)
+            .map(|until| until.saturating_duration_since(now).as_secs().max(1))
+            .min()?
+    };
+    Some(format!(
+        "model '{model_name}' is temporarily unschedulable: it failed {MODEL_FAILURE_STRIKES} \
+         times in a row on every available GPU for reasons the engine reported as specific to \
+         this model rather than to the device. Retry in {remaining}s; other models are \
+         unaffected."
+    ))
+}
+
+#[cfg(test)]
+pub(crate) fn clear_model_specific_failures_for_tests() {
+    MODEL_DEVICE_FAILURES.write().unwrap().clear();
 }
 
 #[cfg(test)]
@@ -440,6 +602,10 @@ pub struct GpuJob {
     /// Opaque durable-media authority transferred without hydration by the
     /// scheduler. Only the leased worker may consume it.
     pub deferred_media: Option<crate::queue_media_runtime::DeferredQueueMedia>,
+    /// The server-minted LTX-2 control adapter this job's preparation
+    /// resolved. Restored onto the request with — and only with — the sealed
+    /// media set, in `queue_media_runtime::hydrate_dispatch_media`.
+    pub materialized_control_lora: Option<mold_core::LoraWeight>,
     pub completion_payload: crate::state::SseCompletionPayload,
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
     pub result_tx: tokio::sync::oneshot::Sender<Result<crate::state::GenerationJobResult, String>>,
@@ -1817,6 +1983,18 @@ impl GpuPool {
         self.workers.snapshot()
     }
 
+    /// Every ordinal this pool has a worker for, degraded ones included.
+    ///
+    /// This is the set a per-model hold is measured against: a device holding
+    /// one model is still a healthy device, so it must be counted here even
+    /// while it is not a candidate for THAT model.
+    pub fn worker_ordinals(&self) -> Vec<usize> {
+        self.worker_snapshot()
+            .into_iter()
+            .map(|worker| worker.gpu.ordinal)
+            .collect()
+    }
+
     /// Return the worker bound to `ordinal`, if present in this pool.
     pub fn worker_by_ordinal(&self, ordinal: usize) -> Option<Arc<GpuWorker>> {
         self.worker_snapshot()
@@ -2784,6 +2962,124 @@ mod tests {
     /// `is_degraded()` lazily resets the failure counter when the cooldown
     /// has expired. Without this, a worker that took 3 historical failures
     /// would re-degrade on the very first post-cooldown failure (because
+    /// Three model-specific failures hold the MODEL on that device and leave
+    /// the device — and every other model on it — alone.
+    #[test]
+    fn three_model_specific_failures_hold_only_that_model_on_that_device() {
+        clear_model_specific_failures_for_tests();
+        let now = Instant::now();
+
+        assert!(!record_model_specific_failure_at("hold-scope-a", 0, now));
+        assert!(!record_model_specific_failure_at("hold-scope-a", 0, now));
+        assert!(
+            record_model_specific_failure_at("hold-scope-a", 0, now),
+            "the third consecutive failure holds the pair"
+        );
+
+        assert_eq!(
+            model_specific_hold_ordinals_at("hold-scope-a", now),
+            vec![0]
+        );
+        assert!(
+            model_specific_hold_ordinals_at("hold-scope-b", now).is_empty(),
+            "another model on the same device must stay schedulable"
+        );
+
+        let message = model_specific_hold_message_at("hold-scope-a", &[0], now)
+            .expect("the only device is holding hold-scope-a");
+        assert!(
+            message.contains("model 'hold-scope-a'") && !message.contains("device is available"),
+            "the refusal names the model, not the device: {message}"
+        );
+        assert!(
+            model_specific_hold_message_at("hold-scope-b", &[0], now).is_none(),
+            "an unheld model is not refused"
+        );
+
+        clear_model_specific_failures_for_tests();
+    }
+
+    /// A second GPU is somewhere to route to, not a second refusal.
+    #[test]
+    fn a_model_held_on_one_gpu_still_runs_on_the_other() {
+        clear_model_specific_failures_for_tests();
+        let now = Instant::now();
+        for _ in 0..3 {
+            record_model_specific_failure_at("hold-routing-a", 0, now);
+        }
+
+        assert_eq!(
+            model_specific_hold_ordinals_at("hold-routing-a", now),
+            vec![0]
+        );
+        assert!(
+            model_specific_hold_message_at("hold-routing-a", &[0, 1], now).is_none(),
+            "GPU 1 is free of the hold, so the job routes there instead of being refused"
+        );
+
+        clear_model_specific_failures_for_tests();
+    }
+
+    /// The hold has the device breaker's own sixty-second shape, and it
+    /// clears itself.
+    #[test]
+    fn a_model_hold_clears_when_its_cooldown_expires() {
+        clear_model_specific_failures_for_tests();
+        let failed_at = Instant::now() - MODEL_FAILURE_COOLDOWN - Duration::from_secs(1);
+        for _ in 0..3 {
+            record_model_specific_failure_at("hold-cooldown-a", 0, failed_at);
+        }
+        let now = Instant::now();
+
+        assert!(
+            model_specific_hold_ordinals_at("hold-cooldown-a", now).is_empty(),
+            "an expired hold is no longer a routing fact"
+        );
+        assert!(model_specific_hold_message_at("hold-cooldown-a", &[0], now).is_none());
+        assert!(
+            !record_model_specific_failure_at("hold-cooldown-a", 0, now),
+            "the strike count starts again after the cooldown, exactly as the \
+             worker breaker's does"
+        );
+
+        clear_model_specific_failures_for_tests();
+    }
+
+    /// Consecutive means consecutive: a render that worked clears the count.
+    #[test]
+    fn a_successful_render_clears_the_model_strikes() {
+        clear_model_specific_failures_for_tests();
+        let now = Instant::now();
+        record_model_specific_failure_at("hold-success-a", 0, now);
+        record_model_specific_failure_at("hold-success-a", 0, now);
+        clear_model_specific_failures("hold-success-a", 0);
+
+        assert!(
+            !record_model_specific_failure_at("hold-success-a", 0, now),
+            "one failure after a success is the first strike, not the third"
+        );
+        assert!(model_specific_hold_ordinals_at("hold-success-a", now).is_empty());
+
+        clear_model_specific_failures_for_tests();
+    }
+
+    /// A held pair is a routing fact for every caller that already filtered
+    /// on the OOM cooldown.
+    #[test]
+    fn a_model_hold_joins_the_ordinals_a_plan_must_avoid() {
+        clear_model_specific_failures_for_tests();
+        clear_model_cuda_ooms_for_tests();
+        for _ in 0..3 {
+            record_model_specific_failure("hold-filter-a", 1);
+        }
+
+        assert!(failed_ordinals_for_model("hold-filter-a").contains(&1));
+        assert!(failed_ordinals_for_model("hold-filter-b").is_empty());
+
+        clear_model_specific_failures_for_tests();
+        clear_model_cuda_ooms_for_tests();
+    }
+
     /// `consecutive_failures` was still ≥ 3 from before, even though the
     /// time-based gate had already opened back up).
     #[test]

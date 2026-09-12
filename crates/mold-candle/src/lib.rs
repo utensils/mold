@@ -5,6 +5,7 @@
 //! universal tensor/backend semantics belong upstream.
 
 pub mod comfy_int8;
+pub mod gguf_mmap;
 pub mod ltx_video;
 pub mod metal_reduce;
 pub mod minimax_h3;

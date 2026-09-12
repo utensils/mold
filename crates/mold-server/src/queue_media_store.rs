@@ -583,7 +583,7 @@ pub enum ProjectedImageDimensions {
 }
 
 /// Authenticated, payload-free facts used before a worker/device lease.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct QueueMediaProjection {
     pub source_image: bool,
     pub source_video_inline: bool,
@@ -599,6 +599,23 @@ pub struct QueueMediaProjection {
     pub control_image: bool,
     pub audio_inline: bool,
     pub audio_path: bool,
+    /// The effective adapter stack this render will merge, in merge order.
+    ///
+    /// It rides here because the request the planner is handed is the
+    /// SCRUBBED clone — `scrubbed_clone()` empties `loras` before the job
+    /// reaches the scheduler, since the adapter is an authority field whose
+    /// single custody is the sealed media set — so without it no durable
+    /// `--lora` render was planned with an adapter at all.
+    ///
+    /// It is deliberately NOT part of the sealed projection record: that
+    /// record is fixed-width and versioned, and nothing needs this to survive
+    /// a restart. `durable_queue_feeder` stamps it with
+    /// `DeferredQueueMedia::project_sealed_loras` at the one moment both the
+    /// hydrated stack and the job exist, which is the same moment on a fresh
+    /// admission and on a replay. A projection read from the store alone
+    /// carries none, and every reader falls back to the request's own stack —
+    /// which is exactly today's behaviour.
+    pub loras: Vec<mold_core::LoraWeight>,
 }
 
 impl QueueMediaProjection {
@@ -608,6 +625,10 @@ impl QueueMediaProjection {
 
     pub fn edit_image_count(&self) -> usize {
         self.edit_image_count as usize
+    }
+
+    pub fn has_loras(&self) -> bool {
+        !self.loras.is_empty()
     }
 
     pub fn has_visual_conditioning(&self) -> bool {
@@ -3780,6 +3801,10 @@ fn decode_projection(bytes: &[u8]) -> Result<QueueMediaProjection, QueueMediaErr
     }
     let bit = |index| flags & (1_u32 << index) != 0_u32;
     let projection = QueueMediaProjection {
+        // Not encoded: see `QueueMediaProjection::loras`. The feeder stamps
+        // the stack onto the projection it publishes; a decode alone carries
+        // none and every reader falls back to the request.
+        loras: Vec::new(),
         source_image: bit(0),
         source_video_inline: bit(1),
         source_video_path: bit(2),
@@ -4857,6 +4882,9 @@ mod tests {
             control_image: true,
             audio_inline: true,
             audio_path: true,
+            // Not sealed — the feeder stamps it onto the projection it
+            // publishes, so a stored one always reads empty.
+            loras: Vec::new(),
         }
     }
 

@@ -42,6 +42,28 @@ use crate::image::{build_output_metadata, encode_image};
 use crate::progress::{ProgressCallback, ProgressReporter};
 
 // ---------------------------------------------------------------------------
+// Prompt conditioning cache
+// ---------------------------------------------------------------------------
+
+/// The epoch of the FLUX.2 conditioning CONTRACT, folded into the prompt cache
+/// key.
+///
+/// Bump it whenever the shape or the values of a cached conditioning tensor
+/// stop being interchangeable with the previous build's. Epoch 2 is the
+/// padding fix: a [klein] embedding is now 512 rows wide whatever the prompt
+/// says, so a tensor cached under epoch 1 is a different tensor entirely, not
+/// a smaller one. The cache is an in-process LRU and cannot outlive the binary
+/// that filled it, so this is documentation of the contract rather than a
+/// migration — but it is the key's job to say so, and a future on-disk cache
+/// inherits the guarantee for free.
+const FLUX2_CONDITIONING_EPOCH: u32 = 2;
+
+/// The prompt cache key for one FLUX.2 conditioning tensor.
+fn flux2_prompt_cache_key(prompt: &str) -> String {
+    format!("v{FLUX2_CONDITIONING_EPOCH}:{}", prompt_text_key(prompt))
+}
+
+// ---------------------------------------------------------------------------
 // Loaded state
 // ---------------------------------------------------------------------------
 
@@ -64,6 +86,58 @@ struct LoadedFlux2 {
 // Engine
 // ---------------------------------------------------------------------------
 
+/// How a guided FLUX.2 [klein] base render issues its two predictions.
+///
+/// Resolved by the caller, which is the only place that knows the config, the
+/// checkpoint's size, the card and both prompts' token counts; the engine
+/// obeys the answer rather than re-deriving it, so the progress line and the
+/// render cannot disagree. Without a readable VRAM total — CPU, Metal, a build
+/// without NVML — the answer is the historical two forwards.
+fn resolve_cfg_batching(
+    flux2_cfg: &super::transformer::Flux2Config,
+    positive_txt: &candle_core::Tensor,
+    negative_txt: &candle_core::Tensor,
+    img_tokens: usize,
+    transformer_bytes: u64,
+    dtype: candle_core::DType,
+    device: &candle_core::Device,
+) -> super::transformer::Flux2CfgBatching {
+    use super::transformer::Flux2CfgBatching;
+    let ordinal = match device.location() {
+        candle_core::DeviceLocation::Cuda { gpu_id } => Some(gpu_id),
+        _ => None,
+    };
+    let Some(total) = ordinal.and_then(crate::device::total_vram_bytes) else {
+        return Flux2CfgBatching::Sequential;
+    };
+    let positive_tokens = positive_txt.dim(1).unwrap_or(0);
+    let negative_tokens = negative_txt.dim(1).unwrap_or(usize::MAX);
+    let head_dim = flux2_cfg
+        .hidden_size
+        .checked_div(flux2_cfg.num_heads)
+        .unwrap_or(0);
+    let backend = crate::attention::effective_backend_under(
+        crate::attention::AttentionPolicy::FastStill,
+        device,
+        dtype,
+        head_dim,
+    );
+    let activation = super::transformer::flux2_activation_bytes_for(
+        flux2_cfg,
+        positive_tokens + img_tokens,
+        2,
+        dtype,
+        backend,
+    );
+    super::transformer::flux2_cfg_batching_for(
+        positive_tokens,
+        negative_tokens,
+        transformer_bytes,
+        activation,
+        total,
+    )
+}
+
 /// Flux.2 Klein inference engine (4B and 9B variants) backed by candle.
 pub struct Flux2Engine {
     base: EngineBase<LoadedFlux2>,
@@ -85,6 +159,207 @@ pub struct Flux2Engine {
     /// to wrap the transformer's `VarBuilder` with a `Flux2LoraBackend`.
     pending_loras: Vec<LoraWeight>,
     shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
+    /// FLUX.2 [dev]'s Mistral3 conditioner, outliving the request that built
+    /// it.
+    ///
+    /// The shell itself is cheap — paths, a tokenizer, the resolved key
+    /// namespace — and the encoder holds NO device weights between requests
+    /// either way, because `encode` builds and drops one decoder layer at a
+    /// time. What this slot exists for is the HOST park: when
+    /// `decide_text_encoder_residency` says the machine can afford it, the
+    /// prefix stays in RAM and the next encode is a host-to-device copy per
+    /// layer instead of a page fault, a dtype conversion and a copy.
+    dev_text_encoder: Option<encoders::mistral3::Mistral3Encoder>,
+    /// A transformer the SEQUENTIAL generate path kept on the card, when the
+    /// residency budget allowed it.
+    ///
+    /// The sequential path exists because some phase of the render cannot
+    /// co-reside with the transformer — the VAE encode of a source image, the
+    /// 35 GB Mistral3 prefix, a LoRA merge. None of those is a reason to give
+    /// the weights back to the DISK: dropping a 33 GB Q8 dev transformer and
+    /// re-reading it measured 34 s per render on an idle 46 GB card. The slot
+    /// lives on the engine rather than inside `base.loaded` because the
+    /// sequential path deliberately never populates that — it is the state
+    /// that says "nothing is eagerly resident" — and because the engine is
+    /// what the model cache owns, so `unload()` is what releases this.
+    retained_transformer: Option<RetainedFlux2Transformer>,
+    /// What the transformer checkpoint is, for the residency arithmetic —
+    /// resolved once and memoized, because it costs a `stat` per shard, a
+    /// format probe and a safetensors header parse, and the residency
+    /// question is asked on every render.
+    xformer_residency_facts: OnceLock<XformerResidencyFacts>,
+}
+
+/// The checkpoint-side inputs to [`crate::device::transformer_resident_bytes_for`].
+#[derive(Clone, Copy)]
+struct XformerResidencyFacts {
+    /// GGUF, or the NVFP4 streaming tier: weights that keep their stored
+    /// width on the card, for which the file length IS the resident figure.
+    is_quantized: bool,
+    file_bytes: u64,
+    /// `None` when the header could not be read, which falls the decision
+    /// back to the file length rather than to a guess.
+    dense_parameter_count: Option<u64>,
+}
+
+/// A GPU-resident FLUX.2 transformer kept between sequential renders, with
+/// everything that has to match before it may be reused.
+///
+/// Reuse is refused on ANY mismatch rather than repaired. A transformer is
+/// the render, so serving one request's weights to another's settings is the
+/// one failure mode that produces a plausible wrong picture instead of an
+/// error — the lesson `QwenImageEngine::active_lora_fingerprint` records.
+pub(crate) struct RetainedFlux2Transformer {
+    transformer: super::transformer::Flux2TransformerWrapper,
+    /// Device bytes these weights occupy.
+    ///
+    /// Carried on the slot rather than re-derived, because the cache asks for
+    /// it through `&self` long after the paths that knew it are out of scope —
+    /// and because the figure must be the one the residency budget was
+    /// decided against, not a fresh `stat` of a file that may have moved.
+    device_bytes: u64,
+    /// The GPU this was built on. A multi-GPU host leases whichever device is
+    /// free, and candle tensors are bound to their ordinal.
+    ordinal: usize,
+    /// The working dtype the linears were materialized at.
+    dtype: DType,
+    /// `(path hash, scale bits)` per adapter, in request order — the FLUX.1
+    /// `LoraFingerprint` keying, order-sensitive because the merge is.
+    lora_fingerprint: Vec<(u64, u64)>,
+    /// The resolved architecture. An engine resolves its config once, so this
+    /// cannot normally move; it is here so that a checkpoint swapped under a
+    /// live engine cannot be rendered with the previous one's geometry.
+    config_hash: u64,
+}
+
+impl RetainedFlux2Transformer {
+    fn matches(
+        &self,
+        ordinal: usize,
+        dtype: DType,
+        loras: &[(u64, u64)],
+        config_hash: u64,
+    ) -> bool {
+        self.ordinal == ordinal
+            && self.dtype == dtype
+            && self.config_hash == config_hash
+            && self.lora_fingerprint == loras
+    }
+}
+
+/// `(path hash, scale bits)` per adapter, in request order.
+///
+/// Scales are compared by BITS, not by value: two `f64`s that differ in the
+/// last bit merge different weights, and `to_bits` is also what the FLUX.1
+/// fingerprint compares.
+fn flux2_lora_fingerprint(loras: &[LoraWeight]) -> Vec<(u64, u64)> {
+    loras
+        .iter()
+        .map(|weight| {
+            (
+                super::lora::lora_path_hash(&weight.path),
+                weight.scale.to_bits(),
+            )
+        })
+        .collect()
+}
+
+/// Resolve a FLUX.2 architecture from the checkpoint, then from its name.
+///
+/// A free function rather than a method because the SERVER needs the same
+/// answer: `flux2_fp8_checkpoint_bytes` is derived from this config, and the
+/// widen gate compares three copies of it against free VRAM. When the planner
+/// sized that from the FILE instead, a Comfy-Org `fp8mixed` checkpoint — whose
+/// file is materially larger than its parameter count, because its attention
+/// stays BF16 — made the server say `PerForward` and charge nothing where the
+/// engine said `AtLoad` and widened. Two gates reading two different inputs
+/// cannot agree by construction.
+///
+/// The header probe is a few KiB off the front of a safetensors file, not a
+/// read of the checkpoint, so it is safe on the coordinator.
+pub fn resolve_flux2_config(
+    transformer: &std::path::Path,
+    model_name: &str,
+) -> Option<Flux2Config> {
+    let is_safetensors = transformer
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"));
+    if is_safetensors {
+        match super::single_file::detect_hidden_size(transformer) {
+            Ok(Some(6144)) => return Some(Flux2Config::dev()),
+            Ok(Some(4096)) => return Some(Flux2Config::klein_9b()),
+            Ok(Some(3072)) => return Some(Flux2Config::klein()),
+            // Anything else: unknown variant, defer to the name heuristic.
+            _ => {}
+        }
+    }
+    let is_gguf = transformer
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"));
+    let name = model_name.to_lowercase();
+    if name.contains("flux2-dev") || name.contains("flux.2-dev") {
+        Some(Flux2Config::dev())
+    } else if name.contains("9b") {
+        Some(Flux2Config::klein_9b())
+    } else if name.contains("klein") || is_gguf {
+        // Opaque catalog IDs are common for Klein GGUF checkpoints. GGUF
+        // metadata is not available through the safetensors header probe, so
+        // retain the established Klein-4B default for this format.
+        Some(Flux2Config::klein())
+    } else {
+        None
+    }
+}
+
+/// Every file the transformer is stored in, sharded or not.
+fn xformer_component_files(paths: &mold_core::ModelPaths) -> &[std::path::PathBuf] {
+    if paths.transformer_shards.is_empty() {
+        std::slice::from_ref(&paths.transformer)
+    } else {
+        paths.transformer_shards.as_slice()
+    }
+}
+
+/// On-disk bytes of the transformer, sharded or not.
+///
+/// This is what a PRE-load gate spends — the bytes that have to be read, and
+/// what the FP8 widen policy's own three-copy arithmetic is denominated in.
+/// It is NOT the resident figure: see [`xformer_resident_bytes`].
+fn xformer_component_bytes(paths: &mold_core::ModelPaths) -> u64 {
+    xformer_component_files(paths)
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
+        .sum()
+}
+
+/// Total elements across every shard of a dense FLUX.2 transformer.
+///
+/// `None` when the header could not be read — see
+/// [`crate::device::transformer_resident_bytes_for`], which then falls back to
+/// the file length rather than guessing.
+fn dense_parameter_count(paths: &mold_core::ModelPaths) -> Option<u64> {
+    crate::device::safetensors_parameter_count(xformer_component_files(paths))
+        .inspect_err(|error| {
+            tracing::warn!(
+                %error,
+                "could not read the Flux.2 transformer's parameter count; the residency budget \
+                 falls back to the checkpoint's file length"
+            );
+        })
+        .ok()
+}
+
+/// A hash of the resolved architecture, for the retained slot's guard.
+fn flux2_config_hash(cfg: &Flux2Config) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // `Flux2Config` is plain data with no `Hash`, and adding one would put a
+    // derive on a public type for a private guard. Its `Debug` form names
+    // every field, which is exactly the property this needs.
+    format!("{cfg:?}").hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Resolve the effective LoRA list for a request. Mirrors the FLUX helper of
@@ -126,17 +401,112 @@ enum Flux2OffloadDecision {
     Unsupported(&'static str),
 }
 
+/// Whether this FLUX.2 transformer is a single-file checkpoint the streamed
+/// loader cannot read.
+///
+/// THE predicate, not a copy of one. `is_bfl_native_single_file` and the
+/// planner's `flux2_block_offload_unsupported_reason` both call it, because a
+/// server-side reimplementation is exactly what let `flux2-dev:fp8` be planned
+/// as streamed and then loaded whole: the installed Comfy-Org fp8 checkpoint is
+/// `BflNativeRoot`, the engine's own test accepts that variant alongside
+/// `BflNative` and `Nvfp4`, and the copy matched only `BflNative`. The plan said
+/// stream, the loader refused, and the refusal arrived after a 100 s lease
+/// instead of at submit.
+pub fn flux2_transformer_is_single_file(
+    transformer: &std::path::Path,
+    transformer_shards: &[std::path::PathBuf],
+) -> bool {
+    if !transformer_shards.is_empty() {
+        return false;
+    }
+    let is_safetensors = transformer
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"));
+    if !is_safetensors {
+        return false;
+    }
+    matches!(
+        super::single_file::detect_format(transformer),
+        Ok(super::single_file::Flux2SingleFileFormat::BflNative)
+            | Ok(super::single_file::Flux2SingleFileFormat::BflNativeRoot)
+            | Ok(super::single_file::Flux2SingleFileFormat::Nvfp4)
+    )
+}
+
+/// Why this FLUX.2 checkpoint cannot stream its blocks from host RAM, or
+/// `None` when it can.
+///
+/// The SAME gates `flux2_offload_decision` applies at load, exported so the
+/// planner refuses with the engine's own reason instead of a second copy of
+/// the predicate. #1707's sibling defect: the 2026-09-11 audit's 24 GB
+/// simulation refused `flux2-dev:q8` at the LOADER with "memory pressure
+/// changed after scheduler admission" on a card nothing else was using — the
+/// scheduler had admitted a plan the loader could not honour, and nothing in
+/// the refusal said that this tier has no streamed path at all.
+pub fn flux2_block_offload_unsupported_reason(
+    transformer: &std::path::Path,
+    transformer_shards: &[std::path::PathBuf],
+    has_lora: bool,
+) -> Option<&'static str> {
+    let lower = transformer.to_string_lossy().to_lowercase();
+    let is_gguf = lower.ends_with(".gguf");
+    let is_nvfp4 = lower.contains("nvfp4");
+    if is_nvfp4 {
+        return Some(
+            "Flux.2 NVFP4 transformers are already resident in their packed form and \
+             have no block-streaming path",
+        );
+    }
+    // The engine's own predicate, on the same file, so the planner can never
+    // promise a streamed load the loader would turn into a resident one.
+    let is_single_file =
+        !is_gguf && flux2_transformer_is_single_file(transformer, transformer_shards);
+    match flux2_offload_decision_for(true, is_gguf, is_nvfp4, has_lora, is_single_file) {
+        Flux2OffloadDecision::Unsupported(reason) => Some(reason),
+        Flux2OffloadDecision::Disabled | Flux2OffloadDecision::Selected => None,
+    }
+}
+
 fn flux2_offload_decision(
     forced_offload: bool,
     is_gguf: bool,
     is_nvfp4: bool,
     has_lora: bool,
 ) -> Flux2OffloadDecision {
+    flux2_offload_decision_for(forced_offload, is_gguf, is_nvfp4, has_lora, false)
+}
+
+/// The whole decision, including the layout the streamed loader needs.
+///
+/// `is_bfl_native_single_file` is load-bearing and was missing: `load_transformer`
+/// dispatches GGUF, then BFL-native single file, then everything else — and ONLY
+/// the last arm reads `block_offload_enabled()`. A single-file fp8 [dev]
+/// checkpoint therefore loaded WHOLE while the plan said `StreamedBlocks`, so
+/// admission reserved a ~8 GB streamed working set and the engine put 35 GB on
+/// the card. On the 46 GB host of the 2026-09-12 24 GB simulation that merely
+/// hid the divergence; on a real 24 GB card it is the OOM admission exists to
+/// prevent. The layout cannot stream, so it is refused HERE, where the server's
+/// `flux2_block_offload_unsupported_reason` reads the same answer and plans a
+/// refusal instead of a promise.
+fn flux2_offload_decision_for(
+    forced_offload: bool,
+    is_gguf: bool,
+    is_nvfp4: bool,
+    has_lora: bool,
+    is_bfl_native_single_file: bool,
+) -> Flux2OffloadDecision {
     if !forced_offload {
         return Flux2OffloadDecision::Disabled;
     }
     if is_nvfp4 {
         return Flux2OffloadDecision::Disabled;
+    }
+    if is_bfl_native_single_file {
+        return Flux2OffloadDecision::Unsupported(
+            "Flux.2 block-level offload streams sharded diffusers weights; a BFL-native \
+             single-file checkpoint is loaded whole and cannot be streamed",
+        );
     }
     if is_gguf {
         return Flux2OffloadDecision::Unsupported(
@@ -153,9 +523,69 @@ fn flux2_offload_decision(
     Flux2OffloadDecision::Selected
 }
 
+/// The activation dtype a GGUF Flux.2 transformer is built and run at.
+///
+/// The GGUF path used to pin F32 on the premise that candle's quantized
+/// matmul is f32-only. It is not — `fast_mmq::try_fwd` takes BF16/F16/F32 and
+/// returns what it was fed (`candle-core/src/quantized/fast_mmq.rs:218-221`,
+/// `:349-358`) — but the permission is still narrow, and
+/// `crate::quantized_linear::gguf_activation_dtype` is the one place every
+/// GGUF family asks. `MOLD_WAN_FORCE_DMMV=1` withdraws it, because the
+/// fallback it selects reads activations as f32.
+fn gguf_activation_dtype(device: &Device, requested: DType) -> DType {
+    crate::quantized_linear::gguf_activation_dtype(
+        crate::quantized_linear::LinearDevice::of(device),
+        requested,
+        crate::quantized_dmmv::force_dmmv_enabled(),
+    )
+}
+
 fn validate_dev_lora_runtime(config: &Flux2Config, has_lora: bool) -> Result<()> {
     if config.hidden_size == 6144 && has_lora {
         bail!("FLUX.2 [dev] LoRA loading is not implemented")
+    }
+    Ok(())
+}
+
+/// The label a refusal quotes back for an adapter path — its file name, which
+/// is what the user typed and what a stack of adapters is told apart by.
+fn lora_label(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+}
+
+/// Refuse an adapter trained for a different FLUX.2 tier BEFORE the
+/// transformer loads.
+///
+/// This runs beside `validate_dev_lora_runtime` for the same reason that one
+/// is here: server admission asks the identical question through
+/// `mold_core::flux2_lora`, but it may only know an opaque catalog ID, while
+/// by this point the checkpoint's own header has resolved the config. The
+/// engine is the last authority, and it is the one that must not reach the
+/// merge — a mismatch used to surface as `shape mismatch in add, lhs: [3072,
+/// 3072], rhs: [4096, 4096]` after the whole GGUF checkpoint had been read and
+/// dequantised.
+///
+/// The adapter's header is read here and not at `load_lora_adapters`, which is
+/// further in: `load_transformer` is the one place that holds both the
+/// resolved `Flux2Config` and the pending stack, and it runs before a single
+/// transformer byte is touched on either the GGUF or the BF16 branch.
+fn validate_lora_tier_runtime(config: &Flux2Config, loras: &[LoraWeight]) -> Result<()> {
+    for lora in loras {
+        // A `camera-control:` entry is an alias the runtime materializes, not
+        // a file on disk; the tier question does not apply to it.
+        if lora.path.starts_with("camera-control:") {
+            continue;
+        }
+        if let Some(refusal) = mold_core::flux2_lora::flux2_lora_tier_mismatch_for_file(
+            std::path::Path::new(&lora.path),
+            lora_label(&lora.path),
+            config.hidden_size,
+        ) {
+            bail!("{refusal}");
+        }
     }
     Ok(())
 }
@@ -180,6 +610,9 @@ impl Flux2Engine {
             pending_placement: None,
             pending_loras: Vec::new(),
             shared_pool,
+            dev_text_encoder: None,
+            retained_transformer: None,
+            xformer_residency_facts: OnceLock::new(),
         }
     }
 
@@ -242,6 +675,9 @@ impl Flux2Engine {
             pending_placement: None,
             pending_loras: Vec::new(),
             shared_pool,
+            dev_text_encoder: None,
+            retained_transformer: None,
+            xformer_residency_facts: OnceLock::new(),
         })
     }
 
@@ -257,49 +693,15 @@ impl Flux2Engine {
         if let Some(config) = self.resolved_config.get() {
             return Ok(config.clone());
         }
-        if let Some(cfg) = self.detect_config_from_checkpoint() {
-            let _ = self.resolved_config.set(cfg.clone());
-            return Ok(cfg);
-        }
-        let name = self.base.model_name.to_lowercase();
-        let config = if name.contains("flux2-dev") || name.contains("flux.2-dev") {
-            Flux2Config::dev()
-        } else if name.contains("9b") {
-            Flux2Config::klein_9b()
-        } else if name.contains("klein") || self.is_gguf_transformer() {
-            // Opaque catalog IDs are common for Klein GGUF checkpoints. GGUF
-            // metadata is not available through the safetensors header probe,
-            // so retain the established Klein-4B default for this format.
-            Flux2Config::klein()
-        } else {
-            return Err(anyhow::anyhow!(
-                "unsupported FLUX.2 architecture for model '{}': checkpoint metadata did not identify a known 3072, 4096, or 6144-wide transformer",
-                self.base.model_name
-            ));
-        };
+        let config = resolve_flux2_config(&self.base.paths.transformer, &self.base.model_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unsupported FLUX.2 architecture for model '{}': checkpoint metadata did not identify a known 3072, 4096, or 6144-wide transformer",
+                    self.base.model_name
+                )
+            })?;
         let _ = self.resolved_config.set(config.clone());
         Ok(config)
-    }
-
-    /// Header-peek the transformer file (if it's a single `.safetensors`)
-    /// and pick the config matching its `hidden_size`. Returns `None` for
-    /// sharded loads or when no `img_in.weight` marker is present.
-    fn detect_config_from_checkpoint(&self) -> Option<Flux2Config> {
-        let path = &self.base.paths.transformer;
-        let is_safetensors = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"));
-        if !is_safetensors {
-            return None;
-        }
-        match super::single_file::detect_hidden_size(path) {
-            Ok(Some(6144)) => Some(Flux2Config::dev()),
-            Ok(Some(4096)) => Some(Flux2Config::klein_9b()),
-            Ok(Some(3072)) => Some(Flux2Config::klein()),
-            // Anything else: unknown variant, defer to name heuristic.
-            _ => None,
-        }
     }
 
     /// Whether this is a Klein-9B model (uses Qwen3-8B text encoder).
@@ -338,6 +740,23 @@ impl Flux2Engine {
     }
 
     /// The negative prompt this render's unconditional branch encodes, or
+    /// The transformer checkpoint's size on disk, across shards.
+    ///
+    /// Stands in for its resident size because it is measured per tier: a Q8
+    /// GGUF is charged its quantized bytes, not what the same parameters would
+    /// cost in the working dtype.
+    fn transformer_file_bytes(&self) -> u64 {
+        let paths = if self.base.paths.transformer_shards.is_empty() {
+            std::slice::from_ref(&self.base.paths.transformer)
+        } else {
+            self.base.paths.transformer_shards.as_slice()
+        };
+        paths
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
+            .sum()
+    }
+
     /// `None` when the render runs one forward per step.
     ///
     /// `diffusers`' `pipeline_flux2_klein.py:593` is the condition —
@@ -379,7 +798,12 @@ impl Flux2Engine {
     ) -> Result<Option<Vec<Tensor>>> {
         let mut hits = Vec::with_capacity(prompts.len());
         for prompt in prompts {
-            match restore_cached_tensor(prompt_cache, &prompt_text_key(prompt), device, dtype)? {
+            match restore_cached_tensor(
+                prompt_cache,
+                &flux2_prompt_cache_key(prompt),
+                device,
+                dtype,
+            )? {
                 Some(tensor) => hits.push(tensor),
                 None => return Ok(None),
             }
@@ -461,6 +885,14 @@ impl Flux2Engine {
     }
 
     fn uses_sequential_generate_path(&self, req: &GenerateRequest) -> bool {
+        // `is_dev()` is here for the ENCODER PHASE, not for the transformer's
+        // size. FLUX.2 [dev] conditions on a streamed Mistral3 whose prefix is
+        // ~35 GB if it were resident at once, and the eager path holds the
+        // transformer across prompt encoding — the two do not co-reside on any
+        // card mold ships against. The transformer itself is a residency
+        // question now (`retained_transformer`) and the sequential path keeps
+        // it across renders when the budget allows, so taking this path no
+        // longer implies a reload.
         self.is_dev()
             || self.base.load_strategy == LoadStrategy::Sequential
             || self.offload
@@ -568,6 +1000,7 @@ impl Flux2Engine {
         // opaque catalog ID, while the checkpoint header still identifies a
         // 6144-wide Dev transformer.
         validate_dev_lora_runtime(cfg, has_lora)?;
+        validate_lora_tier_runtime(cfg, &self.pending_loras)?;
         if self.is_gguf_transformer() {
             if has_lora {
                 // Dequant→merge→requant on every LoRA-affected GGUF tensor.
@@ -593,7 +1026,10 @@ impl Flux2Engine {
                 return Ok((
                     Flux2TransformerWrapper::Quantized(
                         super::quantized_transformer::QuantizedFlux2Transformer::new(
-                            cfg, gguf_vb, device,
+                            cfg,
+                            gguf_vb,
+                            device,
+                            gguf_activation_dtype(device, gpu_dtype),
                         )?,
                     ),
                     "Loading Flux.2 transformer (GPU, GGUF + LoRA)",
@@ -601,20 +1037,38 @@ impl Flux2Engine {
             }
             // Weights stay quantized in VRAM via QMatMul — no dequantization at load
             // time. A Q4 Klein-9B uses ~6GB VRAM instead of ~18GB with full dequant.
-            let gguf_vb = mold_candle::quantized::VarBuilder::from_gguf(
+            let gguf_vb = crate::weight_loader::load_gguf_var_builder(
                 &self.base.paths.transformer,
                 device,
+                "Flux.2 transformer (GGUF)",
+                &self.base.progress,
             )?;
             Ok((
                 Flux2TransformerWrapper::Quantized(
                     super::quantized_transformer::QuantizedFlux2Transformer::new(
-                        cfg, gguf_vb, device,
+                        cfg,
+                        gguf_vb,
+                        device,
+                        gguf_activation_dtype(device, gpu_dtype),
                     )?,
                 ),
                 "Loading Flux.2 transformer (GPU, GGUF)",
             ))
         } else if self.is_bfl_native_single_file() {
             let is_nvfp4 = self.is_nvfp4_single_file();
+            // A plan that says "stream" and a loader that loads whole is an
+            // admitted peak the render then exceeds. Fail loudly instead: the
+            // server resolves the same refusal through
+            // `flux2_block_offload_unsupported_reason` and never plans one.
+            if let Flux2OffloadDecision::Unsupported(reason) = flux2_offload_decision_for(
+                self.block_offload_enabled(),
+                false,
+                is_nvfp4,
+                has_lora,
+                true,
+            ) {
+                anyhow::bail!("{reason}");
+            }
             // Civitai / ComfyUI single-file checkpoints carry BFL-native
             // tensor names (`model.diffusion_model.*`); the diffusers
             // `Flux2Transformer::new` consumer is wrapped over a
@@ -830,22 +1284,53 @@ impl Flux2Engine {
     /// non-safetensors path skip this detection. Header-peeks the file
     /// once per load — a few KB read.
     fn is_bfl_native_single_file(&self) -> bool {
-        if !self.base.paths.transformer_shards.is_empty() {
-            return false;
-        }
-        let path = &self.base.paths.transformer;
-        let is_safetensors = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"));
-        if !is_safetensors {
-            return false;
-        }
-        matches!(
-            super::single_file::detect_format(path),
-            Ok(super::single_file::Flux2SingleFileFormat::BflNative)
-                | Ok(super::single_file::Flux2SingleFileFormat::BflNativeRoot)
-                | Ok(super::single_file::Flux2SingleFileFormat::Nvfp4)
+        flux2_transformer_is_single_file(
+            &self.base.paths.transformer,
+            &self.base.paths.transformer_shards,
+        )
+    }
+
+    /// Device bytes this engine's transformer occupies, held at `weight_dtype`.
+    ///
+    /// The file length is the resident figure only while the loader leaves the
+    /// checkpoint's dtype alone, and FLUX.2 has two ways it does not:
+    /// `crate::engine::gpu_dtype` is F32 on every non-CUDA device, so a BF16
+    /// Klein-9B is ~36 GB of weights on a Mac rather than its ~18 GB file; and
+    /// an FP8 tier widened once at load holds two bytes per parameter where
+    /// the file holds one, which is exactly what
+    /// `flux2_fp8_widen_extra_resident_bytes_for_checkpoint` teaches the
+    /// server estimators to charge. Charging the file in either case lets the
+    /// card Keep a transformer it can no longer hold — #276's failure with
+    /// `4fc27b19`'s own cause — so the rule is
+    /// [`crate::device::transformer_resident_bytes_for`], the one FLUX.1
+    /// takes, asked with the dtype the weights are actually held at.
+    ///
+    /// `weight_dtype` is the loaded transformer's own answer
+    /// ([`super::transformer::Flux2TransformerWrapper::resident_weight_dtype`])
+    /// wherever there is one; a pre-load estimate passes the working dtype,
+    /// which charges the widened figure and so errs on the side the card
+    /// cannot OOM on.
+    ///
+    /// The checkpoint-side inputs cost a `stat` per shard, a format probe and
+    /// a safetensors header parse, so they are resolved once and memoized: the
+    /// residency question is asked on every render, and FLUX.1 records the
+    /// same facts on its loaded state for the same reason.
+    fn xformer_resident_bytes(&self, weight_dtype: DType) -> u64 {
+        let facts = self.xformer_residency_facts.get_or_init(|| {
+            let is_quantized = self.is_gguf_transformer() || self.is_nvfp4_single_file();
+            XformerResidencyFacts {
+                is_quantized,
+                file_bytes: xformer_component_bytes(&self.base.paths),
+                dense_parameter_count: (!is_quantized)
+                    .then(|| dense_parameter_count(&self.base.paths))
+                    .flatten(),
+            }
+        });
+        crate::device::transformer_resident_bytes_for(
+            facts.is_quantized,
+            facts.file_bytes,
+            facts.dense_parameter_count,
+            weight_dtype,
         )
     }
 
@@ -897,11 +1382,157 @@ impl Flux2Engine {
         Ok(())
     }
 
-    fn should_delay_transformer_reload_for_prompt_encode(
-        load_strategy: LoadStrategy,
-        transformer_loaded: bool,
+    /// Whether a resident transformer has to go before the text encoder runs.
+    ///
+    /// This replaces a predicate that asked only whether the transformer was
+    /// ALREADY absent (`Eager && !loaded`) and used the answer for a log line.
+    /// Now that the transformer survives a render, the real question is an
+    /// arithmetic one: the encoder's peak and the retained weights are both on
+    /// the card at the same moment, and on FLUX.2 [dev] that is a ~35 GB
+    /// Mistral3 prefix beside a 33 GB Q8 transformer — 68 GB on a 46 GB card.
+    /// Klein's Qwen3 is a few GB and normally co-resides fine.
+    ///
+    /// `retained_bytes` is zero when nothing is resident, which makes the
+    /// answer false: there is nothing to drop.
+    ///
+    /// Everything else FAILS CLOSED, for the reason the three other probe
+    /// sites do. A reading of `Measured(0)` is a card with nothing free — the
+    /// most pressured answer there is — and `Unmeasurable` is a probe that
+    /// failed on a device that has VRAM. Both used to return "keep", on the
+    /// very path whose own comment describes a 35 GB prefix landing beside a
+    /// 33 GB transformer on a 46 GB card.
+    fn encoder_needs_transformer_dropped(
+        retained_bytes: u64,
+        encoder_peak_bytes: u64,
+        usable_free: crate::device::UsableFreeVram,
     ) -> bool {
-        load_strategy == LoadStrategy::Eager && !transformer_loaded
+        if retained_bytes == 0 {
+            return false;
+        }
+        match usable_free {
+            // A CPU render's encoder and transformer share host memory, where
+            // this drop frees nothing the encoder can use.
+            crate::device::UsableFreeVram::NotApplicable => false,
+            crate::device::UsableFreeVram::Unmeasurable => true,
+            crate::device::UsableFreeVram::Measured(free) => {
+                retained_bytes.saturating_add(encoder_peak_bytes) > free
+            }
+        }
+    }
+
+    /// Whether FLUX.2 [dev]'s Mistral3 prefix should live in host RAM.
+    ///
+    /// The engine asks the SAME pure function the planner asks
+    /// (`text_encoder_residency::decide_text_encoder_residency`), with the
+    /// host's own live numbers, so a machine that the planner charged for a
+    /// park actually takes one and a machine it did not is not surprised by
+    /// 35 GB it never budgeted.
+    fn decide_mistral_prefix_residency(
+        encoder_device: &Device,
+        encoder_dtype: DType,
+        transformer_bytes: u64,
+        already_parked_bytes: u64,
+        prior_encodes: u32,
+    ) -> super::text_encoder_residency::TextEncoderResidency {
+        use super::text_encoder_residency as residency;
+        let device = if encoder_device.is_metal() {
+            residency::TextEncoderDevice::Metal
+        } else if encoder_device.is_cuda() {
+            residency::TextEncoderDevice::Cuda
+        } else {
+            residency::TextEncoderDevice::Cpu
+        };
+        let budget =
+            residency::decide_text_encoder_residency(&residency::TextEncoderResidencyInputs {
+                encoder_bytes: residency::mistral3_prefix_bytes(encoder_dtype),
+                transformer_bytes,
+                // An unmeasurable host reads as zero, which the decision answers
+                // with `StreamFromMmap` — today's behaviour.
+                host_total_bytes: crate::flux::pinned::total_system_ram_bytes().unwrap_or(0),
+                host_available_bytes: crate::device::available_host_ram_bytes().unwrap_or(0),
+                pinned_cap_bytes: crate::flux::pinned::pinned_cap_bytes(),
+                keep_te_ram: crate::device::keep_te_ram_mode(),
+                device,
+                already_parked_bytes,
+            });
+        // The budget answers "is there room"; this answers "is there reuse".
+        // Mistral3's park is a fresh read of the shards, unlike Qwen3's, so
+        // the first encode of a process must not pay for it — unless the
+        // operator set `MOLD_KEEP_TE_RAM=1`, which answers the reuse question
+        // for us.
+        residency::mistral3_prefix_residency(
+            budget,
+            prior_encodes,
+            crate::device::keep_te_ram_mode(),
+        )
+    }
+
+    /// Peak device bytes this checkpoint's conditioner holds while it runs.
+    ///
+    /// [dev] streams its Mistral3 prefix, so the figure is the streamed peak
+    /// `flux2::text_encoder_residency` is the authority for — never the 36 GB
+    /// of shards, which are a reclaimable mapping. Klein materializes its
+    /// Qwen3, so there the file length IS the residency.
+    fn text_encoder_peak_bytes(&self, gpu_dtype: DType) -> u64 {
+        if self.is_dev() {
+            return super::text_encoder_residency::mistral3_streamed_device_peak_bytes(
+                gpu_dtype,
+                super::text_encoder_residency::MISTRAL3_DEFAULT_LOOKAHEAD,
+            );
+        }
+        // The files the encoder was ACTUALLY built from when one is loaded —
+        // a resolved Q8 GGUF variant is a tenth of the BF16 shards the
+        // manifest lists, and pricing the wrong one would drop a transformer
+        // that had room. The manifest list is the fallback for the cold case,
+        // where over-estimating only means taking today's drop.
+        let paths = self
+            .base
+            .loaded
+            .as_ref()
+            .map(|loaded| loaded.text_encoder.encoder_paths().to_vec())
+            .unwrap_or_else(|| self.text_encoder_paths());
+        paths
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
+            .sum()
+    }
+
+    /// The residency budget for this render, shared by both generate paths.
+    ///
+    /// `transformer_bytes` is the caller's, because the two paths know it from
+    /// different places: the sequential path has already summed the checkpoint
+    /// files to preflight against them, and the eager path reads the resolved
+    /// path off `LoadedFlux2`.
+    fn still_transformer_budget(
+        &self,
+        req: &GenerateRequest,
+        gpu_dtype: DType,
+        vae_dtype: DType,
+        cfg: &Flux2Config,
+        transformer_bytes: u64,
+    ) -> crate::device::StillTransformerBudget {
+        crate::device::StillTransformerBudget {
+            transformer_bytes,
+            activation_bytes: crate::device::flux_activation_budget_bytes_for(
+                req.width,
+                req.height,
+                1,
+                crate::device::dtype_bytes(gpu_dtype),
+                crate::device::ActivationFamily::Flux2Dit,
+                cfg.num_heads as u64,
+                crate::device::flux_effective_attention_backend(),
+            ),
+            vae_decode_peak_bytes: crate::device::flux_vae_decode_peak_bytes(
+                req.width,
+                req.height,
+                crate::device::dtype_bytes(vae_dtype),
+            ),
+            runtime_headroom_bytes: crate::device::STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+            // FLUX.2 has no bypass registry and no identity adapter: [dev]
+            // refuses LoRAs outright and Klein merges them into the weights
+            // the checkpoint term already charges, and PuLID is FLUX.1-only.
+            companion_resident_bytes: 0,
+        }
     }
 
     /// Get text encoder file paths (shards or single file).
@@ -935,12 +1566,18 @@ impl Flux2Engine {
         target_device: &Device,
         target_dtype: DType,
     ) -> Result<Tensor> {
-        // Extract hidden states from layers 9, 18, 27 and stack to (B, seq, 7680)
+        // Extract hidden states from layers 9, 18, 27 and stack to (B, seq, 7680).
+        //
+        // Every Klein tier — 4B, 9B and the undistilled base — conditions on a
+        // FIXED 512 rows: the prompt is truncated and right-padded, the pad
+        // keys are masked out of the language model, and all 512 rows reach
+        // the transformer (BFL `flux2/text_encoder.py:28,397-419`).
         let (stacked, _token_count) = encoder.encode_with_layers(
             prompt,
             target_device,
             target_dtype,
             &Self::QWEN3_HIDDEN_LAYERS,
+            Some(encoders::qwen3::FLUX2_KLEIN_MAX_LENGTH),
         )?;
         Ok(stacked)
     }
@@ -966,7 +1603,7 @@ impl Flux2Engine {
         } else {
             "Encoding negative prompt (Qwen3)"
         };
-        let cache_key = prompt_text_key(prompt);
+        let cache_key = flux2_prompt_cache_key(prompt);
         let (txt_emb, cache_hit) = get_or_insert_cached_tensor(
             prompt_cache,
             cache_key,
@@ -1013,6 +1650,13 @@ impl Flux2Engine {
         if self.base.load_strategy == LoadStrategy::Sequential || self.is_dev() {
             return Ok(());
         }
+
+        // An eager load populates `base.loaded` with a transformer of its own,
+        // so the sequential path's retained slot must go first — holding both
+        // is the doubled peak each path exists to bound. `generate_inner`
+        // already clears it before taking the eager branch; this covers the
+        // admin and direct-caller routes that reach `load()` on their own.
+        self.retained_transformer = None;
 
         tracing::info!(model = %self.base.model_name, "loading Flux.2 Klein model components...");
 
@@ -1224,9 +1868,44 @@ impl Flux2Engine {
         let embeddings = if let Some(hits) =
             Self::restore_cached_prompts(&self.prompt_cache, &prompts, &device, gpu_dtype)?
         {
+            // A cache hit runs no encoder at all, so a retained transformer
+            // has nothing to make room for — and this is exactly the case the
+            // retention exists for: a repeated prompt, or the second and later
+            // members of a batch, render with no reload and no encode.
             self.base.progress.cache_hit("prompt conditioning");
             hits
         } else {
+            // A cache MISS streams the conditioner beside whatever is
+            // resident. Ask the budget whether the two fit; on FLUX.2 [dev]
+            // they do not, and the slot goes before the encoder allocates
+            // rather than after it fails.
+            // The slot's OWN recorded bytes, not a fresh `stat` of the
+            // checkpoint: that is the figure the residency budget was decided
+            // against, and the file may have moved since.
+            let retained_bytes = self
+                .retained_transformer
+                .as_ref()
+                .map_or(0, |retained| retained.device_bytes);
+            if retained_bytes > 0 {
+                let usable_free = crate::device::usable_free_for_residency(
+                    &device,
+                    self.base.gpu_ordinal,
+                    retained_bytes,
+                );
+                let encoder_peak = self.text_encoder_peak_bytes(gpu_dtype);
+                if Self::encoder_needs_transformer_dropped(
+                    retained_bytes,
+                    encoder_peak,
+                    usable_free,
+                ) {
+                    self.retained_transformer = None;
+                    tracing::info!(
+                        retained_mb = retained_bytes / 1024 / 1024,
+                        encoder_peak_mb = encoder_peak / 1024 / 1024,
+                        "released the retained Flux.2 transformer so the text encoder can stream"
+                    );
+                }
+            }
             if self.is_dev() {
                 if self
                     .qwen3_variant
@@ -1265,37 +1944,116 @@ impl Flux2Engine {
                     activation_budget,
                 )?;
 
-                let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
-                let encoder = encoders::mistral3::Mistral3Encoder::load(
-                    &encoder_paths,
-                    text_tokenizer,
+                // The encoder may already be here, holding its prefix in host
+                // RAM from the previous request. `dev_text_encoder` is what
+                // makes that possible: the shell is cheap (paths, tokenizer,
+                // the resolved namespace) and what it OWNS is the park.
+                // A shell built for a different placement is not reusable:
+                // a prefix parked at BF16 on the GPU is not the checkpoint a
+                // CPU F32 encode wants.
+                if self.dev_text_encoder.as_ref().is_some_and(|encoder| {
+                    !encoder.matches_placement(&encoder_device, encoder_dtype)
+                }) {
+                    self.dev_text_encoder = None;
+                }
+                if self.dev_text_encoder.is_none() {
+                    let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
+                    self.dev_text_encoder = Some(encoders::mistral3::Mistral3Encoder::load(
+                        &encoder_paths,
+                        text_tokenizer,
+                        &encoder_device,
+                        encoder_dtype,
+                    )?);
+                }
+                let park = Self::decide_mistral_prefix_residency(
                     &encoder_device,
                     encoder_dtype,
-                )?;
-                self.base
-                    .progress
-                    .stage_start("Encoding prompt (streamed Mistral3)");
+                    // Pre-load: the transformer this is making room for has
+                    // not been built, so there is nothing to ask which dtype
+                    // it settled at. The working dtype charges the widened
+                    // figure, which parks the prefix sooner rather than
+                    // leaving the card short.
+                    self.xformer_resident_bytes(gpu_dtype),
+                    self.dev_text_encoder
+                        .as_ref()
+                        .map_or(0, |encoder| encoder.parked_bytes()),
+                    self.dev_text_encoder
+                        .as_ref()
+                        .map_or(0, |encoder| encoder.encodes_completed()),
+                );
+                let encoder = self
+                    .dev_text_encoder
+                    .as_mut()
+                    .expect("just installed above");
+                match park {
+                    super::text_encoder_residency::TextEncoderResidency::HostParked { pinned } => {
+                        if !encoder.is_parked() {
+                            let park_label = "Parking Mistral3 prefix in host RAM";
+                            self.base.progress.stage_start(park_label);
+                            let park_start = Instant::now();
+                            encoder.park_prefix(pinned)?;
+                            self.base
+                                .progress
+                                .stage_done(park_label, park_start.elapsed());
+                            tracing::info!(
+                                pinned,
+                                host_gb = encoder.parked_bytes() as f64 / 1e9,
+                                "Mistral3 prefix parked in host RAM"
+                            );
+                        }
+                    }
+                    super::text_encoder_residency::TextEncoderResidency::StreamFromMmap => {
+                        if encoder.is_parked() {
+                            encoder.unpark();
+                            tracing::info!(
+                                "released the parked Mistral3 prefix: the host budget no longer \
+                                 allows it"
+                            );
+                        }
+                    }
+                }
+                let encoder = &*encoder;
+                // Name the device and the streamed peak in the stage label:
+                // the whole point of the planner's streaming charge is that
+                // this phase runs on the GPU in bf16 at ~3.6 GB rather than on
+                // the CPU in F32, and a log line that says neither cannot tell
+                // the two apart after the fact.
+                let encoder_label =
+                    format!(
+                    "Encoding prompt (streamed Mistral3, {device}, {peak:.1} GB peak, {dtype:?})",
+                    device = if encoder_device.is_cpu() { "CPU" } else { "GPU" },
+                    peak = super::text_encoder_residency::mistral3_streamed_device_peak_bytes(
+                        encoder_dtype,
+                        super::text_encoder_residency::MISTRAL3_DEFAULT_LOOKAHEAD,
+                    ) as f64
+                        / 1e9,
+                    dtype = encoder_dtype,
+                );
+                self.base.progress.stage_start(&encoder_label);
                 let encode_start = Instant::now();
                 // Dev is guidance-distilled, so `prompts` is always the single
                 // positive prompt here — the loop is over one element.
                 let mut encoded = Vec::with_capacity(prompts.len());
                 for prompt in &prompts {
-                    let (txt_emb, _) = encoder.encode(prompt, &device, gpu_dtype)?;
+                    let (txt_emb, _) =
+                        encoder.encode(prompt, &device, gpu_dtype, &self.base.progress)?;
                     let cached = CachedTensor::from_tensor(&txt_emb)?;
                     self.prompt_cache
                         .lock()
                         .unwrap()
-                        .insert(prompt_text_key(prompt), cached);
+                        .insert(flux2_prompt_cache_key(prompt), cached);
                     encoded.push(txt_emb);
                 }
                 self.base.progress.phase_done(
                     crate::ProgressPhase::PromptEncode,
-                    "Encoding prompt (streamed Mistral3)",
+                    &encoder_label,
                     encode_start.elapsed(),
                 );
-                drop(encoder);
+                // The DEVICE side of the encoder is released by `encode`
+                // itself — every layer is built and dropped inside the stream
+                // loop — so there is nothing to free here beyond the sync. The
+                // shell (and its host park, when it has one) stays.
                 encoder_device.synchronize()?;
-                self.base.progress.info("Freed streamed Mistral3 encoder");
                 encoded
             } else {
                 // Reserve-adjusted reading drives the Qwen3 variant selection.
@@ -1456,6 +2214,7 @@ impl Flux2Engine {
                     &device,
                     vae_dtype,
                 )?;
+                let _conv = crate::conv_policy::ConvScope::for_family("flux2");
                 latents.push(vae.encode(&source)?.to_dtype(gpu_dtype)?);
             }
             let (tokens, ids) = sampling::pack_reference_group(&latents)?;
@@ -1498,7 +2257,10 @@ impl Flux2Engine {
                 &device,
                 vae_dtype,
             )?;
-            let encoded = vae.encode(&source_tensor)?.to_dtype(gpu_dtype)?;
+            let encoded = {
+                let _conv = crate::conv_policy::ConvScope::for_family("flux2");
+                vae.encode(&source_tensor)?.to_dtype(gpu_dtype)?
+            };
             self.base.progress.phase_done(
                 crate::ProgressPhase::Vae,
                 "Encoding source image (VAE)",
@@ -1572,27 +2334,53 @@ impl Flux2Engine {
         // Block offload reserves a bounded GPU working set; the full
         // transformer remains host-mapped and is accounted by Scheduler V2's
         // host-memory ledger.
-        let resident_xformer_size = if self.block_offload_enabled() {
-            xformer_size.min(crate::device::STREAMING_TRANSFORMER_CAP_BYTES)
-        } else {
-            xformer_size
-        };
-        preflight_memory_check(
-            "Flux.2 transformer",
-            resident_xformer_size,
-            xformer_activation_budget,
-        )?;
-        if let Some(status) = memory_status_string() {
-            self.base.progress.info(&status);
-        }
-
+        let resident_xformer_size = crate::device::resident_transformer_charge_bytes(
+            xformer_size,
+            self.block_offload_enabled(),
+        );
         let flux2_cfg = self.resolve_config()?;
-        let xformer_stage = Instant::now();
-        let (transformer, xformer_label) =
-            self.load_transformer(&flux2_cfg, gpu_dtype, &device, xformer_activation_budget)?;
-        self.base
-            .progress
-            .stage_done(xformer_label, xformer_stage.elapsed());
+        let lora_fingerprint = flux2_lora_fingerprint(&self.pending_loras);
+        let config_hash = flux2_config_hash(&flux2_cfg);
+        let reuse = self.retained_transformer.as_ref().is_some_and(|retained| {
+            retained.matches(
+                self.base.gpu_ordinal,
+                gpu_dtype,
+                &lora_fingerprint,
+                config_hash,
+            )
+        });
+        // A retained transformer is already on the card, so the preflight it
+        // would otherwise pay is not a question about this render — asking it
+        // would charge the weights a second time against the free VRAM they
+        // are already occupying.
+        let transformer = if reuse {
+            self.base.progress.cache_hit("Flux.2 transformer");
+            tracing::info!("Flux.2 transformer reused from the previous render (no reload)");
+            self.retained_transformer
+                .take()
+                .expect("just matched")
+                .transformer
+        } else {
+            // A stale slot that did not match is released BEFORE the
+            // replacement loads, or the two co-reside at the exact moment the
+            // sequential path exists to avoid.
+            self.retained_transformer = None;
+            preflight_memory_check(
+                "Flux.2 transformer",
+                resident_xformer_size,
+                xformer_activation_budget,
+            )?;
+            if let Some(status) = memory_status_string() {
+                self.base.progress.info(&status);
+            }
+            let xformer_stage = Instant::now();
+            let (transformer, xformer_label) =
+                self.load_transformer(&flux2_cfg, gpu_dtype, &device, xformer_activation_budget)?;
+            self.base
+                .progress
+                .stage_done(xformer_label, xformer_stage.elapsed());
+            transformer
+        };
 
         let denoise_label = format!("Denoising ({} steps)", timesteps.len().saturating_sub(1));
         self.base.progress.stage_start(&denoise_label);
@@ -1606,6 +2394,17 @@ impl Flux2Engine {
             .as_ref()
             .map(|emb| sampling::text_conditioning(emb, state.img.dim(0)?, state.img.device()))
             .transpose()?;
+        let cfg_batching = neg_conditioning.as_ref().map(|(neg_txt, _)| {
+            resolve_cfg_batching(
+                &flux2_cfg,
+                &state.txt,
+                neg_txt,
+                state.img.dim(1).unwrap_or(0),
+                self.transformer_file_bytes(),
+                gpu_dtype,
+                &device,
+            )
+        });
         let cfg_branch =
             neg_conditioning
                 .as_ref()
@@ -1613,11 +2412,14 @@ impl Flux2Engine {
                     scale: req.guidance,
                     txt,
                     txt_ids,
+                    batching: cfg_batching
+                        .unwrap_or(super::transformer::Flux2CfgBatching::Sequential),
                 });
-        if cfg_branch.is_some() {
+        if let Some(branch) = cfg_branch.as_ref() {
             self.base.progress.info(&format!(
-                "Undistilled FLUX.2 base: classifier-free guidance at {:.2} (two forwards per step)",
-                req.guidance
+                "Undistilled FLUX.2 base: classifier-free guidance at {:.2} ({})",
+                req.guidance,
+                branch.batching.progress_note()
             ));
         }
         let img = transformer.denoise(
@@ -1641,14 +2443,81 @@ impl Flux2Engine {
             .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
 
-        // Drop transformer + state to free memory for VAE decode
+        // The transformer either goes back to the card's free list or stays on
+        // it for the next render. The VAE decode runs next either way, so this
+        // is the same budget the eager path weighs — not a rule about which
+        // generate path is running.
         drop(inpaint_ctx);
-        drop(transformer);
-        self.base.progress.info("Freed Flux.2 transformer");
+        // What the card is HOLDING, which the file length answers only while
+        // the loader leaves the checkpoint's dtype alone — the transformer is
+        // built by now, so it names the dtype its own weights settled at. A
+        // streamed transformer keeps the same bounded working set the
+        // preflight was charged.
+        let xformer_resident_size = crate::device::resident_transformer_charge_bytes(
+            self.xformer_resident_bytes(transformer.resident_weight_dtype(gpu_dtype)),
+            self.block_offload_enabled(),
+        );
+        let budget = self.still_transformer_budget(
+            req,
+            gpu_dtype,
+            crate::device::resolve_vae_dtype(gpu_dtype),
+            &flux2_cfg,
+            xformer_resident_size,
+        );
+        // Sampled with the transformer still resident, so its bytes are added
+        // back: the budget is defined against the card as if nothing this
+        // render loaded were on it.
+        let usable_free = crate::device::usable_free_for_residency(
+            &device,
+            self.base.gpu_ordinal,
+            xformer_resident_size,
+        );
+        // The budget is not the whole answer: `MOLD_FLUX_KEEP_TRANSFORMER=0`
+        // is the operator's opt-out, and it is resolved through the SAME
+        // function FLUX.1 uses. Reading the budget alone left an operator on a
+        // card the budget likes — a 46 GB L40S holding a 34 GB [dev]
+        // transformer — with no way to say "don't", which is exactly the state
+        // the variable exists for.
+        let budget_residency = crate::device::still_transformer_residency(&budget, usable_free);
+        let decision = crate::device::resolve_keep_transformer(
+            crate::runtime_env::value("MOLD_FLUX_KEEP_TRANSFORMER").as_deref(),
+            budget_residency,
+        );
+        let keeps = decision == crate::device::ResidencyDecision::KeepResident;
+        if keeps {
+            self.retained_transformer = Some(RetainedFlux2Transformer {
+                transformer,
+                device_bytes: xformer_resident_size,
+                ordinal: self.base.gpu_ordinal,
+                dtype: gpu_dtype,
+                lora_fingerprint,
+                config_hash,
+            });
+            self.base
+                .progress
+                .info("Kept Flux.2 transformer resident for the next render");
+        } else {
+            drop(transformer);
+            self.base.progress.info("Freed Flux.2 transformer");
+            match decision {
+                crate::device::ResidencyDecision::DropRequested => tracing::info!(
+                    "Flux.2 transformer dropped before VAE decode \
+                     (MOLD_FLUX_KEEP_TRANSFORMER=0)"
+                ),
+                _ => tracing::info!(
+                    shortfall_mb = budget_residency.shortfall_bytes() / 1024 / 1024,
+                    required_mb = budget.required_bytes() / 1024 / 1024,
+                    "Flux.2 transformer dropped before VAE decode: the residency budget does not fit"
+                ),
+            }
+        }
         drop(state);
         drop(txt_emb);
         device.synchronize()?;
-        tracing::info!("Transformer dropped (sequential mode), decoding VAE...");
+        tracing::info!(
+            retained = keeps,
+            "Flux.2 transformer settled (sequential mode), decoding VAE..."
+        );
 
         let (vae, vae_dtype) = self.load_sequential_vae(&device, gpu_dtype)?;
 
@@ -1675,6 +2544,10 @@ impl Flux2Engine {
         }
         let img_for_vae = img.to_dtype(vae_dtype)?;
         let device_for_sync = device.clone();
+        // See the FLUX.1 decode: the transformer is linear throughout, so the
+        // VAE is where `ConvPolicy::FastStill` has anything to decide.
+        let cudnn_dispatches_before = crate::conv_policy::cudnn_dispatch_count();
+        let _conv = crate::conv_policy::ConvScope::for_family("flux2");
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
             |latents| vae.decode(latents).map_err(Into::into),
@@ -1686,6 +2559,7 @@ impl Flux2Engine {
                 }
             },
         )?;
+        crate::conv_policy::report_vae_decode_backend("flux2", cudnn_dispatches_before);
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
@@ -1756,27 +2630,68 @@ impl Flux2Engine {
             return self.generate_sequential(req);
         }
 
-        // Eager mode: use pre-loaded components. After a previous request we
-        // intentionally drop the transformer before VAE decode, but the VAE
-        // and Qwen3 shell remain resident. In that warm state, reloading the
-        // transformer before prompt encoding recreates the highest peak
-        // (transformer + Qwen3) and can OOM on 24 GB cards when queued
-        // requests arrive back-to-back. Encode/drop Qwen3 first, then reload
-        // the transformer for denoising.
+        // Eager mode: use pre-loaded components, held in `base.loaded`. The
+        // sequential path's retained slot belongs to that path alone — holding
+        // both would double the peak this engine's two paths each exist to
+        // bound — so it is released here.
+        self.retained_transformer = None;
         if self.base.loaded.is_none() {
             self.load()?;
         }
-        let delay_transformer_reload = self.base.loaded.as_ref().is_some_and(|loaded| {
-            Self::should_delay_transformer_reload_for_prompt_encode(
-                self.base.load_strategy,
-                loaded.transformer.is_some(),
+        // Derived before the `loaded` borrow below, because the residency
+        // question needs `self` and the encode loop needs `&mut loaded`. The
+        // transformer is on the card by now, so it answers for the dtype its
+        // own weights are held at rather than being charged its file length.
+        let transformer_weight_dtype = self
+            .base
+            .loaded
+            .as_ref()
+            .and_then(|loaded| {
+                loaded
+                    .transformer
+                    .as_ref()
+                    .map(|transformer| transformer.resident_weight_dtype(loaded.dtype))
+            })
+            .unwrap_or(DType::BF16);
+        let transformer_bytes = self.xformer_resident_bytes(transformer_weight_dtype);
+        let encoder_peak_bytes = self.text_encoder_peak_bytes(
+            self.base
+                .loaded
+                .as_ref()
+                .map(|loaded| loaded.dtype)
+                .unwrap_or(DType::BF16),
+        );
+        let eager_usable_free = {
+            let resident = self
+                .base
+                .loaded
+                .as_ref()
+                .is_some_and(|loaded| loaded.transformer.is_some());
+            let device = self
+                .base
+                .loaded
+                .as_ref()
+                .map(|loaded| loaded.device.clone())
+                .unwrap_or(Device::Cpu);
+            crate::device::usable_free_for_residency(
+                &device,
+                self.base.gpu_ordinal,
+                if resident { transformer_bytes } else { 0 },
             )
-        });
-        if delay_transformer_reload {
-            tracing::info!(
-                "delaying Flux.2 transformer reload until after prompt encode to reduce peak VRAM"
-            );
-        }
+        };
+        // The post-denoise residency budget, resolved here for the same
+        // borrow reason: `loaded` is mutably borrowed across the whole render.
+        let eager_budget = {
+            let cfg = self.resolve_config()?;
+            let (gpu_dtype, vae_dtype) = self
+                .base
+                .loaded
+                .as_ref()
+                .map(|loaded| (loaded.dtype, loaded.vae_dtype))
+                .unwrap_or((DType::BF16, DType::BF16));
+            self.still_transformer_budget(req, gpu_dtype, vae_dtype, &cfg, transformer_bytes)
+        };
+        let gpu_ordinal_for_budget = self.base.gpu_ordinal;
 
         let start = Instant::now();
         let seed = req.seed.unwrap_or_else(rand_seed);
@@ -1810,8 +2725,31 @@ impl Flux2Engine {
                 progress.cache_hit("prompt conditioning");
                 hits
             } else {
-                // Cache miss — restore encoder if it was dropped or parked after
-                // a previous generation.
+                // Cache miss — the encoder is about to be resident. On a warm
+                // engine the transformer may be too, and reloading it BEFORE
+                // the encode recreates the highest peak of the whole render
+                // (transformer + Qwen3), which is what OOM'd 24 GB cards on
+                // back-to-back queued requests. Ask the budget rather than
+                // always dropping: on a card with room, the two co-reside and
+                // the next render skips a full reload.
+                if loaded.transformer.is_some()
+                    && Self::encoder_needs_transformer_dropped(
+                        transformer_bytes,
+                        encoder_peak_bytes,
+                        eager_usable_free,
+                    )
+                {
+                    loaded.transformer = None;
+                    tracing::info!(
+                        transformer_mb = transformer_bytes / 1024 / 1024,
+                        encoder_peak_mb = encoder_peak_bytes / 1024 / 1024,
+                        "dropped the resident Flux.2 transformer so the text encoder fits; it \
+                         reloads after the encode"
+                    );
+                }
+
+                // Restore the encoder if it was dropped or parked after a
+                // previous generation.
                 if loaded.text_encoder.model.is_none() {
                     let label = if loaded.text_encoder.is_parked() {
                         "Unparking Qwen3 encoder (CPU→GPU)"
@@ -1842,14 +2780,23 @@ impl Flux2Engine {
                 }
                 tracing::info!("Qwen3 encoding complete");
 
-                // Free GPU VRAM for denoising. With `MOLD_KEEP_TE_RAM=1` and the
-                // BF16 encoder, parameters move to host RAM instead of being
-                // released — saves ~10 s on the next request. GGUF and Metal
-                // flow through the original drop path.
+                // Free GPU VRAM for denoising. Whether the parameters move
+                // to host RAM or are released is `decide_text_encoder_residency`'s
+                // answer, not a flag: a host with room keeps them and the next
+                // cache-miss prompt costs a copy instead of a re-read (3.9 s
+                // to under 1 s on Klein). GGUF parks too now — a quantized
+                // tensor round-trips byte-exact through
+                // `wan::block_offload` — and Metal still does not, because
+                // there the "parked" copy is in the pool the encoder already
+                // runs from.
                 if loaded.text_encoder.on_gpu || loaded.device.is_metal() {
-                    let park_mode = crate::device::keep_te_in_ram()
-                        && !loaded.device.is_metal()
-                        && !loaded.text_encoder.is_quantized;
+                    let park_mode = super::text_encoder_residency::qwen3_park_residency(
+                        &loaded.device,
+                        loaded.text_encoder.encoder_paths(),
+                        transformer_bytes,
+                        loaded.text_encoder.parked_bytes(),
+                    )
+                    .parks();
                     if park_mode {
                         loaded.text_encoder.park_to_cpu()?;
                         tracing::info!(
@@ -1875,6 +2822,11 @@ impl Flux2Engine {
         let neg_emb = embeddings.next();
 
         self.reload_transformer_if_needed()?;
+
+        // Read before the mutable borrow below: the CFG batching decision
+        // needs both, and neither changes during the denoise.
+        let eager_cfg = self.resolve_config()?;
+        let eager_transformer_bytes = self.transformer_file_bytes();
 
         let loaded = self
             .base
@@ -1919,7 +2871,10 @@ impl Flux2Engine {
                 &loaded.device,
                 loaded.vae_dtype,
             )?;
-            let encoded = loaded.vae.encode(&source_tensor)?;
+            let encoded = {
+                let _conv = crate::conv_policy::ConvScope::for_family("flux2");
+                loaded.vae.encode(&source_tensor)?
+            };
             progress.phase_done(
                 crate::ProgressPhase::Vae,
                 "Encoding source image (VAE)",
@@ -1976,6 +2931,17 @@ impl Flux2Engine {
             .as_ref()
             .map(|emb| sampling::text_conditioning(emb, state.img.dim(0)?, state.img.device()))
             .transpose()?;
+        let cfg_batching = neg_conditioning.as_ref().map(|(neg_txt, _)| {
+            resolve_cfg_batching(
+                &eager_cfg,
+                &state.txt,
+                neg_txt,
+                state.img.dim(1).unwrap_or(0),
+                eager_transformer_bytes,
+                loaded.dtype,
+                &loaded.device,
+            )
+        });
         let cfg_branch =
             neg_conditioning
                 .as_ref()
@@ -1983,11 +2949,14 @@ impl Flux2Engine {
                     scale: req.guidance,
                     txt,
                     txt_ids,
+                    batching: cfg_batching
+                        .unwrap_or(super::transformer::Flux2CfgBatching::Sequential),
                 });
-        if cfg_branch.is_some() {
+        if let Some(branch) = cfg_branch.as_ref() {
             progress.info(&format!(
-                "Undistilled FLUX.2 base: classifier-free guidance at {:.2} (two forwards per step)",
-                req.guidance
+                "Undistilled FLUX.2 base: classifier-free guidance at {:.2} ({})",
+                req.guidance,
+                branch.batching.progress_note()
             ));
         }
         let img = transformer.denoise(
@@ -2010,18 +2979,57 @@ impl Flux2Engine {
         progress.stage_done(&denoise_label, denoise_start.elapsed());
         tracing::info!("denoising complete, decoding VAE...");
 
-        // Free denoising intermediates and transformer before VAE decode.
-        // The transformer consumes most of VRAM — VAE decode needs that
-        // memory for conv2d intermediates. Transformer is reloaded next generate.
+        // Free denoising intermediates before VAE decode. Whether the
+        // transformer goes with them is the budget's answer, not a default:
+        // the decode wants a large contiguous conv2d workspace, and on a card
+        // that has room for both, dropping it only buys a 34 s reload on the
+        // next render.
         drop(inpaint_ctx);
         drop(state);
         drop(txt_emb);
-        loaded.transformer = None;
+        let free_before_vae = crate::device::free_vram_bytes(gpu_ordinal_for_budget).unwrap_or(0);
+        let usable_free = crate::device::usable_free_for_residency(
+            &loaded.device,
+            gpu_ordinal_for_budget,
+            transformer_bytes,
+        );
+        // Same two authorities as the sequential path above, in the same
+        // order: the budget, then the operator's opt-out.
+        let budget_residency =
+            crate::device::still_transformer_residency(&eager_budget, usable_free);
+        let decision = crate::device::resolve_keep_transformer(
+            crate::runtime_env::value("MOLD_FLUX_KEEP_TRANSFORMER").as_deref(),
+            budget_residency,
+        );
+        match decision {
+            crate::device::ResidencyDecision::KeepResident => tracing::info!(
+                free_mb = free_before_vae / 1024 / 1024,
+                required_mb = eager_budget.required_bytes() / 1024 / 1024,
+                "Flux.2 transformer kept resident: the residency budget fits, so the next render \
+                 skips the reload"
+            ),
+            crate::device::ResidencyDecision::DropRequested => {
+                loaded.transformer = None;
+                tracing::info!(
+                    free_mb = free_before_vae / 1024 / 1024,
+                    "Flux.2 transformer dropped before VAE decode \
+                     (MOLD_FLUX_KEEP_TRANSFORMER=0)"
+                );
+            }
+            crate::device::ResidencyDecision::DropForHeadroom => {
+                loaded.transformer = None;
+                tracing::info!(
+                    free_mb = free_before_vae / 1024 / 1024,
+                    shortfall_mb = budget_residency.shortfall_bytes() / 1024 / 1024,
+                    "Flux.2 transformer dropped before VAE decode: the residency budget does not \
+                     fit this card at this resolution"
+                );
+            }
+        }
         // Force CUDA to complete pending operations and release freed memory.
         // Without this, cuMemFree is asynchronous and the freed VRAM may not
         // be available when VAE decode allocates its conv2d intermediates.
         loaded.device.synchronize()?;
-        tracing::info!("Transformer dropped to free VRAM for VAE decode");
 
         // 7. Decode with VAE
         progress.stage_start("VAE decode");
@@ -2047,6 +3055,8 @@ impl Flux2Engine {
         let img_for_vae = img.to_dtype(loaded.vae_dtype)?;
         let vae = &loaded.vae;
         let device_for_sync = loaded.device.clone();
+        let cudnn_dispatches_before = crate::conv_policy::cudnn_dispatch_count();
+        let _conv = crate::conv_policy::ConvScope::for_family("flux2");
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
             |latents| vae.decode(latents).map_err(Into::into),
@@ -2058,6 +3068,7 @@ impl Flux2Engine {
                 }
             },
         )?;
+        crate::conv_policy::report_vae_decode_backend("flux2", cudnn_dispatches_before);
 
         // 8. Convert to u8 image: clamp to [-1, 1], map to [0, 255]
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
@@ -2119,7 +3130,15 @@ impl InferenceEngine for Flux2Engine {
     }
 
     fn is_loaded(&self) -> bool {
-        self.base.is_loaded()
+        // A retained transformer is GPU residency this engine owns, and the
+        // model cache classifies residency from exactly this answer
+        // (`ModelCache::insert` / `restore`). `EngineBase::is_loaded` already
+        // answers true for a Sequential STRATEGY, but a FLUX.2 [dev] engine
+        // takes the sequential generate PATH on an Eager strategy, and
+        // `generate_inner` clears `base.loaded` before it — so without this
+        // the cache would reclassify a 33 GB resident engine as parked and
+        // zero its VRAM credit while the weights sat on the card.
+        self.base.is_loaded() || self.retained_transformer.is_some()
     }
 
     fn load(&mut self) -> Result<()> {
@@ -2129,23 +3148,61 @@ impl InferenceEngine for Flux2Engine {
     fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
         self.pending_placement = req.placement.clone();
         self.pending_loras = effective_flux2_loras(req);
-        let result = if !self.pending_loras.is_empty()
-            && self.base.load_strategy != LoadStrategy::Sequential
-        {
-            Err(anyhow::anyhow!(
-                "Flux.2 LoRA requests require a sequential engine load plan; \
-                 refusing to preload an unadapted transformer"
-            ))
-        } else {
+        // A LoRA is merged into the transformer as it is BUILT, and only
+        // `generate_sequential` builds one per request — so there is nothing
+        // useful to preload here, and an eager preload would put an UNADAPTED
+        // transformer on the card.
+        //
+        // The answer to that is to DEFER, not to refuse. This gate used to
+        // read `load_strategy`, the FIELD, while the render is decided by the
+        // PATH — `uses_sequential_generate_path`, whose LoRA term makes a
+        // LoRA request sequential on any strategy, pinned by
+        // `a_lora_request_takes_the_sequential_generate_path_on_an_eager_engine`.
+        // On a card large enough for an eager plan the two disagreed, and a
+        // Klein LoRA render was refused outright ("requires a sequential
+        // engine load plan") though the engine would have executed it
+        // sequentially with the adapter applied. Deferring is the same answer
+        // `load()` already gives a Sequential strategy and FLUX.2 [dev]:
+        // lazy is a valid load, and the tier's own refusals (dev's
+        // `validate_dev_lora_runtime`) then speak for themselves at render
+        // time instead of being masked by a plan sentence.
+        let result = if self.pending_loras.is_empty() {
             Flux2Engine::load(self)
+        } else {
+            Ok(())
         };
         self.pending_placement = None;
         self.pending_loras.clear();
         result
     }
 
+    fn resident_vram_bytes(&self) -> Option<u64> {
+        // Only the SEQUENTIAL path's retained slot. An eager engine's
+        // transformer lives in `base.loaded` and was already measured by the
+        // cache's `vram_load_delta`, so reporting it here would double it.
+        let retained = self.retained_transformer.as_ref()?;
+        Some(retained.device_bytes)
+    }
+
+    fn release_retained_residency(&mut self) -> u64 {
+        let freed = self
+            .retained_transformer
+            .as_ref()
+            .map_or(0, |retained| retained.device_bytes);
+        self.retained_transformer = None;
+        freed
+    }
+
     fn unload(&mut self) {
         self.base.unload();
+        // The retained slot is the one piece of GPU state that does NOT live
+        // in `base.loaded`, so `base.unload()` cannot release it and the model
+        // cache's eviction would otherwise leave ~33 GB on the card with no
+        // owner that can be asked about it. The parked Mistral3 prefix is the
+        // same story in HOST memory: ~35 GB the host ledger has been told is
+        // spent, which only this engine can give back.
+        self.retained_transformer = None;
+        self.dev_text_encoder = None;
         clear_cache(&self.prompt_cache);
     }
 
@@ -2190,6 +3247,85 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokenizers::models::bpe::BPE;
 
+    /// The FLUX.2 residency budget charges the weights the card is holding.
+    ///
+    /// `4fc27b19` fixed this for FLUX.1 and left FLUX.2 charging the
+    /// checkpoint's file length, under a comment asserting the claim that
+    /// commit disproved. Two cases: a dense checkpoint off CUDA is
+    /// materialized at F32 whatever the file stores, and an FP8 tier widened
+    /// at load holds two bytes per parameter where the file holds one. Both
+    /// are the same under-charge — the card Keeps a transformer it can no
+    /// longer hold — and the second is the figure `e5919ced` already taught
+    /// the SERVER estimators, so the engine agreeing is the point.
+    #[test]
+    fn the_residency_budget_follows_the_dtype_the_weights_are_held_at() {
+        use crate::device::transformer_resident_bytes_for;
+        use crate::flux2::transformer::{
+            flux2_fp8_checkpoint_bytes, flux2_fp8_widen_extra_resident_bytes, Flux2Config,
+        };
+
+        // The FP8 checkpoint size IS one byte per parameter, so it doubles as
+        // the parameter count both halves of this test need.
+        let parameters = flux2_fp8_checkpoint_bytes(&Flux2Config::klein_9b());
+        let bf16_file = parameters * 2;
+
+        // A Mac. `device::gpu_dtype` is F32 on every non-CUDA device.
+        assert_eq!(
+            transformer_resident_bytes_for(false, bf16_file, Some(parameters), DType::F32),
+            parameters * 4,
+            "a BF16 Klein-9B is materialized at F32 off CUDA — twice its file"
+        );
+        assert_eq!(
+            transformer_resident_bytes_for(false, bf16_file, Some(parameters), DType::BF16),
+            bf16_file,
+            "on CUDA the same checkpoint's weights are its file, byte for byte"
+        );
+
+        // An FP8 tier that widened at load, and the server's own extra for it.
+        let fp8_file = parameters;
+        let widened =
+            transformer_resident_bytes_for(false, fp8_file, Some(parameters), DType::BF16);
+        assert_eq!(widened, parameters * 2, "two bytes per parameter");
+        let idle_46gb = 43 * 1024 * 1024 * 1024;
+        assert_eq!(
+            widened,
+            fp8_file + flux2_fp8_widen_extra_resident_bytes(fp8_file, idle_46gb, None),
+            "the engine's residency figure is the server estimator's file-plus-widen"
+        );
+
+        // The same tier on a card that could not afford the widen keeps its
+        // packed slab, which the loaded layer reports as F8E4M3.
+        assert_eq!(
+            transformer_resident_bytes_for(false, fp8_file, Some(parameters), DType::F8E4M3),
+            fp8_file,
+        );
+        let crowded_24gb = 10 * 1024 * 1024 * 1024;
+        assert_eq!(
+            flux2_fp8_widen_extra_resident_bytes(fp8_file, crowded_24gb, None),
+            0,
+            "and the server charges no extra there either"
+        );
+
+        // A GGUF keeps its GGML dtype on the card, so nothing moves.
+        let q8_file = 9_000_000_000;
+        assert_eq!(
+            transformer_resident_bytes_for(true, q8_file, None, DType::F32),
+            q8_file
+        );
+        assert_eq!(
+            transformer_resident_bytes_for(true, q8_file, Some(parameters), DType::BF16),
+            q8_file,
+            "a parameter count cannot re-price a quantized checkpoint"
+        );
+
+        // An unreadable header falls back to the file length rather than a
+        // guess, exactly as every other residency decision does.
+        assert_eq!(
+            transformer_resident_bytes_for(false, bf16_file, None, DType::F32),
+            bf16_file
+        );
+    }
+
     fn temp_test_dir(prefix: &str) -> PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2206,8 +3342,19 @@ mod tests {
         path
     }
 
+    /// A LoRA is merged into the transformer as it is BUILT, and only the
+    /// sequential render builds one per request — so the preload has nothing
+    /// useful to do and must DEFER, not refuse.
+    ///
+    /// The gate used to read `load_strategy`, the FIELD, while the render is
+    /// decided by the PATH (`uses_sequential_generate_path`). On a card large
+    /// enough for an eager plan that refused a Klein LoRA render outright,
+    /// twice, with "requires a sequential engine load plan" — a render the
+    /// engine would in fact have executed sequentially with the adapter
+    /// applied. Deferring is the same answer `load()` already gives a
+    /// Sequential strategy and FLUX.2 [dev]: lazy is a valid load.
     #[test]
-    fn lora_request_refuses_eager_preload_before_touching_model_files() {
+    fn lora_request_defers_the_eager_preload_without_touching_model_files() {
         let dir = temp_test_dir("mold-flux2-lora-eager-preload");
         let mut engine = Flux2Engine::new(
             "flux2-klein:bf16".to_string(),
@@ -2218,34 +3365,101 @@ mod tests {
             false,
             None,
         );
-        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
-            "prompt": "portrait",
-            "model": "flux2-klein:bf16",
-            "width": 1024,
-            "height": 1024,
-            "steps": 4,
-            "guidance": 1.0,
-            "batch_size": 1,
-            "loras": [{
-                "path": dir.join("adapter.safetensors"),
-                "scale": 1.0
-            }]
-        }))
-        .unwrap();
+        let request = lora_request(&dir, "flux2-klein:bf16");
 
-        let error = engine.load_for_request(&request).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("LoRA requests require a sequential engine load plan"),
-            "got: {error:#}"
-        );
+        engine
+            .load_for_request(&request)
+            .expect("a Klein LoRA request on an eager plan must be accepted, not refused");
         assert!(engine.pending_loras.is_empty());
         assert!(engine.pending_placement.is_none());
         assert!(
             !engine.is_loaded(),
-            "fail-closed request loading must not retain partial eager components"
+            "the deferred preload must not put an unadapted transformer on the card"
         );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// The linkage the gate above rests on: the render this engine would run
+    /// for a LoRA request is the sequential one, whatever the configured
+    /// strategy says. If this ever stops holding, deferring the preload would
+    /// leave the eager path with no transformer.
+    #[test]
+    fn a_lora_request_takes_the_sequential_generate_path_on_an_eager_engine() {
+        let dir = temp_test_dir("mold-flux2-lora-sequential-path");
+        let mut engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            flux2_model_paths(&dir, "transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+        );
+        let req = test_generate_request();
+        assert!(
+            !engine.uses_sequential_generate_path(&req),
+            "a plain Klein request on an eager plan still renders eagerly"
+        );
+
+        engine.pending_loras = effective_flux2_loras(&lora_request(&dir, "flux2-klein:bf16"));
+        assert!(!engine.pending_loras.is_empty());
+        assert!(
+            engine.uses_sequential_generate_path(&req),
+            "a LoRA request renders sequentially on ANY strategy — the gate in \
+             `load_for_request` defers on exactly this answer"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// A plain request keeps the eager preload it always had: this engine's
+    /// files are missing, so a preload that really ran reports it.
+    #[test]
+    fn plain_request_still_preloads_eagerly() {
+        let dir = temp_test_dir("mold-flux2-plain-eager-preload");
+        let mut engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            flux2_model_paths(&dir, "missing-transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+        );
+
+        let error = engine
+            .load_for_request(&test_generate_request())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not found"),
+            "a plain eager request must still reach the loader; got: {error:#}"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// FLUX.2 [dev] takes the same deferral. Its LoRA refusal is a TIER fact
+    /// (`validate_dev_lora_runtime`, "LoRA loading is not implemented") and
+    /// belongs to the render, not to a preload gate that was reading the
+    /// strategy field and answering with the wrong sentence.
+    #[test]
+    fn flux2_dev_lora_request_defers_the_preload_too() {
+        let dir = temp_test_dir("mold-flux2-dev-lora-preload");
+        let mut engine = Flux2Engine::new(
+            "flux2-dev:bf16".to_string(),
+            flux2_model_paths(&dir, "missing-transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+        );
+
+        engine
+            .load_for_request(&lora_request(&dir, "flux2-dev:bf16"))
+            .expect("the dev tier's LoRA answer belongs to the render, not the preload");
+        assert!(!engine.is_loaded());
 
         fs::remove_dir_all(dir).ok();
     }
@@ -2308,6 +3522,23 @@ mod tests {
             "steps": 4,
             "guidance": 1.0,
             "batch_size": 1
+        }))
+        .unwrap()
+    }
+
+    fn lora_request(dir: &Path, model: &str) -> GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "portrait",
+            "model": model,
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1,
+            "loras": [{
+                "path": dir.join("adapter.safetensors"),
+                "scale": 1.0
+            }]
         }))
         .unwrap()
     }
@@ -2390,29 +3621,174 @@ mod tests {
         assert!(engine.uses_sequential_generate_path(&req));
     }
 
+    /// The prompt-encode ordering rule is arithmetic, and it FAILS CLOSED.
+    ///
+    /// * FLUX.2 [dev] on a 46 GB card — a 33 GB Q8 transformer beside a
+    ///   ~3.6 GB streamed Mistral3 peak is fine, but beside the ~35 GB prefix
+    ///   a host-parked encoder would hold, it is not;
+    /// * Klein on a 24 GB card — a 9.5 GB Q8 transformer and a ~8 GB Qwen3
+    ///   co-reside;
+    /// * nothing resident — there is nothing to drop, whatever the numbers;
+    /// * an UNMEASURABLE or zero-free card drops, like the three other probe
+    ///   sites. This was the fourth one still failing open: it returned
+    ///   "keep" on a zero sentinel, on the very path whose own comment
+    ///   describes 68 GB landing on a 46 GB card.
     #[test]
-    fn eager_warm_request_delays_transformer_reload_until_after_prompt_encode() {
+    fn the_encoder_drops_the_transformer_only_when_the_two_do_not_fit() {
+        use crate::device::UsableFreeVram::{Measured, NotApplicable, Unmeasurable};
+        const GB: u64 = 1_000_000_000;
+
         assert!(
-            Flux2Engine::should_delay_transformer_reload_for_prompt_encode(
-                LoadStrategy::Eager,
-                false
+            !Flux2Engine::encoder_needs_transformer_dropped(
+                33 * GB,
+                3_600_000_000,
+                Measured(46 * GB)
             ),
-            "warm eager requests with a dropped transformer must encode/drop Qwen3 before reload"
+            "a streamed Mistral3 peak co-resides with a 33 GB transformer on a 46 GB card"
         );
         assert!(
-            !Flux2Engine::should_delay_transformer_reload_for_prompt_encode(
-                LoadStrategy::Eager,
-                true
-            ),
-            "fully loaded eager requests should keep the existing hot path"
+            Flux2Engine::encoder_needs_transformer_dropped(33 * GB, 35 * GB, Measured(46 * GB)),
+            "a resident 35 GB prefix beside a 33 GB transformer is 68 GB on a 46 GB card"
         );
         assert!(
-            !Flux2Engine::should_delay_transformer_reload_for_prompt_encode(
-                LoadStrategy::Sequential,
-                false
+            !Flux2Engine::encoder_needs_transformer_dropped(
+                9_500_000_000,
+                8 * GB,
+                Measured(24 * GB)
             ),
-            "sequential mode already handles load-use-drop ordering"
+            "Klein's Qwen3 and its Q8 transformer fit a 24 GB card together"
         );
+        assert!(
+            Flux2Engine::encoder_needs_transformer_dropped(20 * GB, 8 * GB, Measured(24 * GB)),
+            "a BF16 Klein-9B plus its encoder does not"
+        );
+        assert!(
+            !Flux2Engine::encoder_needs_transformer_dropped(0, 35 * GB, Measured(24 * GB)),
+            "nothing resident means nothing to drop"
+        );
+
+        // The fail-closed rows.
+        assert!(
+            Flux2Engine::encoder_needs_transformer_dropped(33 * GB, 35 * GB, Unmeasurable),
+            "a failed accelerator probe must drop, not keep 33 GB resident"
+        );
+        assert!(
+            Flux2Engine::encoder_needs_transformer_dropped(33 * GB, 35 * GB, Measured(0)),
+            "a card measured at zero free is the most pressured reading there is"
+        );
+        assert!(
+            !Flux2Engine::encoder_needs_transformer_dropped(33 * GB, 35 * GB, NotApplicable),
+            "a CPU render's encoder and transformer share host memory; this drop frees nothing"
+        );
+    }
+
+    /// The retained slot is refused on ANY mismatch. A transformer IS the
+    /// render, so reusing one across a different LoRA stack, dtype, GPU, or
+    /// architecture is the failure mode that produces a plausible wrong
+    /// picture rather than an error.
+    #[test]
+    fn retained_transformer_is_reused_only_when_lora_and_dtype_match() {
+        use crate::flux2::quantized_transformer::test_support::{tiny_cfg, tiny_transformer};
+
+        let cfg = tiny_cfg(false);
+        let config_hash = flux2_config_hash(&cfg);
+        let loras = vec![(11u64, 22u64)];
+        let retained = RetainedFlux2Transformer {
+            transformer: super::super::transformer::Flux2TransformerWrapper::Quantized(
+                tiny_transformer(&cfg),
+            ),
+            device_bytes: 33_000_000_000,
+            ordinal: 1,
+            dtype: DType::BF16,
+            lora_fingerprint: loras.clone(),
+            config_hash,
+        };
+
+        assert!(retained.matches(1, DType::BF16, &loras, config_hash));
+        assert!(
+            !retained.matches(0, DType::BF16, &loras, config_hash),
+            "a tensor is bound to the GPU it was built on"
+        );
+        assert!(
+            !retained.matches(1, DType::F16, &loras, config_hash),
+            "the working dtype is the linears' materialized precision"
+        );
+        assert!(
+            !retained.matches(1, DType::BF16, &[], config_hash),
+            "an unadapted request must not render through a merged transformer"
+        );
+        assert!(
+            !retained.matches(1, DType::BF16, &[(11, 23)], config_hash),
+            "a changed scale is a different merge"
+        );
+        assert!(
+            !retained.matches(1, DType::BF16, &[(11, 22), (33, 44)], config_hash),
+            "a second adapter is a different merge"
+        );
+        assert!(
+            !retained.matches(1, DType::BF16, &loras, config_hash ^ 1),
+            "a different architecture is a different transformer"
+        );
+
+        // The fingerprint is order-sensitive and compares scales by BITS,
+        // because the merge is both.
+        let weight = |path: &str, scale: f64| LoraWeight {
+            path: path.to_string(),
+            scale,
+            expert: None,
+        };
+        let forward = flux2_lora_fingerprint(&[weight("/a", 0.8), weight("/b", 0.4)]);
+        let reversed = flux2_lora_fingerprint(&[weight("/b", 0.4), weight("/a", 0.8)]);
+        assert_ne!(forward, reversed);
+        assert_ne!(
+            flux2_lora_fingerprint(&[weight("/a", 0.8)]),
+            flux2_lora_fingerprint(&[weight("/a", 0.8 + f64::EPSILON)])
+        );
+    }
+
+    /// `unload()` is what the model cache calls on eviction, and the retained
+    /// slot is the one piece of GPU state that does not live in
+    /// `base.loaded` — so `base.unload()` alone would leave the weights on the
+    /// card with no owner that could be asked about them.
+    #[test]
+    fn unload_clears_the_retained_transformer() {
+        use crate::flux2::quantized_transformer::test_support::{tiny_cfg, tiny_transformer};
+        use crate::InferenceEngine;
+
+        let dir = temp_test_dir("mold-flux2-retained-unload");
+        let mut engine = Flux2Engine::new(
+            "flux2-klein:bf16".to_string(),
+            flux2_model_paths(&dir, "transformer.safetensors", vec![], None),
+            None,
+            LoadStrategy::Eager,
+            0,
+            false,
+            None,
+        );
+        assert!(
+            !engine.is_loaded(),
+            "an Eager engine with nothing loaded is not resident"
+        );
+
+        let cfg = tiny_cfg(false);
+        engine.retained_transformer = Some(RetainedFlux2Transformer {
+            transformer: super::super::transformer::Flux2TransformerWrapper::Quantized(
+                tiny_transformer(&cfg),
+            ),
+            device_bytes: 33_000_000_000,
+            ordinal: 0,
+            dtype: DType::F32,
+            lora_fingerprint: Vec::new(),
+            config_hash: flux2_config_hash(&cfg),
+        });
+        assert!(
+            engine.is_loaded(),
+            "a retained transformer is GPU residency the cache must see"
+        );
+
+        InferenceEngine::unload(&mut engine);
+        assert!(engine.retained_transformer.is_none());
+        assert!(!engine.is_loaded());
     }
 
     #[test]
@@ -2495,6 +3871,103 @@ mod tests {
             .to_string()
             .contains("LoRA loading is not implemented"));
         assert!(validate_dev_lora_runtime(&Flux2Config::klein(), true).is_ok());
+    }
+
+    /// `mold_core::flux2_lora` cannot depend on this crate, so its tier table
+    /// is a second copy of three numbers. This is the pin that keeps the two
+    /// the same — a new tier or a changed width fails here rather than
+    /// silently teaching the refusal a geometry the engine no longer has.
+    #[test]
+    fn the_core_tier_table_is_the_engines_own() {
+        let engine_widths: Vec<usize> = [
+            Flux2Config::klein(),
+            Flux2Config::klein_9b(),
+            Flux2Config::dev(),
+        ]
+        .iter()
+        .map(|cfg| cfg.hidden_size)
+        .collect();
+        let core_widths: Vec<usize> = mold_core::flux2_lora::FLUX2_TIER_WIDTHS
+            .iter()
+            .map(|(width, _)| *width)
+            .collect();
+        assert_eq!(engine_widths, core_widths);
+        for cfg in [
+            Flux2Config::klein(),
+            Flux2Config::klein_9b(),
+            Flux2Config::dev(),
+        ] {
+            assert!(
+                mold_core::flux2_lora::flux2_tier_for_hidden_size(cfg.hidden_size).is_some(),
+                "every engine config must name a tier, missed {}",
+                cfg.hidden_size
+            );
+        }
+    }
+
+    /// The defect: a 4096-wide adapter handed to the 3072-wide 4B tier used to
+    /// load, build 32 patches, and then die inside the merge with `shape
+    /// mismatch in add, lhs: [3072, 3072], rhs: [4096, 4096]` — after the whole
+    /// GGUF checkpoint had been read and dequantised. It is refused here
+    /// instead, before a transformer byte is touched, and the header is the
+    /// only thing read.
+    #[test]
+    fn a_foreign_tier_lora_is_refused_before_the_transformer_loads() {
+        use std::io::Write;
+
+        let dir = temp_test_dir("mold-flux2-lora-tier");
+        let path = dir.join("flux2-klein-delight-lora.safetensors");
+        let mut header = serde_json::Map::new();
+        for i in 0..8 {
+            for leaf in ["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0"] {
+                header.insert(
+                    format!("transformer.transformer_blocks.{i}.{leaf}.lora_A.weight"),
+                    serde_json::json!({"dtype": "F32", "shape": [32, 4096], "data_offsets": [0, 4]}),
+                );
+                header.insert(
+                    format!("transformer.transformer_blocks.{i}.{leaf}.lora_B.weight"),
+                    serde_json::json!({"dtype": "F32", "shape": [4096, 32], "data_offsets": [0, 4]}),
+                );
+            }
+        }
+        let json = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(&(json.len() as u64).to_le_bytes()).unwrap();
+        file.write_all(&json).unwrap();
+        file.write_all(&[0u8; 4]).unwrap();
+        drop(file);
+
+        let stack = vec![LoraWeight {
+            path: path.to_string_lossy().into_owned(),
+            scale: 1.0,
+            expert: None,
+        }];
+
+        let refusal = validate_lora_tier_runtime(&Flux2Config::klein(), &stack)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.contains("flux2-klein-delight-lora.safetensors"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("4096") && refusal.contains("3072"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("[klein] 9B"), "{refusal}");
+
+        // The tier it was actually trained for still loads.
+        assert!(validate_lora_tier_runtime(&Flux2Config::klein_9b(), &stack).is_ok());
+
+        // An alias the runtime materializes is not a file and is not asked.
+        let alias = vec![LoraWeight {
+            path: "camera-control:orbit-left".to_string(),
+            scale: 1.0,
+            expert: None,
+        }];
+        assert!(validate_lora_tier_runtime(&Flux2Config::klein(), &alias).is_ok());
+
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2587,6 +4060,105 @@ mod tests {
         fs::remove_dir_all(dir).ok();
     }
 
+    /// The plan is frozen for a reason: whatever the engine does about memory,
+    /// it may not do LESS than the plan promised without saying so.
+    ///
+    /// `load_transformer` dispatches GGUF, then BFL-native single file, then
+    /// everything else, and only the last arm ever reads
+    /// `block_offload_enabled()`. A single-file fp8 [dev] checkpoint therefore
+    /// loaded WHOLE under a plan that said `StreamedBlocks` — admission
+    /// reserved a streamed working set and the engine put the entire 35 GB
+    /// checkpoint on the card. The 2026-09-12 24 GB simulation ran on a host
+    /// with 45 GB physically free, so it rendered and hid the divergence; a
+    /// real 24 GB card would have OOM'd exactly as #1707 did.
+    #[test]
+    fn a_single_file_checkpoint_refuses_the_streamed_plan_it_cannot_honour() {
+        assert_eq!(
+            flux2_offload_decision_for(true, false, false, false, true),
+            Flux2OffloadDecision::Unsupported(
+                "Flux.2 block-level offload streams sharded diffusers weights; a BFL-native \
+                 single-file checkpoint is loaded whole and cannot be streamed",
+            ),
+            "a layout the loader cannot stream must refuse, never load whole"
+        );
+        // Sharded diffusers weights are the layout the streamed loader is for.
+        assert_eq!(
+            flux2_offload_decision_for(true, false, false, false, false),
+            Flux2OffloadDecision::Selected
+        );
+        // And nothing changes for a render that never asked to stream.
+        assert_eq!(
+            flux2_offload_decision_for(false, false, false, false, true),
+            Flux2OffloadDecision::Disabled
+        );
+    }
+
+    /// The server reads the engine's answer for the file it will actually load.
+    ///
+    /// Every layout `is_bfl_native_single_file` accepts, INCLUDING the
+    /// root-keyed one plato's installed `flux2-dev:fp8` actually is
+    /// (`detect_format` -> `BflNativeRoot`). The planner's copy of this
+    /// predicate matched only `BflNative`, so it answered "this can stream" for
+    /// the one checkpoint in the campaign that provoked the question.
+    #[test]
+    fn every_single_file_layout_the_loader_accepts_is_refused_for_streaming() {
+        let dir = temp_test_dir("mold-flux2-singlefile-offload");
+        for (tag, prefix) in [("prefixed", "model.diffusion_model."), ("root", "")] {
+            let path = dir.join(format!("flux2_dev_fp8mixed_{tag}.safetensors"));
+            write_flux2_single_file_header(&path, prefix);
+            assert!(
+                matches!(
+                    super::super::single_file::detect_format(&path),
+                    Ok(super::super::single_file::Flux2SingleFileFormat::BflNative)
+                        | Ok(super::super::single_file::Flux2SingleFileFormat::BflNativeRoot)
+                ),
+                "{tag}: fixture must be a layout the loader takes"
+            );
+            assert!(
+                flux2_transformer_is_single_file(&path, &[]),
+                "{tag}: the shared predicate must see it"
+            );
+            let reason = flux2_block_offload_unsupported_reason(&path, &[], false)
+                .unwrap_or_else(|| panic!("{tag}: a single file cannot stream its blocks"));
+            assert!(reason.contains("single-file"), "{tag}: {reason}");
+        }
+        // Sharded diffusers weights are the layout the streamed loader is for,
+        // and they must keep streaming.
+        let sharded = dir.join("shard-00001.safetensors");
+        write_flux2_single_file_header(&sharded, "");
+        assert!(!flux2_transformer_is_single_file(
+            &sharded,
+            &[sharded.clone(), dir.join("shard-00002.safetensors")]
+        ));
+        assert_eq!(
+            flux2_block_offload_unsupported_reason(
+                &sharded,
+                &[sharded.clone(), dir.join("shard-00002.safetensors")],
+                false
+            ),
+            None
+        );
+    }
+
+    /// A minimal FLUX.2 single-file header at the given key prefix: the marker
+    /// keys `single_file::detect_format` looks for, and no tensor data.
+    fn write_flux2_single_file_header(path: &std::path::Path, prefix: &str) {
+        use std::io::Write;
+        let header = serde_json::json!({
+            format!("{prefix}img_in.weight"): {
+                "dtype": "F32", "shape": [6144, 128], "data_offsets": [0, 0]
+            },
+            format!("{prefix}double_blocks.0.img_attn.to_out.weight"): {
+                "dtype": "F32", "shape": [6144, 6144], "data_offsets": [0, 0]
+            },
+        });
+        let mut bytes = serde_json::to_vec(&header).unwrap();
+        bytes.resize(bytes.len().next_multiple_of(8), b' ');
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(&(bytes.len() as u64).to_le_bytes()).unwrap();
+        file.write_all(&bytes).unwrap();
+    }
+
     #[test]
     fn flux2_offload_decision_gates_current_unsupported_cases() {
         assert_eq!(
@@ -2650,7 +4222,7 @@ mod tests {
         let cfg = engine.resolve_config().unwrap();
         let txt_emb = Tensor::zeros((1, 1, cfg.context_in_dim), DType::F32, &Device::Cpu).unwrap();
         engine.prompt_cache.lock().unwrap().insert(
-            prompt_text_key("a cat"),
+            flux2_prompt_cache_key("a cat"),
             CachedTensor::from_tensor(&txt_emb).unwrap(),
         );
         let req = GenerateRequest {

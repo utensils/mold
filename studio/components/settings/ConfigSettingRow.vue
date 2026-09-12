@@ -83,6 +83,7 @@ const asNumber = computed(() => {
     :source="row.source"
     :locked-reason="lockedReason"
     :needs-engine-restart="schema.needsEngineRestart || row.restart_required"
+    :needs-app-restart="schema.needsAppRestart"
     :resettable="canResetConfig(schemaKey)"
     @reset="emit('reset', schemaKey)"
   >

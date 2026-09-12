@@ -1,6 +1,8 @@
 //! Unit tests for the resources module.
 
-use crate::resources::{nonzero_process_vram, ResourceBroadcaster, TelemetryTarget};
+use crate::resources::{
+    attribute_used_ram, nonzero_process_vram, ResourceBroadcaster, TelemetryTarget,
+};
 use mold_core::{GpuBackend, GpuSnapshot, RamSnapshot, ResourceSnapshot};
 use mold_inference::device::CudaDeviceKind;
 
@@ -199,11 +201,14 @@ fn ram_snapshot_satisfies_invariants() {
         ram.used,
         ram.total
     );
+    // Deliberately NOT `used_by_mold <= used`: RSS and `total - MemAvailable`
+    // are computed on different bases, so a process holding mmap'd weights
+    // legitimately exceeds `used`. See `attribute_used_ram`.
     assert!(
-        ram.used_by_mold <= ram.used,
-        "used_by_mold ({}) must be <= used ({})",
+        ram.used_by_mold <= ram.total,
+        "used_by_mold ({}) must be <= total ({})",
         ram.used_by_mold,
-        ram.used
+        ram.total
     );
     assert_eq!(
         ram.used_by_other,
@@ -242,6 +247,83 @@ fn ram_snapshot_satisfies_invariants() {
     assert_eq!(
         system.reclaimable_zfs_arc, None,
         "the RSS-only reading never consults arcstats"
+    );
+}
+
+#[test]
+fn process_rss_reader_agrees_with_sysinfo() {
+    // Touch a few MiB of ballast first so a stale page-size assumption or a
+    // KiB/byte unit slip cannot hide inside the noise.
+    let mut ballast: Vec<u8> = vec![0_u8; 64 << 20];
+    for page in ballast.chunks_mut(4096) {
+        page[0] = 7;
+    }
+    std::hint::black_box(&ballast);
+
+    // The kernel's own answer is the oracle for units and page size:
+    // `/proc/self/status: VmRSS` and `/proc/self/statm` field 2 describe the
+    // same resident set, so the O(1) reader must land on it to within the
+    // pages the two reads are apart.
+    #[cfg(target_os = "linux")]
+    {
+        let low = crate::resources::process_rss_bytes();
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let high = crate::resources::process_rss_bytes();
+        let vm_rss_kb: u64 = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .expect("VmRSS is always present on Linux");
+        let vm_rss = vm_rss_kb * 1024;
+        // Reading /proc/self/status itself grows the heap, so bracket it.
+        // One page of slack on each side; a page-size or KiB/byte slip would
+        // be a factor, not a page.
+        let page = 1_u64 << 12;
+        assert!(
+            vm_rss + page >= low.min(high) && vm_rss <= high.max(low) + page,
+            "statm reader bracket [{low}, {high}] does not contain VmRSS ({vm_rss})"
+        );
+    }
+
+    // And it must agree with the per-PID `sysinfo` probe it replaces. The
+    // tolerance is 25 %, not 5 %, for a measured reason worth keeping: that
+    // probe builds its own `System` and walks /proc, so the sample it takes
+    // is inflated by its own working set (measured ~16 MB of a ~93 MB
+    // process here) — which is exactly why the 1 Hz sampler stopped using it.
+    let before = crate::resources::process_rss_bytes();
+    let theirs = crate::resources::sysinfo_process_rss_bytes();
+    let after = crate::resources::process_rss_bytes();
+    assert!(
+        before > 0 && after > 0 && theirs > 0,
+        "the resident set of a running process is never zero"
+    );
+    let lo = before.min(after) as f64 * 0.75;
+    let hi = before.max(after) as f64 * 1.25;
+    assert!(
+        (theirs as f64) >= lo && (theirs as f64) <= hi,
+        "RSS readers disagree: statm bracket [{before}, {after}] sysinfo={theirs}"
+    );
+}
+
+#[test]
+fn ram_snapshot_does_not_list_other_processes() {
+    // The 1 Hz sampler must never walk /proc. The shared memory-only
+    // `System` is the whole budget: it holds no process table at all,
+    // before or after a snapshot.
+    let ram = crate::resources::ram_snapshot();
+    assert!(ram.total > 0);
+    assert!(ram.used_by_mold > 0, "RSS must still be reported");
+    assert_eq!(
+        crate::resources::shared_system_process_count(),
+        0,
+        "sampling must not populate the process table"
+    );
+    let _ = crate::resources::ram_snapshot_from_system();
+    assert_eq!(
+        crate::resources::shared_system_process_count(),
+        0,
+        "the shared sampler System must never hold a process table"
     );
 }
 
@@ -380,6 +462,107 @@ fn smi_snapshot_sets_per_process_fields_to_none() {
 
 #[test]
 #[cfg(feature = "nvml")]
+fn shared_nvml_handle_is_reused_and_reset_on_poison() {
+    // `Nvml::init()` dlopens libnvidia-ml and enumerates the driver. It used
+    // to be paid on every telemetry tick and on every hot-cache admission;
+    // one handle now serves all of them. This test never needs a GPU: the
+    // handle-absent branch is the one CI takes, and it is also the branch
+    // that must not re-dlopen on every call.
+    crate::resources::reset_shared_nvml_for_test();
+    let attempts_before = crate::resources::shared_nvml_init_attempts();
+    let Some(first) = crate::resources::shared_nvml() else {
+        assert!(
+            crate::resources::shared_nvml().is_none(),
+            "an absent driver stays absent"
+        );
+        assert_eq!(
+            crate::resources::shared_nvml_init_attempts(),
+            attempts_before + 1,
+            "the negative answer is memoized too — a keyless host must not \
+             dlopen libnvidia-ml once per telemetry tick"
+        );
+        return;
+    };
+    assert_eq!(
+        crate::resources::shared_nvml_init_attempts(),
+        attempts_before + 1
+    );
+    let second = crate::resources::shared_nvml().expect("a live handle stays live");
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "one handle serves every caller"
+    );
+    assert_eq!(
+        crate::resources::shared_nvml_init_attempts(),
+        attempts_before + 1,
+        "reuse costs no initialization"
+    );
+
+    // A handle that dies immediately after being created is the loop this
+    // gate exists for: re-initializing costs a dlopen plus a driver
+    // enumeration under the global mutex admission waits on, and ungated it
+    // was paid at telemetry's 1 Hz plus once per admission, forever.
+    first.poison_for_test();
+    assert!(
+        crate::resources::shared_nvml().is_none(),
+        "a handle poisoned inside the retry window backs off instead of re-initializing"
+    );
+    assert_eq!(
+        crate::resources::shared_nvml_init_attempts(),
+        attempts_before + 1,
+        "the backoff must cost no initialization at all"
+    );
+
+    // Once the window has passed, a genuine driver reload still recovers.
+    // `attempted_at` is when the CURRENT handle was made, so a long-lived
+    // handle killed by a reload is already past the window and recovers on
+    // the very next sample.
+    crate::resources::age_shared_nvml_for_test();
+    let third = crate::resources::shared_nvml().expect("re-initializes once the window has passed");
+    assert!(
+        !std::sync::Arc::ptr_eq(&first, &third),
+        "a poisoned handle is replaced, not reused"
+    );
+    assert_eq!(
+        crate::resources::shared_nvml_init_attempts(),
+        attempts_before + 2
+    );
+}
+
+/// `FailedToLoadSymbol` is an old driver against a newer wrapper: the library
+/// loaded, the symbol is simply not in it. Re-`dlopen`ing the same file cannot
+/// fix that, so poisoning on it made a permanent mismatch into an
+/// init/call/poison/init loop.
+#[test]
+#[cfg(feature = "nvml")]
+fn a_missing_symbol_is_permanent_and_never_poisons_the_handle() {
+    use nvml_wrapper::error::NvmlError;
+    for permanent in [
+        NvmlError::FailedToLoadSymbol("nvmlDeviceGetMemoryInfo_v2".to_string()),
+        NvmlError::NotFound,
+        NvmlError::NotSupported,
+    ] {
+        assert!(
+            !crate::resources::nvml_error_kills_the_handle(&permanent),
+            "{permanent:?} must not poison the shared handle"
+        );
+    }
+    for fatal in [
+        NvmlError::Uninitialized,
+        NvmlError::DriverNotLoaded,
+        NvmlError::LibraryNotFound,
+        NvmlError::GpuLost,
+        NvmlError::ResetRequired,
+    ] {
+        assert!(
+            crate::resources::nvml_error_kills_the_handle(&fatal),
+            "{fatal:?} means the handle is finished"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "nvml")]
 fn nvml_source_returns_zero_gpus_when_nvml_init_fails() {
     // On a CI box without NVML, `NvmlSource::try_new()` returns Err — the
     // caller must treat that as "no GPUs" without panicking.
@@ -485,4 +668,36 @@ fn metal_policy_receives_the_shared_host_observation_without_estimated_fallback(
             expected
         );
     }
+}
+
+/// The pair the watchdog exists to measure, and the one the clamp destroyed.
+///
+/// On Linux sysinfo's `used` is `total - MemAvailable`, while `/proc/self/statm`
+/// counts clean file-backed resident pages in RSS that `MemAvailable` reports
+/// as available. A process holding mmap'd GGUF weights therefore has an RSS
+/// LARGER than `used` as a matter of course — not as a pathology — so clamping
+/// `used_by_mold` by `used` reported ~0 RSS across a multi-GB mmap and sent
+/// `used_by_other` to the whole machine.
+#[test]
+fn mmapped_weights_do_not_shrink_this_processs_own_attribution() {
+    let used = 8 << 30;
+    let rss = 40u64 << 30;
+    let (used_by_mold, used_by_other) = attribute_used_ram(used, rss);
+    assert_eq!(
+        used_by_mold, rss,
+        "the RSS probe must survive intact; it is the whole measurement"
+    );
+    // The two figures are on different bases, so "everything else" is simply
+    // not derivable here. Zero is the honest floor, not an attribution.
+    assert_eq!(used_by_other, 0);
+}
+
+/// And the ordinary case still splits `used` the way it always did.
+#[test]
+fn a_resident_set_inside_used_still_splits_it() {
+    let used = 32 << 30;
+    let rss = 12 << 30;
+    let (used_by_mold, used_by_other) = attribute_used_ram(used, rss);
+    assert_eq!(used_by_mold, rss);
+    assert_eq!(used_by_other, 20 << 30);
 }

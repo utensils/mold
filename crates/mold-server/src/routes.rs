@@ -1318,6 +1318,20 @@ pub(crate) struct PreparedGenerationRoute {
     pub(crate) warnings: RequestWarnings,
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
+    /// The built-in LTX-2 IC-LoRA this preparation resolved and prepended
+    /// into `request.loras`, when it resolved one.
+    ///
+    /// Preparation runs AFTER durable admission sealed the request's media
+    /// set, and `loras` is one of the fields the publication scrub wipes — so
+    /// an adapter materialized here is destroyed on its way to the runtime
+    /// unless the feeder is told to carry it across. It is reported rather
+    /// than inferred because only this function knows which entry it added.
+    ///
+    /// Safe to carry where a user's LoRA is not: the path is server-minted,
+    /// resolved from the request's own `ltx2_control` field against this
+    /// host's manifest, and names an installed first-party artifact rather
+    /// than anything the caller supplied.
+    pub(crate) materialized_control_lora: Option<mold_core::LoraWeight>,
 }
 
 /// Name the first request-owned media authority that cannot be replayed from
@@ -1650,6 +1664,7 @@ async fn prepare_generation_inner(
         .extend(resolve_request_filing(state, request).await);
 
     resolve_server_local_media_paths(state, request).await?;
+    let mut materialized_control_lora = None;
     if let Some((adapter, path)) = planned_control {
         // The ordinary attached route may wait for this first-party adapter
         // download. A durable acknowledgement may not: there is no persisted
@@ -1663,7 +1678,8 @@ async fn prepare_generation_inner(
                 adapter.id
             )));
         }
-        materialize_builtin_ltx2_control(state, request, adapter, path).await?;
+        materialized_control_lora =
+            Some(materialize_builtin_ltx2_control(state, request, adapter, path).await?);
     }
     if let Some((preset, _)) = planned_camera_controls
         .iter()
@@ -1675,6 +1691,16 @@ async fn prepare_generation_inner(
         )));
     }
     materialize_builtin_ltx2_camera_controls(state, &planned_camera_controls).await?;
+    // Now that the whole adapter stack is on the request, snap the canvas
+    // onto the grid an IC-LoRA reference video can be encoded on. This is the
+    // last moment it can happen: the frozen execution plan, the memory
+    // estimate, the queue row and the saved provenance are all resolved from
+    // the request after this point, so a canvas changed any later would leave
+    // every one of them describing a render that never happened.
+    if let Some(advisory) = materialize_ltx2_reference_canvas(request) {
+        tracing::info!("{advisory}");
+        warnings.other.push(advisory);
+    }
     // Durable admission accepts a request naming a server-local adapter and
     // preparation may run minutes — or a restart — later, so the path is
     // re-asked HERE rather than trusted from admission. A LoRA that has since
@@ -1731,6 +1757,7 @@ async fn prepare_generation_inner(
         warnings,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
+        materialized_control_lora,
     })
 }
 
@@ -2152,12 +2179,37 @@ async fn apply_lip_dub_reference_timing(
     Ok(timing.warnings)
 }
 
+/// Snap an IC-LoRA control render onto the canvas its reference video can be
+/// encoded at.
+///
+/// A `ref0.5` IC-LoRA conditions on a reference at half the conditioned
+/// stage's resolution, and that half must still land on the video VAE's 32px
+/// latent grid — `mold_core::validation::ltx2_reference_axis_is_aligned` has
+/// the upstream citations. mold's LTX-2 manifest default is 1216x704, whose
+/// stage-1 grid is 19x11, so `--ic-lora-control union` failed inside the VAE
+/// at the tier's OWN default canvas after paying for the Gemma encode.
+///
+/// The factor is read from the adapters' own safetensors metadata through
+/// `mold_inference::ltx2::reference_video_downscale_factor` — the same
+/// authority the engine asks — rather than from a table keyed on the control
+/// id, so a caller's own `--lora` carrying the metadata is covered too. An
+/// unreadable adapter answers nothing here and the engine's guard still
+/// refuses by name; this seam never fails a request.
+fn materialize_ltx2_reference_canvas(request: &mut mold_core::GenerateRequest) -> Option<String> {
+    let stack = crate::queue_media::effective_request_loras(request);
+    if stack.is_empty() {
+        return None;
+    }
+    let factor = mold_inference::ltx2::reference_video_downscale_factor(&stack).ok()?;
+    mold_core::validation::materialize_ltx2_reference_canvas(request, factor as u32)
+}
+
 async fn materialize_builtin_ltx2_control(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
     adapter: &'static mold_core::ltx2_control::Ltx2ControlAdapter,
     path: std::path::PathBuf,
-) -> Result<(), ApiError> {
+) -> Result<mold_core::LoraWeight, ApiError> {
     if !control_artifact_is_complete(adapter, &path) {
         let mut events = state.downloads.subscribe();
         let (job_id, _, _) = state
@@ -2199,20 +2251,21 @@ async fn materialize_builtin_ltx2_control(
         )));
     }
 
-    let mut ordered = vec![mold_core::LoraWeight {
+    let materialized = mold_core::LoraWeight {
         path: path.to_string_lossy().into_owned(),
         scale: 1.0,
 
         expert: None,
-    }];
-    if let Some(lora) = request.lora.take() {
-        ordered.push(lora);
-    }
-    if let Some(loras) = request.loras.take() {
-        ordered.extend(loras);
-    }
+    };
+    // The adapter first, then the caller's own stack — taken from whichever
+    // well carries it, never both. `take_caller_lora_stack` is the one
+    // authority on that precedence; concatenating `lora` and `loras` recorded
+    // and merged a single `--lora` twice on every `ltx2` control render,
+    // because `mold run` fills both wells with it.
+    let mut ordered = vec![materialized.clone()];
+    ordered.extend(request.take_caller_lora_stack());
     request.loras = Some(ordered);
-    Ok(())
+    Ok(materialized)
 }
 
 /// Which of this adapter's files have not landed and verified.
@@ -5819,6 +5872,9 @@ async fn delete_model(
         }
     }
     drop(config);
+    // Files are gone from the models directory; the memoized catalog would
+    // still advertise them as installed.
+    state.model_catalog.invalidate();
 
     // Evict any parked (non-GPU-resident) engine so a later request can't
     // reactivate an engine whose files are gone.
@@ -8039,6 +8095,10 @@ async fn server_capabilities(
         media_version: true,
         conditional_get: true,
         row_events: true,
+        // A print is readable back byte-for-byte from
+        // `GET /api/gallery/image/:filename` whenever there is an output
+        // directory to write it to.
+        persists_outputs: Some(!state.is_output_disabled(&config)),
     };
     Json(mold_core::ServerCapabilities {
         generation_profile_v1: true,
@@ -12844,11 +12904,54 @@ mod tests {
 
         assert!(request.lora.is_none());
         let loras = request.loras.unwrap();
-        assert_eq!(loras.len(), 3);
+        // The adapter, then the caller's stack from ONE well. A present
+        // `loras` is what every reader resolves, so the legacy singular is
+        // dropped rather than appended behind it: concatenating the two is
+        // how a single `mold run --lora` — which fills BOTH wells for an
+        // ltx2 model — was recorded and merged twice.
+        assert_eq!(loras.len(), 2);
         assert_eq!(loras[0].path, adapter_path.to_string_lossy());
         assert_eq!(loras[0].scale, 1.0);
-        assert_eq!(loras[1].path, "/loras/legacy.safetensors");
-        assert_eq!(loras[2].path, "/loras/style.safetensors");
+        assert_eq!(loras[1].path, "/loras/style.safetensors");
+    }
+
+    /// `mold run --lora X` on an ltx2 model sends X in `lora` AND in `loras`
+    /// (`run::resolve_effective_loras_for_family`), so the control fold must
+    /// still record exactly two adapters.
+    #[tokio::test]
+    async fn built_in_control_records_one_caller_lora_once() {
+        let state = AppState::for_tests();
+        let temp = tempfile::tempdir().unwrap();
+        let adapter_path = temp.path().join("control.safetensors");
+        std::fs::write(&adapter_path, b"installed").unwrap();
+        mold_core::download::write_sha256_marker(&adapter_path, "test").unwrap();
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "test",
+            "model": "ltx-2-19b-distilled:fp8",
+            "width": 960,
+            "height": 576,
+            "steps": 8,
+            "guidance": 3.0,
+            "batch_size": 1,
+            "lora": { "path": "/loras/dolly-in.safetensors", "scale": 1.0 },
+            "loras": [{ "path": "/loras/dolly-in.safetensors", "scale": 1.0 }]
+        }))
+        .unwrap();
+        let adapter = mold_core::ltx2_control::resolve_control_adapter(
+            mold_core::ltx2_control::Ltx2ControlProfile::Ltx2_19bDistilled,
+            "union",
+        )
+        .unwrap();
+
+        materialize_builtin_ltx2_control(&state, &mut request, adapter, adapter_path.clone())
+            .await
+            .unwrap();
+
+        assert!(request.lora.is_none());
+        let loras = request.loras.unwrap();
+        assert_eq!(loras.len(), 2, "the caller's adapter is recorded once");
+        assert_eq!(loras[0].path, adapter_path.to_string_lossy());
+        assert_eq!(loras[1].path, "/loras/dolly-in.safetensors");
     }
 
     struct TrackingUpscaler {

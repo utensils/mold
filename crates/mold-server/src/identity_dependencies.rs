@@ -401,6 +401,7 @@ mod tests {
 
     fn device() -> DeviceFact {
         DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: "cuda:0".to_string(),
             ordinal: 0,
@@ -1046,6 +1047,7 @@ mod tests {
     /// A second device, so the fan-out cases below are genuinely multi-device.
     fn second_device() -> DeviceFact {
         DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: "cuda:1".to_string(),
             ordinal: 1,

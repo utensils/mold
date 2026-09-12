@@ -307,6 +307,23 @@ exactly the widest target whose halved stage 1 still lands at 2048px; mold
 applies one spatial rung, so there is no second halving to rescue anything
 wider.
 
+#### IC-LoRA reference controls need a 128-pixel canvas
+
+The published `ref0.5` control adapters — Union and Motion Track — condition on
+the guide video at **half** the conditioned stage's resolution, and that half
+still has to be a whole number of the video VAE's 32-pixel latent cells. On a
+composing checkpoint the conditioned stage is already half the output, so both
+axes of the render must be multiples of **128**. The tier default of 1216x704
+is not: its stage-1 latent grid is 19x11, which would need a reference of
+9.5 x 5.5 cells.
+
+mold snaps such a render down onto the nearest usable canvas and says so
+(1216x704 renders at 1152x640), so the documented command works with no
+`--width`/`--height`. Name a multiple of 128 on both axes to choose the canvas
+yourself. Every other adapter, including the camera-control presets and your
+own LoRAs, is unaffected — only an adapter whose safetensors metadata declares
+`reference_downscale_factor` greater than 1 changes the grid.
+
 Nothing is composed by hand: pick the output size and mold runs the
 composition. `/api/models` carries the per-model `max_pixels`,
 `max_axis_pixels`, `dimension_alignment`, and `recommended_dimensions` so

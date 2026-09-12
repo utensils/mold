@@ -21,6 +21,23 @@ Use `mold info <model>` or `/api/models` before selecting dimensions, frame
 counts, steps, guidance, conditioning, or audio. A catalog model can differ
 from a built-in manifest profile.
 
+A seed reproduces a render only within one mold version and one backend. FLUX.1
+and FLUX.2 in particular changed their arithmetic in mold 0.29, and the change
+lands on EVERY CUDA build regardless of which kernels it compiled: their math
+attention path now folds the softmax scale into the keys, and their GGUF
+activations run in BF16. A build that also compiled the kernels additionally
+attends through FlashAttention-2 and convolves through cuDNN. All of those
+change the order the same sums accumulate in, so a FLUX print archived before
+that release will not re-render byte-for-byte after it under any setting — on
+any CUDA artifact, whether or not it has the kernels. `MOLD_ATTN=math`
+and `MOLD_CONV=im2col` are the cross-build determinism contract going forward,
+and every other still family already renders that way in every build. Never
+promise a user that an old seed will reproduce an old picture; re-render and
+compare instead. Compare RAW PIXELS, never the saved file's hash: mold 0.29
+also changed the default PNG profile (`MOLD_PNG_ENCODING`, `fast` by default,
+`balanced` for the old one), which is lossless but a different deflate, so an
+unchanged picture saves to a different — and 6-11 % larger — file.
+
 The prompt is OPTIONAL, not absent, on a video render that already carries
 visual conditioning — a source image, keyframes, a clip to continue, or a
 reference set. LTX-2, Wan and MiniMax H3 all answer this way: what the user
@@ -547,6 +564,48 @@ different backend; improve the image instead.
 For published CUDA images, use Mold's live distribution resolver rather than
 guessing an architecture tag. Its current contract includes B200/B300 → `:<version>-sm100`; Grace Hopper and Grace Blackwell are unsupported. B200 support
 is simulated until hardware-qualified.
+
+## Gallery archive-authority storage
+
+The gallery archive authority records what this host has published. Storage
+version 3 (an append-only delta log, so publishing costs the same on a large
+library as on a small one) is OPT-IN via `gallery.authority_log`, because a
+mold older than 0.29 reads version 2 only and refuses to publish against a
+version-3 store — turning it on is a decision about every binary sharing that
+`$MOLD_HOME`. Reading a version-3 store never needs the switch.
+
+`mold system gallery-authority status` inspects THIS machine, ignoring
+`MOLD_HOST`:
+
+```bash
+mold system gallery-authority status --json
+mold system gallery-authority status --output-dir /storage/mold/output
+```
+
+`status` also reports `writer lease: held | stale | none` — whether some mold
+process is publishing to that gallery right now, or only left a file behind.
+
+`mold system gallery-authority downgrade` folds a version-3 store back to
+version 2 so an older binary can publish against the home again. Run it with
+the NEWER build, before rolling one back:
+
+```bash
+mold system gallery-authority downgrade --output-dir /storage/mold/output
+```
+
+STOP THE SERVER FIRST — and the command enforces it. Every mold process that
+can publish to a gallery holds a writer lease on it (`.mold-gallery-writer.lease`
+in the gallery directory) for as long as it runs, and `downgrade` refuses while
+one is held, naming the process and its pid and reporting that nothing was
+changed. The lease is shared (several servers still share one home), a clean
+stop removes the file, and a file left by a killed process is `stale`: it blocks
+nothing and `downgrade` clears it, so the gallery it hands over holds no mold
+bookkeeping an older binary would trip on.
+
+It is idempotent, verifies the result by reading it back, parks the retired
+version-3 directory rather than deleting it, and refuses if a mutation is
+pending or the log tail is torn — start `mold serve` once with a
+version-3-capable build to let recovery resolve those, stop it, then downgrade.
 
 ## macOS Metal memory
 

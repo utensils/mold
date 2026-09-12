@@ -1725,6 +1725,582 @@ pub fn wan_step_cache_bytes_for(
     retained.saturating_add(reduction)
 }
 
+// ── Still transformer residency ──────────────────────────────────────────────
+
+/// Query-chunk width the still families' math attention picks, identical to
+/// [`WAN_ATTENTION_QUERY_CHUNK`] because it is the SAME chunker
+/// (`attention::math_attention_chunk_size`). Named separately so the two
+/// budgets read their own constant rather than one family borrowing the
+/// other's.
+const FLUX_ATTENTION_QUERY_CHUNK: u64 = WAN_ATTENTION_QUERY_CHUNK;
+
+/// Text tokens the joint attention stream carries beside the image tokens.
+///
+/// Both families pad their conditioner unconditionally — FLUX.1's T5 to 512
+/// and FLUX.2's Mistral3 to `encoders::mistral3`'s `MAX_LENGTH` — and both
+/// concatenate the text stream onto the image stream inside the double
+/// blocks, so the score matrix spans the joint length rather than the canvas
+/// alone.
+const FLUX_TEXT_TOKENS: u64 = 512;
+
+/// Bytes the FLUX VAE decode allocates at its peak, per pixel per dtype byte.
+///
+/// Calibrated against the two anchors #276 recorded when the force-drop it
+/// added was written: a 1024² decode peaks at roughly 2–3 GB and a 2048²
+/// decode at 10–12 GB (`flux/pipeline.rs`'s headroom comment). Both families
+/// decode through the same 8x convolutional decoder shape, and the peak is a
+/// single contiguous conv2d workspace, so it scales with output AREA rather
+/// than with the transformer.
+const FLUX_VAE_DECODE_BYTES_PER_PIXEL_PER_DTYPE_BYTE: f64 = 1_300.0;
+
+/// Floor on the VAE decode peak, so a thumbnail-sized render still reserves a
+/// kernel workspace. Mirrors [`activation_bytes`]'s own floor.
+const FLUX_VAE_DECODE_FLOOR_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Slack a resident still transformer must leave beside the tensors the
+/// budget names: cuBLAS/cuDNN scratch, allocator fragmentation, the preview
+/// encoder, and the driver's own context growth.
+///
+/// One GB rather than `estimate_peak_memory`'s 2 GB: that constant covers a
+/// whole load whose component sizes are read from the filesystem, while every
+/// term here is a measured or derived runtime figure.
+pub const STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES: u64 = 1_000_000_000;
+
+/// Image tokens one FLUX-family forward attends over at this canvas.
+///
+/// Both families pack 2x2 patches of the 8x latent, so the grid is the canvas
+/// divided by 16 (BFL `sampling.py`'s `prepare`, and `flux2::sampling`'s
+/// `pack`).
+pub(crate) fn flux_token_count(width: u32, height: u32) -> u64 {
+    let grid_h = (u64::from(height) / 16).max(1);
+    let grid_w = (u64::from(width) / 16).max(1);
+    grid_h.saturating_mul(grid_w)
+}
+
+/// Activation bytes one FLUX-family forward holds, against an explicit
+/// attention backend.
+///
+/// [`activation_bytes`] is an area model fitted when every still ran math
+/// attention with no flash path at all, so it prices ONE render shape. The
+/// flux families now resolve their backend per build
+/// (`attention::AttentionPolicy::FastStill`), and the score matrix — the
+/// single largest per-token term — is materialized by math and not at all by
+/// flash. An estimate blind to that prices a render that is not the one
+/// running, which is the same trap [`wan_activation_budget_bytes_for`] exists
+/// to avoid: here it decides whether the transformer may stay resident, and a
+/// flash build priced as math drops a transformer it had room for on every
+/// single render.
+///
+/// The score term has the same shape as the wan one — score plus softmax,
+/// both `[heads, chunk, joint_tokens]` at the compute dtype — so it is a
+/// per-token cost with the chunk width, not the token count, on the query
+/// axis.
+pub fn flux_activation_budget_bytes_for(
+    width: u32,
+    height: u32,
+    batch: u32,
+    dtype_bytes: u32,
+    family: ActivationFamily,
+    heads: u64,
+    backend: crate::attention::AttentionBackend,
+) -> u64 {
+    let base = activation_bytes(width, height, batch, dtype_bytes, family);
+    let scores = match backend {
+        crate::attention::AttentionBackend::Flash => 0,
+        crate::attention::AttentionBackend::Math => {
+            let joint = flux_token_count(width, height).saturating_add(FLUX_TEXT_TOKENS);
+            let per_token = 2u64
+                .saturating_mul(heads.max(1))
+                .saturating_mul(FLUX_ATTENTION_QUERY_CHUNK)
+                .saturating_mul(u64::from(dtype_bytes.max(1)));
+            joint
+                .saturating_mul(per_token)
+                .saturating_mul(u64::from(batch.max(1)))
+        }
+    };
+    base.saturating_add(scores)
+}
+
+/// Elements of the residual stream one FLUX.2 single-stream block holds live,
+/// per joint token, expressed as a multiple of `hidden_size`.
+///
+/// Read straight off `flux2::transformer::SingleStreamBlock::forward`, which
+/// is the family's peak site because its fused `to_qkv_mlp_proj` is by far the
+/// widest tensor any block materializes. Live at once, in order: `xs`, the
+/// modulated `x_mod`, the contiguous `q` and `k` copies and the `v` view
+/// (`3 x h`), and `linear2`'s output — nine `h`-wide tensors. The fused
+/// projection's own `3 x h` share is counted here too, which is where the
+/// ninth comes from; its `2 x mlp` share is counted below.
+const FLUX2_DENOISE_LIVE_HIDDEN_MULTIPLE: u64 = 9;
+
+/// The same live set's `mlp_size` share: the fused projection's `2 x mlp`
+/// SwiGLU half, plus the `mlp_gate`, `mlp_val` and `mlp_out` tensors the block
+/// then derives from it, minus the one the `Tensor::cat` reuses — six.
+const FLUX2_DENOISE_LIVE_MLP_MULTIPLE: u64 = 6;
+
+/// What candle's CUDA allocator holds beyond the tensors named above, as a
+/// fraction of them.
+///
+/// The derived live set is what is *reachable* at the peak instant; the figure
+/// a card reports — and the figure admission has to survive — is the process's
+/// VRAM high-water, which also carries every block-loop allocation the
+/// allocator has not handed back. Fitted to three independent readings of the
+/// same shape on plato (4x L40S), taken from `scheduler_estimates`'
+/// `vram_high_water_bytes` on the BF16 GGUF path at 1024x1024, minus each
+/// tier's own resident weights:
+///
+/// | tier | high water | weights | runtime |
+/// | --- | --- | --- | --- |
+/// | `flux2-dev:q4` | 23,293,067,264 | 20,295,944,724 | **3.00 GB** |
+/// | `flux2-dev:q6` | 30,708,596,736 | 27,732,445,716 | **2.98 GB** |
+/// | `flux2-dev:q8` | 38,359,007,232 | 35,338,816,020 | **3.02 GB** |
+///
+/// The q8 row decomposes further, from the same session's residency log: the
+/// engine RETAINS 34,878 MiB (36.57 GB) on the card between renders, so ~1.2 GB
+/// of that 3.02 is CUDA context and pool the checkpoint's file length never
+/// named, and ~1.8 GB is the denoise's own incremental high water. Charging
+/// the whole 3.0 GB here leaves `MEMORY_BUDGET_HEADROOM`'s 2 GB as pure
+/// allocator margin rather than splitting it, which over-reserves by roughly
+/// that 2 GB on a warm card. That is deliberate and is the direction #1707
+/// asks for: the shape this prices OOM'd twice at ~38 GB planned against a
+/// ~46 GB card. Tightening it needs its own measurement, not an argument.
+///
+/// Three quantizations spanning 15 GB of weights agree inside 1.3%, which is
+/// what says the term is a property of the TOKEN COUNT and not of the
+/// checkpoint — and the derived live set alone prices it at 1.53 GB, so the
+/// retention is real and this is the one constant in the model that is fitted
+/// rather than read off the forward pass. `flux2-dev:fp8` measures 3.91 GB at
+/// the same shape because its per-forward widen holds one linear's working-
+/// dtype copy beside the stream; that 0.9 GB sits inside
+/// `MEMORY_BUDGET_HEADROOM` rather than being charged a second time, so the
+/// fp8 tier's admission decision is unchanged.
+///
+/// **Fitted on the FLASH arm, because that is the arm the readings were taken
+/// on.** The same session's log reports `fast_still_default=Flash`, and the
+/// planner asks [`flux_effective_attention_backend`], so the number these
+/// three readings have to reproduce is the one with no score pair in it:
+/// `49/25 x` the 1.529 GB stream is 3.00 GB, within 0.8% of all three. The
+/// earlier `3/2` was fitted against `stream + math scores` and so reproduced
+/// them only on an arm plato does not run — on plato itself it charged
+/// 2.29 GB for a measured 3.00 GB, three quarters of the gap #1707 is about.
+///
+/// The MATH arm is DERIVED from this fit, never measured: the flash charge
+/// plus the `[heads, chunk, joint]` score pair at its own exact size, so it
+/// can only be higher (3.45 GB at the same shape). The retention multiplies
+/// the stream only, because the stream is what the three readings contain —
+/// compounding a fitted allocator factor over a tile that was not part of the
+/// fit charges a math build 0.43 GB it has never been shown to need, which on
+/// plato's own card is the difference between a resident fp8 [dev] and one
+/// streaming its blocks at the documented 3-5x penalty. Measuring the math
+/// arm is what would let this tighten or widen; an argument is not.
+const FLUX2_DENOISE_ALLOCATOR_RETENTION_NUMERATOR: u64 = 49;
+const FLUX2_DENOISE_ALLOCATOR_RETENTION_DENOMINATOR: u64 = 25;
+
+/// The FLUX.2 transformer dimensions the denoise working set is a function of.
+///
+/// Deliberately three numbers rather than a borrowed `Flux2Config`: this is a
+/// budget input, and the planner resolves it from the checkpoint through
+/// `flux2::pipeline::resolve_flux2_config` exactly as the FP8 widen gate
+/// already does, so plan and engine cannot size the same render differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Flux2ActivationGeometry {
+    /// `Flux2Config::hidden_size`.
+    pub hidden_size: u64,
+    /// `hidden_size x mlp_ratio`, the SwiGLU width.
+    pub mlp_size: u64,
+    /// `Flux2Config::num_heads`, the score tile's leading dimension.
+    pub num_heads: u64,
+}
+
+impl Flux2ActivationGeometry {
+    /// FLUX.2 \[dev]: `hidden_size` 6144, `mlp_ratio` 3.0, 48 heads.
+    pub const fn dev() -> Self {
+        Self {
+            hidden_size: 6144,
+            mlp_size: 18432,
+            num_heads: 48,
+        }
+    }
+
+    /// FLUX.2 \[klein] 4B: `hidden_size` 3072, `mlp_ratio` 3.0, 24 heads.
+    pub const fn klein() -> Self {
+        Self {
+            hidden_size: 3072,
+            mlp_size: 9216,
+            num_heads: 24,
+        }
+    }
+
+    /// FLUX.2 \[klein] 9B: `hidden_size` 4096, `mlp_ratio` 3.0, 32 heads.
+    pub const fn klein_9b() -> Self {
+        Self {
+            hidden_size: 4096,
+            mlp_size: 12288,
+            num_heads: 32,
+        }
+    }
+
+    /// The geometry of a resolved checkpoint config.
+    ///
+    /// One derivation, so the budget can never be sized from a different
+    /// `Flux2Config` than the one the transformer is built with — the rule
+    /// `flux2_fp8_widen_extra_resident_bytes_for_checkpoint` already states
+    /// for the widen gate.
+    pub fn from_config(cfg: &crate::flux2::transformer::Flux2Config) -> Self {
+        Self {
+            hidden_size: cfg.hidden_size as u64,
+            mlp_size: (cfg.hidden_size as f64 * cfg.mlp_ratio) as u64,
+            num_heads: cfg.num_heads as u64,
+        }
+    }
+
+    /// Elements the peak block holds live per joint token.
+    pub const fn live_elements_per_token(&self) -> u64 {
+        FLUX2_DENOISE_LIVE_HIDDEN_MULTIPLE * self.hidden_size
+            + FLUX2_DENOISE_LIVE_MLP_MULTIPLE * self.mlp_size
+    }
+}
+
+/// Device bytes a FLUX.2 denoise holds beside its weights.
+///
+/// [`activation_bytes`]'s pixel-area factor is FLUX.1's, fitted at
+/// `hidden_size` 3072 with no fused SwiGLU projection at all, and it prices
+/// 1024x1024 at 273 MB. FLUX.2 \[dev] runs the same canvas through a 6144-wide
+/// stream whose single blocks materialize a `3h + 2 x mlp` = 55,296-element
+/// row per token, and plato measured 2.98-3.02 GB — an order of magnitude the
+/// area model cannot see, because nothing in it scales with the transformer's
+/// width. Admission charging 273 MB for 3 GB is what let `flux2-dev:q8` be
+/// planned at ~38 GB on a 46 GB L40S and die two minutes into the denoise
+/// (#1707).
+///
+/// `joint_tokens` is the packed sequence the blocks actually attend over:
+/// image tokens plus [`FLUX_TEXT_TOKENS`], plus every reference group a
+/// FLUX.2 edit appends. That is why it is a token count and not a canvas —
+/// `flux2_reference_scaled_activation_bytes` scales the same bytes by the same
+/// ratio on the request side.
+///
+/// The score term matches [`flux_activation_budget_bytes_for`]'s exactly, for
+/// the same reason: math materializes `[heads, chunk, joint]` twice and flash
+/// materializes neither.
+pub fn flux2_denoise_activation_bytes(
+    geometry: Flux2ActivationGeometry,
+    joint_tokens: u64,
+    batch: u32,
+    dtype_bytes: u32,
+    backend: crate::attention::AttentionBackend,
+) -> u64 {
+    let dtype = u64::from(dtype_bytes.max(1));
+    let batch = u64::from(batch.max(1));
+    let stream = joint_tokens
+        .saturating_mul(geometry.live_elements_per_token())
+        .saturating_mul(dtype);
+    let scores = match backend {
+        crate::attention::AttentionBackend::Flash => 0,
+        crate::attention::AttentionBackend::Math => 2u64
+            .saturating_mul(geometry.num_heads.max(1))
+            .saturating_mul(FLUX_ATTENTION_QUERY_CHUNK)
+            .saturating_mul(joint_tokens)
+            .saturating_mul(dtype),
+    };
+    // The retention factor is fitted over the STREAM alone, because that is
+    // the arm it was measured on — see
+    // `FLUX2_DENOISE_ALLOCATOR_RETENTION_NUMERATOR`. Math's score pair is
+    // added at its own exact size on top, which keeps the derived arm strictly
+    // above the measured one without compounding a fit it was never part of.
+    stream
+        .saturating_mul(batch)
+        .saturating_mul(FLUX2_DENOISE_ALLOCATOR_RETENTION_NUMERATOR)
+        / FLUX2_DENOISE_ALLOCATOR_RETENTION_DENOMINATOR
+        + scores.saturating_mul(batch)
+}
+
+/// [`flux2_denoise_activation_bytes`] from a canvas, for the callers that have
+/// one: the joint sequence is the packed image grid plus the padded text
+/// stream.
+pub fn flux2_denoise_activation_bytes_for_canvas(
+    geometry: Flux2ActivationGeometry,
+    width: u32,
+    height: u32,
+    batch: u32,
+    dtype_bytes: u32,
+    backend: crate::attention::AttentionBackend,
+) -> u64 {
+    flux2_denoise_activation_bytes(
+        geometry,
+        flux_token_count(width, height).saturating_add(FLUX_TEXT_TOKENS),
+        batch,
+        dtype_bytes,
+        backend,
+    )
+}
+
+/// The attention backend a FLUX.1 / FLUX.2 render on this process will
+/// actually execute.
+///
+/// Mirrors [`wan_effective_attention_backend`] exactly, including the reason
+/// it asks for the EFFECTIVE answer: a `Flash` request in a build without the
+/// kernels runs as math and would otherwise be priced with no score tile at
+/// all. Device-blind for the same reason — the estimate is computed before a
+/// device is leased.
+pub fn flux_effective_attention_backend() -> crate::attention::AttentionBackend {
+    crate::attention::AttentionBackend::resolve_effective_for(
+        crate::attention::AttentionPolicy::FastStill,
+    )
+}
+
+/// Peak device bytes a FLUX-family VAE decode allocates at this output size.
+///
+/// The decode is one contiguous conv2d workspace chain, so this is an area
+/// model pinned to the two anchors #276 measured — see
+/// [`FLUX_VAE_DECODE_BYTES_PER_PIXEL_PER_DTYPE_BYTE`]. `vae_dtype_bytes` is
+/// the VAE's OWN dtype, which `MOLD_VAE_DTYPE=f32` can lift above the
+/// transformer's.
+pub fn flux_vae_decode_peak_bytes(width: u32, height: u32, vae_dtype_bytes: u32) -> u64 {
+    let area = u64::from(width).saturating_mul(u64::from(height));
+    let raw = (area as f64
+        * f64::from(vae_dtype_bytes.max(1))
+        * FLUX_VAE_DECODE_BYTES_PER_PIXEL_PER_DTYPE_BYTE) as u64;
+    raw.max(FLUX_VAE_DECODE_FLOOR_BYTES)
+}
+
+/// Everything a resident still transformer has to share the card with.
+///
+/// Every field is in bytes and every field is the caller's measurement or the
+/// caller's derivation — this struct carries no policy of its own, which is
+/// what lets the engine and the server's planner answer the same question
+/// from different vantage points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StillTransformerBudget {
+    /// Device bytes the transformer's weights occupy while resident.
+    pub transformer_bytes: u64,
+    /// Denoise-phase workspace, from [`flux_activation_budget_bytes_for`].
+    pub activation_bytes: u64,
+    /// VAE decode workspace, from [`flux_vae_decode_peak_bytes`].
+    pub vae_decode_peak_bytes: u64,
+    /// Allocator and kernel slack — see
+    /// [`STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES`].
+    pub runtime_headroom_bytes: u64,
+    /// Device bytes held BESIDE the checkpoint for the whole render: the
+    /// bypass registry's resident LoRA A/B matrices and the PuLID adapter.
+    ///
+    /// #276 is titled "VAE decode OOM under KEEP_TRANSFORMER=1 **+ LoRAs** on
+    /// 24 GB", and the budget charged only `fs::metadata(transformer).len()`
+    /// — the checkpoint file and nothing else. It could not see either
+    /// ingredient the report blamed, so a matrix row asserting `Keep` for
+    /// that configuration was asserting it from a model structurally unable
+    /// to disagree.
+    ///
+    /// Both follow the transformer: `free_gpu_state_before_vae_decode`
+    /// releases the adapter only on a DROP, and the registry lives as long as
+    /// the transformer it is bound to.
+    pub companion_resident_bytes: u64,
+}
+
+impl StillTransformerBudget {
+    /// The device bytes a kept transformer commits the render to.
+    ///
+    /// The three workspace terms are SUMMED rather than maxed, and that is
+    /// deliberate. The decision is made once, before the render, and has to
+    /// hold for the denoise phase and the decode phase both; the maximum
+    /// would be the right answer only if freeing the denoise workspace
+    /// reliably handed a single contiguous decode-sized block back to the
+    /// allocator. #276 is the record of what happens when it does not — a
+    /// 24 GB card with a kept Q8 transformer OOM'd on the FIRST conv
+    /// allocation of the decode with the arithmetic apparently in its favour.
+    /// Summing is the conservative reading, and "conservative" here means
+    /// "falls back to today's behaviour", which is this campaign's own rule
+    /// for every residency decision.
+    pub fn required_bytes(&self) -> u64 {
+        self.transformer_bytes
+            .saturating_add(self.companion_resident_bytes)
+            .saturating_add(self.activation_bytes)
+            .saturating_add(self.vae_decode_peak_bytes)
+            .saturating_add(self.runtime_headroom_bytes)
+    }
+}
+
+/// Whether a still's transformer may stay GPU-resident across a render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformerResidency {
+    /// The budget fits: keep the weights on the card.
+    Keep,
+    /// The budget does not fit, by `shortfall_bytes`.
+    Drop {
+        /// Bytes by which [`StillTransformerBudget::required_bytes`] overran
+        /// the usable free VRAM. Named in the log line so an operator can see
+        /// how far from residency the card is.
+        shortfall_bytes: u64,
+    },
+}
+
+impl TransformerResidency {
+    /// Whether this answer keeps the transformer resident.
+    pub fn keeps(self) -> bool {
+        matches!(self, Self::Keep)
+    }
+
+    /// Bytes by which the budget overran, or zero when it fits.
+    pub fn shortfall_bytes(self) -> u64 {
+        match self {
+            Self::Keep => 0,
+            Self::Drop { shortfall_bytes } => shortfall_bytes,
+        }
+    }
+}
+
+/// The ONE budgeted residency decision both still families read.
+///
+/// `usable_free_bytes` is what this render may spend on the card **as if
+/// nothing it loaded were already resident**. A caller sampling free VRAM
+/// with the transformer already on the card adds those bytes back, exactly as
+/// `memory_preflight` folds `active_vram_bytes` into `available_bytes`;
+/// otherwise the transformer is charged twice and every warm render drops.
+///
+/// The reading is TYPED, because "the probe failed" and "there is no VRAM to
+/// probe" are different answers and collapsing them into one `0` sentinel is
+/// how a failed CUDA `mem_get_info` came to mean "keep 24 GB of weights
+/// resident". See [`UsableFreeVram`].
+pub fn still_transformer_residency(
+    budget: &StillTransformerBudget,
+    usable_free: UsableFreeVram,
+) -> TransformerResidency {
+    let usable_free_bytes = match usable_free {
+        // An accelerator whose reading failed is the #276 case, not a quiet
+        // one: fail CLOSED, the way the Metal memory policy already does for
+        // a failed supported probe. The whole budget is the shortfall.
+        UsableFreeVram::Unmeasurable => {
+            return TransformerResidency::Drop {
+                shortfall_bytes: budget.required_bytes(),
+            };
+        }
+        // A CPU render competes for no VRAM at all, so there is nothing a
+        // drop would free and nothing to drop for.
+        UsableFreeVram::NotApplicable => return TransformerResidency::Keep,
+        UsableFreeVram::Measured(bytes) => bytes,
+    };
+    match budget.required_bytes().checked_sub(usable_free_bytes) {
+        Some(shortfall) if shortfall > 0 => TransformerResidency::Drop {
+            shortfall_bytes: shortfall,
+        },
+        _ => TransformerResidency::Keep,
+    }
+}
+
+/// What the operator asked of `MOLD_FLUX_KEEP_TRANSFORMER`.
+///
+/// Parsed in ONE place so the engines and the execution fingerprint can never
+/// read the same string differently — a render the engine drops on must not be
+/// filed in the budgeted execution class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepTransformerRequest {
+    /// `0` / `off` / `false` / `no`: drop, whatever the card has room for.
+    Drop,
+    /// `1` / `on` / `true` / `yes`: keep where it fits. Identical to unset,
+    /// because #276's rule — an explicit keep must still yield to a card that
+    /// cannot afford it — is exactly what the budget expresses for everybody.
+    Keep,
+    /// Unset, or anything unrecognised: the budget decides.
+    Budget,
+}
+
+/// Read the variable. Case-insensitive, whitespace-trimmed; an unrecognised
+/// value is the default rather than an error, because an engine-shaping
+/// variable is not a place to fail a render over a typo.
+pub fn keep_transformer_request(env: Option<&str>) -> KeepTransformerRequest {
+    match env
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("0" | "off" | "false" | "no") => KeepTransformerRequest::Drop,
+        Some("1" | "on" | "true" | "yes") => KeepTransformerRequest::Keep,
+        _ => KeepTransformerRequest::Budget,
+    }
+}
+
+/// What a still family does with its transformer once denoising is done.
+///
+/// The reason travels with the answer because the log line names it: an
+/// operator watching a warm render reload a 12 GB checkpoint every time needs
+/// to know whether the card refused the residency or they asked for the drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidencyDecision {
+    /// The budget fits (or the operator asked for the keep and the budget
+    /// agreed): the transformer survives into the next render.
+    KeepResident,
+    /// The budget does not fit. This is #276's force-drop, generalized: it is
+    /// the answer for an unset variable too, rather than only an override of
+    /// an explicit `1`.
+    DropForHeadroom,
+    /// The operator asked for the drop.
+    DropRequested,
+}
+
+/// Resolve the residency from the variable and the budget, for EITHER still
+/// family.
+///
+/// This lives beside [`still_transformer_residency`] rather than inside
+/// `flux::pipeline` because both FLUX.1 and FLUX.2 answer the same question
+/// and must answer it the same way. FLUX.2 called the budget directly and
+/// never read the variable at all, so on a card whose budget said "keep" — a
+/// 46 GB L40S holding a 34 GB [dev] transformer — the operator had no way to
+/// say "don't", which is the state `MOLD_FLUX_KEEP_TRANSFORMER=0` exists for.
+///
+/// The default is the BUDGET's: before #276's generalization an unset variable
+/// dropped the transformer on every render regardless of the card, so an L40S
+/// re-read a 12.6 GB Q8 checkpoint (8.4 s) for every print.
+pub fn resolve_keep_transformer(
+    env: Option<&str>,
+    budget: TransformerResidency,
+) -> ResidencyDecision {
+    match keep_transformer_request(env) {
+        KeepTransformerRequest::Drop => ResidencyDecision::DropRequested,
+        KeepTransformerRequest::Keep | KeepTransformerRequest::Budget => {
+            if budget.keeps() {
+                ResidencyDecision::KeepResident
+            } else {
+                ResidencyDecision::DropForHeadroom
+            }
+        }
+    }
+}
+
+/// What a residency decision knows about the card's free VRAM.
+///
+/// Three states, not an `Option<u64>` and certainly not a `0` sentinel: the
+/// difference between a failed probe and a device with no VRAM decides
+/// whether the safe answer is to drop or to keep, and they are opposite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsableFreeVram {
+    /// A real reserve-adjusted reading, with any resident bytes this render
+    /// loaded already added back.
+    Measured(u64),
+    /// The device has VRAM and the probe failed — CUDA `CudaContext::new` or
+    /// `mem_get_info` returning an error, or a failed Metal supported probe.
+    Unmeasurable,
+    /// There is no VRAM to measure: a CPU render.
+    NotApplicable,
+}
+
+/// The card's usable free VRAM for a residency decision, with `resident_bytes`
+/// added back.
+///
+/// ONE place performs the probe and the add-back, so the convention that
+/// `usable_free` is "the card as if nothing this render loaded were on it"
+/// cannot drift between the four call sites that ask it.
+pub fn usable_free_for_residency(
+    device: &candle_core::Device,
+    ordinal: usize,
+    resident_bytes: u64,
+) -> UsableFreeVram {
+    if device.is_cpu() {
+        return UsableFreeVram::NotApplicable;
+    }
+    match usable_free_vram_bytes(ordinal) {
+        Some(free) => UsableFreeVram::Measured(free.saturating_add(resident_bytes)),
+        None => UsableFreeVram::Unmeasurable,
+    }
+}
+
 /// Map a manifest family slug (e.g. `"flux"`, `"sdxl"`, `"qwen-image"`) to the
 /// activation-budget family. Falls back to [`ActivationFamily::FluxDit`] for
 /// unknown slugs — the FLUX factor is the most common diffusion default and
@@ -1995,6 +2571,21 @@ const MEMORY_BUDGET_HEADROOM: u64 = 2_000_000_000; // 2GB
 /// resident top-level weights, streamed block weights, VAE residency, and
 /// allocator slack; activations are budgeted separately.
 pub const STREAMING_TRANSFORMER_CAP_BYTES: u64 = 6_000_000_000;
+
+/// What the residency budget charges for a transformer the card is HOLDING.
+/// Block offload streams the blocks through a bounded working set and keeps
+/// the checkpoint host-mapped (Scheduler V2's host ledger accounts for that
+/// half), so the charge is capped at [`STREAMING_TRANSFORMER_CAP_BYTES`];
+/// a resident transformer is charged at the bytes its weights settled at.
+/// Both FLUX.2 residency sites ask this so the cap cannot drift between
+/// them — and so the cap is a tested fact rather than a repeated `min`.
+pub fn resident_transformer_charge_bytes(held_bytes: u64, block_offload: bool) -> u64 {
+    if block_offload {
+        held_bytes.min(STREAMING_TRANSFORMER_CAP_BYTES)
+    } else {
+        held_bytes
+    }
+}
 
 // ── Placement resolution ─────────────────────────────────────────────────────
 
@@ -2276,6 +2867,35 @@ pub fn available_system_memory_bytes() -> Option<u64> {
     None
 }
 
+/// Host RAM a new allocation can have, on every platform mold runs on.
+///
+/// **Not the same question as [`available_system_memory_bytes`], which is
+/// macOS-only on purpose.** That one is the unified-memory probe: its callers
+/// treat the answer as a GPU budget, and several of them sit on fallback paths
+/// whose comments say "macOS unified memory" while the code is not
+/// cfg-gated — teaching it to answer on Linux would hand a discrete-GPU host a
+/// unified-memory preflight and could refuse jobs that admit today. So the
+/// HOST question gets its own name.
+///
+/// This is the reader the residency budgets want, and its absence was the
+/// wave-2 defect: `total_system_ram_bytes` read `/proc/meminfo` on Linux while
+/// the available figure did not, so `decide_text_encoder_residency` compared a
+/// real requirement against a hard-coded `0` and answered `StreamFromMmap` on
+/// every Linux host. With Metal and CPU returning early, no platform was left
+/// on which a park could happen, and `MOLD_KEEP_TE_RAM=1` could not override
+/// it either — measured as zero park lines and an 8.3 s re-stream per encode
+/// on a host with 985 GB free.
+pub fn available_host_ram_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        available_system_memory_bytes()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::flux::pinned::available_system_ram_bytes()
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn used_system_swap_bytes() -> Option<u64> {
     None
@@ -2289,13 +2909,18 @@ pub fn used_system_swap_bytes() -> Option<u64> {
 /// Default off. Two things keep it that way rather than letting mold decide
 /// per host:
 ///
-/// * A park is a multi-gigabyte **host** allocation, and the only probes
-///   available here (`/proc/meminfo`, the macOS VM statistics) describe the
-///   machine, not this process's cgroup. Inside a memory-capped container —
-///   which is how mold ships (the GHCR matrix, Lambda/RunPod provisioning) —
-///   `MemAvailable` reports the host's free RAM, so a probe-driven default
-///   would engage against a limit it cannot see and get the process
-///   OOM-killed. Nothing in the tree reads `memory.max`.
+/// * A park is a multi-gigabyte **host** allocation. `/proc/meminfo` and the
+///   macOS VM statistics describe the MACHINE, not this process's cgroup, and
+///   inside a memory-capped container — which is how mold ships (the GHCR
+///   matrix, Lambda/RunPod provisioning) — `MemAvailable` reports the host's
+///   free RAM, so a probe-driven default would engage against a limit it
+///   cannot see and get the process OOM-killed. That objection is now
+///   ANSWERED rather than standing:
+///   [`crate::flux::pinned::available_system_ram_bytes`] clamps the host
+///   reading by `memory.max`/`memory.current` (cgroup v2, falling back to
+///   v1), so the probe describes the process's own ceiling. `Auto` may
+///   therefore decide, and does so against a budget that also keeps a
+///   `max(15 % of total, 8 GiB)` floor.
 /// * `MOLD_KEEP_TE_RAM` is an [`crate::runtime_env::ENGINE_SHAPING_VARIABLES`]
 ///   member precisely because memory residency must be frozen at admission.
 ///   A live host probe would let two runs with byte-identical frozen
@@ -2313,9 +2938,40 @@ pub fn used_system_swap_bytes() -> Option<u64> {
 /// This mirrors ComfyUI's `text_encoder_offload_device()` behavior
 /// (`comfy/model_management.py:1012`).
 pub fn keep_te_in_ram() -> bool {
-    crate::runtime_env::value("MOLD_KEEP_TE_RAM")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    keep_te_ram_mode() == crate::flux2::text_encoder_residency::KeepTeRamMode::Force
+}
+
+/// `MOLD_KEEP_TE_RAM` as the tri-state it became.
+///
+/// The variable now answers two questions. It has always been the OPT-IN that
+/// keeps FLUX's T5, SD3's and Wan's encoders in host RAM — and
+/// [`keep_te_in_ram`], which those families read, is exactly `Force`, so their
+/// behaviour is byte-for-byte what it was: `1` opts in, `0` and every other
+/// value including absence do not. It is now also the OVERRIDE on a decision
+/// that has a real default
+/// ([`crate::flux2::text_encoder_residency::decide_text_encoder_residency`]),
+/// and `Auto` is that default.
+///
+/// The paragraph above `keep_te_in_ram` is still the reason `Auto` is not
+/// simply "park whenever there is room": a probe here describes the MACHINE,
+/// not this process's cgroup. What changed is that the residency decision now
+/// takes a measured budget with a safety floor and a transformer term, so
+/// `Auto` refuses a park long before a container limit could be reached — a
+/// 64 GB host streams — rather than engaging against a limit it cannot see.
+///
+/// `Force` is also the override on the one heuristic layered ON TOP of that
+/// budget: [`crate::flux2::text_encoder_residency::mistral3_prefix_residency`]
+/// makes the first encode of a process stream, because parking a STREAMED
+/// prefix is a fresh 35 GB read the first render cannot amortize. An explicit
+/// `1` is an operator answering that question themselves, so it parks from the
+/// first encode; `Auto` waits for the second, and `Never` never parks.
+pub fn keep_te_ram_mode() -> crate::flux2::text_encoder_residency::KeepTeRamMode {
+    use crate::flux2::text_encoder_residency::KeepTeRamMode;
+    match crate::runtime_env::value("MOLD_KEEP_TE_RAM").as_deref() {
+        Some("1") => KeepTeRamMode::Force,
+        Some("0") => KeepTeRamMode::Never,
+        _ => KeepTeRamMode::Auto,
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -3084,6 +3740,75 @@ pub(crate) fn gpu_compute_dtype(device: &candle_core::Device) -> candle_core::DT
     }
 }
 
+// ---------------------------------------------------------------------------
+// Transformer residency: what the card is HOLDING, not what the file weighs
+// ---------------------------------------------------------------------------
+
+/// Device bytes a loaded diffusion transformer occupies.
+///
+/// `fs::metadata(checkpoint).len()` is the right answer only while the loader
+/// leaves the checkpoint's dtype alone, and it does not always. Shared by
+/// FLUX.1 and FLUX.2 because the two arms are the same arms:
+///
+/// * A **quantized** checkpoint (GGUF, and FLUX.2's NVFP4 streaming tier)
+///   keeps its storage dtype on the card on BOTH LoRA paths. The bypass
+///   registry (the default — `MOLD_LORA_BYPASS` is `Auto` unless it reads
+///   `off`/`0`/`false`) never touches the base weights at all, and the legacy
+///   `off` merge in `flux::lora::gguf_lora_var_builder` dequantizes each
+///   patched tensor to CPU F32, adds the delta, and `quantize_onto`s it
+///   straight back to the ORIGINAL GGML dtype — deliberately, "to avoid the 2x
+///   VRAM inflation that storing as F16 would cause". So the file length is
+///   exact for both, and this returns it.
+/// * A **dense safetensors** checkpoint is materialized at `loaded_dtype`,
+///   which is NOT the storage dtype off CUDA: [`gpu_dtype`] is F32 on every
+///   non-CUDA device, so a BF16 file loads at F32 and 23.8 GB of checkpoint is
+///   47.6 GB of weights. Charging the file length there lets a card Keep a
+///   transformer it can no longer hold, which is #276's failure with a
+///   different cause. The same arithmetic covers FLUX.2's FP8 tiers from the
+///   other side: an fp8 slab widened once at load holds TWO bytes per
+///   parameter where the file holds one, which is exactly what
+///   `flux2_fp8_widen_extra_resident_bytes_for_checkpoint` teaches the server
+///   estimators to charge — so the caller passes the dtype the weights are
+///   actually held at (`F8E4M3` for a tier that did not widen) and both sides
+///   land on the same figure.
+///
+/// `dense_parameter_count` is `None` when the header could not be read, and
+/// then this falls back to the file length rather than guessing, exactly as
+/// every other residency decision does on a reading it does not have.
+pub(crate) fn transformer_resident_bytes_for(
+    is_quantized: bool,
+    checkpoint_file_bytes: u64,
+    dense_parameter_count: Option<u64>,
+    loaded_dtype: candle_core::DType,
+) -> u64 {
+    if is_quantized {
+        return checkpoint_file_bytes;
+    }
+    match dense_parameter_count {
+        // The dtype's STORAGE width, not `dtype_bytes` — that one answers the
+        // activation question, where a sub-byte float still travels as two
+        // bytes, and these are weights at rest. The two agree on F32/BF16/F16
+        // and differ on exactly the case this has to get right: an FP8 slab
+        // that declined the load-time widen is one byte per parameter.
+        Some(parameters) => parameters.saturating_mul(loaded_dtype.size_in_bytes() as u64),
+        None => checkpoint_file_bytes,
+    }
+}
+
+/// Total elements across every tensor of a safetensors checkpoint, sharded or
+/// not.
+///
+/// Read once at load, because the residency decision is taken per render and
+/// must not re-open the file to answer.
+pub(crate) fn safetensors_parameter_count(paths: &[std::path::PathBuf]) -> anyhow::Result<u64> {
+    let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(paths)? };
+    Ok(tensors
+        .tensors()
+        .iter()
+        .map(|(_, view)| view.shape().iter().product::<usize>() as u64)
+        .sum())
+}
+
 /// Select the optimal dtype for GPU inference (CUDA-only BF16 variant).
 ///
 /// - CUDA: BF16 (well-supported by tensor cores, standard for diffusion)
@@ -3246,6 +3971,26 @@ pub(crate) fn fits_in_memory(
 /// family-specific estimator can price each phase without adding one phase's
 /// work to the other phase's weights.
 pub fn estimate_sequential_phase_weights(paths: &mold_core::ModelPaths) -> (u64, u64) {
+    estimate_sequential_phase_weights_with_encoder_override(paths, None)
+}
+
+/// [`estimate_sequential_phase_weights`] with the encoder phase re-priced.
+///
+/// `encoder_override` replaces the deduplicated encoder file total outright. It
+/// exists for encoders that never materialize their checkpoint: FLUX.2 [dev]'s
+/// Mistral3 conditioner streams one decoder layer at a time off a memory
+/// mapping, so its 36 GB of shards are reclaimable page cache and its real
+/// demand is the ~3.6 GB
+/// [`crate::flux2::text_encoder_residency::mistral3_streamed_device_peak_bytes`]
+/// prices. Charging the file made the planner declare memory pressure on an
+/// idle 46 GB card and park the encoder on the CPU.
+///
+/// `None` keeps today's answer exactly, so every caller without such an encoder
+/// is unchanged.
+pub fn estimate_sequential_phase_weights_with_encoder_override(
+    paths: &mold_core::ModelPaths,
+    encoder_override: Option<u64>,
+) -> (u64, u64) {
     let file_size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
     let same_file = |a: &std::path::Path, b: &std::path::Path| -> bool {
         a == b
@@ -3338,7 +4083,8 @@ pub fn estimate_sequential_phase_weights(paths: &mold_core::ModelPaths) -> (u64,
         .map(|p| encoder_size(p))
         .sum();
 
-    let encoder_total = t5_size + clip_size + clip2_size + text_encoder_size;
+    let encoder_total =
+        encoder_override.unwrap_or(t5_size + clip_size + clip2_size + text_encoder_size);
 
     (encoder_total, transformer_size + vae_size)
 }
@@ -3347,8 +4093,29 @@ pub fn estimate_sequential_phase_weights(paths: &mold_core::ModelPaths) -> (u64,
 ///
 /// For Eager: sum of all component files + headroom.
 /// For Sequential: max(encoder_total, transformer + VAE) + headroom.
+///
+/// NOTE for FLUX.2 fp8: the widen's second resident copy is NOT charged here.
+/// `flux2_fp8_widen_policy` compares three copies against the card's FREE
+/// VRAM, and this function has no device and no reading — it prices weights
+/// from the filesystem. Its availability-aware callers
+/// (`memory_preflight::select_server_load_strategy_for_budget` and the request
+/// estimate) add `flux2_fp8_widen_extra_bytes` on top, because they are the
+/// ones that can resolve the gate. Charging it unconditionally here would
+/// over-charge every card that will not widen, which refuses renders that fit.
 pub fn estimate_peak_memory(paths: &mold_core::ModelPaths, strategy: LoadStrategy) -> u64 {
-    let (encoder_weights, inference_weights) = estimate_sequential_phase_weights(paths);
+    estimate_peak_memory_with_encoder_override(paths, strategy, None)
+}
+
+/// [`estimate_peak_memory`] with the encoder phase re-priced; see
+/// [`estimate_sequential_phase_weights_with_encoder_override`]. `None` is
+/// today's answer.
+pub fn estimate_peak_memory_with_encoder_override(
+    paths: &mold_core::ModelPaths,
+    strategy: LoadStrategy,
+    encoder_override: Option<u64>,
+) -> u64 {
+    let (encoder_weights, inference_weights) =
+        estimate_sequential_phase_weights_with_encoder_override(paths, encoder_override);
     match strategy {
         LoadStrategy::Eager => encoder_weights + inference_weights + MEMORY_BUDGET_HEADROOM,
         LoadStrategy::Sequential => {
@@ -3489,6 +4256,34 @@ pub fn memory_status_string() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Block offload streams the transformer through a bounded working set,
+    /// so charging the whole checkpoint to the card would refuse residency
+    /// on exactly the cards that enabled offload; a resident transformer is
+    /// charged at what its weights settled at. Both FLUX.2 residency sites
+    /// go through this function, so the cap is one fact rather than two
+    /// `min`s that can drift apart.
+    #[test]
+    fn the_residency_charge_is_capped_only_when_the_blocks_stream() {
+        use super::{resident_transformer_charge_bytes, STREAMING_TRANSFORMER_CAP_BYTES};
+        let held = 4 * STREAMING_TRANSFORMER_CAP_BYTES;
+        assert_eq!(
+            resident_transformer_charge_bytes(held, true),
+            STREAMING_TRANSFORMER_CAP_BYTES,
+            "a streamed transformer is charged its bounded working set"
+        );
+        assert_eq!(
+            resident_transformer_charge_bytes(held, false),
+            held,
+            "a resident transformer is charged the bytes it holds"
+        );
+        let small = STREAMING_TRANSFORMER_CAP_BYTES / 2;
+        assert_eq!(
+            resident_transformer_charge_bytes(small, true),
+            small,
+            "the cap never inflates a transformer smaller than the working set"
+        );
+    }
+
     use super::*;
 
     /// The two Wan calibrations must each reproduce the renders they were
@@ -5146,6 +5941,751 @@ mod tests {
         }
     }
 
+    // ── Still transformer residency ──────────────────────────────────────
+
+    const MIB: u64 = 1024 * 1024;
+
+    /// `nvidia-smi` totals for the two cards the campaign is measured on. A
+    /// card advertised as "24 GB" reports BINARY gibibytes, and the matrix
+    /// used to be written in decimal GB — 9.1 % low on a 4090, which moved
+    /// two boundary rows to the wrong side of the comparison.
+    const RTX_4090_TOTAL_MIB: u64 = 24_564;
+    const L40S_TOTAL_MIB: u64 = 46_068;
+
+    /// What a render may spend: the card's own total less the reserve
+    /// `usable_free_vram_bytes` already subtracts, in the SAME units
+    /// `free_vram_bytes` reports.
+    fn usable_free_for_mib(total_mib: u64) -> u64 {
+        total_mib.saturating_sub(400) * MIB
+    }
+
+    /// The largest square a request can actually ask for.
+    ///
+    /// `mold_core::validation::MAX_PIXELS` caps a request at 1.8 MP, so the
+    /// 1536² and 2048² rows this matrix used to assert were unreachable
+    /// through the public API — they exercised arithmetic no user can reach
+    /// while leaving the real ceiling untested.
+    const MAX_SQUARE: u32 = 1_328;
+
+    /// One row of the residency matrix.
+    #[derive(Clone, Copy)]
+    struct MatrixRow {
+        transformer_bytes: u64,
+        companion_resident_bytes: u64,
+        width: u32,
+        height: u32,
+        family: ActivationFamily,
+        heads: u64,
+        usable_free_bytes: u64,
+    }
+
+    fn residency_for_backend(
+        row: MatrixRow,
+        backend: crate::attention::AttentionBackend,
+    ) -> TransformerResidency {
+        let budget = StillTransformerBudget {
+            transformer_bytes: row.transformer_bytes,
+            activation_bytes: flux_activation_budget_bytes_for(
+                row.width, row.height, 1, 2, row.family, row.heads, backend,
+            ),
+            vae_decode_peak_bytes: flux_vae_decode_peak_bytes(row.width, row.height, 2),
+            runtime_headroom_bytes: STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+            companion_resident_bytes: row.companion_resident_bytes,
+        };
+        still_transformer_residency(&budget, UsableFreeVram::Measured(row.usable_free_bytes))
+    }
+
+    /// Every row, on BOTH attention backends.
+    ///
+    /// The matrix hardcoded `Flash`, which is what an sm89 `h3-cuda` build
+    /// runs — but sm86, sm100, sm120 and Metal run the math arm, whose score
+    /// tile is a real term in the budget. A row that flips between the two is
+    /// a row that is wrong on most of the shipped artifacts.
+    fn residency_on_both_backends(
+        transformer_bytes: u64,
+        width: u32,
+        height: u32,
+        family: ActivationFamily,
+        heads: u64,
+        usable_free_bytes: u64,
+    ) -> TransformerResidency {
+        residency_on_both_backends_with_companions(
+            transformer_bytes,
+            0,
+            width,
+            height,
+            family,
+            heads,
+            usable_free_bytes,
+        )
+    }
+
+    /// The same row, with device bytes held BESIDE the checkpoint — resident
+    /// LoRA A/B matrices and a PuLID adapter.
+    fn residency_on_both_backends_with_companions(
+        transformer_bytes: u64,
+        companion_resident_bytes: u64,
+        width: u32,
+        height: u32,
+        family: ActivationFamily,
+        heads: u64,
+        usable_free_bytes: u64,
+    ) -> TransformerResidency {
+        let row = MatrixRow {
+            transformer_bytes,
+            companion_resident_bytes,
+            width,
+            height,
+            family,
+            heads,
+            usable_free_bytes,
+        };
+        let flash = residency_for_backend(row, crate::attention::AttentionBackend::Flash);
+        let math = residency_for_backend(row, crate::attention::AttentionBackend::Math);
+        assert_eq!(
+            flash.keeps(),
+            math.keeps(),
+            "the {width}x{height} row for a {transformer_bytes}-byte transformer disagrees \
+             between the flash and math arms; the shipped artifacts do not all run flash"
+        );
+        flash
+    }
+
+    /// The residency matrix, in the units the hardware reports.
+    ///
+    /// Sizes are the shipped checkpoints: FLUX.1 dev Q8_0 ~12.6 GB and BF16
+    /// ~23.8 GB, FLUX.2 dev Q8_0 ~33 GB, Klein-4B Q8 ~4.3 GB and Klein-9B Q8
+    /// ~9.5 GB. Head counts are the architectures': 24 for FLUX.1's 3072-wide
+    /// stream, 48 for FLUX.2 [dev]'s 6144-wide one.
+    #[test]
+    fn the_still_residency_budget_covers_the_24gb_matrix() {
+        const FLUX1_Q8: u64 = 12_600_000_000;
+        const FLUX1_BF16: u64 = 23_800_000_000;
+        const FLUX2_DEV_Q8: u64 = 33_000_000_000;
+        const KLEIN_4B_Q8: u64 = 4_300_000_000;
+        const KLEIN_9B_Q8: u64 = 9_500_000_000;
+
+        let rtx_4090 = usable_free_for_mib(RTX_4090_TOTAL_MIB);
+        let l40s = usable_free_for_mib(L40S_TOTAL_MIB);
+
+        // flux-dev Q8 at 1024² keeps on a 24 GiB card — the whole point of the
+        // change: before it dropped unconditionally.
+        assert!(
+            residency_on_both_backends(
+                FLUX1_Q8,
+                1024,
+                1024,
+                ActivationFamily::FluxDit,
+                24,
+                rtx_4090
+            )
+            .keeps(),
+            "a 12.6 GB Q8 transformer plus a 1024² decode fits a 24 GiB card"
+        );
+
+        // THE BOUNDARY ROW, and the one that needs hardware to settle. At the
+        // 1.8 MP ceiling the budget says a 24 GiB card keeps a Q8 transformer
+        // (~18.6 GB of 25.3 GB), and that is exactly the configuration #276
+        // reported as a VAE-decode OOM. Either the decode anchors are low at
+        // this size or #276's card had less free than nominal; only a render
+        // can say which, and until one does this row records what the model
+        // claims rather than asserting the model is right.
+        let ceiling = residency_on_both_backends(
+            FLUX1_Q8,
+            MAX_SQUARE,
+            MAX_SQUARE,
+            ActivationFamily::FluxDit,
+            24,
+            rtx_4090,
+        );
+        assert!(
+            ceiling.keeps(),
+            "the budget currently keeps flux1-Q8 at the 1.8 MP ceiling on a 24 GiB card — \
+             if a render OOMs here, the decode anchors are what must move"
+        );
+
+        // The Drop arm at a size a request can actually reach: BF16 on 24 GiB.
+        let dropped = residency_on_both_backends(
+            FLUX1_BF16,
+            1024,
+            1024,
+            ActivationFamily::FluxDit,
+            24,
+            rtx_4090,
+        );
+        assert!(!dropped.keeps(), "23.8 GB of weights cannot hold 24 GiB");
+        assert!(
+            dropped.shortfall_bytes() > 0,
+            "a drop names how far short it is"
+        );
+        // …and the same checkpoint is resident on the bigger card.
+        assert!(residency_on_both_backends(
+            FLUX1_BF16,
+            1024,
+            1024,
+            ActivationFamily::FluxDit,
+            24,
+            l40s
+        )
+        .keeps());
+
+        // flux2-dev Q8: never on 24 GiB, kept on an L40S at 1024² and at the
+        // 1.8 MP ceiling. There is deliberately no Drop row for it on the
+        // bigger card — at every shape a request can reach, it fits, and the
+        // 2048² row that used to assert otherwise was unreachable.
+        assert!(!residency_on_both_backends(
+            FLUX2_DEV_Q8,
+            1024,
+            1024,
+            ActivationFamily::Flux2Dit,
+            48,
+            rtx_4090
+        )
+        .keeps());
+        for (width, height) in [(1024, 1024), (MAX_SQUARE, MAX_SQUARE)] {
+            assert!(
+                residency_on_both_backends(
+                    FLUX2_DEV_Q8,
+                    width,
+                    height,
+                    ActivationFamily::Flux2Dit,
+                    48,
+                    l40s
+                )
+                .keeps(),
+                "flux2-dev Q8 at {width}x{height} fits an L40S"
+            );
+        }
+
+        // Klein keeps everywhere, which is the tier people run locally —
+        // including at the ceiling, on the smaller card, on both backends.
+        for transformer in [KLEIN_4B_Q8, KLEIN_9B_Q8] {
+            for (width, height) in [(1024, 1024), (MAX_SQUARE, MAX_SQUARE)] {
+                assert!(
+                    residency_on_both_backends(
+                        transformer,
+                        width,
+                        height,
+                        ActivationFamily::Flux2Dit,
+                        32,
+                        rtx_4090
+                    )
+                    .keeps(),
+                    "Klein Q8 at {transformer} bytes, {width}x{height}, must stay resident \
+                     on a 24 GiB card"
+                );
+            }
+        }
+    }
+
+    /// LoRA delta bytes for ONE rank-`rank` FLUX.1 adapter, at the dtype the
+    /// bypass registry actually stores (`build_lora_registry` places every
+    /// `down`/`up` on the device at the transformer's working dtype, BF16 on
+    /// CUDA).
+    ///
+    /// Derived from FLUX.1 dev's own layer table rather than from a
+    /// remembered file size: 19 double blocks and 38 single blocks at width
+    /// 3072, with `r * (in + out)` elements per adapted linear.
+    ///
+    ///   double, per stream: qkv 3072->9216, proj 3072->3072,
+    ///                       mlp.0 3072->12288, mlp.2 12288->3072
+    ///                       => r * 49_152, and img + txt => r * 98_304
+    ///   single:             linear1 3072->21504, linear2 15360->3072
+    ///                       => r * 43_008
+    ///
+    /// 19 * 98_304 + 38 * 43_008 = 3_502_080 elements per unit of rank.
+    fn flux1_lora_resident_bytes(rank: u64) -> u64 {
+        const ELEMENTS_PER_RANK: u64 = 19 * 98_304 + 38 * 43_008;
+        rank * ELEMENTS_PER_RANK * 2
+    }
+
+    /// #276's two named ingredients, charged.
+    ///
+    /// The ceiling row above asserts `Keep` for what the issue titled "VAE
+    /// decode OOM under KEEP_TRANSFORMER=1 **+ LoRAs** on 24 GB" — from a
+    /// budget whose only weight term was `fs::metadata(transformer).len()`.
+    /// Neither the resident LoRA A/B matrices nor the ~1.7 GB PuLID adapter
+    /// existed in it, so the row was asserting `Keep` from a model
+    /// STRUCTURALLY UNABLE to disagree, which is no assertion at all.
+    ///
+    /// Now it can disagree, and this test pins both directions.
+    #[test]
+    fn the_276_companions_are_charged_against_the_ceiling_row() {
+        const FLUX1_Q8: u64 = 12_600_000_000;
+        /// `docs/architecture/pulid-adapter.md`: ~1.14 GB of fp16 weights,
+        /// 0.8-1.7 GB resident depending on the working dtype. The upper end
+        /// is what a BF16/F32 CUDA render holds, and it is held for the whole
+        /// render: `free_gpu_state_before_vae_decode` releases the adapter
+        /// only on a DROP.
+        const PULID_ADAPTER: u64 = 1_700_000_000;
+
+        let rtx_4090 = usable_free_for_mib(RTX_4090_TOTAL_MIB);
+        let lora = flux1_lora_resident_bytes(256);
+
+        let ceiling = |companions: u64| {
+            residency_on_both_backends_with_companions(
+                FLUX1_Q8,
+                companions,
+                MAX_SQUARE,
+                MAX_SQUARE,
+                ActivationFamily::FluxDit,
+                24,
+                rtx_4090,
+            )
+        };
+
+        // The two-adapter stack the issue reported, with PuLID beside it:
+        // 5.29 GB the budget could not previously see. It still fits, and
+        // that is the honest answer at these sizes — the ceiling row's slack
+        // is 6.33 GB on the math arm, so two rank-256 adapters and an adapter
+        // do not by themselves overrun a nominal 24 GiB card. What changed is
+        // that the budget now SPENDS them: the deviation from "this row must
+        // flip" is arithmetic, not policy, and it is recorded here so the
+        // next person does not have to re-derive it.
+        let reported = 2 * lora + PULID_ADAPTER;
+        assert_eq!(
+            reported, 5_286_129_920,
+            "two rank-256 FLUX.1 adapters plus the PuLID adapter"
+        );
+        assert!(
+            ceiling(reported).keeps(),
+            "5.29 GB of companions still fits the ceiling row's 6.33 GB of slack"
+        );
+
+        // …and a heavier stack DROPS, which is the whole point: mold's LoRA
+        // stack takes several adapters, and four rank-256 ones beside the
+        // PuLID adapter are 8.87 GB. Before companions were charged this was
+        // byte-for-byte the `Keep` above, because the budget's only weight
+        // term was the checkpoint file.
+        let heavy = 4 * lora + PULID_ADAPTER;
+        let dropped = ceiling(heavy);
+        assert!(
+            !dropped.keeps(),
+            "8.87 GB of resident adapters beside a 12.6 GB checkpoint cannot \
+             also hold the ceiling decode on a 24 GiB card"
+        );
+        assert!(
+            dropped.shortfall_bytes() > 0,
+            "a drop names how far short it is"
+        );
+
+        // The pin that makes the two rows above mean something: with the
+        // companion term at zero — the pre-change budget — the heavy stack
+        // KEEPS. The row could not have disagreed.
+        assert!(
+            ceiling(0).keeps(),
+            "the checkpoint-only budget keeps at the ceiling regardless of \
+             what else the render is holding, which is why this row was \
+             asserting nothing"
+        );
+    }
+
+    /// Every budgeted residency in a still pipeline passes through the
+    /// operator's opt-out before it becomes a decision.
+    ///
+    /// This is a SOURCE contract because that is the shape the defect took:
+    /// `resolve_keep_transformer` was correct, fully tested, and simply not
+    /// called — FLUX.2's two sites read `still_transformer_residency` directly
+    /// and acted on it, so `MOLD_FLUX_KEEP_TRANSFORMER=0` was verified present
+    /// in `/proc/<pid>/environ` while the server logged
+    /// `Flux.2 transformer settled ... retained=true` and kept 34 GB on the
+    /// card. No behavioural test of either function could have caught that;
+    /// only counting the call sites can.
+    #[test]
+    fn both_still_pipelines_resolve_residency_through_the_operator_opt_out() {
+        for (family, source) in [
+            ("flux", include_str!("flux/pipeline.rs")),
+            ("flux2", include_str!("flux2/pipeline.rs")),
+        ] {
+            // Production code only: a test may ask the budget in isolation.
+            let source = source
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap_or(source);
+            let budgets = source.matches("still_transformer_residency(&").count();
+            let resolved = source.matches("resolve_keep_transformer(").count()
+                + source.matches("resolve_flux_keep_transformer(").count();
+            assert!(budgets > 0, "{family} must still ask the budget at all");
+            assert_eq!(
+                budgets, resolved,
+                "{family} asks the residency budget {budgets} time(s) but resolves the \
+                 MOLD_FLUX_KEEP_TRANSFORMER opt-out {resolved} time(s); a budget read \
+                 that is acted on directly is an operator with no way to say 'don't'"
+            );
+        }
+    }
+
+    /// A pipeline that can KEEP its transformer can also report and release
+    /// it.
+    ///
+    /// The two go together by construction: keeping weights across renders is
+    /// how a card comes to be full of a model nobody is currently rendering,
+    /// and `resident_vram_bytes` / `release_retained_residency` are the only
+    /// way admission can see those bytes and the only way anything can hand
+    /// them back without destroying the engine. Both default to "nothing
+    /// here" on the trait, so a family that keeps and does not report compiles
+    /// perfectly and is invisible.
+    ///
+    /// FLUX.1 was exactly that: `MOLD_FLUX_KEEP_TRANSFORMER` and the residency
+    /// budget have kept its transformer since the campaign began, and it
+    /// implemented neither accessor — so under a tight reserve an 18.8 GB
+    /// retained FLUX.1 transformer could not be released for a following
+    /// klein plan, which the loader then refused (UAT final-2, F4d).
+    #[test]
+    fn a_pipeline_that_can_keep_its_transformer_can_report_and_release_it() {
+        for (family, source) in [
+            ("flux", include_str!("flux/pipeline.rs")),
+            ("flux2", include_str!("flux2/pipeline.rs")),
+        ] {
+            let source = source
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap_or(source);
+            assert!(
+                source.contains("resolve_keep_transformer(")
+                    || source.contains("resolve_flux_keep_transformer("),
+                "{family} is expected to resolve a keep decision at all"
+            );
+            for accessor in ["fn resident_vram_bytes(", "fn release_retained_residency("] {
+                assert!(
+                    source.contains(accessor),
+                    "{family} keeps its transformer across renders but does not implement \
+                     `{accessor}`, so those bytes are invisible to admission and cannot be \
+                     handed back without destroying the engine"
+                );
+            }
+        }
+    }
+
+    /// The variable's precedence, for BOTH still families.
+    ///
+    /// Unset means "ask the budget" rather than "always drop", and an explicit
+    /// keep means the same thing, because #276's override — an explicit keep
+    /// must still yield to a card that cannot afford it — is what the budget
+    /// now expresses for everybody. The drop spellings are the one answer that
+    /// overrides a fitting budget, and they are the whole opt-out: FLUX.2 read
+    /// none of them until this moved here.
+    #[test]
+    fn resolve_keep_transformer_env_precedence() {
+        let fits = TransformerResidency::Keep;
+        let does_not = TransformerResidency::Drop {
+            shortfall_bytes: 4_000_000_000,
+        };
+
+        for env in [None, Some("1"), Some("on"), Some("true"), Some("YES")] {
+            assert_eq!(
+                resolve_keep_transformer(env, fits),
+                ResidencyDecision::KeepResident,
+                "env={env:?} with a fitting budget keeps"
+            );
+            assert_eq!(
+                resolve_keep_transformer(env, does_not),
+                ResidencyDecision::DropForHeadroom,
+                "env={env:?} yields to a budget that does not fit (#276)"
+            );
+        }
+
+        for env in [Some("0"), Some("off"), Some("false"), Some(" NO ")] {
+            assert_eq!(
+                resolve_keep_transformer(env, fits),
+                ResidencyDecision::DropRequested,
+                "env={env:?} drops even where the card has room"
+            );
+            assert_eq!(
+                resolve_keep_transformer(env, does_not),
+                ResidencyDecision::DropRequested,
+                "env={env:?}"
+            );
+        }
+
+        // An unrecognised value is the default, never a failed render.
+        assert_eq!(
+            keep_transformer_request(Some("maybe")),
+            KeepTransformerRequest::Budget
+        );
+        assert_eq!(
+            resolve_keep_transformer(Some("maybe"), fits),
+            ResidencyDecision::KeepResident
+        );
+    }
+
+    /// A warm LoRA render reaches the same answer as a cold one.
+    ///
+    /// `usable_free_bytes` is the card "as if nothing this render loaded were
+    /// resident", so a caller sampling free VRAM mid-render adds back
+    /// EVERYTHING it is holding — the checkpoint AND the companions. Adding
+    /// back only the checkpoint charges the adapters twice (once by shrinking
+    /// the reading, once in `required_bytes`) and drops every warm LoRA
+    /// render on a card that can plainly afford it.
+    #[test]
+    fn the_add_back_convention_covers_the_companions_too() {
+        const TOTAL: u64 = 21_000_000_000;
+        const CHECKPOINT: u64 = 12_600_000_000;
+        let companions = 2 * flux1_lora_resident_bytes(256);
+
+        let budget = StillTransformerBudget {
+            transformer_bytes: CHECKPOINT,
+            companion_resident_bytes: companions,
+            activation_bytes: 500_000_000,
+            vae_decode_peak_bytes: 2_700_000_000,
+            runtime_headroom_bytes: STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+        };
+
+        // Cold: nothing of this render's is on the card yet.
+        let cold = still_transformer_residency(&budget, UsableFreeVram::Measured(TOTAL));
+
+        // Warm: the driver reports what is actually free, and the caller adds
+        // back every byte this render put there.
+        let sampled_free = TOTAL - CHECKPOINT - companions;
+        let warm = still_transformer_residency(
+            &budget,
+            UsableFreeVram::Measured(sampled_free + CHECKPOINT + companions),
+        );
+        assert_eq!(cold, warm, "the add-back must reconstruct the cold reading");
+        assert!(cold.keeps());
+
+        // And the bug it prevents: adding back only the checkpoint drops.
+        let double_charged = still_transformer_residency(
+            &budget,
+            UsableFreeVram::Measured(sampled_free + CHECKPOINT),
+        );
+        assert!(
+            !double_charged.keeps(),
+            "charging the adapters twice is what a checkpoint-only add-back does"
+        );
+    }
+
+    /// The matrix's shapes are ones a request can actually carry.
+    ///
+    /// Pins the premise of the rewrite: `MAX_PIXELS` is what makes 1536² and
+    /// 2048² untestable through the public API, so a matrix written in those
+    /// sizes proves nothing about what users reach.
+    #[test]
+    fn the_matrix_shapes_are_admissible_through_the_public_api() {
+        let pixels = u64::from(MAX_SQUARE) * u64::from(MAX_SQUARE);
+        assert!(
+            pixels <= mold_core::validation::MAX_PIXELS,
+            "{MAX_SQUARE}² is {pixels} pixels, over the {} cap",
+            mold_core::validation::MAX_PIXELS
+        );
+        // And it really is the ceiling on the /16 grid both families pack to.
+        let next = u64::from(MAX_SQUARE + 16) * u64::from(MAX_SQUARE + 16);
+        assert!(
+            next > mold_core::validation::MAX_PIXELS,
+            "a larger square would still be admissible; the matrix is not at the ceiling"
+        );
+        let retired: u64 = 2048 * 2048;
+        assert!(
+            retired > mold_core::validation::MAX_PIXELS,
+            "the rows this matrix replaced were unreachable, which is why they were replaced"
+        );
+    }
+
+    /// A measured card with almost nothing free drops regardless of the
+    /// checkpoint — the 2-LoRA observation #276 was written against.
+    #[test]
+    fn a_card_with_three_gigabytes_free_drops_every_still_transformer() {
+        let answer = residency_on_both_backends(
+            12_600_000_000,
+            1024,
+            1024,
+            ActivationFamily::FluxDit,
+            24,
+            3 * 1024 * MIB,
+        );
+        assert!(!answer.keeps());
+        assert!(answer.shortfall_bytes() > 10 * 1024 * MIB);
+    }
+
+    /// A card MEASURED at zero free is the most pressured reading there is.
+    ///
+    /// This test used to assert the opposite, on the reasoning that "an
+    /// unmeasurable card is not evidence of pressure". That conflated a
+    /// measurement of zero with the absence of a measurement, and the absence
+    /// now has its own variant — see
+    /// `an_unmeasurable_accelerator_drops_and_only_a_cpu_keeps`.
+    #[test]
+    fn a_card_measured_at_zero_free_drops_the_transformer() {
+        assert!(!residency_on_both_backends(
+            33_000_000_000,
+            1024,
+            1024,
+            ActivationFamily::Flux2Dit,
+            48,
+            0
+        )
+        .keeps());
+    }
+
+    /// A GPU whose probe FAILED must drop, not keep.
+    ///
+    /// "An unmeasurable card is not evidence of pressure" is right for a CPU
+    /// render and wrong for an accelerator whose reading failed: that is the
+    /// #276 OOM the budget exists to prevent, it inverts the Metal memory
+    /// policy CLAUDE.md documents ("failed supported probes block admission"),
+    /// and it breaks the campaign's own rule that every residency decision
+    /// falls back to TODAY'S behaviour — which was to drop.
+    ///
+    /// The three readings are distinct on purpose. Collapsing "the probe
+    /// failed" and "there is no VRAM to probe" into one `0` sentinel is
+    /// exactly how a failed CUDA `mem_get_info` came to mean "keep 24 GB of
+    /// weights resident".
+    #[test]
+    fn an_unmeasurable_accelerator_drops_and_only_a_cpu_keeps() {
+        let budget = StillTransformerBudget {
+            transformer_bytes: 23_800_000_000,
+            activation_bytes: 500_000_000,
+            vae_decode_peak_bytes: 2_700_000_000,
+            runtime_headroom_bytes: STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+            companion_resident_bytes: 0,
+        };
+
+        let failed = still_transformer_residency(&budget, UsableFreeVram::Unmeasurable);
+        assert!(
+            !failed.keeps(),
+            "a failed accelerator probe must fail CLOSED"
+        );
+        assert_eq!(
+            failed.shortfall_bytes(),
+            budget.required_bytes(),
+            "with no reading at all the whole budget is the shortfall"
+        );
+
+        assert!(
+            still_transformer_residency(&budget, UsableFreeVram::NotApplicable).keeps(),
+            "a CPU render has no VRAM to compete for, so there is nothing to drop for"
+        );
+
+        // A real measurement still decides on the arithmetic.
+        assert!(still_transformer_residency(
+            &budget,
+            UsableFreeVram::Measured(45 * 1024 * 1024 * 1024)
+        )
+        .keeps());
+        assert!(!still_transformer_residency(
+            &budget,
+            UsableFreeVram::Measured(8 * 1024 * 1024 * 1024)
+        )
+        .keeps());
+
+        // And a measured ZERO is a card with nothing free, which is the most
+        // pressured reading there is — never a keep.
+        assert!(
+            !still_transformer_residency(&budget, UsableFreeVram::Measured(0)).keeps(),
+            "a card measured at zero free is pressure, not an unknown"
+        );
+    }
+
+    /// Flash materializes no score matrix, so it is charged none — the same
+    /// distinction `wan_activation_budget_bytes_for` draws, and the reason a
+    /// flash build must not be priced as a math one.
+    #[test]
+    fn flux_activation_budget_is_backend_aware() {
+        let math = flux_activation_budget_bytes_for(
+            1024,
+            1024,
+            1,
+            2,
+            ActivationFamily::FluxDit,
+            24,
+            crate::attention::AttentionBackend::Math,
+        );
+        let flash = flux_activation_budget_bytes_for(
+            1024,
+            1024,
+            1,
+            2,
+            ActivationFamily::FluxDit,
+            24,
+            crate::attention::AttentionBackend::Flash,
+        );
+        assert!(math > flash, "math charges the score tile, flash does not");
+        assert_eq!(
+            flash,
+            activation_bytes(1024, 1024, 1, 2, ActivationFamily::FluxDit),
+            "with no score tile the budget is exactly the area model"
+        );
+        // The difference is the score plus softmax tile over the joint
+        // sequence: (64x64 image + 512 text) tokens x 2 x 24 heads x 512
+        // chunk rows x 2 bytes.
+        assert_eq!(math - flash, (4096 + 512) * 2 * 24 * 512 * 2);
+
+        // More heads and a bigger canvas both cost more, and only on math.
+        let wide = flux_activation_budget_bytes_for(
+            2048,
+            2048,
+            1,
+            2,
+            ActivationFamily::FluxDit,
+            24,
+            crate::attention::AttentionBackend::Math,
+        );
+        assert!(wide > math);
+        let many_heads = flux_activation_budget_bytes_for(
+            1024,
+            1024,
+            1,
+            2,
+            ActivationFamily::FluxDit,
+            48,
+            crate::attention::AttentionBackend::Math,
+        );
+        assert!(many_heads > math);
+        assert_eq!(
+            flux_activation_budget_bytes_for(
+                1024,
+                1024,
+                1,
+                2,
+                ActivationFamily::FluxDit,
+                48,
+                crate::attention::AttentionBackend::Flash
+            ),
+            flash,
+            "head count cannot move a flash budget: there is no tile to widen"
+        );
+    }
+
+    /// The decode peak reproduces #276's two measured anchors — 2–3 GB at
+    /// 1024² bf16 and 10–12 GB at 2048² — and scales with area, not with a
+    /// fixed 5 GB magic number.
+    #[test]
+    fn vae_decode_peak_reproduces_the_276_anchors() {
+        let small = flux_vae_decode_peak_bytes(1024, 1024, 2);
+        assert!(
+            (2_000_000_000..=3_000_000_000).contains(&small),
+            "1024² bf16 decode peak was {small}"
+        );
+        let large = flux_vae_decode_peak_bytes(2048, 2048, 2);
+        assert!(
+            (10_000_000_000..=12_000_000_000).contains(&large),
+            "2048² bf16 decode peak was {large}"
+        );
+        assert_eq!(large, small * 4, "the decode is an area model");
+        assert_eq!(
+            flux_vae_decode_peak_bytes(1024, 1024, 4),
+            small * 2,
+            "MOLD_VAE_DTYPE=f32 doubles the workspace"
+        );
+        assert_eq!(
+            flux_vae_decode_peak_bytes(64, 64, 2),
+            FLUX_VAE_DECODE_FLOOR_BYTES,
+            "a tiny canvas still reserves a kernel workspace"
+        );
+    }
+
+    /// The effective backend is the flux families' own policy, resolved the
+    /// same way wan's is — never a hard-coded `Math`.
+    #[test]
+    fn the_flux_effective_backend_is_the_fast_still_policy() {
+        assert_eq!(
+            flux_effective_attention_backend(),
+            crate::attention::AttentionBackend::resolve_effective_for(
+                crate::attention::AttentionPolicy::FastStill
+            )
+        );
+    }
+
     // ── keep_te_in_ram ───────────────────────────────────────────────────
 
     /// Every `MOLD_KEEP_TE_RAM` behavior lives under one `#[test]` so cargo's
@@ -6067,6 +7607,173 @@ mod tests {
         assert!(
             auto.same_device(&resolved),
             "create_device vs resolve_gpu_ordinal"
+        );
+    }
+}
+#[cfg(test)]
+mod flux2_denoise_budget_tests {
+    use super::{
+        activation_bytes, flux2_denoise_activation_bytes,
+        flux2_denoise_activation_bytes_for_canvas, ActivationFamily, Flux2ActivationGeometry,
+        FLUX_ATTENTION_QUERY_CHUNK, FLUX_TEXT_TOKENS,
+    };
+    use crate::attention::AttentionBackend;
+
+    /// plato's process VRAM high water minus each tier's own resident weights,
+    /// at 1024x1024 / batch 1 on the BF16 GGUF path. Three quantizations, one
+    /// working set — see `FLUX2_DENOISE_ALLOCATOR_RETENTION_NUMERATOR`.
+    const PLATO_1024_RUNTIME_BYTES: [u64; 3] = [
+        // flux2-dev:q4 — 23,293,067,264 - 20,295,944,724
+        2_997_122_540,
+        // flux2-dev:q6 — 30,708,596,736 - 27,732,445,716
+        2_976_151_020,
+        // flux2-dev:q8 — 38,359,007,232 - 35,338,816,020
+        3_020_191_212,
+    ];
+
+    #[test]
+    fn the_live_set_is_read_off_the_single_stream_block() {
+        let dev = Flux2ActivationGeometry::dev();
+        // 9 x 6144 + 6 x 18432. The fused `to_qkv_mlp_proj` row alone is
+        // 3 x 6144 + 2 x 18432 = 55,296 of it.
+        assert_eq!(dev.live_elements_per_token(), 165_888);
+        assert_eq!(
+            Flux2ActivationGeometry::klein().live_elements_per_token(),
+            82_944
+        );
+        assert_eq!(
+            Flux2ActivationGeometry::klein_9b().live_elements_per_token(),
+            110_592
+        );
+    }
+
+    #[test]
+    fn every_geometry_is_the_config_the_engine_builds() {
+        for (cfg, geometry) in [
+            (
+                crate::flux2::transformer::Flux2Config::dev(),
+                Flux2ActivationGeometry::dev(),
+            ),
+            (
+                crate::flux2::transformer::Flux2Config::klein(),
+                Flux2ActivationGeometry::klein(),
+            ),
+            (
+                crate::flux2::transformer::Flux2Config::klein_9b(),
+                Flux2ActivationGeometry::klein_9b(),
+            ),
+        ] {
+            assert_eq!(Flux2ActivationGeometry::from_config(&cfg), geometry);
+        }
+    }
+
+    /// The arm the measurement was taken on is the arm the fit has to
+    /// reproduce. plato's own log for these renders reports
+    /// `fast_still_default=Flash`, and the planner asks
+    /// `flux_effective_attention_backend()`, so the charge these three numbers
+    /// pin is the one with NO score pair in it.
+    #[test]
+    fn the_dev_flash_budget_reproduces_every_runtime_plato_measured() {
+        let budget = flux2_denoise_activation_bytes_for_canvas(
+            Flux2ActivationGeometry::dev(),
+            1024,
+            1024,
+            1,
+            2,
+            AttentionBackend::Flash,
+        );
+        for measured in PLATO_1024_RUNTIME_BYTES {
+            assert!(
+                budget >= measured * 95 / 100 && budget <= measured * 105 / 100,
+                "{budget} must sit within 5% of the measured {measured}"
+            );
+        }
+        // And it is an order of magnitude above what the area model charged,
+        // which is the whole of #1707's plan-side defect.
+        assert!(budget > 10 * activation_bytes(1024, 1024, 1, 2, ActivationFamily::Flux2Dit));
+    }
+
+    /// The math arm is DERIVED from the flash fit, not measured: the same
+    /// retention over a live set that also holds the score pair. It can only
+    /// be higher, and it must still sit inside a factor of two of the reading
+    /// the other arm produced.
+    #[test]
+    fn the_dev_math_budget_is_the_flash_one_with_its_score_pair_on_top() {
+        let math = flux2_denoise_activation_bytes_for_canvas(
+            Flux2ActivationGeometry::dev(),
+            1024,
+            1024,
+            1,
+            2,
+            AttentionBackend::Math,
+        );
+        let flash = flux2_denoise_activation_bytes_for_canvas(
+            Flux2ActivationGeometry::dev(),
+            1024,
+            1024,
+            1,
+            2,
+            AttentionBackend::Flash,
+        );
+        assert!(
+            math > flash,
+            "math materializes a score pair flash never does: {math} vs {flash}"
+        );
+        for measured in PLATO_1024_RUNTIME_BYTES {
+            assert!(
+                math >= measured && math <= measured * 2,
+                "{math} must stay above the measured {measured} and inside a factor of two"
+            );
+        }
+    }
+
+    #[test]
+    fn flash_charges_no_score_tile_and_math_charges_exactly_one() {
+        let dev = Flux2ActivationGeometry::dev();
+        let joint = 4096 + FLUX_TEXT_TOKENS;
+        let math = flux2_denoise_activation_bytes(dev, joint, 1, 2, AttentionBackend::Math);
+        let flash = flux2_denoise_activation_bytes(dev, joint, 1, 2, AttentionBackend::Flash);
+        let tile = 2 * dev.num_heads * FLUX_ATTENTION_QUERY_CHUNK * joint * 2;
+        // Exactly one tile, at its own size: the allocator retention is fitted
+        // over the stream, which is the only thing plato's readings contain.
+        assert_eq!(math - flash, tile);
+    }
+
+    #[test]
+    fn the_budget_is_linear_in_the_packed_sequence_the_dtype_and_the_batch() {
+        let dev = Flux2ActivationGeometry::dev();
+        let one = flux2_denoise_activation_bytes(dev, 4608, 1, 2, AttentionBackend::Math);
+        // To within the single truncation the retention's integer division
+        // performs on each side — doubling an input may move the remainder.
+        for doubled in [
+            flux2_denoise_activation_bytes(dev, 9216, 1, 2, AttentionBackend::Math),
+            flux2_denoise_activation_bytes(dev, 4608, 1, 4, AttentionBackend::Math),
+            flux2_denoise_activation_bytes(dev, 4608, 2, 2, AttentionBackend::Math),
+        ] {
+            assert!(
+                doubled.abs_diff(one * 2) <= 1,
+                "{doubled} must be twice {one}"
+            );
+        }
+    }
+
+    #[test]
+    fn klein_is_never_charged_devs_stream() {
+        let joint = 4096 + FLUX_TEXT_TOKENS;
+        assert!(
+            flux2_denoise_activation_bytes(
+                Flux2ActivationGeometry::klein(),
+                joint,
+                1,
+                2,
+                AttentionBackend::Math
+            ) < flux2_denoise_activation_bytes(
+                Flux2ActivationGeometry::dev(),
+                joint,
+                1,
+                2,
+                AttentionBackend::Math
+            )
         );
     }
 }

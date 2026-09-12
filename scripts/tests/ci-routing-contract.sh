@@ -16,11 +16,42 @@ fail() {
   exit 1
 }
 
+# A commented-out job is a false promise, and `grep` over the raw file cannot
+# tell `flash-attn-check:` from `#   flash-attn-check:`. This script asserted a
+# CUDA compile gate for months after 48dbb266 ("ci: disable H3 CUDA server job")
+# switched the whole job off, because every one of its `# ...` lines still
+# carried the strings the assertions matched. So every assertion about a
+# workflow reads the ACTIVE document: a line whose first non-space character is
+# `#` is blanked, which is exactly how a job block is switched off in YAML.
+# Blanking rather than deleting keeps the surrounding block structure that
+# `extract_job` and `extract_filter` walk.
+active_cache_dir="$(mktemp -d)"
+trap 'rm -rf "$active_cache_dir"' EXIT
+
+active_file() {
+  local file=$1
+  case "$file" in
+    *.yml | *.yaml) ;;
+    # Only YAML is projected. A non-workflow file (a shell script, a Gradle
+    # build) is asserted verbatim, because `#` does not mean the same thing
+    # there and blanking would change what the assertion is about.
+    *)
+      printf '%s' "$file"
+      return
+      ;;
+  esac
+  local cached="$active_cache_dir/$(printf '%s' "$file" | tr '/' '%')"
+  if [[ ! -f "$cached" ]]; then
+    sed -e 's/^[[:space:]]*#.*$//' "$file" > "$cached"
+  fi
+  printf '%s' "$cached"
+}
+
 require_text() {
   local file=$1
   local text=$2
   local message=$3
-  grep -Fq -- "$text" "$file" || fail "$message"
+  grep -Fq -- "$text" "$(active_file "$file")" || fail "$message"
 }
 
 extract_job() {
@@ -30,7 +61,7 @@ extract_job() {
     $0 == key { selected = 1 }
     selected && $0 ~ /^  [[:alnum:]_-][[:alnum:]_-]*:$/ && $0 != key { exit }
     selected { print }
-  ' "$file"
+  ' "$(active_file "$file")"
 }
 
 extract_filter() {
@@ -40,17 +71,24 @@ extract_filter() {
     $0 == key { selected = 1 }
     selected && $0 ~ /^            [[:alnum:]_-][[:alnum:]_-]*:$/ && $0 != key { exit }
     selected { print }
-  ' "$file"
+  ' "$(active_file "$file")"
 }
+
+# Self-test the projection before trusting it: a job that exists only as a
+# comment must be invisible to every assertion below, and a live one must not
+# be. Without this a future refactor could quietly go back to searching the raw
+# file and nothing here would notice.
+comment_probe="$active_cache_dir/comment-probe.yml"
+printf 'jobs:\n  live-job:\n    runs-on: ubuntu-latest\n  # dead-job:\n  #   runs-on: ubuntu-latest\n' \
+  > "$comment_probe"
+[[ -n "$(extract_job "$comment_probe" live-job)" ]] \
+  || fail "the active-YAML projection hides a live job"
+[[ -z "$(extract_job "$comment_probe" dead-job)" ]] \
+  || fail "the active-YAML projection still reads a commented-out job as real"
 
 rust_job=$(extract_job "$ci" rust)
 windows_rust_job=$(extract_job "$ci" windows-rust)
 cuda_job=$(extract_job "$ci" cuda-check)
-# flash_job=$(extract_job "$ci" flash-attn-check)
-# grep -Fq 'needs.changes.outputs.h3_cuda_server' <<< "$flash_job" \
-#   || fail "H3 CUDA server tests are not path-gated on PRs"
-# grep -Fq 'bash scripts/test-h3-cuda-server.sh' <<< "$flash_job" \
-#   || fail "CUDA toolkit job does not run the full hermetic H3 server suite"
 producer_command='cargo clippy -p mold-ai-inference --features dev-bins,h3-cuda --bin h3_runtime_qualification_record -- -D warnings'
 if grep -Fq -- "$producer_command" <<< "$rust_job"; then
   fail "the CUDA-backed H3 runtime-record producer runs in the CPU Rust job"
@@ -87,7 +125,7 @@ fi
 
 # Assert the complete trusted-app predicates, then exercise the security truth
 # table. Fragment checks would pass if an operator were accidentally inverted.
-python3 - "$ci" "$desktop" "$ios" "$android" <<'PY' || exit 1
+python3 - "$(active_file "$ci")" "$(active_file "$desktop")" "$(active_file "$ios")" "$(active_file "$android")" <<'PY' || exit 1
 import re
 import sys
 from pathlib import Path
@@ -318,8 +356,8 @@ require_text "$ci" \
   "cargo clippy -p mold-ai --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings" \
   "Metal-gated production code is not linted"
 require_text "$ci_local" \
-  "cargo clippy -p mold-ai --features h3-cuda,mesh-texture,mesh-matting,mesh-delight,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings" \
-  "the local CUDA gate omits required Hunyuan3D mesh features"
+  "cargo clippy -p mold-ai --features h3-cuda,mesh-texture,mesh-matting,mesh-delight,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid --all-targets -- -D warnings" \
+  "the local CUDA gate does not lint the shipping feature set (mesh features, discord, metrics)"
 require_text "$ci" \
   "cargo check -p mold-ai-server --features h3,mesh-texture,mesh-matting,mesh-delight,metal,expand,mdns,metrics,mp4,pulid,webp" \
   "the reviewed H3 Metal server recipe is not compiled"
@@ -329,9 +367,24 @@ require_text "$release_workflow" \
 require_text "$release_workflow" \
   "--features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid  # macOS" \
   "the documented macOS source install omits Hunyuan3D texture baking"
-cuda_release_features="cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
-[[ "$(grep -Fc -- "cargo build --release -p mold-ai --features $cuda_release_features" "$release_workflow")" -eq 3 ]] \
-  || fail "the sm86/sm100/sm120 CUDA release recipes do not all ship the Hunyuan3D mesh stack"
+# `flash-attn` rides sm86 and sm100 alongside `cuda`, and sm89 gets the same
+# kernel through `h3-cuda`. FLUX's `AttentionPolicy::FastStill` math path folds
+# the softmax scale into K whether or not the kernel is compiled, so a
+# published CUDA artifact without it carries the archived-seed break and none
+# of the speedup.
+#
+# sm120 is the one qualified exception and is asserted SEPARATELY, so dropping
+# flash from another capability cannot hide inside a loosened count. FA2 keys
+# its head-dim 96/128/160 tile on a runtime `is_sm8x` test that consumer
+# Blackwell fails, so it would take the A100/H100 tile on an Ada-sized SM —
+# unmeasured, and mold owns no RTX 50-series card. See `flashAttnQualifiedCaps`
+# in flake.nix.
+cuda_release_features="cuda,flash-attn,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
+[[ "$(grep -Fc -- "cargo build --release -p mold-ai --features $cuda_release_features" "$release_workflow")" -eq 2 ]] \
+  || fail "the sm86/sm100 CUDA release recipes do not both ship FlashAttention and the Hunyuan3D mesh stack"
+sm120_release_features="cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
+[[ "$(grep -Fc -- "cargo build --release -p mold-ai --features $sm120_release_features" "$release_workflow")" -eq 1 ]] \
+  || fail "the sm120 CUDA release recipe must ship the mesh stack on math attention, without flash-attn"
 require_text "$release_workflow" \
   "cargo build --release -p mold-ai --features h3-cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight" \
   "the sm89 CUDA release recipe omits the Hunyuan3D mesh stack"
@@ -350,12 +403,76 @@ grep -Fq "github.event_name == 'pull_request'" <<< "$metal_block" \
 grep -Fq "needs.changes.outputs.trusted_release_pr != 'true'" <<< "$metal_block" \
   || fail "the Metal compile runs on generated release PRs"
 
-require_text "$ci" \
-  "cargo clippy -p mold-ai --features flash-attn -- -D warnings" \
-  "the flash-attn binary wiring is only typechecked"
-# flash_job="$(extract_job "$ci" flash-attn-check)"
-# grep -Fq "if: github.event_name == 'push'" <<< "$flash_job" \
-#   || fail "FlashAttention still consumes the PR critical path"
+# The `cuda` and `metal` cfg arms gate the SAME mold-cli call sites into
+# mold-server (`execution_plan::materialize_request`,
+# `execution_plan::validate_before_cuda` sit behind
+# `#[cfg(any(feature = "cuda", feature = "metal"))]`). `metal-check` compiles
+# one of those arms on macOS; after the CUDA toolkit job was retired NOTHING on
+# the pull-request route compiled the other, and `cargo check -p mold-ai
+# --no-default-features` type-checks neither -- so a mold-server signature
+# change can land green and break every shipping CUDA build with E0061.
+# `cuda-typecheck` is that missing arm. It is a `cargo check`, not a release
+# build: the retired 40-minute forced-local job is still refused above.
+cuda_typecheck_block="$(extract_job "$ci" cuda-typecheck)"
+[[ -n "$cuda_typecheck_block" ]] \
+  || fail "no pull-request job compiles the CUDA cfg arm of the mold-cli/mold-server seam"
+grep -Fq "github.event_name == 'pull_request'" <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck does not protect relevant pull requests"
+grep -Fq "needs.changes.outputs.trusted_release_pr != 'true'" <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck runs on generated release PRs"
+grep -Fq "needs.changes.outputs.cuda_typecheck == 'true'" <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck is not gated on the crates that can break the CUDA cfg arm"
+grep -Fq "cargo check -p mold-ai --features h3-cuda," <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck does not compile mold-ai with the shipping h3-cuda arm"
+# Every feature the shipping CUDA build enables (release.yml's sm89 job) must
+# be in the typecheck, except `cudnn`, whose headers the runner does not have
+# and whose cfg arm mold's own crates never gate on. A cfg arm that ships but
+# is not typechecked is how two non-building tips landed on the FLUX campaign.
+cuda_typecheck_features="$(grep -oE 'cargo check -p mold-ai --features [^ ]+' <<< "$cuda_typecheck_block" | head -n1 | sed 's/.*--features //')"
+for shipped_feature in h3-cuda preview discord expand tui webp mp4 metrics mdns pulid mesh-texture mesh-matting mesh-delight; do
+  case ",${cuda_typecheck_features}," in
+    *",${shipped_feature},"*) ;;
+    *) fail "the CUDA typecheck does not compile the shipped feature '${shipped_feature}'" ;;
+  esac
+done
+grep -Fq "Jimver/cuda-toolkit@" <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck has no nvcc: candle-kernels' build script cannot emit PTX without it"
+grep -Fq 'CUDA_COMPUTE_CAP:' <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck does not pin a compute capability for the PTX build"
+# The Actions cache store sits at its 10 GB ceiling. This job RESTORES the
+# `rust` job's key and must never save: a new key would evict the union cache
+# every pull request restores.
+grep -Fq 'save-if: false' <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck saves a rust-cache key while the Actions store is at its ceiling"
+cuda_typecheck_keys="$(grep -o 'shared-key: [A-Za-z0-9_-]*' <<< "$cuda_typecheck_block" | sort -u)"
+[[ "$cuda_typecheck_keys" == "shared-key: workspace-default" ]] \
+  || fail "the CUDA typecheck must restore the shared workspace-default key and introduce none of its own"
+cuda_typecheck_filter="$(extract_filter "$ci" cuda_typecheck)"
+for reached in \
+  "'crates/mold-cli/**'" \
+  "'crates/mold-server/**'" \
+  "'crates/mold-inference/**'" \
+  "'Cargo.toml'" \
+  "'Cargo.lock'"; do
+  grep -Fq -- "$reached" <<< "$cuda_typecheck_filter" \
+    || fail "the CUDA typecheck filter does not reach $reached"
+done
+
+# `flash-attn-check` is GONE, not switched off. 48dbb266 ("ci: disable H3 CUDA
+# server job", merged with release PR #1607) commented the whole job out to
+# stop the H3 CUDA server suite, and the `--features flash-attn` compile went
+# with it. This script then kept asserting that job's commands for months,
+# because it searched the raw file and every line was still there behind a `#`.
+# The truth today: the pull-request CUDA compile gate is `cuda-typecheck`
+# (asserted above) and the dependency-shape half of what the dead job covered
+# is `candle-single-identity.sh` on the release-contract route. Nothing
+# compiles `--features flash-attn`; reviving that is a deliberate decision,
+# because the job owned rust-cache keys this repository cannot currently
+# afford. Assert the absence against the RAW file, so the block cannot come
+# back as a comment and quietly re-arm the old false promise.
+if grep -Fq 'flash-attn-check:' "$ci"; then
+  fail "flash-attn-check is back in ci.yml: if it is revived it must be an ACTIVE job asserted through extract_job, never a commented block"
+fi
 
 for required_job in rust docs web; do
   required_block="$(extract_job "$ci" "$required_job")"

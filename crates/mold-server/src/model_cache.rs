@@ -40,6 +40,20 @@ pub struct ReclaimableEntry {
     pub vram_bytes: u64,
 }
 
+/// The engine `unload_active` parked, and what it gave back.
+///
+/// The bytes travel with the name because the caller is the only one that
+/// knows what the release was FOR, and a release nobody can see is the same
+/// to an operator as a release that did not happen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnloadedActiveModel {
+    pub model: String,
+    /// The entry's credited device footprint at the moment it was parked —
+    /// the load-time measurement, or the engine's own retained report where
+    /// that is larger.
+    pub vram_bytes: u64,
+}
+
 /// Result of returning a checked-out cache entry.
 pub struct RestoreOutcome {
     /// The restored entry changed from GPU-resident to parked while checked out.
@@ -214,6 +228,22 @@ impl ModelCache {
         if reclassified_to_parked {
             cached.residency = ModelResidency::Parked;
             cached.vram_bytes = 0;
+        } else if let Some(resident) = cached.engine.resident_vram_bytes() {
+            // Residency the load-time measurement could not see. `vram_bytes`
+            // is `vram_load_delta` around `engine.load()`, which for a
+            // sequential FLUX.2 engine returns immediately — so the 18-35 GB
+            // it retains during `generate` read as zero, admission planned
+            // against VRAM that was not there, and the evict-to-fit loop had
+            // nothing to reclaim. This is the only place the credit can be
+            // RAISED; the branch above is the only one that lowers it.
+            //
+            // The LARGER of the two, never the reported one: an EAGER engine
+            // (FLUX.1) keeps its transformer inside a loaded set the delta
+            // measured in full, and reports only the part a release can hand
+            // back — so assigning would lower a correct measurement to its
+            // transformer alone and lose the VAE and encoders beside it.
+            cached.residency = ModelResidency::Gpu;
+            cached.vram_bytes = cached.vram_bytes.max(resident);
         }
         // A restore closes an inference take-window, so it is the authoritative
         // moment at which the engine was most recently used. Without this, the
@@ -335,22 +365,32 @@ impl ModelCache {
     /// Unload the current GPU-resident model (if any) to make room for a new one.
     /// The engine is parked (retains tokenizers/caches) for faster reload.
     /// Returns the name of the unloaded model.
-    pub fn unload_active(&mut self) -> Option<String> {
+    pub fn unload_active(&mut self) -> Option<UnloadedActiveModel> {
         let active_name = self
             .entries
             .values()
             .find(|e| e.residency == ModelResidency::Gpu)
             .map(|e| e.model_name.clone());
 
-        if let Some(ref name) = active_name {
-            if let Some(entry) = self.entries.get_mut(name) {
-                entry.engine.unload();
-                entry.residency = ModelResidency::Parked;
-                entry.vram_bytes = 0;
-            }
-        }
+        let name = active_name?;
+        let entry = self.entries.get_mut(&name)?;
+        // What this is about to hand back, read BEFORE the unload zeroes it.
+        // It used to be discarded, which is why the biggest single release on
+        // the swap path — an 18.8 GB FLUX.1 transformer leaving the card for a
+        // klein render — was written nowhere at all: the reclaim and eviction
+        // paths each log, and this one, which does the work in the ordinary
+        // case, said nothing.
+        let vram_bytes = entry
+            .vram_bytes
+            .max(entry.engine.resident_vram_bytes().unwrap_or(0));
+        entry.engine.unload();
+        entry.residency = ModelResidency::Parked;
+        entry.vram_bytes = 0;
         self.debug_check_invariants();
-        active_name
+        Some(UnloadedActiveModel {
+            model: name,
+            vram_bytes,
+        })
     }
 
     /// Drop all entries, returning all engines for cleanup. Also clears
@@ -368,13 +408,50 @@ impl ModelCache {
         drained
     }
 
-    /// VRAM footprint of the currently GPU-resident model (0 if none loaded).
+    /// VRAM footprint of every GPU-resident entry (0 if none).
+    ///
+    /// SUMS rather than picking the first. "At most one engine is
+    /// GPU-resident" stopped being true when an engine gained a retained
+    /// transformer: `restore` forces `Gpu` on one, `insert` sets it for any
+    /// loaded engine without demoting the incumbent, and a `HashMap`'s `find`
+    /// then answers in iteration order — which could report a 0-byte husk
+    /// while a 35 GB holder sat beside it. Under-crediting is exactly what
+    /// wedged the queue, so the credit is the total.
     pub fn active_vram_bytes(&self) -> u64 {
+        let resident: u64 = self
+            .entries
+            .values()
+            .filter(|entry| entry.residency == ModelResidency::Gpu)
+            .map(|entry| entry.vram_bytes)
+            .sum();
+        if resident == 0 {
+            return self.in_flight_active_vram_bytes;
+        }
+        resident.saturating_add(self.in_flight_active_vram_bytes)
+    }
+
+    /// Device VRAM this cache's engines are RETAINING speculatively, asked of
+    /// the engines themselves.
+    ///
+    /// This is the same number `active_vram_bytes` reports for those entries,
+    /// read from a different authority on purpose. `vram_bytes` is a stored
+    /// figure — a load-time delta that `restore` may raise — and admission
+    /// clips it to third-party process attribution
+    /// (`reclaimable_model_cache_bytes`) precisely because a stored counter
+    /// can go stale. A retained transformer cannot: the engine is asked now,
+    /// and it answers only for weights `release_retained_residency` will hand
+    /// straight back. So this is first-party evidence admission may credit
+    /// WITHOUT that clip, which is what keeps a 35 GB retained transformer
+    /// from reading as zero free capacity on a host whose per-process VRAM
+    /// attribution is unavailable.
+    ///
+    /// Checked-out engines are absent by construction ([`Self::take`] removes
+    /// the entry), so this never credits weights a running generation owns.
+    pub fn retained_residency_bytes(&self) -> u64 {
         self.entries
             .values()
-            .find(|e| e.residency == ModelResidency::Gpu)
-            .map(|e| e.vram_bytes)
-            .unwrap_or(self.in_flight_active_vram_bytes)
+            .filter_map(|entry| entry.engine.resident_vram_bytes())
+            .fold(0, u64::saturating_add)
     }
 
     /// The currently GPU-loaded model name.
@@ -552,6 +629,61 @@ impl ModelCache {
     /// preflight fails, we shrink the parked working set one entry at a time
     /// and retry. The `skip` parameter exists because the parked-reload branch
     /// must not evict the very entry it's about to reload.
+    /// Release retained device residency from the least-recently-used engine
+    /// that has any, WITHOUT evicting it.
+    ///
+    /// A retained transformer is reclaimable in a way an evictable entry is
+    /// not: the engine stays alive, keeps its prompt cache and its warm
+    /// shell, and simply hands back weights it was holding speculatively. So
+    /// this is tried before `evict_lru_parked_except`, which destroys a warm
+    /// set outright — and it reaches residency that function cannot touch at
+    /// all, because a retaining engine is `ModelResidency::Gpu` and that
+    /// filter skips exactly those.
+    ///
+    /// Returns the model name and the bytes freed.
+    pub fn release_retained_residency_except(
+        &mut self,
+        skip: Option<&str>,
+    ) -> Option<(String, u64)> {
+        let candidate = self
+            .lru_order
+            .iter()
+            .find(|name| {
+                if Some(name.as_str()) == skip {
+                    return false;
+                }
+                self.entries
+                    .get(name.as_str())
+                    .is_some_and(|entry| entry.engine.resident_vram_bytes().unwrap_or(0) > 0)
+            })?
+            .clone();
+        let entry = self.entries.get_mut(&candidate)?;
+        let freed = entry.engine.release_retained_residency();
+        if freed == 0 {
+            return None;
+        }
+        // The engine is still here and still loaded in every other sense, so
+        // it keeps its place in the LRU order; only the credit moves — and it
+        // moves by what was FREED, not down to what is left retained. An
+        // eager engine still holds the VAE and encoders the load delta
+        // measured beside the transformer that just went back.
+        entry.vram_bytes = entry.vram_bytes.saturating_sub(freed);
+        if entry.vram_bytes == 0 && !entry.engine.is_loaded() {
+            entry.residency = ModelResidency::Parked;
+        }
+        tracing::info!(
+            model = %candidate,
+            freed_mb = freed / 1024 / 1024,
+            still_resident_mb = entry.vram_bytes / 1024 / 1024,
+            for_model = skip.unwrap_or("queued work"),
+            reason = "reclaim-retained-residency",
+            "released a retained transformer to make room"
+        );
+        self.report_size();
+        self.debug_check_invariants();
+        Some((candidate, freed))
+    }
+
     pub fn evict_lru_parked_except(
         &mut self,
         skip: Option<&str>,
@@ -604,14 +736,22 @@ impl ModelCache {
     /// 2. `entries.len() == lru_order.len()` (LRU mirrors entries 1:1).
     #[cfg(debug_assertions)]
     fn debug_check_invariants(&self) {
-        let gpu_count = self
+        // "At most one engine is GPU-resident" still holds for entries that
+        // hold their weights the classic way — one eagerly-loaded model at a
+        // time. An engine RETAINING a transformer is the case that made
+        // several legitimate (it keeps weights across renders by design), so
+        // it is excluded from the count rather than the rule being dropped.
+        let eager_gpu_count = self
             .entries
             .values()
-            .filter(|e| e.residency == ModelResidency::Gpu)
+            .filter(|e| {
+                e.residency == ModelResidency::Gpu && e.engine.resident_vram_bytes().is_none()
+            })
             .count();
         debug_assert!(
-            gpu_count <= 1,
-            "ModelCache invariant violated: {gpu_count} engines have residency=Gpu (must be ≤1)"
+            eager_gpu_count <= 1,
+            "ModelCache invariant violated: {eager_gpu_count} eagerly-loaded engines have \
+             residency=Gpu (must be ≤1)"
         );
         debug_assert_eq!(
             self.entries.len(),
@@ -758,6 +898,41 @@ mod tests {
         assert!(cache.contains("model-c"));
     }
 
+    /// `unload_active` reports what it freed.
+    ///
+    /// It zeroes `vram_bytes` on the way past and used to return only the
+    /// name, so the bytes were gone before any caller could name them — which
+    /// is why the biggest single release on the swap path (18.8 GB of FLUX.1
+    /// leaving the card for a klein render, UAT final-2 Part G) was written
+    /// nowhere at all.
+    #[test]
+    fn unload_active_reports_the_bytes_it_freed() {
+        const MEASURED: u64 = 18 << 30;
+        let mut cache = ModelCache::new(2);
+        cache.insert(Box::new(MockEngine::new("flux-dev:q8")), MEASURED);
+
+        let unloaded = cache.unload_active().expect("an active engine");
+        assert_eq!(unloaded.model, "flux-dev:q8");
+        assert_eq!(
+            unloaded.vram_bytes, MEASURED,
+            "the credit as it stood the instant before the unload"
+        );
+        assert_eq!(cache.active_vram_bytes(), 0);
+    }
+
+    /// A RETAINING engine whose load delta measured nothing still reports the
+    /// bytes it is holding — the sequential FLUX.2 shape, where `insert` is
+    /// priced at zero and everything arrived during `generate`.
+    #[test]
+    fn unload_active_reports_a_retaining_engines_own_bytes() {
+        const RETAINED: u64 = 34 << 30;
+        let mut cache = ModelCache::new(2);
+        cache.insert(Box::new(RetainingEngine::new("flux2-dev:q8", RETAINED)), 0);
+
+        let unloaded = cache.unload_active().expect("an active engine");
+        assert_eq!(unloaded.vram_bytes, RETAINED);
+    }
+
     #[test]
     fn unload_active() {
         let mut cache = ModelCache::new(3);
@@ -765,7 +940,10 @@ mod tests {
         assert_eq!(cache.active_model(), Some("model-a"));
 
         let unloaded = cache.unload_active();
-        assert_eq!(unloaded.as_deref(), Some("model-a"));
+        assert_eq!(
+            unloaded.map(|unloaded| unloaded.model).as_deref(),
+            Some("model-a")
+        );
         assert_eq!(cache.active_model(), None);
         // Still in cache, just unloaded
         assert!(cache.contains("model-a"));
@@ -919,6 +1097,309 @@ mod tests {
 
         cache.restore(engine);
         assert_eq!(cache.active_vram_bytes(), 16 << 30);
+    }
+
+    /// An engine whose residency is established during `generate`, not
+    /// `load` — the shape of a sequential FLUX.2 engine.
+    struct RetainingEngine {
+        name: String,
+        retained: u64,
+    }
+
+    impl RetainingEngine {
+        fn new(name: &str, retained: u64) -> Self {
+            Self {
+                name: name.to_string(),
+                retained,
+            }
+        }
+    }
+
+    impl InferenceEngine for RetainingEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> Result<mold_core::GenerateResponse> {
+            unimplemented!()
+        }
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+        /// Faithful to `Flux2Engine::is_loaded`, which is
+        /// `base.is_loaded() || retained.is_some()`. A sequential [dev]
+        /// engine has `base.loaded == None`, so once its retained slot is
+        /// reclaimed it reports NOT loaded — which is what drives the
+        /// `Parked` demotion in `restore` and in the reclaim. Returning
+        /// `true` unconditionally left that branch untested.
+        fn is_loaded(&self) -> bool {
+            self.retained > 0
+        }
+        fn load(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn unload(&mut self) {
+            self.retained = 0;
+        }
+        fn resident_vram_bytes(&self) -> Option<u64> {
+            (self.retained > 0).then_some(self.retained)
+        }
+        fn release_retained_residency(&mut self) -> u64 {
+            std::mem::take(&mut self.retained)
+        }
+    }
+
+    /// The 18-minute starvation, as arithmetic.
+    ///
+    /// The cache prices an engine by `vram_load_delta` around `load()`, which
+    /// for a sequential engine returns immediately — so production inserts it
+    /// at ~0 bytes and the 18-35 GB it retains during `generate` is invisible.
+    /// Admission then plans against VRAM that is not there and the
+    /// evict-to-fit loop has nothing to reclaim.
+    ///
+    /// This inserts at 0 the way production does, deliberately: the earlier
+    /// test handed `RETAINED` to `insert()` by hand, which is exactly the call
+    /// production never makes, so it could not have caught this.
+    #[test]
+    fn a_retained_transformer_is_credited_to_the_cache_on_restore() {
+        const RETAINED: u64 = 35 << 30;
+        let mut cache = ModelCache::new(2);
+
+        // Production's insert: the load measured nothing.
+        cache.insert(Box::new(RetainingEngine::new("flux2-dev:q8", RETAINED)), 0);
+        let taken = cache.take("flux2-dev:q8").expect("resident engine");
+        cache.restore(taken);
+
+        assert_eq!(
+            cache.active_vram_bytes(),
+            RETAINED,
+            "the retained transformer must be visible to admission, not worth zero"
+        );
+        assert_eq!(cache.active_model(), Some("flux2-dev:q8"));
+    }
+
+    /// Two retaining engines are REACHABLE, and the credit must be their sum.
+    ///
+    /// `restore` forces `Gpu` on a retaining engine and `insert` sets it for
+    /// any `is_loaded()` engine without demoting the incumbent, so with
+    /// `MOLD_MAX_CACHED_MODELS >= 2` two `Gpu` entries exist — a debug-build
+    /// panic on the old `<= 1` invariant, and in release a `HashMap`-ordered
+    /// `find` that could report either one. Reporting the 0-byte husk while a
+    /// 35 GB holder sat beside it is the same under-credit that wedged the
+    /// queue in the first place.
+    #[test]
+    fn two_retaining_engines_are_credited_together() {
+        const FIRST: u64 = 35 << 30;
+        const SECOND: u64 = 18 << 30;
+        let mut cache = ModelCache::new(4);
+
+        cache.insert(Box::new(RetainingEngine::new("flux2-dev:q8", FIRST)), 0);
+        let taken = cache.take("flux2-dev:q8").expect("resident");
+        cache.restore(taken);
+        cache.insert(
+            Box::new(RetainingEngine::new("flux2-klein:bf16", SECOND)),
+            0,
+        );
+        let taken = cache.take("flux2-klein:bf16").expect("resident");
+        cache.restore(taken);
+
+        assert_eq!(
+            cache.active_vram_bytes(),
+            FIRST + SECOND,
+            "both retained transformers are on the card, so both are reclaimable credit"
+        );
+
+        // And reclaim walks them one at a time, least-recently-used first,
+        // so a blocked request takes only as much as it needs.
+        let (first_name, freed) = cache
+            .release_retained_residency_except(None)
+            .expect("the LRU retaining engine is reclaimable");
+        assert_eq!(first_name, "flux2-dev:q8");
+        assert_eq!(freed, FIRST);
+        assert_eq!(cache.active_vram_bytes(), SECOND);
+
+        let (second_name, freed) = cache
+            .release_retained_residency_except(None)
+            .expect("the other one is too");
+        assert_eq!(second_name, "flux2-klein:bf16");
+        assert_eq!(freed, SECOND);
+        assert_eq!(cache.active_vram_bytes(), 0);
+    }
+
+    /// An EAGER engine that also retains: the credit is the larger of the two
+    /// measurements, and a release subtracts rather than replaces.
+    ///
+    /// FLUX.1 is this shape. Its transformer lives inside the engine's loaded
+    /// state, so `vram_load_delta` around `load()` measured the whole set —
+    /// transformer, VAE and whatever encoders stayed on the card — while
+    /// `resident_vram_bytes` reports only the part a release can hand back.
+    /// Assigning the reported figure would LOWER a correctly measured entry to
+    /// its transformer alone, and zeroing it after a release would forget the
+    /// VAE that is still there. Neither is true of the sequential FLUX.2 shape
+    /// (`insert` at 0, everything retained), and both readings have to be
+    /// right for both.
+    #[test]
+    fn an_eager_engine_that_also_retains_keeps_the_larger_credit() {
+        const MEASURED_SET: u64 = 19 << 30;
+        const RETAINED_TRANSFORMER: u64 = 12 << 30;
+        let mut cache = ModelCache::new(2);
+
+        // Production's eager insert: the load delta measured the whole set.
+        cache.insert(
+            Box::new(RetainingEngine::new("flux-dev:q8", RETAINED_TRANSFORMER)),
+            MEASURED_SET,
+        );
+        let taken = cache.take("flux-dev:q8").expect("resident");
+        cache.restore(taken);
+
+        assert_eq!(
+            cache.active_vram_bytes(),
+            MEASURED_SET,
+            "a measured eager engine must not be lowered to the part it can release"
+        );
+        assert_eq!(cache.retained_residency_bytes(), RETAINED_TRANSFORMER);
+
+        let (name, freed) = cache
+            .release_retained_residency_except(None)
+            .expect("the transformer is reclaimable");
+        assert_eq!(name, "flux-dev:q8");
+        assert_eq!(freed, RETAINED_TRANSFORMER);
+        assert_eq!(
+            cache.active_vram_bytes(),
+            MEASURED_SET - RETAINED_TRANSFORMER,
+            "the VAE and encoders are still on the card; only the transformer went back"
+        );
+        assert_eq!(cache.retained_residency_bytes(), 0);
+        assert!(cache.contains("flux-dev:q8"), "the engine survives");
+    }
+
+    /// An ordinary eager engine beside a retaining one is still counted, and
+    /// the classic "one eagerly-loaded engine" rule still holds for entries
+    /// that retain nothing.
+    #[test]
+    fn an_eager_engine_and_a_retaining_one_are_summed() {
+        const RETAINED: u64 = 35 << 30;
+        const EAGER: u64 = 8 << 30;
+        let mut cache = ModelCache::new(4);
+
+        cache.insert(Box::new(MockEngine::new("sdxl")), EAGER);
+        cache.insert(Box::new(RetainingEngine::new("flux2-dev:q8", RETAINED)), 0);
+        let taken = cache.take("flux2-dev:q8").expect("resident");
+        cache.restore(taken);
+
+        assert_eq!(cache.active_vram_bytes(), EAGER + RETAINED);
+    }
+
+    /// And it is RECLAIMABLE without destroying the engine.
+    ///
+    /// `evict_lru_parked_except` cannot reach it — a retaining engine is
+    /// `ModelResidency::Gpu` and that filter skips exactly those — which is
+    /// why the queue wedged instead of evicting its way out.
+    #[test]
+    fn a_retained_transformer_is_reclaimed_before_the_engine_is_evicted() {
+        const RETAINED: u64 = 35 << 30;
+        let mut cache = ModelCache::new(2);
+        cache.insert(Box::new(RetainingEngine::new("flux2-dev:q8", RETAINED)), 0);
+        let taken = cache.take("flux2-dev:q8").expect("resident engine");
+        cache.restore(taken);
+
+        assert!(
+            cache.evict_lru_parked_except(None).is_none(),
+            "the eviction path cannot see a retaining engine at all — this is the wedge"
+        );
+
+        let (name, freed) = cache
+            .release_retained_residency_except(None)
+            .expect("the retained slot is reclaimable");
+        assert_eq!(name, "flux2-dev:q8");
+        assert_eq!(freed, RETAINED);
+        assert_eq!(
+            cache.active_vram_bytes(),
+            0,
+            "the bytes are credited back so the blocked request can admit"
+        );
+        assert!(
+            cache.contains("flux2-dev:q8"),
+            "the engine survives: it keeps its prompt cache and its warm shell"
+        );
+
+        // Nothing left to give, and asking again is not an error.
+        assert!(cache.release_retained_residency_except(None).is_none());
+    }
+
+    /// The request's own model is never the victim: reclaiming the engine
+    /// that is about to run would be self-defeating.
+    #[test]
+    fn the_reclaim_skips_the_model_the_request_needs() {
+        const RETAINED: u64 = 18 << 30;
+        let mut cache = ModelCache::new(3);
+        cache.insert(Box::new(RetainingEngine::new("wanted", RETAINED)), 0);
+        let taken = cache.take("wanted").expect("resident");
+        cache.restore(taken);
+
+        assert!(
+            cache
+                .release_retained_residency_except(Some("wanted"))
+                .is_none(),
+            "the only retaining engine is the one the request needs"
+        );
+        assert_eq!(
+            cache.active_vram_bytes(),
+            RETAINED,
+            "and it keeps its bytes"
+        );
+    }
+
+    /// An ordinary engine is untouched by either mechanism — the frozen
+    /// load-time credit still stands, and nothing reports bytes to reclaim.
+    #[test]
+    fn an_ordinary_engine_keeps_its_measured_credit() {
+        let mut cache = ModelCache::new(2);
+        cache.insert(Box::new(MockEngine::new("sdxl")), 8 << 30);
+        let taken = cache.take("sdxl").expect("resident");
+        cache.restore(taken);
+
+        assert_eq!(
+            cache.active_vram_bytes(),
+            8 << 30,
+            "a measured eager engine must not have its credit rewritten"
+        );
+        assert!(cache.release_retained_residency_except(None).is_none());
+    }
+
+    /// A FLUX.2 [dev] engine takes the SEQUENTIAL generate path on an Eager
+    /// strategy, and `generate_inner` clears `base.loaded` before it — so
+    /// after #WP4 an engine may hold a 33 GB transformer while the state the
+    /// cache used to read as residency is empty. `restore` reclassifies a
+    /// `Gpu` entry to `Parked` and ZEROES its VRAM credit whenever
+    /// `is_loaded()` is false, which would report the card as free while the
+    /// weights sat on it. `Flux2Engine::is_loaded` therefore answers for the
+    /// retained slot too; this pins the cache side of that contract.
+    #[test]
+    fn a_sequential_engine_holding_a_retained_transformer_keeps_its_vram_credit() {
+        const RETAINED: u64 = 33 << 30;
+        let mut cache = ModelCache::new(1);
+        cache.insert(Box::new(MockEngine::new("flux2-dev:q8")), RETAINED);
+        assert_eq!(cache.active_vram_bytes(), RETAINED);
+
+        // The render's take window: the scheduler must still see the exact
+        // resident footprint while the owner is busy.
+        let engine = cache.take("flux2-dev:q8").expect("resident engine");
+        assert_eq!(cache.active_vram_bytes(), RETAINED);
+
+        // The engine comes back still reporting residency, because its
+        // retained transformer never left the card.
+        cache.restore(engine);
+        assert_eq!(
+            cache.active_vram_bytes(),
+            RETAINED,
+            "a retained transformer is VRAM the next admission may credit as reclaimable"
+        );
+        assert_eq!(cache.active_model(), Some("flux2-dev:q8"));
+
+        // An engine that genuinely released everything is the contrast: its
+        // credit must go, or admission plans against memory nobody holds.
+        let mut engine = cache.take("flux2-dev:q8").expect("resident engine");
+        engine.engine.unload();
+        cache.restore(engine);
+        assert_eq!(cache.active_vram_bytes(), 0);
+        assert_eq!(cache.active_model(), None);
     }
 
     #[test]

@@ -3372,7 +3372,10 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     expect(wrapper.get("[data-test='mobile-prepared-expansion']").text()).toContain(
-      "Host selection changed from Auto to Render",
+      // The prepared panel's sentences are `@studio/lib/preparedExpansion`'s,
+      // which says "Machine" — the quick panel below still uses this view's own
+      // copy, so the two assertions deliberately read differently.
+      "Machine selection changed from Auto to Render",
     );
   });
 

@@ -11,7 +11,7 @@ pub(crate) mod dir_sync;
 mod durable_admission_authority;
 mod durable_disposition;
 mod durable_generation_settlement;
-mod gallery_authority;
+pub mod gallery_authority;
 mod gallery_source_media;
 mod generation_assets;
 #[allow(dead_code)]
@@ -357,6 +357,17 @@ pub async fn run_server(
     let mut config = Config::load_or_default();
     config.models_dir = models_dir.to_string_lossy().into_owned();
     let model_name = config.resolved_default_model();
+
+    // Writing storage version 3 is a decision about a SHARED resource: the
+    // `$MOLD_HOME` may be published to by other binaries, and a mold older
+    // than 0.29 cannot read a v3 store at all. Installed here, before
+    // anything opens a gallery, so a request can never see a different answer
+    // from the startup recovery that prepared the store.
+    let authority_log = gallery_authority::authority_log_from_config(&config);
+    gallery_authority::set_authority_log_requested(authority_log);
+    if authority_log {
+        info!("gallery archive authority: writing storage version 3 (gallery.authority_log)");
+    }
 
     // ── Discover and initialize GPU workers ────────────────────────────────
     let shared_pool = std::sync::Arc::new(std::sync::Mutex::new(
@@ -1208,6 +1219,31 @@ pub async fn run_server(
         let _ = http_shutdown_tx.send(());
     });
 
+    // The first render after a restart otherwise reads every artifact's
+    // equivalence facts inside its own preparation phase, where it is on the
+    // client's wall clock. Warmed once here instead, on a blocking thread,
+    // through the artifact read limiter so a request that arrives meanwhile
+    // is never starved.
+    {
+        let warm_state = state.clone();
+        tokio::spawn(async move {
+            let models_dir = warm_state.config.read().await.resolved_models_dir();
+            let started = std::time::Instant::now();
+            let warmed = tokio::task::spawn_blocking(move || {
+                crate::execution_plan::warm_installed_artifact_facts(&models_dir)
+            })
+            .await
+            .unwrap_or(0);
+            if warmed > 0 {
+                tracing::info!(
+                    artifacts = warmed,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "warmed installed artifact facts"
+                );
+            }
+        });
+    }
+
     #[cfg(unix)]
     {
         let sigterm_state = state.clone();
@@ -1555,6 +1591,12 @@ pub async fn run_server(
         }
     }
 
+    // Every publisher has now stopped, so nothing will re-take the lease: hand
+    // back the gallery writer leases and remove their files. The OS releases
+    // the LOCK however a process ends, but a file left behind says a server is
+    // publishing here when none is, and `mold system gallery-authority
+    // downgrade` believes it.
+    gallery_authority::release_gallery_writer_leases();
     tracing::debug!("shutdown sequence complete");
 
     if fatal_cuda_error.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1733,6 +1775,11 @@ fn arm_shutdown_deadline(fatal_cuda: std::sync::Arc<AtomicBool>) {
                 "shutdown did not complete within its budget; ending the process now — \
                  retained generations replay on the next start"
             );
+            // An overrun still ends cleanly as far as the gallery is
+            // concerned: a lease file that outlives its process is what makes
+            // `downgrade` refuse for a server that is already gone. A writer
+            // still mid-commit keeps its own lock, so its file survives.
+            gallery_authority::release_gallery_writer_leases();
             std::process::exit(status);
         }
         ShutdownExpiry::KeepWaiting => {}

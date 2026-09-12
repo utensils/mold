@@ -115,9 +115,9 @@ impl ResolvedIdentity {
 ///
 /// That matters at exactly one moment. Every FLUX path that drops the
 /// transformer before VAE decode does it to create decode headroom — the
-/// sequential and offloaded paths always, the eager path unless
-/// `MOLD_FLUX_KEEP_TRANSFORMER` keeps it hot — and those are the constrained
-/// machines that chose those paths in the first place. An adapter still alive
+/// sequential and offloaded paths always, the eager path whenever
+/// `device::still_transformer_residency` does not fit the card — and those are
+/// the constrained machines that chose those paths in the first place. An adapter still alive
 /// there is 0.8–1.7 GB the VAE's conv2d intermediates have to compete with, on
 /// the render that could least afford it.
 pub(crate) struct RenderIdentity<'a> {
@@ -173,7 +173,12 @@ impl RenderIdentity<'_> {
     }
 
     /// Device bytes still held, across both references.
-    #[cfg(test)]
+    ///
+    /// No longer test-only: the residency budget charges it. The adapter is
+    /// ~1.7 GB on FLUX.1 and `free_gpu_state_before_vae_decode` releases it
+    /// only on a DROP, so on the keep path it is on the card while the VAE
+    /// decode allocates — one of the two ingredients #276 named that the
+    /// checkpoint's file length cannot see.
     pub(crate) fn resident_bytes(&self) -> u64 {
         self.state.resident_bytes()
     }

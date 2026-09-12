@@ -27,6 +27,18 @@ same defect (see "Z-Image is a second victim" below); it now defaults to a
 per-forward dequant arm exactly like Qwen's, with `MOLD_ZIMAGE_QMATMUL=1` as
 the opt-in.
 
+The FLUX families' flag points the other way, and that asymmetry is the
+evidence rather than an oversight: `MOLD_FLUX2_QMATMUL` defaults to **1** and is
+a kill switch, because FLUX.1 and FLUX.2 have rendered correctly through these
+kernels for as long as they have loaded GGUFs. Both now also run their
+activations in BF16, which is the dtype the kernels are fed and return
+(`fast_mmq.rs:218-221`, `:349-358`), so if the defect ever does reach a FLUX
+shape it will reach it there first. `MOLD_FLUX_DEBUG_NONFINITE=1` is the
+instrument: one check per denoise step that names the step and fails, rather
+than the eighteen-per-block NaN scrub FLUX.2's GGUF transformer carried until
+2026-09-11 — which, being a mask rather than a check, would have hidden exactly
+this defect if it had ever fired.
+
 ---
 
 ## Reproduction

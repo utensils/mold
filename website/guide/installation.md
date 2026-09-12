@@ -232,7 +232,7 @@ set `CUDA_COMPUTE_CAP` to the target required by the GPUs you intend to expose.
 ::: code-group
 
 ```bash [Linux (CUDA), fast local build]
-./scripts/ensure-web-dist.sh && cargo build --profile dev-fast -p mold-ai --features cuda
+./scripts/ensure-web-dist.sh && cargo build --profile dev-fast -p mold-ai --features cuda,flash-attn
 ```
 
 ```bash [macOS (Metal), fast local build]
@@ -240,7 +240,7 @@ set `CUDA_COMPUTE_CAP` to the target required by the GPUs you intend to expose.
 ```
 
 ```bash [Linux (CUDA), shipping build]
-cargo build --release -p mold-ai --features cuda
+cargo build --release -p mold-ai --features cuda,flash-attn,cudnn
 ```
 
 ```bash [macOS (Metal), shipping build]
@@ -251,8 +251,20 @@ cargo build --release -p mold-ai --features metal
 
 Requires Rust 1.93+ and CUDA toolkit (Linux) or Xcode (macOS).
 
+**Name `flash-attn` on a CUDA build.** FLUX.1 and FLUX.2 changed their
+arithmetic in mold 0.29, and the change lands whether or not the kernel is
+compiled: their math path folds the softmax scale into K either way. A CUDA
+binary without `flash-attn` is therefore correct, and slower than one with it,
+for exactly the same pixels — the worst of both. Every shipped Linux CUDA
+artifact compiles it except `mold-sm120`, which stays on math attention until
+FlashAttention's tile selection is measured on an RTX 50-series card, and on
+that hardware you should leave `flash-attn` off too. `cudnn` is the matching
+convolution backend and needs the cuDNN SDK's headers, which is why it is not
+implied by `cuda`; drop it if you do not have them. Adding the kernels costs
+several minutes of `nvcc` on the first build.
+
 Optional features can be added to the same build, for example
-`--features cuda,preview,expand,discord,tui` or
+`--features cuda,flash-attn,preview,expand,discord,tui` or
 `--features metal,preview,expand,discord,tui` if you also want terminal preview,
 local prompt expansion, the Discord bot, or the interactive TUI.
 

@@ -50,28 +50,37 @@ By the time the single-stream loop runs, text and image tokens share one
 tensor. Only the image slice — `xs[:, txt_len..]` — is conditioned; the text
 prefix is spliced back bit-for-bit (`flux/model.py:141-146`).
 
-## One policy, four variants
+## One policy, three variants
 
-`FluxTransformer` has four arms and they reach their block loops three
+`FluxTransformer` has three arms and they reach their block loops two
 different ways:
 
 | variant | how the hook gets in |
 | --- | --- |
 | `BF16` | the candle fork's `Flux::forward_with_hook` |
-| `Quantized` | the same, on `quantized_model::Flux` |
 | `QuantizedBypass` | mold's own loop in `quantized_transformer.rs` |
 | `Offloaded` | mold's own loop in `offload.rs` |
 
-All four drive the same `PulidBlockHook`, which implements the fork's
+There used to be a fourth, `Quantized`, on the candle fork's own
+`quantized_model::Flux`, and it was the arm the commonest render took: a GGUF
+with no LoRA. It was deleted in the FLUX performance campaign because it had no
+attention-policy hook — `flux/model.rs:64-76` is unchunked F32 math — so that
+render could reach neither FlashAttention nor half-precision activations
+however the binary was built. Every GGUF load, with or without a LoRA, now goes
+through `build_gguf_transformer` into `QuantizedBypass`; the two were verified
+bit-identical (`f32_bypass_forward_matches_the_upstream_quantized_model`)
+before the arm was removed.
+
+All three drive the same `PulidBlockHook`, which implements the fork's
 `BlockHook` trait (`candle_transformers::models::flux::BlockHook`, added in
-utensils/candle#6). The upstream models take `&dyn BlockHook`; mold's two take
+utensils/candle#6). The upstream model takes `&dyn BlockHook`; mold's two take
 `Option<&dyn BlockHook>`, because a `None` hook has to execute the untouched
 loop rather than a no-op implementation of one.
 
 `crates/mold-inference/src/flux/pulid_variants.rs` renders a synthetic 4-double
-/ 8-single transformer through all four arms and asserts they agree
+/ 8-single transformer through all three arms and asserts they agree
 numerically, which is what makes the per-variant claims below claims about one
-model rather than four.
+model rather than three.
 
 ## The zero-weight rule
 
@@ -114,7 +123,7 @@ only while the transformer is**:
 - **Released at the transformer drop point, not at the end of the render.**
   Every path that drops the transformer before VAE decode does it to create
   decode headroom — the sequential and offloaded paths always, the eager path
-  unless `MOLD_FLUX_KEEP_TRANSFORMER` keeps it hot — and those are the
+  whenever the residency budget does not fit the card — and those are the
   constrained machines that took that path in the first place. An adapter still
   resident there hands 0.8–1.7 GB of that headroom straight back to the VAE's
   conv2d intermediates. So the release happens beside the transformer drop,
@@ -142,10 +151,20 @@ of the above. The `InferenceEngine` trait has no resident-bytes method to fold
 it into, so it is exposed on the engine directly and pinned by hermetic tests
 that assert an `unload()` leaves it at zero.
 
-The dtype is the transformer's *working* dtype, not its weight dtype: the
-quantized paths run their state tensors in f32, so the adapter is loaded in f32
-there and in bf16 on the dense path. A dtype or shape change rebuilds rather
-than silently feeding the transformer the wrong precision.
+The dtype is the transformer's *working* dtype, not its weight dtype, and
+`flux::pipeline::render_state_dtype_for` is the one function that answers it —
+for the noise and conditioning cast in `generate_with_embeddings` and for the
+identity site alike. A dense transformer answers its loaded dtype; a GGUF one
+answers `gguf_activation_dtype`, which is **bf16 on CUDA** (f32 on Metal and
+CPU, and f32 again under `MOLD_WAN_FORCE_DMMV=1`, whose fallback kernel reads
+activations as f32). It used to be f32 on every quantized path, and the
+identity site kept its own copy of that rule after the GGUF path stopped
+pinning it: the adapter's fused LayerNorm then met bf16 activations with an f32
+weight and bias, which candle's `Map3` refuses as "dtype mismatch in ternary
+op" at the first denoise step, so every `--id-image` render failed while the
+same request rendered on the previous build. Ask the function; never restate
+its answer. A dtype or shape change rebuilds rather than silently feeding the
+transformer the wrong precision.
 
 ## The embedding seam
 

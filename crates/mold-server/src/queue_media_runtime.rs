@@ -49,6 +49,18 @@ impl DeferredQueueMedia {
         &self.projection
     }
 
+    /// Record the adapter stack this job will merge, for the planner.
+    ///
+    /// Called by `durable_queue_feeder` at the one moment it holds both the
+    /// HYDRATED request and the job about to be published — immediately
+    /// before `scrubbed_clone()` empties `loras`. The execution plan is
+    /// resolved from that scrubbed copy, so this is the only description of
+    /// the render's adapters the planner can read; see
+    /// `QueueMediaProjection::loras`.
+    pub fn project_sealed_loras(&mut self, loras: Vec<mold_core::LoraWeight>) {
+        self.projection.loras = loras;
+    }
+
     pub fn media_set_ref(&self) -> &MediaSetRef {
         &self.media_set
     }
@@ -80,6 +92,90 @@ impl DeferredQueueMedia {
             reference_paths,
         })
     }
+}
+
+/// Hydrate a dispatched job's sealed media, then restore the two adapters the
+/// sealed set cannot hand back: the server-minted control adapter on top of
+/// whatever it did, and the plan's own stack when it handed back none.
+///
+/// Both dispatchers (the GPU-pool worker and the single-worker loop) call this
+/// and nothing else, because the ORDER is the whole contract. The built-in
+/// LTX-2 IC-LoRA is resolved by preparation AFTER admission sealed the media
+/// set, so it cannot ride in the sealed set and the publication scrub wipes it
+/// from the request; the feeder therefore carries it on the job. Restoring it
+/// BEFORE hydration is what broke every durable built-in-control render:
+/// `rehydrate_request_media_into`'s precondition loop refuses a request that
+/// already carries `loras`, and `fail_hydration_blocking` turns that refusal
+/// into a failed job. Restoring it AFTER means the adapter never meets that
+/// precondition and is prepended onto the caller's own restored stack instead
+/// of replacing it.
+pub(crate) fn hydrate_dispatch_media(
+    expected_job_id: &str,
+    request: &mut mold_core::GenerateRequest,
+    deferred: Option<DeferredQueueMedia>,
+    materialized_control_lora: Option<mold_core::LoraWeight>,
+    planned_loras: &[mold_core::LoraWeight],
+) -> Result<Option<HydratedQueueMediaLease>, DeferredQueueMediaError> {
+    let lease = match deferred {
+        Some(deferred) => Some(deferred.hydrate_into(expected_job_id, request)?),
+        None => None,
+    };
+    prepend_materialized_control_lora(request, materialized_control_lora);
+    apply_planned_default_loras(request, planned_loras);
+    Ok(lease)
+}
+
+/// Put back the one adapter no sealed set can hand back.
+///
+/// `execution_plan::materialize_request` is the only production writer of the
+/// per-model `config.models.<model>.lora` default onto a request, and on a
+/// durable render with an overlay still pending it correctly writes nothing —
+/// `rehydrate_request_media_into` refuses a request that already carries
+/// `loras`. For the CALLER's adapter that is safe, because the sealed set is
+/// the authority and hydration restores it. A config default is not a request
+/// field: admission seals nothing for it, so skipping the write dropped it
+/// with nothing behind it, and the plan charged an adapter the render never
+/// merged.
+///
+/// The precedence is `effective_lora_requests`', unchanged: the request's own
+/// stack wins, then its legacy singular, then what the plan resolved. So this
+/// writes ONLY into a request that carries no adapter at all after hydration
+/// — which is exactly the case where the plan's stack can only have come from
+/// the config default — and is a no-op on every path where
+/// `materialize_request` already wrote the same stack.
+pub(crate) fn apply_planned_default_loras(
+    request: &mut mold_core::GenerateRequest,
+    planned: &[mold_core::LoraWeight],
+) {
+    if planned.is_empty() {
+        return;
+    }
+    if request.lora.is_some() || request.loras.as_ref().is_some_and(|set| !set.is_empty()) {
+        return;
+    }
+    request.loras = Some(planned.to_vec());
+}
+
+/// Put the server's own control adapter back at the head of the stack.
+///
+/// The fold mirrors `routes::materialize_builtin_ltx2_control` exactly — the
+/// adapter first, then the caller's own stack from whichever well carries it
+/// — because that is the composition preparation itself performed before the
+/// scrub. Both read the one authority, `GenerateRequest::take_caller_lora_stack`:
+/// the engines resolve a present `loras` INSTEAD of `lora`, so leaving a
+/// hydrated singular beside the restored stack would silently drop the
+/// caller's adapter, and concatenating the two wells recorded and merged one
+/// `mold run --lora` twice.
+pub(crate) fn prepend_materialized_control_lora(
+    request: &mut mold_core::GenerateRequest,
+    materialized: Option<mold_core::LoraWeight>,
+) {
+    let Some(materialized) = materialized else {
+        return;
+    };
+    let mut ordered = vec![materialized];
+    ordered.extend(request.take_caller_lora_stack());
+    request.loras = Some(ordered);
 }
 
 /// Owns every private staged path until the generation attempt finishes.
@@ -525,6 +621,135 @@ mod tests {
             "source_video_path": path.to_string_lossy()
         }))
         .unwrap()
+    }
+
+    fn lora(path: &str, scale: f64) -> mold_core::LoraWeight {
+        mold_core::LoraWeight {
+            path: path.to_string(),
+            scale,
+            expert: None,
+        }
+    }
+
+    fn bare_request() -> mold_core::GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "control render",
+            "model": "ltx-2.3-22b-distilled:fp8",
+            "width": 1152,
+            "height": 640,
+            "steps": 8,
+            "guidance": 1.0
+        }))
+        .unwrap()
+    }
+
+    /// `mold run --lora X` on an ltx2 model writes X into BOTH `lora` and
+    /// `loras` (`run::resolve_effective_loras_for_family`), and this seam used
+    /// to concatenate the two wells — so a control render's provenance listed
+    /// the caller's adapter twice and `Ltx2LoraRegistry` merged it twice, at
+    /// double its scale. The wells are alternatives: plural wins, singular is
+    /// the fallback, and the composed stack is the control adapter plus the
+    /// caller's stack ONCE.
+    #[test]
+    fn the_control_adapter_rides_above_one_copy_of_the_callers_stack() {
+        let mut request = bare_request();
+        request.lora = Some(lora("/loras/dolly-in.safetensors", 1.0));
+        request.loras = Some(vec![lora("/loras/dolly-in.safetensors", 1.0)]);
+
+        prepend_materialized_control_lora(
+            &mut request,
+            Some(lora("/control/union.safetensors", 1.0)),
+        );
+
+        assert!(request.lora.is_none());
+        let stack = request.loras.clone().unwrap();
+        assert_eq!(
+            stack
+                .iter()
+                .map(|lora| lora.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/control/union.safetensors", "/loras/dolly-in.safetensors"],
+        );
+    }
+
+    /// The legacy singular is DROPPED, never appended, when a plural stack is
+    /// present: `effective_lora_requests`, `queue_media::effective_request_loras`
+    /// and `mold_inference::ltx2::lora::normalize_loras` all resolve one well
+    /// or the other, so concatenating resurrected an adapter no engine would
+    /// ever have merged.
+    #[test]
+    fn a_plural_stack_outranks_the_legacy_singular_at_the_dispatch_seam() {
+        let mut request = bare_request();
+        request.lora = Some(lora("/loras/legacy.safetensors", 0.6));
+        request.loras = Some(vec![lora("/loras/style.safetensors", 0.8)]);
+
+        prepend_materialized_control_lora(
+            &mut request,
+            Some(lora("/control/union.safetensors", 1.0)),
+        );
+
+        let stack = request.loras.clone().unwrap();
+        assert_eq!(
+            stack
+                .iter()
+                .map(|lora| lora.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/control/union.safetensors", "/loras/style.safetensors"],
+        );
+    }
+
+    /// With no plural stack the legacy singular is still the caller's adapter.
+    #[test]
+    fn the_legacy_singular_alone_still_rides_under_the_control_adapter() {
+        let mut request = bare_request();
+        request.lora = Some(lora("/loras/legacy.safetensors", 0.6));
+
+        prepend_materialized_control_lora(
+            &mut request,
+            Some(lora("/control/union.safetensors", 1.0)),
+        );
+
+        let stack = request.loras.clone().unwrap();
+        assert_eq!(
+            stack
+                .iter()
+                .map(|lora| lora.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/control/union.safetensors", "/loras/legacy.safetensors"],
+        );
+    }
+
+    /// The seam as a whole: no sealed set, a control adapter, a plan stack
+    /// that already contains both. The plan's copy must not be appended on
+    /// top of the composed stack.
+    #[test]
+    fn hydrate_dispatch_media_composes_each_adapter_once() {
+        let mut request = bare_request();
+        request.lora = Some(lora("/loras/dolly-in.safetensors", 1.0));
+        request.loras = Some(vec![lora("/loras/dolly-in.safetensors", 1.0)]);
+        let planned = vec![
+            lora("/control/union.safetensors", 1.0),
+            lora("/loras/dolly-in.safetensors", 1.0),
+        ];
+
+        let lease = hydrate_dispatch_media(
+            "job-1",
+            &mut request,
+            None,
+            Some(lora("/control/union.safetensors", 1.0)),
+            &planned,
+        )
+        .unwrap();
+
+        assert!(lease.is_none());
+        let stack = request.loras.clone().unwrap();
+        assert_eq!(
+            stack
+                .iter()
+                .map(|lora| lora.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/control/union.safetensors", "/loras/dolly-in.safetensors"],
+        );
     }
 
     #[test]

@@ -284,7 +284,15 @@ async fn unified_memory_chain_stage_transports_the_admitted_plan() {
             .as_ref()
             .expect("a refused stage must reach reclaim and bounded settlement");
         assert_eq!(blocked.required_bytes, demand);
-        assert_eq!(blocked.headroom_bytes, demand - 1);
+        // A discrete card's schedulable capacity is reserve-adjusted, because
+        // the loader's own gate is. Metal's budget authority carries its own
+        // floor and never pays the driver reserve.
+        let reserve = if backend == mold_core::GpuBackend::Metal {
+            0
+        } else {
+            mold_inference::device::reserved_vram_bytes()
+        };
+        assert_eq!(blocked.headroom_bytes, (demand - 1).saturating_sub(reserve));
         coordinator
             .pending_owner_work
             .get_mut("unified-stage")

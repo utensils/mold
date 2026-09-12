@@ -732,18 +732,18 @@ mold config path
 mold config edit
 ```
 
-| Section   | Keys                                                                                                                                                                                                                               |
-| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| General   | `default_model`, `models_dir`, `output_dir`, `server_port`, `default_width`, `default_height`, `default_steps`, `embed_metadata`, `t5_variant`, `qwen3_variant`, `default_negative_prompt`                                         |
-| Expand    | `expand.enabled`, `expand.backend`, `expand.model`, `expand.api_model`, `expand.temperature`, `expand.top_p`, `expand.max_tokens`, `expand.thinking`                                                                               |
-| Scheduler | `scheduler.replan_debounce_ms`, `scheduler.replan_max_delay_ms`, `scheduler.warm_wait_max_ms`                                                                                                                                      |
-| Gallery   | `gallery.trash_retention_days` (days a trashed print is kept before the sweeper purges it; `0` = forever, default 30, stored in `mold.db`)                                                                                         |
-| Queue     | `queue.held_retention_days` (days a held queue row is kept before the sweeper purges it; `0` = forever, default 30, stored in `mold.db`)                                                                                           |
-| Generate  | `generate.auto_tag_title` (add the print title as a tag by default; on unless set to `false`)                                                                                                                                      |
-| Logging   | `logging.level`, `logging.file`, `logging.dir`, `logging.max_days`                                                                                                                                                                 |
-| RunPod    | `runpod.api_key`, `runpod.default_gpu`, `runpod.default_datacenter`, `runpod.default_network_volume_id`, `runpod.auto_teardown`, `runpod.auto_teardown_idle_mins`, `runpod.cost_alert_usd`, `runpod.endpoint`                      |
-| Lambda    | `lambda.api_key`, `lambda.endpoint`, `lambda.image_repository`, `lambda.ssh_key_name`, `lambda.ssh_private_key_path`, `lambda.filesystem_prefix`, `lambda.filesystem_mount_path`, `lambda.confirm_hourly_usd`, `lambda.local_port` |
-| Per-model | `models.<name>.<field>` where field is one of `default_steps`, `default_guidance`, `default_width`, `default_height`, `scheduler`, `negative_prompt`, `lora`, `lora_scale`                                                         |
+| Section   | Keys                                                                                                                                                                                                                                                 |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| General   | `default_model`, `models_dir`, `output_dir`, `server_port`, `default_width`, `default_height`, `default_steps`, `embed_metadata`, `t5_variant`, `qwen3_variant`, `default_negative_prompt`                                                           |
+| Expand    | `expand.enabled`, `expand.backend`, `expand.model`, `expand.api_model`, `expand.temperature`, `expand.top_p`, `expand.max_tokens`, `expand.thinking`                                                                                                 |
+| Scheduler | `scheduler.replan_debounce_ms`, `scheduler.replan_max_delay_ms`, `scheduler.warm_wait_max_ms`                                                                                                                                                        |
+| Gallery   | `gallery.trash_retention_days` (days a trashed print is kept before the sweeper purges it; `0` = forever, default 30, stored in `mold.db`), `gallery.authority_log` (write archive-authority storage version 3; off by default, stored in `mold.db`) |
+| Queue     | `queue.held_retention_days` (days a held queue row is kept before the sweeper purges it; `0` = forever, default 30, stored in `mold.db`)                                                                                                             |
+| Generate  | `generate.auto_tag_title` (add the print title as a tag by default; on unless set to `false`)                                                                                                                                                        |
+| Logging   | `logging.level`, `logging.file`, `logging.dir`, `logging.max_days`                                                                                                                                                                                   |
+| RunPod    | `runpod.api_key`, `runpod.default_gpu`, `runpod.default_datacenter`, `runpod.default_network_volume_id`, `runpod.auto_teardown`, `runpod.auto_teardown_idle_mins`, `runpod.cost_alert_usd`, `runpod.endpoint`                                        |
+| Lambda    | `lambda.api_key`, `lambda.endpoint`, `lambda.image_repository`, `lambda.ssh_key_name`, `lambda.ssh_private_key_path`, `lambda.filesystem_prefix`, `lambda.filesystem_mount_path`, `lambda.confirm_hourly_usd`, `lambda.local_port`                   |
+| Per-model | `models.<name>.<field>` where field is one of `default_steps`, `default_guidance`, `default_width`, `default_height`, `scheduler`, `negative_prompt`, `lora`, `lora_scale`                                                                           |
 
 `config.toml` owns bootstrap paths, ports, credentials, logging, and model path
 overrides. The SQLite settings DB owns user preferences and per-model
@@ -990,6 +990,33 @@ source <(mold completions zsh)
 source <(mold completions bash)
 mold completions fish > ~/.config/fish/completions/mold.fish
 ```
+
+## `mold system gallery-authority`
+
+Inspect or downgrade **this machine's** gallery archive-authority storage. Like
+every `mold system` verb it targets the local machine rather than `MOLD_HOST`,
+and it takes `--output-dir <PATH>` (defaulting to this host's configured
+gallery) and `--json`:
+
+| Command     | Behavior                                                                                                                    |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `status`    | Report the store's on-disk version, generation, delta-log size, whether a writer is live, and whether a downgrade is needed |
+| `downgrade` | Fold a version-3 store back to version 2 so a mold older than 0.29 can publish against the home again                       |
+
+Storage version 3 is opt-in (`gallery.authority_log`). Run `downgrade` with the
+newer build, before rolling one back. It is idempotent, verifies the result by
+reading it back, and refuses if a mutation is pending or the log tail is torn.
+
+**Stop the server first — `downgrade` enforces it.** Any mold process that
+publishes to a gallery holds a writer lease on it (`.mold-gallery-writer.lease`
+in the gallery directory) for as long as it runs, and `downgrade` refuses while
+one is held, naming the process and its pid rather than rewriting the store
+under it. A stopped process takes its lease file with it; one left behind by a
+killed process is reported by `status` as `stale`, blocks nothing, and is
+removed by the next `downgrade`, which leaves the gallery clean for the older
+binary. `status` reports `writer lease: held / stale / none` and changes
+nothing. See
+[Gallery authority storage](./configuration#gallery-authority-storage).
 
 ## `mold system metal-memory`
 

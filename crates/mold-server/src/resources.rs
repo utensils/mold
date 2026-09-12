@@ -132,7 +132,7 @@ pub(crate) fn discover_telemetry_targets(
         .map(TelemetryTarget::from_discovered)
         .collect();
     #[cfg(feature = "nvml")]
-    if let Ok(source) = NvmlSource::try_new() {
+    if let Some(source) = shared_nvml() {
         for target in &mut targets {
             if let Some(metadata) = source.metadata(target) {
                 target.nvml_uuid = Some(metadata.nvml_uuid.clone());
@@ -252,8 +252,10 @@ pub(crate) mod nvml_source {
     };
     use mold_core::{GpuBackend, GpuSnapshot};
     use nvml_wrapper::enums::device::UsedGpuMemory;
+    use nvml_wrapper::error::NvmlError;
     use nvml_wrapper::Device;
     use nvml_wrapper::Nvml;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     pub(crate) struct NvmlMetadata {
         pub nvml_uuid: String,
@@ -264,18 +266,55 @@ pub(crate) mod nvml_source {
 
     pub(crate) struct NvmlSource {
         nvml: Nvml,
+        /// Set when a call observed an error that invalidates the handle
+        /// itself rather than one device's answer. [`super::shared_nvml`]
+        /// replaces a poisoned handle instead of serving it forever.
+        poisoned: AtomicBool,
     }
 
     impl NvmlSource {
         pub(crate) fn try_new() -> anyhow::Result<Self> {
             let nvml = Nvml::init()?;
-            Ok(Self { nvml })
+            Ok(Self {
+                nvml,
+                poisoned: AtomicBool::new(false),
+            })
+        }
+
+        /// Has this handle seen an error that means the handle is dead?
+        pub(crate) fn is_poisoned(&self) -> bool {
+            self.poisoned.load(Ordering::Relaxed)
+        }
+
+        #[cfg(test)]
+        pub(crate) fn poison_for_test(&self) {
+            self.poisoned.store(true, Ordering::Relaxed);
+        }
+
+        /// Classify an NVML failure. A missing device, an unreadable MIG UUID
+        /// or an absent utilization counter say nothing about the handle; a
+        /// driver reload, an unloaded driver or a lost GPU say the handle is
+        /// finished and the next caller should re-initialize.
+        ///
+        /// `FailedToLoadSymbol` is deliberately NOT in that set. nvml-wrapper
+        /// returns it when the library that loaded fine lacks the symbol —
+        /// an old driver against a newer wrapper — and re-`dlopen`ing the
+        /// same library cannot conjure it. Poisoning on it turned a permanent
+        /// mismatch into an init/call/poison/init loop.
+        fn note_error(&self, error: &NvmlError) {
+            if super::nvml_error_kills_the_handle(error) {
+                self.poisoned.store(true, Ordering::Relaxed);
+            }
         }
 
         fn matching_device<'a>(&'a self, target: &TelemetryTarget) -> Option<Device<'a>> {
             for candidate in nvidia_uuid_candidates(target) {
-                let Ok(device) = self.nvml.device_by_uuid(candidate.as_str()) else {
-                    continue;
+                let device = match self.nvml.device_by_uuid(candidate.as_str()) {
+                    Ok(device) => device,
+                    Err(error) => {
+                        self.note_error(&error);
+                        continue;
+                    }
                 };
                 let Ok(actual_uuid) = device.uuid() else {
                     continue;
@@ -317,6 +356,7 @@ pub(crate) mod nvml_source {
                     let mem = match dev.memory_info() {
                         Ok(memory) => memory,
                         Err(error) => {
+                            self.note_error(&error);
                             tracing::debug!(
                                 ordinal = target.logical_ordinal,
                                 err = %error,
@@ -362,6 +402,7 @@ pub(crate) mod nvml_source {
             let count = match self.nvml.device_count() {
                 Ok(c) => c,
                 Err(e) => {
+                    self.note_error(&e);
                     tracing::debug!(err = %e, "NVML device_count failed");
                     return Vec::new();
                 }
@@ -377,6 +418,7 @@ pub(crate) mod nvml_source {
                 let mem = match dev.memory_info() {
                     Ok(m) => m,
                     Err(e) => {
+                        self.note_error(&e);
                         tracing::debug!(ordinal, err = %e, "NVML memory_info failed");
                         continue;
                     }
@@ -415,6 +457,129 @@ pub(crate) mod nvml_source {
 #[cfg(feature = "nvml")]
 pub(crate) use nvml_source::NvmlSource;
 
+/// How long the absent-driver answer is trusted before another `Nvml::init()`
+/// is attempted. Long enough that a keyless host does not dlopen
+/// libnvidia-ml once per telemetry tick, short enough that a driver that
+/// appears after boot is picked up without a restart.
+#[cfg(feature = "nvml")]
+const NVML_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+#[cfg(feature = "nvml")]
+struct SharedNvmlSlot {
+    source: Option<Arc<NvmlSource>>,
+    attempted_at: std::time::Instant,
+}
+
+#[cfg(feature = "nvml")]
+static SHARED_NVML: Mutex<Option<SharedNvmlSlot>> = Mutex::new(None);
+
+/// Counts `Nvml::init()` calls made through [`shared_nvml`]. The pin on
+/// "one handle, not one per caller" — a reuse costs no initialization, and
+/// neither does a memoized absence.
+#[cfg(feature = "nvml")]
+static SHARED_NVML_INIT_ATTEMPTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Does this NVML error mean the HANDLE is finished, rather than one
+/// device's answer being unavailable?
+///
+/// Only errors a fresh `Nvml::init()` could actually repair belong here.
+/// `FailedToLoadSymbol` deliberately does not: nvml-wrapper returns it when
+/// the library loaded but lacks the symbol, so re-`dlopen`ing the same file
+/// cannot change the outcome and poisoning on it produced an
+/// init/call/poison/init loop.
+#[cfg(feature = "nvml")]
+pub(crate) fn nvml_error_kills_the_handle(error: &nvml_wrapper::error::NvmlError) -> bool {
+    use nvml_wrapper::error::NvmlError;
+    matches!(
+        error,
+        NvmlError::Uninitialized
+            | NvmlError::DriverNotLoaded
+            | NvmlError::LibraryNotFound
+            | NvmlError::GpuLost
+            | NvmlError::ResetRequired
+    )
+}
+
+/// The process-wide NVML handle.
+///
+/// `Nvml::init()` dlopens libnvidia-ml and enumerates the driver. It was being
+/// paid on every 1 Hz telemetry tick, on every `discover_telemetry_targets`,
+/// and on every hot-cache admission through
+/// [`current_process_vram_bytes`] — i.e. on the per-request critical path.
+/// One handle now serves all of them.
+///
+/// The slot is reset when a call observes an error that kills the handle
+/// (`Uninitialized`, `DriverNotLoaded`, `LibraryNotFound`, `GpuLost`,
+/// `ResetRequired`), so a driver reload recovers on the next sample instead
+/// of leaving telemetry permanently dead. An absent driver AND a handle that
+/// poisons immediately after being created are both memoized for
+/// [`NVML_RETRY_AFTER`].
+#[cfg(feature = "nvml")]
+pub(crate) fn shared_nvml() -> Option<Arc<NvmlSource>> {
+    let mut slot = SHARED_NVML
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(held) = slot.as_ref() {
+        match held.source.as_ref() {
+            Some(source) if !source.is_poisoned() => return Some(source.clone()),
+            // A poisoned handle is dead, and replacing it costs an
+            // `Nvml::init()` — a dlopen plus a driver enumeration — performed
+            // while holding this global mutex, which every admission through
+            // `current_process_vram_bytes` waits on. Ungated, a handle that
+            // poisons on first use re-initialized at telemetry's 1 Hz PLUS
+            // once per admission, forever. The same `NVML_RETRY_AFTER` gate
+            // the absent-driver branch has bounds that.
+            //
+            // `attempted_at` is when the CURRENT handle was created, so a
+            // long-lived handle killed by a genuine driver reload still
+            // recovers on the very next sample; only a handle that dies
+            // immediately after being made — the loop — is made to wait.
+            Some(_) if held.attempted_at.elapsed() < NVML_RETRY_AFTER => return None,
+            Some(_) => {}
+            None if held.attempted_at.elapsed() < NVML_RETRY_AFTER => return None,
+            None => {}
+        }
+    }
+    SHARED_NVML_INIT_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let source = match NvmlSource::try_new() {
+        Ok(source) => Some(Arc::new(source)),
+        Err(error) => {
+            tracing::debug!(%error, "NVML unavailable");
+            None
+        }
+    };
+    *slot = Some(SharedNvmlSlot {
+        source: source.clone(),
+        attempted_at: std::time::Instant::now(),
+    });
+    source
+}
+
+#[cfg(all(test, feature = "nvml"))]
+pub(crate) fn shared_nvml_init_attempts() -> usize {
+    SHARED_NVML_INIT_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(all(test, feature = "nvml"))]
+pub(crate) fn reset_shared_nvml_for_test() {
+    *SHARED_NVML
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = None;
+}
+
+/// Age the held slot past [`NVML_RETRY_AFTER`], so a test can reach the
+/// recovery branch without sleeping a minute.
+#[cfg(all(test, feature = "nvml"))]
+pub(crate) fn age_shared_nvml_for_test() {
+    let mut slot = SHARED_NVML
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(held) = slot.as_mut() {
+        held.attempted_at = std::time::Instant::now() - (NVML_RETRY_AFTER + Duration::from_secs(1));
+    }
+}
+
 #[cfg(any(feature = "nvml", test))]
 pub(crate) fn nonzero_process_vram(bytes: Option<u64>) -> Option<u64> {
     bytes.filter(|bytes| *bytes > 0)
@@ -437,8 +602,7 @@ pub(crate) fn current_process_vram_bytes(
     }
     let target = TelemetryTarget::from_discovered(gpu);
     nonzero_process_vram(
-        NvmlSource::try_new()
-            .ok()?
+        shared_nvml()?
             .snapshot_visible(std::process::id(), std::slice::from_ref(&target))
             .into_iter()
             .find(|snapshot| snapshot.ordinal == gpu.ordinal)
@@ -549,8 +713,79 @@ pub fn ram_snapshot() -> RamSnapshot {
     ram_snapshot_from_system().with_zfs_arc_credit(crate::zfs_arc::evictable_arc_credit())
 }
 
-/// Build a single `RamSnapshot` using `sysinfo`. Refreshes only memory and
-/// the current process — cheap enough to run at 1 Hz (~200 µs).
+/// The ONE process-wide `sysinfo::System` the RAM sampler owns.
+///
+/// It is built memory-only and **must never gain a process table**. A
+/// per-call `System::new_with_specifics(..with_processes(..))` walks all of
+/// `/proc` on every construction, and `ProcessesToUpdate::Some(&[pid])` still
+/// `read_dir`s `/proc` on Linux — so the "cheap enough at 1 Hz" claim this
+/// function used to carry was false by three orders of magnitude on a
+/// 128-core host. RSS comes from [`process_rss_bytes`] instead, which is O(1).
+fn shared_system() -> &'static Mutex<System> {
+    static SYSTEM: std::sync::OnceLock<Mutex<System>> = std::sync::OnceLock::new();
+    SYSTEM.get_or_init(|| {
+        Mutex::new(System::new_with_specifics(
+            RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
+        ))
+    })
+}
+
+/// How many processes the shared sampler `System` is tracking. Always zero —
+/// the test that reads it is the pin on "the sampler never walks /proc".
+#[cfg(test)]
+pub(crate) fn shared_system_process_count() -> usize {
+    let sys = shared_system()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    sys.processes().len()
+}
+
+/// This process's resident set size in bytes, in O(1).
+///
+/// Linux exposes it as the second field of `/proc/self/statm`, in pages; one
+/// small read and one parse, with no directory walk anywhere. Other hosts fall
+/// back to the per-PID `sysinfo` probe (on macOS that is a `task_info` call,
+/// not a process enumeration).
+pub(crate) fn process_rss_bytes() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(bytes) = statm_resident_bytes() {
+            return bytes;
+        }
+    }
+    sysinfo_process_rss_bytes()
+}
+
+/// Parse `resident` (field 2, in pages) out of `/proc/self/statm`.
+#[cfg(target_os = "linux")]
+fn statm_resident_bytes() -> Option<u64> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let resident_pages: u64 = statm.split_ascii_whitespace().nth(1)?.parse().ok()?;
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let page_size = u64::try_from(page_size).ok().filter(|size| *size > 0)?;
+    Some(resident_pages.saturating_mul(page_size))
+}
+
+/// The per-PID `sysinfo` reading of this process's RSS. The fallback for
+/// non-Linux hosts, and the oracle the Linux reader is tested against.
+///
+/// This one DOES build its own `System`: it is not on the 1 Hz path.
+pub(crate) fn sysinfo_process_rss_bytes() -> u64 {
+    let pid = Pid::from_u32(std::process::id());
+    let mut sys = System::new_with_specifics(
+        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing().with_memory()),
+    );
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_memory(),
+    );
+    sys.process(pid).map(|p| p.memory()).unwrap_or(0)
+}
+
+/// Build a single `RamSnapshot` using `sysinfo`. Refreshes host memory on the
+/// shared memory-only `System` and reads this process's RSS in O(1) — no
+/// process table is built or walked, so this is genuinely cheap at 1 Hz.
 ///
 /// `reclaimable_zfs_arc` is `None` here on purpose: this is the reading for
 /// RSS-only probes (`used_by_mold` before/after an unload), which have no
@@ -569,26 +804,39 @@ pub(crate) fn ram_snapshot_from_system() -> RamSnapshot {
     })
 }
 
+/// Split `used` between this process and everything else.
+///
+/// `used_by_mold` is the measured RSS, deliberately NOT clamped by `used`.
+/// The two are computed on different bases: on Linux sysinfo reports
+/// `used = total - MemAvailable`, while `/proc/self/statm`'s resident field
+/// counts clean file-backed pages that `MemAvailable` simultaneously counts
+/// as available. A process holding mmap'd GGUF weights therefore has an RSS
+/// larger than `used` routinely rather than exceptionally, and clamping made
+/// the one figure the memory watchdog reads — `used_by_mold`, sampled as
+/// `rss_before`/`rss_after` around a load — report ~0 across a multi-GB mmap.
+///
+/// `used_by_other` saturates to zero in that case. With the two figures on
+/// different bases the rest of the machine is not derivable from them, and a
+/// floor of zero is the honest answer; nothing reads it for a decision.
+pub(crate) fn attribute_used_ram(used: u64, rss: u64) -> (u64, u64) {
+    (rss, used.saturating_sub(rss))
+}
+
 pub(crate) fn ram_snapshot_from_system_with_available(
     sample_available: impl FnOnce(&System) -> Option<u64>,
 ) -> RamSnapshot {
-    let mut sys = System::new_with_specifics(
-        RefreshKind::nothing()
-            .with_memory(sysinfo::MemoryRefreshKind::everything())
-            .with_processes(ProcessRefreshKind::nothing().with_memory()),
-    );
-    sys.refresh_memory();
-    let pid = Pid::from_u32(std::process::id());
-    sys.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[pid]),
-        true,
-        ProcessRefreshKind::nothing().with_memory(),
-    );
-    let total = sys.total_memory();
-    let used = sys.used_memory();
-    let available = sample_available(&sys);
-    let used_by_mold = sys.process(pid).map(|p| p.memory()).unwrap_or(0);
-    let used_by_other = used.saturating_sub(used_by_mold);
+    let (total, used, available) = {
+        let mut sys = shared_system()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        sys.refresh_memory();
+        (
+            sys.total_memory(),
+            sys.used_memory(),
+            sample_available(&sys),
+        )
+    };
+    let (used_by_mold, used_by_other) = attribute_used_ram(used, process_rss_bytes());
     RamSnapshot {
         total,
         used,
@@ -839,7 +1087,7 @@ fn collect_gpus(inventory: Option<&[TelemetryTarget]>, ram: &RamSnapshot) -> Vec
     // Linux / other: try NVML first, fall back to nvidia-smi.
     #[cfg(all(not(target_os = "macos"), feature = "nvml"))]
     {
-        if let Ok(src) = NvmlSource::try_new() {
+        if let Some(src) = shared_nvml() {
             let gpus = match inventory {
                 Some(inventory) => src.snapshot_visible(std::process::id(), inventory),
                 None => src.snapshot(std::process::id()),

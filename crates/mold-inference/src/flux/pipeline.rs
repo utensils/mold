@@ -2,7 +2,6 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::flux;
-use candle_transformers::quantized_var_builder;
 use mold_core::{GenerateRequest, GenerateResponse, ImageData, ModelPaths};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -91,6 +90,66 @@ fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool, transformer_is_fp8: boo
     } else {
         DType::F32
     }
+}
+
+/// The activation dtype a GGUF FLUX transformer is built and run at.
+///
+/// `flux_runtime_dtype` already answers BF16 on CUDA for a quantized model;
+/// what this adds is the kernel-side veto. `MOLD_WAN_FORCE_DMMV=1` is a
+/// process switch mold itself flips and never clears, and it routes every
+/// CUDA quantized matmul into `dequantize_matmul`, which reads the activation
+/// as f32 — so a BF16 transformer built while it is set would fail on its
+/// first linear. Metal and CPU answer F32 for the reasons in
+/// `crate::quantized_linear::gguf_activation_dtype`, which is the one rule
+/// every GGUF family reads.
+/// The dtype every state tensor of a render is cast to — noise, conditioning,
+/// and therefore what the PuLID adapter and every hook must feed.
+///
+/// A GGUF transformer runs at [`gguf_transformer_dtype`]; a dense one at the
+/// dtype it was loaded with. The eager identity site and
+/// `generate_with_embeddings` both ask THIS function, because when the GGUF
+/// path stopped pinning F32 the identity site kept its own copy of the old
+/// answer and PuLID renders died with "dtype mismatch in ternary op".
+fn render_state_dtype_for(is_quantized: bool, device: &Device, loaded_dtype: DType) -> DType {
+    if is_quantized {
+        gguf_transformer_dtype(device, loaded_dtype)
+    } else {
+        loaded_dtype
+    }
+}
+
+fn gguf_transformer_dtype(device: &Device, requested: DType) -> DType {
+    crate::quantized_linear::gguf_activation_dtype(
+        crate::quantized_linear::LinearDevice::of(device),
+        requested,
+        crate::quantized_dmmv::force_dmmv_enabled(),
+    )
+}
+
+/// Build the GGUF FLUX transformer — the ONE place a `.gguf` becomes a
+/// `FluxTransformer`, whether or not a LoRA is stacked on it.
+///
+/// Before the FLUX performance campaign a no-LoRA GGUF took
+/// `flux::quantized_model::Flux` from the candle fork instead. That model has
+/// no attention-policy hook — `flux/model.rs:64-76` is unchunked F32 math —
+/// so the common case could not reach FlashAttention however the artifact was
+/// built, and its F32 `LayerNorm` weights pinned the whole render to F32
+/// activations. The two were verified bit-identical before the arm was
+/// deleted (`f32_bypass_forward_matches_the_upstream_quantized_model`).
+fn build_gguf_transformer(
+    flux_cfg: &flux::model::Config,
+    vb: mold_candle::quantized::VarBuilder,
+    registry: Option<&crate::flux::lora_bypass::LoraRegistry>,
+    progress: &ProgressReporter,
+    device: &Device,
+    requested_dtype: DType,
+) -> Result<FluxTransformer> {
+    let dtype = gguf_transformer_dtype(device, requested_dtype);
+    Ok(FluxTransformer::QuantizedBypass(
+        crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
+            flux_cfg, vb, registry, progress, dtype,
+        )?,
+    ))
 }
 
 /// Path for the Q8 GGUF cache of an FP8 safetensors file.
@@ -950,6 +1009,24 @@ pub(crate) fn effective_loras(req: &mold_core::GenerateRequest) -> Vec<mold_core
         .collect()
 }
 
+/// Attention heads in every shipped FLUX.1 checkpoint — dev, schnell, krea,
+/// kontext and fill all carry `num_heads: 24` over a 3072-wide stream
+/// (`candle-transformers`' `flux::model::Config::{dev,schnell}`). The score
+/// tile the math attention budget charges is per head, so this is a term in
+/// [`crate::device::flux_activation_budget_bytes_for`].
+const FLUX1_ATTENTION_HEADS: u64 = 24;
+
+/// Both still families resolve residency through ONE function, and FLUX.1
+/// reaches it under the name it has always had here.
+///
+/// It moved to [`crate::device`] beside `still_transformer_residency` when
+/// FLUX.2 was found to be calling the budget directly and never reading
+/// `MOLD_FLUX_KEEP_TRANSFORMER` at all: two families answering the same
+/// question must not answer it in two places.
+pub(crate) use crate::device::{
+    resolve_keep_transformer as resolve_flux_keep_transformer, ResidencyDecision,
+};
+
 /// Loaded FLUX model components, ready for inference.
 /// FLUX transformer and VAE always run on GPU. T5 and CLIP run on GPU or CPU
 /// depending on available VRAM (checked at load time after the transformer is loaded).
@@ -977,6 +1054,20 @@ struct LoadedFlux {
     transformer_path: PathBuf,
     /// The actual T5 encoder path used (may be a quantized GGUF, not the original FP16 path).
     t5_encoder_path: std::path::PathBuf,
+    /// Device bytes the bypass registry's LoRA adapters hold beside the
+    /// transformer, for as long as the transformer lives.
+    ///
+    /// Recorded at load because the registry is consumed INTO the transformer
+    /// and is not separately reachable at decode time — and the residency
+    /// budget needs it, because #276's OOM was reported with LoRAs attached
+    /// and the budget charged only the checkpoint file.
+    lora_resident_bytes: u64,
+    /// Device bytes the transformer's weights occupy while resident — see
+    /// [`crate::device::transformer_resident_bytes_for`]. Recorded at load
+    /// because the
+    /// answer depends on the checkpoint's HEADER, which the per-render
+    /// residency decision must not re-open the file to read.
+    transformer_resident_bytes: u64,
 }
 
 /// Fingerprint of a single LoRA adapter (path + scale). Used to detect
@@ -1111,23 +1202,37 @@ impl FluxEngine {
     /// Free the GPU state VAE decode competes with, before the decode starts.
     ///
     /// The eager path's decision to keep the transformer hot is
-    /// `MOLD_FLUX_KEEP_TRANSFORMER` minus the headroom override; whatever it
-    /// decides, the PuLID adapter follows. Both live here rather than at the
-    /// call site so the pair cannot drift — a drop that released the
-    /// transformer and left 0.8–1.7 GB of adapter resident would hand the VAE
-    /// back part of the headroom the drop just created, on exactly the
-    /// machines that needed it.
+    /// [`resolve_flux_keep_transformer`]; whatever it decides, the PuLID
+    /// adapter follows. Both live here rather than at the call site so the
+    /// pair cannot drift — a drop that released the transformer and left
+    /// 0.8–1.7 GB of adapter resident would hand the VAE back part of the
+    /// headroom the drop just created, on exactly the machines that needed it.
     ///
     /// Takes `&mut Option<FluxTransformer>` rather than `&mut LoadedFlux` so a
     /// test can drive it with a synthetic transformer and no encoders or VAE.
     /// Returns whether the transformer was dropped.
+    /// Device bytes the resident transformer holds, from the checkpoint that
+    /// produced it.
+    ///
+    /// The file length is the right measure for both arms: a GGUF stays
+    /// quantized at rest so its resident bytes ARE its file bytes, and a BF16
+    /// safetensors is materialized one-for-one. `transformer_path` is the
+    /// RESOLVED path, so an fp8 checkpoint reports its Q8 cache rather than
+    /// the original it was converted from — which is the file that is actually
+    /// on the card.
+    fn resident_transformer_bytes(loaded: &LoadedFlux) -> u64 {
+        if loaded.flux_model.is_none() {
+            return 0;
+        }
+        loaded.transformer_resident_bytes
+    }
+
     fn free_gpu_state_before_vae_decode(
         flux_model: &mut Option<FluxTransformer>,
         identity: &mut RenderIdentity<'_>,
-        keep_transformer_env: bool,
-        force_drop_for_headroom: bool,
+        decision: ResidencyDecision,
     ) -> bool {
-        if keep_transformer_env && !force_drop_for_headroom {
+        if decision == ResidencyDecision::KeepResident {
             return false;
         }
         *flux_model = None;
@@ -1460,9 +1565,17 @@ impl FluxEngine {
             "loading FLUX transformer on GPU..."
         );
 
+        // The eager load carries no adapters; a LoRA request rebuilds the
+        // transformer below and records what its registry holds.
+        let lora_resident_bytes = 0u64;
         let flux_model = if is_quantized {
-            let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
-            FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+            let vb = crate::weight_loader::load_gguf_var_builder(
+                &transformer_path,
+                &device,
+                "FLUX transformer (GGUF)",
+                &self.base.progress,
+            )?;
+            build_gguf_transformer(&flux_cfg, vb, None, &self.base.progress, &device, gpu_dtype)?
         } else {
             let flux_vb = flux_transformer_var_builder(flux_safetensors_var_builder(
                 &transformer_path,
@@ -1473,6 +1586,31 @@ impl FluxEngine {
             )?);
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
+        // What the card is holding, which the file length answers only while
+        // the loader leaves the checkpoint's dtype alone. A dense checkpoint
+        // is materialized at `gpu_dtype`, which off CUDA is F32 whatever the
+        // file stores; a GGUF keeps its GGML dtype on both LoRA paths.
+        let transformer_resident_bytes = crate::device::transformer_resident_bytes_for(
+            is_quantized,
+            std::fs::metadata(&transformer_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+            if is_quantized {
+                None
+            } else {
+                crate::device::safetensors_parameter_count(std::slice::from_ref(&transformer_path))
+                    .inspect_err(|error| {
+                        tracing::warn!(
+                            path = %transformer_path.display(),
+                            %error,
+                            "could not read the transformer's parameter count; the residency \
+                             budget falls back to the checkpoint's file length"
+                        );
+                    })
+                    .ok()
+            },
+            gpu_dtype,
+        );
         self.base
             .progress
             .stage_done(xformer_label, xformer_stage.elapsed());
@@ -1642,6 +1780,8 @@ impl FluxEngine {
             is_quantized,
             transformer_path,
             t5_encoder_path: resolved_t5_path,
+            lora_resident_bytes,
+            transformer_resident_bytes,
         });
 
         tracing::info!(model = %self.base.model_name, "all model components loaded successfully");
@@ -2121,15 +2261,20 @@ impl FluxEngine {
                     gpu_dtype,
                     &self.base.progress,
                 )?;
-                let vb = mold_candle::quantized::VarBuilder::from_gguf(&transformer_path, &device)?;
-                FluxTransformer::QuantizedBypass(
-                    crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
-                        &flux_cfg,
-                        vb,
-                        registry.as_ref(),
-                        &self.base.progress,
-                    )?,
-                )
+                let vb = crate::weight_loader::load_gguf_var_builder(
+                    &transformer_path,
+                    &device,
+                    "FLUX transformer (GGUF)",
+                    &self.base.progress,
+                )?;
+                build_gguf_transformer(
+                    &flux_cfg,
+                    vb,
+                    registry.as_ref(),
+                    &self.base.progress,
+                    &device,
+                    gpu_dtype,
+                )?
             } else {
                 // Legacy fallback: dequantize LoRA-affected layers, keep rest quantized.
                 let vb = flux_gguf_lora_var_builder(
@@ -2139,18 +2284,23 @@ impl FluxEngine {
                     &self.base.progress,
                     self.lora_delta_cache_handle(),
                 )?;
-                FluxTransformer::QuantizedBypass(
-                    crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
-                        &flux_cfg,
-                        vb,
-                        None,
-                        &self.base.progress,
-                    )?,
-                )
+                build_gguf_transformer(
+                    &flux_cfg,
+                    vb,
+                    None,
+                    &self.base.progress,
+                    &device,
+                    gpu_dtype,
+                )?
             }
         } else if is_quantized {
-            let vb = quantized_var_builder::VarBuilder::from_gguf(&transformer_path, &device)?;
-            FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+            let vb = crate::weight_loader::load_gguf_var_builder(
+                &transformer_path,
+                &device,
+                "FLUX transformer (GGUF)",
+                &self.base.progress,
+            )?;
+            build_gguf_transformer(&flux_cfg, vb, None, &self.base.progress, &device, gpu_dtype)?
         } else if has_lora {
             // LoRA without offload (GPU has enough VRAM for full model)
             let flux_vb = flux_lora_var_builder(
@@ -2179,8 +2329,17 @@ impl FluxEngine {
             self.base.progress.info(&status);
         }
 
-        // Generate noise and build state
-        let noise_dtype = if is_quantized { DType::F32 } else { gpu_dtype };
+        // Generate noise and build state.
+        //
+        // The GGUF path used to pin this to F32 on the premise that candle's
+        // quantized matmul is f32-only. It is not: `fast_mmq::try_fwd` takes
+        // BF16/F16/F32 and returns what it was fed
+        // (`candle-core/src/quantized/fast_mmq.rs:218-221`, `:349-358`), and
+        // the transformer is now built at the dtype its activations will
+        // arrive in. The latent's dtype is also what the position ids and the
+        // RoPE tables take (`flux/sampling.rs:25,43,47`, `model.rs:92`), which
+        // is exactly what the dense BF16 arm has always done.
+        let noise_dtype = gguf_transformer_dtype(&device, gpu_dtype);
         let latent_h = height / 16 * 2;
         let latent_w = width / 16 * 2;
         // Pre-compute timestep schedule (needed before mixing for img2img).
@@ -2250,7 +2409,10 @@ impl FluxEngine {
                 early_vae_dtype,
             )?;
             // FLUX VAE expects pixels in [-1, 1]; encode applies shift/scale internally
-            let encoded = vae.encode(&source_tensor)?;
+            let encoded = {
+                let _conv = crate::conv_policy::ConvScope::for_family("flux");
+                vae.encode(&source_tensor)?
+            };
             self.base.progress.phase_done(
                 crate::ProgressPhase::Vae,
                 "Encoding source image (VAE)",
@@ -2305,15 +2467,13 @@ impl FluxEngine {
         // path (which returns GPU tensors) costs nothing here.
         let t5_emb = t5_emb.to_device(&device)?;
         let clip_emb = clip_emb.to_device(&device)?;
-        let (t5_emb_state, clip_emb_state, img_state) = if is_quantized {
-            (
-                t5_emb.to_dtype(DType::F32)?,
-                clip_emb.to_dtype(DType::F32)?,
-                img.to_dtype(DType::F32)?,
-            )
-        } else {
-            (t5_emb, clip_emb, img)
-        };
+        // Conditioning follows the transformer's working dtype, whether the
+        // weights are dense or quantized — `noise_dtype` is that answer.
+        let (t5_emb_state, clip_emb_state, img_state) = (
+            t5_emb.to_dtype(noise_dtype)?,
+            clip_emb.to_dtype(noise_dtype)?,
+            img.to_dtype(noise_dtype)?,
+        );
 
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
         // The negative branch's conditioning, prepared exactly as the positive
@@ -2325,7 +2485,7 @@ impl FluxEngine {
             neg_clip_emb.as_ref(),
             &img_state,
             &device,
-            is_quantized,
+            noise_dtype,
         )?;
         let inpaint_ctx = inpaint_ctx
             .as_ref()
@@ -2419,6 +2579,13 @@ impl FluxEngine {
         let vae_decode_start = Instant::now();
         let img_for_vae = img.to_dtype(vae_dtype)?;
         let device_for_sync = device.clone();
+        // FLUX's only convolutions are in the VAE, and the family renders
+        // under `ConvPolicy::FastStill` (#1483's machinery, the flux entry).
+        // The scope restores the previous backend on drop, including on an
+        // error return, so a failed decode cannot leave the next still on a
+        // path that would move its bytes.
+        let cudnn_dispatches_before = crate::conv_policy::cudnn_dispatch_count();
+        let _conv = crate::conv_policy::ConvScope::for_family("flux");
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
             |latents| vae.decode(latents).map_err(Into::into),
@@ -2430,6 +2597,7 @@ impl FluxEngine {
                 }
             },
         )?;
+        crate::conv_policy::report_vae_decode_backend("flux", cudnn_dispatches_before);
 
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
@@ -2544,14 +2712,14 @@ impl FluxEngine {
                 .map(|loaded| {
                     (
                         loaded.device.clone(),
-                        // The quantized transformer's state tensors are F32
-                        // (see `generate_with_embeddings`), so that — not the
-                        // loaded weight dtype — is what the adapter must feed.
-                        if loaded.is_quantized {
-                            DType::F32
-                        } else {
-                            loaded.dtype
-                        },
+                        // The adapter must feed the SAME dtype the render's
+                        // state tensors are cast to, which for a GGUF is the
+                        // working dtype (BF16 on CUDA) and not the F32 the
+                        // quantized path used to pin. One function answers
+                        // both sites so they cannot drift again: a BF16 state
+                        // against F32 adapter norms is "dtype mismatch in
+                        // ternary op" at the first denoise step.
+                        render_state_dtype_for(loaded.is_quantized, &loaded.device, loaded.dtype),
                         loaded.is_schnell,
                     )
                 })
@@ -2635,18 +2803,25 @@ impl FluxEngine {
                             loaded.dtype,
                             progress,
                         )?;
-                        let vb = mold_candle::quantized::VarBuilder::from_gguf(
+                        // These adapters stay on the card for the whole
+                        // render, so the residency budget has to see them.
+                        loaded.lora_resident_bytes = registry
+                            .as_ref()
+                            .map_or(0, |registry| registry.resident_bytes());
+                        let vb = crate::weight_loader::load_gguf_var_builder(
                             &transformer_path,
                             &loaded.device,
+                            "FLUX transformer (GGUF)",
+                            progress,
                         )?;
-                        FluxTransformer::QuantizedBypass(
-                            crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
-                                &flux_cfg,
-                                vb,
-                                registry.as_ref(),
-                                progress,
-                            )?,
-                        )
+                        build_gguf_transformer(
+                            &flux_cfg,
+                            vb,
+                            registry.as_ref(),
+                            progress,
+                            &loaded.device,
+                            loaded.dtype,
+                        )?
                     } else {
                         let vb = flux_gguf_lora_var_builder(
                             &transformer_path,
@@ -2655,18 +2830,30 @@ impl FluxEngine {
                             progress,
                             cache_handle.clone(),
                         )?;
-                        FluxTransformer::QuantizedBypass(
-                            crate::flux::quantized_transformer::QuantizedFluxTransformer::load(
-                                &flux_cfg, vb, None, progress,
-                            )?,
-                        )
+                        build_gguf_transformer(
+                            &flux_cfg,
+                            vb,
+                            None,
+                            progress,
+                            &loaded.device,
+                            loaded.dtype,
+                        )?
                     }
                 } else if loaded.is_quantized {
-                    let vb = quantized_var_builder::VarBuilder::from_gguf(
+                    let vb = crate::weight_loader::load_gguf_var_builder(
                         &transformer_path,
                         &loaded.device,
+                        "FLUX transformer (GGUF)",
+                        progress,
                     )?;
-                    FluxTransformer::Quantized(flux::quantized_model::Flux::new(&flux_cfg, vb)?)
+                    build_gguf_transformer(
+                        &flux_cfg,
+                        vb,
+                        None,
+                        progress,
+                        &loaded.device,
+                        loaded.dtype,
+                    )?
                 } else if has_lora {
                     // BF16 + LoRA stack: merge all deltas during construction
                     let flux_vb = flux_lora_var_builder(
@@ -2912,27 +3099,23 @@ impl FluxEngine {
 /// not run one.
 ///
 /// Mirrors the positive path exactly — the same device migration, the same
-/// quantized-F32 cast, and the same `State::new` over the SAME image latent —
-/// because upstream builds it with the identical `prepare()` call
+/// cast to the working dtype, and the same `State::new` over the SAME image
+/// latent — because upstream builds it with the identical `prepare()` call
 /// (`PuLID/app_flux.py:111`) and any divergence here would be a difference the
-/// guidance formula then amplifies.
+/// guidance formula then amplifies. `dtype` is therefore the positive path's
+/// resolved activation dtype, never a second decision.
 fn negative_conditioning_state(
     neg_t5_emb: Option<&candle_core::Tensor>,
     neg_clip_emb: Option<&candle_core::Tensor>,
     img_state: &candle_core::Tensor,
     device: &Device,
-    is_quantized: bool,
+    dtype: DType,
 ) -> Result<Option<flux::sampling::State>> {
     let (Some(t5), Some(clip)) = (neg_t5_emb, neg_clip_emb) else {
         return Ok(None);
     };
-    let t5 = t5.to_device(device)?;
-    let clip = clip.to_device(device)?;
-    let (t5, clip) = if is_quantized {
-        (t5.to_dtype(DType::F32)?, clip.to_dtype(DType::F32)?)
-    } else {
-        (t5, clip)
-    };
+    let t5 = t5.to_device(device)?.to_dtype(dtype)?;
+    let clip = clip.to_device(device)?.to_dtype(dtype)?;
     Ok(Some(flux::sampling::State::new(&t5, &clip, img_state)?))
 }
 
@@ -3016,6 +3199,65 @@ impl InferenceEngine for FluxEngine {
         result
     }
 
+    /// What this engine is holding on the card that it can hand straight back.
+    ///
+    /// FLUX.1 keeps its transformer across renders whenever the residency
+    /// budget fits and the operator has not asked otherwise, so the same
+    /// question FLUX.2's sequential slot answers applies here — the card can
+    /// be full of a model nobody is rendering. It is a DIFFERENT shape: the
+    /// transformer lives inside `base.loaded` beside the VAE and whatever
+    /// encoders stayed resident, and the cache already measured that whole set
+    /// as `vram_load_delta` around `load()`. So this reports only the part a
+    /// release can actually return — the transformer, its resident LoRA
+    /// matrices, and the PuLID adapter whose residency follows it — and the
+    /// cache takes it as a FLOOR under its own measurement rather than as a
+    /// replacement for it.
+    ///
+    /// `None` while no transformer is resident, so a parked or
+    /// transformer-released engine offers nothing and is never chosen as a
+    /// reclaim target twice.
+    fn resident_vram_bytes(&self) -> Option<u64> {
+        let loaded = self.base.loaded.as_ref()?;
+        loaded.flux_model.as_ref()?;
+        Some(
+            loaded
+                .transformer_resident_bytes
+                .saturating_add(loaded.lora_resident_bytes)
+                .saturating_add(self.identity.resident_bytes()),
+        )
+    }
+
+    /// Hand the transformer back without destroying the engine.
+    ///
+    /// The next render reloads it on demand — `generate`'s eager path already
+    /// rebuilds whenever `flux_model.is_none()`, which is the same door
+    /// `MOLD_FLUX_KEEP_TRANSFORMER=0` and a LoRA-stack change go through — so
+    /// the engine keeps its VAE, its encoders, its prompt cache and its warm
+    /// shell, and only the weights that were being held speculatively go.
+    ///
+    /// The adapter follows the transformer, by the same rule the render's own
+    /// drop site obeys: nothing will use it before the next conditioned
+    /// request, which reloads it anyway.
+    fn release_retained_residency(&mut self) -> u64 {
+        let Some(loaded) = self.base.loaded.as_mut() else {
+            return 0;
+        };
+        if loaded.flux_model.is_none() {
+            return 0;
+        }
+        let freed = loaded
+            .transformer_resident_bytes
+            .saturating_add(loaded.lora_resident_bytes);
+        loaded.flux_model = None;
+        // `active_lora` describes the stack merged into a transformer that no
+        // longer exists; leaving it would let the next render skip a rebuild
+        // it must do.
+        self.active_lora = Vec::new();
+        let adapter = self.identity.resident_bytes();
+        self.release_identity_adapter_unless_transformer_resident();
+        freed.saturating_add(adapter.saturating_sub(self.identity.resident_bytes()))
+    }
+
     fn unload(&mut self) {
         self.base.unload();
         // prompt_cache holds GPU-resident T5/CLIP embedding tensors; clear so
@@ -3080,12 +3322,9 @@ impl FluxEngine {
         gpu_ordinal: usize,
         identity: &mut RenderIdentity<'_>,
     ) -> Result<GenerateResponse> {
-        // 3. Generate initial noise (F32 for quantized, gpu_dtype for BF16)
-        let noise_dtype = if loaded.is_quantized {
-            DType::F32
-        } else {
-            loaded.dtype
-        };
+        // 3. Generate initial noise at the transformer's working dtype — see
+        //    the sequential path for why a GGUF no longer pins F32.
+        let noise_dtype = render_state_dtype_for(loaded.is_quantized, &loaded.device, loaded.dtype);
         let latent_h = height / 16 * 2;
         let latent_w = width / 16 * 2;
 
@@ -3129,7 +3368,10 @@ impl FluxEngine {
                 &loaded.device,
                 loaded.vae_dtype,
             )?;
-            let encoded = loaded.vae.encode(&source_tensor)?;
+            let encoded = {
+                let _conv = crate::conv_policy::ConvScope::for_family("flux");
+                loaded.vae.encode(&source_tensor)?
+            };
             progress.phase_done(
                 crate::ProgressPhase::Vae,
                 "Encoding source image (VAE)",
@@ -3180,16 +3422,12 @@ impl FluxEngine {
         // cache-restore path costs nothing here.
         let t5_emb = t5_emb.to_device(&loaded.device)?;
         let clip_emb = clip_emb.to_device(&loaded.device)?;
-        // For quantized model, state tensors must be F32
-        let (t5_emb_state, clip_emb_state, img_state) = if loaded.is_quantized {
-            (
-                t5_emb.to_dtype(DType::F32)?,
-                clip_emb.to_dtype(DType::F32)?,
-                img.to_dtype(DType::F32)?,
-            )
-        } else {
-            (t5_emb, clip_emb, img)
-        };
+        // Conditioning follows the transformer's working dtype.
+        let (t5_emb_state, clip_emb_state, img_state) = (
+            t5_emb.to_dtype(noise_dtype)?,
+            clip_emb.to_dtype(noise_dtype)?,
+            img.to_dtype(noise_dtype)?,
+        );
 
         // Build sampling state
         let state = flux::sampling::State::new(&t5_emb_state, &clip_emb_state, &img_state)?;
@@ -3200,7 +3438,7 @@ impl FluxEngine {
             neg_clip_emb.as_ref(),
             &img_state,
             &loaded.device,
-            loaded.is_quantized,
+            noise_dtype,
         )?;
         let inpaint_ctx = inpaint_ctx
             .as_ref()
@@ -3248,69 +3486,94 @@ impl FluxEngine {
         tracing::info!("denoising complete, decoding VAE...");
 
         // Free denoising intermediates and transformer before VAE decode.
-        // On discrete GPUs (CUDA), the BF16 transformer alone is ~24GB — VAE
-        // decode needs that VRAM for conv2d intermediates. For Q8 (~12GB) on a
-        // 24GB GPU, the transformer can stay resident; dropping forces a full
-        // `gguf_lora_var_builder` rebuild on the next generation, which peaks
-        // at ~95GB CPU when LoRAs are applied. `MOLD_FLUX_KEEP_TRANSFORMER=1`
-        // opts into keeping it loaded across same-LoRA generations.
+        //
+        // Whether the transformer goes with them is a BUDGET, not a default.
+        // On discrete GPUs the BF16 transformer alone is ~24 GB and the VAE
+        // decode needs a large contiguous conv2d workspace, so it has to go;
+        // a Q8 (~12.6 GB) on the same card does not, and dropping it forces a
+        // full `gguf_lora_var_builder` rebuild on the next generation (8.4 s
+        // measured, peaking at ~95 GB host when LoRAs are applied) for no
+        // reason. `crate::device::still_transformer_residency` decides, and
+        // `MOLD_FLUX_KEEP_TRANSFORMER=0` is the opt-out.
         drop(state);
         drop(t5_emb_state);
         drop(clip_emb_state);
         drop(img_state);
-        let keep_transformer_env = crate::runtime_env::value("MOLD_FLUX_KEEP_TRANSFORMER")
-            .map(|v| v == "1")
-            .unwrap_or(false);
 
-        // Even with KEEP_TRANSFORMER=1 the keep is conditional: VAE decode
-        // needs a large contiguous conv2d allocation (~2–3 GB peak at 1024²,
-        // ~10–12 GB at 2048²). When the kept transformer + LoRA-merged
-        // tensors leave too little headroom (observed at ~3 GB free with a
-        // 2-LoRA stack on a 24 GB card), the VAE alloc OOMs even though the
-        // resident transformer size is identical to the no-LoRA case. The
-        // next request rebuilds — that's the trade-off for not OOMing here.
+        // The three terms the budget weighs at this moment: the weights that
+        // are resident right now, the denoise workspace the next render will
+        // want, and the decode workspace this render is about to allocate.
         //
-        // The headroom budget scales with output resolution via
-        // [`activation_bytes`] instead of a fixed 5 GB magic — at 1024² the
-        // budget is the FluxDit floor (~256 MB, the previous 5 GB was wildly
-        // over-conservative on a busy 24 GB card with KEEP_TRANSFORMER=1)
-        // while at 2048² it grows past 1 GB, catching what fixed 5 GB only
-        // approximated.
-        let vae_headroom_bytes = crate::device::activation_bytes(
-            req.width,
-            req.height,
-            1,
-            crate::device::dtype_bytes(loaded.dtype),
-            crate::device::ActivationFamily::FluxDit,
-        );
+        // `free_vram_bytes` is sampled with the transformer STILL RESIDENT, so
+        // its bytes are added back — `still_transformer_residency` is defined
+        // against the card as if nothing this render loaded were on it, the
+        // same convention `memory_preflight` uses with `active_vram_bytes`.
+        // Charging them twice would drop every warm render on every card.
+        let transformer_bytes = Self::resident_transformer_bytes(loaded);
+        // The two things #276 named that the checkpoint's file length cannot
+        // see: the bypass registry's resident LoRA matrices, and the ~1.7 GB
+        // PuLID adapter that `free_gpu_state_before_vae_decode` releases only
+        // on a drop. Both are on the card while the VAE decode allocates.
+        let companion_resident_bytes = loaded
+            .lora_resident_bytes
+            .saturating_add(identity.resident_bytes());
+        let budget = crate::device::StillTransformerBudget {
+            transformer_bytes,
+            companion_resident_bytes,
+            activation_bytes: crate::device::flux_activation_budget_bytes_for(
+                req.width,
+                req.height,
+                1,
+                crate::device::dtype_bytes(loaded.dtype),
+                crate::device::ActivationFamily::FluxDit,
+                FLUX1_ATTENTION_HEADS,
+                crate::device::flux_effective_attention_backend(),
+            ),
+            vae_decode_peak_bytes: crate::device::flux_vae_decode_peak_bytes(
+                req.width,
+                req.height,
+                crate::device::dtype_bytes(loaded.vae_dtype),
+            ),
+            runtime_headroom_bytes: crate::device::STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+        };
         let free_before_vae = crate::device::free_vram_bytes(gpu_ordinal).unwrap_or(0);
-        let force_drop_for_headroom =
-            keep_transformer_env && free_before_vae > 0 && free_before_vae < vae_headroom_bytes;
+        // The add-back covers the COMPANIONS as well as the checkpoint: the
+        // sample above was taken with the adapters on the card, so charging
+        // them in `required_bytes` while also letting them shrink the reading
+        // counts them twice and drops every warm LoRA render.
+        let usable_free = crate::device::usable_free_for_residency(
+            &loaded.device,
+            gpu_ordinal,
+            transformer_bytes.saturating_add(companion_resident_bytes),
+        );
+        let decision = resolve_flux_keep_transformer(
+            crate::runtime_env::value("MOLD_FLUX_KEEP_TRANSFORMER").as_deref(),
+            crate::device::still_transformer_residency(&budget, usable_free),
+        );
 
         // The PuLID adapter follows the transformer, and is released here —
         // before the sync below — so the bytes are actually available to the
         // decode rather than freed after it.
-        if Self::free_gpu_state_before_vae_decode(
-            &mut loaded.flux_model,
-            identity,
-            keep_transformer_env,
-            force_drop_for_headroom,
-        ) {
-            if force_drop_for_headroom {
-                tracing::info!(
+        if Self::free_gpu_state_before_vae_decode(&mut loaded.flux_model, identity, decision) {
+            match decision {
+                ResidencyDecision::DropForHeadroom => tracing::info!(
                     free_mb = free_before_vae / 1024 / 1024,
-                    headroom_mb = vae_headroom_bytes / 1024 / 1024,
-                    "Transformer force-dropped before VAE decode (free VRAM below \
-                     resolution-scaled headroom; overrides MOLD_FLUX_KEEP_TRANSFORMER=1 \
-                     for this request)"
-                );
-            } else {
-                tracing::info!("Transformer dropped to free VRAM for VAE decode");
+                    required_mb = budget.required_bytes() / 1024 / 1024,
+                    usable = ?usable_free,
+                    "Transformer dropped before VAE decode: the residency budget does not fit \
+                     this card at this resolution"
+                ),
+                ResidencyDecision::DropRequested => tracing::info!(
+                    "Transformer dropped before VAE decode (MOLD_FLUX_KEEP_TRANSFORMER=0)"
+                ),
+                ResidencyDecision::KeepResident => unreachable!("a keep does not drop"),
             }
         } else {
             tracing::info!(
                 free_mb = free_before_vae / 1024 / 1024,
-                "Transformer kept loaded (MOLD_FLUX_KEEP_TRANSFORMER=1)"
+                required_mb = budget.required_bytes() / 1024 / 1024,
+                "Transformer kept resident: the residency budget fits, so the next render \
+                 skips the reload"
             );
         }
         // Force CUDA to complete pending operations and release freed memory
@@ -3332,6 +3595,8 @@ impl FluxEngine {
         let img_for_vae = img.to_dtype(loaded.vae_dtype)?;
         let vae = &loaded.vae;
         let device_for_sync = loaded.device.clone();
+        let cudnn_dispatches_before = crate::conv_policy::cudnn_dispatch_count();
+        let _conv = crate::conv_policy::ConvScope::for_family("flux");
         let img = crate::vae_tiling::decode_with_oom_fallback(
             &img_for_vae,
             |latents| vae.decode(latents).map_err(Into::into),
@@ -3343,6 +3608,7 @@ impl FluxEngine {
                 }
             },
         )?;
+        crate::conv_policy::report_vae_decode_backend("flux", cudnn_dispatches_before);
 
         // 9. Convert to u8 image: clamp to [-1, 1], map to [0, 255]
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
@@ -3391,10 +3657,12 @@ impl FluxEngine {
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_loras, flux_rms_norm_scale_aliases, flux_runtime_dtype,
-        flux_transformer_var_builder, park_cond_to_cpu, should_use_offload_bypass_registry,
-        LoraBypassMode,
+        build_gguf_transformer, effective_loras, flux_rms_norm_scale_aliases, flux_runtime_dtype,
+        flux_transformer_var_builder, gguf_transformer_dtype, park_cond_to_cpu,
+        render_state_dtype_for, should_use_offload_bypass_registry, FluxTransformer,
+        LoraBypassMode, ProgressReporter, FLUX1_ATTENTION_HEADS,
     };
+    use crate::device::transformer_resident_bytes_for;
     use crate::{InferenceEngine, LoadStrategy};
     use candle_core::{DType, Device, Result, Tensor};
     use candle_nn::VarBuilder;
@@ -3583,7 +3851,10 @@ mod tests {
     /// would free nothing.
     #[test]
     fn dropping_the_transformer_for_vae_headroom_releases_the_adapter() {
-        for (keep_env, force_drop) in [(false, false), (false, true), (true, true)] {
+        for decision in [
+            super::ResidencyDecision::DropForHeadroom,
+            super::ResidencyDecision::DropRequested,
+        ] {
             let mut state = super::super::identity::tests::state_holding_an_adapter();
             let watched = state
                 .resident_adapter_for_test()
@@ -3601,11 +3872,10 @@ mod tests {
             let dropped = super::FluxEngine::free_gpu_state_before_vae_decode(
                 &mut flux_model,
                 &mut identity,
-                keep_env,
-                force_drop,
+                decision,
             );
 
-            assert!(dropped, "keep_env={keep_env} force_drop={force_drop}");
+            assert!(dropped, "{decision:?} must drop");
             assert!(flux_model.is_none(), "the transformer must be gone");
             assert_eq!(
                 identity.resident_bytes(),
@@ -3634,20 +3904,148 @@ mod tests {
         let dropped = super::FluxEngine::free_gpu_state_before_vae_decode(
             &mut flux_model,
             &mut identity,
-            /* keep_transformer_env */ true,
-            /* force_drop_for_headroom */ false,
+            super::ResidencyDecision::KeepResident,
         );
 
         assert!(!dropped);
-        assert!(
-            flux_model.is_some(),
-            "MOLD_FLUX_KEEP_TRANSFORMER=1 keeps it"
-        );
+        assert!(flux_model.is_some(), "a budget that fits keeps it");
         assert_eq!(identity.resident_bytes(), before);
         assert!(
             identity.is_active(),
             "and the render keeps its conditioning"
         );
+    }
+
+    /// What the residency budget charges for the weights is what the DEVICE
+    /// is holding, which is the checkpoint file only when the loader does not
+    /// widen it.
+    ///
+    /// A GGUF checkpoint stays in its GGML dtype on the card on BOTH LoRA
+    /// paths — the bypass registry never touches the base weights, and the
+    /// legacy `MOLD_LORA_BYPASS=off` merge dequantizes to CPU F32, adds the
+    /// delta, and `quantize_onto`s straight back to the ORIGINAL dtype, so
+    /// the file length is exact there too.
+    ///
+    /// A dense safetensors checkpoint is a different story:
+    /// `flux_runtime_dtype` answers F32 off CUDA, so a BF16 file is TWICE its
+    /// own length once resident, and `fs::metadata().len()` understates a
+    /// 23.8 GB checkpoint by 23.8 GB. That is the case where a card would
+    /// Keep a transformer that no longer fits.
+    #[test]
+    fn the_weight_term_follows_the_loaded_dtype_not_the_file_length() {
+        // FLUX.1 dev: ~11.9 B parameters, shipped as a 23.8 GB BF16
+        // safetensors and a 12.6 GB Q8_0 GGUF.
+        const PARAMS: u64 = 11_900_000_000;
+        const BF16_FILE: u64 = 23_800_000_000;
+        const Q8_FILE: u64 = 12_600_000_000;
+
+        // Quantized: the file length, on both LoRA paths, because neither
+        // changes the on-device dtype. `dense_parameter_count` is irrelevant.
+        assert_eq!(
+            transformer_resident_bytes_for(true, Q8_FILE, None, DType::BF16),
+            Q8_FILE
+        );
+        assert_eq!(
+            transformer_resident_bytes_for(true, Q8_FILE, Some(PARAMS), DType::F32),
+            Q8_FILE,
+            "a GGUF's weights stay quantized however the activations run"
+        );
+
+        // Dense at the dtype it was stored at: unchanged from today.
+        assert_eq!(
+            transformer_resident_bytes_for(false, BF16_FILE, Some(PARAMS), DType::BF16),
+            PARAMS * 2
+        );
+
+        // Dense WIDENED to F32 — the Metal/CPU answer — is twice the file.
+        assert_eq!(
+            transformer_resident_bytes_for(false, BF16_FILE, Some(PARAMS), DType::F32),
+            PARAMS * 4
+        );
+
+        // An unreadable header falls back to TODAY'S behaviour, the file
+        // length, rather than guessing.
+        assert_eq!(
+            transformer_resident_bytes_for(false, BF16_FILE, None, DType::F32),
+            BF16_FILE
+        );
+    }
+
+    /// The 24 GiB rows, on the decision the budget actually makes.
+    ///
+    /// Both LoRA paths on a Q8 checkpoint KEEP at 1024°, because both hold
+    /// the same quantized bytes. The row that flips is the widened dense one:
+    /// charged at its file length a 46 GiB L40S keeps 23.8 GB of weights it
+    /// is actually holding 47.6 GB of.
+    #[test]
+    fn the_widened_checkpoint_drops_where_the_file_length_kept() {
+        use crate::device::{
+            still_transformer_residency, ActivationFamily, StillTransformerBudget, UsableFreeVram,
+            STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+        };
+
+        const PARAMS: u64 = 11_900_000_000;
+        const BF16_FILE: u64 = 23_800_000_000;
+        const Q8_FILE: u64 = 12_600_000_000;
+        // `usable_free_vram_bytes`'s reserve-adjusted totals for the two cards
+        // the campaign measures on, in the binary units `nvidia-smi` reports.
+        const RTX_4090_USABLE: u64 = (24_564 - 400) * 1024 * 1024;
+        const L40S_USABLE: u64 = (46_068 - 400) * 1024 * 1024;
+
+        let budget = |transformer_bytes: u64, dtype_bytes: u32| StillTransformerBudget {
+            transformer_bytes,
+            companion_resident_bytes: 0,
+            activation_bytes: crate::device::flux_activation_budget_bytes_for(
+                1024,
+                1024,
+                1,
+                dtype_bytes,
+                ActivationFamily::FluxDit,
+                FLUX1_ATTENTION_HEADS,
+                crate::attention::AttentionBackend::Math,
+            ),
+            vae_decode_peak_bytes: crate::device::flux_vae_decode_peak_bytes(
+                1024,
+                1024,
+                dtype_bytes,
+            ),
+            runtime_headroom_bytes: STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+        };
+
+        // A Q8 checkpoint keeps on a 24 GiB card whichever LoRA path built
+        // it: `is_quantized` is what both paths hand this function, and the
+        // legacy merge requantizes, so the answer is one figure, not two.
+        let quantized = transformer_resident_bytes_for(true, Q8_FILE, Some(PARAMS), DType::BF16);
+        assert_eq!(quantized, Q8_FILE);
+        assert!(
+            still_transformer_residency(
+                &budget(quantized, 2),
+                UsableFreeVram::Measured(RTX_4090_USABLE)
+            )
+            .keeps(),
+            "a Q8 transformer is 12.6 GB on the card on the bypass path and on the \
+             legacy merge path alike"
+        );
+
+        // The widened dense checkpoint, charged honestly, does NOT fit an
+        // L40S — and the file length said it did.
+        let by_file = still_transformer_residency(
+            &budget(BF16_FILE, 4),
+            UsableFreeVram::Measured(L40S_USABLE),
+        );
+        assert!(
+            by_file.keeps(),
+            "the file length is what made this row a Keep"
+        );
+
+        let honest = transformer_resident_bytes_for(false, BF16_FILE, Some(PARAMS), DType::F32);
+        let by_residency =
+            still_transformer_residency(&budget(honest, 4), UsableFreeVram::Measured(L40S_USABLE));
+        assert!(
+            !by_residency.keeps(),
+            "47.6 GB of F32 weights cannot stay resident on a 46 GiB card"
+        );
+        assert!(by_residency.shortfall_bytes() > 0);
     }
 
     #[test]
@@ -3930,6 +4328,69 @@ mod tests {
         assert_eq!(flux_runtime_dtype(true, false, true), DType::F16);
         assert_eq!(flux_runtime_dtype(true, false, false), DType::BF16);
         assert_eq!(flux_runtime_dtype(false, false, true), DType::F32);
+    }
+
+    /// Every GGUF load — with or without a LoRA — goes through
+    /// `build_gguf_transformer` and lands on the mold-owned bypass arm. The
+    /// candle fork's `flux::quantized_model::Flux` used to serve the no-LoRA
+    /// case, and because it carries no attention-policy hook that silently
+    /// excluded the COMMONEST FLUX render from every fast path the artifact
+    /// compiled.
+    #[test]
+    fn no_lora_gguf_builds_the_bypass_transformer() {
+        use crate::flux::pulid_variants::{gguf_weights, shared_weights, tiny_flux_config};
+
+        let device = Device::Cpu;
+        let cfg = tiny_flux_config();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tiny-flux.gguf");
+        gguf_weights(&shared_weights(&cfg), &path).unwrap();
+
+        let vb = mold_candle::quantized::VarBuilder::from_gguf(&path, &device).unwrap();
+        let built = build_gguf_transformer(
+            &cfg,
+            vb,
+            None,
+            &ProgressReporter::default(),
+            &device,
+            DType::BF16,
+        )
+        .unwrap();
+        assert!(
+            matches!(built, FluxTransformer::QuantizedBypass(_)),
+            "a no-LoRA GGUF must take the mold-owned transformer"
+        );
+    }
+
+    /// The requested working dtype survives only where the kernels accept it.
+    /// CPU is the case this suite can reach: a BF16 request there resolves to
+    /// F32, because candle's CPU `QMatMul` bails on anything but f32/f16 and
+    /// the dequant arm it would otherwise take reads f32.
+    #[test]
+    fn render_state_dtype_is_the_gguf_working_dtype_for_quantized_models() {
+        // Off CUDA the GGUF working dtype narrows to F32 (Metal kernels and the
+        // dequantize fallback are f32-only); a dense model keeps its own dtype.
+        assert_eq!(
+            render_state_dtype_for(true, &Device::Cpu, DType::BF16),
+            gguf_transformer_dtype(&Device::Cpu, DType::BF16)
+        );
+        assert_eq!(
+            render_state_dtype_for(false, &Device::Cpu, DType::BF16),
+            DType::BF16
+        );
+        assert_eq!(
+            render_state_dtype_for(false, &Device::Cpu, DType::F16),
+            DType::F16
+        );
+    }
+
+    #[test]
+    fn gguf_transformer_dtype_narrows_to_f32_off_cuda() {
+        assert_eq!(
+            gguf_transformer_dtype(&Device::Cpu, DType::BF16),
+            DType::F32
+        );
+        assert_eq!(gguf_transformer_dtype(&Device::Cpu, DType::F32), DType::F32);
     }
 
     #[test]

@@ -558,9 +558,11 @@ impl SD3Engine {
 
         let transformer = if is_quantized {
             // GGUF files from city96 use unprefixed tensor names (no "model.diffusion_model.")
-            let vb = quantized_var_builder::VarBuilder::from_gguf(
+            let vb = crate::weight_loader::load_gguf_var_builder(
                 &self.base.paths.transformer,
                 &device,
+                "SD3 transformer (GGUF)",
+                &self.base.progress,
             )?;
             SD3Transformer::Quantized(QuantizedMMDiT::new(&mmdit_config, vb)?)
         } else {
@@ -966,7 +968,12 @@ impl SD3Engine {
 
         let transformer = if is_quantized {
             let vb = if active_loras.is_empty() {
-                quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, &device)?
+                crate::weight_loader::load_gguf_var_builder(
+                    &self.base.paths.transformer,
+                    &device,
+                    "SD3 transformer (GGUF)",
+                    &self.base.progress,
+                )?
             } else {
                 sd3_gguf_lora_var_builder(
                     &self.base.paths.transformer,
@@ -1348,9 +1355,11 @@ impl SD3Engine {
                 let reload_start = Instant::now();
                 let transformer = if is_quantized {
                     let vb = if active_loras.is_empty() {
-                        quantized_var_builder::VarBuilder::from_gguf(
+                        crate::weight_loader::load_gguf_var_builder(
                             &transformer_path,
                             &loaded_device,
+                            "SD3 transformer (GGUF)",
+                            progress,
                         )?
                     } else {
                         sd3_gguf_lora_var_builder(

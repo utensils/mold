@@ -3290,6 +3290,7 @@ dependencies = [
  "float8",
  "half",
  "libc",
+ "memmap2",
  "serde",
  "serde_json",
  "sha2",

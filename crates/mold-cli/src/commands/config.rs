@@ -661,13 +661,14 @@ mod tests {
 
     #[test]
     fn all_keys_count() {
-        // 12 General + 8 Expand + 3 Scheduler + 1 Gallery + 1 Queue +
+        // 12 General + 8 Expand + 3 Scheduler + 2 Gallery + 1 Queue +
         // 1 Generate + 4 Logging + 8 RunPod + 9 Lambda static keys.
         // General gained `umt5_variant` with the Wan quantized encoder (#778);
-        // Gallery gained `trash_retention_days` with the Library trash;
+        // Gallery gained `trash_retention_days` with the Library trash, and
+        // `authority_log` with opt-in archive-authority storage version 3;
         // Generate gained `auto_tag_title` with creation-time filing;
         // Queue gained `held_retention_days` with durable held-row retention.
-        assert_eq!(ALL_KEYS.len(), 47);
+        assert_eq!(ALL_KEYS.len(), 48);
     }
 
     #[test]

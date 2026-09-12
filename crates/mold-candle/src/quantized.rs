@@ -40,26 +40,44 @@ pub struct VarBuilder {
 }
 
 impl VarBuilder {
+    /// Load a GGUF checkpoint from a memory mapping.
+    ///
+    /// See [`crate::gguf_mmap`] for why: the reader loop this replaced copied
+    /// every byte of the file into a fresh anonymous buffer before uploading
+    /// it, which measured 0.96 GB/s on a 33 GB checkpoint against 8.3 GB/s for
+    /// the same file read by stable-diffusion.cpp.
     pub fn from_gguf<P: AsRef<std::path::Path>>(path: P, device: &Device) -> Result<Self> {
-        let mut file = std::fs::File::open(path)?;
-        let content = candle::quantized::gguf_file::Content::read(&mut file)?;
+        Self::from_gguf_with_progress(path, device, &mut |_, _| {})
+    }
+
+    /// [`Self::from_gguf`] reporting `(bytes_done, bytes_total)` as it loads.
+    pub fn from_gguf_with_progress<P: AsRef<std::path::Path>>(
+        path: P,
+        device: &Device,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Result<Self> {
+        let map = crate::gguf_mmap::GgufMmap::open(path)?;
+        let data = map.load_all(device, progress)?;
+        Ok(Self::from_qtensors(data, device))
+    }
+
+    /// The pre-mapping reader loop, kept for callers holding a reader rather
+    /// than a path (and as the oracle the mapping is tested against).
+    pub fn from_gguf_reader<R: std::io::Seek + std::io::Read>(
+        reader: &mut R,
+        device: &Device,
+    ) -> Result<Self> {
+        let content = candle::quantized::gguf_file::Content::read(reader)?;
         let mut data = HashMap::new();
         for tensor_name in content.tensor_infos.keys() {
-            let tensor = content.tensor(&mut file, tensor_name, device)?;
+            let tensor = content.tensor(reader, tensor_name, device)?;
             data.insert(tensor_name.to_string(), Arc::new(tensor));
         }
         Ok(Self::from_qtensors(data, device))
     }
 
     pub fn from_gguf_buffer(buffer: &[u8], device: &Device) -> Result<Self> {
-        let mut cursor = std::io::Cursor::new(buffer);
-        let content = candle::quantized::gguf_file::Content::read(&mut cursor)?;
-        let mut data = HashMap::new();
-        for tensor_name in content.tensor_infos.keys() {
-            let tensor = content.tensor(&mut cursor, tensor_name, device)?;
-            data.insert(tensor_name.to_string(), Arc::new(tensor));
-        }
-        Ok(Self::from_qtensors(data, device))
+        Self::from_gguf_reader(&mut std::io::Cursor::new(buffer), device)
     }
 
     pub fn from_qtensors(data: HashMap<String, Arc<QTensor>>, device: &Device) -> Self {

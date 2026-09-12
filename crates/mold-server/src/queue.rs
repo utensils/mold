@@ -204,14 +204,18 @@ pub(crate) fn save_image_to_dir_with_suffix(
         suffix,
         title_slug.as_deref(),
     );
-    let (filename, path, reservation) =
-        match write_gallery_bytes_no_replace(dir, &filename, &img.data) {
-            Ok(saved) => saved,
-            Err(e) => {
-                tracing::warn!("failed to save image to {}: {e}", dir.display());
-                return None;
-            }
-        };
+    let PublishedGalleryBytes {
+        filename,
+        path,
+        sha256,
+        reservation,
+    } = match write_gallery_bytes_no_replace(dir, &filename, &img.data) {
+        Ok(saved) => saved,
+        Err(e) => {
+            tracing::warn!("failed to save image to {}: {e}", dir.display());
+            return None;
+        }
+    };
     tracing::info!("saved image to {}", path.display());
     let image_row = if let Some(meta) = metadata {
         let params = mold_db::persist::OutputRecordParams {
@@ -226,6 +230,7 @@ pub(crate) fn save_image_to_dir_with_suffix(
             dir,
             &path,
             record,
+            Some(sha256.clone()),
             gallery_gate,
             reservation.authority(),
         ) {
@@ -522,7 +527,12 @@ fn save_video_to_dir_with_sidecar(
             .and_then(mold_core::title_slug)
             .as_deref(),
     );
-    let (filename, path, reservation) = match write_gallery_bytes_no_replace(dir, &desired, bytes) {
+    let PublishedGalleryBytes {
+        filename,
+        path,
+        sha256,
+        reservation,
+    } = match write_gallery_bytes_no_replace(dir, &desired, bytes) {
         Ok(saved) => saved,
         Err(e) => {
             tracing::error!("failed to save video to {}: {e}", dir.display());
@@ -541,6 +551,7 @@ fn save_video_to_dir_with_sidecar(
         dir,
         &path,
         record,
+        Some(sha256),
         gallery_gate,
         reservation.authority(),
     ) {
@@ -803,6 +814,7 @@ pub(crate) fn save_video_to_dir_named(
             dir,
             &path,
             record,
+            None,
             gallery_gate,
             &authority,
         ) {
@@ -927,6 +939,7 @@ pub(crate) fn publish_video_path_to_dir_named(
             dir,
             &path,
             record,
+            None,
             gallery_gate,
             &authority,
         ) {
@@ -968,15 +981,24 @@ pub(crate) fn publish_video_path_to_dir_named(
     Ok(filename.to_string())
 }
 
+/// One published gallery file: its final name, its path, the digest of the
+/// bytes that landed, and the reservation that held the name.
+///
+/// The digest is computed WHILE the bytes are written. The archive step needs
+/// it, and re-reading a freshly written multi-megabyte PNG to hash it a second
+/// time was a full extra pass over data this process still had in memory.
+pub(crate) struct PublishedGalleryBytes {
+    pub(crate) filename: String,
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) sha256: String,
+    pub(crate) reservation: crate::batch_transaction::GalleryNameReservation,
+}
+
 fn write_gallery_bytes_no_replace(
     dir: &std::path::Path,
     desired: &str,
     bytes: &[u8],
-) -> anyhow::Result<(
-    String,
-    std::path::PathBuf,
-    crate::batch_transaction::GalleryNameReservation,
-)> {
+) -> anyhow::Result<PublishedGalleryBytes> {
     write_gallery_bytes_no_replace_with_directory_sync(
         dir,
         desired,
@@ -990,16 +1012,8 @@ fn write_gallery_bytes_no_replace_with_directory_sync(
     desired: &str,
     bytes: &[u8],
     sync_directory: &dyn Fn(&std::path::Path) -> anyhow::Result<()>,
-) -> anyhow::Result<(
-    String,
-    std::path::PathBuf,
-    crate::batch_transaction::GalleryNameReservation,
-)> {
-    let reservation = crate::batch_transaction::reserve_gallery_final_name_with_directory_sync(
-        dir,
-        desired,
-        sync_directory,
-    )?;
+) -> anyhow::Result<PublishedGalleryBytes> {
+    let reservation = crate::batch_transaction::reserve_gallery_final_name(dir, desired)?;
     let filename = reservation.final_name().to_owned();
     let path = dir.join(&filename);
     // Stage under `<final>.partial` and publish by rename. Writing the final
@@ -1026,7 +1040,16 @@ fn write_gallery_bytes_no_replace_with_directory_sync(
         return Err(error.into());
     }
     sync_directory(dir)?;
-    Ok((filename, path, reservation))
+    let sha256 = {
+        use sha2::Digest as _;
+        format!("{:x}", sha2::Sha256::digest(bytes))
+    };
+    Ok(PublishedGalleryBytes {
+        filename,
+        path,
+        sha256,
+        reservation,
+    })
 }
 
 /// Move staged bytes onto their final gallery name, atomically, without ever
@@ -1741,11 +1764,18 @@ pub(crate) fn build_sse_completion_message(
     saved: &SavedOutputNames,
     payload: SseCompletionPayload,
 ) -> SseMessage {
-    if payload == SseCompletionPayload::MetadataOnly && saved.output.is_none() {
-        return SseMessage::Error(SseErrorEvent::failed(
-            "generation completed but the output could not be saved for streaming".to_string(),
-        ));
-    }
+    // `MetadataOnly` is a transport preference: the client said it would
+    // fetch the bytes from the gallery rather than receive them inline. If the
+    // save did not happen there is nothing to fetch — but the server is
+    // holding the finished pixels, which is precisely what the inline payload
+    // is for. Falling back to `Full` costs one base64 body; answering `Error`
+    // threw a completed render away, and a long-lived client that had
+    // memoized "this host persists outputs" did it on every render.
+    let payload = if payload == SseCompletionPayload::MetadataOnly && saved.output.is_none() {
+        SseCompletionPayload::Full
+    } else {
+        payload
+    };
     SseMessage::Complete(Box::new(build_sse_complete_event(
         response, img, original, metadata, saved, payload,
     )))
@@ -2210,18 +2240,28 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     // bundle opaque through all queueing and cancellation-before-start paths,
     // then hydrate off Tokio immediately before reference/model preparation.
     let job_id = job.id.clone();
+    let materialized_control_lora = job.materialized_control_lora.take();
     let hydrated_media_lease = if let Some(deferred) = job.deferred_media.take() {
         let expected_job_id = job_id.clone();
         let mut request = job.request.clone();
         match tokio::task::spawn_blocking(move || {
-            let result = deferred.hydrate_into(&expected_job_id, &mut request);
+            // No planned stack here: the legacy single-worker loop carries no
+            // frozen execution plan at all, so nothing ever materialized one
+            // onto its request and there is none to restore.
+            let result = crate::queue_media_runtime::hydrate_dispatch_media(
+                &expected_job_id,
+                &mut request,
+                Some(deferred),
+                materialized_control_lora,
+                &[],
+            );
             (request, result)
         })
         .await
         {
             Ok((request, Ok(lease))) => {
                 job.request = request;
-                Some(lease)
+                lease
             }
             Ok((_request, Err(error))) => {
                 durable_generation_settlement::fail_hydration_async(job, &job_id, error).await;
@@ -2238,6 +2278,12 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             }
         }
     } else {
+        // No sealed set to overlay, so nothing can conflict — the adapter is
+        // simply put back.
+        crate::queue_media_runtime::prepend_materialized_control_lora(
+            &mut job.request,
+            materialized_control_lora,
+        );
         None
     };
     // The ordered references are bound from THIS hydration, under this lease;
@@ -3452,7 +3498,16 @@ async fn run_queue_dispatcher_with_tuning_inner(
             job.deferred_media.as_ref().map(|media| media.projection()),
         );
         if let Some(err_msg) =
-            crate::gpu_pool::model_unschedulable_message(&model_name, Some(&shape_bucket))
+            crate::gpu_pool::model_unschedulable_message(&model_name, Some(&shape_bucket)).or_else(
+                || {
+                    // Held on every device after its own repeated failures: the
+                    // refusal names the model, and the devices stay healthy.
+                    crate::gpu_pool::model_specific_hold_message(
+                        &model_name,
+                        &state.gpu_pool.worker_ordinals(),
+                    )
+                },
+            )
         {
             tracing::warn!(model = %model_name, "{err_msg}");
             durable_generation_settlement::fail_async(
@@ -3588,6 +3643,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
             model: model_name.clone(),
             request: job.request,
             deferred_media: job.deferred_media,
+            materialized_control_lora: job.materialized_control_lora,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
@@ -3986,6 +4042,7 @@ fn generation_from_legacy_gpu_job(job: GpuJob) -> GenerationJob {
         durable_queue_rank: job.durable_queue_rank,
         request: job.request,
         deferred_media: job.deferred_media,
+        materialized_control_lora: job.materialized_control_lora,
         completion_payload: job.completion_payload,
         progress_tx: job.progress_tx,
         result_tx: job.result_tx,
@@ -4140,6 +4197,9 @@ pub(crate) fn build_observed_dispatch(
                     crate::scheduler::worker_device_id(worker) == device.id.as_str()
                 })?;
                 Some(crate::execution_plan::DeviceFact {
+                    total_vram_bytes: crate::execution_plan::DeviceFact::sampled_total_vram_bytes(
+                        worker.gpu.total_vram_bytes,
+                    ),
                     cuda_peak_baseline: None,
                     id: device.id.to_string(),
                     ordinal: worker.gpu.ordinal,
@@ -4412,7 +4472,7 @@ mod tests {
             .expect("attempt cancellation installation");
         let slot = body.find("mark_running").expect("single-worker slot claim");
         let hydrate = body
-            .find("deferred.hydrate_into")
+            .find("queue_media_runtime::hydrate_dispatch_media")
             .expect("slot-bound durable hydration");
         let binding = body
             .find("inference_bindings_for_request")
@@ -4702,6 +4762,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("mock-model"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: Some(progress_tx),
             result_tx,
@@ -4791,6 +4852,7 @@ mod tests {
             durable_queue_rank: None,
             request: serde_json::from_str(&request_json).unwrap(),
             deferred_media: Some(deferred),
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: Some(progress_tx),
             result_tx,
@@ -5584,6 +5646,7 @@ mod tests {
             model: request.model.clone(),
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -5767,8 +5830,9 @@ mod tests {
         std::fs::create_dir_all(&reservations).unwrap();
         std::fs::write(reservations.join("same.png.reserve"), b"reserved").unwrap();
 
-        let (filename, path, _reservation) =
+        let published =
             write_gallery_bytes_no_replace(tmp.path(), "same.png", b"ordinary").unwrap();
+        let (filename, path) = (published.filename, published.path);
 
         assert_eq!(filename, "same-1.png");
         assert_eq!(std::fs::read(path).unwrap(), b"ordinary");
@@ -5817,7 +5881,12 @@ mod tests {
 
         let outcome = write_gallery_bytes_no_replace(tmp.path(), "ordinary.png", b"ours");
 
-        if let Ok((filename, _, _)) = outcome {
+        if let Ok(PublishedGalleryBytes {
+            filename,
+            reservation: _reservation,
+            ..
+        }) = outcome
+        {
             assert_ne!(
                 filename, "ordinary.png",
                 "a taken name must never be published over"
@@ -5872,7 +5941,12 @@ mod tests {
         let saved = write_gallery_bytes_no_replace(tmp.path(), "ordinary.png", b"generated output");
 
         let published = match saved {
-            Ok((filename, path, _reservation)) => {
+            Ok(PublishedGalleryBytes {
+                filename,
+                path,
+                reservation: _reservation,
+                ..
+            }) => {
                 assert_eq!(filename, "ordinary.png");
                 path
             }
@@ -5895,7 +5969,12 @@ mod tests {
         std::fs::write(tmp.path().join("taken.png"), b"someone else's").unwrap();
         let refused = write_gallery_bytes_no_replace(tmp.path(), "taken.png", b"ours");
         FORCE_PUBLISH_FALLBACK.store(false, Ordering::SeqCst);
-        if let Ok((filename, _, _)) = refused {
+        if let Ok(PublishedGalleryBytes {
+            filename,
+            reservation: _reservation,
+            ..
+        }) = refused
+        {
             assert_ne!(
                 filename, "taken.png",
                 "a taken name must not be published over"
@@ -5947,12 +6026,108 @@ mod tests {
         );
     }
 
+    /// A print's publication fences its bytes with directory fsyncs, and those
+    /// are the most expensive thing on the path that is not the render.
+    /// Exactly two are load-bearing on the gallery root: the one after the
+    /// staged file is renamed onto its final name, and the one that fences
+    /// that rename before the archive authority records it (the ordering
+    /// contract's "PNG fsync+rename -> authority" step).
+    ///
+    /// The reservation's own two fsyncs are NOT among them: no recovery path
+    /// reads a reservation file, name selection also checks whether the final
+    /// name exists, and the publish is no-replace, so a reservation that did
+    /// not survive a crash cannot produce a collision.
+    #[test]
+    fn ordinary_publication_performs_exactly_two_directory_syncs() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let mut img = fake_image();
+        img.data = b"generated output".to_vec();
+        let metadata =
+            OutputMetadata::from_generate_request(&fake_request("sdxl"), 42, None, "test-version");
+
+        crate::dir_sync::reset_recorded_directory_syncs();
+        let saved = save_image_to_dir_with_suffix(
+            &root,
+            &img,
+            "sdxl",
+            1,
+            None,
+            Some(&metadata),
+            None,
+            None,
+            None,
+            &gate,
+        );
+        assert!(saved.is_some(), "the print must publish");
+        let gallery_root_syncs = crate::dir_sync::recorded_directory_syncs()
+            .into_iter()
+            .filter(|path| path == &root)
+            .count();
+        assert_eq!(
+            gallery_root_syncs,
+            2,
+            "recorded syncs: {:?}",
+            crate::dir_sync::recorded_directory_syncs()
+        );
+    }
+
+    /// The bytes are hashed while they are written; archiving must use that
+    /// digest rather than reading the freshly written file back and hashing it
+    /// a second time. For a 1024^2 PNG that second pass was megabytes this
+    /// process still had in memory.
+    #[test]
+    fn archive_ordinary_gallery_record_uses_precomputed_digest() {
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let mut img = fake_image();
+        img.data = b"generated output".to_vec();
+        let metadata =
+            OutputMetadata::from_generate_request(&fake_request("sdxl"), 42, None, "test-version");
+
+        crate::batch_transaction::reset_ordinary_publication_hash_count();
+        let filename = save_image_to_dir_with_suffix(
+            &root,
+            &img,
+            "sdxl",
+            1,
+            None,
+            Some(&metadata),
+            None,
+            None,
+            None,
+            &gate,
+        )
+        .expect("the print must publish");
+        assert_eq!(
+            crate::batch_transaction::ordinary_publication_hash_count(),
+            0,
+            "a caller that hashed its own bytes must not make the archive read them back"
+        );
+
+        // And the digest that was recorded is the real one.
+        let expected = {
+            use sha2::Digest as _;
+            format!("{:x}", sha2::Sha256::digest(b"generated output"))
+        };
+        let authority = crate::batch_transaction::acquire_gallery_bookkeeping_lock(&root).unwrap();
+        let index = gate
+            .committed_archive_index_while_locked(&root, &authority)
+            .unwrap();
+        let entry = index.get(&filename).expect("the print is archived");
+        assert_eq!(entry.identity.checksum_sha256, expected);
+    }
+
     #[test]
     fn ordinary_gallery_save_leaves_no_staging_file_behind() {
         let tmp = TempDir::new().unwrap();
-        let (filename, path, _reservation) =
+        let published =
             write_gallery_bytes_no_replace(tmp.path(), "ordinary.png", b"generated output")
                 .unwrap();
+        let (filename, path) = (published.filename, published.path);
 
         assert_eq!(filename, "ordinary.png");
         assert_eq!(std::fs::read(path).unwrap(), b"generated output");
@@ -5975,20 +6150,22 @@ mod tests {
             )
         };
 
-        let (filename, path, _reservation) = write_gallery_bytes_no_replace_with_directory_sync(
+        let published = write_gallery_bytes_no_replace_with_directory_sync(
             tmp.path(),
             "ordinary.png",
             b"generated output",
             &unsupported_sync,
         )
         .unwrap();
+        let (filename, path) = (published.filename, published.path);
 
         assert_eq!(filename, "ordinary.png");
         assert_eq!(std::fs::read(path).unwrap(), b"generated output");
         assert_eq!(
             sync_attempts.load(Ordering::SeqCst),
-            2,
-            "reservation and gallery directories both use the explicit best-effort policy"
+            1,
+            "only the gallery directory is synced, through the explicit best-effort policy; \
+             the reservation is a live token and no longer fsyncs anything"
         );
     }
 
@@ -6002,9 +6179,15 @@ mod tests {
 
         save_image_to_dir(tmp.path(), &img, "sdxl", 4, None, None, None, None);
 
+        // Prints only: mold's own dotfiles (the gallery writer lease) share
+        // this directory and the gallery listing ignores them.
         let entries: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
-            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .filter(|entry| {
+                entry.as_ref().is_ok_and(|entry| {
+                    entry.path().is_file() && !entry.file_name().to_string_lossy().starts_with('.')
+                })
+            })
             .collect();
         let name = entries[0]
             .as_ref()
@@ -6297,7 +6480,14 @@ mod tests {
         assert_eq!(
             std::fs::read_dir(tmp.path())
                 .unwrap()
-                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                // Prints only: mold's own dotfiles (the gallery writer
+                // lease) share this directory.
+                .filter(|entry| {
+                    entry.as_ref().is_ok_and(|entry| {
+                        entry.path().is_file()
+                            && !entry.file_name().to_string_lossy().starts_with('.')
+                    })
+                })
                 .count(),
             1
         );
@@ -6462,9 +6652,15 @@ mod tests {
             &gallery_gate,
         );
 
+        // Prints only: mold's own dotfiles (the gallery writer lease) share
+        // this directory and the gallery listing ignores them.
         let entries: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
-            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .filter(|entry| {
+                entry.as_ref().is_ok_and(|entry| {
+                    entry.path().is_file() && !entry.file_name().to_string_lossy().starts_with('.')
+                })
+            })
             .collect();
         assert_eq!(entries.len(), 1);
         let name = entries[0]
@@ -6822,7 +7018,14 @@ mod tests {
         assert_eq!(
             std::fs::read_dir(tmp.path())
                 .unwrap()
-                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                // Prints only: mold's own dotfiles (the gallery writer
+                // lease) share this directory.
+                .filter(|entry| {
+                    entry.as_ref().is_ok_and(|entry| {
+                        entry.path().is_file()
+                            && !entry.file_name().to_string_lossy().starts_with('.')
+                    })
+                })
                 .count(),
             1
         );
@@ -6852,9 +7055,15 @@ mod tests {
             &gallery_gate,
         );
 
+        // Prints only: mold's own dotfiles (the gallery writer lease) share
+        // this directory and the gallery listing ignores them.
         let entries: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
-            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .filter(|entry| {
+                entry.as_ref().is_ok_and(|entry| {
+                    entry.path().is_file() && !entry.file_name().to_string_lossy().starts_with('.')
+                })
+            })
             .collect();
         assert_eq!(entries.len(), 1);
         let name = entries[0]
@@ -7375,8 +7584,16 @@ mod tests {
         assert!(metadata_only.metadata.is_some());
     }
 
+    /// A save failure must not become a LOST RENDER.
+    ///
+    /// `MetadataOnly` is an optimization: the client said it would fetch the
+    /// bytes from the gallery instead of receiving them inline. When the save
+    /// did not happen there is nothing to fetch — but the server is holding
+    /// the finished pixels, which is exactly the case the inline payload
+    /// exists for. Answering `Error` there threw away a completed render over
+    /// a transport preference.
     #[test]
-    fn metadata_only_completion_fails_when_the_output_was_not_saved() {
+    fn a_metadata_only_completion_falls_back_to_the_bytes_when_the_save_failed() {
         let response = mold_core::GenerateResponse {
             mesh: None,
             request_warnings: Vec::new(),
@@ -7396,10 +7613,50 @@ mod tests {
             &SavedOutputNames::default(),
             SseCompletionPayload::MetadataOnly,
         );
-        match message {
-            SseMessage::Error(error) => assert!(error.message.contains("could not be saved")),
-            _ => panic!("metadata-only completion without a file must be an SSE error"),
-        }
+        let SseMessage::Complete(event) = message else {
+            panic!("a finished render the server still holds must complete, not fail")
+        };
+        assert!(
+            !event.image.is_empty(),
+            "the fallback must carry the pixels inline — there is no file to fetch"
+        );
+        assert!(
+            event.filename.is_none(),
+            "and it must not name a file that was never written"
+        );
+    }
+
+    /// The fallback is only for the failed save; a saved print still gets the
+    /// lean payload the client asked for.
+    #[test]
+    fn a_saved_metadata_only_completion_still_omits_the_bytes() {
+        let response = mold_core::GenerateResponse {
+            mesh: None,
+            request_warnings: Vec::new(),
+            audio: None,
+            images: vec![fake_image()],
+            video: None,
+            generation_time_ms: 100,
+            model: "flux-dev:q4".to_string(),
+            seed_used: 5,
+            gpu: None,
+        };
+        let message = build_sse_completion_message(
+            &response,
+            &fake_image(),
+            None,
+            None,
+            &SavedOutputNames {
+                output: Some("flux-dev-q4-123.png".to_string()),
+                original: None,
+            },
+            SseCompletionPayload::MetadataOnly,
+        );
+        let SseMessage::Complete(event) = message else {
+            panic!("a saved print completes")
+        };
+        assert!(event.image.is_empty(), "the lean payload stays lean");
+        assert_eq!(event.filename.as_deref(), Some("flux-dev-q4-123.png"));
     }
 
     #[test]
@@ -7636,6 +7893,7 @@ mod tests {
             model: "busy-model".to_string(),
             request: fake_request("busy-model"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: filler_result_tx,
@@ -7669,6 +7927,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -7721,6 +7980,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -7804,6 +8064,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request(model),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
@@ -7821,6 +8082,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request(model),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
@@ -8081,6 +8343,7 @@ mod tests {
                 durable_queue_rank: None,
                 request: fake_request(model),
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -8156,6 +8419,7 @@ mod tests {
                 durable_queue_rank: None,
                 request: fake_request(&format!("model-{id}")),
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -8216,6 +8480,7 @@ mod tests {
                 durable_queue_rank: None,
                 request: fake_request(&format!("model-{i}")),
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -8323,6 +8588,7 @@ mod tests {
                 durable_queue_rank: None,
                 request: fake_request(&format!("model-{i}")),
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -8456,6 +8722,7 @@ mod tests {
             durable_queue_rank: None,
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -8499,6 +8766,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -8580,6 +8848,7 @@ mod tests {
                     durable_queue_rank: None,
                     request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -8748,6 +9017,7 @@ mod tests {
                         durable_queue_rank: None,
                         request: fake_request("flux-dev:q4"),
                         deferred_media: None,
+                        materialized_control_lora: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx,
@@ -8866,6 +9136,7 @@ mod tests {
                     durable_queue_rank: None,
                     request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -8963,6 +9234,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -9024,6 +9296,7 @@ mod tests {
                         durable_queue_rank: None,
                         request: fake_request("flux-dev:q4"),
                         deferred_media: None,
+                        materialized_control_lora: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx,
@@ -9088,6 +9361,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,

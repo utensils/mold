@@ -117,14 +117,82 @@ pub(crate) fn add_metadata_chunks<W: std::io::Write>(
     Ok(())
 }
 
+/// How much CPU a saved PNG is worth.
+///
+/// PNG is lossless under both, so this only trades encode time against file
+/// size — never pixels. A 1024² still spent ~1.0 s of the measured 16.6 s
+/// server timeline at zlib-6 with adaptive per-row filter selection, which is
+/// five filter evaluations per row plus a full-strength deflate on data that
+/// is mostly incompressible noise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PngEncoding {
+    /// `fdeflate`'s PNG-tuned ultra-fast deflate with a fixed `Sub` filter.
+    /// The default.
+    #[default]
+    Fast,
+    /// zlib level 6 with adaptive per-row filter selection — the historical
+    /// behaviour, for anyone who would rather spend the second.
+    Balanced,
+}
+
+/// Resolve `MOLD_PNG_ENCODING`. Pure, so the contract is testable without
+/// touching the process environment.
+///
+/// An unrecognized value is the default rather than an error: a finished
+/// render must never fail to save because the variable was mistyped.
+pub fn png_profile_from(value: Option<&str>) -> PngEncoding {
+    match value.map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("balanced") => PngEncoding::Balanced,
+        _ => PngEncoding::Fast,
+    }
+}
+
+/// The profile this process encodes stills with.
+///
+/// Read with `std::env::var`, not `runtime_env::value`: the choice is lossless
+/// either way, so it changes no pixel and must never join the engine
+/// fingerprint (`ENGINE_SHAPING_VARIABLES`) or split an execution-equivalence
+/// class. `latent_preview.rs` reads `MOLD_STEP_PREVIEW` the same way.
+pub fn png_profile() -> PngEncoding {
+    png_profile_from(std::env::var("MOLD_PNG_ENCODING").ok().as_deref())
+}
+
 fn write_png(
     rgb_image: &image::RgbImage,
     writer: &mut std::io::Cursor<Vec<u8>>,
     metadata: Option<&OutputMetadata>,
 ) -> Result<()> {
+    write_png_with(rgb_image, writer, metadata, png_profile())
+}
+
+fn write_png_with<W: std::io::Write>(
+    rgb_image: &image::RgbImage,
+    writer: W,
+    metadata: Option<&OutputMetadata>,
+    profile: PngEncoding,
+) -> Result<()> {
     let mut encoder = png::Encoder::new(writer, rgb_image.width(), rgb_image.height());
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
+    match profile {
+        PngEncoding::Fast => {
+            // `fdeflate`'s PNG-tuned ultra-fast deflate, keeping the adaptive
+            // per-row filter `Compression::Fast` already selects. The plan for
+            // this change asked for a fixed `Filter::Sub` on the theory that
+            // adaptive selection is five trial encodes per row; measured, it
+            // is a pessimization in BOTH directions at this deflate level —
+            // 1024² noise 2,759,598 B / 7.3 ms with `Sub` against 2,741,265 B
+            // / 7.4 ms adaptive, a 512² photograph 380,599 B / 1.5 ms against
+            // 322,448 B / 1.7 ms — because the smaller filtered stream costs
+            // the deflate pass back what the filter search spent.
+            encoder.set_compression(png::Compression::Fast);
+            encoder.set_filter(png::Filter::Adaptive);
+        }
+        PngEncoding::Balanced => {
+            encoder.set_compression(png::Compression::Balanced);
+            encoder.set_filter(png::Filter::Adaptive);
+        }
+    }
 
     if let Some(metadata) = metadata {
         add_metadata_chunks(&mut encoder, metadata)?;
@@ -132,6 +200,7 @@ fn write_png(
 
     let mut png_writer = encoder.write_header()?;
     png_writer.write_image_data(rgb_image.as_raw())?;
+    png_writer.finish()?;
     Ok(())
 }
 
@@ -305,6 +374,100 @@ mod tests {
         let bytes = encode_image(&tensor, OutputFormat::Png, 4, 4, None).unwrap();
         assert!(bytes.len() >= 4);
         assert_eq!(&bytes[..4], &[0x89, 0x50, 0x4E, 0x47]);
+    }
+
+    /// A photographic-ish 1024² RGB image: smooth gradients plus per-pixel
+    /// noise, so neither profile can win on a degenerate solid colour.
+    fn synthetic_render(width: u32, height: u32) -> image::RgbImage {
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        image::RgbImage::from_fn(width, height, |x, y| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let noise = (state & 0x1F) as u32;
+            let r = ((x * 255) / width.max(1) + noise) % 256;
+            let g = ((y * 255) / height.max(1) + noise) % 256;
+            let b = (((x + y) * 255) / (width + height).max(1) + noise) % 256;
+            image::Rgb([r as u8, g as u8, b as u8])
+        })
+    }
+
+    #[test]
+    fn png_profile_defaults_to_fast_and_reads_the_env() {
+        assert_eq!(png_profile_from(None), PngEncoding::Fast);
+        assert_eq!(png_profile_from(Some("fast")), PngEncoding::Fast);
+        assert_eq!(png_profile_from(Some(" BALANCED ")), PngEncoding::Balanced);
+        assert_eq!(png_profile_from(Some("Balanced")), PngEncoding::Balanced);
+        // An unrecognized value is the default, not an error: a saved print
+        // must never fail because someone typed the variable wrong.
+        assert_eq!(png_profile_from(Some("maximum")), PngEncoding::Fast);
+        assert_eq!(png_profile_from(Some("")), PngEncoding::Fast);
+    }
+
+    #[test]
+    fn fast_png_round_trips_pixel_exactly() {
+        // PNG is lossless under every profile. This is the whole safety
+        // argument for making the fast one the default.
+        let source = synthetic_render(97, 61);
+        for profile in [PngEncoding::Fast, PngEncoding::Balanced] {
+            let mut buf = Cursor::new(Vec::new());
+            write_png_with(&source, &mut buf, None, profile).unwrap();
+            let bytes = buf.into_inner();
+            let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+                .unwrap()
+                .to_rgb8();
+            assert_eq!(
+                decoded.as_raw(),
+                source.as_raw(),
+                "{profile:?} PNG must decode to the exact pixels it was handed"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_png_stays_within_a_third_of_the_balanced_size() {
+        // A real 512^2 photograph is the honest proxy for a render: measured
+        // fast 322_448 B against balanced 304_452 B, a ratio of 1.059, for
+        // 1.7 ms against 59.0 ms. The bound is 1.35 so the test pins the
+        // trade rather than the exact fdeflate build.
+        let photo = image::load_from_memory(include_bytes!(
+            "../testdata/pulid/faces/frank-rubio-official-portrait.eva512.png"
+        ))
+        .unwrap()
+        .to_rgb8();
+        let (fast_len, balanced_len) = encoded_sizes(&photo);
+        eprintln!(
+            "png sizes (photograph): fast={fast_len} balanced={balanced_len} ratio={:.3}",
+            fast_len as f64 / balanced_len as f64
+        );
+        assert!(
+            fast_len as f64 <= 1.35 * balanced_len as f64,
+            "fast PNG is {fast_len} B against balanced {balanced_len} B"
+        );
+
+        // The adversarial case, stated rather than hidden: an image that is
+        // per-pixel noise everywhere is where fdeflate's ultra-fast mode
+        // gives up the most (measured 2_741_265 B against 1_426_861 B, 1.92,
+        // for 7.4 ms against 203.2 ms). No render looks like this, but the
+        // bound records how far the default can go.
+        let noise = synthetic_render(1024, 1024);
+        let (fast_len, balanced_len) = encoded_sizes(&noise);
+        eprintln!(
+            "png sizes (pure noise): fast={fast_len} balanced={balanced_len} ratio={:.3}",
+            fast_len as f64 / balanced_len as f64
+        );
+        assert!(
+            fast_len as f64 <= 2.0 * balanced_len as f64,
+            "fast PNG is {fast_len} B against balanced {balanced_len} B"
+        );
+    }
+
+    fn encoded_sizes(image: &image::RgbImage) -> (usize, usize) {
+        let mut fast = Cursor::new(Vec::new());
+        write_png_with(image, &mut fast, None, PngEncoding::Fast).unwrap();
+        let mut balanced = Cursor::new(Vec::new());
+        write_png_with(image, &mut balanced, None, PngEncoding::Balanced).unwrap();
+        (fast.into_inner().len(), balanced.into_inner().len())
     }
 
     #[test]

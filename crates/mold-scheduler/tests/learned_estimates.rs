@@ -328,6 +328,97 @@ fn conservative_measured_memory_high_water_decays_after_an_outlier() {
     );
 }
 
+/// A run that died did not reach a peak. It reached the card.
+///
+/// #1707: `flux2-dev:q8` at 1024x1024 completed nine times on plato and then
+/// OOM'd twice, and each failure's `vram_high_water_bytes` was the whole card
+/// — 46,554,677,248 bytes of a 46 GB L40S. Folded into the envelope, it became
+/// the frozen plan's recheck peak, `~46.5 GB no longer fits the current
+/// ~46.1 GB`, and every retry was refused: the envelope decays only when a new
+/// sample arrives, and no sample can arrive while the refusal stands.
+///
+/// A bucket with no completion sample keeps today's behaviour, because
+/// `failure_only_vram_floor` deliberately reads exactly that case (#641) and a
+/// floor from a failure is better evidence than none at all.
+#[test]
+fn a_failure_never_raises_an_envelope_successes_established() {
+    let mut store = EstimateStore::default();
+    let key = key("oom-envelope");
+    store.observe(
+        key.clone(),
+        EstimateObservation {
+            total_ms: Some(1_000),
+            vram_high_water_bytes: Some(42_515_562_496),
+            observed_at_unix_s: 1,
+            ..Default::default()
+        },
+    );
+    store.observe(
+        key.clone(),
+        EstimateObservation {
+            vram_high_water_bytes: Some(46_554_677_248),
+            outcome: EstimateOutcome::Failure,
+            observed_at_unix_s: 2,
+            ..Default::default()
+        },
+    );
+
+    let bucket = store.exact(&key).unwrap();
+    assert_eq!(bucket.failure_count, 1);
+    assert_eq!(
+        bucket.vram_conservative_bytes,
+        Some(42_515_562_496),
+        "the card the attempt ran out of is not evidence about the shape"
+    );
+
+    // A later SUCCESS is evidence, and still moves the envelope.
+    store.observe(
+        key.clone(),
+        EstimateObservation {
+            total_ms: Some(1_000),
+            vram_high_water_bytes: Some(43_571_478_528),
+            outcome: EstimateOutcome::Success,
+            observed_at_unix_s: 3,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        store.exact(&key).unwrap().vram_conservative_bytes,
+        Some(43_571_478_528)
+    );
+}
+
+/// #641's floor is untouched: with no completion sample, a failure's high water
+/// is the only evidence there is.
+#[test]
+fn a_failure_still_seeds_the_envelope_of_a_bucket_that_never_succeeded() {
+    let mut store = EstimateStore::default();
+    let key = key("never-succeeded");
+    store.observe(
+        key.clone(),
+        EstimateObservation {
+            vram_high_water_bytes: Some(24_884_805_632),
+            outcome: EstimateOutcome::Failure,
+            observed_at_unix_s: 1,
+            ..Default::default()
+        },
+    );
+    store.observe(
+        key.clone(),
+        EstimateObservation {
+            vram_high_water_bytes: Some(24_900_000_000),
+            outcome: EstimateOutcome::Failure,
+            observed_at_unix_s: 2,
+            ..Default::default()
+        },
+    );
+
+    let bucket = store.exact(&key).unwrap();
+    assert_eq!(bucket.sample_count, 0);
+    assert_eq!(bucket.failure_count, 2);
+    assert_eq!(bucket.vram_conservative_bytes, Some(24_900_000_000));
+}
+
 #[test]
 fn old_buckets_and_capacity_overflow_are_pruned_deterministically() {
     let mut store = EstimateStore::with_limits(2, 180 * 24 * 60 * 60);

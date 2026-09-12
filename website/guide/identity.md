@@ -86,7 +86,7 @@ the Nix packages, the AUR source packages, and the release tarballs. If you
 built from source yourself:
 
 ```bash
-cargo build --release -p mold-ai --features cuda,pulid   # or metal,pulid
+cargo build --release -p mold-ai --features cuda,flash-attn,pulid   # or metal,pulid
 ```
 
 `protoc` must be on `PATH` at build time (`nix develop` provides it; otherwise

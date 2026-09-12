@@ -53,21 +53,39 @@ storage requirements even when GPU residency is bounded.
 
 ### Variants
 
-| Model            | Size  | Gated | Notes                               |
-| ---------------- | ----- | ----- | ----------------------------------- |
-| `flux2-dev:q4`   | 20 GB | no    | Smallest dev tier; fits a 24 GB GPU |
-| `flux2-dev:q6`   | 27 GB | no    | Fits a 32 GB GPU with room to spare |
-| `flux2-dev:q8`   | 35 GB | no    | Near-BF16 quality                   |
-| `flux2-dev:fp8`  | 35 GB | no    | Mixed FP8 — BF16 attention, FP8 MLP |
-| `flux2-dev:bf16` | 65 GB | yes   | Full precision, 7 shards            |
+| Model            | Size  | Needs   | Gated | Notes                               |
+| ---------------- | ----- | ------- | ----- | ----------------------------------- |
+| `flux2-dev:q4`   | 20 GB | ~25 GB  | no    | Smallest dev tier; 32 GB-class GPU  |
+| `flux2-dev:q6`   | 27 GB | ~33 GB  | no    | 40 GB-class GPU                     |
+| `flux2-dev:q8`   | 35 GB | ~40 GB  | no    | Near-BF16 quality; 46/48 GB-class   |
+| `flux2-dev:fp8`  | 35 GB | ~41 GB  | no    | Mixed FP8; one file, 46/48 GB-class |
+| `flux2-dev:bf16` | 65 GB | streams | yes   | Full precision, 7 shards            |
 
 Sizes are the transformer alone. Every tier also pulls the Mistral3 encoder,
 VAE, and tokenizer (~36 GB), shared across tiers.
 
+**Needs** is what the render asks of the GPU, which is more than the
+checkpoint: a FLUX.2 denoise holds a ~3 GB working set of its own at
+1024x1024 — it scales with the transformer's width, not with the canvas —
+plus the VAE and the planner's safety headroom. A card that merely matches
+the file size is refused at submit time with both figures named.
+
 The bare name `flux2-dev` means `flux2-dev:bf16`; name a tag for the others.
-Only the safetensors tiers (`bf16`, `fp8`) block-offload when a CUDA GPU
-cannot hold the transformer — a GGUF tier stays fully resident, so its size
-above is the VRAM it needs.
+
+**Only `flux2-dev:bf16` can block-offload**, because block streaming reads the
+transformer shard by shard and `bf16` is the only [dev] tier published as
+sharded weights (7 shards). Streaming them from host RAM costs the documented
+3-5x slowdown and asks the HOST for the room the GPU is not giving — the whole
+65 GB checkpoint has to fit in system RAM. Every other [dev] tier is a single
+file that is loaded whole: the GGUF tiers by format, and `flux2-dev:fp8`
+because its checkpoint is one BFL-native safetensors file with nothing to
+stream. For all of them the **Needs** figure above is a hard floor, and mold
+refuses an oversized request at submit time — naming the peak, the card, and
+that the layout is why it could not stream — rather than after a two-minute
+load.
+
+**No FLUX.2 [dev] tier fits a 24 GB card.** The smallest, `flux2-dev:q4`, needs
+~25 GB. On 24 GB use a Klein tier; every one of them fits comfortably.
 
 Only `flux2-dev:bf16` is gated: it comes from Black Forest Labs'
 [FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev) repo, which
@@ -88,6 +106,73 @@ mold run flux2-dev:q4 "preserve the subject, change the lighting" \
 hf auth login
 mold pull flux2-dev:bf16
 ```
+
+### The prompt encoder does not need 36 GB of VRAM
+
+The Mistral3 encoder is 36 GB on disk and mold used to plan for all of it,
+which made even an idle 46 GB card look over-subscribed: the encoder was moved
+to the CPU, where it runs at F32, and a cache-miss prompt took **78.8 seconds**
+with the GPU completely idle.
+
+It never needed that much. The encoder streams — it memory-maps the shards and
+builds one decoder layer at a time, holding the running layer and the next one
+— so it runs on the GPU in bf16 at a peak of about **3.6 GB**, and those 36 GB
+of shards stay reclaimable page cache rather than memory anything has to
+reserve. mold now plans for the streamed peak on both sides, so:
+
+- The encoder stays on the GPU on a 24 GB card as well as a 46 GB one, even
+  beside a resident Q8 transformer. It runs before the transformer denoises,
+  so the two phases do not overlap.
+- **Host RAM**: you need room for the working set, not for the file — roughly
+  7 GB if you deliberately pin the encoder to the CPU with
+  `--device-text-encoders cpu`, and effectively nothing beyond page cache
+  otherwise. A 64 GB desktop used to be refused outright.
+- **Disk cache**: the shards are read through the page cache, so the second
+  render of a session is much faster than the first on a machine with enough
+  free RAM to keep them.
+
+Pinning the encoder to the CPU is still honoured; it is just no longer chosen
+for you on a card that had the room all along.
+
+### A second render of the same prompt reuses what the first built
+
+Two things now survive a render rather than being rebuilt from disk.
+
+The **transformer** stays GPU-resident when the card has room for it beside
+the VAE decode. The decision is a measurement taken per render — the resident
+checkpoint, the denoise workspace, the decode workspace and a 1 GB allocator
+margin against the card's usable free VRAM — so it moves with the canvas as
+well as the card. Flux.2 renders are capped at 1.8 megapixels (1328x1328 at
+the square) and the decode wants about 2.7 GB in bf16 at 1024x1024 and about
+4.6 GB at that ceiling, so across everything mold will render: a 46 GB card
+keeps a 33 GB Q8 [dev] transformer resident, a 24 GB card never does, and a
+24 GB card keeps a Q8 Klein tier, 4B or 9B. It is released before the encoder streams
+whenever the two would not fit together, and reused only when the LoRA stack,
+the working precision, the GPU and the resolved architecture all match.
+`MOLD_FLUX_KEEP_TRANSFORMER=0` (also `off`, `false`, `no`) forces the old
+drop-every-render behaviour. FLUX.2 resolves it through the same function FLUX.1
+does, so the opt-out means the same thing on both families; when it fires, the
+server logs `Flux.2 transformer dropped before VAE decode
+(MOLD_FLUX_KEEP_TRANSFORMER=0)`.
+
+The **encoder prefix** stays in host RAM when the machine can afford it, which
+turns a cache-miss prompt into a host-to-device copy per layer instead of a
+page fault, a dtype conversion and a copy. The park is measured, not a flag:
+the prefix, the transformer that loads beside it, and a `max(15 % of RAM,
+8 GiB)` floor must all fit in available memory, so a 64 GB desktop keeps
+streaming and a 1.5 TB host parks and page-locks. Only the layers the encoder
+actually runs are parked — the vision tower, the projector and layers 30-39
+that the single-file republication also ships are never touched.
+The measured park also waits for evidence that it will be reused: the prefix is
+never materialized by the streamed path, so parking it is a fresh ~35 GB read
+of the shards (29.1 s on a 4x L40S host), and the first encode of a process
+streams from the mapping instead — which is what every one-shot `mold run` is.
+A long-lived server parks from its second encode onwards.
+
+`MOLD_KEEP_TE_RAM=0` opts out; `MOLD_KEEP_TE_RAM=1` parks wherever the encoder
+alone clears the floor, and parks from the FIRST encode rather than waiting.
+
+Klein's Qwen3 encoder takes the same decision, quantized tiers included.
 
 Classic strength-based img2img, masks, ControlNet, LoRA, and batches with
 references are rejected because the checkpoint-native reference protocol does
@@ -136,9 +221,14 @@ publishes them as the base for fine-tuning, LoRA training, and custom
 pipelines.
 
 These are the only Flux.2 checkpoints that use a **negative prompt**. Guidance
-above 1.0 runs a second, unconditional forward per step, so a base render costs
-roughly twice a distilled render of the same step count; `--guidance 1` skips
-the branch entirely.
+above 1.0 adds an unconditional branch; `--guidance 1` skips it entirely. Where
+the card has room, both branches ride in ONE batch-2 forward per step, so each
+weight is read once for the pair and a guided render costs far less than two
+separate ones — on a bandwidth-bound quantized tier, closer to 1.2x a distilled
+render than 2x. Both prompts are padded to the same fixed 512 tokens, so the
+only thing that can send a render back to two sequential forwards is the
+doubled activations not fitting beside the weights on this card. The progress
+line says which ran.
 
 - **Developer**: [Black Forest Labs](https://blackforestlabs.ai/)
 - **License**: Apache 2.0 (4B), Non-Commercial (9B)
@@ -270,3 +360,74 @@ modulation transformer (BF16 or GGUF), and a BN-VAE decoder. Klein-4B uses
 Qwen3-4B (hidden_size=2560), Klein-9B uses Qwen3-8B (hidden_size=4096). GGUF
 variants keep weights quantized in VRAM with on-the-fly dequantization per
 matmul, minimizing memory usage.
+
+Every Klein prompt is truncated and padded to a fixed 512 tokens before it
+reaches the transformer, and every text token carries its own running position
+— both are Black Forest Labs' own conditioning contract, which mold did not
+follow before 0.29, so a Klein or dev render made with an earlier version will
+not reproduce from the same seed and settings.
+
+## Speed
+
+On CUDA, Flux.2 renders through FlashAttention-2 and cuDNN by default wherever
+the artifact compiled them — `mold` (sm89), `mold-sm86`, `mold-sm100` and the
+matching desktop packages compile both. `mold-sm120` uses math attention:
+FlashAttention's tile selection reads consumer Blackwell as a datacenter part
+with far more shared memory than it has, and mold owns no RTX 50-series card to
+measure the result on, so that artifact waits for qualification. A self-built
+`--features cuda` binary without `flash-attn`, and every Metal build, take the
+math path too: still correct, but carrying 0.29's byte change without its
+speedup — the byte change is a property of every CUDA build, not of the kernel.
+`MOLD_ATTN=math`
+and `MOLD_CONV=im2col` render the byte-stable way instead; a print archived
+before mold 0.29 does not re-render byte-for-byte after it under any setting,
+and renders made from 0.29 on are reproducible among themselves. Every other
+still family keeps the math/im2col defaults it has always had.
+
+**GGUF tiers run in BF16.** Activations follow the working dtype instead of
+being cast to F32 at the transformer boundary, which halves the bandwidth every
+matmul moves; the weights stay quantized in VRAM exactly as before, and
+position ids stay F32 because the rotary embedding is built from them. The
+transformer also no longer wraps all eighteen of its linear sites in a
+full-tensor NaN compare — about half a second per step spent masking a fault
+that had never been observed, and which would have been the wrong thing to hide
+anyway. `MOLD_FLUX_DEBUG_NONFINITE=1` replaces it with one check per denoise
+step that names the step and fails; `MOLD_FLUX2_QMATMUL=0` restores the
+per-forward dequantization arm if a render comes out wrong.
+
+**FP8 tiers widen their weights once.** An FP8 layer used to rebuild a
+working-dtype copy of its whole slab on every call, so the tier chosen to save
+VRAM paid full BF16 bandwidth for its weights. Where the card has room the
+widening now happens once at load and the packed slab is dropped — the same
+arithmetic in the same order, so the picture does not change. Free VRAM decides,
+measured before the first weight lands; `MOLD_FLUX2_FP8_CACHE=1` or `=0` forces
+it either way.
+
+**A guided Klein Base step is one forward, not two.** Both branches denoise the
+same latent, so they ride one batch-2 forward and every weight is read once for
+the pair — which is what Black Forest Labs' own sampler does. mold falls back
+to two sequential forwards when the doubled activations would not fit beside
+the weights on this card; the progress line names which shape ran — `one
+batched forward per step` or `two forwards per step` — and deliberately names
+no cause, because on a real render the budget is the only one. (A batch-2
+forward also needs both branches to be the same length, but every Klein prompt
+is padded to a fixed 512 rows, so that gate now survives only as a structural
+guard and no render reaches it.) `--guidance 1` still skips the branch entirely.
+
+**Smaller operations got out of the way.** The Q/K norms and the affine-less
+LayerNorms now hit candle's fused kernels rather than a ten-operation strided
+fallback, the rotary embedding takes candle's fused interleaved kernel where
+the layout allows, the double blocks issue one fused Q/K/V projection per
+stream instead of three, and the VAE's mid-block attention no longer
+materialises a full 16384x16384 score matrix during decode — the spike that
+used to push a loaded card into the much slower tiled-decode recovery.
+
+**Loading is 8-10x faster on a cold checkpoint.** A whole GGUF file is read in
+contiguous batches across eight threads into a reused page-locked staging
+buffer and uploaded from there, with two buffers alternating so one is filling
+while the other is still in flight. Reading it through a memory mapping instead
+is one page fault per 4 KiB on ZFS, which is where `$MOLD_HOME` lives on every
+machine mold is qualified on. Measured with the page cache dropped,
+`flux2-dev-Q8_0` went from 41.7 s to 4.3 s. The weights are byte-identical, so
+renders are too; macOS and CPU keep the mapping, where staging would be a pure
+extra copy.

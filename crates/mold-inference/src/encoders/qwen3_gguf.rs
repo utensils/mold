@@ -226,21 +226,89 @@ impl Qwen3Block {
 pub(crate) struct GgufQwen3Encoder {
     embedding: candle_nn::Embedding,
     blocks: Vec<Qwen3Block>,
+    /// The checkpoint the blocks were built from, retained so parking is a
+    /// device move rather than a re-read from disk.
+    ///
+    /// Retaining it is very nearly free: `QMatMul::from_weights` keeps the
+    /// `Arc<QTensor>` it was given, so every block weight in this map is the
+    /// same allocation the model is already using. The ONE exception is
+    /// `token_embd.weight`, which is dequantized once at load and then never
+    /// touched again — [`GgufQwen3Encoder::from_tensors`] therefore relocates
+    /// that single entry to the host, so the retained map adds no device bytes
+    /// at all.
+    retained: GgufCheckpoint,
+}
+
+/// A parked GGUF checkpoint: every tensor on the host, plus the header
+/// metadata the architecture half needs to rebuild.
+pub(crate) type GgufParked = GgufCheckpoint;
+
+/// The checkpoint as the architecture half consumes it.
+type GgufCheckpoint = (
+    HashMap<String, Arc<QTensor>>,
+    HashMap<String, gguf_file::Value>,
+);
+
+/// Read every tensor off one memory mapping, with the header metadata the
+/// architecture half needs.
+fn read_tensors(path: &Path, device: &Device) -> Result<GgufCheckpoint> {
+    let map = mold_candle::gguf_mmap::GgufMmap::open(path)?;
+    let metadata = map.content().metadata.clone();
+    let tensors = map.load_all(device, &mut |_, _| {})?;
+    Ok((tensors, metadata))
 }
 
 impl GgufQwen3Encoder {
     /// Load from a GGUF file.
+    ///
+    /// Split in two so the transport and the architecture are separable: the
+    /// read is one memory mapping (see `mold_candle::gguf_mmap`), and
+    /// [`Self::from_tensors`] is the part that knows llama.cpp's naming.
     pub fn load(path: &Path, device: &Device) -> Result<Self> {
-        let mut file = std::fs::File::open(path)?;
-        let content = gguf_file::Content::read(&mut file)?;
+        let (tensors, metadata) = read_tensors(path, device)?;
+        Self::from_tensors(tensors, metadata, device)
+    }
 
-        // Load all tensors
-        let mut tensors: HashMap<String, Arc<QTensor>> = HashMap::new();
-        for name in content.tensor_infos.keys() {
-            let tensor = content.tensor(&mut file, name, device)?;
-            tensors.insert(name.clone(), Arc::new(tensor));
+    /// Move the whole checkpoint to host RAM and hand it back, leaving nothing
+    /// on the device.
+    ///
+    /// Byte-exact: `wan::block_offload::qtensor_to_device` serializes the
+    /// quantized blocks through `QTensor::data` and reconstructs them with
+    /// `qtensor_from_ggml`, so an unparked encoder is bit-for-bit the one that
+    /// was parked — which is the property `qwen3_gguf_park_unpark_is_byte_identical`
+    /// pins. This is the same mechanism #1044 gave Qwen-Image's Qwen2 encoder;
+    /// the "GGUF is device-tied and cannot park" carve-out this replaces was a
+    /// scoping decision, never a limitation.
+    pub fn park_to_cpu(&self) -> Result<GgufParked> {
+        let (tensors, metadata) = &self.retained;
+        let mut parked = HashMap::with_capacity(tensors.len());
+        for (name, tensor) in tensors {
+            parked.insert(
+                name.clone(),
+                crate::wan::block_offload::qtensor_to_device(tensor, &Device::Cpu)?,
+            );
         }
+        Ok((parked, metadata.clone()))
+    }
 
+    /// Rebuild on `device` from a parked checkpoint.
+    pub fn from_parked(parked: &GgufParked, device: &Device) -> Result<Self> {
+        let (tensors, metadata) = parked;
+        let mut restored = HashMap::with_capacity(tensors.len());
+        for (name, tensor) in tensors {
+            restored.insert(
+                name.clone(),
+                crate::wan::block_offload::qtensor_to_device(tensor, device)?,
+            );
+        }
+        Self::from_tensors(restored, metadata.clone(), device)
+    }
+
+    fn from_tensors(
+        tensors: HashMap<String, Arc<QTensor>>,
+        metadata: HashMap<String, gguf_file::Value>,
+        device: &Device,
+    ) -> Result<Self> {
         let get = |name: &str| -> Result<Arc<QTensor>> {
             tensors
                 .get(name)
@@ -255,10 +323,9 @@ impl GgufQwen3Encoder {
         let embedding = candle_nn::Embedding::new(emb_weights, d_model);
 
         // Read layer count from metadata, default to 36 (Qwen3-4B)
-        let n_layers = content
-            .metadata
+        let n_layers = metadata
             .get("qwen3.block_count")
-            .or_else(|| content.metadata.get("llama.block_count"))
+            .or_else(|| metadata.get("llama.block_count"))
             .and_then(|v| match v {
                 gguf_file::Value::U32(n) => Some(*n as usize),
                 _ => None,
@@ -323,7 +390,20 @@ impl GgufQwen3Encoder {
             });
         }
 
-        Ok(Self { embedding, blocks })
+        // The embedding's quantized source has done its only job. Relocating
+        // it to the host is what keeps the retained map free of device bytes
+        // the model is not already holding.
+        let mut retained = tensors;
+        if let Some(embed) = retained.get("token_embd.weight") {
+            let host = crate::wan::block_offload::qtensor_to_device(embed, &Device::Cpu)?;
+            retained.insert("token_embd.weight".to_string(), host);
+        }
+
+        Ok(Self {
+            embedding,
+            blocks,
+            retained: (retained, metadata),
+        })
     }
 
     /// Run the Qwen3 encoder forward pass.
@@ -351,10 +431,16 @@ impl GgufQwen3Encoder {
     /// Run forward pass and collect hidden states from specific layers.
     /// Returns outputs stacked and reshaped: (B, seq_len, num_layers * hidden_size).
     /// Used by Flux.2 Klein which needs layers 9, 18, 27 stacked to 7680-dim.
+    ///
+    /// `attention` names the real (non-pad) positions of a fixed-width
+    /// prompt. When present the causal mask additionally excludes the padded
+    /// KEYS, which is the mask BFL hands the Qwen3 language model
+    /// (`flux2/text_encoder.py:408-416`).
     pub fn forward_with_layers(
         &mut self,
         input_ids: &Tensor,
         layer_indices: &[usize],
+        attention: Option<&[bool]>,
     ) -> Result<Tensor> {
         if layer_indices.is_empty() {
             anyhow::bail!("layer_indices must not be empty");
@@ -370,7 +456,18 @@ impl GgufQwen3Encoder {
         let (_batch, seq_len) = input_ids.dims2()?;
         let mut xs = self.embedding.forward(input_ids)?;
         let (cos, sin) = compute_rope(seq_len, xs.device())?;
-        let mask = causal_mask(seq_len, xs.dtype(), xs.device())?;
+        let mask = match attention {
+            Some(attention) => {
+                if attention.len() != seq_len {
+                    anyhow::bail!(
+                        "Qwen3 attention mask covers {} positions but the input has {seq_len}",
+                        attention.len()
+                    );
+                }
+                super::qwen3::causal_padding_mask(attention, xs.dtype(), xs.device())?
+            }
+            None => causal_mask(seq_len, xs.dtype(), xs.device())?,
+        };
 
         let n_run = max_layer + 1;
         let mut collected: Vec<Tensor> = Vec::with_capacity(layer_indices.len());
@@ -388,5 +485,170 @@ impl GgufQwen3Encoder {
         Ok(stacked
             .permute((0, 2, 1, 3))?
             .reshape((b, s, collected.len() * h))?)
+    }
+}
+
+impl GgufQwen3Encoder {
+    /// [`Self::park_to_cpu`] with the same-device short circuit removed.
+    ///
+    /// Split out for exactly the reason `wan::block_offload::rebuild_on` is:
+    /// `qtensor_to_device` hands back the input `Arc` when the target is the
+    /// device the tensor is already on, so a CPU-only test written against the
+    /// production path would compare a tensor with itself and prove nothing
+    /// about the byte path — which is the whole correctness claim.
+    #[cfg(test)]
+    fn park_rebuilt(&self) -> Result<GgufParked> {
+        let (tensors, metadata) = &self.retained;
+        let mut parked = HashMap::with_capacity(tensors.len());
+        for (name, tensor) in tensors {
+            parked.insert(
+                name.clone(),
+                crate::wan::block_offload::rebuild_on(tensor, &Device::Cpu)?,
+            );
+        }
+        Ok((parked, metadata.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::quantized::GgmlDType;
+
+    const TEST_VOCAB: usize = 32;
+    const TEST_FFN: usize = 256;
+    /// The block width is fixed by the architecture constants above
+    /// (`N_HEADS * HEAD_DIM`), so a "tiny" fixture can shrink the vocabulary
+    /// and the FFN but not this.
+    const TEST_DIM: usize = N_HEADS * HEAD_DIM;
+
+    /// A deterministic quantized tensor of the given shape.
+    fn q(shape: (usize, usize), seed: f32) -> Arc<QTensor> {
+        let count = shape.0 * shape.1;
+        let values: Vec<f32> = (0..count)
+            .map(|i| ((i as f32) * 0.001 + seed).sin())
+            .collect();
+        let dense = Tensor::from_vec(values, shape, &Device::Cpu).unwrap();
+        Arc::new(QTensor::quantize(&dense, GgmlDType::Q8_0).unwrap())
+    }
+
+    fn norm(width: usize, seed: f32) -> Arc<QTensor> {
+        let values: Vec<f32> = (0..width)
+            .map(|i| 1.0 + ((i as f32) * 0.01 + seed).cos() * 0.1)
+            .collect();
+        let dense = Tensor::from_vec(values, (1, width), &Device::Cpu).unwrap();
+        Arc::new(QTensor::quantize(&dense, GgmlDType::F32).unwrap())
+    }
+
+    /// A one-block checkpoint carrying every tensor `from_tensors` reads.
+    fn synthetic_checkpoint() -> GgufCheckpoint {
+        let mut tensors: HashMap<String, Arc<QTensor>> = HashMap::new();
+        tensors.insert("token_embd.weight".into(), q((TEST_VOCAB, TEST_DIM), 0.1));
+        let kv_width = N_KV_HEADS * HEAD_DIM;
+        tensors.insert("blk.0.attn_q.weight".into(), q((TEST_DIM, TEST_DIM), 0.2));
+        tensors.insert("blk.0.attn_k.weight".into(), q((kv_width, TEST_DIM), 0.3));
+        tensors.insert("blk.0.attn_v.weight".into(), q((kv_width, TEST_DIM), 0.4));
+        tensors.insert(
+            "blk.0.attn_output.weight".into(),
+            q((TEST_DIM, TEST_DIM), 0.5),
+        );
+        tensors.insert("blk.0.attn_q_norm.weight".into(), norm(HEAD_DIM, 0.6));
+        tensors.insert("blk.0.attn_k_norm.weight".into(), norm(HEAD_DIM, 0.7));
+        tensors.insert("blk.0.attn_norm.weight".into(), norm(TEST_DIM, 0.8));
+        tensors.insert("blk.0.ffn_norm.weight".into(), norm(TEST_DIM, 0.9));
+        tensors.insert("blk.0.ffn_gate.weight".into(), q((TEST_FFN, TEST_DIM), 1.0));
+        tensors.insert("blk.0.ffn_up.weight".into(), q((TEST_FFN, TEST_DIM), 1.1));
+        tensors.insert("blk.0.ffn_down.weight".into(), q((TEST_DIM, TEST_FFN), 1.2));
+
+        let mut metadata = HashMap::new();
+        metadata.insert("qwen3.block_count".to_string(), gguf_file::Value::U32(1));
+        (tensors, metadata)
+    }
+
+    /// The premise of the GGUF park: the bytes that come back are the bytes
+    /// that went out, and the encoder built from them renders identically.
+    ///
+    /// A dequantize/re-quantize round trip would pass a loose tolerance check
+    /// and still make a render depend on whether the encoder happened to be
+    /// parked, so this asserts raw storage equality and then BIT equality of
+    /// the forward output — not closeness.
+    ///
+    /// This is the test that retires the "GGUF: device-tied QTensors don't
+    /// survive a CPU round-trip" carve-out. They do, through exactly the
+    /// mechanism #1044 already gave Qwen-Image's Qwen2 encoder.
+    #[test]
+    fn qwen3_gguf_park_unpark_is_byte_identical() {
+        let (tensors, metadata) = synthetic_checkpoint();
+        let mut original =
+            GgufQwen3Encoder::from_tensors(tensors.clone(), metadata.clone(), &Device::Cpu)
+                .expect("the synthetic checkpoint carries every tensor the loader reads");
+
+        let parked = original.park_rebuilt().expect("park");
+        assert_eq!(
+            parked.0.len(),
+            tensors.len(),
+            "a park must keep every tensor the checkpoint carried"
+        );
+        for (name, before) in &tensors {
+            let after = parked.0.get(name).expect("parked set keeps the name");
+            assert_eq!(before.dtype(), after.dtype(), "{name} changed quantization");
+            assert_eq!(before.shape(), after.shape(), "{name} changed shape");
+            assert_eq!(
+                before.data().unwrap().as_ref(),
+                after.data().unwrap().as_ref(),
+                "{name} is not byte-identical after a park/unpark cycle"
+            );
+        }
+
+        let mut restored =
+            GgufQwen3Encoder::from_parked(&parked, &Device::Cpu).expect("unpark rebuilds");
+
+        let ids = Tensor::from_vec(vec![1u32, 5, 9, 2], (1, 4), &Device::Cpu).unwrap();
+        let before = original.forward(&ids).unwrap();
+        let after = restored.forward(&ids).unwrap();
+        assert_eq!(
+            before.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            after.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            "a parked encoder must render bit-identically to the one that was parked"
+        );
+    }
+
+    /// Retaining the checkpoint is not a second copy of the model.
+    ///
+    /// Every matmul weight in the map is the very `Arc` its `QMatMul` holds,
+    /// so it costs nothing. The tensors that are NOT shared are the ones the
+    /// loader dequantizes once and never looks at again: the token embedding,
+    /// which `from_tensors` therefore relocates to the host because it is the
+    /// only large one, and the four RMS norm weights per block, which are a
+    /// handful of kilobytes each. What this pins is the bound — the retained
+    /// map must never hold a MEANINGFUL unshared allocation on the device,
+    /// because that is the failure this design exists to avoid.
+    #[test]
+    fn the_retained_checkpoint_is_not_a_second_copy_of_the_model() {
+        const NEGLIGIBLE: usize = 1024 * 1024;
+
+        let (tensors, metadata) = synthetic_checkpoint();
+        let model = GgufQwen3Encoder::from_tensors(tensors, metadata, &Device::Cpu).unwrap();
+        let (retained, _) = &model.retained;
+
+        let embedding = retained
+            .get("token_embd.weight")
+            .expect("the embedding stays in the map so an unpark can rebuild from it");
+        assert!(
+            embedding.device().is_cpu(),
+            "the embedding's quantized source belongs on the host after the dequantize"
+        );
+
+        let mut unshared_device_bytes = 0usize;
+        for (name, tensor) in retained {
+            if name == "token_embd.weight" || Arc::strong_count(tensor) > 1 {
+                continue;
+            }
+            unshared_device_bytes += tensor.storage_size_in_bytes();
+        }
+        assert!(
+            unshared_device_bytes < NEGLIGIBLE,
+            "the retained map holds {unshared_device_bytes} device bytes nothing else is using"
+        );
     }
 }

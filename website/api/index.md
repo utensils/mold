@@ -191,15 +191,37 @@ would silently drop and render without.
 
 `gallery` describes what this host's Library can do: `can_delete` (always
 true), `trash: { enabled, retention_days }`, `organize`, `bulk_mutations`,
-`media_version`, `conditional_get`, and `row_events`. `trash.enabled` and
-`organize` are false whenever the metadata DB is disabled (`MOLD_DB_DISABLE=1`)
-or gallery output is off, and a client that sees them false must hide every
-organization control and keep the hard-delete wording.
+`media_version`, `conditional_get`, `row_events`, and `persists_outputs`.
+`trash.enabled` and `organize` are false whenever the metadata DB is disabled
+(`MOLD_DB_DISABLE=1`) or gallery output is off, and a client that sees them
+false must hide every organization control and keep the hard-delete wording.
+
+`gallery.persists_outputs` says a saved print's bytes read back from
+`GET /api/gallery/image/{filename}` exactly as they were written. It is
+`false` when the output directory is disabled — there is nothing to read back
+— and **absent means an older server**, never a refusal. It is the gate on
+asking for the leaner completion payload below; a client that cannot see the
+field keeps taking the inline base64, which every server has always sent.
+
+#### `X-Mold-SSE-Payload: metadata-only`
+
+A request header on the streaming generation endpoints. It trades the base64
+copy of the whole render carried inside the SSE `complete` frame for one HTTP
+GET of the file the server just wrote, which for a video or a large still is
+most of the bytes on the wire. Send it only when `gallery.persists_outputs` is
+true.
+
+The server answers a `complete` event with an empty `image` and the saved
+`filename` for the client to fetch. **If the save did not happen, the server
+falls back to the full inline payload rather than failing** — the render is
+finished either way, and the header is a transport preference, not a
+contract about what the render is worth. So a client must branch on what
+actually arrived rather than assuming the frame is empty.
 
 `durable_media` is present only while restart-safe encrypted request media is
 actually live (`protocol_version`, `encrypted_at_rest`, `generate_request_media`,
 `identity`, `private_h3`). Absence means unavailable, so a request carrying
-conditioning media is refused with `503 DURABLE_MEDIA_UNAVAILABLE`.
+conditioning media or a LoRA is refused with `503 DURABLE_MEDIA_UNAVAILABLE`.
 
 `expand` reports `configured`, `backend`, `remix`, the manifest `model` local
 expansion resolves (`qwen3-expand` today, so clients stop hard-coding it), and
@@ -491,11 +513,12 @@ the requests that need it, with HTTP 503 `DURABLE_MEDIA_UNAVAILABLE`; a
 media-free request is unaffected. There is no `X-Mold-Operation-Id` header and
 no attached, non-durable fallback.
 
-A LoRA combined with conditioning media is an ordinary durable request: the
-adapter's path and scale are sealed in the encrypted media set beside the media,
-restored before the print is planned, and re-validated when the job is
-dispatched, so an adapter that was moved or deleted in the meantime holds its
-row with a reason naming the file rather than rendering without it.
+A LoRA is an ordinary durable request, with or without conditioning media: the
+adapter's path and scale are sealed in the encrypted media set, restored before
+the print is planned, and re-validated when the job is dispatched, so an adapter
+that was moved or deleted in the meantime holds its row with a reason naming the
+file rather than rendering without it. A request naming a LoRA therefore needs
+the encrypted-media store exactly as one carrying a source image does.
 
 Ordered MiniMax H3 references are durable in the same way: each reference's
 descriptor (kind, probed shape, content `sha256`) stays on the queued request,
@@ -2090,6 +2113,14 @@ the desired preference remains enabled, health is unavailable, and
 `unschedulable_reason` reports `device_start_failed: ...`; retry the PATCH or
 restart after correcting the driver/device fault. A delayed ready, stopped, or
 completion event from the predecessor cannot mutate or reap the replacement.
+
+`unschedulable_reason` also reports `device_degraded` while a device is in its
+60-second cooldown after three consecutive **device-class** failures (driver
+faults, CUDA errors, out-of-memory). A failure the engine reports as specific
+to the model or the request — a non-finite prediction, for example — never
+reaches this state: it holds that model on that device instead, the device
+stays `healthy` and `schedulable`, and the refusal for the held model names
+the model.
 
 Runtime mutation requires scheduler V2. In legacy, observe, or maintenance
 mode, disabling still returns `409`, but enabling a persistently-disabled,

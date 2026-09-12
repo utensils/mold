@@ -680,6 +680,29 @@ fn ltx2_implicit_pipeline(req: &GenerateRequest) -> Option<Ltx2PipelineMode> {
     None
 }
 
+/// The pipeline this request will run, explicit or implied.
+///
+/// `None` only where the answer depends on the checkpoint's own assets, which
+/// this crate cannot see.
+pub fn ltx2_resolved_pipeline(req: &GenerateRequest) -> Option<Ltx2PipelineMode> {
+    req.pipeline.or_else(|| ltx2_implicit_pipeline(req))
+}
+
+/// Whether this request's conditioned stage VAE-encodes an IC-LoRA reference
+/// video.
+///
+/// Mirrors the engine's own gate — `maybe_load_stage_video_conditioning`'s
+/// `include_reference_video` argument is
+/// `matches!(plan.pipeline, PipelineKind::IcLora | PipelineKind::LipDub)` —
+/// so a plain `--lora` render, a retake, or a keyframe interpolation is never
+/// judged against the reference grid.
+pub fn ltx2_encodes_reference_video(req: &GenerateRequest) -> bool {
+    matches!(
+        ltx2_resolved_pipeline(req),
+        Some(Ltx2PipelineMode::IcLora | Ltx2PipelineMode::LipDub)
+    )
+}
+
 /// [`ltx2_spatial_composition`] resolved from the whole request.
 ///
 /// An explicit `pipeline` wins; otherwise the request's own conditioning
@@ -687,10 +710,7 @@ fn ltx2_implicit_pipeline(req: &GenerateRequest) -> Option<Ltx2PipelineMode> {
 /// retake — which denoises once — would be admitted at the composed ceiling
 /// and only refused by the engine's backstop, minutes later.
 pub fn ltx2_spatial_composition_for_request(req: &GenerateRequest) -> Ltx2SpatialComposition {
-    ltx2_spatial_composition(
-        &req.model,
-        req.pipeline.or_else(|| ltx2_implicit_pipeline(req)),
-    )
+    ltx2_spatial_composition(&req.model, ltx2_resolved_pipeline(req))
 }
 
 /// Total-pixel ceiling for a generation family, assuming no composition.
@@ -1043,6 +1063,140 @@ pub fn validate_ltx2_stage1_span(
          {ceiling}px.",
         stage1.0, stage1.1, LTX2_MAX_AXIS_PIXELS,
     ))
+}
+
+/// Whether an IC-LoRA reference video encodes onto the VAE's latent grid at
+/// this output axis.
+///
+/// An IC-LoRA trained on scaled reference clips declares
+/// `reference_downscale_factor` in its own safetensors metadata (the union and
+/// motion-track adapters ship `2`, which is what their `ref0.5` filenames
+/// mean). Upstream divides the *conditioned stage's* pixel dimensions by it
+/// and VAE-encodes the result
+/// (`packages/ltx-pipelines/src/ltx_pipelines/iclora_utils.py:111-141`), then
+/// appends those latents as reference tokens whose positions are the
+/// reference grid's own coordinates multiplied back by the same factor
+/// (`iclora_utils.py:160-167`; mold's
+/// `ltx2/runtime.rs::append_condition_from_video_latents`). The reference
+/// latent grid must therefore be EXACTLY the conditioned stage's grid divided
+/// by the factor — a half cell has no representation, and nothing upstream
+/// pads, crops, or shortens a patch to make one: `SpaceToDepthDownsample`
+/// `rearrange`s each axis by its stride
+/// (`packages/ltx-core/src/ltx_core/model/video_vae/sampling.py:41-49`), which
+/// raises on a non-divisible extent exactly as candle's `reshape` does.
+///
+/// Upstream never meets it because its own IC-LoRA defaults are 1024x1536
+/// (`utils/constants.py:43-44`, doubled by `stage_2_*`), both multiples of
+/// 128; `assert_resolution`'s divisor of 64 for a two-stage pipeline
+/// (`utils/helpers.py:540-551`) is the reference-factor-1 case of this rule.
+/// mold's LTX-2 manifest default is 1216x704, whose stage-1 latent grid is
+/// 19x11 — both odd — so `--ic-lora-control union` failed inside the VAE at
+/// the tier's own default canvas.
+///
+/// A `downscale_factor` of 0 or 1 is every ordinary adapter, and is always
+/// aligned.
+pub fn ltx2_reference_axis_is_aligned(
+    target: u32,
+    upscale: Option<Ltx2SpatialUpscale>,
+    downscale_factor: u32,
+) -> bool {
+    if downscale_factor <= 1 {
+        return true;
+    }
+    // Same reading of an absent rung as `validate_ltx2_stage1_span`: the
+    // runtime applies an implicit x2 on every spatially refining pipeline,
+    // and IC-LoRA is one of them.
+    let effective = upscale.unwrap_or(Ltx2SpatialUpscale::X2);
+    let stage1 = ltx2_stage1_axis_for(target, Some(effective));
+    let cells = stage1 / LTX2_SPATIAL_LATENT_STRIDE;
+    cells > 0 && cells.is_multiple_of(downscale_factor)
+}
+
+/// The largest output axis at or below `target` whose IC-LoRA reference
+/// encodes onto the latent grid, or `None` when no such axis exists above the
+/// VAE's own stride.
+///
+/// Snapping DOWN rather than up mirrors upstream's only other grid
+/// accommodation — `snap_frames_to_grid` floors onto the causal temporal
+/// lattice (`utils/helpers.py:554-562`) — and is the safe direction: it can
+/// never raise the pixel budget, the memory estimate, or the render time
+/// above what the caller asked for.
+pub fn ltx2_reference_aligned_axis(
+    target: u32,
+    upscale: Option<Ltx2SpatialUpscale>,
+    downscale_factor: u32,
+) -> Option<u32> {
+    if ltx2_reference_axis_is_aligned(target, upscale, downscale_factor) {
+        return Some(target);
+    }
+    let stride = LTX2_SPATIAL_LATENT_STRIDE;
+    let mut candidate = target - (target % stride);
+    if candidate == target {
+        candidate = target.checked_sub(stride)?;
+    }
+    while candidate >= stride {
+        if ltx2_reference_axis_is_aligned(candidate, upscale, downscale_factor) {
+            return Some(candidate);
+        }
+        candidate -= stride;
+    }
+    None
+}
+
+/// The largest canvas at or below `width`x`height` an IC-LoRA reference can
+/// condition on, or `None` when either axis has no aligned value.
+pub fn ltx2_reference_aligned_canvas(
+    width: u32,
+    height: u32,
+    upscale: Option<Ltx2SpatialUpscale>,
+    downscale_factor: u32,
+) -> Option<(u32, u32)> {
+    Some((
+        ltx2_reference_aligned_axis(width, upscale, downscale_factor)?,
+        ltx2_reference_aligned_axis(height, upscale, downscale_factor)?,
+    ))
+}
+
+/// Snap an IC-LoRA control render's canvas onto the reference grid, reporting
+/// the change.
+///
+/// This is a MUTATION at the admission seam, for the same reason
+/// [`materialize_extend_overlap_frames`] is: the canvas the reference was
+/// encoded against is the canvas that rendered, so the queue row, the frozen
+/// execution plan, the memory estimate and the saved provenance must all
+/// carry it. Doing it inside the engine instead would leave every one of
+/// those describing a render that never happened.
+///
+/// Returns the advisory sentence when it moved the canvas, `None` when the
+/// request was already aligned or carries no downscaling reference adapter.
+/// A canvas with no aligned value at all is left untouched — the engine's own
+/// guard refuses it by name rather than this silently rendering something
+/// else.
+pub fn materialize_ltx2_reference_canvas(
+    req: &mut GenerateRequest,
+    downscale_factor: u32,
+) -> Option<String> {
+    if !ltx2_encodes_reference_video(req) {
+        return None;
+    }
+    let (width, height) = ltx2_reference_aligned_canvas(
+        req.width,
+        req.height,
+        req.spatial_upscale,
+        downscale_factor,
+    )?;
+    if (width, height) == (req.width, req.height) {
+        return None;
+    }
+    let advisory = format!(
+        "{}x{} renders at {width}x{height}: this IC-LoRA conditions on a reference video at \
+         1/{downscale_factor} of the render, and only a canvas whose stage-1 latent grid divides \
+         by {downscale_factor} can encode one.",
+        req.width, req.height,
+    );
+    req.width = width;
+    req.height = height;
+    Some(advisory)
 }
 
 /// Number of stage-2 tiles one axis is split into.
@@ -3213,7 +3367,11 @@ fn validate_generate_request_after_activation_with(
         if req.source_video.is_none() && req.source_video_path.is_none() {
             return Err("ic_lora_control requires source_video or source_video_path".to_string());
         }
-        let user_loras = usize::from(req.lora.is_some()) + req.loras.as_ref().map_or(0, Vec::len);
+        // `caller_lora_stack`, not the two wells added together: a single
+        // `mold run --lora X` on an ltx2 model fills BOTH with the same
+        // adapter, so summing them charged one adapter twice and put the
+        // four-slot ceiling at two real LoRAs beside the control.
+        let user_loras = req.caller_lora_stack().len();
         if user_loras + 1 > 4 {
             return Err(
                 "ic_lora_control plus custom LoRAs exceeds the four-LoRA stack limit".to_string(),
@@ -5871,6 +6029,121 @@ mod tests {
         req.output_format = Some(OutputFormat::Mp4);
         req.temporal_upscale = Some(crate::Ltx2TemporalUpscale::X2);
         validate_generate_request(&req).unwrap();
+    }
+
+    /// The exact geometry from the campaign UAT. `ltx-2.3-22b-distilled:fp8`
+    /// defaults to 1216x704; stage 1 halves the latent grid, so its cells are
+    /// 19 x 11 — both odd — and a `ref0.5` adapter's reference would need 9.5
+    /// x 5.5 of them. 1152x640 is the largest canvas at or below it that
+    /// works, which is the size the UAT proved renders.
+    #[test]
+    fn the_ltx2_default_canvas_is_snapped_onto_the_reference_grid() {
+        assert!(!ltx2_reference_axis_is_aligned(1216, None, 2));
+        assert!(!ltx2_reference_axis_is_aligned(704, None, 2));
+        assert_eq!(ltx2_reference_aligned_axis(1216, None, 2), Some(1152));
+        assert_eq!(ltx2_reference_aligned_axis(704, None, 2), Some(640));
+        assert_eq!(
+            ltx2_reference_aligned_canvas(1216, 704, None, 2),
+            Some((1152, 640))
+        );
+        // The snapped canvas is a fixed point.
+        assert!(ltx2_reference_axis_is_aligned(1152, None, 2));
+        assert!(ltx2_reference_axis_is_aligned(640, None, 2));
+    }
+
+    /// The ceil in `ltx2_stage1_axis_for` means two adjacent 32px rungs can
+    /// share a stage-1 grid, so the walk cannot assume one step per cell.
+    #[test]
+    fn the_reference_walk_steps_past_axes_that_share_a_stage_one_grid() {
+        // 1216 -> 38 latent cells -> stage 1 19; 1184 -> 37 -> ceil 19 too.
+        assert!(!ltx2_reference_axis_is_aligned(1184, None, 2));
+        assert_eq!(ltx2_reference_aligned_axis(1184, None, 2), Some(1152));
+    }
+
+    /// Upstream's own IC-LoRA default canvas (1536x1024, `PipelineParams`
+    /// `stage_1_*` doubled) is already on the grid, which is why upstream
+    /// never meets this failure.
+    #[test]
+    fn upstreams_own_ic_lora_default_canvas_needs_no_snap() {
+        assert_eq!(
+            ltx2_reference_aligned_canvas(1536, 1024, None, 2),
+            Some((1536, 1024))
+        );
+    }
+
+    /// Factor 1 — every ordinary adapter — constrains nothing, and an
+    /// explicit rung is honoured instead of the implicit x2.
+    #[test]
+    fn the_reference_grid_follows_the_factor_and_the_rung() {
+        assert!(ltx2_reference_axis_is_aligned(1216, None, 1));
+        assert!(ltx2_reference_axis_is_aligned(1216, None, 0));
+        assert_eq!(ltx2_reference_aligned_axis(1216, None, 1), Some(1216));
+        // An absent rung reads as the implicit x2 the runtime applies, so it
+        // must answer identically to naming x2.
+        assert_eq!(
+            ltx2_reference_axis_is_aligned(1216, None, 2),
+            ltx2_reference_axis_is_aligned(1216, Some(Ltx2SpatialUpscale::X2), 2)
+        );
+        // x1.5 puts stage 1 somewhere else entirely, and the helper follows
+        // `ltx2_stage1_axis_for` rather than assuming a halving: 704 -> 22
+        // target cells -> ceil((2*22 - 1) / 3) = 15 stage-1 cells, odd.
+        assert_eq!(
+            ltx2_stage1_axis_for(704, Some(Ltx2SpatialUpscale::X1_5)) / LTX2_SPATIAL_LATENT_STRIDE,
+            15
+        );
+        assert!(!ltx2_reference_axis_is_aligned(
+            704,
+            Some(Ltx2SpatialUpscale::X1_5),
+            2
+        ));
+        assert_eq!(
+            ltx2_reference_aligned_axis(704, Some(Ltx2SpatialUpscale::X1_5), 2),
+            Some(672)
+        );
+    }
+
+    /// The snap is a request mutation and only ever fires on a pipeline that
+    /// actually encodes a reference video.
+    #[test]
+    fn materializing_the_reference_canvas_only_touches_a_conditioned_render() {
+        fn request() -> GenerateRequest {
+            serde_json::from_value(serde_json::json!({
+                "prompt": "a lighthouse keeper",
+                "model": "ltx-2.3-22b-distilled:fp8",
+                "width": 1216,
+                "height": 704,
+                "steps": 8,
+                "guidance": 1.0,
+                "batch_size": 1
+            }))
+            .unwrap()
+        }
+
+        // Text-to-video with a plain LoRA: no reference is encoded, so the
+        // canvas is the caller's.
+        let mut plain = request();
+        assert!(materialize_ltx2_reference_canvas(&mut plain, 2).is_none());
+        assert_eq!((plain.width, plain.height), (1216, 704));
+
+        // A source video implies the IC-LoRA pipeline even with no explicit
+        // `pipeline`, exactly as `select_pipeline` resolves it.
+        let mut control = request();
+        control.source_video_path = Some("/guide.mp4".to_string());
+        assert!(ltx2_encodes_reference_video(&control));
+        let advisory = materialize_ltx2_reference_canvas(&mut control, 2).unwrap();
+        assert_eq!((control.width, control.height), (1152, 640));
+        assert!(advisory.contains("1216x704"), "{advisory}");
+        assert!(advisory.contains("1152x640"), "{advisory}");
+
+        // Idempotent: a second pass over the snapped request changes nothing.
+        assert!(materialize_ltx2_reference_canvas(&mut control, 2).is_none());
+        assert_eq!((control.width, control.height), (1152, 640));
+
+        // Factor 1 never moves a canvas.
+        let mut ordinary = request();
+        ordinary.source_video_path = Some("/guide.mp4".to_string());
+        assert!(materialize_ltx2_reference_canvas(&mut ordinary, 1).is_none());
+        assert_eq!((ordinary.width, ordinary.height), (1216, 704));
     }
 
     #[test]
@@ -9240,6 +9513,28 @@ mod tests {
         assert!(validate_generate_request(&req)
             .unwrap_err()
             .contains("four-LoRA"));
+
+        // The ceiling counts ADAPTERS, not wells. `mold run --lora X` on an
+        // ltx2 model fills `lora` and `loras` with the same adapter, and
+        // adding the two together charged it twice — so three real LoRAs
+        // beside the control read as five and were refused.
+        req.loras = Some(
+            (0..3)
+                .map(|index| crate::LoraWeight {
+                    path: format!("/loras/{index}.safetensors"),
+                    scale: 1.0,
+
+                    expert: None,
+                })
+                .collect(),
+        );
+        req.lora = Some(crate::LoraWeight {
+            path: "/loras/0.safetensors".to_string(),
+            scale: 1.0,
+
+            expert: None,
+        });
+        validate_generate_request(&req).unwrap();
     }
 
     // ── lip-dub ─────────────────────────────────────────────────────────────

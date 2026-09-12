@@ -20,7 +20,7 @@ pub struct Flux2State {
     pub img_ids: Tensor,
     /// Text encoder hidden states: (B, txt_len, context_dim)
     pub txt: Tensor,
-    /// Text positional IDs: (B, txt_len, 4) — zeros for text tokens
+    /// Text positional IDs: (B, txt_len, 4) — `[0, 0, 0, token_index]`
     pub txt_ids: Tensor,
     /// Conditioning vector: (B, vec_dim) — retained as zeros because FLUX.2
     /// has no pooled text input.
@@ -59,26 +59,68 @@ impl Flux2State {
     }
 }
 
-/// Batch one encoder output into transformer text tokens and their (all-zero)
-/// four-axis position ids.
+/// Batch one encoder output into transformer text tokens and their four-axis
+/// position ids.
 ///
 /// A classifier-free-guided render needs exactly this pair for its negative
 /// prompt and nothing else — no second latent, no second id grid, since both
 /// branches denoise the SAME image tokens. Building it through `Flux2State`
 /// instead would demand the rank-4 latent the positive state was already
 /// built from, which by then has been packed to rank 3.
+///
+/// This is the ONE place FLUX.2 text position ids are built — [dev] and
+/// [klein], positive branch and unconditional branch alike — so the table
+/// cannot drift between tiers or between the two halves of a guided step.
 pub fn text_conditioning(
     txt_emb: &Tensor,
     batch_size: usize,
     device: &candle_core::Device,
 ) -> Result<(Tensor, Tensor)> {
     let txt = txt_emb.repeat(batch_size)?;
-    let txt_ids = Tensor::zeros(
-        (batch_size, txt.dim(1)?, 4),
-        candle_core::DType::F32,
-        device,
-    )?;
+    let txt_ids = text_position_ids(txt.dim(1)?, batch_size, device)?;
     Ok((txt, txt_ids))
+}
+
+/// The four-axis position table FLUX.2 gives its text tokens.
+///
+/// Axis 3 is a RUNNING TOKEN INDEX and axes 0-2 (time, height, width) are
+/// zero. Three upstreams agree and mold matched none of them until #WP13:
+///
+/// - BFL `flux2/src/flux2/sampling.py:93-104` — `prc_txt` builds
+///   `cartesian_prod(t=arange(1), h=arange(1), w=arange(1), l=arange(L))`,
+///   whose only varying column is the last.
+/// - diffusers `pipelines/flux2/pipeline_flux2_klein.py:264-282` —
+///   `_prepare_text_ids` repeats that cartesian product per batch row.
+/// - ComfyUI `comfy/model_detection.py:278` sets `txt_ids_dims = [3]` for
+///   every `flux2` checkpoint, and `comfy/ldm/flux/model.py:400-406` writes
+///   `linspace(0, L-1)` into exactly those axes of an otherwise zero table.
+///
+/// mold carried FLUX.1's convention instead — an all-zero table — which gives
+/// every text token the same RoPE position, so the transformer could not tell
+/// the first word of the prompt from the last. That is a conditioning bug on
+/// EVERY FLUX.2 render, [dev] and [klein] both.
+///
+/// The axis choice is not arbitrary: [`pack_image_tokens`] mirrors BFL's
+/// `prc_img` (`sampling.py:141-151`), whose cartesian product is
+/// `(t, h, w, l=arange(1))` — image tokens pin axis 3 to zero and vary axes
+/// 0-2, so text and image tables are disjoint by construction and
+/// `EmbedNd`'s four 32-wide RoPE axes each carry exactly one meaning.
+///
+/// Ids stay F32 for the same reason [`pack_image_tokens`] does: BF16 cannot
+/// represent every integer above 256, and a padded FLUX.2 [klein] prompt is
+/// 512 tokens long.
+pub fn text_position_ids(
+    len: usize,
+    batch_size: usize,
+    device: &candle_core::Device,
+) -> Result<Tensor> {
+    let zeros = Tensor::zeros((len, 1), candle_core::DType::F32, device)?;
+    let index = Tensor::arange(0u32, len as u32, device)?
+        .to_dtype(candle_core::DType::F32)?
+        .reshape((len, 1))?;
+    Tensor::cat(&[&zeros, &zeros, &zeros, &index], 1)?
+        .reshape((1, len, 4))?
+        .repeat((batch_size, 1, 1))
 }
 
 /// Patchify one FLUX.2 VAE latent and create its four-axis position IDs.
@@ -371,6 +413,92 @@ mod tests {
         assert_eq!(ids.dims(), &[1, 12, 4]);
         let ids = ids.to_vec3::<f32>().unwrap();
         assert!(ids[0].iter().all(|id| id[0] == 20.0 && id[3] == 0.0));
+    }
+
+    /// BFL's `prc_txt` (`flux2/sampling.py:93-104`) is
+    /// `cartesian_prod(arange(1), arange(1), arange(1), arange(L))`, so for
+    /// `L = 3` the table is exactly the literal below: axes 0-2 (t, h, w) are
+    /// pinned to zero and axis 3 (`l`) is a running token index. diffusers'
+    /// `_prepare_text_ids` (`pipeline_flux2_klein.py:264-282`) builds the same
+    /// four columns, and ComfyUI writes `linspace(0, L-1)` into the axes named
+    /// by `txt_ids_dims = [3]` (`comfy/model_detection.py:278`,
+    /// `comfy/ldm/flux/model.py:400-406`).
+    ///
+    /// mold used to hand the transformer an all-zero table, which is FLUX.1's
+    /// convention: every text token then shared one RoPE position.
+    #[test]
+    fn flux2_text_ids_are_a_running_index_on_axis_three() {
+        let dev = Device::Cpu;
+        let txt = Tensor::randn(0f32, 1., (1, 3, 7680), &dev).unwrap();
+        let (_, ids) = text_conditioning(&txt, 1, &dev).unwrap();
+        assert_eq!(ids.dims(), &[1, 3, 4]);
+        assert_eq!(
+            ids.i(0).unwrap().to_vec2::<f32>().unwrap(),
+            vec![
+                vec![0.0, 0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0, 1.0],
+                vec![0.0, 0.0, 0.0, 2.0],
+            ],
+            "axis 3 must be the running token index, axes 0-2 zero"
+        );
+    }
+
+    /// The axis the text index lands on is the one `pack_image_tokens` leaves
+    /// free. Image ids are `[t, h, w, 0]` (BFL `prc_img`,
+    /// `flux2/sampling.py:141-151`) and text ids are `[0, 0, 0, l]`, so the two
+    /// tables never collide on a shared axis — which is the whole reason the
+    /// fourth axis exists in a model whose images are 2-D.
+    #[test]
+    fn text_and_image_ids_occupy_disjoint_axes() {
+        let dev = Device::Cpu;
+        let latent = Tensor::zeros((1, 32, 4, 6), DType::F32, &dev).unwrap();
+        let (_, img_ids) = pack_image_tokens(&latent, 0).unwrap();
+        let img_rows = img_ids.i(0).unwrap().to_vec2::<f32>().unwrap();
+        assert!(
+            img_rows.iter().all(|row| row[3] == 0.0),
+            "image ids must leave axis 3 free for text"
+        );
+
+        let txt = Tensor::randn(0f32, 1., (1, 5, 7680), &dev).unwrap();
+        let (_, txt_ids) = text_conditioning(&txt, 1, &dev).unwrap();
+        let txt_rows = txt_ids.i(0).unwrap().to_vec2::<f32>().unwrap();
+        assert!(
+            txt_rows
+                .iter()
+                .all(|row| row[0] == 0.0 && row[1] == 0.0 && row[2] == 0.0),
+            "text ids must leave the time/height/width axes to the image"
+        );
+    }
+
+    /// FLUX.2 [dev] and [klein] differ only in the width of the conditioning
+    /// their encoders produce — Mistral3's `3 * 5120` against Qwen3-4B's
+    /// `3 * 2560`. The position ids are a property of the SEQUENCE, not of the
+    /// encoder, and both tiers reach the transformer through
+    /// `Flux2State::new` -> `text_conditioning`. One builder, one table.
+    #[test]
+    fn dev_and_klein_share_one_txt_id_builder() {
+        let dev = Device::Cpu;
+        let img = Tensor::randn(0f32, 1., (1, 32, 16, 16), &dev).unwrap();
+
+        // [klein]: Qwen3 layers 9/18/27 stacked -> 3 * 2560.
+        let klein = Tensor::randn(0f32, 1., (1, 7, 7680), &dev).unwrap();
+        let klein_ids = Flux2State::new(&klein, &img).unwrap().txt_ids;
+        // [dev]: Mistral3 layers 10/20/30 stacked -> 3 * 5120.
+        let dev_emb = Tensor::randn(0f32, 1., (1, 7, 15360), &dev).unwrap();
+        let dev_ids = Flux2State::new(&dev_emb, &img).unwrap().txt_ids;
+
+        assert_eq!(
+            klein_ids.to_vec3::<f32>().unwrap(),
+            dev_ids.to_vec3::<f32>().unwrap(),
+            "both tiers must get the same position table for the same length"
+        );
+        // And it is the running index, not FLUX.1's zeros.
+        let (_, standalone) = text_conditioning(&klein, 1, &dev).unwrap();
+        assert_eq!(
+            klein_ids.to_vec3::<f32>().unwrap(),
+            standalone.to_vec3::<f32>().unwrap(),
+            "the CFG branch's builder and the state's builder must be one"
+        );
     }
 
     #[test]

@@ -183,6 +183,124 @@ pub(crate) enum PullStatus {
     Pulled,
 }
 
+/// Memoized `/api/models` rows, and the parsed `config.toml` behind them.
+///
+/// Both halves are per-request cost the audit measured: `refresh_config` runs
+/// on every admission and every model listing, and `list_models` walked the
+/// models directory's sidecars and stat'd every manifest model's component
+/// files each time.
+#[derive(Default)]
+pub(crate) struct ModelCatalogCache {
+    /// Bumped by anything that changes what is INSTALLED without changing the
+    /// config: a completed pull, a repair, a companion fetch, a delete, a
+    /// quantize. Configuration changes need no bump — they move the config
+    /// fingerprint, which cannot be forgotten at a new call site.
+    epoch: std::sync::atomic::AtomicU64,
+    inner: tokio::sync::Mutex<ModelCatalogCacheInner>,
+}
+
+#[derive(Default)]
+struct ModelCatalogCacheInner {
+    /// `config.toml` as parsed, WITHOUT the DB overlay, beside the file
+    /// identity it was parsed from.
+    parsed_config_file: Option<(
+        mold_core::config::ConfigFileIdentity,
+        mold_core::Config,
+        std::time::Instant,
+    )>,
+    catalog: Option<CachedCatalog>,
+}
+
+struct CachedCatalog {
+    epoch: u64,
+    config_fingerprint: u64,
+    built_at: std::time::Instant,
+    /// Built with no model marked loaded; residency is applied per call.
+    rows: Vec<ModelInfoExtended>,
+}
+
+/// How long a memoized catalog is trusted without any invalidation signal.
+///
+/// The backstop exists for installation changes made by code that holds no
+/// `AppState`: the download driver task lands a catalog sidecar in the models
+/// directory without touching `config.toml`, so neither the epoch nor the
+/// config fingerprint moves. One second of staleness on "is it installed yet"
+/// is the price; the alternative is walking the whole models directory on
+/// every admission, which is what this replaces.
+const CATALOG_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long a parsed `config.toml` is trusted on identity alone.
+///
+/// `ConfigFileIdentity` is `{len, modified}`, and `modified` is an `Option`:
+/// where the platform does not report an mtime it is `None` for every sample
+/// and the identity degrades to LENGTH ALONE, so a same-length edit
+/// (`flux-dev:q8` -> `flux-dev:q4`, `cuda:0` -> `cuda:1`) stayed invisible
+/// until restart. Coarse mtime on SMB/NFSv3/exFAT/HFS+ adds a same-second
+/// window with the same effect. The catalog half of this cache has always had
+/// a max-age backstop; the parse half had none, so a miss was permanent
+/// rather than brief.
+const CONFIG_FILE_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl ModelCatalogCache {
+    /// Discard the memoized filesystem rows. Call after anything that changes
+    /// what is installed on disk.
+    pub(crate) fn invalidate(&self) {
+        self.epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONFIG_FILE_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CATALOG_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_catalog_counters() {
+    CONFIG_FILE_PARSE_COUNT.with(|count| count.set(0));
+    CATALOG_BUILD_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn config_file_parse_count() -> usize {
+    CONFIG_FILE_PARSE_COUNT.with(|count| count.get())
+}
+
+#[cfg(test)]
+pub(crate) fn catalog_build_count() -> usize {
+    CATALOG_BUILD_COUNT.with(|count| count.get())
+}
+
+/// A stable digest of everything in the config the catalog reads.
+///
+/// Deliberately NOT `serde_json::to_vec(config)`: `Config::models` is a
+/// `HashMap`, and two freshly parsed configs with identical contents iterate
+/// it in different orders because each map instance gets its own hasher seed —
+/// so a naive serialization would miss on every call.
+fn catalog_config_fingerprint(config: &mold_core::Config) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut models: Vec<(&str, String)> = config
+        .models
+        .iter()
+        .map(|(name, model)| {
+            (
+                name.as_str(),
+                serde_json::to_string(model).unwrap_or_default(),
+            )
+        })
+        .collect();
+    models.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    models.hash(&mut hasher);
+    let mut scalars = config.clone();
+    scalars.models.clear();
+    serde_json::to_string(&scalars)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
 pub(crate) async fn refresh_config(state: &AppState) -> mold_core::Config {
     // Unit-test states intentionally carry isolated in-memory model and
     // output authorities. Reloading is explicit per state so another
@@ -193,67 +311,117 @@ pub(crate) async fn refresh_config(state: &AppState) -> mold_core::Config {
         return state.config.read().await.clone();
     }
 
-    {
-        let fresh = {
-            let current = state.config.read().await;
-            current.reload_from_disk_preserving_runtime()
-        };
+    // Re-parse `config.toml` only when the file itself changed. The DB-backed
+    // overlay is re-applied every time regardless: another process's
+    // `mold config set expand.*` or a per-model preference never touches the
+    // file, so caching past it would make those settings invisible until a
+    // restart.
+    let identity = mold_core::Config::config_file_identity();
+    let mut fresh = {
+        let mut cache = state.model_catalog.inner.lock().await;
+        let cached = cache
+            .parsed_config_file
+            .as_ref()
+            .filter(|(cached_identity, _, parsed_at)| {
+                identity.is_some_and(|now| now == *cached_identity)
+                    && parsed_at.elapsed() < CONFIG_FILE_CACHE_MAX_AGE
+            })
+            .map(|(_, config, _)| config.clone());
+        match cached {
+            Some(config) => config,
+            None => {
+                #[cfg(test)]
+                CONFIG_FILE_PARSE_COUNT.with(|count| count.set(count.get() + 1));
+                let parsed = mold_core::Config::load_file_only();
+                cache.parsed_config_file =
+                    identity.map(|identity| (identity, parsed.clone(), std::time::Instant::now()));
+                parsed
+            }
+        }
+    };
+    fresh.apply_post_load_overlay();
+    // `reload_from_disk_preserving_runtime`'s one runtime override.
+    fresh.models_dir = state.config.read().await.models_dir.clone();
 
-        let mut config = state.config.write().await;
-        *config = fresh.clone();
-        fresh
-    }
+    let mut config = state.config.write().await;
+    *config = fresh.clone();
+    fresh
 }
 
 pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
     let config = refresh_config(state).await;
     let models_dir = config.resolved_models_dir();
+    let epoch = state
+        .model_catalog
+        .epoch
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let fingerprint = catalog_config_fingerprint(&config);
+
+    // The filesystem half — manifest download probes and a sidecar walk over
+    // the whole models directory — is the same answer until something is
+    // installed, removed, or reconfigured. Residency is not: it is applied
+    // below, per call, to a copy of the memoized rows.
+    let mut catalog = {
+        let mut cache = state.model_catalog.inner.lock().await;
+        let hit = cache
+            .catalog
+            .as_ref()
+            .filter(|cached| {
+                cached.epoch == epoch
+                    && cached.config_fingerprint == fingerprint
+                    && cached.built_at.elapsed() < CATALOG_CACHE_MAX_AGE
+            })
+            .map(|cached| cached.rows.clone());
+        match hit {
+            Some(rows) => rows,
+            None => {
+                #[cfg(test)]
+                CATALOG_BUILD_COUNT.with(|count| count.set(count.get() + 1));
+                let mut rows = build_model_catalog(&config, None, false);
+                rows.extend(installed_catalog_models(
+                    state,
+                    &config,
+                    &models_dir,
+                    None,
+                    false,
+                ));
+                annotate_audio_capabilities(&mut rows, &config);
+                annotate_ltx25_runtime_readiness(&mut rows, &config);
+                // CPU-fallback / maintenance runtimes (no workers) advertise
+                // the same conditioning contracts: classification reads
+                // safetensors headers, not a GPU.
+                annotate_source_image_capabilities(&mut rows, &config);
+                synchronize_generation_profile_capabilities(&mut rows);
+                retain_deliverable_generation_profiles(&mut rows);
+                cache.catalog = Some(CachedCatalog {
+                    epoch,
+                    config_fingerprint: fingerprint,
+                    built_at: std::time::Instant::now(),
+                    rows: rows.clone(),
+                });
+                rows
+            }
+        }
+    };
 
     // Multi-GPU mode: derive "loaded" state from the worker pool so /api/models
     // reflects the actual engine cache, not the legacy single-GPU snapshot.
     if state.gpu_pool.worker_count() > 0 {
         let loaded_models = loaded_models_across_pool(state);
-        let primary = loaded_models.first().cloned();
-        let mut catalog = build_model_catalog(&config, primary.as_deref(), primary.is_some());
-        // Mark every GPU-resident model as loaded (not just the primary).
         for entry in catalog.iter_mut() {
-            if loaded_models.contains(&entry.info.name) {
-                entry.info.is_loaded = true;
-            }
+            entry.info.is_loaded = loaded_models.contains(&entry.info.name);
         }
-        catalog.extend(installed_catalog_models(
-            state,
-            &config,
-            &models_dir,
-            primary.as_deref(),
-            primary.is_some(),
-        ));
-        annotate_audio_capabilities(&mut catalog, &config);
-        annotate_ltx25_runtime_readiness(&mut catalog, &config);
-        annotate_source_image_capabilities(&mut catalog, &config);
-        synchronize_generation_profile_capabilities(&mut catalog);
-        retain_deliverable_generation_profiles(&mut catalog);
         return catalog;
     }
 
     let snapshot = state.model_cache.lock().await.snapshot();
-    let mut catalog =
-        build_model_catalog(&config, snapshot.model_name.as_deref(), snapshot.is_loaded);
-    catalog.extend(installed_catalog_models(
-        state,
-        &config,
-        &models_dir,
-        snapshot.model_name.as_deref(),
-        snapshot.is_loaded,
-    ));
-    annotate_audio_capabilities(&mut catalog, &config);
-    annotate_ltx25_runtime_readiness(&mut catalog, &config);
-    // CPU-fallback / maintenance runtimes (no workers) advertise the same
-    // conditioning contracts: classification reads safetensors headers, not
-    // a GPU.
-    annotate_source_image_capabilities(&mut catalog, &config);
-    synchronize_generation_profile_capabilities(&mut catalog);
-    retain_deliverable_generation_profiles(&mut catalog);
+    if snapshot.is_loaded {
+        if let Some(loaded) = snapshot.model_name.as_deref() {
+            for entry in catalog.iter_mut() {
+                entry.info.is_loaded = entry.info.name == loaded;
+            }
+        }
+    }
     catalog
 }
 
@@ -1895,9 +2063,10 @@ pub(crate) async fn ensure_model_ready(
             // First unload the currently active model (if any) to free VRAM.
             if let Some(active_name) = cache.unload_active() {
                 #[cfg(feature = "metrics")]
-                crate::metrics::clear_model_loaded(&active_name);
+                crate::metrics::clear_model_loaded(&active_name.model);
                 tracing::info!(
-                    from = %active_name,
+                    from = %active_name.model,
+                    freed_mb = active_name.vram_bytes / 1024 / 1024,
                     to = %model_name,
                     "unloaded active model to reload cached model"
                 );
@@ -2143,6 +2312,9 @@ pub(crate) async fn pull_model(
         let mut config = state.config.write().await;
         *config = new_config;
     }
+    // Weights landed and the config changed; either alone would be enough to
+    // miss the cache, but a pull is exactly the case the epoch exists for.
+    state.model_catalog.invalidate();
 
     tracing::info!(model = %model, "pull complete");
     Ok(PullStatus::Pulled)
@@ -2156,7 +2328,7 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
         Some(name) => {
             #[cfg(feature = "metrics")]
             {
-                crate::metrics::clear_model_loaded(&name);
+                crate::metrics::clear_model_loaded(&name.model);
                 crate::metrics::record_gpu_memory(0);
             }
             drop(cache);
@@ -2165,8 +2337,12 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
                 free_vram_bytes = ?free_after_drop,
                 "legacy model unloaded; sampled post-drop VRAM"
             );
-            tracing::info!(model = %name, "model unloaded via API");
-            format!("unloaded {name}")
+            tracing::info!(
+                model = %name.model,
+                freed_mb = name.vram_bytes / 1024 / 1024,
+                "model unloaded via API"
+            );
+            format!("unloaded {}", name.model)
         }
         None => "no model loaded".to_string(),
     }
@@ -2191,11 +2367,12 @@ async fn create_and_load_engine(
     {
         let mut cache = state.model_cache.lock().await;
         let result = cache.unload_active();
-        if let Some(ref name) = result {
+        if let Some(ref unloaded) = result {
             #[cfg(feature = "metrics")]
-            crate::metrics::clear_model_loaded(name);
+            crate::metrics::clear_model_loaded(&unloaded.model);
             tracing::info!(
-                from = %name,
+                from = %unloaded.model,
+                freed_mb = unloaded.vram_bytes / 1024 / 1024,
                 to = %model_name,
                 "unloading active model before loading new one"
             );
@@ -2287,6 +2464,143 @@ async fn create_and_load_engine(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// `/api/models` walked the whole models directory and stat'd every
+    /// manifest model's component files on every call, and admission calls it
+    /// too. The filesystem half is memoized; residency is not.
+    #[tokio::test]
+    async fn list_models_reuses_the_catalog_until_invalidated() {
+        let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
+        let mut state = AppState::for_tests();
+        state.reload_config_from_disk = false;
+        state.config.write().await.models_dir = root.path().display().to_string();
+
+        reset_catalog_counters();
+        let first = list_models(&state).await;
+        assert_eq!(catalog_build_count(), 1, "the first call builds");
+        assert!(!first.is_empty(), "the manifest catalog is never empty");
+
+        let second = list_models(&state).await;
+        assert_eq!(
+            catalog_build_count(),
+            1,
+            "an unchanged host reuses the build"
+        );
+        assert_eq!(first.len(), second.len());
+
+        state.model_catalog.invalidate();
+        let _ = list_models(&state).await;
+        assert_eq!(catalog_build_count(), 2, "an installation change rebuilds");
+
+        // And a configuration change rebuilds without anyone remembering to
+        // call `invalidate` — that is what the fingerprint is for.
+        state.config.write().await.models.insert(
+            "synthetic:one".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(
+                    root.path()
+                        .join("synthetic.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                family: Some("flux".to_string()),
+                ..Default::default()
+            },
+        );
+        let _ = list_models(&state).await;
+        assert_eq!(
+            catalog_build_count(),
+            3,
+            "a config change is caught by the fingerprint"
+        );
+        let _ = list_models(&state).await;
+        assert_eq!(catalog_build_count(), 3, "and then settles again");
+    }
+
+    /// The fingerprint must be stable across two freshly parsed configs with
+    /// identical contents. `Config::models` is a `HashMap`, and each instance
+    /// gets its own hasher seed, so a naive `serde_json::to_vec` would differ
+    /// every time and the cache would never hit.
+    #[test]
+    fn the_config_fingerprint_is_independent_of_hash_map_order() {
+        let mut left = mold_core::Config::default();
+        let mut right = mold_core::Config::default();
+        for name in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+            left.models.insert(
+                name.to_string(),
+                mold_core::ModelConfig {
+                    transformer: Some(format!("/models/{name}.safetensors")),
+                    ..Default::default()
+                },
+            );
+        }
+        for name in ["h", "g", "f", "e", "d", "c", "b", "a"] {
+            right.models.insert(
+                name.to_string(),
+                mold_core::ModelConfig {
+                    transformer: Some(format!("/models/{name}.safetensors")),
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(
+            catalog_config_fingerprint(&left),
+            catalog_config_fingerprint(&right)
+        );
+        right.models.remove("a");
+        assert_ne!(
+            catalog_config_fingerprint(&left),
+            catalog_config_fingerprint(&right),
+            "a real difference must still move it"
+        );
+    }
+
+    /// `config.toml` is re-parsed only when the file itself changed. The
+    /// DB-backed overlay is applied every time regardless — another process's
+    /// `mold config set expand.*` never touches the file, and caching past it
+    /// would make those settings invisible until a restart.
+    #[tokio::test]
+    async fn refresh_config_reparses_only_when_the_config_file_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
+        std::env::set_var("MOLD_HOME", home.path());
+        let config_path = home.path().join("config.toml");
+        // `config_version = 1` so the load does not run a migration, which
+        // saves the file and legitimately changes its identity.
+        std::fs::write(
+            &config_path,
+            "config_version = 1\ndefault_model = \"flux-dev:q8\"\n",
+        )
+        .unwrap();
+
+        let mut state = AppState::for_tests();
+        state.reload_config_from_disk = true;
+
+        reset_catalog_counters();
+        let first = refresh_config(&state).await;
+        assert_eq!(config_file_parse_count(), 1);
+        assert_eq!(first.default_model, "flux-dev:q8");
+
+        let _ = refresh_config(&state).await;
+        assert_eq!(
+            config_file_parse_count(),
+            1,
+            "an unchanged config file is not re-parsed"
+        );
+
+        // A changed file is picked up. Write enough to move the length, so the
+        // check does not depend on the filesystem's timestamp granularity.
+        std::fs::write(
+            &config_path,
+            "config_version = 1\ndefault_model = \"flux-schnell:q8\"\nserver_port = 7681\n",
+        )
+        .unwrap();
+        let changed = refresh_config(&state).await;
+        assert_eq!(config_file_parse_count(), 2);
+        assert_eq!(changed.default_model, "flux-schnell:q8");
+        std::env::remove_var("MOLD_HOME");
+    }
 
     const GB: u64 = 1_000_000_000;
 

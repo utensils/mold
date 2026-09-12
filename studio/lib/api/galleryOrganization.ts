@@ -81,6 +81,9 @@ export interface GalleryCapabilitiesWire {
   media_version?: boolean;
   conditional_get?: boolean;
   row_events?: boolean;
+  /** A saved print reads back byte-for-byte from
+   * `GET /api/gallery/image/{filename}`. Absent means an older server. */
+  persists_outputs?: boolean;
 }
 
 /** `PATCH /api/gallery/image/:filename` body. Every field is optional; an

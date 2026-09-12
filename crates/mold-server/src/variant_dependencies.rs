@@ -529,12 +529,23 @@ fn resource_device_facts(state: &AppState) -> Vec<DeviceFact> {
                 reclaimable_cache_bytes,
                 device.sampled_mold_vram_bytes,
             );
-            let available = crate::scheduler::effective_available_vram_bytes(
+            // The SAME budget the scheduler's own gate and the model loader
+            // read — reserve-adjusted. Preparation used the raw attribution
+            // figure, and on a card with a large `MOLD_RESERVE_VRAM_MB` that
+            // is a different question with a different answer: a 40.60 GB
+            // resident FLUX.2 [dev] plan cleared 90 % of an unadjusted
+            // ~45.5 GB by 0.35 GB, so nothing ever asked whether it should
+            // stream, and the refusal came from a later gate that had none of
+            // the planner's advice to give (D7a/D7b, 2026-09-12).
+            let available = crate::scheduler::schedulable_available_vram_bytes(
                 device.sampled_free_vram_bytes,
                 reclaimable_cache_bytes,
+                device.sampled_mold_vram_bytes,
+                device.active_work,
                 worker.gpu.total_vram_bytes,
             );
             Some(DeviceFact {
+                total_vram_bytes: DeviceFact::sampled_total_vram_bytes(worker.gpu.total_vram_bytes),
                 cuda_peak_baseline: worker.wan_context_baseline(),
                 id: device.id,
                 ordinal: device.ordinal,
@@ -553,15 +564,35 @@ fn effective_preparation_available_vram(
     mold_used_bytes: Option<u64>,
     active_cache_bytes: u64,
 ) -> u64 {
+    effective_preparation_available_vram_with_reserve(
+        total_vram_bytes,
+        used_vram_bytes,
+        mold_used_bytes,
+        active_cache_bytes,
+        0,
+    )
+}
+
+#[cfg(test)]
+fn effective_preparation_available_vram_with_reserve(
+    total_vram_bytes: u64,
+    used_vram_bytes: Option<u64>,
+    mold_used_bytes: Option<u64>,
+    active_cache_bytes: u64,
+    reserved_bytes: u64,
+) -> u64 {
     let sampled_free_bytes = used_vram_bytes
         .map(|used| total_vram_bytes.saturating_sub(used))
         .unwrap_or(0);
     let reclaimable_cache_bytes =
         crate::scheduler::reclaimable_model_cache_bytes(active_cache_bytes, mold_used_bytes);
-    crate::scheduler::effective_available_vram_bytes(
+    crate::scheduler::schedulable_available_vram_bytes_with_reserve(
         sampled_free_bytes,
         reclaimable_cache_bytes,
+        mold_used_bytes,
+        false,
         total_vram_bytes,
+        reserved_bytes,
     )
 }
 
@@ -574,12 +605,18 @@ fn worker_device_facts_from_startup_sample(state: &AppState) -> Vec<DeviceFact> 
         .workers
         .iter()
         .map(|worker| DeviceFact {
+            total_vram_bytes: DeviceFact::sampled_total_vram_bytes(worker.gpu.total_vram_bytes),
             cuda_peak_baseline: None,
             id: worker_device_id(&worker),
             ordinal: worker.gpu.ordinal,
             backend: worker.gpu.backend,
             compute_capability: worker.gpu.compute_capability,
-            available_vram_bytes: worker.gpu.free_vram_bytes,
+            // Reserve-adjusted for the same reason the live sample is: this
+            // fallback feeds the same planner.
+            available_vram_bytes: worker
+                .gpu
+                .free_vram_bytes
+                .saturating_sub(mold_inference::device::reserved_vram_bytes()),
         })
         .collect()
 }
@@ -3268,6 +3305,47 @@ mod tests {
         }
     }
 
+    /// D7a/D7b on hardware (`MOLD_RESERVE_VRAM_MB=22000`, GPU 2, 2026-09-12):
+    /// `flux2-dev:fp8` 1024²x20 was refused — `still 15.5 GB short (requires
+    /// 40.60 GB, 25.12 GB available)` — with no offload line anywhere, and
+    /// `flux2-dev:q4` was refused without the GGUF-cannot-stream reason.
+    ///
+    /// Both are one bug. Preparation resolved the execution plan against the
+    /// RAW free sample — ~45.5 GB on that card — where the scheduler's own gate
+    /// and the loader both read `free - reserved_vram_bytes()` = 25.12 GB. A
+    /// 40.60 GB resident plan clears 90 % of 45.5 GB by 0.35 GB, so the
+    /// auto-offload predicate never fired and no streamed plan was ever
+    /// considered; the refusal then came from a LATER gate, which is also why
+    /// it carried none of the planner's advice.
+    #[test]
+    fn preparation_reads_the_same_reserve_adjusted_budget_as_admission() {
+        const GIB: u64 = 1 << 30;
+        // 46 GB card, 45.5 GB free, a 22 GB simulated reserve.
+        let free = 48_000_000_000u64 - 2_500_000_000;
+        assert_eq!(
+            effective_preparation_available_vram_with_reserve(
+                48_000_000_000,
+                Some(2_500_000_000),
+                None,
+                0,
+                22_000_000_000,
+            ),
+            free - 22_000_000_000,
+            "preparation must plan against the budget the loader will enforce"
+        );
+        // And the attribution policy is unchanged with no reserve.
+        assert_eq!(
+            effective_preparation_available_vram_with_reserve(
+                24 * GIB,
+                Some(20 * GIB),
+                Some(16 * GIB),
+                16 * GIB,
+                0,
+            ),
+            20 * GIB,
+        );
+    }
+
     #[test]
     fn preparation_capacity_includes_only_measured_reclaimable_warm_cache() {
         const GIB: u64 = 1 << 30;
@@ -3738,6 +3816,7 @@ mod tests {
             &request,
             &config,
             vec![DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
@@ -3768,6 +3847,7 @@ mod tests {
             &config,
             &request,
             &[DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
@@ -3812,6 +3892,7 @@ mod tests {
             &config,
             &request,
             &[DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
@@ -3932,6 +4013,7 @@ mod tests {
             &config,
             &request,
             vec![DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
@@ -3997,6 +4079,7 @@ mod tests {
             &request,
             vec![
                 DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: "cuda:0".to_string(),
                     ordinal: 0,
@@ -4005,6 +4088,7 @@ mod tests {
                     available_vram_bytes: 4_000_000_000,
                 },
                 DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: "cuda:1".to_string(),
                     ordinal: 1,
@@ -4037,6 +4121,7 @@ mod tests {
         config.qwen3_variant = Some("bf16".to_string());
         let low_facts = (0..8)
             .map(|ordinal| DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: format!("cuda:{ordinal}"),
                 ordinal,
@@ -4065,6 +4150,7 @@ mod tests {
             &request,
             &(0..8)
                 .map(|ordinal| DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: format!("cuda:{ordinal}"),
                     ordinal,
@@ -4094,6 +4180,7 @@ mod tests {
             &request,
             (0..8)
                 .map(|ordinal| DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: format!("cuda:{ordinal}"),
                     ordinal,
@@ -4128,6 +4215,7 @@ mod tests {
             &request,
             &config,
             vec![DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:0".to_string(),
                 ordinal: 0,
@@ -4561,6 +4649,7 @@ mod tests {
     fn auto_quantized_download_choice_is_bounded_for_arbitrary_device_count() {
         let devices = (0..64)
             .map(|ordinal| DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: format!("cuda:{ordinal}"),
                 ordinal,
@@ -4594,6 +4683,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let variants = mold_core::manifest::known_qwen3_8b_variants();
         let devices = vec![DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: "cuda:0".to_string(),
             ordinal: 0,
@@ -4625,6 +4715,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let variants = mold_core::manifest::known_qwen3_8b_variants();
         let pressured = vec![DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: "cuda:0".to_string(),
             ordinal: 0,
@@ -4665,6 +4756,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let variants = mold_core::manifest::known_qwen3_8b_variants();
         let pressured = vec![DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: "cuda:0".to_string(),
             ordinal: 0,

@@ -358,6 +358,9 @@ pub enum RuntimeSemanticVariable {
     Eager,
     FluxDeltaCache,
     FluxKeepTransformer,
+    Flux2QMatMul,
+    Flux2Fp8Cache,
+    Flux2Fp8Gemm,
     H3TurboAdapter,
     H3TurboTier,
     Hunyuan3dDecodeChunks,
@@ -463,7 +466,10 @@ pub struct ExecutionSemanticConfig {
     ///
     /// `None` for families whose convolutions never take cuDNN, so their
     /// fingerprints stay exactly as they were — the same reason `umt5_variant`
-    /// is skipped when absent.
+    /// is skipped when absent. The flux families left that set when they took
+    /// `ConvPolicy::FastStill`: their VAE now runs cuDNN wherever the feature
+    /// is compiled, and an im2col render and a cuDNN one are not the same
+    /// execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conv_backend: Option<SemanticConvBackend>,
     /// Whether this render will actually reuse first-block residuals.
@@ -489,6 +495,62 @@ pub struct ExecutionSemanticConfig {
     /// to what they were before this existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wan_step_cache: Option<SemanticWanStepCache>,
+    /// Whether this render's transformer may survive into the next one.
+    ///
+    /// It changes no pixel, and it is here for the OTHER thing the
+    /// equivalence class buys: a render that reloads a 33 GB checkpoint and
+    /// one that does not have wildly different wall clocks, so sharing a
+    /// learned-timing bucket makes both estimates wrong. Resolved rather than
+    /// read from the variable, for the same reason `conv_backend` is — the
+    /// DEFAULT is what changed, and a default is invisible to a value.
+    ///
+    /// `None` for every non-flux family, so their fingerprints are
+    /// byte-identical to what they were before this existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flux_transformer_residency: Option<SemanticFluxTransformerResidency>,
+    /// The width a GGUF FLUX transformer feeds its quantized kernels.
+    ///
+    /// `None` for every family whose GGUF path does not take the flux dtype
+    /// rule, which is every family but these two.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantized_activation_dtype: Option<SemanticQuantizedActivationDType>,
+    /// Whether this render issues its two classifier-free guidance branches as
+    /// one batch-2 forward.
+    ///
+    /// `None` outside flux2. Resolved through the engine's OWN gate and the
+    /// engine's OWN inputs — `mold_inference::flux2::flux2_cfg_batching`, the
+    /// pure function `flux2::pipeline::resolve_cfg_batching` calls, charged
+    /// with the activation term that function charges
+    /// (`flux2_cfg_plan_activation_bytes`, which IS
+    /// `flux2_activation_bytes_for`) — against the card's TOTAL VRAM rather
+    /// than what is free at this instant. That total is precisely why
+    /// `DeviceFact` carries it: the free figure moves between planning and
+    /// execution, so charging it would let the plan and the render disagree
+    /// about which execution this is.
+    ///
+    /// `Batched` is reserved for the render that actually batches. The engine
+    /// applies three gates on top of the budget, and the plan asks all three:
+    /// the tier test (`validation::is_flux2_base_model`) and `guidance > 1`
+    /// decide whether a CFG branch exists at all, and both are answerable
+    /// here — `PlanContext` carries the model name and the request — so a
+    /// [dev], a distilled [klein], or an unguided base render records
+    /// `Sequential` and does NOT vary with the card. A value that moved with
+    /// the card's total for a render that issues one forward per step would
+    /// split its equivalence class and its learned-timing bucket across two
+    /// machines that execute identically, which is the same defect as the
+    /// collision, in the mirror.
+    ///
+    /// The third gate — `flux2_cfg_batching_for`'s equal-token-length test —
+    /// is the one the plan genuinely cannot ask, and since Klein prompts are
+    /// truncated and right-padded to `FLUX2_KLEIN_MAX_LENGTH` it is always
+    /// true anyway; it survives in the engine as a structural guard on the
+    /// concatenation. It is also the one the fingerprint could not have
+    /// carried: no fingerprint input holds a prompt, since the equivalence
+    /// descriptor has no request text and the learned-timing key's shape
+    /// bucket is `{w}x{h}:s{steps}:f{frames}`
+    /// (`gpu_pool::scheduling_shape_bucket`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flux2_cfg_batching: Option<SemanticFlux2CfgBatching>,
     pub vae_tiling: SemanticVaeTiling,
     pub vae_dtype: SemanticVaeDType,
     pub runtime: Vec<RuntimeSemanticSetting>,
@@ -509,6 +571,94 @@ pub enum SemanticWanStepCache {
     /// Engaged. The threshold is carried in millionths so the value is exact
     /// and `Eq`, which a bare `f64` could not be.
     Threshold { micros: u64 },
+}
+
+/// How a FLUX still decides whether its transformer stays GPU-resident.
+///
+/// There are deliberately TWO variants rather than the three the outcome enum
+/// inside the engine has. `MOLD_FLUX_KEEP_TRANSFORMER=1` and an unset
+/// variable now resolve to the same execution — the budget decides either way,
+/// because #276's "an explicit keep must still yield to a card that cannot
+/// afford it" is exactly what the budget expresses for everybody — so a third
+/// class here would be a distinction the engine cannot make. The raw value is
+/// still carried in `runtime`, so a fleet can tell the two apart when it cares.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticFluxTransformerResidency {
+    /// `device::still_transformer_residency` decides per render.
+    Budgeted,
+    /// `MOLD_FLUX_KEEP_TRANSFORMER=0` — the transformer is dropped before
+    /// every VAE decode whatever the card has room for.
+    DropRequested,
+}
+
+/// The activation width a GGUF-backed FLUX transformer runs at.
+///
+/// This is the field the campaign's F32→BF16 flip needed: a GGUF component's
+/// `EffectiveComponentDType` is `QuantizedNative`, which says how the WEIGHTS
+/// are stored and nothing at all about the dtype the kernels are fed. Two
+/// renders whose activations differ in width are different numerics, different
+/// bandwidth and different step latency, and before this they hashed alike.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticQuantizedActivationDType {
+    F32,
+    Bf16,
+}
+
+/// Whether an undistilled FLUX.2 base render runs its two classifier-free
+/// guidance branches as one batch-2 forward or as two batch-1 forwards.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticFlux2CfgBatching {
+    /// One forward over `[uncond, cond]` — the budget holds the doubled
+    /// activations beside the transformer.
+    Batched,
+    /// Two forwards per step. Also the answer whenever the card's total is
+    /// unknown, which is every non-CUDA device and every discovery sample that
+    /// carried no total: two forwards is what such a host has always run
+    /// (`flux2::pipeline::resolve_cfg_batching` returns `Sequential` when it
+    /// cannot read a total), so the unknown case costs no reclassification.
+    Sequential,
+}
+
+/// The three byte counts the FLUX.2 CFG budget gate is charged against.
+///
+/// It is a struct rather than three parameters because it travels from the
+/// planner, which knows the checkpoint and the card, to `from_frozen`, which
+/// knows the family — and because `Default` is the honest answer for a caller
+/// that has neither (no total ⇒ `Sequential`, the historical execution).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Flux2CfgBudget {
+    /// Bytes of transformer weights, summed over the checkpoint's shards —
+    /// the same quantity `Flux2Engine::transformer_file_bytes` hands the
+    /// engine's own call.
+    pub transformer_bytes: u64,
+    /// Denoise workspace for a batch-2 forward at this request's canvas.
+    pub activation_bytes_batch2: u64,
+    /// The card's installed VRAM, or `None` where none was sampled.
+    pub device_total_vram_bytes: Option<u64>,
+}
+
+impl Flux2CfgBudget {
+    /// The engine's verdict for this budget.
+    ///
+    /// `mold_inference::flux2::flux2_cfg_batching` is called rather than
+    /// mirrored: the arithmetic includes the engine's own runtime headroom
+    /// constant, and a planner that re-derived it would drift the moment that
+    /// constant moved.
+    fn resolve(self) -> SemanticFlux2CfgBatching {
+        let Some(total) = self.device_total_vram_bytes else {
+            return SemanticFlux2CfgBatching::Sequential;
+        };
+        match mold_inference::flux2::flux2_cfg_batching(
+            self.transformer_bytes,
+            self.activation_bytes_batch2,
+            total,
+        ) {
+            mold_inference::flux2::Flux2CfgBatching::Batched => SemanticFlux2CfgBatching::Batched,
+            mold_inference::flux2::Flux2CfgBatching::Sequential => {
+                SemanticFlux2CfgBatching::Sequential
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -658,8 +808,21 @@ impl ExecutionEnvironmentDescriptor {
 }
 
 impl ExecutionSemanticConfig {
+    /// `backend` is the accelerator the plan targets. It is a parameter
+    /// rather than a process probe because the GGUF activation width is a
+    /// property of the DEVICE (CUDA's MMQ kernels take bf16; Metal's and the
+    /// CPU's take f32 only), and the planner resolves one descriptor per
+    /// candidate device.
+    ///
+    /// `flux2_cfg_budget` is likewise a parameter: the CFG gate is charged
+    /// against the CARD and the CHECKPOINT, neither of which a frozen engine
+    /// configuration describes. A caller outside flux2 passes
+    /// `Flux2CfgBudget::default()` — the field is `None` for its family
+    /// anyway.
     pub fn from_frozen(
         frozen: &mold_inference::FrozenEngineConfig,
+        backend: GpuBackend,
+        flux2_cfg_budget: Flux2CfgBudget,
     ) -> Result<Self, ExecutionPlanError> {
         let mold_inference::FrozenEngineConfig {
             family,
@@ -739,22 +902,34 @@ impl ExecutionSemanticConfig {
                     SemanticAttentionChunk::Size(*size as u64)
                 }
             },
-            // Only video families can take cuDNN, so only they carry the
-            // field; an image family's fingerprint is byte-identical to what
-            // it was before this existed.
-            conv_backend: match (
-                mold_inference::conv_policy::policy_for_family(family),
-                paint_assets.is_some(),
-            ) {
-                (mold_inference::conv_policy::ConvPolicy::Image, false) => None,
-                (mold_inference::conv_policy::ConvPolicy::Video, _)
-                | (mold_inference::conv_policy::ConvPolicy::Paint, _)
-                | (mold_inference::conv_policy::ConvPolicy::Image, true) => Some(
-                    match mold_inference::conv_policy::resolve_for(if paint_assets.is_some() {
-                        mold_inference::conv_policy::ConvPolicy::Paint
-                    } else {
-                        mold_inference::conv_policy::ConvPolicy::Video
-                    }) {
+            // Only families that can take cuDNN carry the field; a plain
+            // image family's fingerprint is byte-identical to what it was
+            // before this existed. The flux families joined that set with
+            // `ConvPolicy::FastStill`, so their fingerprint now records the
+            // convolution backend — which is the point: an im2col render and
+            // a cuDNN one are not the same execution.
+            conv_backend: {
+                let policy = mold_inference::conv_policy::policy_for_family(family);
+                let resolved = match (policy, paint_assets.is_some()) {
+                    (mold_inference::conv_policy::ConvPolicy::Image, false) => None,
+                    (mold_inference::conv_policy::ConvPolicy::Image, true)
+                    | (mold_inference::conv_policy::ConvPolicy::Paint, _) => {
+                        Some(mold_inference::conv_policy::ConvPolicy::Paint)
+                    }
+                    (mold_inference::conv_policy::ConvPolicy::Video, _) => {
+                        Some(mold_inference::conv_policy::ConvPolicy::Video)
+                    }
+                    (mold_inference::conv_policy::ConvPolicy::FastStill, false) => {
+                        Some(mold_inference::conv_policy::ConvPolicy::FastStill)
+                    }
+                    // Paint assets on a flux request would be a planning bug,
+                    // but the paint scope wins wherever it is present.
+                    (mold_inference::conv_policy::ConvPolicy::FastStill, true) => {
+                        Some(mold_inference::conv_policy::ConvPolicy::Paint)
+                    }
+                };
+                resolved.map(
+                    |policy| match mold_inference::conv_policy::resolve_for(policy) {
                         mold_inference::conv_policy::ConvBackend::Im2Col => {
                             SemanticConvBackend::Im2Col
                         }
@@ -762,8 +937,48 @@ impl ExecutionSemanticConfig {
                             SemanticConvBackend::Cudnn
                         }
                     },
-                ),
+                )
             },
+            // Residency is a flux-family decision and nothing else reads the
+            // variable, so only these two carry the field.
+            flux_transformer_residency: matches!(family.as_str(), "flux" | "flux2").then(|| {
+                // Read through the engines' OWN parser. A render the engine
+                // drops on must never be filed in the budgeted class, and the
+                // only way to guarantee that is for both to read the string
+                // once, in one place.
+                match mold_inference::device::keep_transformer_request(
+                    runtime_environment.value("MOLD_FLUX_KEEP_TRANSFORMER"),
+                ) {
+                    mold_inference::device::KeepTransformerRequest::Drop => {
+                        SemanticFluxTransformerResidency::DropRequested
+                    }
+                    mold_inference::device::KeepTransformerRequest::Keep
+                    | mold_inference::device::KeepTransformerRequest::Budget => {
+                        SemanticFluxTransformerResidency::Budgeted
+                    }
+                }
+            }),
+            // Resolved against the plan's own backend plus the process-global
+            // `FORCE_DMMV` switch, both of which the engine reads at the same
+            // moment through the same function.
+            quantized_activation_dtype: matches!(family.as_str(), "flux" | "flux2").then(|| {
+                match mold_inference::gguf_activation_width_for_backend(backend) {
+                    mold_inference::GgufActivationWidth::Bf16 => {
+                        SemanticQuantizedActivationDType::Bf16
+                    }
+                    mold_inference::GgufActivationWidth::F32 => {
+                        SemanticQuantizedActivationDType::F32
+                    }
+                }
+            }),
+            // Only the undistilled FLUX.2 base tier runs a CFG branch at all,
+            // but the field is carried for the whole family: the tier is a
+            // NAME test the engine performs, and recording it per tier here
+            // would be a second authority for that question.
+            //
+            // The VALUE is the engine's own budget verdict — see the field's
+            // doc for what that does and does not settle.
+            flux2_cfg_batching: (family == "flux2").then(|| flux2_cfg_budget.resolve()),
             // Only wan has a step cache, so only wan carries the field; every
             // other family's fingerprint is byte-identical to what it was
             // before this existed.
@@ -813,6 +1028,17 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_EAGER" => RuntimeSemanticVariable::Eager,
         "MOLD_FLUX_DELTA_CACHE" => RuntimeSemanticVariable::FluxDeltaCache,
         "MOLD_FLUX_KEEP_TRANSFORMER" => RuntimeSemanticVariable::FluxKeepTransformer,
+        // Swaps the Flux.2 GGUF linear arm (candle's MMQ fast path vs a
+        // per-forward dequant), which changes numerics, transient memory, and
+        // step latency — its own execution-equivalence and timing class.
+        "MOLD_FLUX2_QMATMUL" => RuntimeSemanticVariable::Flux2QMatMul,
+        // Widening FP8 weights once at load trades VRAM for a per-forward
+        // cast — residency and step latency both move, exactly as they do for
+        // `MOLD_QWEN_FP8_CACHE`.
+        "MOLD_FLUX2_FP8_CACHE" => RuntimeSemanticVariable::Flux2Fp8Cache,
+        // The native FP8 GEMM quantizes the activation; that is a numerics
+        // change, not just a speed one.
+        "MOLD_FLUX2_FP8_GEMM" => RuntimeSemanticVariable::Flux2Fp8Gemm,
         "MOLD_HUNYUAN3D_DECODE_CHUNKS" => RuntimeSemanticVariable::Hunyuan3dDecodeChunks,
         "MOLD_H3_TURBO_ADAPTER" => RuntimeSemanticVariable::H3TurboAdapter,
         "MOLD_H3_TURBO_TIER" => RuntimeSemanticVariable::H3TurboTier,
@@ -1134,6 +1360,22 @@ pub struct ResolvedExecutionPlan {
     /// Exact, device-qualified worker/lease identity. This remains the
     /// authority for residency, grants, cache reconstruction, and provenance.
     pub execution_fingerprint: String,
+    /// The same identity with the LOAD PLAN normalised away — everything that
+    /// says how and how much to load, and nothing that says what is loaded.
+    ///
+    /// It exists for one question: may a worker's engine that is RETAINING its
+    /// transformer serve this plan? The load strategy is chosen from the
+    /// device's available VRAM, so a card whose free space IS that engine's
+    /// own weights plans differently from a cold one for a byte-identical
+    /// request, and `execution_fingerprint` moves with it. This does not —
+    /// while a replaced checkpoint, a different adapter, a different dtype or
+    /// quantization, a different placement, a different config and a
+    /// different output format all still move it, so they all still
+    /// invalidate the engine.
+    ///
+    /// NEVER use it for residency, grants or provenance: it is deliberately
+    /// blind to the one axis those need.
+    pub warm_reuse_fingerprint: String,
 }
 
 impl ResolvedExecutionPlan {
@@ -1236,7 +1478,36 @@ pub struct DeviceFact {
     pub backend: GpuBackend,
     pub compute_capability: Option<(u16, u16)>,
     pub available_vram_bytes: u64,
+    /// The card's installed VRAM, from the same NVML/CUDA telemetry that fills
+    /// `available_vram_bytes`.
+    ///
+    /// It is a SEPARATE fact rather than a derivation because the two answer
+    /// different questions and only one of them is stable: `available` moves
+    /// between planning and execution as other tenants and this server's own
+    /// cache come and go, while the total does not move at all. An engine gate
+    /// that must reach the same verdict in the planner and in the renderer has
+    /// to be charged against the stable number — see
+    /// `mold_inference::flux2::flux2_cfg_batching`, whose doc says exactly
+    /// that.
+    ///
+    /// `None` where no total was sampled: CPU, a discovery snapshot that never
+    /// carried one, and every `GpuDevice` whose `total_vram_bytes` is the `0`
+    /// sentinel. A gate that needs it falls back to its historical answer
+    /// rather than guessing from `available_vram_bytes`.
+    pub total_vram_bytes: Option<u64>,
     pub cuda_peak_baseline: Option<crate::cuda_peak::CertifiedBaseline>,
+}
+
+impl DeviceFact {
+    /// `total_vram_bytes` from a sampled [`mold_inference::device::GpuDevice`].
+    ///
+    /// That struct carries `0` for "no total was read" rather than an
+    /// `Option` — the CLI's device listing already treats it that way — so
+    /// every construction site normalizes through this one function instead of
+    /// each deciding for itself what a zero-capacity card means.
+    pub fn sampled_total_vram_bytes(sampled: u64) -> Option<u64> {
+        (sampled > 0).then_some(sampled)
+    }
 }
 
 /// The one identity a batch parent's siblings share, filled by whichever of
@@ -1529,6 +1800,13 @@ pub enum ExecutionPlanError {
         /// compares this against device *total* VRAM: a peak no device could
         /// ever hold is terminal, anything else is transient pressure.
         required_peak_bytes: u64,
+        /// The ceiling THAT rejection's peak was compared against, so a
+        /// scheduler-side refusal prints the pair the decision used.
+        admissible_ceiling_bytes: Option<u64>,
+        /// That rejection's remediation, so a refusal the scheduler composes
+        /// itself still carries the planner's reason — for FLUX.2, why the
+        /// transformer could not stream.
+        advice: Option<String>,
         /// Stable IDs of the devices that were actually considered for this
         /// request. Physical-impossibility classification must not borrow
         /// capacity from a sibling excluded by placement or preparation.
@@ -1617,7 +1895,7 @@ pub fn eligible_devices_for_request(
     if let Some(alias) = unresolvable_camera_control_alias(config, request) {
         return Err(ExecutionPlanError::UnresolvableLora { alias });
     }
-    let loras = effective_loras(config, request);
+    let loras = effective_loras(config, request, None);
     let artifacts = concrete_artifacts_for_family(&paths, &family, &loras, &engine_config);
     let normalized = config.effective_placement(&request.model, request.placement.as_ref());
     let effective = effective_constraints(&normalized, &artifacts);
@@ -1813,7 +2091,7 @@ fn resolve_execution_plans_with_policy(
     if let Some(alias) = unresolvable_camera_control_alias(config, request) {
         return Err(ExecutionPlanError::UnresolvableLora { alias });
     }
-    let effective_loras = effective_loras(config, request);
+    let effective_loras = effective_loras(config, request, projection);
     let admission_engine_config =
         mold_inference::FrozenEngineConfig::resolve_for_request(request, config);
     if let Some(prepared) = prepared {
@@ -1983,6 +2261,10 @@ fn resolve_private_h3_execution_plans(
                 device_id: device.id,
                 predicted_peak_bytes: evidence.predicted_device_peak_bytes(),
                 available_bytes: available_device_bytes,
+                // The H3 evidence judges itself against the device bytes it
+                // was handed, with no separate admission cap, so the ceiling
+                // the decision used IS that figure.
+                admissible_ceiling_bytes: available_device_bytes,
                 advice: Some(format!(
                     "private admission evidence no longer fits: {error:#}"
                 )),
@@ -2044,6 +2326,9 @@ fn resolve_private_h3_execution_plans(
             determinism_class,
             true,
             &BTreeMap::new(),
+            // MiniMax H3 is not flux2, so the field this budget resolves is
+            // `None` for every plan on this path.
+            Flux2CfgBudget::default(),
         )?;
         let execution_equivalence_fingerprint = execution_environment.fingerprint();
         plans.push(ResolvedExecutionPlan {
@@ -2074,6 +2359,9 @@ fn resolve_private_h3_execution_plans(
             execution_environment,
             execution_equivalence_fingerprint,
             execution_fingerprint: evidence.execution_fingerprint().to_string(),
+            // One-shot owner work with no engine to reuse: its warm identity
+            // is its exact one, so the comparison stays exact.
+            warm_reuse_fingerprint: evidence.execution_fingerprint().to_string(),
         });
     }
     if plans.is_empty() {
@@ -2141,6 +2429,13 @@ pub(crate) struct DeviceInfeasibility {
     pub(crate) device_id: String,
     pub(crate) predicted_peak_bytes: u64,
     pub(crate) available_bytes: u64,
+    /// The figure the verdict compared `predicted_peak_bytes` against —
+    /// `GenerationMemoryBudget::admissible_ceiling_bytes`, which is 90 % of
+    /// `available_bytes` for every family whose estimate is a heuristic. A
+    /// refusal that prints `available_bytes` instead prints a pair the
+    /// decision never used, which is how "still 0.0 GB short (requires
+    /// 43.00 GB, 46.72 GB available)" reached an operator.
+    pub(crate) admissible_ceiling_bytes: u64,
     /// Family-specific remediation, e.g. an LTX-2 shape that does fit.
     pub(crate) advice: Option<String>,
 }
@@ -2150,6 +2445,8 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
         return ExecutionPlanError::InsufficientVram {
             reason: "no request-eligible device produced a concrete execution plan".to_string(),
             required_peak_bytes: 0,
+            admissible_ceiling_bytes: None,
+            advice: None,
             eligible_device_ids: Vec::new(),
         };
     }
@@ -2161,22 +2458,36 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
                 .as_ref()
                 .map(|advice| format!(" ({advice})"))
                 .unwrap_or_default();
+            let ceiling = if rejection.admissible_ceiling_bytes < rejection.available_bytes {
+                format!(
+                    "~{:.1} GB admission ceiling (90% of the ~{:.1} GB usable)",
+                    rejection.admissible_ceiling_bytes as f64 / 1_000_000_000.0,
+                    rejection.available_bytes as f64 / 1_000_000_000.0,
+                )
+            } else {
+                format!(
+                    "~{:.1} GB usable",
+                    rejection.admissible_ceiling_bytes as f64 / 1_000_000_000.0,
+                )
+            };
             format!(
-                "{} needs ~{:.1} GB but only ~{:.1} GB is currently available for this request{advice}",
+                "{} needs ~{:.1} GB, over this request's {ceiling}{advice}",
                 rejection.device_id,
                 rejection.predicted_peak_bytes as f64 / 1_000_000_000.0,
-                rejection.available_bytes as f64 / 1_000_000_000.0,
             )
         })
         .collect::<Vec<_>>()
         .join("; ");
+    // The ceiling must belong to the SAME rejection as the peak, or the pair a
+    // refusal prints is two devices' arithmetic spliced together.
+    let cheapest = rejections
+        .iter()
+        .min_by_key(|rejection| rejection.predicted_peak_bytes);
     ExecutionPlanError::InsufficientVram {
         reason,
-        required_peak_bytes: rejections
-            .iter()
-            .map(|rejection| rejection.predicted_peak_bytes)
-            .min()
-            .unwrap_or(0),
+        required_peak_bytes: cheapest.map_or(0, |rejection| rejection.predicted_peak_bytes),
+        admissible_ceiling_bytes: cheapest.map(|rejection| rejection.admissible_ceiling_bytes),
+        advice: cheapest.and_then(|rejection| rejection.advice.clone()),
         eligible_device_ids: rejections
             .iter()
             .map(|rejection| rejection.device_id.clone())
@@ -2220,7 +2531,7 @@ pub(crate) fn preparation_authority_fingerprint(
         )
         .as_bytes(),
     );
-    hash.update(format!("{:?}", effective_loras(config, request)).as_bytes());
+    hash.update(format!("{:?}", effective_loras(config, request, None)).as_bytes());
     hash.update(
         serde_json::to_vec(&normalized_request)
             .expect("GenerateRequest serialization is infallible")
@@ -2269,7 +2580,7 @@ pub(crate) fn warm_execution_equivalence_cache(
                 .map(|manifest| manifest.family.clone())
         })
         .unwrap_or_else(|| "unknown".to_string());
-    let loras = effective_loras(config, request);
+    let loras = effective_loras(config, request, None);
     let mut paths = BTreeSet::new();
     for inputs in prepared.by_device.values() {
         paths.extend(
@@ -2281,6 +2592,24 @@ pub(crate) fn warm_execution_equivalence_cache(
             )
             .into_values(),
         );
+    }
+    // Every fact already cached: nothing to read, and — the part that
+    // matters — no progress publication. Each `publish_preparation_progress`
+    // wakes the coordinator, which advances scheduler state and emits a
+    // queue-plan event; a warm host was spending that on a "Resolving
+    // installed model" stage that renders and completes in the same tick.
+    //
+    // This is a check, never a fire-and-forget skip: a MISS still takes the
+    // full path below. Returning early on a miss would leave the plan with a
+    // random-secret fingerprint, which is a cold reload of the whole engine.
+    if paths.iter().all(|path| {
+        !matches!(
+            artifact_facts_path_with_policy_and_progress(path, true, None).format,
+            ArtifactFormatFact::CacheMiss
+        )
+    }) {
+        warm_family_checkpoint_facts(&family, prepared);
+        return;
     }
     let total_bytes = paths
         .iter()
@@ -2316,9 +2645,14 @@ pub(crate) fn warm_execution_equivalence_cache(
             total_bytes,
         );
     }
+    warm_family_checkpoint_facts(&family, prepared);
+}
+
+fn warm_family_checkpoint_facts(family: &str, prepared: &PreparedExecutionInputs) {
     // LTX-2 admission needs the checkpoint's per-block weight layout. Reading
     // the safetensors header is blocking work, so it is warmed here (already
     // on the blocking pool) and only ever read from cache by the coordinator.
+    // Both of these carry their own caches, so they run on the hot path too.
     if family == "ltx2" {
         for inputs in prepared.by_device.values() {
             crate::ltx2_admission::warm_checkpoint_facts(&inputs.engine_paths.transformer);
@@ -2333,6 +2667,78 @@ pub(crate) fn warm_execution_equivalence_cache(
     }
 }
 
+/// Read one installed artifact's equivalence facts into the process cache.
+///
+/// It goes through the same [`ARTIFACT_MAX_CONCURRENT_READS`] limiter every
+/// other reader uses, so a warm pass cannot starve a live admission of disk
+/// bandwidth, and it is a NO-OP on an already-cached artifact.
+pub(crate) fn warm_artifact_facts(path: &Path) {
+    let _ = artifact_facts_path_with_policy_and_progress(path, false, None);
+}
+
+/// Whether this artifact's facts are already in the process cache.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn artifact_facts_are_cached(path: &Path) -> bool {
+    !matches!(
+        artifact_facts_path_with_policy_and_progress(path, true, None).format,
+        ArtifactFormatFact::CacheMiss
+    )
+}
+
+/// Containers a generation's equivalence facts are ever computed for.
+const WARMABLE_ARTIFACT_EXTENSIONS: &[&str] = &["safetensors", "gguf", "pth", "bin", "onnx"];
+
+/// A bound on the startup pass, so a models directory that has accumulated
+/// thousands of files cannot turn boot into a filesystem sweep.
+const STARTUP_WARM_MAX_ARTIFACTS: usize = 4096;
+
+/// Read every installed artifact's equivalence facts once, at startup.
+///
+/// The first render after a restart otherwise pays this inside the
+/// preparation phase, where it is on the client's wall clock and publishes
+/// progress. The work is a `stat` and a pinned-digest sidecar read per file —
+/// `installed_artifact_identity` records a digest rather than re-hashing the
+/// bytes — so this is cheap; the limiter is what keeps it out of the way of a
+/// request that arrives while it runs.
+///
+/// Returns how many artifacts it warmed.
+pub(crate) fn warm_installed_artifact_facts(models_dir: &Path) -> usize {
+    let mut warmed = 0_usize;
+    for entry in walkdir::WalkDir::new(models_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if warmed >= STARTUP_WARM_MAX_ARTIFACTS {
+            break;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let is_warmable = entry
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                WARMABLE_ARTIFACT_EXTENSIONS
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(extension))
+            });
+        if !is_warmable {
+            continue;
+        }
+        warm_artifact_facts(entry.path());
+        warmed += 1;
+    }
+    warmed
+}
+
+/// `projection` is the sealed-media view of the job being dispatched, and it
+/// is REQUIRED wherever one exists: the worker validates before hydration, so
+/// its `request` is the scrubbed clone whose `loras` were emptied at
+/// publication. Comparing that against a plan whose `effective_loras` came
+/// from the same projection is the only way the two can agree — pass `None`
+/// only where the request genuinely carries its own stack.
 pub fn validate_before_cuda(
     plan: &ResolvedExecutionPlan,
     worker_device_id: &str,
@@ -2340,6 +2746,7 @@ pub fn validate_before_cuda(
     config: &Config,
     request: &GenerateRequest,
     prepared: Option<&PreparedExecutionInputs>,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> Result<(), ExecutionPlanError> {
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if let Some(prepared) = prepared.filter(|prepared| prepared.h3_private_ingress_grant.is_some())
@@ -2366,7 +2773,7 @@ pub fn validate_before_cuda(
     let current_paths = ModelPaths::resolve(model, config).ok_or_else(|| {
         ExecutionPlanError::PlanInvalidated("model paths are no longer resolvable".into())
     })?;
-    let current_loras = effective_loras(config, request);
+    let current_loras = effective_loras(config, request, projection);
     let current_engine_config =
         mold_inference::FrozenEngineConfig::resolve_for_request(request, config);
     if current_paths != plan.admission_paths
@@ -2520,7 +2927,30 @@ pub fn materialized_placement(plan: &ResolvedExecutionPlan) -> DevicePlacement {
 /// Apply the request-shaping portion of a selected plan. This freezes the
 /// ordered default/request LoRA stack in the payload actually consumed by the
 /// engine; later config edits cannot inject or reorder adapters.
-pub fn materialize_request(plan: &ResolvedExecutionPlan, request: &mut GenerateRequest) {
+/// Write the plan's decisions onto the request the worker will execute.
+///
+/// `sealed_media_pending` says the request still has an encrypted media set
+/// to overlay at dispatch. When it does, the adapter stack must NOT be
+/// written: `rehydrate_request_media_into`'s precondition loop refuses any
+/// request that already carries `loras` or `lora`
+/// (`OverlayAuthorityConflict`), which fails the job outright — the failure
+/// `b7c841cc` fixed for the server's own control adapter, and which a plan
+/// that now knows the caller's adapter (from the sealed projection) would
+/// otherwise re-create for every durable `--lora` render. On that path the
+/// sealed set IS the authority: hydration restores the caller's stack,
+/// `prepend_materialized_control_lora` puts the server's adapter back at its
+/// head, and `apply_planned_default_loras` then supplies this same stack for
+/// the one adapter neither of those can produce — the per-model config
+/// default, which is not a request field and so is sealed by nothing. The
+/// plan's copy is written back AFTER the overlay, never before it.
+///
+/// Everything else the plan materializes — the placement above all — is
+/// written either way, because none of it is an authority field.
+pub fn materialize_request(
+    plan: &ResolvedExecutionPlan,
+    request: &mut GenerateRequest,
+    sealed_media_pending: bool,
+) {
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if plan.engine_config.h3_factory_authority.is_some()
         && mold_core::minimax_h3::is_family(&plan.model_family)
@@ -2528,18 +2958,30 @@ pub fn materialize_request(plan: &ResolvedExecutionPlan, request: &mut GenerateR
         return;
     }
     request.placement = Some(materialized_placement(plan));
-    let loras = plan
-        .effective_loras
+    if sealed_media_pending {
+        return;
+    }
+    let loras = materialized_lora_stack(plan);
+    request.lora = None;
+    request.loras = (!loras.is_empty()).then_some(loras);
+}
+
+/// The plan's resolved adapter stack in the shape a request carries it.
+///
+/// One derivation, read by [`materialize_request`] and — after hydration, for
+/// the one adapter no sealed set can hand back — by
+/// `queue_media_runtime::apply_planned_default_loras`. `expert` is dropped
+/// because the plan resolves a path and a scale and nothing else; an expert
+/// binding belongs to the request the caller wrote.
+pub(crate) fn materialized_lora_stack(plan: &ResolvedExecutionPlan) -> Vec<mold_core::LoraWeight> {
+    plan.effective_loras
         .iter()
         .map(|lora| mold_core::LoraWeight {
             path: lora.path.to_string_lossy().into_owned(),
             scale: lora.scale(),
-
             expert: None,
         })
-        .collect::<Vec<_>>();
-    request.lora = None;
-    request.loras = (!loras.is_empty()).then_some(loras);
+        .collect()
 }
 
 fn concrete_artifacts_for_family(
@@ -2744,7 +3186,7 @@ fn concrete_artifacts_for_family(
 /// and then agrees with itself everywhere, so the render proceeds with the
 /// preset silently absent. Admission calls this first and refuses instead.
 fn unresolvable_camera_control_alias(config: &Config, request: &GenerateRequest) -> Option<String> {
-    effective_lora_requests(config, request)
+    effective_lora_requests(config, request, None)
         .into_iter()
         .find_map(|lora| {
             let id = lora.path.strip_prefix("camera-control:")?;
@@ -2769,9 +3211,25 @@ fn resolved_camera_control_path(config: &Config, id: &str) -> Option<PathBuf> {
 /// The LoRA stack a request actually asks for, before alias resolution:
 /// explicit `loras`, else the legacy single `lora`, else the model config's
 /// own default.
+/// The adapter stack this render will actually merge.
+///
+/// The `projection` arm is not a nicety: a durable job's plan is resolved from
+/// the SCRUBBED request (`durable_queue_feeder` publishes
+/// `scrubbed_clone()`, which empties `loras` because the adapter is an
+/// authority field sealed into the encrypted media set), so on that path the
+/// request carries nothing and the sealed stack is the only description of the
+/// render there is. Reading only the request charged no adapter bytes and left
+/// `request_has_lora` false, which for flux2 and z-image froze an `Eager`
+/// strategy into a plan whose engine merges the LoRA as the transformer is
+/// BUILT — a decision only the sequential path can honour.
+///
+/// It is a FALLBACK, in this order, so a projection can never add an adapter
+/// to a render that has none: the request's own stack wins wherever it
+/// survived, and the config default stays last.
 fn effective_lora_requests(
     config: &Config,
     request: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> Vec<mold_core::LoraWeight> {
     request
         .loras
@@ -2779,6 +3237,11 @@ fn effective_lora_requests(
         .filter(|stack| !stack.is_empty())
         .cloned()
         .or_else(|| request.lora.clone().map(|lora| vec![lora]))
+        .or_else(|| {
+            projection
+                .filter(|projection| projection.has_loras())
+                .map(|projection| projection.loras.clone())
+        })
         .or_else(|| {
             config
                 .resolved_model_config(&request.model)
@@ -2793,9 +3256,13 @@ fn effective_lora_requests(
         .unwrap_or_default()
 }
 
-fn effective_loras(config: &Config, request: &GenerateRequest) -> Vec<PlannedLora> {
+fn effective_loras(
+    config: &Config,
+    request: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> Vec<PlannedLora> {
     const ZERO_SCALE_EPS: f64 = 1e-8;
-    effective_lora_requests(config, request)
+    effective_lora_requests(config, request, projection)
         .into_iter()
         .filter(|lora| lora.scale.abs() > ZERO_SCALE_EPS)
         .map(|lora| {
@@ -3132,6 +3599,30 @@ fn build_plan(
     }
     if memory.fits_available_memory != Some(true) {
         let mut advice = ltx2_shape_advice(context, device);
+        // A FLUX.2 tier that does not fit resident would normally be planned
+        // to stream its blocks. When it cannot, the refusal has to say so:
+        // the 2026-09-11 audit's 24 GB simulation refused `flux2-dev:q8` with
+        // nothing but "memory pressure changed after scheduler admission",
+        // which named a cause that had not happened and left out the one that
+        // had. The reason is the ENGINE's own, so plan and loader agree.
+        if !memory.block_offload {
+            if let Some(reason) = crate::memory_preflight::flux2_block_offload_unsupported_reason(
+                context.paths,
+                request_has_lora,
+            )
+            .filter(|_| {
+                context.family == "flux2"
+                    || hint.is_some_and(|hint| {
+                        hint.family == mold_inference::device::ActivationFamily::Flux2Dit
+                    })
+            }) {
+                let clause = format!("streaming was not possible: {reason}");
+                advice = Some(match advice {
+                    Some(existing) => format!("{existing}; {clause}"),
+                    None => clause,
+                });
+            }
+        }
         if recent_oom_reduced_budget {
             let cooldown = "this request is temporarily limited after a recent CUDA OOM; retry after the cooldown or reduce the output size".to_string();
             advice = Some(match advice {
@@ -3145,6 +3636,7 @@ fn build_plan(
                 baseline.incremental_peak(memory.peak_memory_bytes)
             }),
             available_bytes: device_budget,
+            admissible_ceiling_bytes: memory.admissible_ceiling_bytes.unwrap_or(device_budget),
             advice,
         });
         return None;
@@ -3174,6 +3666,9 @@ fn build_plan(
             device_id: device.id.clone(),
             predicted_peak_bytes: pending_dependency_peak,
             available_bytes: device.available_vram_bytes,
+            // A pending dependency is compared against the whole device, not
+            // against the request's admission ceiling.
+            admissible_ceiling_bytes: device.available_vram_bytes,
             advice: None,
         });
         return None;
@@ -3190,6 +3685,74 @@ fn build_plan(
     let mut recurring_host_bytes_by_path: BTreeMap<PathBuf, u64> = BTreeMap::new();
     let gemma_anon_peak_anchor =
         ltx2_cpu_gemma_anon_peak_anchor(context.family, context.artifacts, &placements);
+    // FLUX.2 [dev]'s Mistral3 encoder streams on either side of the placement
+    // decision, so its charge is resolved once here and applied in whichever
+    // arm this plan takes.
+    let mistral_peak_anchor =
+        flux2_mistral_peak_anchor(context.family, context.model, context.artifacts);
+    let mistral_charge = mistral_peak_anchor.as_ref().and_then(|_| {
+        mold_inference::flux2::text_encoder_residency::mistral3_admission_charge_for_gpu(
+            context.model,
+            context.paths,
+        )
+    });
+    // A GPU-placed Mistral3 encoder may also hold its ~35 GB prefix in HOST
+    // RAM between requests. That is a real, irreclaimable allocation the
+    // engine makes on its own, and the planner has to charge it or two queued
+    // [dev] prints on a 128 GB host would both be admitted against memory only
+    // one of them can have. The decision is the ENGINE's own function, asked
+    // with this ledger's host snapshot, so the plan and the render cannot
+    // disagree about whether a park happens.
+    //
+    // It is a COLD charge only: a warm hit finds the prefix already parked,
+    // and `MemAvailable` — this ledger's own input — already excludes it.
+    let mistral_host_park_bytes = mistral_charge
+        .as_ref()
+        .filter(|_| device.backend == GpuBackend::Cuda)
+        .map_or(0, |_| {
+            use mold_inference::flux2::text_encoder_residency as residency;
+            let host = crate::h3_admission::current_h3_host_memory();
+            let transformer_bytes: u64 = context
+                .artifacts
+                .iter()
+                .filter(|(role, _)| {
+                    matches!(
+                        role,
+                        ComponentRole::Transformer | ComponentRole::TransformerShard(_)
+                    )
+                })
+                .map(|(_, path)| {
+                    context
+                        .pending_artifacts
+                        .get(path)
+                        .map_or_else(|| artifact_size(path), |artifact| artifact.bytes)
+                })
+                .sum();
+            let prefix = residency::mistral3_prefix_bytes_bf16();
+            let decision =
+                residency::decide_text_encoder_residency(&residency::TextEncoderResidencyInputs {
+                    encoder_bytes: prefix,
+                    transformer_bytes,
+                    host_total_bytes: host.total_bytes,
+                    host_available_bytes: host.spendable_bytes(),
+                    pinned_cap_bytes:
+                        mold_inference::flux2::text_encoder_residency::host_pinned_cap_bytes(),
+                    keep_te_ram: mold_inference::device::keep_te_ram_mode(),
+                    device: residency::TextEncoderDevice::Cuda,
+                    // Zero, deliberately. The planner charges the COLD case —
+                    // an engine that already holds a park is a warm hit whose
+                    // bytes `MemAvailable` has already excluded, and which
+                    // this charge is documented not to re-reserve. Passing a
+                    // live figure here would also make the plan depend on
+                    // which worker the job later lands on.
+                    already_parked_bytes: 0,
+                });
+            if decision.parks() {
+                prefix
+            } else {
+                0
+            }
+        });
     for (role, path) in context.artifacts {
         let place_cpu = placements.get(role).copied().unwrap_or(false);
         let bytes = context
@@ -3208,10 +3771,16 @@ fn build_plan(
             // that sum it refuses every job while the GPU idles (#1108).
             // Only the encoder's real anonymous heap is irreclaimable, and
             // only the anchor shard carries it.
-            let streams_from_mmap = ltx2_cpu_gemma_streams_from_mmap(context.family, role, path);
+            let streams_from_mmap = ltx2_cpu_gemma_streams_from_mmap(context.family, role, path)
+                || flux2_mistral_streams_from_mmap(context.family, context.model, role, path);
             let host = if streams_from_mmap {
                 if gemma_anon_peak_anchor.as_ref() == Some(role) {
                     mold_inference::ltx2::cpu_gemma_streaming_anon_peak_bytes()
+                } else if mistral_peak_anchor.as_ref() == Some(role) {
+                    // A CPU-placed FLUX.2 encoder runs at F32, and its shards
+                    // stay a reclaimable mapping there exactly as they do on
+                    // the device.
+                    mistral_charge.map_or(bytes, |charge| charge.host_anon_peak)
                 } else {
                     0
                 }
@@ -3263,11 +3832,39 @@ fn build_plan(
             } else {
                 ComponentLoadStrategy::Resident
             };
+            // A GPU-placed FLUX.2 [dev] Mistral3 encoder never holds its
+            // checkpoint either: the shards stay a memory mapping and one
+            // decoder layer at a time reaches the device. The anchor carries
+            // the whole streamed peak; the remaining shards carry nothing.
+            let vram = match (&mistral_charge, mistral_peak_anchor.as_ref() == Some(role)) {
+                (Some(charge), true) => charge.device_peak,
+                (Some(_), false)
+                    if flux2_mistral_streams_from_mmap(
+                        context.family,
+                        context.model,
+                        role,
+                        path,
+                    ) =>
+                {
+                    0
+                }
+                _ => bytes,
+            };
+            // The host park rides on the SAME anchor the device peak does, so
+            // a multi-shard encoder is charged once.
+            let host = if mistral_peak_anchor.as_ref() == Some(role) {
+                mistral_host_park_bytes
+            } else {
+                0
+            };
+            if host > 0 {
+                host_bytes_by_path.insert(path.clone(), host);
+            }
             (
                 ResolvedComponentPlacement::Device(device.id.clone()),
                 strategy,
-                bytes,
-                0,
+                vram,
+                host,
             )
         };
         components.insert(
@@ -3357,6 +3954,15 @@ fn build_plan(
         context.effective_loras,
         memory.block_offload,
     );
+    let warm_reuse_fingerprint = execution_fingerprint(
+        context.model,
+        device,
+        context.effective,
+        &load_plan_independent_components(&components),
+        context.engine_config,
+        context.effective_loras,
+        memory.block_offload,
+    );
     let model_fingerprint =
         model_fingerprint(context.model, context.artifacts, context.pending_artifacts);
     let equivalence_model_fingerprint = equivalence_model_fingerprint(
@@ -3395,6 +4001,14 @@ fn build_plan(
         determinism_class,
         context.equivalence_cache_only,
         context.pending_artifacts,
+        flux2_cfg_budget(
+            context.family,
+            context.model,
+            context.request,
+            device,
+            context.artifacts,
+            context.pending_artifacts,
+        ),
     ) {
         Ok(environment) => environment,
         Err(error) => return Some(Err(error)),
@@ -3426,6 +4040,7 @@ fn build_plan(
         execution_environment,
         execution_equivalence_fingerprint,
         execution_fingerprint: fingerprint,
+        warm_reuse_fingerprint,
     }))
 }
 
@@ -3445,6 +4060,7 @@ pub(crate) fn execution_environment_descriptor(
     determinism_class: DeterminismClass,
     equivalence_cache_only: bool,
     pending_artifacts: &BTreeMap<PathBuf, PendingArtifactIdentity>,
+    flux2_cfg_budget: Flux2CfgBudget,
 ) -> Result<ExecutionEnvironmentDescriptor, ExecutionPlanError> {
     let architecture = match (device.backend, device.compute_capability) {
         (GpuBackend::Cuda, Some((major, minor))) => {
@@ -3537,7 +4153,11 @@ pub(crate) fn execution_environment_descriptor(
             AttentionBackend::Flash => AttentionKernelClass::Flash,
         },
         code: execution_code_identity(),
-        semantic_config: ExecutionSemanticConfig::from_frozen(engine_config)?,
+        semantic_config: ExecutionSemanticConfig::from_frozen(
+            engine_config,
+            device.backend,
+            flux2_cfg_budget,
+        )?,
         runtime_model_id: runtime_model_id.to_string(),
         runtime_artifact_paths,
         model_family: model_family.to_string(),
@@ -3747,6 +4367,153 @@ fn ltx2_cpu_gemma_streams_from_mmap(family: &str, role: &ComponentRole, path: &P
 /// residency is especially wrong on Metal, where that charge is folded back
 /// into the same unified-memory gate. The real transient for every format is
 /// bounded by `BASE_HOST_TRANSIENT`.
+/// Whether a text-encoder artifact is FLUX.2 [dev]'s Mistral3 conditioner,
+/// which STREAMS one decoder layer at a time off a memory mapping rather than
+/// materializing its checkpoint.
+///
+/// Same shape as [`ltx2_cpu_gemma_streams_from_mmap`] and the same reasoning,
+/// but it answers for BOTH placements: the shards are a reclaimable mapping on
+/// the host, and only the layers in flight are ever on the device. Charging the
+/// 36 GB file made the planner declare memory pressure on an idle 46 GB card,
+/// park the encoder to the CPU, and take 78.8 s to encode a prompt with the GPU
+/// at 0 % SM.
+///
+/// `mold_inference::flux2::text_encoder_residency` is the single authority; this
+/// only adds the role gate the planner needs.
+fn flux2_mistral_streams_from_mmap(
+    family: &str,
+    model: &str,
+    role: &ComponentRole,
+    path: &Path,
+) -> bool {
+    matches!(role, ComponentRole::QwenShard(_))
+        && mold_inference::flux2::text_encoder_residency::mistral3_streams_from_mmap(
+            family, model, path,
+        )
+}
+
+/// The one FLUX.2 [dev] Mistral3 shard that carries the streamed encoder's
+/// peak, if this plan has one.
+///
+/// The encoder's working set belongs to the ENCODER, not to any one shard —
+/// BFL publishes it as eight, Comfy-Org as one — so it is attributed to the
+/// lowest-ordered shard exactly as [`ltx2_cpu_gemma_anon_peak_anchor`] does.
+/// Added per shard it would be charged eight times over.
+fn flux2_mistral_peak_anchor(
+    family: &str,
+    model: &str,
+    artifacts: &BTreeMap<ComponentRole, PathBuf>,
+) -> Option<ComponentRole> {
+    artifacts
+        .iter()
+        .find(|(role, path)| flux2_mistral_streams_from_mmap(family, model, role, path))
+        .map(|(role, _)| role.clone())
+}
+
+/// Transformer weight bytes for this plan, or `None` when the checkpoint
+/// cannot be measured.
+///
+/// The engine charges its CFG budget against
+/// `Flux2Engine::transformer_file_bytes` — the summed size of the transformer
+/// file or its shards — so this sums the same thing over the same roles. A
+/// pending artifact contributes its declared size; a file whose metadata
+/// cannot be read contributes nothing at all, and the whole answer becomes
+/// `None`, because [`artifact_size`]'s 64 MiB unknown-charge is a host-RAM
+/// placeholder and using it here would understate a 9 GB checkpoint by two
+/// orders of magnitude and report `Batched` on a card that cannot.
+fn flux2_transformer_weight_bytes(
+    artifacts: &BTreeMap<ComponentRole, PathBuf>,
+    pending_artifacts: &BTreeMap<PathBuf, PendingArtifactIdentity>,
+) -> Option<u64> {
+    let mut total: u64 = 0;
+    let mut measured = false;
+    for (role, path) in artifacts {
+        if !matches!(
+            role,
+            ComponentRole::Transformer | ComponentRole::TransformerShard(_)
+        ) {
+            continue;
+        }
+        let bytes = match pending_artifacts.get(path) {
+            Some(pending) => pending.bytes,
+            None => std::fs::metadata(path).ok()?.len(),
+        };
+        total = total.saturating_add(bytes);
+        measured = true;
+    }
+    measured.then_some(total)
+}
+
+/// The budget the FLUX.2 CFG gate is charged with for this plan, or the
+/// default — which resolves `Sequential` — for a render that cannot batch.
+///
+/// Every input is the ENGINE's, read from where the planner can see it:
+///
+/// * the transformer's bytes, summed exactly as the engine sums them;
+/// * the batch-2 denoise workspace from
+///   `mold_inference::flux2::flux2_cfg_plan_activation_bytes`, which is the
+///   engine's own `flux2_activation_bytes_for` at the engine's own arguments.
+///   Charging a DIFFERENT estimator here was the first version's defect: the
+///   gate is a comparison, so sharing the comparison without sharing its
+///   inputs still disagrees on every card whose total falls between the two
+///   answers, which is precisely the collision the field exists to prevent;
+/// * the card's total VRAM, which is why `DeviceFact` carries it.
+///
+/// The four refusals below are the renders that never issue a batched step,
+/// and each is the ENGINE's own test asked of the plan's own inputs:
+///
+/// * a family that is not flux2;
+/// * a device that is not CUDA — `resolve_cfg_batching` reads the total
+///   through a CUDA ordinal and answers `Sequential` for every other device
+///   location, so charging a Metal card's unified total would have the plan
+///   claim an execution the engine never runs;
+/// * a checkpoint that is not an undistilled [klein] base tier, by
+///   `mold_core::validation::is_flux2_base_model` — the same function
+///   `Flux2Engine::cfg_branch_prompt` asks — which is also what names the
+///   geometry the activation term is charged over;
+/// * `guidance` at or below 1, by the shared `engine::cfg_active`. That is
+///   the same question `cfg_branch_prompt`'s `req.guidance <= 1.0` asks, an
+///   epsilon apart: a guidance inside 1e-4 of 1 is CFG to the engine and no
+///   branch to this, which resolves `Sequential` — the conservative side, and
+///   a value no one types.
+///
+/// A render failing any of them records `Sequential` and therefore does not
+/// vary with the card, which matters as much as the batched case does: a
+/// [dev] or distilled [klein] print executes identically on a 24 GB and a
+/// 48 GB card, and a card-dependent value would split its equivalence class
+/// and its learned-timing bucket for nothing.
+fn flux2_cfg_budget(
+    family: &str,
+    model: &str,
+    request: &GenerateRequest,
+    device: &DeviceFact,
+    artifacts: &BTreeMap<ComponentRole, PathBuf>,
+    pending_artifacts: &BTreeMap<PathBuf, PendingArtifactIdentity>,
+) -> Flux2CfgBudget {
+    if family != "flux2"
+        || device.backend != GpuBackend::Cuda
+        || !mold_inference::engine::cfg_active(request.guidance)
+    {
+        return Flux2CfgBudget::default();
+    }
+    let Some(geometry) = mold_inference::flux2::flux2_base_tier_config(model) else {
+        return Flux2CfgBudget::default();
+    };
+    let Some(transformer_bytes) = flux2_transformer_weight_bytes(artifacts, pending_artifacts)
+    else {
+        return Flux2CfgBudget::default();
+    };
+    Flux2CfgBudget {
+        transformer_bytes,
+        activation_bytes_batch2: mold_inference::flux2::flux2_cfg_plan_activation_bytes(
+            &geometry,
+            request.width,
+            request.height,
+        ),
+        device_total_vram_bytes: device.total_vram_bytes,
+    }
+}
+
 fn ltx2_transformer_streams_from_mmap(family: &str, role: &ComponentRole, path: &Path) -> bool {
     matches!(family, "ltx2" | "ltx-2" | "ltx2.3")
         && matches!(
@@ -4915,6 +5682,54 @@ pub fn freeze_chain_model_with_paths(
     })
 }
 
+/// The component plans with the LOAD PLAN canonicalised away.
+///
+/// Four fields, each a statement about how to load rather than about what is
+/// loaded, and each decided by the SAME reading of the device's momentary free
+/// VRAM that decides the engine load strategy:
+///
+/// * `load_strategy` — resident, dropped-and-reloaded, parked, streamed. An
+///   engine that is holding its transformer has already answered this.
+/// * `predicted_vram_bytes` / `predicted_host_bytes` — a forecast about that
+///   loading. A forecast is not an identity.
+/// * `placement` — the planner's RESOLUTION of where a component goes, which
+///   for a text encoder is mold's documented dynamic placement: "text encoders
+///   go to GPU or CPU based on remaining VRAM after the transformer loads",
+///   re-decided by the engine at run time. Measured on one L40S: the identical
+///   `flux2-dev:q8` request resolved `QwenShard(0)` to `Device` on the cold
+///   card and to `Cpu` on the warm one, one minute later.
+///
+/// What a caller AUTHORED is a different question and is not normalised: an
+/// explicit `--device` pin lives in `EffectivePlacement`, which
+/// `execution_fingerprint` hashes separately and which this never touches. So
+/// a request that pinned its encoder still invalidates a warm engine planned
+/// without that pin; only the planner's own VRAM-driven resolution is
+/// forgotten.
+///
+/// Everything else is kept deliberately, and is exactly what must still force
+/// a rebuild: `artifact_path` and `content_fingerprint` (a checkpoint replaced
+/// on disk under a warm engine is the case this narrowing exists to keep),
+/// `dtype`, `quantization`, and the role itself.
+fn load_plan_independent_components(
+    components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
+) -> BTreeMap<ComponentRole, ComponentExecutionPlan> {
+    components
+        .iter()
+        .map(|(role, plan)| {
+            (
+                role.clone(),
+                ComponentExecutionPlan {
+                    load_strategy: ComponentLoadStrategy::Resident,
+                    predicted_vram_bytes: 0,
+                    predicted_host_bytes: 0,
+                    placement: ResolvedComponentPlacement::Cpu,
+                    ..plan.clone()
+                },
+            )
+        })
+        .collect()
+}
+
 fn execution_fingerprint(
     model: &str,
     device: &DeviceFact,
@@ -5374,10 +6189,14 @@ mod tests {
         (config, request)
     }
 
+    /// Synthetic idle cards: each entry is both what is free and what is
+    /// installed, which is what an idle card reports. Anything that needs the
+    /// two to differ says so at the call site.
     fn devices(free: &[u64]) -> Vec<DeviceFact> {
         free.iter()
             .enumerate()
             .map(|(ordinal, bytes)| DeviceFact {
+                total_vram_bytes: Some(*bytes),
                 cuda_peak_baseline: None,
                 id: format!("cuda:{ordinal}"),
                 ordinal,
@@ -5392,6 +6211,7 @@ mod tests {
         free.iter()
             .enumerate()
             .map(|(ordinal, bytes)| DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: format!("metal:{ordinal}"),
                 ordinal,
@@ -5785,6 +6605,282 @@ mod tests {
             plan.predicted_warm_host_increment_bytes,
             BASE_HOST_TRANSIENT + streaming_heap,
             "the streaming heap is a forward-loop allocation and recurs on a warm hit"
+        );
+    }
+
+    /// A FLUX.2 [dev] fixture: a GGUF transformer, a small VAE, and one
+    /// Mistral3 encoder file whose 36 GB are page cache, not demand.
+    /// D7a on hardware (`MOLD_RESERVE_VRAM_MB=22000`): a dense FLUX.2 [dev]
+    /// tier that cannot be resident on the reserve-adjusted budget was
+    /// REFUSED — "still 14.2 GB short (requires 39.37 GB, 25.12 GB available)"
+    /// with no offload line anywhere — where it should have been planned as
+    /// block-streamed automatically. The unit test on the estimator passed, so
+    /// the gap is in the plan, not in the budget.
+    #[test]
+    fn a_dense_flux2_dev_tier_that_cannot_be_resident_is_planned_streamed() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = flux2_dev_dense_config(root.path(), "flux2-dev:fp8", 33 * GIB);
+        let plan = resolve_execution_plans(&config, &request, &devices(&[25 * GIB]), false)
+            .expect("a dense dev tier that does not fit resident must STREAM, not refuse")
+            .remove(0);
+
+        assert_eq!(
+            plan.offload_mode,
+            OffloadMode::Block,
+            "the plan must name the streamed disposition"
+        );
+        assert_eq!(
+            plan.components[&ComponentRole::Transformer].load_strategy,
+            ComponentLoadStrategy::StreamedBlocks,
+        );
+        assert!(
+            plan.predicted_vram_peak_bytes < 25 * GIB,
+            "the streamed working set must fit the budget it was admitted \
+             against, not the resident one ({})",
+            plan.predicted_vram_peak_bytes
+        );
+    }
+
+    /// D7b: the GGUF tier has no streamed path, so it is refused — and the
+    /// refusal has to say that rather than leaving it to be guessed.
+    #[test]
+    fn a_gguf_flux2_dev_tier_is_refused_with_the_reason_it_cannot_stream() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = flux2_dev_config(root.path(), "flux2-dev:q4", 19 * GIB, 36 * GIB);
+        let error = resolve_execution_plans(&config, &request, &devices(&[25 * GIB]), false)
+            .expect_err("a GGUF dev tier cannot stream and does not fit resident");
+        let message = error.to_string();
+        assert!(
+            message.contains("GGUF"),
+            "the refusal must name the format that cannot stream: {message}"
+        );
+    }
+
+    fn flux2_dev_dense_config(
+        root: &Path,
+        model: &str,
+        transformer_bytes: u64,
+    ) -> (Config, GenerateRequest) {
+        let transformer = root.join("flux2_dev_fp8mixed.safetensors");
+        let vae = root.join("flux2-vae.safetensors");
+        let encoder = root.join("mistral_3_small_flux2_bf16.safetensors");
+        sparse_file(&transformer, transformer_bytes);
+        sparse_file(&vae, GIB / 2);
+        sparse_file(&encoder, 36 * GIB);
+        let mut config = Config::default();
+        config.models.insert(
+            model.to_string(),
+            ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![encoder.display().to_string()]),
+                family: Some("flux2".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let request: GenerateRequest = serde_json::from_str(&format!(
+            r#"{{"prompt":"x","model":"{model}","width":1024,"height":1024,"steps":20,"guidance":4.0}}"#
+        ))
+        .unwrap();
+        (config, request)
+    }
+
+    fn flux2_dev_config(
+        root: &Path,
+        model: &str,
+        transformer_bytes: u64,
+        encoder_bytes: u64,
+    ) -> (Config, GenerateRequest) {
+        let transformer = root.join("flux2-dev-transformer.gguf");
+        let vae = root.join("flux2-vae.safetensors");
+        let encoder = root.join("mistral_3_small_flux2_bf16.safetensors");
+        sparse_file(&transformer, transformer_bytes);
+        sparse_file(&vae, GIB / 2);
+        sparse_file(&encoder, encoder_bytes);
+        let mut config = Config::default();
+        config.models.insert(
+            model.to_string(),
+            ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![encoder.display().to_string()]),
+                family: Some("flux2".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let request: GenerateRequest = serde_json::from_str(&format!(
+            r#"{{"prompt":"x","model":"{model}","width":1024,"height":1024,"steps":20,"guidance":4.0}}"#
+        ))
+        .unwrap();
+        (config, request)
+    }
+
+    fn mistral_charge(
+        config: &Config,
+        model: &str,
+    ) -> mold_inference::flux2::text_encoder_residency::StreamedEncoderCharge {
+        let entry = &config.models[model];
+        let paths = mold_core::ModelPaths {
+            transformer: PathBuf::from(entry.transformer.as_deref().unwrap()),
+            transformer_shards: Vec::new(),
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
+            vae: PathBuf::from(entry.vae.as_deref().unwrap()),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: entry
+                .text_encoder_files
+                .iter()
+                .flatten()
+                .map(PathBuf::from)
+                .collect(),
+            text_tokenizer: None,
+            decoder: None,
+        };
+        mold_inference::flux2::text_encoder_residency::mistral3_admission_charge_for_gpu(
+            model, &paths,
+        )
+        .expect("a dev Mistral3 encoder streams")
+    }
+
+    /// The 2026-09-11 audit's headline: a 46 GB L40S with nothing else on it
+    /// parked FLUX.2 [dev]'s encoder on the CPU because the planner charged
+    /// its 36 GB file, and the encode then took 78.8 s at F32 with the GPU
+    /// idle. The encoder streams — it is charged its streamed device peak and
+    /// stays on the card.
+    #[test]
+    fn flux2_dev_mistral_streams_on_a_46gb_card_and_is_not_auto_parked() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = flux2_dev_config(root.path(), "flux2-dev:q8", 33 * GIB, 36 * GIB);
+        let plan = resolve_execution_plans(&config, &request, &devices(&[46 * GIB]), false)
+            .expect("a streamed encoder fits beside a Q8 transformer on a 46 GB card")
+            .remove(0);
+
+        let encoder = &plan.components[&ComponentRole::QwenShard(0)];
+        assert!(
+            matches!(encoder.placement, ResolvedComponentPlacement::Device(_)),
+            "a streamed Mistral3 encoder belongs on the GPU"
+        );
+        assert_eq!(
+            encoder.predicted_vram_bytes,
+            mistral_charge(&config, "flux2-dev:q8").device_peak,
+            "charge the streamed peak, never the shard"
+        );
+        // The host side is either nothing — the encoder streams from its
+        // mapping, which is reclaimable and already counted as available — or
+        // EXACTLY the parked prefix, on a host whose own memory allows the
+        // park. It is never the 36 GB shard set, which is the charge that
+        // refused a 64 GB desktop outright. Which of the two it is depends on
+        // the machine this test runs on, and that is the point: the planner
+        // asks the engine's own residency function with this host's numbers.
+        assert!(
+            encoder.predicted_host_bytes == 0
+                || encoder.predicted_host_bytes
+                    == mold_inference::flux2::text_encoder_residency::mistral3_prefix_bytes_bf16(),
+            "host charge was {} bytes",
+            encoder.predicted_host_bytes
+        );
+    }
+
+    /// The same answer on a 24 GB card with a Q4 transformer: the encoder is
+    /// phase-disjoint from the denoise, so streaming it on the GPU is what
+    /// makes both fit.
+    #[test]
+    fn flux2_dev_q4_on_a_24gb_card_streams_the_encoder_on_the_gpu() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = flux2_dev_config(root.path(), "flux2-dev:q4", 11 * GIB, 36 * GIB);
+        let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .expect("a Q4 dev tier admits on a 24 GB card")
+            .remove(0);
+
+        let encoder = &plan.components[&ComponentRole::QwenShard(0)];
+        assert!(
+            matches!(encoder.placement, ResolvedComponentPlacement::Device(_)),
+            "24 GB is still enough for a 3.6 GB streamed encoder phase"
+        );
+        assert_eq!(
+            encoder.predicted_vram_bytes,
+            mistral_charge(&config, "flux2-dev:q4").device_peak
+        );
+    }
+
+    /// An explicit CPU pin is honoured, and it charges the streaming heap the
+    /// CPU arm really allocates — at F32, the dtype `flux2/pipeline.rs` picks
+    /// there — never the 36 GB of shards, which stay a reclaimable mapping on
+    /// the host exactly as they are on the device. Charging the file is an
+    /// outright refusal on a 64 GB desktop.
+    #[test]
+    fn an_explicit_cpu_pin_on_the_mistral_encoder_charges_its_streaming_heap_not_its_file() {
+        let root = TempDir::new().unwrap();
+        let (config, mut request) =
+            flux2_dev_config(root.path(), "flux2-dev:q8", 33 * GIB, 36 * GIB);
+        request.placement = Some(DevicePlacement {
+            text_encoders: DeviceRef::Cpu,
+            advanced: None,
+        });
+
+        let plan = resolve_execution_plans(&config, &request, &devices(&[46 * GIB]), false)
+            .expect("a CPU-pinned Mistral3 encoder keeps FLUX.2 admissible")
+            .remove(0);
+
+        let charge = mistral_charge(&config, "flux2-dev:q8");
+        let encoder = &plan.components[&ComponentRole::QwenShard(0)];
+        assert_eq!(encoder.placement, ResolvedComponentPlacement::Cpu);
+        assert_eq!(
+            encoder.predicted_host_bytes, charge.host_anon_peak,
+            "only the streaming encoder's anonymous heap; the shards are a \
+             reclaimable file mapping"
+        );
+        assert!(
+            charge.host_anon_peak < 10 * GIB,
+            "the heap is bounded; the file is 36 GB"
+        );
+    }
+
+    /// The regression pin. FLUX.1's T5 is COPIED to wherever it is placed, so
+    /// a 9.8 GB encoder beside a resident 12 GB Q8 transformer on a 24 GB card
+    /// is a legitimate park at its real file size. Nothing about the Mistral3
+    /// exemption may reach it.
+    #[test]
+    fn flux_dev_q8_on_a_24gb_card_still_parks_t5() {
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("flux1-dev-Q8_0.gguf");
+        let vae = root.path().join("ae.safetensors");
+        let t5 = root.path().join("t5xxl_fp16.safetensors");
+        sparse_file(&transformer, 12_500_000_000);
+        sparse_file(&vae, 335_000_000);
+        sparse_file(&t5, 9_790_000_000);
+        let mut config = Config::default();
+        config.models.insert(
+            "flux-dev:q8".to_string(),
+            ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                t5_encoder: Some(t5.display().to_string()),
+                family: Some("flux".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"x","model":"flux-dev:q8","width":1024,"height":1024,"steps":20,"guidance":3.5}"#,
+        )
+        .unwrap();
+
+        let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .expect("flux-dev:q8 admits on a 24 GB card")
+            .remove(0);
+        let encoder = &plan.components[&ComponentRole::T5];
+        assert_eq!(encoder.placement, ResolvedComponentPlacement::Cpu);
+        assert_eq!(
+            encoder.predicted_host_bytes, 9_790_000_000,
+            "a copied T5 is charged its bytes"
         );
     }
 
@@ -6403,12 +7499,13 @@ mod tests {
             device_id: "cuda:0".into(),
             predicted_peak_bytes: 16_600_000_000,
             available_bytes: 15_000_000_000,
+            admissible_ceiling_bytes: 13_500_000_000,
             advice: Some("retry after the cooldown".into()),
         }]);
 
         assert_eq!(
             error.to_string(),
-            "no device has enough effective VRAM capacity for a safe execution plan: cuda:0 needs ~16.6 GB but only ~15.0 GB is currently available for this request (retry after the cooldown)"
+            "no device has enough effective VRAM capacity for a safe execution plan: cuda:0 needs ~16.6 GB, over this request's ~13.5 GB admission ceiling (90% of the ~15.0 GB usable) (retry after the cooldown)"
         );
     }
 
@@ -6471,7 +7568,7 @@ mod tests {
             let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
                 .unwrap()
                 .remove(0);
-            validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None).unwrap();
+            validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None, None).unwrap();
         }
     }
 
@@ -6491,11 +7588,11 @@ mod tests {
             placement.advanced.unwrap().transformer,
             DeviceRef::Device { .. }
         ));
-        validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None).unwrap();
+        validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None, None).unwrap();
 
         std::fs::write(root.path().join("transformer-q4.gguf"), vec![1_u8; 2048]).unwrap();
         assert!(matches!(
-            validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None),
+            validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None, None),
             Err(ExecutionPlanError::PlanInvalidated(_))
         ));
     }
@@ -6591,7 +7688,7 @@ mod tests {
             vec![-0.5, 1.25]
         );
         let mut materialized = request.clone();
-        materialize_request(&request_plan, &mut materialized);
+        materialize_request(&request_plan, &mut materialized, false);
         assert!(materialized.lora.is_none());
         assert_eq!(
             materialized
@@ -6605,9 +7702,340 @@ mod tests {
 
         config.models.get_mut("test:q4").unwrap().is_schnell = Some(false);
         assert!(matches!(
-            validate_before_cuda(&request_plan, "cuda:0", 0, &config, &request, None),
+            validate_before_cuda(&request_plan, "cuda:0", 0, &config, &request, None, None),
             Err(ExecutionPlanError::PlanInvalidated(_))
         ));
+    }
+
+    /// A request with a sealed set still to overlay must reach hydration
+    /// carrying NO authority field — `loras` included.
+    ///
+    /// `materialize_request` writes the plan's resolved stack onto the
+    /// request so the engine gets concrete paths. On the durable path that
+    /// request is about to be handed to `rehydrate_request_media_into`, whose
+    /// precondition loop refuses any request that already carries `loras`
+    /// (`OverlayAuthorityConflict`) — the failure `b7c841cc` fixed for the
+    /// server's own control adapter, and the one a plan that now knows about
+    /// the caller's adapter would re-create for every durable `--lora`
+    /// render. The sealed set is the authority on that path; the plan's copy
+    /// exists to be CHARGED, not to be written back.
+    #[test]
+    fn a_pending_overlay_is_never_handed_a_materialized_lora_stack() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            sparse_file(&root.path().join(name), GIB);
+        }
+        let adapter = root.path().join("style.safetensors");
+        sparse_file(&adapter, GIB / 4);
+        let config = config(root.path(), "flux2", None);
+
+        // The plan a durable LoRA render now resolves: the adapter is known,
+        // because the projection carries it.
+        let scrubbed = request(None);
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            loras: vec![mold_core::LoraWeight {
+                path: adapter.display().to_string(),
+                scale: 0.8,
+                expert: None,
+            }],
+            ..Default::default()
+        };
+        let plan = resolve_execution_plans_for_coordinator_with_projection(
+            &config,
+            &scrubbed,
+            &devices(&[48 * GIB]),
+            false,
+            None,
+            Some(&projection),
+        )
+        .expect("plans")
+        .remove(0);
+        assert_eq!(
+            plan.effective_loras.len(),
+            1,
+            "the plan charges the adapter"
+        );
+
+        let mut pending_overlay = scrubbed.clone();
+        materialize_request(&plan, &mut pending_overlay, true);
+        assert!(
+            pending_overlay.loras.is_none() && pending_overlay.lora.is_none(),
+            "hydration refuses a request that already carries an adapter"
+        );
+        assert!(
+            pending_overlay.placement.is_some(),
+            "everything else the plan materializes is unaffected"
+        );
+
+        // With nothing left to overlay, the plan writes the stack the engine
+        // must load. On the durable path the same stack is re-applied after
+        // hydration instead — see
+        // `queue_media_runtime::apply_planned_default_loras`, which is what
+        // carries the config default, the one adapter the sealed set never
+        // holds.
+        let mut settled = scrubbed.clone();
+        materialize_request(&plan, &mut settled, false);
+        assert_eq!(
+            settled
+                .loras
+                .expect("the resolved stack")
+                .iter()
+                .map(|lora| lora.path.clone())
+                .collect::<Vec<_>>(),
+            vec![adapter.display().to_string()]
+        );
+    }
+
+    /// A durable LoRA render is planned from a request whose `loras` the
+    /// queue-media seal already emptied, so the plan must read the adapter
+    /// off the PROJECTION that travels beside it.
+    ///
+    /// `durable_queue_feeder` publishes `scrubbed_clone()` and the coordinator
+    /// resolves the frozen plan from that copy. Reading only the request meant
+    /// `request_has_lora` was false on every durable `--lora` render: no
+    /// `ComponentRole::Lora` artifact, no adapter bytes charged, and — for
+    /// flux2 and z-image, whose LoRA merge happens as the transformer is
+    /// BUILT — an `Eager` strategy frozen into a plan the engine then has to
+    /// render sequentially anyway.
+    #[test]
+    fn a_scrubbed_durable_lora_request_is_planned_from_its_projection() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            sparse_file(&root.path().join(name), GIB);
+        }
+        let adapter = root.path().join("style.safetensors");
+        sparse_file(&adapter, GIB / 4);
+        let config = config(root.path(), "flux2", None);
+
+        let mut authored = request(None);
+        authored.loras = Some(vec![mold_core::LoraWeight {
+            path: adapter.display().to_string(),
+            scale: 0.8,
+            expert: None,
+        }]);
+        let authored_plan =
+            resolve_execution_plans(&config, &authored, &devices(&[48 * GIB]), false)
+                .expect("the authored request plans")
+                .remove(0);
+        assert_eq!(
+            authored_plan.engine_load_strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "control: a flux2 LoRA request is planned sequentially when the \
+             request still carries the adapter"
+        );
+        assert!(authored_plan
+            .components
+            .contains_key(&ComponentRole::Lora(0)));
+
+        // What the coordinator actually receives.
+        let scrubbed = request(None);
+        assert!(scrubbed.loras.is_none() && scrubbed.lora.is_none());
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            loras: vec![mold_core::LoraWeight {
+                path: adapter.display().to_string(),
+                scale: 0.8,
+                expert: None,
+            }],
+            ..Default::default()
+        };
+        let durable_plan = resolve_execution_plans_for_coordinator_with_projection(
+            &config,
+            &scrubbed,
+            &devices(&[48 * GIB]),
+            false,
+            None,
+            Some(&projection),
+        )
+        .expect("the durable request plans")
+        .remove(0);
+
+        assert_eq!(
+            durable_plan.engine_load_strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "the sealed adapter must reach the load-strategy decision"
+        );
+        assert_eq!(
+            durable_plan.effective_loras.len(),
+            1,
+            "the plan records the adapter that will actually be merged"
+        );
+        assert_eq!(durable_plan.effective_loras[0].path, adapter);
+        assert!(
+            durable_plan
+                .components
+                .contains_key(&ComponentRole::Lora(0)),
+            "the adapter's bytes must be charged to the plan"
+        );
+        assert_eq!(
+            durable_plan.execution_equivalence_fingerprint,
+            authored_plan.execution_equivalence_fingerprint,
+            "the same render must fingerprint the same whether the adapter \
+             arrived inline or sealed"
+        );
+    }
+
+    /// The fallback is a fallback: a request that still carries its own stack
+    /// wins, so a projection can never add an adapter to a render that
+    /// dropped one.
+    #[test]
+    fn the_request_stack_outranks_the_projection() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            sparse_file(&root.path().join(name), GIB);
+        }
+        let authored = root.path().join("authored.safetensors");
+        let sealed = root.path().join("sealed.safetensors");
+        sparse_file(&authored, GIB / 4);
+        sparse_file(&sealed, GIB / 4);
+        let config = config(root.path(), "flux2", None);
+
+        let mut request = request(None);
+        request.loras = Some(vec![mold_core::LoraWeight {
+            path: authored.display().to_string(),
+            scale: 1.0,
+            expert: None,
+        }]);
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            loras: vec![mold_core::LoraWeight {
+                path: sealed.display().to_string(),
+                scale: 1.0,
+                expert: None,
+            }],
+            ..Default::default()
+        };
+        let plan = resolve_execution_plans_for_coordinator_with_projection(
+            &config,
+            &request,
+            &devices(&[48 * GIB]),
+            false,
+            None,
+            Some(&projection),
+        )
+        .expect("plans")
+        .remove(0);
+
+        assert_eq!(plan.effective_loras[0].path, authored);
+    }
+
+    /// The per-model config default is the one adapter the sealed set never
+    /// carries, so skipping the materialization write must not drop it.
+    ///
+    /// A config default is not a request field: admission seals nothing for
+    /// it, hydration restores nothing for it, and `materialize_request` was
+    /// the only thing that ever put it on the request. On a durable render
+    /// that carries conditioning media the write is correctly skipped for the
+    /// SEALED stack, so the default now reaches the engine the way the
+    /// server's own control adapter does — re-applied after hydration, from
+    /// the plan that charged it.
+    #[test]
+    fn a_config_default_adapter_survives_a_pending_overlay() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            sparse_file(&root.path().join(name), GIB);
+        }
+        let adapter = root.path().join("house-style.safetensors");
+        sparse_file(&adapter, GIB / 4);
+        let mut config = config(root.path(), "flux2", None);
+        let model = config.models.get_mut("test:q4").unwrap();
+        model.lora = Some(adapter.display().to_string());
+        model.lora_scale = Some(0.7);
+
+        // The durable shape: the request carries no adapter of its own and a
+        // sealed media set is still due.
+        let scrubbed = request(None);
+        let plan = resolve_execution_plans_for_coordinator_with_projection(
+            &config,
+            &scrubbed,
+            &devices(&[48 * GIB]),
+            false,
+            None,
+            None,
+        )
+        .expect("plans")
+        .remove(0);
+        assert_eq!(
+            plan.effective_loras.len(),
+            1,
+            "the plan charges the config default"
+        );
+
+        let mut pending_overlay = scrubbed.clone();
+        materialize_request(&plan, &mut pending_overlay, true);
+        assert!(
+            pending_overlay.loras.is_none() && pending_overlay.lora.is_none(),
+            "hydration still refuses a request that already carries an adapter"
+        );
+
+        // What dispatch does after the overlay has landed.
+        crate::queue_media_runtime::apply_planned_default_loras(
+            &mut pending_overlay,
+            &materialized_lora_stack(&plan),
+        );
+        let stack = pending_overlay
+            .loras
+            .as_ref()
+            .expect("the config default reaches the engine");
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack[0].path, adapter.display().to_string());
+        assert!((stack[0].scale - 0.7).abs() < f64::EPSILON);
+        assert_eq!(
+            effective_loras(&config, &pending_overlay, None),
+            plan.effective_loras,
+            "the request the engine runs and the plan that charged it must \
+             describe the same adapter"
+        );
+    }
+
+    /// A caller's own adapter outranks the config default on the durable path
+    /// exactly as it does inline: hydration restores the sealed stack first,
+    /// and the default is never added beside it.
+    #[test]
+    fn a_sealed_caller_adapter_outranks_the_config_default() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            sparse_file(&root.path().join(name), GIB);
+        }
+        let default_adapter = root.path().join("house-style.safetensors");
+        let caller_adapter = root.path().join("callers.safetensors");
+        sparse_file(&default_adapter, GIB / 4);
+        sparse_file(&caller_adapter, GIB / 4);
+        let mut config = config(root.path(), "flux2", None);
+        let model = config.models.get_mut("test:q4").unwrap();
+        model.lora = Some(default_adapter.display().to_string());
+        model.lora_scale = Some(0.7);
+
+        let scrubbed = request(None);
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            loras: vec![mold_core::LoraWeight {
+                path: caller_adapter.display().to_string(),
+                scale: 0.8,
+                expert: None,
+            }],
+            ..Default::default()
+        };
+        let plan = resolve_execution_plans_for_coordinator_with_projection(
+            &config,
+            &scrubbed,
+            &devices(&[48 * GIB]),
+            false,
+            None,
+            Some(&projection),
+        )
+        .expect("plans")
+        .remove(0);
+        assert_eq!(plan.effective_loras[0].path, caller_adapter);
+
+        // Hydration restores the caller's stack; the default must not join it.
+        let mut hydrated = scrubbed.clone();
+        materialize_request(&plan, &mut hydrated, true);
+        hydrated.loras = Some(projection.loras.clone());
+        crate::queue_media_runtime::apply_planned_default_loras(
+            &mut hydrated,
+            &materialized_lora_stack(&plan),
+        );
+        let stack = hydrated.loras.as_ref().expect("the caller's stack");
+        assert_eq!(stack.len(), 1, "no second adapter is added: {stack:?}");
+        assert_eq!(stack[0].path, caller_adapter.display().to_string());
     }
 
     #[test]
@@ -7289,7 +8717,7 @@ mod tests {
                 .all(|component| component.predicted_vram_bytes > 0),
             "every concrete GPU component must expose a non-zero weight estimate"
         );
-        validate_before_cuda(plan, "cuda:0", 0, &config, &request, None).unwrap();
+        validate_before_cuda(plan, "cuda:0", 0, &config, &request, None, None).unwrap();
     }
 
     #[test]
@@ -7371,7 +8799,16 @@ mod tests {
         .unwrap()
         .remove(0);
         assert_eq!(plan.admission_paths, paths);
-        validate_before_cuda(&plan, "cuda:0", 0, &cold_config, &request, Some(&prepared)).unwrap();
+        validate_before_cuda(
+            &plan,
+            "cuda:0",
+            0,
+            &cold_config,
+            &request,
+            Some(&prepared),
+            None,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -7698,6 +9135,7 @@ mod tests {
         let rebuild = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>| {
             execution_environment_descriptor(
                 &DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: plan.device_id.clone(),
                     ordinal: plan.device_ordinal,
@@ -7718,6 +9156,7 @@ mod tests {
                 plan.determinism_class,
                 false,
                 &BTreeMap::new(),
+                Flux2CfgBudget::default(),
             )
             .expect("rebuild descriptor classifies every frozen engine-shaping variable")
         };
@@ -8143,9 +9582,246 @@ mod tests {
         assert_eq!(max_active.load(Ordering::SeqCst), 2);
     }
 
+    /// The warm-reuse identity forgets the load plan and remembers everything
+    /// else.
+    ///
+    /// R6-P2-1: the retained-engine exemption was skipping the WHOLE execution
+    /// fingerprint, while its justification licensed only the resolved load
+    /// strategy. The fingerprint also hashes component content, dtype,
+    /// quantization, placement, the semantic config and the adapter stack, so
+    /// a checkpoint REPLACED ON DISK under a warm retaining engine would have
+    /// been served stale — the one thing the fingerprint was uniquely placed
+    /// to catch at that seam.
+    #[test]
+    fn the_warm_reuse_identity_forgets_the_load_plan_and_nothing_else() {
+        let device = DeviceFact {
+            total_vram_bytes: None,
+            cuda_peak_baseline: None,
+            id: "cuda:stable-device".into(),
+            ordinal: 2,
+            backend: GpuBackend::Cuda,
+            compute_capability: Some((8, 6)),
+            available_vram_bytes: 24 * GIB,
+        };
+        let effective = EffectivePlacement {
+            components: BTreeMap::from([(
+                ComponentRole::Transformer,
+                ResolvedComponentConstraint::Auto,
+            )]),
+        };
+        let component = ComponentExecutionPlan {
+            role: ComponentRole::Transformer,
+            artifact_path: PathBuf::from("/models/transformer-q8.gguf"),
+            content_fingerprint: ContentFingerprint("the-checkpoint-on-disk".into()),
+            dtype: None,
+            quantization: Some(QuantizationVariant::Q8),
+            placement: ResolvedComponentPlacement::Device("cuda:stable-device".into()),
+            load_strategy: ComponentLoadStrategy::DropReload,
+            predicted_vram_bytes: 34 * GIB,
+            predicted_host_bytes: 2 * GIB,
+        };
+        let engine_config = mold_inference::FrozenEngineConfig {
+            request_offload: None,
+            family: "flux2".into(),
+            artifact_root: PathBuf::from("/models"),
+            is_schnell: Some(false),
+            is_turbo: None,
+            scheduler: None,
+            t5_variant: None,
+            qwen3_variant: Some("q8".into()),
+            qwen2_variant: None,
+            qwen2_text_encoder_mode: None,
+            ltx2_gemma_variant: None,
+            umt5_variant: None,
+            selected_t5_path: None,
+            selected_qwen3_paths: Vec::new(),
+            selected_qwen2_path: None,
+            selected_gemma_paths: Vec::new(),
+            selected_umt5_path: None,
+            identity_assets: None,
+            ip_adapter_assets: None,
+            paint_assets: None,
+            matting_asset: None,
+            delight_paths: None,
+            h3_factory_authority: None,
+            runtime_environment: mold_inference::runtime_env::FrozenRuntimeEnvironment::default(),
+            attention_backend: mold_inference::attention::AttentionBackend::Math,
+            attention_chunk: mold_inference::attention::AttentionChunkPolicy::Auto,
+            vae_tiling: mold_inference::vae_tiling::TiledMode::Auto,
+            vae_dtype: mold_inference::device::VaeDtypePolicy::Auto,
+        };
+
+        let warm_of = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
+                       config: &mold_inference::FrozenEngineConfig,
+                       loras: &[PlannedLora]| {
+            execution_fingerprint(
+                "flux2-dev:q8",
+                &device,
+                &effective,
+                &load_plan_independent_components(components),
+                config,
+                loras,
+                false,
+            )
+        };
+
+        // The cold card's plan.
+        let cold = BTreeMap::from([(ComponentRole::Transformer, component.clone())]);
+        // The warm card's plan for the byte-identical request: the same
+        // checkpoint, loaded differently because the free VRAM moved.
+        let warm = BTreeMap::from([(
+            ComponentRole::Transformer,
+            ComponentExecutionPlan {
+                load_strategy: ComponentLoadStrategy::Resident,
+                predicted_vram_bytes: 31 * GIB,
+                predicted_host_bytes: 0,
+                ..component.clone()
+            },
+        )]);
+        assert_ne!(
+            execution_fingerprint(
+                "flux2-dev:q8",
+                &device,
+                &effective,
+                &cold,
+                &engine_config,
+                &[],
+                false
+            ),
+            execution_fingerprint(
+                "flux2-dev:q8",
+                &device,
+                &effective,
+                &warm,
+                &engine_config,
+                &[],
+                false
+            ),
+            "the exact identity moves with the load plan — that is what it is for"
+        );
+        assert_eq!(
+            warm_of(&cold, &engine_config, &[]),
+            warm_of(&warm, &engine_config, &[]),
+            "and the warm identity does not, which is the whole exemption"
+        );
+
+        // THE RESIDUAL R6-P2-1 NAMED: the same plan against a checkpoint that
+        // was replaced on disk. It must still rebuild.
+        let replaced = BTreeMap::from([(
+            ComponentRole::Transformer,
+            ComponentExecutionPlan {
+                content_fingerprint: ContentFingerprint("a-different-checkpoint".into()),
+                ..component.clone()
+            },
+        )]);
+        assert_ne!(
+            warm_of(&cold, &engine_config, &[]),
+            warm_of(&replaced, &engine_config, &[]),
+            "a checkpoint replaced under a warm engine still invalidates it"
+        );
+
+        // So does everything else the exemption was never argued for.
+        for (label, altered) in [
+            (
+                "a different artifact path",
+                ComponentExecutionPlan {
+                    artifact_path: PathBuf::from("/models/other-transformer-q8.gguf"),
+                    ..component.clone()
+                },
+            ),
+            (
+                "a different quantization",
+                ComponentExecutionPlan {
+                    quantization: Some(QuantizationVariant::Q4),
+                    ..component.clone()
+                },
+            ),
+            (
+                "a different dtype",
+                ComponentExecutionPlan {
+                    dtype: Some(PlannedDType::Bf16),
+                    ..component.clone()
+                },
+            ),
+        ] {
+            let map = BTreeMap::from([(ComponentRole::Transformer, altered)]);
+            assert_ne!(
+                warm_of(&cold, &engine_config, &[]),
+                warm_of(&map, &engine_config, &[]),
+                "{label} must still rebuild a warm engine"
+            );
+        }
+
+        // The planner's OWN resolution of placement travels with the load
+        // plan: on the warm card this request resolved its text encoder to
+        // `Cpu` where the cold one resolved it to `Device`, from the same
+        // free-VRAM reading that moved the load strategy.
+        let reparked = BTreeMap::from([(
+            ComponentRole::Transformer,
+            ComponentExecutionPlan {
+                placement: ResolvedComponentPlacement::Cpu,
+                ..component.clone()
+            },
+        )]);
+        assert_eq!(
+            warm_of(&cold, &engine_config, &[]),
+            warm_of(&reparked, &engine_config, &[]),
+        );
+
+        // What the CALLER authored is a different question, and it is not
+        // normalised: an explicit device pin lives in `EffectivePlacement`.
+        let pinned = EffectivePlacement {
+            components: BTreeMap::from([(
+                ComponentRole::Transformer,
+                ResolvedComponentConstraint::Cpu,
+            )]),
+        };
+        assert_ne!(
+            execution_fingerprint(
+                "flux2-dev:q8",
+                &device,
+                &effective,
+                &load_plan_independent_components(&cold),
+                &engine_config,
+                &[],
+                false,
+            ),
+            execution_fingerprint(
+                "flux2-dev:q8",
+                &device,
+                &pinned,
+                &load_plan_independent_components(&cold),
+                &engine_config,
+                &[],
+                false,
+            ),
+            "an authored placement constraint still invalidates a warm engine"
+        );
+
+        let mut other_config = engine_config.clone();
+        other_config.attention_backend = mold_inference::attention::AttentionBackend::Flash;
+        assert_ne!(
+            warm_of(&cold, &engine_config, &[]),
+            warm_of(&cold, &other_config, &[]),
+            "the semantic config still invalidates a warm engine"
+        );
+
+        let adapter = [PlannedLora {
+            path: PathBuf::from("/models/loras/style.safetensors"),
+            scale_bits: (0.8f64).to_bits(),
+            content_fingerprint: ContentFingerprint("adapter-content".into()),
+        }];
+        assert_ne!(
+            warm_of(&cold, &engine_config, &[]),
+            warm_of(&cold, &engine_config, &adapter),
+            "the adapter stack still invalidates a warm engine"
+        );
+    }
+
     #[test]
     fn exact_execution_fingerprint_matches_rejected_candidate_contract() {
         let device = DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: "cuda:stable-device".into(),
             ordinal: 2,
@@ -8255,6 +9931,583 @@ mod tests {
         );
     }
 
+    /// The flux families render under `FastStill`, so their semantic config
+    /// must record which convolution backend actually ran and which attention
+    /// kernel the family default resolved to. Without the first, one `mold.db`
+    /// spanning a cudnn and a non-cudnn binary reuses one's timings for the
+    /// other; without the second, the frozen plan would describe arithmetic
+    /// the renderer does not run.
+    #[test]
+    fn the_flux_families_carry_a_resolved_convolution_backend() {
+        let expected = if mold_inference::conv_policy::cudnn_compiled() {
+            SemanticConvBackend::Cudnn
+        } else {
+            SemanticConvBackend::Im2Col
+        };
+        for family in ["flux", "flux2"] {
+            let frozen = frozen_config_for_family(family);
+            let semantic = ExecutionSemanticConfig::from_frozen(
+                &frozen,
+                GpuBackend::Cuda,
+                Flux2CfgBudget::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                semantic.conv_backend,
+                Some(expected),
+                "{family} must record the convolution backend it ran on"
+            );
+        }
+        // A plain still family is untouched: no field at all.
+        for family in ["sd15", "sdxl", "qwen-image", "z-image", "minimax-h3"] {
+            let frozen = frozen_config_for_family(family);
+            let semantic = ExecutionSemanticConfig::from_frozen(
+                &frozen,
+                GpuBackend::Cuda,
+                Flux2CfgBudget::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                semantic.conv_backend, None,
+                "{family} must keep its pre-existing fingerprint"
+            );
+        }
+        // And the attention side agrees with the engine's own family policy.
+        for family in ["flux", "flux2"] {
+            let frozen = frozen_config_for_family(family);
+            assert_eq!(
+                frozen.attention_backend,
+                mold_inference::attention::AttentionBackend::resolve_for(
+                    mold_inference::attention::AttentionPolicy::FastStill
+                ),
+                "{family}'s frozen backend must be the family default"
+            );
+        }
+    }
+
+    /// The three fields WP5 adds, on the two families that carry them and on
+    /// the families that must stay byte-identical without them.
+    #[test]
+    fn the_flux_families_record_residency_activation_width_and_cfg_shape() {
+        for family in ["flux", "flux2"] {
+            let frozen = frozen_config_for_family(family);
+            let cuda = ExecutionSemanticConfig::from_frozen(
+                &frozen,
+                GpuBackend::Cuda,
+                Flux2CfgBudget::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                cuda.flux_transformer_residency,
+                Some(SemanticFluxTransformerResidency::Budgeted),
+                "{family} defaults to the budgeted residency now"
+            );
+            // Resolved against the backend, exactly as the engine resolves it:
+            // CUDA's MMQ kernels take bf16 and Metal's take f32 only.
+            assert_eq!(
+                cuda.quantized_activation_dtype,
+                Some(
+                    match mold_inference::gguf_activation_width_for_backend(GpuBackend::Cuda) {
+                        mold_inference::GgufActivationWidth::Bf16 =>
+                            SemanticQuantizedActivationDType::Bf16,
+                        mold_inference::GgufActivationWidth::F32 =>
+                            SemanticQuantizedActivationDType::F32,
+                    }
+                )
+            );
+            let metal = ExecutionSemanticConfig::from_frozen(
+                &frozen,
+                GpuBackend::Metal,
+                Flux2CfgBudget::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                metal.quantized_activation_dtype,
+                Some(SemanticQuantizedActivationDType::F32),
+                "Metal's quantized kernels are f32-only"
+            );
+
+            // The CFG shape is carried by flux2 alone. A default budget
+            // knows no card total, which is the `Sequential` fallback;
+            // `flux2_cfg_batching_field_follows_the_engine_gate` covers the
+            // resolved values.
+            let expected_cfg = (family == "flux2").then_some(SemanticFlux2CfgBatching::Sequential);
+            assert_eq!(cuda.flux2_cfg_batching, expected_cfg);
+        }
+
+        for family in ["sd15", "sdxl", "qwen-image", "z-image", "wan", "minimax-h3"] {
+            let frozen = frozen_config_for_family(family);
+            let semantic = ExecutionSemanticConfig::from_frozen(
+                &frozen,
+                GpuBackend::Cuda,
+                Flux2CfgBudget::default(),
+            )
+            .unwrap();
+            assert_eq!(semantic.flux_transformer_residency, None);
+            assert_eq!(semantic.quantized_activation_dtype, None);
+            assert_eq!(
+                semantic.flux2_cfg_batching, None,
+                "{family} must keep its pre-existing fingerprint"
+            );
+        }
+    }
+
+    /// The recorded CFG class is the ENGINE's verdict, not a constant and not
+    /// a second derivation of it.
+    ///
+    /// A host that batches and a host that runs two forwards per step have
+    /// different numerics, different step latency and different peak memory;
+    /// sharing one equivalence class lets a batched render's learned timings
+    /// price a sequential one. The three cases below are the three the gate
+    /// itself has: the budget holds, the budget does not, and there is no
+    /// budget to charge.
+    #[test]
+    fn flux2_cfg_batching_field_follows_the_engine_gate() {
+        // Klein-9B at Q8_0, the tier this decision was measured on.
+        const KLEIN_9B_Q8_BYTES: u64 = 9_500_000_000;
+
+        let frozen = frozen_config_for_family("flux2");
+        let recorded = |budget: Flux2CfgBudget| {
+            ExecutionSemanticConfig::from_frozen(&frozen, GpuBackend::Cuda, budget)
+                .unwrap()
+                .flux2_cfg_batching
+        };
+        // Priced exactly as `flux2_cfg_budget` prices it: a 1024² canvas at
+        // the doubled batch a batched CFG step allocates.
+        let activation = mold_inference::device::flux_activation_budget_bytes_for(
+            1024,
+            1024,
+            2,
+            2,
+            mold_inference::device::ActivationFamily::Flux2Dit,
+            mold_inference::flux2::Flux2Config::dev().num_heads as u64,
+            mold_inference::attention::AttentionBackend::Math,
+        );
+        let on_card = |total: Option<u64>| Flux2CfgBudget {
+            transformer_bytes: KLEIN_9B_Q8_BYTES,
+            activation_bytes_batch2: activation,
+            device_total_vram_bytes: total,
+        };
+
+        // A 24 GB card holds the checkpoint, the doubled activations and the
+        // engine's runtime headroom with room to spare.
+        assert_eq!(
+            recorded(on_card(Some(24 * GIB))),
+            Some(SemanticFlux2CfgBatching::Batched),
+            "a 24 GB card running klein-9b Q8 batches its CFG branches"
+        );
+
+        // A card whose whole capacity is the weights plus one batch-2
+        // workspace has nothing left for the runtime headroom the gate also
+        // charges, so the engine runs two forwards and so does the record.
+        let exactly_weights_and_activations = KLEIN_9B_Q8_BYTES.saturating_add(activation);
+        assert_eq!(
+            recorded(on_card(Some(exactly_weights_and_activations))),
+            Some(SemanticFlux2CfgBatching::Sequential),
+            "a card that cannot seat the doubled activations runs two forwards"
+        );
+
+        // No sampled total — CPU, Metal, a discovery snapshot that carried
+        // none — is the historical two forwards, never a guess from what
+        // happens to be free.
+        assert_eq!(
+            recorded(on_card(None)),
+            Some(SemanticFlux2CfgBatching::Sequential),
+            "an unknown card total falls back to the historical execution"
+        );
+
+        // And the differential that matters: for the same three byte counts
+        // the field agrees with the engine's own function, including at the
+        // exact boundary, so the two cannot drift when the headroom constant
+        // moves.
+        for total in [
+            24 * GIB,
+            exactly_weights_and_activations,
+            KLEIN_9B_Q8_BYTES,
+            u64::MAX,
+        ] {
+            let engine = match mold_inference::flux2::flux2_cfg_batching(
+                KLEIN_9B_Q8_BYTES,
+                activation,
+                total,
+            ) {
+                mold_inference::flux2::Flux2CfgBatching::Batched => {
+                    SemanticFlux2CfgBatching::Batched
+                }
+                mold_inference::flux2::Flux2CfgBatching::Sequential => {
+                    SemanticFlux2CfgBatching::Sequential
+                }
+            };
+            assert_eq!(
+                recorded(on_card(Some(total))),
+                Some(engine),
+                "the recorded class must be the engine's own verdict at {total} bytes"
+            );
+        }
+
+        // Every other family asks no such question whatever the card holds.
+        for family in ["flux", "sdxl", "wan"] {
+            let frozen = frozen_config_for_family(family);
+            assert_eq!(
+                ExecutionSemanticConfig::from_frozen(
+                    &frozen,
+                    GpuBackend::Cuda,
+                    on_card(Some(24 * GIB)),
+                )
+                .unwrap()
+                .flux2_cfg_batching,
+                None,
+                "{family} carries no CFG-shape field"
+            );
+        }
+    }
+
+    /// The budget the planner charges is built from the card and the
+    /// checkpoint in front of it — and from nothing at all when either is
+    /// missing.
+    #[test]
+    fn the_flux2_cfg_budget_reads_the_card_and_the_checkpoint() {
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("flux2-klein-base-9b-Q8_0.gguf");
+        sparse_file(&transformer, 9 * GIB);
+        let shard = root.path().join("flux2-klein-base-9b-Q8_0-00002.gguf");
+        sparse_file(&shard, GIB / 2);
+        let artifacts = BTreeMap::from([
+            (ComponentRole::Transformer, transformer.clone()),
+            (ComponentRole::TransformerShard(1), shard),
+            (ComponentRole::Vae, root.path().join("vae.safetensors")),
+        ]);
+        let pending = BTreeMap::new();
+        let base = "test-flux2-klein-base-9b:q8";
+        let mut request = request(None);
+        request.guidance = 4.0;
+        let card = &devices(&[24 * GIB])[0];
+
+        let budget = flux2_cfg_budget("flux2", base, &request, card, &artifacts, &pending);
+        assert_eq!(
+            budget.transformer_bytes,
+            9 * GIB + GIB / 2,
+            "every transformer shard is charged, exactly as the engine sums its files"
+        );
+        assert_eq!(budget.device_total_vram_bytes, Some(24 * GIB));
+        assert_eq!(
+            budget.activation_bytes_batch2,
+            mold_inference::flux2::flux2_cfg_plan_activation_bytes(
+                &mold_inference::flux2::flux2_base_tier_config(base).unwrap(),
+                request.width,
+                request.height,
+            ),
+            "the activation term is the engine's own, over this checkpoint's geometry"
+        );
+
+        // Everything that cannot batch is charged nothing at all, which
+        // resolves `Sequential` — never a guess, and never a value that then
+        // varies with the card.
+        let mut unknown_total = card.clone();
+        unknown_total.total_vram_bytes = None;
+        assert_eq!(
+            flux2_cfg_budget(
+                "flux2",
+                base,
+                &request,
+                &unknown_total,
+                &artifacts,
+                &pending
+            )
+            .device_total_vram_bytes,
+            None
+        );
+        assert_eq!(
+            flux2_cfg_budget(
+                "flux2",
+                base,
+                &request,
+                &metal_devices(&[24 * GIB])[0],
+                &artifacts,
+                &pending,
+            ),
+            Flux2CfgBudget::default(),
+            "Metal never reaches a batched step, so it is charged no budget"
+        );
+        assert_eq!(
+            flux2_cfg_budget("flux", base, &request, card, &artifacts, &pending),
+            Flux2CfgBudget::default(),
+        );
+        for distilled in ["test-flux2-klein-9b:q8", "test-flux2-dev:bf16"] {
+            assert_eq!(
+                flux2_cfg_budget("flux2", distilled, &request, card, &artifacts, &pending),
+                Flux2CfgBudget::default(),
+                "{distilled} runs no CFG branch, so it is charged no budget"
+            );
+        }
+        let mut unguided = request.clone();
+        unguided.guidance = 1.0;
+        assert_eq!(
+            flux2_cfg_budget("flux2", base, &unguided, card, &artifacts, &pending),
+            Flux2CfgBudget::default(),
+            "guidance at 1 skips the branch entirely"
+        );
+        let absent = BTreeMap::from([(
+            ComponentRole::Transformer,
+            root.path().join("never-downloaded.gguf"),
+        )]);
+        assert_eq!(
+            flux2_cfg_budget("flux2", base, &request, card, &absent, &pending),
+            Flux2CfgBudget::default(),
+            "an unmeasurable checkpoint must not be charged the 64 MiB unknown-artifact stub"
+        );
+    }
+
+    /// A flux2 plan against one klein-base checkpoint, on a card whose total
+    /// this caller chooses.
+    fn flux2_base_plan(
+        root: &Path,
+        model: &str,
+        transformer_bytes: u64,
+        guidance: f64,
+        canvas: (u32, u32),
+        device_total_bytes: u64,
+    ) -> ResolvedExecutionPlan {
+        let mut config = config(root, "flux2", None);
+        let entry = config.models.remove("test:q4").expect("fixture model");
+        config.models.insert(model.to_string(), entry);
+        let mut request = request(None);
+        request.model = model.to_string();
+        request.guidance = guidance;
+        request.width = canvas.0;
+        request.height = canvas.1;
+        let mut card = devices(&[transformer_bytes.saturating_add(48 * GIB)])[0].clone();
+        card.total_vram_bytes = Some(device_total_bytes);
+        resolve_execution_plans(&config, &request, &[card], false)
+            .expect("a flux2 base plan resolves")
+            .remove(0)
+    }
+
+    /// The plan and the engine must share the activation ESTIMATE, not merely
+    /// the comparator it is fed to.
+    ///
+    /// `flux2_cfg_batching` is a comparison, so two sides that agree on the
+    /// comparison and disagree on its inputs still disagree on every card
+    /// whose total falls between their two answers — and the whole point of
+    /// the field is that the plan names the execution that will run. The
+    /// engine charges `flux2_activation_bytes_for`, a token model; charging an
+    /// area model read ~1.45 GB at 1024² where the engine's token model read
+    /// ~1.36 GB, and the gap widens with the canvas — so a band of card totals
+    /// was recorded as the opposite execution.
+    ///
+    /// The assertion is the BOUNDARY rather than a sweep, because a sweep
+    /// coarse enough to be cheap steps straight over a band this narrow (the
+    /// first draft of this test did exactly that and passed against the wrong
+    /// estimator). The engine's own gate is bisected for the smallest card
+    /// total it will batch on, and the plan must flip at that exact byte: any
+    /// difference in the activation term at all moves the plan's boundary and
+    /// fails one of the two.
+    #[test]
+    fn the_plan_charges_the_engines_own_activation_model() {
+        let root = TempDir::new().unwrap();
+        let model = "test-flux2-klein-base-9b:q8";
+        let transformer_bytes = 9 * GIB;
+        sparse_file(&root.path().join("transformer-q4.gguf"), transformer_bytes);
+        sparse_file(&root.path().join("vae.safetensors"), GIB / 2);
+        sparse_file(&root.path().join("t5.safetensors"), GIB / 2);
+
+        let geometry = mold_inference::flux2::flux2_base_tier_config(model)
+            .expect("a klein-base name resolves its own transformer geometry");
+        let recorded = |canvas: (u32, u32), total: u64| {
+            flux2_base_plan(root.path(), model, transformer_bytes, 4.0, canvas, total)
+                .execution_environment
+                .semantic_config
+                .flux2_cfg_batching
+        };
+        for canvas in [(1024, 1024), (1536, 1536)] {
+            let activation = mold_inference::flux2::flux2_cfg_plan_activation_bytes(
+                &geometry, canvas.0, canvas.1,
+            );
+            let batches = |total: u64| {
+                matches!(
+                    mold_inference::flux2::flux2_cfg_batching(transformer_bytes, activation, total),
+                    mold_inference::flux2::Flux2CfgBatching::Batched
+                )
+            };
+            let (mut lo, mut hi) = (0u64, 64 * GIB);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if batches(mid) {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            let boundary = lo;
+            assert!(boundary > 0 && batches(boundary) && !batches(boundary - 1));
+
+            assert_eq!(
+                recorded(canvas, boundary),
+                Some(SemanticFlux2CfgBatching::Batched),
+                "{canvas:?} must batch at the engine's own smallest sufficient total"
+            );
+            assert_eq!(
+                recorded(canvas, boundary - 1),
+                Some(SemanticFlux2CfgBatching::Sequential),
+                "{canvas:?} must NOT batch one byte below it"
+            );
+            // And far from the boundary in both directions, so a plan that
+            // stopped charging a budget at all cannot pass.
+            assert_eq!(
+                recorded(canvas, 64 * GIB),
+                Some(SemanticFlux2CfgBatching::Batched)
+            );
+            assert_eq!(
+                recorded(canvas, 4 * GIB),
+                Some(SemanticFlux2CfgBatching::Sequential)
+            );
+        }
+    }
+
+    /// Only a guided, undistilled base render can batch — so only that render
+    /// may record a class that moves with the card.
+    ///
+    /// `Batched` is reserved for the case that batches. Everything else in the
+    /// family runs one forward per step and records `Sequential`, because a
+    /// value that varied with the card for a [dev] or a distilled [klein]
+    /// print would split its equivalence class and its learned-timing bucket
+    /// across two machines that execute identically.
+    #[test]
+    fn only_a_guided_undistilled_base_render_records_batched() {
+        let root = TempDir::new().unwrap();
+        let transformer_bytes = GIB;
+        sparse_file(&root.path().join("transformer-q4.gguf"), transformer_bytes);
+        sparse_file(&root.path().join("vae.safetensors"), GIB / 2);
+        sparse_file(&root.path().join("t5.safetensors"), GIB / 2);
+        let recorded = |model: &str, guidance: f64, total: u64| {
+            flux2_base_plan(
+                root.path(),
+                model,
+                transformer_bytes,
+                guidance,
+                (512, 512),
+                total,
+            )
+        };
+
+        assert_eq!(
+            recorded("test-flux2-klein-base:bf16", 4.0, 48 * GIB)
+                .execution_environment
+                .semantic_config
+                .flux2_cfg_batching,
+            Some(SemanticFlux2CfgBatching::Batched),
+            "a guided undistilled base render on a card with room IS the batched case"
+        );
+
+        // The three renders that never reach a CFG branch at all: guidance at
+        // or below 1, a distilled tier, and [dev]'s embedded guidance.
+        for (model, guidance) in [
+            ("test-flux2-klein-base:bf16", 1.0),
+            ("test-flux2-klein:bf16", 4.0),
+            ("test-flux2-dev:bf16", 4.0),
+        ] {
+            let small = recorded(model, guidance, 12 * GIB);
+            let large = recorded(model, guidance, 48 * GIB);
+            for plan in [&small, &large] {
+                assert_eq!(
+                    plan.execution_environment
+                        .semantic_config
+                        .flux2_cfg_batching,
+                    Some(SemanticFlux2CfgBatching::Sequential),
+                    "{model} at guidance {guidance} issues no batched step"
+                );
+            }
+            assert_eq!(
+                small.execution_equivalence_fingerprint, large.execution_equivalence_fingerprint,
+                "{model} executes identically on both cards and must share one class"
+            );
+        }
+    }
+
+    /// A requested drop is its own residency class. A requested keep resolves
+    /// to `Budgeted` like unset, because with the current precedence the two
+    /// are the same execution — the raw value is still carried in `runtime`,
+    /// so nothing is lost.
+    ///
+    /// The class is read through `mold_inference::device`'s own parser, so a
+    /// spelling the engine drops on can never be filed as budgeted; and it
+    /// answers for FLUX.2 as well, which until this campaign did not read the
+    /// variable at all.
+    #[test]
+    fn an_explicit_keep_transformer_opt_out_is_its_own_residency_class() {
+        let resolved_for = |family: &str, value: Option<&str>| {
+            let mut frozen = frozen_config_for_family(family);
+            if let Some(value) = value {
+                frozen.runtime_environment =
+                    mold_inference::runtime_env::FrozenRuntimeEnvironment::from_values([(
+                        "MOLD_FLUX_KEEP_TRANSFORMER".to_string(),
+                        Some(value.to_string()),
+                    )]);
+            }
+            ExecutionSemanticConfig::from_frozen(
+                &frozen,
+                GpuBackend::Cuda,
+                Flux2CfgBudget::default(),
+            )
+            .unwrap()
+            .flux_transformer_residency
+        };
+
+        for family in ["flux", "flux2"] {
+            for value in [Some("0"), Some("off"), Some("FALSE")] {
+                assert_eq!(
+                    resolved_for(family, value),
+                    Some(SemanticFluxTransformerResidency::DropRequested),
+                    "{family} value={value:?}"
+                );
+            }
+            for value in [None, Some("1"), Some("on"), Some("anything-else")] {
+                assert_eq!(
+                    resolved_for(family, value),
+                    Some(SemanticFluxTransformerResidency::Budgeted),
+                    "{family} value={value:?}"
+                );
+            }
+        }
+    }
+
+    /// Minimal frozen config for a family, with every optional input absent so
+    /// the assertions are about the family policy and nothing else.
+    fn frozen_config_for_family(family: &str) -> mold_inference::FrozenEngineConfig {
+        mold_inference::FrozenEngineConfig {
+            request_offload: None,
+            family: family.to_string(),
+            artifact_root: PathBuf::from("/models"),
+            is_schnell: None,
+            is_turbo: None,
+            scheduler: None,
+            t5_variant: None,
+            qwen3_variant: None,
+            qwen2_variant: None,
+            qwen2_text_encoder_mode: None,
+            ltx2_gemma_variant: None,
+            umt5_variant: None,
+            selected_t5_path: None,
+            selected_qwen3_paths: Vec::new(),
+            selected_qwen2_path: None,
+            selected_gemma_paths: Vec::new(),
+            selected_umt5_path: None,
+            identity_assets: None,
+            ip_adapter_assets: None,
+            paint_assets: None,
+            matting_asset: None,
+            delight_paths: None,
+            h3_factory_authority: None,
+            runtime_environment: mold_inference::runtime_env::FrozenRuntimeEnvironment::default(),
+            attention_backend: mold_inference::attention::AttentionBackend::resolve_for(
+                mold_inference::attention::policy_for_family(family),
+            ),
+            attention_chunk: mold_inference::attention::AttentionChunkPolicy::Auto,
+            vae_tiling: mold_inference::vae_tiling::TiledMode::Auto,
+            vae_dtype: mold_inference::device::VaeDtypePolicy::Auto,
+        }
+    }
+
     #[test]
     fn execution_equivalence_v4_schema_and_hash_are_golden() {
         let content = EquivalenceContentIdentity::Sha256("00".repeat(32));
@@ -8283,10 +10536,20 @@ mod tests {
                 h3_factory_authority_sha256: None,
                 attention_backend: SemanticAttentionBackend::Math,
                 attention_chunk: SemanticAttentionChunk::Auto,
-                // flux is an image family: it never takes cuDNN, so its
-                // fingerprint carries no convolution backend at all.
+                // Hand-built schema fixture: this pins the v4 encoding and
+                // the hash function, not any family's policy. `None` is the
+                // field-absent case (`skip_serializing_if`), which is what a
+                // plain image family still produces — flux itself now carries
+                // `Some(..)` through `ConvPolicy::FastStill`, pinned by
+                // `the_flux_families_carry_a_resolved_convolution_backend`.
                 conv_backend: None,
                 wan_step_cache: None,
+                // The three WP5 fields, absent — which is what a plain image
+                // family still produces, and what keeps this fixture's encoded
+                // bytes and hash exactly what they were.
+                flux_transformer_residency: None,
+                quantized_activation_dtype: None,
+                flux2_cfg_batching: None,
                 vae_tiling: SemanticVaeTiling::Auto,
                 vae_dtype: SemanticVaeDType::Auto,
                 runtime: vec![RuntimeSemanticSetting {
@@ -8581,5 +10844,52 @@ mod tests {
                 .unwrap()
         );
         assert!(changed_config.has_frozen_model_config(model));
+    }
+
+    /// A warm pass over facts that are all already cached must publish NO
+    /// progress. Each publication wakes the scheduler coordinator, which
+    /// advances queue state and emits a plan event — on a warm host that was
+    /// a "Resolving installed model" stage that rendered and completed in the
+    /// same tick, per request.
+    #[test]
+    fn warm_pass_is_a_no_op_when_every_fact_is_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("transformer.safetensors");
+        std::fs::write(&artifact, b"weights").unwrap();
+        assert!(
+            !artifact_facts_are_cached(&artifact),
+            "a fresh artifact starts cold"
+        );
+        warm_artifact_facts(&artifact);
+        assert!(
+            artifact_facts_are_cached(&artifact),
+            "warming records the facts"
+        );
+        // And warming again is free — the whole point of the early return.
+        warm_artifact_facts(&artifact);
+        assert!(artifact_facts_are_cached(&artifact));
+    }
+
+    /// The startup pass reads every installed artifact once, so the first
+    /// render after a restart does not pay for it inside its preparation.
+    #[test]
+    fn the_startup_warm_pass_covers_installed_artifacts_and_skips_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("flux/split_files");
+        std::fs::create_dir_all(&nested).unwrap();
+        let weights = nested.join("flux1-dev-Q8_0.gguf");
+        let encoder = nested.join("t5xxl.safetensors");
+        let notes = nested.join("README.md");
+        for path in [&weights, &encoder, &notes] {
+            std::fs::write(path, b"bytes").unwrap();
+        }
+
+        assert_eq!(warm_installed_artifact_facts(dir.path()), 2);
+        assert!(artifact_facts_are_cached(&weights));
+        assert!(artifact_facts_are_cached(&encoder));
+        assert!(
+            !artifact_facts_are_cached(&notes),
+            "a README is not a generation artifact"
+        );
     }
 }

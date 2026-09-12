@@ -700,7 +700,17 @@ struct MemoryBlock {
     /// The cheapest eligible candidate's demand, what the planner compared.
     required_bytes: u64,
     /// The headroom that demand was compared against.
+    ///
+    /// Physical, and kept fresh by the reclaim's own re-sample. On a DEVICE
+    /// block this is NOT what the verdict used — see
+    /// [`Self::admissible_ceiling_bytes`].
     headroom_bytes: u64,
+    /// The admission ceiling the plan's peak actually exceeded, when the block
+    /// came from a plan. `None` for a host block, whose comparison really is
+    /// against `headroom_bytes`.
+    admissible_ceiling_bytes: Option<u64>,
+    /// See `VramShortfall::advice`.
+    advice: Option<String>,
     /// Evictable ZFS ARC the SAME sample counted into `headroom_bytes`
     /// (#1439); only a host block carries one, and only on ZFS.
     reclaimable_zfs_arc_bytes: Option<u64>,
@@ -841,6 +851,15 @@ struct TransientPlanFailure {
 #[derive(Debug, Clone)]
 struct VramShortfall {
     required_peak_bytes: u64,
+    /// The ceiling that peak was compared against — see
+    /// `execution_plan::DeviceInfeasibility::admissible_ceiling_bytes`. `None`
+    /// only for a refusal that named no device at all.
+    admissible_ceiling_bytes: Option<u64>,
+    /// The planner's own remediation for the cheapest rejection — for FLUX.2,
+    /// why the transformer could not stream. It rides the BLOCK because on the
+    /// idle-hold path the block's message is the one the user reads and the
+    /// planner's error text is never surfaced (D7b, 2026-09-12).
+    advice: Option<String>,
     eligible_device_ids: Vec<String>,
 }
 
@@ -926,11 +945,34 @@ enum PreparationEvent {
     Ready {
         work_id: String,
         prepared: Box<PreparedGeneration>,
+        timings: PreparationTimings,
     },
     Failed {
         work_id: String,
         error: String,
     },
+}
+
+/// Where a preparation's wall clock went.
+///
+/// The measured server timeline spends 2.4 s in "preparing generation
+/// dependencies" on a WARM host, which the work the phase is supposed to do
+/// does not explain — artifact facts are LRU-cached and the dependency probes
+/// are a handful of `stat`s. One `elapsed_ms` could not say whether that was
+/// the preparer, the slot semaphore, or the coordinator's own event loop, so
+/// the line now reports all three separately.
+#[derive(Clone, Copy, Debug, Default)]
+struct PreparationTimings {
+    /// Spawned to holding a preparation slot. Non-zero means the semaphore is
+    /// the bottleneck, not the work.
+    slot_wait_ms: u64,
+    /// Inside `preparer.prepare` — the dependency resolution, the device
+    /// probes, the artifact warm pass.
+    prepare_ms: u64,
+    /// When the task published its `Ready`, so the coordinator can report how
+    /// long the event waited to be handled. A large value here is the
+    /// coordinator's loop (a debounced replan, a long mutate), not preparation.
+    ready_sent_ms: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1929,6 +1971,18 @@ impl Coordinator {
             reject_generation(&self.state, job, error);
             return;
         }
+        // A model every device is holding after its own repeated failures is
+        // refused BY NAME. Without this the job simply has no candidate plan
+        // and waits for the idle grace to bound it with an untyped
+        // "no schedulable device", which is the device's sentence for the
+        // model's problem.
+        if let Some(error) = crate::gpu_pool::model_specific_hold_message(
+            &job.request.model,
+            &self.state.gpu_pool.worker_ordinals(),
+        ) {
+            reject_generation(&self.state, job, error);
+            return;
+        }
         if let Err(error) = self
             .state
             .gpu_pool
@@ -2223,7 +2277,10 @@ impl Coordinator {
                 // The permit is taken inside the task so a queued preparation
                 // waits here rather than in `Needed`, where the scheduler
                 // would keep re-spawning it.
+                let spawned_ms = monotonic_ms();
                 let _slot = slots.acquire_owned().await;
+                let slot_wait_ms = monotonic_ms().saturating_sub(spawned_ms);
+                let prepare_started_ms = monotonic_ms();
                 let request =
                     crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(request);
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
@@ -2272,6 +2329,11 @@ impl Coordinator {
                     Ok(prepared) => PreparationEvent::Ready {
                         work_id: id,
                         prepared: Box::new(prepared),
+                        timings: PreparationTimings {
+                            slot_wait_ms,
+                            prepare_ms: monotonic_ms().saturating_sub(prepare_started_ms),
+                            ready_sent_ms: monotonic_ms(),
+                        },
                     },
                     Err(error) => PreparationEvent::Failed { work_id: id, error },
                 };
@@ -2297,7 +2359,11 @@ impl Coordinator {
                     self.mutate(immediate);
                 }
             }
-            PreparationEvent::Ready { work_id, prepared } => {
+            PreparationEvent::Ready {
+                work_id,
+                prepared,
+                timings,
+            } => {
                 let Some(pending) = self.pending.get_mut(&work_id) else {
                     return;
                 };
@@ -2311,6 +2377,9 @@ impl Coordinator {
                         .preparation_started_ms
                         .map(|started| monotonic_ms().saturating_sub(started))
                         .unwrap_or_default(),
+                    slot_wait_ms = timings.slot_wait_ms,
+                    prepare_ms = timings.prepare_ms,
+                    ready_latency_ms = monotonic_ms().saturating_sub(timings.ready_sent_ms),
                     "generation dependencies prepared"
                 );
                 pending.preparation_started_ms = None;
@@ -3197,17 +3266,18 @@ impl Coordinator {
                 // a generation is already running even if the local lease or
                 // in-flight counter is temporarily absent.
                 let has_active_work = active_lease.is_some() || device.active_work;
-                let measured_cache_bytes = worker
+                let (measured_cache_bytes, retained_residency_bytes) = worker
                     .map(|worker| {
-                        worker
+                        let cache = worker
                             .model_cache
                             .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .active_vram_bytes()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        (cache.active_vram_bytes(), cache.retained_residency_bytes())
                     })
-                    .unwrap_or(0);
-                let reclaimable_cache_bytes = reclaimable_model_cache_bytes(
+                    .unwrap_or((0, 0));
+                let reclaimable_cache_bytes = reclaimable_device_credit_bytes(
                     measured_cache_bytes,
+                    retained_residency_bytes,
                     device.sampled_mold_vram_bytes,
                 );
                 let mut warm = BTreeSet::new();
@@ -3348,6 +3418,9 @@ impl Coordinator {
                     .iter()
                     .find(|worker| worker_device_id(worker) == device.id.as_str())?;
                 Some(crate::execution_plan::DeviceFact {
+                    total_vram_bytes: crate::execution_plan::DeviceFact::sampled_total_vram_bytes(
+                        worker.gpu.total_vram_bytes,
+                    ),
                     cuda_peak_baseline: worker.wan_context_baseline(),
                     id: device.id.to_string(),
                     ordinal: worker.gpu.ordinal,
@@ -3448,6 +3521,10 @@ impl Coordinator {
                         determinism_class,
                         false,
                         &BTreeMap::new(),
+                        // This synthetic path has no components at all, so
+                        // there is no checkpoint to charge a CFG budget
+                        // against; the honest answer is the historical one.
+                        crate::execution_plan::Flux2CfgBudget::default(),
                     )
                     .expect(
                         "synthetic coordinator-test descriptor classifies every frozen \
@@ -3519,6 +3596,7 @@ impl Coordinator {
                         execution_environment: environment,
                         execution_equivalence_fingerprint: equivalence,
                         execution_fingerprint: pending.job.request.model.clone(),
+                        warm_reuse_fingerprint: pending.job.request.model.clone(),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -3530,6 +3608,10 @@ impl Coordinator {
                             device_id: device.id.clone(),
                             predicted_peak_bytes: estimate,
                             available_bytes: device.available_vram_bytes,
+                            // The cheapest-estimate pre-filter compares against
+                            // the whole budget; the per-family ceiling belongs
+                            // to a resolved plan, and there is none here.
+                            admissible_ceiling_bytes: device.available_vram_bytes,
                             advice: None,
                         })
                         .collect::<Vec<_>>(),
@@ -3757,6 +3839,9 @@ impl Coordinator {
                 device_id: plan.device_id.clone(),
                 predicted_peak_bytes: demand,
                 available_bytes: plan.admitted_available_vram_bytes,
+                // This gate is the whole admitted budget, not the request's
+                // own admission ceiling: the plan already cleared that.
+                admissible_ceiling_bytes: plan.admitted_available_vram_bytes,
                 advice: None,
             });
             false
@@ -3803,6 +3888,8 @@ impl Coordinator {
             };
             if let crate::execution_plan::ExecutionPlanError::InsufficientVram {
                 required_peak_bytes,
+                admissible_ceiling_bytes,
+                advice,
                 eligible_device_ids,
                 ..
             } = &error
@@ -3816,6 +3903,8 @@ impl Coordinator {
                     &id,
                     &VramShortfall {
                         required_peak_bytes: *required_peak_bytes,
+                        admissible_ceiling_bytes: *admissible_ceiling_bytes,
+                        advice: advice.clone(),
                         eligible_device_ids: eligible_device_ids.clone(),
                     },
                     &device_facts,
@@ -4007,7 +4096,27 @@ impl Coordinator {
                     // A job the plan placed or left unblocked has no block; one
                     // the resolver kept out of the plan altogether keeps the block
                     // the resolver recorded for it.
-                    if snapshot.work.iter().any(|work| work.id.as_str() == id) {
+                    //
+                    // "Kept out of the plan" is about CANDIDATES, not about
+                    // membership: every pending generation becomes a
+                    // `WorkSnapshot`, and one whose resolver refused every
+                    // device arrives with an empty `candidate_placements`, so
+                    // the planner can only answer the untyped
+                    // `NoSchedulableDevice` for it. Reading bare membership as
+                    // "the planner had nothing to say" erased the block
+                    // `record_resolver_vram_block` had recorded moments
+                    // earlier in the same turn — and with it went the reclaim
+                    // (`next_memory_reclaim` needs a live block to start from)
+                    // and the idle bound (`settle_unschedulable_generations`
+                    // reads the block to know the job is memory-short at all).
+                    // That is the 22-minute wedge: 1 529 `queued generation is
+                    // blocked on memory` lines, no eviction, no reclaim, no
+                    // refusal.
+                    if snapshot
+                        .work
+                        .iter()
+                        .any(|work| work.id.as_str() == id && !work.candidate_placements.is_empty())
+                    {
                         pending.memory_block = None;
                     }
                     continue;
@@ -4032,6 +4141,10 @@ impl Coordinator {
                         kind,
                         required_bytes,
                         headroom_bytes,
+                        // The host ledger really does compare against the
+                        // headroom it prints.
+                        admissible_ceiling_bytes: None,
+                        advice: None,
                         reclaimable_zfs_arc_bytes,
                         reclaim: ReclaimAttempt::NotStarted,
                     });
@@ -4075,9 +4188,12 @@ impl Coordinator {
         match pending.memory_block.as_mut() {
             Some(block) if block.kind == kind => {
                 let moved = block.required_bytes != shortfall.required_peak_bytes
-                    || block.headroom_bytes != device.available_vram_bytes;
+                    || block.headroom_bytes != device.available_vram_bytes
+                    || block.admissible_ceiling_bytes != shortfall.admissible_ceiling_bytes;
                 block.required_bytes = shortfall.required_peak_bytes;
                 block.headroom_bytes = device.available_vram_bytes;
+                block.admissible_ceiling_bytes = shortfall.admissible_ceiling_bytes;
+                block.advice = shortfall.advice.clone();
                 moved
             }
             _ => {
@@ -4093,6 +4209,8 @@ impl Coordinator {
                     kind,
                     required_bytes: shortfall.required_peak_bytes,
                     headroom_bytes: device.available_vram_bytes,
+                    admissible_ceiling_bytes: shortfall.admissible_ceiling_bytes,
+                    advice: shortfall.advice.clone(),
                     reclaimable_zfs_arc_bytes: None,
                     reclaim: ReclaimAttempt::NotStarted,
                 });
@@ -4126,6 +4244,8 @@ impl Coordinator {
             Some(block) if block.kind == kind => {
                 block.required_bytes = shortfall.required_peak_bytes;
                 block.headroom_bytes = device.available_vram_bytes;
+                block.admissible_ceiling_bytes = shortfall.admissible_ceiling_bytes;
+                block.advice = shortfall.advice.clone();
             }
             _ => {
                 tracing::warn!(
@@ -4140,6 +4260,8 @@ impl Coordinator {
                     kind,
                     required_bytes: shortfall.required_peak_bytes,
                     headroom_bytes: device.available_vram_bytes,
+                    admissible_ceiling_bytes: shortfall.admissible_ceiling_bytes,
+                    advice: shortfall.advice.clone(),
                     reclaimable_zfs_arc_bytes: None,
                     reclaim: ReclaimAttempt::NotStarted,
                 });
@@ -4849,7 +4971,12 @@ impl Coordinator {
                             timing_with_static_floors(estimate, static_estimate);
                         let host_bytes =
                             candidate_host_demand_bytes(warm_resident, &plan, &estimate);
-                        let incremental_vram = plan.incremental_vram_demand(estimate.vram_bytes);
+                        let incremental_vram =
+                            plan.incremental_vram_demand(learned_demand_within_the_budget(
+                                plan.total_vram_demand_bytes(),
+                                estimate.vram_bytes,
+                                plan.admitted_available_vram_bytes,
+                            ));
                         let candidate = CandidatePlacement::new(
                             DeviceId::new(plan.device_id),
                             ExecutionFingerprint::new(plan.execution_fingerprint),
@@ -7308,7 +7435,11 @@ fn gpu_job_from_generation(
     prepared_execution_inputs: Option<crate::execution_plan::PreparedExecutionInputs>,
 ) -> GpuJob {
     if let Some(plan) = execution_plan.as_ref() {
-        crate::execution_plan::materialize_request(plan, &mut job.request);
+        crate::execution_plan::materialize_request(
+            plan,
+            &mut job.request,
+            job.deferred_media.is_some(),
+        );
     }
     GpuJob {
         id: job.id,
@@ -7316,6 +7447,11 @@ fn gpu_job_from_generation(
         model: job.request.model.clone(),
         request: job.request,
         deferred_media: job.deferred_media,
+        // The server's own control adapter was scrubbed off the request at
+        // publication and only `hydrate_dispatch_media` can put it back, so
+        // dropping it here rendered every durable built-in-control job
+        // without its adapter on the V2 path — the default one.
+        materialized_control_lora: job.materialized_control_lora,
         completion_payload: job.completion_payload,
         progress_tx: job.progress_tx,
         result_tx: job.result_tx,
@@ -7352,6 +7488,9 @@ fn generation_and_prepared_from_gpu_job(
             durable_queue_rank: job.durable_queue_rank,
             request: job.request,
             deferred_media: job.deferred_media,
+            // A retry re-enters through the same conversion, so losing it
+            // here would render the second attempt without the adapter.
+            materialized_control_lora: job.materialized_control_lora,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
@@ -7485,12 +7624,17 @@ fn memory_shortfall_reason(pending: &PendingGeneration) -> Option<String> {
     if outcome.sample_failed {
         return None;
     }
-    Some(crate::host_reclaim::host_shortfall_message(
+    let message = crate::host_reclaim::shortfall_message(
         outcome,
         block.required_bytes,
         block.headroom_bytes,
+        block.admissible_ceiling_bytes,
         block.reclaimable_zfs_arc_bytes,
-    ))
+    );
+    Some(match block.advice.as_deref() {
+        Some(advice) if !advice.is_empty() => format!("{message} ({advice})"),
+        _ => message,
+    })
 }
 
 fn memory_shortfall_rejection_message(
@@ -8050,6 +8194,36 @@ fn device_class(worker: &GpuWorker) -> String {
     format!("{backend}:{capability}:{gib}gb")
 }
 
+/// The demand a candidate publishes, with the learned envelope bounded by the
+/// budget the plan was admitted against.
+///
+/// `EstimateStore::estimate` returns `max(static, decayed observed peak)`, and
+/// the observation is keyed by SHAPE and FAMILY, not by the device it was taken
+/// on: a bucket learned on a 46 GB card is applied verbatim to the same shape on
+/// a card with 25 GB usable. On the 2026-09-12 24 GB simulation that is exactly
+/// what happened — a `flux2-dev:q8` success on this home recorded
+/// `vram_high_water_bytes = 42,630,905,856`, the family bucket handed it to a
+/// `flux2-dev:fp8` request whose own plan was far smaller, and the lane gate
+/// refused `requires 42.63 GB, 25.12 GB available`. No offload was considered
+/// and none would have helped: the PLAN was never the thing that did not fit.
+///
+/// An envelope above what the device can give is not evidence about this render
+/// — it cannot be satisfied at all, so it can only turn a feasible plan into a
+/// permanent refusal. Bounding it keeps every case it exists for (#641: a
+/// learned peak ABOVE a too-small static estimate still wins) and removes the
+/// one it cannot serve. The plan's own static demand is never lowered, and a
+/// zero budget means "not measured" and keeps today's answer.
+fn learned_demand_within_the_budget(
+    static_demand_bytes: u64,
+    learned_demand_bytes: u64,
+    admitted_available_vram_bytes: u64,
+) -> u64 {
+    if admitted_available_vram_bytes == 0 {
+        return static_demand_bytes.max(learned_demand_bytes);
+    }
+    static_demand_bytes.max(learned_demand_bytes.min(admitted_available_vram_bytes))
+}
+
 /// Memory a scheduled work item commits, given what its kind actually does.
 ///
 /// The learned estimator prices every kind the same way, from recorded
@@ -8139,6 +8313,8 @@ fn classify_generation_plan_failure(
     match &error {
         crate::execution_plan::ExecutionPlanError::InsufficientVram {
             required_peak_bytes,
+            admissible_ceiling_bytes,
+            advice,
             eligible_device_ids,
             ..
         } => {
@@ -8156,6 +8332,8 @@ fn classify_generation_plan_failure(
                     message: error.to_string(),
                     vram_shortfall: Some(VramShortfall {
                         required_peak_bytes: *required_peak_bytes,
+                        admissible_ceiling_bytes: *admissible_ceiling_bytes,
+                        advice: advice.clone(),
                         eligible_device_ids: eligible_device_ids.clone(),
                     }),
                 })
@@ -8509,6 +8687,10 @@ pub(crate) fn monotonic_ms() -> u64 {
 /// boundary: current driver-reported free bytes plus only the measured active
 /// cache entry that the same owner can unload or reuse. Other process and
 /// non-cache allocations are deliberately never treated as reclaimable.
+///
+/// This is the RAW capacity. The driver reserve is subtracted once, by
+/// [`schedulable_available_vram_bytes`], which is the figure execution
+/// planning consumes.
 pub(crate) fn effective_available_vram_bytes(
     sampled_free_bytes: u64,
     reclaimable_cache_bytes: u64,
@@ -8535,6 +8717,34 @@ pub(crate) fn reclaimable_model_cache_bytes(
     })
 }
 
+/// Everything on a device that is mold's own to hand back, as one number.
+///
+/// Two kinds of evidence with two different standards of proof, which is why
+/// this is not one `min`:
+///
+/// * `measured_cache_bytes` is STORED — a load-time delta the cache carries
+///   until the entry goes away — so it is clipped to the third-party
+///   per-process attribution. A stale counter must not invent capacity the
+///   operating system says this process does not own.
+/// * `retained_residency_bytes` is ASKED, now, of the engines holding the
+///   weights, and names exactly what `release_retained_residency` will return.
+///   It is a FLOOR under the clip rather than a term added to it, so it can
+///   never raise the answer above what mold actually measured.
+///
+/// The floor is the fix for UAT final-2 (2026-09-12): the per-process query
+/// answers `Some(0)` wherever it cannot see this pid, and zero clipped a
+/// 34 878 MiB retained FLUX.2 transformer down to nothing — so the identical
+/// next request, which would have REUSED those very weights, was offered raw
+/// free VRAM and blocked on a card that had room for it three times over.
+pub(crate) fn reclaimable_device_credit_bytes(
+    measured_cache_bytes: u64,
+    retained_residency_bytes: u64,
+    sampled_mold_bytes: Option<u64>,
+) -> u64 {
+    reclaimable_model_cache_bytes(measured_cache_bytes, sampled_mold_bytes)
+        .max(retained_residency_bytes)
+}
+
 /// Effective capacity for serialized work on a device. While work is active,
 /// the sampler's Mold-owned bytes belong to work that must finish before the
 /// next lease can start, so those bytes are future-reclaimable.
@@ -8546,19 +8756,76 @@ pub(crate) fn schedulable_available_vram_bytes(
     has_active_work: bool,
     total_vram_bytes: u64,
 ) -> u64 {
+    schedulable_available_vram_bytes_with_reserve(
+        sampled_free_bytes,
+        reclaimable_cache_bytes,
+        sampled_mold_bytes,
+        has_active_work,
+        total_vram_bytes,
+        mold_inference::device::reserved_vram_bytes(),
+    )
+}
+
+/// [`schedulable_available_vram_bytes`] with the driver reserve supplied, so
+/// the policy is testable without the process environment.
+///
+/// The reserve is subtracted HERE because the LOADER subtracts it:
+/// `device::usable_free_vram_bytes_result`, which every pre-load gate reads,
+/// is `free - reserved_vram_bytes()`. Planning against the raw sample and
+/// loading against the reserved one is two budgets for one question, and the
+/// gap is exactly `MOLD_RESERVE_VRAM_MB`. The 2026-09-11 audit's 24 GB
+/// simulation is what that looks like at scale: with the reserve set to
+/// 22,000 MB the scheduler saw ~46 GB, admitted a 37.6 GB FLUX.2 [dev] plan,
+/// and the loader refused it against 26.2 GB — "the scheduler admitted a plan
+/// the loader then refused". At the 400 MB Linux default the same disagreement
+/// is small and silent, and it lands on exactly the plans that were already
+/// marginal, which is where #1707's shape sat.
+pub(crate) fn schedulable_available_vram_bytes_with_reserve(
+    sampled_free_bytes: u64,
+    reclaimable_cache_bytes: u64,
+    sampled_mold_bytes: Option<u64>,
+    has_active_work: bool,
+    total_vram_bytes: u64,
+    reserved_bytes: u64,
+) -> u64 {
     let immediate = effective_available_vram_bytes(
         sampled_free_bytes,
         reclaimable_cache_bytes,
         total_vram_bytes,
     );
-    if !has_active_work {
-        return immediate;
-    }
-    sampled_mold_bytes.map_or(immediate, |mold_bytes| {
+    let raw = if !has_active_work {
         immediate
-            .max(sampled_free_bytes.saturating_add(mold_bytes))
-            .min(total_vram_bytes)
-    })
+    } else {
+        sampled_mold_bytes.map_or(immediate, |mold_bytes| {
+            immediate
+                .max(sampled_free_bytes.saturating_add(mold_bytes))
+                .min(total_vram_bytes)
+        })
+    };
+    raw.saturating_sub(reserved_bytes)
+}
+
+/// The attribution policy alone, with no driver reserve.
+///
+/// Every assertion below is about which bytes count as reclaimable, not about
+/// the reserve — which is pinned once by
+/// `memory_preflight::fail_closed_tests::admission_and_the_loader_read_the_same_reserve_adjusted_budget`.
+#[cfg(test)]
+fn schedulable_capacity_without_reserve(
+    sampled_free_bytes: u64,
+    reclaimable_cache_bytes: u64,
+    sampled_mold_bytes: Option<u64>,
+    has_active_work: bool,
+    total_vram_bytes: u64,
+) -> u64 {
+    schedulable_available_vram_bytes_with_reserve(
+        sampled_free_bytes,
+        reclaimable_cache_bytes,
+        sampled_mold_bytes,
+        has_active_work,
+        total_vram_bytes,
+        0,
+    )
 }
 
 fn monotonic_deadline_ms(deadline: Instant) -> u64 {
@@ -8590,6 +8857,46 @@ mod true_cfg_estimate_tests {
             .map(|offset| from_gpu + offset)
             .expect("retry adapter boundary");
         assert!(source[from_gpu..retry_end].contains("deferred_media: job.deferred_media"));
+        // The server's own control adapter travels the same two adapters, and
+        // for the same reason: the publication scrub wiped it off the request
+        // and only `hydrate_dispatch_media` can put it back. Dropping it here
+        // rendered every durable built-in-control job WITHOUT its adapter on
+        // the V2 coordinator path — which is the default — while the legacy
+        // `queue.rs` path carried it correctly.
+        assert!(
+            source[to_gpu..from_gpu]
+                .contains("materialized_control_lora: job.materialized_control_lora"),
+            "the generation-to-GPU adapter must carry the control adapter"
+        );
+        assert!(
+            source[from_gpu..retry_end]
+                .contains("materialized_control_lora: job.materialized_control_lora"),
+            "a job handed back for retry must keep it too"
+        );
+    }
+
+    /// The plan is materialized onto a request that may still have a sealed
+    /// set to overlay, so the seam must say which it is.
+    #[test]
+    fn the_conversion_tells_materialization_whether_an_overlay_is_still_pending() {
+        let source = include_str!("mod.rs");
+        let to_gpu = source
+            .find("fn gpu_job_from_generation(")
+            .expect("generation-to-GPU adapter");
+        let body_end = source[to_gpu..]
+            .find("\nfn generation_and_prepared_from_gpu_job(")
+            .map(|offset| to_gpu + offset)
+            .expect("adapter boundary");
+        let body = &source[to_gpu..body_end];
+        let call = body
+            .find("materialize_request(")
+            .expect("the adapter materializes the plan");
+        let args_end = body[call..].find(");").expect("call end") + call;
+        assert!(
+            body[call..args_end].contains("job.deferred_media.is_some()"),
+            "materialization must be told an overlay is pending, or it writes \
+             an authority field hydration then refuses"
+        );
     }
 
     fn request() -> mold_core::GenerateRequest {
@@ -9528,6 +9835,7 @@ mod tests {
                 durable_queue_rank: None,
                 request,
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -9983,6 +10291,7 @@ mod tests {
 
         coordinator.handle_preparation_event(
             PreparationEvent::Ready {
+                timings: PreparationTimings::default(),
                 work_id: "expanded".to_string(),
                 prepared: Box::new(PreparedGeneration {
                     expanded_prompt: Some("expanded prompt".to_string()),
@@ -10035,6 +10344,7 @@ mod tests {
             &config,
             &generation.request,
             vec![crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: worker_device_id(&worker),
                 ordinal: 0,
@@ -10670,6 +10980,154 @@ mod tests {
         fn unload(&mut self) {}
     }
 
+    /// The retained floor survives every shape the attribution can take, and
+    /// never exceeds what mold measured.
+    #[test]
+    fn a_retained_transformer_is_credited_however_the_process_sample_reads() {
+        const RETAINED: u64 = 34 << 30;
+        const OTHER_CACHED: u64 = 2 << 30;
+
+        // Attribution absent (Metal, a CUDA telemetry fallback): the stored
+        // measurement already contains the retained slot.
+        assert_eq!(
+            reclaimable_device_credit_bytes(RETAINED + OTHER_CACHED, RETAINED, None),
+            RETAINED + OTHER_CACHED
+        );
+
+        // Attribution honest: the clip is not reached and the floor is inert.
+        assert_eq!(
+            reclaimable_device_credit_bytes(
+                RETAINED + OTHER_CACHED,
+                RETAINED,
+                Some(RETAINED + OTHER_CACHED + (1 << 30))
+            ),
+            RETAINED + OTHER_CACHED
+        );
+
+        // Attribution unavailable, reported as zero: the retained slot stands
+        // and the wedge does not happen. The parked sibling stays clipped away
+        // — a stored counter the sample contradicts is still not evidence.
+        assert_eq!(
+            reclaimable_device_credit_bytes(RETAINED + OTHER_CACHED, RETAINED, Some(0)),
+            RETAINED
+        );
+
+        // Nothing retained: exactly the old answer, in both directions.
+        assert_eq!(reclaimable_device_credit_bytes(OTHER_CACHED, 0, Some(0)), 0);
+        assert_eq!(
+            reclaimable_device_credit_bytes(OTHER_CACHED, 0, None),
+            OTHER_CACHED
+        );
+    }
+
+    /// A FLUX.2 [dev] engine between renders: nothing eagerly loaded, and a
+    /// transformer held on the card for the next request.
+    ///
+    /// Faithful to `Flux2Engine`: `is_loaded` is true while the retained slot
+    /// is full (the cache classifies residency from exactly that), and
+    /// `resident_vram_bytes` answers only for the retained slot.
+    struct RetainingTestEngine {
+        name: String,
+        retained: u64,
+    }
+
+    impl RetainingTestEngine {
+        fn boxed(name: &str, retained: u64) -> Box<dyn mold_inference::InferenceEngine> {
+            Box::new(Self {
+                name: name.to_string(),
+                retained,
+            })
+        }
+    }
+
+    impl mold_inference::InferenceEngine for RetainingTestEngine {
+        fn generate(
+            &mut self,
+            _req: &mold_core::GenerateRequest,
+        ) -> anyhow::Result<mold_core::GenerateResponse> {
+            unreachable!("a credit test never runs inference")
+        }
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+        fn is_loaded(&self) -> bool {
+            self.retained > 0
+        }
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn unload(&mut self) {
+            self.retained = 0;
+        }
+        fn resident_vram_bytes(&self) -> Option<u64> {
+            (self.retained > 0).then_some(self.retained)
+        }
+        fn release_retained_residency(&mut self) -> u64 {
+            std::mem::take(&mut self.retained)
+        }
+    }
+
+    /// Put a retained transformer on `worker` the way production does: the
+    /// load measured nothing (a sequential load returns immediately) and the
+    /// credit is raised by the restore that closes the take window.
+    fn retain_on_worker(worker: &Arc<GpuWorker>, model: &str, retained: u64) {
+        let mut cache = worker.model_cache.lock().unwrap();
+        cache.insert(RetainingTestEngine::boxed(model, retained), 0);
+        let taken = cache.take(model).expect("the engine was just inserted");
+        cache.restore(taken);
+        assert_eq!(cache.retained_residency_bytes(), retained);
+    }
+
+    /// The retained transformer is capacity, and admission must see it even
+    /// where per-process VRAM attribution cannot.
+    ///
+    /// UAT final-2, 2026-09-12: a `flux2-dev:q8` engine held 34 878 MiB on an
+    /// L40S between renders and the IDENTICAL next request — the one that
+    /// would have REUSED those weights — was offered `headroom_bytes` equal to
+    /// raw free VRAM and blocked forever. `reclaimable_model_cache_bytes`
+    /// clips mold's own cache credit to the sampled per-process figure, which
+    /// reads `Some(0)` wherever that query cannot see this pid, and zero
+    /// clips everything away.
+    #[tokio::test]
+    async fn a_retained_transformer_is_credited_to_the_device_it_sits_on() {
+        const FREE: u64 = 5 << 30;
+        const RETAINED: u64 = 14 << 30;
+        // The scheduler plans against the same reserve-adjusted budget the
+        // loader reads (`schedulable_available_vram_bytes`), so the driver
+        // reserve comes off the sampled figure before any credit is added.
+        let usable_free = FREE - mold_inference::device::reserved_vram_bytes();
+        let (coordinator, ..) = unschedulable_test_coordinator(FREE).await;
+        let worker = coordinator.state.gpu_pool.worker_snapshot()[0].clone();
+
+        assert_eq!(
+            coordinator.device_snapshots()[0].available_vram_bytes,
+            usable_free,
+            "an empty cache credits nothing"
+        );
+
+        retain_on_worker(&worker, "flux2-dev:q8", RETAINED);
+
+        assert_eq!(
+            coordinator.device_snapshots()[0].available_vram_bytes,
+            usable_free + RETAINED,
+            "the retained transformer is capacity: reused by its own model, \
+             released for any other"
+        );
+
+        // Releasing it takes the credit away again — the number tracks the
+        // card, not a one-way marker.
+        worker
+            .model_cache
+            .lock()
+            .unwrap()
+            .release_retained_residency_except(None)
+            .expect("the retained slot is reclaimable");
+        assert_eq!(
+            coordinator.device_snapshots()[0].available_vram_bytes,
+            usable_free
+        );
+    }
+
     /// hal9000's exact host shape on 2026-08-27 — `MemAvailable` 19.9 GB of
     /// 67.1 GB, so 9.85 GB of headroom over the 10.07 GB floor — with a
     /// `test:q4` plan whose CPU-parked 9.79 GB T5 puts its cold host demand
@@ -11070,6 +11528,163 @@ mod tests {
         assert!(result_rx.try_recv().is_err());
     }
 
+    /// Back to back, same model, real admission: the second request is
+    /// granted off the transformer the first one left on the card.
+    ///
+    /// This is the UAT's row-09b in miniature. The device has almost no free
+    /// VRAM and the only thing on it is this very model's retained
+    /// transformer; the plan is placed because those bytes are the request's
+    /// own, nothing is evicted, and the engine keeps its retained slot — the
+    /// generation that follows reuses the weights instead of reloading them.
+    #[tokio::test]
+    async fn a_repeat_of_the_retaining_model_is_granted_off_its_own_retained_transformer() {
+        const RETAINED: u64 = 20 << 30;
+        let (mut coordinator, worker, worker_rx, _result_rx, _root) =
+            hal9000_vram_blocked_coordinator().await;
+
+        // One gigabyte free on its own does not place this plan — the fixture
+        // exists for exactly that — so a grant below is the credit and
+        // nothing else.
+        retain_on_worker(&worker, "test:q4", RETAINED);
+
+        let _ = coordinator.dispatch_ready().await;
+
+        assert!(
+            granted(&worker_rx),
+            "the request's own retained transformer is capacity it will reuse"
+        );
+        assert!(
+            !coordinator.pending.contains_key("print"),
+            "a granted generation leaves the pending map; it is not blocked on anything"
+        );
+
+        let cache = worker.model_cache.lock().unwrap();
+        assert!(
+            cache.contains("test:q4"),
+            "nothing was evicted to make room for a model that was already there"
+        );
+        assert_eq!(
+            cache.retained_residency_bytes(),
+            RETAINED,
+            "and the transformer is still resident, which is the whole point"
+        );
+    }
+
+    /// The 22-minute wedge (UAT final-2, 2026-09-12): a resolver VRAM block
+    /// must SURVIVE the plan pass that runs immediately after it.
+    ///
+    /// `dispatch_ready` settles first — which is where
+    /// `record_resolver_vram_block` records the block and warns — and then
+    /// plans. The planner receives every pending generation as work, and a job
+    /// whose resolver refused every device arrives with ZERO candidate
+    /// placements, so it is neither placed nor typed-blocked and
+    /// `record_memory_blocks` erased the block that had just been recorded.
+    /// Nothing downstream then ran: `next_memory_reclaim` needs a live block to
+    /// start from, and `settle_unschedulable_generations` reads the block to
+    /// decide the job is memory-short at all, so the idle clock reset on every
+    /// tick. On the wedged host that printed `queued generation is blocked on
+    /// memory` 1 529 times over 22 minutes with no eviction, no reclaim and no
+    /// bound.
+    #[tokio::test]
+    async fn a_resolver_vram_block_survives_the_plan_pass_that_follows_it() {
+        let (mut coordinator, _worker, worker_rx, _result_rx, _root) =
+            hal9000_vram_blocked_coordinator().await;
+
+        let _ = coordinator.dispatch_ready().await;
+        assert!(!granted(&worker_rx), "one gigabyte does not place the plan");
+
+        assert!(
+            coordinator.pending["print"].memory_block.is_some(),
+            "the plan pass must not erase the block the resolver just recorded"
+        );
+        assert!(
+            coordinator.next_memory_reclaim().is_some(),
+            "and the idle reclaim must be reachable straight after a plan pass"
+        );
+    }
+
+    /// D7b, second half: the planner knows WHY a GGUF FLUX.2 tier could not be
+    /// streamed, and on the idle-hold path that reason never reached the user —
+    /// the block's own message is what is surfaced, and it carried only
+    /// numbers. The advice now rides the shortfall onto the block.
+    #[test]
+    fn the_planners_reason_rides_the_block_a_user_actually_reads() {
+        let error = crate::execution_plan::insufficient_vram_error(&[
+            crate::execution_plan::DeviceInfeasibility {
+                device_id: "cuda:0".to_string(),
+                predicted_peak_bytes: 25_409_210_663,
+                available_bytes: 24_650_000_000,
+                admissible_ceiling_bytes: 22_185_000_000,
+                advice: Some(
+                    "streaming was not possible: Flux.2 block-level offload is only planned \
+                     for BF16/FP transformers; GGUF variants already use quantized \
+                     transformer paths"
+                        .to_string(),
+                ),
+            },
+        ]);
+        let crate::execution_plan::ExecutionPlanError::InsufficientVram {
+            advice,
+            admissible_ceiling_bytes,
+            required_peak_bytes,
+            ..
+        } = &error
+        else {
+            panic!("an insufficient-VRAM refusal");
+        };
+        assert_eq!(*required_peak_bytes, 25_409_210_663);
+        assert_eq!(*admissible_ceiling_bytes, Some(22_185_000_000));
+        assert!(
+            advice
+                .as_deref()
+                .is_some_and(|advice| advice.contains("GGUF")),
+            "the reason the tier could not stream must survive into the typed error: {advice:?}"
+        );
+    }
+
+    /// D7a, 2026-09-12: `flux2-dev:fp8` on a 24 GB simulation was refused
+    /// `requires 42.63 GB, 25.12 GB available` with no offload line, and the
+    /// figure was not the plan's — it was `vram_high_water_bytes` from a
+    /// `flux2-dev:q8` success recorded on the same home against a 46 GB card,
+    /// reaching fp8 through the family bucket. An envelope the device cannot
+    /// satisfy is not evidence about this render; it can only turn a feasible
+    /// plan into a permanent refusal.
+    #[test]
+    fn a_learned_envelope_above_the_admitted_budget_cannot_refuse_a_plan_that_fits() {
+        const MEASURED_ON_A_46GB_CARD: u64 = 42_630_905_856;
+        const TWENTY_FOUR_GB_SIMULATION: u64 = 25_118_024_704;
+
+        // A streamed plan that fits is published at the budget, not at an
+        // envelope from another card.
+        assert_eq!(
+            learned_demand_within_the_budget(
+                13_000_000_000,
+                MEASURED_ON_A_46GB_CARD,
+                TWENTY_FOUR_GB_SIMULATION,
+            ),
+            TWENTY_FOUR_GB_SIMULATION,
+        );
+
+        // #641's case is untouched: a learned peak ABOVE a too-small static
+        // estimate still wins, as long as the device could actually give it.
+        assert_eq!(
+            learned_demand_within_the_budget(11_548_381_184, 24_884_805_632, 25_769_803_776),
+            24_884_805_632,
+        );
+
+        // The plan's own demand is never lowered.
+        assert_eq!(
+            learned_demand_within_the_budget(30_000_000_000, 12_000_000_000, 25_000_000_000),
+            30_000_000_000,
+        );
+
+        // An unmeasured budget keeps today's answer.
+        assert_eq!(
+            learned_demand_within_the_budget(13_000_000_000, MEASURED_ON_A_46GB_CARD, 0),
+            MEASURED_ON_A_46GB_CARD,
+        );
+    }
+
     #[tokio::test]
     async fn a_vram_shortfall_that_survives_reclaim_is_held_naming_the_device() {
         let (mut coordinator, worker, worker_rx, mut result_rx, _root) =
@@ -11099,7 +11714,15 @@ mod tests {
             error.contains("device memory") && error.contains(&device_id),
             "the refusal names the memory and the device: {error}"
         );
-        assert!(error.contains("still"), "{error}");
+        // A DEVICE refusal names the ceiling the decision used, never a
+        // "still 0.0 GB short" measured against a budget nobody compared
+        // against (defect 7).
+        assert!(error.contains("requires"), "{error}");
+        assert!(
+            error.contains("over the") && error.contains("ceiling"),
+            "{error}"
+        );
+        assert!(!error.contains("0.0 GB"), "{error}");
     }
 
     /// When the reclaim finds nothing to release, the wait is bounded like
@@ -11400,7 +12023,12 @@ mod tests {
             .all(|worker| worker.in_flight.load(Ordering::SeqCst) == 0));
         let device = &coordinator.device_snapshots()[0];
         assert_eq!(device.activity, DeviceActivity::Busy);
-        assert_eq!(device.available_vram_bytes, 24 << 30);
+        // Reserve-adjusted, because the loader's own gate is — see
+        // `schedulable_available_vram_bytes_with_reserve`.
+        assert_eq!(
+            device.available_vram_bytes,
+            (24u64 << 30) - mold_inference::device::reserved_vram_bytes()
+        );
 
         // Even without a usable attribution sample, the authoritative running
         // row still prevents a terminal idle classification.
@@ -11438,6 +12066,7 @@ mod tests {
                 device_id: "cuda:0".to_string(),
                 predicted_peak_bytes: 9_663_676_416,
                 available_bytes: 2_147_483_648,
+                admissible_ceiling_bytes: 1_932_735_283,
                 advice: None,
             },
         ])
@@ -12340,7 +12969,7 @@ mod tests {
         );
         assert_eq!(
             coordinator.device_snapshots()[0].available_vram_bytes,
-            5 << 30
+            (5u64 << 30) - mold_inference::device::reserved_vram_bytes()
         );
     }
 
@@ -12392,22 +13021,22 @@ mod tests {
         const GIB: u64 = 1 << 30;
 
         assert_eq!(
-            schedulable_available_vram_bytes(10 * GIB, 0, Some(14 * GIB), true, 24 * GIB),
+            schedulable_capacity_without_reserve(10 * GIB, 0, Some(14 * GIB), true, 24 * GIB),
             24 * GIB,
             "a sibling session should queue behind active Mold work"
         );
         assert_eq!(
-            schedulable_available_vram_bytes(10 * GIB, 0, Some(14 * GIB), false, 24 * GIB),
+            schedulable_capacity_without_reserve(10 * GIB, 0, Some(14 * GIB), false, 24 * GIB),
             10 * GIB,
             "idle Mold attribution is not automatically reclaimable"
         );
         assert_eq!(
-            schedulable_available_vram_bytes(10 * GIB, 0, None, true, 24 * GIB),
+            schedulable_capacity_without_reserve(10 * GIB, 0, None, true, 24 * GIB),
             10 * GIB,
             "unknown attribution must remain fail closed"
         );
         assert_eq!(
-            schedulable_available_vram_bytes(4 * GIB, 0, Some(14 * GIB), true, 24 * GIB),
+            schedulable_capacity_without_reserve(4 * GIB, 0, Some(14 * GIB), true, 24 * GIB),
             18 * GIB,
             "external allocations remain unavailable after active Mold work completes"
         );
@@ -12416,7 +13045,7 @@ mod tests {
     #[test]
     fn busy_unattributed_metal_pressure_is_transient_when_the_peak_fits_physically() {
         const GIB: u64 = 1 << 30;
-        let available = schedulable_available_vram_bytes(4 * GIB, 0, None, true, 24 * GIB);
+        let available = schedulable_capacity_without_reserve(4 * GIB, 0, None, true, 24 * GIB);
         assert_eq!(
             available,
             4 * GIB,
@@ -12427,6 +13056,8 @@ mod tests {
             crate::execution_plan::ExecutionPlanError::InsufficientVram {
                 reason: "metal:0 is currently busy".to_string(),
                 required_peak_bytes: 20 * GIB,
+                admissible_ceiling_bytes: Some(18 * GIB),
+                advice: None,
                 eligible_device_ids: vec!["metal:0".to_string()],
             },
             &BTreeMap::from([("metal:0".to_string(), 24 * GIB)]),
@@ -12462,7 +13093,7 @@ mod tests {
     fn busy_unattributed_cuda_lanes_keep_an_additional_fitting_job_waiting() {
         const GIB: u64 = 1 << 30;
         let available = (0..2)
-            .map(|_| schedulable_available_vram_bytes(3 * GIB, 0, None, true, 24 * GIB))
+            .map(|_| schedulable_capacity_without_reserve(3 * GIB, 0, None, true, 24 * GIB))
             .collect::<Vec<_>>();
         assert_eq!(available, vec![3 * GIB, 3 * GIB]);
 
@@ -12470,6 +13101,8 @@ mod tests {
             crate::execution_plan::ExecutionPlanError::InsufficientVram {
                 reason: "both CUDA lanes are currently busy".to_string(),
                 required_peak_bytes: 18 * GIB,
+                admissible_ceiling_bytes: Some(16 * GIB),
+                advice: None,
                 eligible_device_ids: vec!["cuda:0".to_string(), "cuda:1".to_string()],
             },
             &BTreeMap::from([
@@ -12484,7 +13117,7 @@ mod tests {
     fn unattributed_external_allocations_are_not_dispatch_capacity() {
         const GIB: u64 = 1 << 30;
         assert_eq!(
-            schedulable_available_vram_bytes(3 * GIB, 0, None, false, 24 * GIB),
+            schedulable_capacity_without_reserve(3 * GIB, 0, None, false, 24 * GIB),
             3 * GIB,
             "neither physical total nor unknown process memory is immediate capacity"
         );
@@ -12496,10 +13129,63 @@ mod tests {
         let reclaimable = reclaimable_model_cache_bytes(16 * GIB, None);
         assert_eq!(reclaimable, 16 * GIB);
         assert_eq!(
-            schedulable_available_vram_bytes(4 * GIB, reclaimable, None, false, 24 * GIB),
+            schedulable_capacity_without_reserve(4 * GIB, reclaimable, None, false, 24 * GIB),
             20 * GIB,
             "the owner can evict its measured cache even when the OS cannot attribute the process"
         );
+    }
+
+    /// The mechanism behind wave-2's round-robin AND its 18-minute wedge:
+    /// both are the retained transformer reading as zero reclaimable bytes.
+    ///
+    /// `measured_cache_bytes` is `ModelCache::active_vram_bytes()`, which for
+    /// a retaining FLUX.2 engine was 0. So a worker holding 35 GB of weights
+    /// advertised only its raw free VRAM:
+    ///
+    /// * the SAME request could not be placed back on it — 11 GB against a
+    ///   37 GB plan is infeasible, so the warm device was filtered out before
+    ///   warmth was ever consulted and the job went to a cold worker that
+    ///   re-encoded the prompt and reloaded 35 GB;
+    /// * and once both workers were in that state, no device was schedulable
+    ///   at all.
+    ///
+    /// With the retained bytes credited, the warm worker is feasible again —
+    /// and `an_idle_warm_device_is_preferred_without_any_waiting` (scheduler
+    /// planner contract) shows the planner then chooses it.
+    #[test]
+    fn a_retained_transformer_restores_the_warm_workers_schedulable_capacity() {
+        const GIB: u64 = 1 << 30;
+        const RETAINED: u64 = 35 * GIB;
+        const PLAN_NEEDS: u64 = 37 * GIB;
+        // An L40S holding a retained flux2-dev transformer.
+        let sampled_free = 46 * GIB - RETAINED;
+
+        // Before: the cache reported nothing, so the card looked full.
+        let blind = schedulable_capacity_without_reserve(
+            sampled_free,
+            reclaimable_model_cache_bytes(0, None),
+            None,
+            false,
+            46 * GIB,
+        );
+        assert!(
+            blind < PLAN_NEEDS,
+            "this is the wedge: {blind} bytes advertised against a {PLAN_NEEDS}-byte plan"
+        );
+
+        // After: the retained transformer is first-party reclaimable evidence.
+        let credited = schedulable_capacity_without_reserve(
+            sampled_free,
+            reclaimable_model_cache_bytes(RETAINED, None),
+            None,
+            false,
+            46 * GIB,
+        );
+        assert!(
+            credited >= PLAN_NEEDS,
+            "a worker holding this model's own weights must be schedulable for it"
+        );
+        assert_eq!(credited, 46 * GIB, "and the credit is bounded by the card");
     }
 
     #[test]
@@ -12562,7 +13248,10 @@ mod tests {
         );
 
         let idle = coordinator.device_snapshots().remove(0);
-        assert_eq!(idle.available_vram_bytes, 20 * GIB);
+        assert_eq!(
+            idle.available_vram_bytes,
+            20 * GIB - mold_inference::device::reserved_vram_bytes()
+        );
         assert!(idle
             .warm_execution_fingerprints
             .contains(&ExecutionFingerprint::new("warm-plan")));
@@ -12604,7 +13293,10 @@ mod tests {
             },
         );
         let busy = coordinator.device_snapshots().remove(0);
-        assert_eq!(busy.available_vram_bytes, 20 * GIB);
+        assert_eq!(
+            busy.available_vram_bytes,
+            20 * GIB - mold_inference::device::reserved_vram_bytes()
+        );
         assert_eq!(busy.available_at_ms, Some(5_000));
         assert_eq!(
             busy.activity,
@@ -12950,6 +13642,7 @@ mod tests {
     fn generation_device_facts_apply_ordinal_and_stable_worker_constraints() {
         let facts = vec![
             crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:stable-small".to_string(),
                 ordinal: 0,
@@ -12958,6 +13651,7 @@ mod tests {
                 available_vram_bytes: 8 << 30,
             },
             crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:stable-large".to_string(),
                 ordinal: 1,
@@ -13366,6 +14060,7 @@ mod tests {
             &config,
             &request,
             &[crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:exact".into(),
                 ordinal: 0,
@@ -15565,6 +16260,99 @@ mod tests {
         assert!(coordinator.leases.is_empty());
     }
 
+    /// The server's own control adapter must survive the V2 coordinator's
+    /// two conversions, or a built-in-control render loses it silently.
+    ///
+    /// `prepare_generation_inner` prepends the built-in LTX-2 IC-LoRA into
+    /// `request.loras` AFTER admission sealed the media set, so the
+    /// publication scrub takes it and the sealed set cannot hand it back; it
+    /// rides on the job instead and `hydrate_dispatch_media` re-prepends it at
+    /// dispatch (`b7c841cc`). `gpu_job_from_generation` dropped it on the
+    /// floor, and the V2 coordinator is the default path — so on plato every
+    /// durable `--ic-lora-control` render reached the engine with no control
+    /// adapter at all, while the legacy `queue.rs` dispatcher carried it
+    /// correctly.
+    #[tokio::test]
+    async fn the_v2_conversion_carries_the_materialized_control_adapter_to_dispatch() {
+        let (worker, _worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let control = mold_core::LoraWeight {
+            path: "/models/ltx2-control-union-23/adapter.safetensors".to_string(),
+            scale: 1.0,
+            expert: None,
+        };
+        let caller = mold_core::LoraWeight {
+            path: "/models/loras/style.safetensors".to_string(),
+            scale: 0.7,
+            expert: None,
+        };
+
+        let (mut generation, _result) = fake_generation("ic-lora-job");
+        generation.materialized_control_lora = Some(control.clone());
+        let fence = LeaseFence {
+            work_id: "ic-lora-job".to_string(),
+            device_id,
+            owner_epoch: 1,
+            state_version: 1,
+            plan_version: 1,
+            worker_generation: 1,
+            memory_sample_generation: 1,
+            memory_ledger_sequence: 1,
+        };
+
+        let gpu_job = gpu_job_from_generation(&state, generation, fence, None, None);
+        assert_eq!(
+            gpu_job
+                .materialized_control_lora
+                .as_ref()
+                .map(|lora| lora.path.as_str()),
+            Some(control.path.as_str()),
+            "the adapter must reach the worker, which is the only place that \
+             can put it back"
+        );
+
+        // What dispatch then composes: hydration restores the caller's sealed
+        // stack onto the scrubbed request, and the control adapter goes back
+        // at its head — `hydrate_dispatch_media`'s two steps, in order.
+        let mut dispatched = gpu_job.request.clone();
+        dispatched.loras = Some(vec![caller.clone()]);
+        crate::queue_media_runtime::prepend_materialized_control_lora(
+            &mut dispatched,
+            gpu_job.materialized_control_lora.clone(),
+        );
+        assert_eq!(
+            dispatched
+                .loras
+                .expect("a composed stack")
+                .iter()
+                .map(|lora| lora.path.clone())
+                .collect::<Vec<_>>(),
+            vec![control.path.clone(), caller.path.clone()],
+            "the control adapter leads, exactly as preparation composed it"
+        );
+
+        // And a job handed back for retry keeps it, or the second attempt
+        // renders without it.
+        let (returned, _prepared) = generation_and_prepared_from_gpu_job(gpu_job);
+        assert_eq!(
+            returned
+                .materialized_control_lora
+                .as_ref()
+                .map(|lora| lora.path.as_str()),
+            Some(control.path.as_str())
+        );
+    }
+
     #[tokio::test]
     async fn post_upscale_followup_waits_for_a_distinct_lease_after_generation_completion() {
         let (worker, worker_rx) = test_worker(0);
@@ -15880,9 +16668,15 @@ mod tests {
         assert_eq!(queue.pending(), 0);
         assert!(state.job_registry.snapshot().entries.is_empty());
         assert!(coordinator.leases.is_empty());
+        // Prints only: mold's own dotfiles (the gallery writer lease) share
+        // this directory and the gallery listing ignores them.
         let files_before = std::fs::read_dir(&output_dir)
             .unwrap()
-            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .filter(|entry| {
+                entry.as_ref().is_ok_and(|entry| {
+                    entry.path().is_file() && !entry.file_name().to_string_lossy().starts_with('.')
+                })
+            })
             .count();
         assert_eq!(files_before, 1, "F0 is published exactly once");
         let events = std::iter::from_fn(|| progress_rx.try_recv().ok()).collect::<Vec<_>>();
@@ -15912,7 +16706,14 @@ mod tests {
         assert_eq!(
             std::fs::read_dir(&output_dir)
                 .unwrap()
-                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                // Prints only: mold's own dotfiles (the gallery writer
+                // lease) share this directory.
+                .filter(|entry| {
+                    entry.as_ref().is_ok_and(|entry| {
+                        entry.path().is_file()
+                            && !entry.file_name().to_string_lossy().starts_with('.')
+                    })
+                })
                 .count(),
             files_before,
             "a late completion cannot publish or settle the parent twice"
@@ -16791,6 +17592,7 @@ mod tests {
         };
         coordinator.handle_preparation_event(
             PreparationEvent::Ready {
+                timings: PreparationTimings::default(),
                 work_id: "waiting-h3".to_string(),
                 prepared: Box::new(PreparedGeneration {
                     execution_inputs: Some(deferred),
@@ -16871,6 +17673,7 @@ mod tests {
         };
         coordinator.handle_preparation_event(
             PreparationEvent::Ready {
+                timings: PreparationTimings::default(),
                 work_id: "parked-h3".to_string(),
                 prepared: Box::new(PreparedGeneration {
                     execution_inputs: Some(parked),
@@ -17152,6 +17955,7 @@ mod tests {
                     durable_queue_rank: None,
                     request: serde_json::from_str(&request_json).unwrap(),
                     deferred_media: Some(deferred),
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -17401,6 +18205,7 @@ mod tests {
         let signature = Coordinator::preparation_refresh_signature(
             &prepared,
             &[crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: "cuda:1".to_string(),
                 ordinal: 1,
@@ -17497,6 +18302,7 @@ mod tests {
         let (worker, _worker_rx) = test_worker(0);
         let stable_id = worker_device_id(&worker);
         let device = crate::execution_plan::DeviceFact {
+            total_vram_bytes: None,
             cuda_peak_baseline: None,
             id: stable_id.clone(),
             ordinal: 0,
@@ -17622,6 +18428,7 @@ mod tests {
         let stable_id1 = worker_device_id(&worker1);
         let devices = vec![
             crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: stable_id0.clone(),
                 ordinal: 0,
@@ -17630,6 +18437,7 @@ mod tests {
                 available_vram_bytes: 24 << 30,
             },
             crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: stable_id1.clone(),
                 ordinal: 1,
@@ -17773,6 +18581,7 @@ mod tests {
             &request,
             vec![
                 crate::execution_plan::DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: stable_id.clone(),
                     ordinal: 0,
@@ -17781,6 +18590,7 @@ mod tests {
                     available_vram_bytes: 24 << 30,
                 },
                 crate::execution_plan::DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: stable_id1.clone(),
                     ordinal: 1,
@@ -17794,6 +18604,7 @@ mod tests {
         .unwrap();
         let device_facts = vec![
             crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: stable_id.clone(),
                 ordinal: 0,
@@ -17802,6 +18613,7 @@ mod tests {
                 available_vram_bytes: 24 << 30,
             },
             crate::execution_plan::DeviceFact {
+                total_vram_bytes: None,
                 cuda_peak_baseline: None,
                 id: stable_id1.clone(),
                 ordinal: 1,
@@ -17973,6 +18785,7 @@ mod tests {
             &request,
             vec![
                 crate::execution_plan::DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: stable_id0.clone(),
                     ordinal: 0,
@@ -17981,6 +18794,7 @@ mod tests {
                     available_vram_bytes: 24 << 30,
                 },
                 crate::execution_plan::DeviceFact {
+                    total_vram_bytes: None,
                     cuda_peak_baseline: None,
                     id: stable_id1.clone(),
                     ordinal: 1,
@@ -18928,6 +19742,8 @@ mod tests {
             crate::execution_plan::ExecutionPlanError::InsufficientVram {
                 reason: "larger than every device".to_string(),
                 required_peak_bytes: 33_474_340_818,
+                admissible_ceiling_bytes: Some(21_474_836_480),
+                advice: None,
                 eligible_device_ids: vec!["cuda:0".to_string()],
             },
             &BTreeMap::from([("cuda:0".to_string(), RTX_4090_TOTAL)]),
@@ -18958,6 +19774,8 @@ mod tests {
                 crate::execution_plan::ExecutionPlanError::InsufficientVram {
                     reason: "currently short of VRAM".to_string(),
                     required_peak_bytes: 12 * GIB,
+                    admissible_ceiling_bytes: Some(10 * GIB),
+                    advice: None,
                     eligible_device_ids: eligible_device_ids
                         .iter()
                         .map(|id| (*id).to_string())

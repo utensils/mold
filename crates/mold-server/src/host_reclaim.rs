@@ -83,7 +83,7 @@ impl HostReclaimOutcome {
         }
         Some(format!(
             "released {} by unloading {}",
-            gb1(self.released_bytes),
+            nonzero_gb1(self.released_bytes),
             plural_models(self.evicted.len())
         ))
     }
@@ -106,20 +106,104 @@ pub(crate) fn host_shortfall_message(
     available_bytes: u64,
     reclaimable_zfs_arc_bytes: Option<u64>,
 ) -> String {
-    let shortfall = required_bytes.saturating_sub(available_bytes);
+    shortfall_message(
+        outcome,
+        required_bytes,
+        available_bytes,
+        None,
+        reclaimable_zfs_arc_bytes,
+    )
+}
+
+/// [`host_shortfall_message`] with the ADMISSION CEILING the decision was
+/// actually made against.
+///
+/// A device refusal is not `required > available`. Admission compares the plan
+/// peak against a ceiling derived from the budget — for every family whose
+/// estimate is a heuristic that is 90 % of it — and the message printed the
+/// raw budget instead. The 2026-09-11 audit caught it three times, twice as the
+/// self-contradicting `still 0.0 GB short (requires 43.00 GB, 46.72 GB
+/// available)`: 46.72 exceeds 43.00, so the message said the request fit and
+/// was refused anyway. Whichever half a reader believed, it could not be acted
+/// on.
+///
+/// `admissible_ceiling_bytes` is `None` for the host ledger, whose comparison
+/// really is against the headroom it prints.
+pub(crate) fn shortfall_message(
+    outcome: &HostReclaimOutcome,
+    required_bytes: u64,
+    available_bytes: u64,
+    admissible_ceiling_bytes: Option<u64>,
+    reclaimable_zfs_arc_bytes: Option<u64>,
+) -> String {
     let arc = match reclaimable_zfs_arc_bytes {
         Some(credit) if credit > 0 => format!(", including {} evictable ZFS ARC", gb2(credit)),
         _ => String::new(),
     };
-    let tail = format!(
-        "still {} short (requires {}, {} available{arc})",
-        gb1(shortfall),
-        gb2(required_bytes),
-        gb2(available_bytes)
-    );
+    let tail = match admissible_ceiling_bytes {
+        Some(ceiling) => {
+            // Name the ceiling, and explain it when it is not simply the
+            // budget: a reader who sees 22.61 against 25.12 must be able to
+            // tell a derate from a second, unexplained memory figure.
+            let ceiling_clause = if ceiling < available_bytes {
+                format!(
+                    "{} admission ceiling (90% of the {} usable on this device{arc})",
+                    gb2(ceiling),
+                    gb2(available_bytes)
+                )
+            } else {
+                format!("{} usable on this device{arc}", gb2(ceiling))
+            };
+            if required_bytes > ceiling {
+                format!(
+                    "requires {}, which is {} over the {ceiling_clause}",
+                    gb2(required_bytes),
+                    over(required_bytes - ceiling),
+                )
+            } else {
+                // Defensive: nothing should reach a shortfall message without
+                // exceeding its own ceiling. Report the pair rather than
+                // inventing a shortfall, which is the defect this replaces.
+                format!(
+                    "requires {}, within the {ceiling_clause} — refused for a                      reason other than this device's free memory",
+                    gb2(required_bytes),
+                )
+            }
+        }
+        None => format!(
+            "still {} short (requires {}, {} available{arc})",
+            gb1(required_bytes.saturating_sub(available_bytes)),
+            gb2(required_bytes),
+            gb2(available_bytes)
+        ),
+    };
     match outcome.release_summary() {
         Some(summary) => format!("{summary}; {tail}"),
         None => tail,
+    }
+}
+
+/// A shortfall is never zero, so it is never printed as `0.0 GB`.
+///
+/// Below a gigabyte the figure is shown in megabytes; a plan that is 52 MB over
+/// its ceiling is 52 MB over, and rounding that to "0.0 GB" is what made the
+/// refusal read as a contradiction.
+fn over(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        gb2(bytes)
+    } else {
+        format!("{} MB", (bytes as f64 / 1_000_000.0).round() as u64)
+    }
+}
+
+/// `gb1`, except that a positive figure below a gigabyte is reported in
+/// megabytes rather than rounded to the `0.0 GB` this module now refuses to
+/// print anywhere.
+fn nonzero_gb1(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 || bytes == 0 {
+        gb1(bytes)
+    } else {
+        format!("{} MB", (bytes as f64 / 1_000_000.0).round() as u64)
     }
 }
 
@@ -254,6 +338,24 @@ pub(crate) fn busy_worker_device_ids(state: &AppState) -> BTreeSet<String> {
 pub(crate) enum ReclaimScope {
     Host,
     Device(usize),
+}
+
+impl ReclaimScope {
+    /// What this reclaim is short OF, in the vocabulary the scheduler's own
+    /// `MemoryBlockKind::noun` uses.
+    ///
+    /// `reclaim_headroom` serves both scopes, and it used to name HOST bytes
+    /// in every line — so a DEVICE reclaim for a 39.3 GB FLUX.2 plan reported
+    /// `required_host_bytes=39295838176 available_host_bytes=10737908736` on a
+    /// machine with 251 GB of RAM. Those are VRAM figures wearing a host
+    /// label, and a reader who trusts the label goes looking for a host-memory
+    /// bug that is not there.
+    pub(crate) fn memory_noun(self) -> &'static str {
+        match self {
+            Self::Host => "host memory",
+            Self::Device(_) => "device memory",
+        }
+    }
 }
 
 async fn reclaim_candidates(
@@ -427,18 +529,26 @@ async fn reclaim_headroom(
     if targets.is_empty() {
         tracing::info!(
             model = %requested_model,
-            required_host_bytes = needed_headroom_bytes,
-            available_host_bytes = before,
-            "host headroom is short and the model cache holds nothing reclaimable"
+            memory = scope.memory_noun(),
+            required_bytes = needed_headroom_bytes,
+            available_bytes = before,
+            // The requested model is never its own reclaim target
+            // (`plan_reclaim` drops it), so a repeat of the model that is
+            // already cached reads as "nothing reclaimable" even when that
+            // engine is holding the whole card. Say so, rather than leaving
+            // the reader to infer an empty cache.
+            skipped_requested_model = true,
+            "headroom is short and the model cache holds nothing else reclaimable"
         );
         return outcome;
     }
     tracing::info!(
         model = %requested_model,
-        required_host_bytes = needed_headroom_bytes,
-        available_host_bytes = before,
+        memory = scope.memory_noun(),
+        required_bytes = needed_headroom_bytes,
+        available_bytes = before,
         reclaimable = targets.len(),
-        "host headroom is short; releasing cached models before refusing"
+        "headroom is short; releasing cached models before refusing"
     );
     for target in targets {
         match evict_target(state, &target).await {
@@ -482,8 +592,9 @@ async fn reclaim_headroom(
         tracing::info!(
             model = %target.model,
             ordinal = ?target.ordinal,
-            available_host_bytes = now,
-            "released a cached model for host headroom"
+            memory = scope.memory_noun(),
+            available_bytes = now,
+            "released a cached model for headroom"
         );
         if now >= needed_headroom_bytes {
             break;
@@ -531,6 +642,24 @@ mod tests {
 
     /// Evicting the model being admitted would turn a warm admission into a
     /// cold reload of the very weights the request is waiting for.
+    /// A device reclaim never reports host bytes.
+    ///
+    /// `reclaim_headroom` serves both scopes from one body, and every line in
+    /// it was `*_host_bytes`. On the single-GPU host that is how a 39.3 GB
+    /// VRAM shortfall came to be logged as `required_host_bytes` beside
+    /// `available_host_bytes=10737908736` on a machine with 251 GB of RAM,
+    /// pointing the reader at the wrong pool entirely.
+    #[test]
+    fn a_reclaim_names_the_memory_it_is_short_of() {
+        assert_eq!(ReclaimScope::Host.memory_noun(), "host memory");
+        assert_eq!(ReclaimScope::Device(3).memory_noun(), "device memory");
+        assert_ne!(
+            ReclaimScope::Device(0).memory_noun(),
+            ReclaimScope::Host.memory_noun(),
+            "the two pools must never read alike in a log line"
+        );
+    }
+
     #[test]
     fn the_requested_model_is_never_a_reclaim_target() {
         let candidates = targets_from(
@@ -570,6 +699,120 @@ mod tests {
             .release_summary()
             .expect("one eviction still reports")
             .contains("1 idle model"));
+    }
+
+    /// Defect 7 (2026-09-11 audit, reproduced three times): the refusal printed
+    /// a pair of numbers that was not the pair the decision was made from, and
+    /// then a shortfall of "0.0 GB" — which reads as "it fits and we refused
+    /// anyway".
+    ///
+    /// ```text
+    /// still 0.0 GB short (requires 43.00 GB, 46.72 GB available)
+    /// still 0.0 GB short (requires 24.25 GB, 25.12 GB available)
+    /// ```
+    ///
+    /// Both decisions were made against the ADMISSION CEILING — 90 % of the
+    /// device's usable memory — which the message never printed. A device
+    /// shortfall now names the ceiling it exceeded, what that ceiling is, and a
+    /// shortfall that is never zero.
+    #[test]
+    fn a_device_shortfall_names_the_ceiling_the_decision_actually_used() {
+        let outcome = HostReclaimOutcome::default();
+
+        // E1b: `flux2-dev:q8` + one reference on a 46.72 GB budget.
+        assert_eq!(
+            shortfall_message(
+                &outcome,
+                43_000_000_000,
+                46_720_000_000,
+                Some(42_048_000_000),
+                None,
+            ),
+            "requires 43.00 GB, which is 952 MB over the 42.05 GB admission ceiling \
+             (90% of the 46.72 GB usable on this device)"
+        );
+
+        // D7b: `flux2-dev:q4` on the 24 GB simulation.
+        assert_eq!(
+            shortfall_message(
+                &outcome,
+                24_252_966_880,
+                25_124_316_160,
+                Some(22_611_884_544),
+                None,
+            ),
+            "requires 24.25 GB, which is 1.64 GB over the 22.61 GB admission ceiling \
+             (90% of the 25.12 GB usable on this device)"
+        );
+
+        // D7a: `flux2-dev:fp8` on the same budget — the shortfall is large and
+        // is still measured against the ceiling, not against raw free memory.
+        assert_eq!(
+            shortfall_message(
+                &outcome,
+                39_370_000_000,
+                25_124_316_160,
+                Some(22_611_884_544),
+                None,
+            ),
+            "requires 39.37 GB, which is 16.76 GB over the 22.61 GB admission ceiling \
+             (90% of the 25.12 GB usable on this device)"
+        );
+    }
+
+    /// A ceiling that is the whole budget — the families whose estimate is
+    /// measured rather than heuristic, so admission does not derate it — has no
+    /// 90% clause to explain.
+    #[test]
+    fn an_underated_ceiling_is_named_as_the_budget_it_is() {
+        assert_eq!(
+            shortfall_message(
+                &HostReclaimOutcome::default(),
+                26_000_000_000,
+                24_000_000_000,
+                Some(24_000_000_000),
+                None,
+            ),
+            "requires 26.00 GB, which is 2.00 GB over the 24.00 GB usable on this device"
+        );
+    }
+
+    /// Never "0.0 GB short". A sub-gigabyte shortfall is real and is reported
+    /// in the unit that shows it.
+    #[test]
+    fn a_shortfall_under_a_gigabyte_is_never_printed_as_zero() {
+        let message = shortfall_message(
+            &HostReclaimOutcome::default(),
+            42_100_000_000,
+            46_720_000_000,
+            Some(42_048_000_000),
+            None,
+        );
+        assert!(
+            message.contains("52 MB over"),
+            "a 52 MB shortfall must not round to 0.0 GB: {message}"
+        );
+        assert!(!message.contains("0.0 GB"), "{message}");
+    }
+
+    /// The defensive branch. If a demand ever reaches this message without
+    /// exceeding its own ceiling, the message must not invent a shortfall —
+    /// it reports the pair and says the refusal came from somewhere else.
+    #[test]
+    fn a_demand_that_does_not_exceed_its_ceiling_never_claims_a_shortfall() {
+        let message = shortfall_message(
+            &HostReclaimOutcome::default(),
+            10_000_000_000,
+            46_720_000_000,
+            Some(42_048_000_000),
+            None,
+        );
+        assert!(!message.contains("short"), "{message}");
+        assert!(!message.contains("over the"), "{message}");
+        assert!(
+            message.contains("10.00 GB") && message.contains("42.05 GB"),
+            "{message}"
+        );
     }
 
     /// Nothing reclaimable must not paste an empty clause into the refusal.

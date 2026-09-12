@@ -326,10 +326,42 @@ describe("settings schema", () => {
 
   it("every env knob names a real MOLD_ variable and needs a restart", () => {
     for (const knob of ENV_KNOB_SCHEMAS) {
-      expect(knob.key).toMatch(/^env\.MOLD_[A-Z_]+$/);
+      // MOLD_FLUX2_* carry a digit, so the name is not letters-and-underscores.
+      expect(knob.key).toMatch(/^env\.MOLD_[A-Z0-9_]+$/);
       expect(knob.needsEngineRestart).toBe(true);
       expect(knob.section).toBe("performance");
     }
+  });
+
+  // The per-family defaults are the campaign's whole point: a user reading
+  // "Automatic" has to be told it is not one answer for every model.
+  it("names the per-family default on the two backend knobs", () => {
+    for (const key of ["env.MOLD_ATTN", "env.MOLD_CONV"]) {
+      const knob = schemaFor(key)!;
+      expect(knob.options?.[0]?.value, key).toBe("");
+      expect(knob.options?.[0]?.label, key).toMatch(/per family/i);
+      expect(knob.help, key).toMatch(/FLUX/);
+      expect(knob.help, key).toMatch(/Wan|video/i);
+    }
+  });
+
+  // `1` is an accepted value that resolves identically to unset — the budget
+  // overrides an explicit keep on a card that cannot afford it (#276). Offering
+  // it as "force on" would be a promise the engine does not keep.
+  it("does not promise that keeping the FLUX transformer overrides the budget", () => {
+    const knob = schemaFor("env.MOLD_FLUX_KEEP_TRANSFORMER")!;
+    expect(knob.options?.map((o) => o.value)).toEqual(["", "1", "0"]);
+    expect(knob.options?.find((o) => o.value === "1")?.label).toContain(
+      "same as automatic",
+    );
+    expect(knob.options?.find((o) => o.value === "0")?.label).toMatch(/drop/i);
+  });
+
+  it("offers MOLD_KEEP_TE_RAM as the tri-state it became", () => {
+    const knob = schemaFor("env.MOLD_KEEP_TE_RAM")!;
+    expect(knob.options?.map((o) => o.value)).toEqual(["", "1", "0"]);
+    expect(knob.options?.[0]?.label).toMatch(/^Automatic/);
+    expect(knob.help).toMatch(/8 GB/);
   });
 
   it("select editors always carry options", () => {
@@ -470,5 +502,48 @@ describe("matchesSearch", () => {
 
   it("empty query matches everything", () => {
     expect(matchesSearch("  ", item)).toBe(true);
+  });
+});
+
+describe("process-frozen engine knobs", () => {
+  const ALL_SCHEMAS = [...ENGINE_KEY_SCHEMAS, ...ENV_KNOB_SCHEMAS];
+  // `crates/mold-inference/src/runtime_env.rs` freezes these in a `OnceLock`
+  // on first use — per PROCESS. The desktop build runs the engine as a thread
+  // inside the Tauri process and applies settings with `set_var` into that
+  // same process, so restarting the ENGINE cannot pick any of them up. A row
+  // promising "RESTART ENGINE" for one of them is simply false.
+  const PROCESS_FROZEN = [
+    "env.MOLD_KEEP_TE_RAM",
+    "env.MOLD_ATTN",
+    "env.MOLD_CONV",
+    "env.MOLD_FLUX_KEEP_TRANSFORMER",
+    "env.MOLD_FLUX2_QMATMUL",
+    "env.MOLD_FLUX2_FP8_CACHE",
+    "env.MOLD_VAE_TILED",
+    "env.MOLD_OFFLOAD",
+    "env.MOLD_RESERVE_VRAM_MB",
+  ];
+
+  it("tells the user to restart the app, not the engine", () => {
+    for (const key of PROCESS_FROZEN) {
+      const schema = ALL_SCHEMAS.find((entry) => entry.key === key);
+      expect(schema, `${key} must be in the schema`).toBeDefined();
+      expect(schema?.needsAppRestart, `${key} is process-frozen`).toBe(true);
+    }
+  });
+
+  it("does not claim an app restart for a knob the server re-reads live", () => {
+    // These are read with a plain `env::var` at the point of use, so an
+    // engine restart really is enough.
+    for (const key of [
+      "env.MOLD_STEP_PREVIEW",
+      "env.MOLD_PNG_ENCODING",
+      "env.MOLD_QUEUE_SIZE",
+    ]) {
+      const schema = ALL_SCHEMAS.find((entry) => entry.key === key);
+      expect(schema?.needsAppRestart ?? false, `${key} is not frozen`).toBe(
+        false,
+      );
+    }
   });
 });
