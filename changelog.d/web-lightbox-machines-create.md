@@ -13,6 +13,10 @@
   Short clip / 3-D object strip and the print's name moved out of the page
   header onto the first row of the column they govern, left-aligned above the
   picture.
+- **Queued and running work now sits under the prompt box on the Create page.**
+  It used to open the column above the picture, so pressing Generate pushed the
+  prompt box down the page. The column now reads: output kind, picture, prompt
+  box, work in flight, Recent.
 - **The composer no longer calls a 16:9 canvas "Custom".** The summary under the
   prompt reads the same shape resolver as the Shape chip beside it, so the two
   can never disagree about the canvas, and it marks a nearest-match shape with

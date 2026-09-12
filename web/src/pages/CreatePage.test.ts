@@ -5620,6 +5620,79 @@ describe("CreatePage prompt gate", () => {
  * canvas read "Custom" in the composer while the ShapePicker beside it showed
  * 16:9 lit — two readings of the same canvas, on the same screen.
  */
+/*
+ * The left column reads top to bottom: kind strip, picture, composer, the work
+ * in flight, then Recent. Queued and running prints used to open the column,
+ * above the picture, so a person who had just pressed Generate watched their
+ * queue scroll away from the prompt box they were still typing in.
+ */
+describe("CreatePage left column order", () => {
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  /** Every marker, in the order the column must render them. */
+  function columnOrder(wrapper: ReturnType<typeof mount>): Element[] {
+    const canvas = wrapper.find("[data-test='result-canvas']").exists()
+      ? wrapper.get("[data-test='result-canvas']").element
+      : wrapper.get("[data-test='cold-start-stub']").element;
+    return [
+      wrapper.get("[data-test='web-output-kind']").element,
+      canvas,
+      wrapper.get("[data-test='composer-submit']").element,
+      wrapper.get("[data-test='activity-stub']").element,
+      wrapper.get("[data-test='recent-grid']").element,
+    ];
+  }
+
+  function assertInOrder(markers: Element[]) {
+    for (let index = 1; index < markers.length; index += 1) {
+      expect(
+        markers[index - 1]!.compareDocumentPosition(markers[index]!) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+  }
+
+  it("puts the work in flight under the prompt box, above Recent", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    assertInOrder(columnOrder(wrapper));
+  });
+
+  it("keeps that order when the column is narrow", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    assertInOrder(columnOrder(wrapper));
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("CreatePage composer summary", () => {
   beforeEach(async () => {
     hostRoutingTesting.reset();

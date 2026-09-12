@@ -5059,17 +5059,6 @@ onBeforeUnmount(() => {
           </label>
         </div>
 
-        <ActivityStrip
-          :jobs="localActivityJobs"
-          :shared="sharedActivityRows"
-          :queue-status="routing.queueStatus.value"
-          @cancel="cancelPrint"
-          @retry="retryPrint"
-          @dismiss="stream.remove"
-          @open="openJob"
-          @shared-open="openLiveWork"
-        />
-
         <section class="create-result" aria-label="Result">
           <div
             v-if="canvasMode === 'empty' && showColdStart"
@@ -5217,6 +5206,21 @@ onBeforeUnmount(() => {
           :request="estimateRequest"
           :target="estimateTarget"
           :estimate="fetchGenerationEstimate"
+        />
+
+        <!-- The work in flight, under the prompt box it came from and above
+             Recent. It used to open the column, above the picture, so pressing
+             Generate pushed the composer down the page. Still inside the same
+             left column: nothing on this path may set an `overflow`. -->
+        <ActivityStrip
+          :jobs="localActivityJobs"
+          :shared="sharedActivityRows"
+          :queue-status="routing.queueStatus.value"
+          @cancel="cancelPrint"
+          @retry="retryPrint"
+          @dismiss="stream.remove"
+          @open="openJob"
+          @shared-open="openLiveWork"
         />
 
         <div
