@@ -28,7 +28,6 @@ const uid = useId();
     viewBox="8.46 3 77.5 77.5"
     :width="size"
     :height="size"
-    class="shrink-0"
     role="img"
     :aria-label="label"
     :data-source="source"
@@ -65,7 +64,6 @@ const uid = useId();
     viewBox="0.2 1.6 20 20"
     :width="size"
     :height="size"
-    class="shrink-0"
     role="img"
     :aria-label="label"
     :data-source="source"
@@ -98,7 +96,6 @@ const uid = useId();
     viewBox="0 0 12 12"
     :width="size"
     :height="size"
-    class="shrink-0"
     role="img"
     :aria-label="label"
     :data-source="source"
@@ -114,3 +111,9 @@ const uid = useId();
     />
   </svg>
 </template>
+
+<style scoped>
+svg {
+  flex-shrink: 0;
+}
+</style>

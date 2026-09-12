@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
 import DrawerPanel from "@ui/components/DrawerPanel.vue";
-import SourceGlyph from "../generate/SourceGlyph.vue";
+import SourceGlyph from "@ui/components/SourceGlyph.vue";
 import ModelFamilyPlaceholder from "./ModelFamilyPlaceholder.vue";
 import { fetchCatalogDetail, startCatalogDownload } from "../../lib/api/catalog";
 import { fetchModelComponents } from "../../lib/api/models";

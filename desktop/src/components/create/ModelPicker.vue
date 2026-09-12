@@ -9,7 +9,7 @@ import { formatGB } from "../../lib/format";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import StyleMenu from "@studio/components/StyleMenu.vue";
-import SourceGlyph from "../generate/SourceGlyph.vue";
+import SourceGlyph from "@ui/components/SourceGlyph.vue";
 
 /**
  * The Mold Studio installed-model picker — the ONE style picker on Create.

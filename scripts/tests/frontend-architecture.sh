@@ -103,6 +103,7 @@ for duplicate in \
   web/src/components/shell/ConfirmDialog.vue \
   desktop/src/components/shell/ConfirmDialog.vue \
   desktop/src/mobile/MobileStyleChips.vue \
+  desktop/src/components/generate/SourceGlyph.vue \
   web/src/components/ConfigSettingsPanel.vue \
   web/src/lib/settingsConfig.ts \
   desktop/src/components/settings/SettingRow.vue \
