@@ -14,6 +14,7 @@ pub mod durable_generation;
 pub mod error;
 pub mod expand;
 pub mod expand_prompts;
+pub mod flux2_lora;
 pub mod format;
 pub mod generation_profile;
 pub mod gguf_probe;
