@@ -422,14 +422,17 @@ grep -Fq "needs.changes.outputs.trusted_release_pr != 'true'" <<< "$cuda_typeche
   || fail "the CUDA typecheck runs on generated release PRs"
 grep -Fq "needs.changes.outputs.cuda_typecheck == 'true'" <<< "$cuda_typecheck_block" \
   || fail "the CUDA typecheck is not gated on the crates that can break the CUDA cfg arm"
-grep -Fq "cargo check -p mold-ai --features h3-cuda," <<< "$cuda_typecheck_block" \
-  || fail "the CUDA typecheck does not compile mold-ai with the shipping h3-cuda arm"
+grep -Fq "cargo check -p mold-ai --features h3,cuda," <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck does not compile mold-ai with the h3 and cuda arms"
 # Every feature the shipping CUDA build enables (release.yml's sm89 job) must
 # be in the typecheck, except `cudnn`, whose headers the runner does not have
 # and whose cfg arm mold's own crates never gate on. A cfg arm that ships but
 # is not typechecked is how two non-building tips landed on the FLUX campaign.
 cuda_typecheck_features="$(grep -oE 'cargo check -p mold-ai --features [^ ]+' <<< "$cuda_typecheck_block" | head -n1 | sed 's/.*--features //')"
-for shipped_feature in h3-cuda preview discord expand tui webp mp4 metrics mdns pulid mesh-texture mesh-matting mesh-delight; do
+# `h3,cuda` rather than `h3-cuda`: the latter adds only flash-attn's and the
+# fused H3 kernel's nvcc work (no mold cfg site is `h3-cuda`-only), which a
+# cold hosted runner cannot finish inside the job's timeout.
+for shipped_feature in h3 cuda preview discord expand tui webp mp4 metrics mdns pulid mesh-texture mesh-matting mesh-delight; do
   case ",${cuda_typecheck_features}," in
     *",${shipped_feature},"*) ;;
     *) fail "the CUDA typecheck does not compile the shipped feature '${shipped_feature}'" ;;
