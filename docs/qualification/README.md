@@ -273,3 +273,9 @@ fixture in the unit tests exercises validator relationships only and is never
 hardware evidence.
 Use `--allow-failure` only when inspecting a valid failed run; it does not
 convert that run into hardware qualification.
+
+The FLUX fast-by-default campaign (FLUX.1/FLUX.2 performance, residency,
+storage v3 opt-in, issue #1707) is recorded in
+[flux-fast-by-default-2026-09.md](./flux-fast-by-default-2026-09.md): targets
+against measurements on plato's L40S, the ten defects the UAT found on the
+branch and their final state, and what is claimed on unit tests alone.
