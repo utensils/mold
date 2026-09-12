@@ -1089,6 +1089,52 @@ fn v3_writing_enabled(root: &Path) -> bool {
         .contains(root)
 }
 
+/// The storage version this process writes to this root.
+fn process_write_version(root: &Path) -> u32 {
+    if v3_writing_enabled(root) {
+        STORAGE_VERSION
+    } else {
+        LEGACY_STORAGE_VERSION
+    }
+}
+
+/// Is the store this root currently resolves to a version-3 one?
+///
+/// Two shapes are: the store in the version-3 DIRECTORY, and a store an
+/// earlier build upgraded IN PLACE under the `-v2` name, whose marker says 3.
+/// A version-2 store is not, whichever directory it occupies.
+fn resolved_store_is_v3(root: &Path) -> anyhow::Result<bool> {
+    if authority_dir(root) == authority_dir_v3(root) {
+        return Ok(true);
+    }
+    Ok(read_marker(root)?.is_some_and(|marker| marker.version == STORAGE_VERSION))
+}
+
+/// Refuse to put version-3 bytes under the version-2 name.
+///
+/// This is the invariant the two-directory design exists for, asked at the
+/// moment of the write rather than inferred from process state. A live server
+/// whose v3 directory disappears — `downgrade` parks it, or an operator moves
+/// it — still had `v3_writing_enabled` set and a cached tail that matched, so
+/// its next publication appended a delta and a version-3 marker into the
+/// freshly rewritten version-2 store and locked every older binary out of the
+/// home (UAT final-2, D9). `cached_commit_tail` now sends that commit through
+/// `recover_storage`, which re-establishes the v3 store beside the v2 one;
+/// this is the backstop that makes the rule true independently of any cache.
+fn ensure_v3_store_is_addressable(root: &Path) -> anyhow::Result<()> {
+    ensure!(
+        resolved_store_is_v3(root)?,
+        "refusing to write gallery archive authority storage version 3 into the version-2 store \
+         at {}: the version-3 store in {} is gone. Version-3 bytes under the version-2 name lock \
+         every mold older than 0.29 out of this $MOLD_HOME. Restart this server so it can \
+         re-establish a version-3 store beside the version-2 one, or turn `gallery.authority_log` \
+         off to keep publishing at version 2.",
+        authority_dir(root).display(),
+        authority_dir_v3(root).display(),
+    );
+    Ok(())
+}
+
 fn disable_v3_writing(root: &Path) {
     v3_enabled_roots()
         .lock()
@@ -1248,6 +1294,14 @@ fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<Au
         .as_ref()
         .map(|marker| marker.committed_generation)
         .unwrap_or_else(|| current.as_ref().map_or(0, |snapshot| snapshot.generation));
+    // The version the store IS right now, before the compaction below decides
+    // whether to upgrade it. Every marker the crash-recovery arms write is
+    // stamped with this rather than with `STORAGE_VERSION`: re-branding a
+    // version-2 store as version 3 mid-recovery locks every mold older than
+    // 0.29 out of the home, and an interruption there leaves it that way.
+    let recovered_version = marker
+        .as_ref()
+        .map_or(LEGACY_STORAGE_VERSION, |marker| marker.version);
     // Under v3 the checkpoint deliberately trails the marker — the delta log
     // holds the difference — so this agreement is checked AFTER the replay
     // below, not here.
@@ -1260,7 +1314,7 @@ fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<Au
             write_marker(
                 root,
                 &MutationMarker {
-                    version: STORAGE_VERSION,
+                    version: recovered_version,
                     committed_generation: wal_snapshot.generation,
                     pending: None,
                 },
@@ -1272,7 +1326,7 @@ fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<Au
             write_marker(
                 root,
                 &MutationMarker {
-                    version: STORAGE_VERSION,
+                    version: recovered_version,
                     committed_generation,
                     pending: None,
                 },
@@ -1285,7 +1339,7 @@ fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<Au
             write_marker(
                 root,
                 &MutationMarker {
-                    version: STORAGE_VERSION,
+                    version: recovered_version,
                     committed_generation: wal_snapshot.generation,
                     pending: None,
                 },
@@ -1383,11 +1437,19 @@ fn recover_storage(root: &Path, authority_log: bool) -> anyhow::Result<Option<Au
             let checkpoint_generation = read_checkpoint_at(&checkpoint_path(root))
                 .map(|existing| existing.generation)
                 .unwrap_or(0);
-            if authority_log && existing_version == Some(LEGACY_STORAGE_VERSION) {
+            // Whether the store this root resolves to is ALREADY a version-3
+            // one is the question, not what its checkpoint file happens to
+            // say: an unreadable checkpoint under the `-v2` name read as
+            // "not version 2" and so compacted version-3 bytes in place,
+            // under the name every older mold looks at.
+            if authority_log && !resolved_store_is_v3(root)? {
                 // The UPGRADE, and it is the whole reason the switch exists.
                 // It writes a NEW store in the v3 directory and does not touch
                 // the v2 one, so a rollback finds its store exactly as it left
-                // it. A default build never reaches this line.
+                // it. A default build never reaches this line. It is also the
+                // repair after a downgrade has parked the v3 store under a
+                // server that is still writing: a fresh v3 store goes up
+                // beside the v2 one rather than over it.
                 upgrade_store_to_v3(root, snapshot)?;
             } else {
                 compact_mutation_log_at(root, snapshot, checkpoint_generation, storage_version)?;
@@ -2021,6 +2083,17 @@ fn cached_commit_tail(
     if marker.pending.is_some() || marker.committed_generation != expected_generation {
         return Ok(None);
     }
+    // The generation can agree while the STORE has been swapped underneath:
+    // `downgrade` rewrites the version-2 directory at the generation the v3
+    // store had reached and parks the v3 one, so the marker this process now
+    // reads is a different store's at the very number it expected (UAT
+    // final-2, D9). The version is what tells them apart, so the tail is
+    // trusted only while the marker is still the kind of store this process
+    // writes; anything else takes the full `recover_storage` read, which is
+    // what re-establishes a v3 store beside the v2 one.
+    if marker.version != process_write_version(root) {
+        return Ok(None);
+    }
     if wal_path(root).try_exists()? {
         return Ok(None);
     }
@@ -2104,11 +2177,7 @@ pub(crate) fn commit_snapshot(
     // The version this commit WRITES. It stamps the snapshot's own field as
     // well as the envelope's: an older mold checks BOTH, so a payload saying
     // 3 inside a v2 envelope still locks it out.
-    let write_version = if v3_writing_enabled(root) {
-        STORAGE_VERSION
-    } else {
-        LEGACY_STORAGE_VERSION
-    };
+    let write_version = process_write_version(root);
     let build_snapshot =
         |index: &CommittedArchiveIndex, legacy: &std::collections::BTreeMap<String, u64>| {
             AuthoritySnapshot {
@@ -2153,6 +2222,9 @@ pub(crate) fn commit_snapshot(
     };
 
     if v3_writing_enabled(root) {
+        // Before a single version-3 byte lands: the store this root resolves
+        // to must actually be the version-3 one.
+        ensure_v3_store_is_addressable(root)?;
         // v3: one appended delta plus the marker — three fsyncs, and the
         // bytes written are proportional to what CHANGED rather than to the
         // size of the gallery.
@@ -3684,6 +3756,119 @@ mod tests {
         let status = storage_status(dir.path()).unwrap();
         assert!(!status.live_writer);
         assert_eq!(status.live_writer_pid, None);
+    }
+
+    /// The second half of D9, and it does not depend on the lease at all.
+    ///
+    /// The measured sequence: a v3 server is live; `downgrade` parks the v3
+    /// directory and rewrites the v2 one at the same generation; the server —
+    /// which knows nothing of that, having its own `v3_writing_enabled` flag
+    /// and a cached tail whose generation still MATCHES the marker it now
+    /// reads — publishes one more print and appends a delta plus a
+    /// `{"version":3}` marker into `gallery-authority-v2`. An older binary
+    /// then refuses to start on that home, which is the incident the
+    /// two-directory design exists to prevent.
+    #[test]
+    fn a_live_v3_writer_never_lands_version_3_bytes_under_the_v2_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = fs::canonicalize(dir.path()).unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
+        let mut index = initial.index;
+        let mut generation = initial.generation;
+        for step in 0..3_u64 {
+            generation = publish(
+                dir.path(),
+                &guard,
+                &mut index,
+                generation,
+                &format!("p{step}.png"),
+            );
+        }
+        // Everything the still-running server holds in memory across the
+        // downgrade: its write-version decision and its cached tail. The
+        // downgrade clears both — but it ran in ANOTHER process.
+        let live_tail = authority_tail_cache()
+            .lock()
+            .unwrap()
+            .get(&canonical)
+            .cloned()
+            .expect("the server has a cached tail");
+        drop(guard);
+
+        stop_the_writer(dir.path());
+        let outcome = downgrade_to_legacy_storage(dir.path()).unwrap();
+        assert_eq!(outcome.generation, generation);
+        assert!(
+            !authority_dir_v3(dir.path()).exists(),
+            "the v3 store is parked"
+        );
+        enable_v3_writing(&canonical);
+        remember_authority_tail(&canonical, live_tail);
+
+        // The next print through that still-running server.
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let next = publish(dir.path(), &guard, &mut index, generation, "after.png");
+        assert_eq!(next, generation + 1);
+        drop(guard);
+
+        // The version-2 store an older mold reads is STILL version 2, and is
+        // exactly where the downgrade left it.
+        let v2 = legacy_authority_dir(dir.path());
+        let v2_marker: MutationMarker =
+            serde_json::from_slice(&fs::read(v2.join(MARKER_FILE)).unwrap()).unwrap();
+        assert_eq!(
+            v2_marker.version, LEGACY_STORAGE_VERSION,
+            "version-3 bytes landed under the version-2 name"
+        );
+        assert_eq!(v2_marker.committed_generation, generation);
+        assert_eq!(
+            read_checkpoint_at(&v2.join(CHECKPOINT_FILE))
+                .unwrap()
+                .version,
+            LEGACY_STORAGE_VERSION
+        );
+        assert!(
+            !v2.join(MUTATION_LOG_FILE).exists(),
+            "a delta log has no business in a version-2 store"
+        );
+
+        // The print itself is not lost: a fresh version-3 store went up beside
+        // the version-2 one, marker last, exactly as the upgrade does.
+        let v3 = authority_dir_v3(dir.path());
+        assert!(
+            v3.join(MARKER_FILE).is_file(),
+            "a v3 store was re-established"
+        );
+        let v3_marker: MutationMarker =
+            serde_json::from_slice(&fs::read(v3.join(MARKER_FILE)).unwrap()).unwrap();
+        assert_eq!(v3_marker.version, STORAGE_VERSION);
+        assert_eq!(v3_marker.committed_generation, next);
+        assert_eq!(authority_dir(dir.path()), v3);
+    }
+
+    /// The backstop under the cache: even with a tail that agrees, a v3 write
+    /// into a version-2 store is refused outright rather than performed.
+    #[test]
+    fn a_v3_write_into_the_v2_store_is_refused_outright() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = fs::canonicalize(dir.path()).unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        load_or_initialize(dir.path(), &guard, || Ok(CommittedArchiveIndex::default())).unwrap();
+        drop(guard);
+        // A version-2 store, and a process that believes it writes version 3.
+        enable_v3_writing(&canonical);
+        let error = ensure_v3_store_is_addressable(&canonical)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("version-2 store"),
+            "unexpected error: {error}"
+        );
+        disable_v3_writing_for_test(&canonical);
     }
 
     #[test]
