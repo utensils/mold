@@ -12,5 +12,5 @@
   produced never appeared in the composer. A saved draft or starter that still
   carries the old setting loads and drops it.
 - **Why reviewed prompt work went stale reads the same on every screen.** The
-  rule is shared now, so both apps name a changed checkpoint a style change and
-  a changed target a machine change, in one wording.
+  rule is shared now, so both apps say "Style changed" and "Machine selection
+  changed" in one wording.
