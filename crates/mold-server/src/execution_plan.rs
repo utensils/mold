@@ -2874,7 +2874,28 @@ pub fn materialized_placement(plan: &ResolvedExecutionPlan) -> DevicePlacement {
 /// Apply the request-shaping portion of a selected plan. This freezes the
 /// ordered default/request LoRA stack in the payload actually consumed by the
 /// engine; later config edits cannot inject or reorder adapters.
-pub fn materialize_request(plan: &ResolvedExecutionPlan, request: &mut GenerateRequest) {
+/// Write the plan's decisions onto the request the worker will execute.
+///
+/// `sealed_media_pending` says the request still has an encrypted media set
+/// to overlay at dispatch. When it does, the adapter stack must NOT be
+/// written: `rehydrate_request_media_into`'s precondition loop refuses any
+/// request that already carries `loras` or `lora`
+/// (`OverlayAuthorityConflict`), which fails the job outright — the failure
+/// `b7c841cc` fixed for the server's own control adapter, and which a plan
+/// that now knows the caller's adapter (from the sealed projection) would
+/// otherwise re-create for every durable `--lora` render. On that path the
+/// sealed set IS the authority: hydration restores the caller's stack and
+/// `prepend_materialized_control_lora` puts the server's adapter back at its
+/// head. The plan's copy exists to be charged and fingerprinted, not to be
+/// written back.
+///
+/// Everything else the plan materializes — the placement above all — is
+/// written either way, because none of it is an authority field.
+pub fn materialize_request(
+    plan: &ResolvedExecutionPlan,
+    request: &mut GenerateRequest,
+    sealed_media_pending: bool,
+) {
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if plan.engine_config.h3_factory_authority.is_some()
         && mold_core::minimax_h3::is_family(&plan.model_family)
@@ -2882,6 +2903,9 @@ pub fn materialize_request(plan: &ResolvedExecutionPlan, request: &mut GenerateR
         return;
     }
     request.placement = Some(materialized_placement(plan));
+    if sealed_media_pending {
+        return;
+    }
     let loras = plan
         .effective_loras
         .iter()
@@ -7462,7 +7486,7 @@ mod tests {
             vec![-0.5, 1.25]
         );
         let mut materialized = request.clone();
-        materialize_request(&request_plan, &mut materialized);
+        materialize_request(&request_plan, &mut materialized, false);
         assert!(materialized.lora.is_none());
         assert_eq!(
             materialized
@@ -7479,6 +7503,82 @@ mod tests {
             validate_before_cuda(&request_plan, "cuda:0", 0, &config, &request, None, None),
             Err(ExecutionPlanError::PlanInvalidated(_))
         ));
+    }
+
+    /// A request with a sealed set still to overlay must reach hydration
+    /// carrying NO authority field — `loras` included.
+    ///
+    /// `materialize_request` writes the plan's resolved stack onto the
+    /// request so the engine gets concrete paths. On the durable path that
+    /// request is about to be handed to `rehydrate_request_media_into`, whose
+    /// precondition loop refuses any request that already carries `loras`
+    /// (`OverlayAuthorityConflict`) — the failure `b7c841cc` fixed for the
+    /// server's own control adapter, and the one a plan that now knows about
+    /// the caller's adapter would re-create for every durable `--lora`
+    /// render. The sealed set is the authority on that path; the plan's copy
+    /// exists to be CHARGED, not to be written back.
+    #[test]
+    fn a_pending_overlay_is_never_handed_a_materialized_lora_stack() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            sparse_file(&root.path().join(name), GIB);
+        }
+        let adapter = root.path().join("style.safetensors");
+        sparse_file(&adapter, GIB / 4);
+        let config = config(root.path(), "flux2", None);
+
+        // The plan a durable LoRA render now resolves: the adapter is known,
+        // because the projection carries it.
+        let scrubbed = request(None);
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            loras: vec![mold_core::LoraWeight {
+                path: adapter.display().to_string(),
+                scale: 0.8,
+                expert: None,
+            }],
+            ..Default::default()
+        };
+        let plan = resolve_execution_plans_for_coordinator_with_projection(
+            &config,
+            &scrubbed,
+            &devices(&[48 * GIB]),
+            false,
+            None,
+            Some(&projection),
+        )
+        .expect("plans")
+        .remove(0);
+        assert_eq!(
+            plan.effective_loras.len(),
+            1,
+            "the plan charges the adapter"
+        );
+
+        let mut pending_overlay = scrubbed.clone();
+        materialize_request(&plan, &mut pending_overlay, true);
+        assert!(
+            pending_overlay.loras.is_none() && pending_overlay.lora.is_none(),
+            "hydration refuses a request that already carries an adapter"
+        );
+        assert!(
+            pending_overlay.placement.is_some(),
+            "everything else the plan materializes is unaffected"
+        );
+
+        // With nothing left to overlay, the plan still writes the stack the
+        // engine must load — a config-default adapter reaches the engine this
+        // way and no other.
+        let mut settled = scrubbed.clone();
+        materialize_request(&plan, &mut settled, false);
+        assert_eq!(
+            settled
+                .loras
+                .expect("the resolved stack")
+                .iter()
+                .map(|lora| lora.path.clone())
+                .collect::<Vec<_>>(),
+            vec![adapter.display().to_string()]
+        );
     }
 
     /// A durable LoRA render is planned from a request whose `loras` the

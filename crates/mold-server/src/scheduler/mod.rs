@@ -7148,7 +7148,11 @@ fn gpu_job_from_generation(
     prepared_execution_inputs: Option<crate::execution_plan::PreparedExecutionInputs>,
 ) -> GpuJob {
     if let Some(plan) = execution_plan.as_ref() {
-        crate::execution_plan::materialize_request(plan, &mut job.request);
+        crate::execution_plan::materialize_request(
+            plan,
+            &mut job.request,
+            job.deferred_media.is_some(),
+        );
     }
     GpuJob {
         id: job.id,
@@ -7156,7 +7160,11 @@ fn gpu_job_from_generation(
         model: job.request.model.clone(),
         request: job.request,
         deferred_media: job.deferred_media,
-        materialized_control_lora: None,
+        // The server's own control adapter was scrubbed off the request at
+        // publication and only `hydrate_dispatch_media` can put it back, so
+        // dropping it here rendered every durable built-in-control job
+        // without its adapter on the V2 path — the default one.
+        materialized_control_lora: job.materialized_control_lora,
         completion_payload: job.completion_payload,
         progress_tx: job.progress_tx,
         result_tx: job.result_tx,
@@ -7193,7 +7201,9 @@ fn generation_and_prepared_from_gpu_job(
             durable_queue_rank: job.durable_queue_rank,
             request: job.request,
             deferred_media: job.deferred_media,
-            materialized_control_lora: None,
+            // A retry re-enters through the same conversion, so losing it
+            // here would render the second attempt without the adapter.
+            materialized_control_lora: job.materialized_control_lora,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
@@ -8521,6 +8531,46 @@ mod true_cfg_estimate_tests {
             .map(|offset| from_gpu + offset)
             .expect("retry adapter boundary");
         assert!(source[from_gpu..retry_end].contains("deferred_media: job.deferred_media"));
+        // The server's own control adapter travels the same two adapters, and
+        // for the same reason: the publication scrub wiped it off the request
+        // and only `hydrate_dispatch_media` can put it back. Dropping it here
+        // rendered every durable built-in-control job WITHOUT its adapter on
+        // the V2 coordinator path — which is the default — while the legacy
+        // `queue.rs` path carried it correctly.
+        assert!(
+            source[to_gpu..from_gpu]
+                .contains("materialized_control_lora: job.materialized_control_lora"),
+            "the generation-to-GPU adapter must carry the control adapter"
+        );
+        assert!(
+            source[from_gpu..retry_end]
+                .contains("materialized_control_lora: job.materialized_control_lora"),
+            "a job handed back for retry must keep it too"
+        );
+    }
+
+    /// The plan is materialized onto a request that may still have a sealed
+    /// set to overlay, so the seam must say which it is.
+    #[test]
+    fn the_conversion_tells_materialization_whether_an_overlay_is_still_pending() {
+        let source = include_str!("mod.rs");
+        let to_gpu = source
+            .find("fn gpu_job_from_generation(")
+            .expect("generation-to-GPU adapter");
+        let body_end = source[to_gpu..]
+            .find("\nfn generation_and_prepared_from_gpu_job(")
+            .map(|offset| to_gpu + offset)
+            .expect("adapter boundary");
+        let body = &source[to_gpu..body_end];
+        let call = body
+            .find("materialize_request(")
+            .expect("the adapter materializes the plan");
+        let args_end = body[call..].find(");").expect("call end") + call;
+        assert!(
+            body[call..args_end].contains("job.deferred_media.is_some()"),
+            "materialization must be told an overlay is pending, or it writes \
+             an authority field hydration then refuses"
+        );
     }
 
     fn request() -> mold_core::GenerateRequest {
@@ -15642,6 +15692,99 @@ mod tests {
         assert!(coordinator.pending_owner_work.is_empty());
         assert!(worker_rx.try_recv().is_err());
         assert!(coordinator.leases.is_empty());
+    }
+
+    /// The server's own control adapter must survive the V2 coordinator's
+    /// two conversions, or a built-in-control render loses it silently.
+    ///
+    /// `prepare_generation_inner` prepends the built-in LTX-2 IC-LoRA into
+    /// `request.loras` AFTER admission sealed the media set, so the
+    /// publication scrub takes it and the sealed set cannot hand it back; it
+    /// rides on the job instead and `hydrate_dispatch_media` re-prepends it at
+    /// dispatch (`b7c841cc`). `gpu_job_from_generation` dropped it on the
+    /// floor, and the V2 coordinator is the default path — so on plato every
+    /// durable `--ic-lora-control` render reached the engine with no control
+    /// adapter at all, while the legacy `queue.rs` dispatcher carried it
+    /// correctly.
+    #[tokio::test]
+    async fn the_v2_conversion_carries_the_materialized_control_adapter_to_dispatch() {
+        let (worker, _worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let control = mold_core::LoraWeight {
+            path: "/models/ltx2-control-union-23/adapter.safetensors".to_string(),
+            scale: 1.0,
+            expert: None,
+        };
+        let caller = mold_core::LoraWeight {
+            path: "/models/loras/style.safetensors".to_string(),
+            scale: 0.7,
+            expert: None,
+        };
+
+        let (mut generation, _result) = fake_generation("ic-lora-job");
+        generation.materialized_control_lora = Some(control.clone());
+        let fence = LeaseFence {
+            work_id: "ic-lora-job".to_string(),
+            device_id,
+            owner_epoch: 1,
+            state_version: 1,
+            plan_version: 1,
+            worker_generation: 1,
+            memory_sample_generation: 1,
+            memory_ledger_sequence: 1,
+        };
+
+        let gpu_job = gpu_job_from_generation(&state, generation, fence, None, None);
+        assert_eq!(
+            gpu_job
+                .materialized_control_lora
+                .as_ref()
+                .map(|lora| lora.path.as_str()),
+            Some(control.path.as_str()),
+            "the adapter must reach the worker, which is the only place that \
+             can put it back"
+        );
+
+        // What dispatch then composes: hydration restores the caller's sealed
+        // stack onto the scrubbed request, and the control adapter goes back
+        // at its head — `hydrate_dispatch_media`'s two steps, in order.
+        let mut dispatched = gpu_job.request.clone();
+        dispatched.loras = Some(vec![caller.clone()]);
+        crate::queue_media_runtime::prepend_materialized_control_lora(
+            &mut dispatched,
+            gpu_job.materialized_control_lora.clone(),
+        );
+        assert_eq!(
+            dispatched
+                .loras
+                .expect("a composed stack")
+                .iter()
+                .map(|lora| lora.path.clone())
+                .collect::<Vec<_>>(),
+            vec![control.path.clone(), caller.path.clone()],
+            "the control adapter leads, exactly as preparation composed it"
+        );
+
+        // And a job handed back for retry keeps it, or the second attempt
+        // renders without it.
+        let (returned, _prepared) = generation_and_prepared_from_gpu_job(gpu_job);
+        assert_eq!(
+            returned
+                .materialized_control_lora
+                .as_ref()
+                .map(|lora| lora.path.as_str()),
+            Some(control.path.as_str())
+        );
     }
 
     #[tokio::test]

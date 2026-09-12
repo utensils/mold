@@ -330,3 +330,12 @@ step` — and names no cause, because the budget is the only one a real render
   their transformer blocks from host RAM at the documented 3-5x slowdown — and
   every Klein tier. `mold list`, the model page and the API all say so, and an
   oversized GGUF request is refused at submit time naming both figures.
+
+- **A built-in LTX-2 control adapter now survives the trip to the GPU on the
+  default scheduler.** The server resolves that adapter during preparation,
+  after the request's media was sealed, so it travels beside the job and is put
+  back on the request at dispatch. The multi-GPU coordinator's job conversion
+  dropped it — and dropped it again when handing a job back for retry — so a
+  durable `--ic-lora-control` render reached the engine with no control adapter
+  at all; only the older single-worker path carried it. Both conversions now
+  carry it, and a source-level check keeps every future one honest.
