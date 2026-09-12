@@ -74,7 +74,9 @@ describe("ProgressBar track color (CSS pin)", () => {
    */
   it("gives .ms-bar a token-relative tint, not the old --mold-bg-deep track", () => {
     const start = source.indexOf(".ms-bar {");
+    expect(start).toBeGreaterThanOrEqual(0);
     const end = source.indexOf("}", start);
+    expect(end).toBeGreaterThan(start);
     const block = source.slice(start, end);
     expect(block).toMatch(
       /background:\s*color-mix\(in srgb,\s*var\(--mold-text\)\s*14%,\s*transparent\)/,
