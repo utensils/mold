@@ -285,10 +285,19 @@ step` — and names no cause, because the budget is the only one a real render
   it. And a generation whose plan resolver refused every device reached the
   planner with no placement to compare, which the plan pass read as "not
   blocked" and used to erase the block that had just been recorded — taking the
-  idle reclaim and the bounded refusal with it. Now the same-model repeat is
-  admitted immediately and reuses the weights, a different model's request
-  releases them at dispatch and keeps the other engine's prompt cache, and
-  anything genuinely too large is refused with numbers instead of waiting.
+  idle reclaim and the bounded refusal with it. And the retained weights were invisible to the server
+  entirely: every scheduler-V2 engine is built inside a wrapper that forwarded
+  `is_loaded` but defaulted the two methods this feature is made of, so
+  admission saw an empty card and the reclaim found nothing to release. Once
+  they were visible the load strategy moved under the warm engine — a card
+  whose free space IS this model's own transformer reads as roomy, so the
+  identical request planned `Eager` where the cold one planned `Sequential` —
+  and the worker destroyed the engine to satisfy it; an engine holding its
+  transformer now serves either. Measured on one L40S: 92.4 s cold, then
+  75.7 s with `Flux.2 transformer [cache hit]` and no load stage at all,
+  byte-identical prints. A different model's request releases the weights and
+  keeps the other engine's prompt cache, and anything genuinely too large is
+  refused with numbers instead of waiting.
 
 - **FLUX.2 [dev] renders again with the text-encoder park on, which is the
   default.** Every `flux2-dev` tier — `:q8`, `:q6`, `:q4` and `:fp8` alike —
