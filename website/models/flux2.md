@@ -156,8 +156,14 @@ the prefix, the transformer that loads beside it, and a `max(15 % of RAM,
 streaming and a 1.5 TB host parks and page-locks. Only the layers the encoder
 actually runs are parked — the vision tower, the projector and layers 30-39
 that the single-file republication also ships are never touched.
+The measured park also waits for evidence that it will be reused: the prefix is
+never materialized by the streamed path, so parking it is a fresh ~35 GB read
+of the shards (29.1 s on a 4x L40S host), and the first encode of a process
+streams from the mapping instead — which is what every one-shot `mold run` is.
+A long-lived server parks from its second encode onwards.
+
 `MOLD_KEEP_TE_RAM=0` opts out; `MOLD_KEEP_TE_RAM=1` parks wherever the encoder
-alone clears the floor.
+alone clears the floor, and parks from the FIRST encode rather than waiting.
 
 Klein's Qwen3 encoder takes the same decision, quantized tiers included.
 

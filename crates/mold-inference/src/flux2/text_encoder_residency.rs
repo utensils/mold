@@ -429,12 +429,22 @@ pub fn decide_text_encoder_residency(inputs: &TextEncoderResidencyInputs) -> Tex
 /// particular it is NOT the fix for the NaN conditioning — that is
 /// `encoders::mistral3::stream_layers`'s `settle`, and the park path is still
 /// taken by every warm process.
+///
+/// It is also a DEFAULT, which is why `keep_te_ram` is a parameter:
+/// `MOLD_KEEP_TE_RAM=1` is an operator saying they know the machine AND that
+/// this process will render again, and an override that a heuristic can
+/// silently narrow is not an override. So `Force` parks from the FIRST
+/// encode, an unset variable takes the reuse gate, and `0` never reaches here
+/// at all — the budget refuses it.
 pub fn mistral3_prefix_residency(
     budget: TextEncoderResidency,
     prior_encodes: u32,
+    keep_te_ram: KeepTeRamMode,
 ) -> TextEncoderResidency {
     match budget {
-        TextEncoderResidency::HostParked { .. } if prior_encodes == 0 => {
+        TextEncoderResidency::HostParked { .. }
+            if prior_encodes == 0 && keep_te_ram != KeepTeRamMode::Force =>
+        {
             TextEncoderResidency::StreamFromMmap
         }
         other => other,
@@ -486,21 +496,21 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// The first encode of a process never parks, because there is nothing yet
-    /// to amortize the read against; the second and later ones take whatever
-    /// the budget said.
+    /// The first encode of a process never parks on its own judgement,
+    /// because there is nothing yet to amortize the read against; the second
+    /// and later ones take whatever the budget said.
     #[test]
     fn a_mistral3_park_waits_for_evidence_that_it_will_be_reused() {
         for pinned in [true, false] {
             let afforded = TextEncoderResidency::HostParked { pinned };
             assert_eq!(
-                mistral3_prefix_residency(afforded, 0),
+                mistral3_prefix_residency(afforded, 0, KeepTeRamMode::Auto),
                 TextEncoderResidency::StreamFromMmap,
                 "the first encode must not pay a 34.7 GB read for a saving it cannot collect"
             );
             for prior in [1u32, 2, 17] {
                 assert_eq!(
-                    mistral3_prefix_residency(afforded, prior),
+                    mistral3_prefix_residency(afforded, prior, KeepTeRamMode::Auto),
                     afforded,
                     "a process that has already encoded keeps the budget's answer"
                 );
@@ -508,17 +518,62 @@ mod tests {
         }
     }
 
+    /// `MOLD_KEEP_TE_RAM=1` is an operator override and overrides this too.
+    ///
+    /// The reuse gate is a DEFAULT — the right call for a process whose next
+    /// render nobody has promised. An operator who set the variable has made
+    /// that promise, and narrowing their explicit `1` to a mapped first encode
+    /// is the tool disagreeing with the instruction it was given.
+    #[test]
+    fn an_explicit_keep_te_ram_parks_from_the_first_encode() {
+        for pinned in [true, false] {
+            let afforded = TextEncoderResidency::HostParked { pinned };
+            for prior in [0u32, 1, 99] {
+                assert_eq!(
+                    mistral3_prefix_residency(afforded, prior, KeepTeRamMode::Force),
+                    afforded,
+                    "an explicit MOLD_KEEP_TE_RAM=1 parks from the first encode"
+                );
+            }
+        }
+    }
+
     /// The gate only ever narrows. A host the budget refused is never parked
     /// because it has encoded a lot — the refusal is about room, and no amount
-    /// of reuse creates any.
+    /// of reuse creates any. `MOLD_KEEP_TE_RAM=0` is refused by the budget
+    /// itself and never reaches a park either.
     #[test]
     fn the_reuse_gate_never_turns_a_refusal_into_a_park() {
-        for prior in [0u32, 1, 99] {
-            assert_eq!(
-                mistral3_prefix_residency(TextEncoderResidency::StreamFromMmap, prior),
-                TextEncoderResidency::StreamFromMmap
-            );
+        for mode in [
+            KeepTeRamMode::Auto,
+            KeepTeRamMode::Force,
+            KeepTeRamMode::Never,
+        ] {
+            for prior in [0u32, 1, 99] {
+                assert_eq!(
+                    mistral3_prefix_residency(TextEncoderResidency::StreamFromMmap, prior, mode),
+                    TextEncoderResidency::StreamFromMmap
+                );
+            }
         }
+    }
+
+    /// And `0` is refused where every other refusal is: the budget. It can
+    /// never produce a `HostParked` for the gate to widen.
+    #[test]
+    fn keep_te_ram_zero_never_reaches_the_reuse_gate_at_all() {
+        let never = decide_text_encoder_residency(&inputs(
+            1_500 * GB,
+            1_400 * GB,
+            24 * GB,
+            KeepTeRamMode::Never,
+            TextEncoderDevice::Cuda,
+        ));
+        assert_eq!(never, TextEncoderResidency::StreamFromMmap);
+        assert_eq!(
+            mistral3_prefix_residency(never, 7, KeepTeRamMode::Never),
+            TextEncoderResidency::StreamFromMmap
+        );
     }
 
     const GIB: u64 = 1024 * 1024 * 1024;

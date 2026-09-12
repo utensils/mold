@@ -2958,6 +2958,13 @@ pub fn keep_te_in_ram() -> bool {
 /// takes a measured budget with a safety floor and a transformer term, so
 /// `Auto` refuses a park long before a container limit could be reached — a
 /// 64 GB host streams — rather than engaging against a limit it cannot see.
+///
+/// `Force` is also the override on the one heuristic layered ON TOP of that
+/// budget: [`crate::flux2::text_encoder_residency::mistral3_prefix_residency`]
+/// makes the first encode of a process stream, because parking a STREAMED
+/// prefix is a fresh 35 GB read the first render cannot amortize. An explicit
+/// `1` is an operator answering that question themselves, so it parks from the
+/// first encode; `Auto` waits for the second, and `Never` never parks.
 pub fn keep_te_ram_mode() -> crate::flux2::text_encoder_residency::KeepTeRamMode {
     use crate::flux2::text_encoder_residency::KeepTeRamMode;
     match crate::runtime_env::value("MOLD_KEEP_TE_RAM").as_deref() {

@@ -1347,8 +1347,14 @@ impl Flux2Engine {
             });
         // The budget answers "is there room"; this answers "is there reuse".
         // Mistral3's park is a fresh read of the shards, unlike Qwen3's, so
-        // the first encode of a process must not pay for it.
-        residency::mistral3_prefix_residency(budget, prior_encodes)
+        // the first encode of a process must not pay for it — unless the
+        // operator set `MOLD_KEEP_TE_RAM=1`, which answers the reuse question
+        // for us.
+        residency::mistral3_prefix_residency(
+            budget,
+            prior_encodes,
+            crate::device::keep_te_ram_mode(),
+        )
     }
 
     /// Peak device bytes this checkpoint's conditioner holds while it runs.
