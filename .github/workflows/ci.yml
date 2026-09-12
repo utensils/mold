@@ -793,7 +793,10 @@ jobs:
   # compile in the release workflows.
   cuda-typecheck:
     name: CUDA forced-local typecheck
-    timeout-minutes: 45
+    # h3-cuda implies flash-attn: 53 nvcc kernels compiled from scratch on
+    # every run (the restored cache never holds them). Measured 5m10s warm
+    # on a 128-core box; a cold hosted runner needs the same budget `rust` has.
+    timeout-minutes: 60
     needs: changes
     if: >-
       github.event_name == 'pull_request' &&
