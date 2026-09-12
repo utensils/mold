@@ -1008,10 +1008,14 @@ newer build, before rolling one back. It is idempotent, verifies the result by
 reading it back, and refuses if a mutation is pending or the log tail is torn.
 
 **Stop the server first — `downgrade` enforces it.** Any mold process that
-publishes to a gallery holds a writer lease on it for as long as it runs, and
-`downgrade` refuses while one is held, naming the process and its pid rather
-than rewriting the store under it. `status` reports `live writer` so you can see
-it before you try. See
+publishes to a gallery holds a writer lease on it (`.mold-gallery-writer.lease`
+in the gallery directory) for as long as it runs, and `downgrade` refuses while
+one is held, naming the process and its pid rather than rewriting the store
+under it. A stopped process takes its lease file with it; one left behind by a
+killed process is reported by `status` as `stale`, blocks nothing, and is
+removed by the next `downgrade`, which leaves the gallery clean for the older
+binary. `status` reports `writer lease: held / stale / none` and changes
+nothing. See
 [Gallery authority storage](./configuration#gallery-authority-storage).
 
 ## `mold system metal-memory`

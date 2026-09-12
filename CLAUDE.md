@@ -324,12 +324,33 @@ home (UAT final-2, D9). Every process that opens the authority for WRITING
 (`load_or_initialize_with_authority_log` AND `commit_snapshot` — the
 publication gate's cache can be installed by `load_existing_read_only`, so a
 commit reaches the store with no recovery of its own) holds a SHARED flock on
-`.mold-batch-transactions/gallery-authority.writer-lease` for the life of the
+`<output_dir>/.mold-gallery-writer.lease` for the life of the
 process; two servers still share a home, a crash releases it, and a writer that
-cannot take one warns and publishes anyway. `downgrade` takes it EXCLUSIVE with
+cannot take one warns and publishes anyway. **The lease is in the GALLERY ROOT,
+never in `.mold-batch-transactions`, and it is REMOVED on a clean stop.** Every
+mold validates the transaction root as an inventory of DIRECTORIES — a regular
+file it does not recognise is "unrecognized non-directory gallery transaction
+entry" during startup recovery — so 42480db8's lease inside it stopped a
+pre-0.29 binary from STARTING, which is the rollback the interlock exists to
+protect, and it survived SIGTERM and outlived `downgrade` (UAT final-2, E2). The
+gallery root is enumerated only for `.mold-batch-attempt-<64 hex>.lock` and for
+media extensions, so a dotfile there is invisible to every build.
+`release_gallery_writer_leases` (the server's shutdown sequence after the drain,
+its hard-exit path, and the CLI's own exit) releases and UNLINKS — upgrading the
+shared lock to exclusive first, so a second server sharing the home keeps its
+file — and `acquire_writer_lease` re-checks the inode after locking so an
+acquirer racing that unlink cannot end up holding a lock on a detached one. A
+lease file NOBODY holds is stale, which is a leftover and not a refusal:
+`downgrade` takes the lock straight through it and removes the file as its LAST
+step, so the home it hands to an older binary is clean, and it removes
+42480db8's transaction-root lease too (as does startup recovery). `downgrade`
+takes the lease EXCLUSIVE with
 `try_lock` AFTER the bookkeeping flock — the order every writer takes them, so
 nothing waits on a lock another holder is queueing for — and refuses naming
-`mold serve` and the recorded pid; `status` reports the live writer. The second
+`mold serve` and the recorded pid (the pid is only quoted when it is ALIVE; a
+dead one means the body is another writer's leftover stamp). `status` reports
+live / stale / none and is READ-ONLY — it describes the stale file rather than
+clearing it. The second
 half stands without the lease: `cached_commit_tail` also requires the marker's
 VERSION to be the one this process writes (the generation can agree across a
 store swap), `recover_storage` routes on whether the RESOLVED store is already

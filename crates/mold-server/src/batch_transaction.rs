@@ -4407,11 +4407,6 @@ pub(crate) fn legacy_gallery_evidence_paths(output_dir: &Path) -> anyhow::Result
             parent_name.as_str(),
             "reservations" | LEGACY_ATTEMPT_LOCKS_DIR | DELETED_ARCHIVE_CHILDREN_DIR
         ) || parent_name == crate::gallery_authority::authority_dir_name()
-            // The writer lease is a regular FILE in this root, and the only
-            // one: it is the lock a publishing process holds for its whole
-            // life, so it cannot live inside a store directory that an upgrade
-            // or a downgrade moves out from under it.
-            || parent_name == crate::gallery_authority::writer_lease_file_name()
         {
             continue;
         }
@@ -4842,11 +4837,6 @@ fn read_committed_archive_catalog(
             parent_name.as_str(),
             "reservations" | LEGACY_ATTEMPT_LOCKS_DIR | DELETED_ARCHIVE_CHILDREN_DIR
         ) || parent_name == crate::gallery_authority::authority_dir_name()
-            // The writer lease is a regular FILE in this root, and the only
-            // one: it is the lock a publishing process holds for its whole
-            // life, so it cannot live inside a store directory that an upgrade
-            // or a downgrade moves out from under it.
-            || parent_name == crate::gallery_authority::writer_lease_file_name()
         {
             continue;
         }
@@ -7688,23 +7678,20 @@ mod tests {
         let replacement = reserve_gallery_final_name(dir.path(), desired).unwrap();
         assert_eq!(replacement.final_name(), desired);
         drop(replacement);
-        let mut transaction_entries = fs::read_dir(dir.path().join(TRANSACTION_DIR))
+        let transaction_entries = fs::read_dir(dir.path().join(TRANSACTION_DIR))
             .unwrap()
             .filter_map(Result::ok)
             .map(|entry| entry.file_name())
             .collect::<Vec<_>>();
-        transaction_entries.sort();
-        // The authority store and the writer lease are the permanent
-        // residents of this root: the lease is the file a publishing process
-        // holds open for its whole life, so it outlives every reservation and
-        // every recovery by design.
-        let mut expected = vec![
-            std::ffi::OsString::from(crate::gallery_authority::authority_dir_name()),
-            std::ffi::OsString::from(crate::gallery_authority::writer_lease_file_name()),
-        ];
-        expected.sort();
+        // The authority store is the ONLY permanent resident of this root, and
+        // it is a directory: every mold validates this root as an inventory of
+        // directories and refuses to start on a regular file it does not know,
+        // which is why the writer lease lives in the gallery root instead.
         assert_eq!(
-            transaction_entries, expected,
+            transaction_entries,
+            vec![std::ffi::OsString::from(
+                crate::gallery_authority::authority_dir_name()
+            )],
             "recovery left mutable attempt/reservation bookkeeping behind"
         );
     }

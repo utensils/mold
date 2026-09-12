@@ -6179,9 +6179,15 @@ mod tests {
 
         save_image_to_dir(tmp.path(), &img, "sdxl", 4, None, None, None, None);
 
+        // Prints only: mold's own dotfiles (the gallery writer lease) share
+        // this directory and the gallery listing ignores them.
         let entries: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
-            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .filter(|entry| {
+                entry.as_ref().is_ok_and(|entry| {
+                    entry.path().is_file() && !entry.file_name().to_string_lossy().starts_with('.')
+                })
+            })
             .collect();
         let name = entries[0]
             .as_ref()
@@ -6474,7 +6480,14 @@ mod tests {
         assert_eq!(
             std::fs::read_dir(tmp.path())
                 .unwrap()
-                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                // Prints only: mold's own dotfiles (the gallery writer
+                // lease) share this directory.
+                .filter(|entry| {
+                    entry.as_ref().is_ok_and(|entry| {
+                        entry.path().is_file()
+                            && !entry.file_name().to_string_lossy().starts_with('.')
+                    })
+                })
                 .count(),
             1
         );
@@ -6639,9 +6652,15 @@ mod tests {
             &gallery_gate,
         );
 
+        // Prints only: mold's own dotfiles (the gallery writer lease) share
+        // this directory and the gallery listing ignores them.
         let entries: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
-            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .filter(|entry| {
+                entry.as_ref().is_ok_and(|entry| {
+                    entry.path().is_file() && !entry.file_name().to_string_lossy().starts_with('.')
+                })
+            })
             .collect();
         assert_eq!(entries.len(), 1);
         let name = entries[0]
@@ -6999,7 +7018,14 @@ mod tests {
         assert_eq!(
             std::fs::read_dir(tmp.path())
                 .unwrap()
-                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                // Prints only: mold's own dotfiles (the gallery writer
+                // lease) share this directory.
+                .filter(|entry| {
+                    entry.as_ref().is_ok_and(|entry| {
+                        entry.path().is_file()
+                            && !entry.file_name().to_string_lossy().starts_with('.')
+                    })
+                })
                 .count(),
             1
         );
@@ -7029,9 +7055,15 @@ mod tests {
             &gallery_gate,
         );
 
+        // Prints only: mold's own dotfiles (the gallery writer lease) share
+        // this directory and the gallery listing ignores them.
         let entries: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
-            .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+            .filter(|entry| {
+                entry.as_ref().is_ok_and(|entry| {
+                    entry.path().is_file() && !entry.file_name().to_string_lossy().starts_with('.')
+                })
+            })
             .collect();
         assert_eq!(entries.len(), 1);
         let name = entries[0]

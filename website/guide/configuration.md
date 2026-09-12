@@ -642,8 +642,9 @@ recovery resolve those, stop it, then downgrade. Both subcommands take
 
 **Stop every writer first, and the command checks.** A mold process that can
 publish to a gallery — a running `mold serve`, a local `mold run`, the desktop
-app — holds a writer lease on it for as long as that process lives, and
-`downgrade` refuses while one is held:
+app — holds a writer lease on it (`.mold-gallery-writer.lease`, a hidden file in
+the gallery directory) for as long as that process lives, and `downgrade`
+refuses while one is held:
 
 ```
 $ mold system gallery-authority downgrade
@@ -654,10 +655,16 @@ desktop app) on this $MOLD_HOME, then run the downgrade again. Nothing has been
 changed.
 ```
 
-`mold system gallery-authority status` prints `live writer: yes (pid …)` for the
-same reason, so you can see it before you try. The lease is shared, so several
-servers keep sharing one home, and the operating system releases it if a process
-is killed — a crashed server never leaves the command blocked.
+`mold system gallery-authority status` prints `writer lease: held (pid …)` for
+the same reason, so you can see it before you try. The lease is shared, so
+several servers keep sharing one home.
+
+A process that stops cleanly takes its lease file with it. One killed outright
+leaves the file but not the lock, which `status` reports as
+`writer lease: stale`: it blocks nothing, and the next `downgrade` removes it —
+that command's whole job is to leave the gallery in a state an older mold can
+open, so it ends by clearing the lease rather than leaving mold's own file
+behind.
 
 ### Held-queue retention
 

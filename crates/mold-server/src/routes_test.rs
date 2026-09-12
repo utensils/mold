@@ -5920,6 +5920,10 @@ mod tests {
             .unwrap()
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            // Prints only. mold's own dotfiles live here too — the gallery
+            // writer lease, which a publishing process holds open — and the
+            // gallery listing ignores them for the same reason.
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
             .count()
     }
 

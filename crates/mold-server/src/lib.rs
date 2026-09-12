@@ -1591,6 +1591,12 @@ pub async fn run_server(
         }
     }
 
+    // Every publisher has now stopped, so nothing will re-take the lease: hand
+    // back the gallery writer leases and remove their files. The OS releases
+    // the LOCK however a process ends, but a file left behind says a server is
+    // publishing here when none is, and `mold system gallery-authority
+    // downgrade` believes it.
+    gallery_authority::release_gallery_writer_leases();
     tracing::debug!("shutdown sequence complete");
 
     if fatal_cuda_error.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1769,6 +1775,11 @@ fn arm_shutdown_deadline(fatal_cuda: std::sync::Arc<AtomicBool>) {
                 "shutdown did not complete within its budget; ending the process now — \
                  retained generations replay on the next start"
             );
+            // An overrun still ends cleanly as far as the gallery is
+            // concerned: a lease file that outlives its process is what makes
+            // `downgrade` refuse for a server that is already gone. A writer
+            // still mid-commit keeps its own lock, so its file survives.
+            gallery_authority::release_gallery_writer_leases();
             std::process::exit(status);
         }
         ShutdownExpiry::KeepWaiting => {}

@@ -141,18 +141,27 @@ fn gallery_authority_status(output_dir: Option<&std::path::Path>, json: bool) ->
     );
     // The one line that says whether a downgrade will be allowed at all. The
     // three format facts above describe the store; this describes the machine.
-    if status.live_writer {
-        println!(
-            "  live writer: yes{} — `downgrade` will refuse until it stops",
-            match (status.live_writer_pid, status.live_writer_since_ms) {
-                (Some(pid), Some(since)) if pid != 0 =>
-                    format!(" (pid {pid}, lease taken at epoch ms {since})"),
-                (Some(pid), None) if pid != 0 => format!(" (pid {pid})"),
-                _ => String::new(),
-            }
-        );
-    } else {
-        println!("  live writer: none");
+    // Three states, because "a file is there" and "somebody is publishing" are
+    // different facts and only the second one refuses a downgrade.
+    let writer = match (status.writer_lease_pid, status.writer_lease_since_ms) {
+        (Some(pid), Some(since)) if pid != 0 => {
+            format!(" (pid {pid}, lease taken at epoch ms {since})")
+        }
+        (Some(pid), _) if pid != 0 => format!(" (pid {pid})"),
+        _ => String::new(),
+    };
+    match status.writer_lease {
+        mold_server::gallery_authority::WriterLeaseState::Live => println!(
+            "  writer lease: held{writer} — a process is publishing here; \
+             `downgrade` will refuse until it stops"
+        ),
+        mold_server::gallery_authority::WriterLeaseState::Stale => println!(
+            "  writer lease: stale{writer} — that process is gone; \
+             `downgrade` clears the file"
+        ),
+        mold_server::gallery_authority::WriterLeaseState::None => {
+            println!("  writer lease: none")
+        }
     }
     if status.pending_mutation {
         println!("  pending mutation: yes — start `mold serve` once to resolve it");

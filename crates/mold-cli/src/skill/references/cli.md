@@ -582,8 +582,8 @@ mold system gallery-authority status --json
 mold system gallery-authority status --output-dir /storage/mold/output
 ```
 
-`status` also reports `live writer`, which is whether some mold process is
-publishing to that gallery right now.
+`status` also reports `writer lease: held | stale | none` — whether some mold
+process is publishing to that gallery right now, or only left a file behind.
 
 `mold system gallery-authority downgrade` folds a version-3 store back to
 version 2 so an older binary can publish against the home again. Run it with
@@ -594,10 +594,13 @@ mold system gallery-authority downgrade --output-dir /storage/mold/output
 ```
 
 STOP THE SERVER FIRST — and the command enforces it. Every mold process that
-can publish to a gallery holds a writer lease on it for as long as it runs, and
-`downgrade` refuses while one is held, naming the process and its pid and
-reporting that nothing was changed. The lease is shared (several servers still
-share one home) and the OS releases it when a process is killed.
+can publish to a gallery holds a writer lease on it (`.mold-gallery-writer.lease`
+in the gallery directory) for as long as it runs, and `downgrade` refuses while
+one is held, naming the process and its pid and reporting that nothing was
+changed. The lease is shared (several servers still share one home), a clean
+stop removes the file, and a file left by a killed process is `stale`: it blocks
+nothing and `downgrade` clears it, so the gallery it hands over holds no mold
+bookkeeping an older binary would trip on.
 
 It is idempotent, verifies the result by reading it back, parks the retired
 version-3 directory rather than deleting it, and refuses if a mutation is

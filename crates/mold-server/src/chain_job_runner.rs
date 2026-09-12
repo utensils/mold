@@ -7562,7 +7562,14 @@ mod tests {
         assert_eq!(
             std::fs::read_dir(&output_dir)
                 .unwrap()
-                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                // Prints only: mold's own dotfiles (the gallery writer
+                // lease) share this directory.
+                .filter(|entry| {
+                    entry.as_ref().is_ok_and(|entry| {
+                        entry.path().is_file()
+                            && !entry.file_name().to_string_lossy().starts_with('.')
+                    })
+                })
                 .count(),
             1
         );
@@ -7592,7 +7599,14 @@ mod tests {
         assert_eq!(
             std::fs::read_dir(&output_dir)
                 .unwrap()
-                .filter(|entry| entry.as_ref().is_ok_and(|entry| entry.path().is_file()))
+                // Prints only: mold's own dotfiles (the gallery writer
+                // lease) share this directory.
+                .filter(|entry| {
+                    entry.as_ref().is_ok_and(|entry| {
+                        entry.path().is_file()
+                            && !entry.file_name().to_string_lossy().starts_with('.')
+                    })
+                })
                 .count(),
             1
         );

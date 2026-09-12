@@ -17,11 +17,15 @@
   pending or the log tail is torn.
 - **`downgrade` now refuses while a server is publishing, instead of rewriting
   the store under it.** Every mold process that can publish to a gallery holds
-  a writer lease on it for as long as it runs, and the downgrade refuses on
+  a writer lease on it (`.mold-gallery-writer.lease`, a hidden file in the
+  gallery directory) for as long as it runs, and the downgrade refuses on
   contention, naming the process and its pid and reporting that nothing was
-  changed; `status` shows `live writer` so you can see it first. The lease is
-  shared — several servers still share one home — and the operating system
-  releases it if a process is killed. Previously the command took only the
+  changed; `status` shows `writer lease: held / stale / none` so you can see it
+  first. The lease is shared — several servers still share one home — a clean
+  stop removes the file, and one left behind by a killed process is `stale`: it
+  blocks nothing, and `downgrade` clears it as its last step so the gallery it
+  hands to an older binary holds no mold bookkeeping at all. Previously the
+  command took only the
   bookkeeping lock, which a server holds for the length of one publication, so
   it waited for the gap between two prints and succeeded against a live
   server; the server's next print then wrote version-3 bytes into the
