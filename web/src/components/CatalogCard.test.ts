@@ -96,6 +96,16 @@ describe("CatalogCard (discover)", () => {
     }
     expect(w.get("[data-test=card-open]").text()).toContain("Alpha");
   });
+  it("shows a source glyph beside the name, from entry.source", () => {
+    const hf = mount(CatalogCard, { props: { entry: baseEntry } });
+    expect(hf.find("svg[data-source='hf']").exists()).toBe(true);
+
+    const civitai = mount(CatalogCard, {
+      props: { entry: { ...baseEntry, source: "civitai" as const } },
+    });
+    expect(civitai.find("svg[data-source='civitai']").exists()).toBe(true);
+  });
+
   it("does not repeat an identifier already used as the name", () => {
     const w = mount(CatalogCard, {
       props: { entry: { ...baseEntry, name: "hf:a" } },

@@ -1073,12 +1073,14 @@ textarea.control {
 }
 
 .mobile-resolution-group .ms-shape__btn {
-  min-width: 60px;
+  /* Width is the shared grid's decision (ui/components/ShapePicker.vue's
+   * `minmax(48px, 1fr)` track), not this override's — a `min-width` here
+   * cannot grow a track and only forces the tile past it, overflowing the
+   * row instead of shrinking or wrapping with everything else. */
   min-height: 72px;
   width: auto;
   height: auto;
   padding: 7px;
-  flex: 1 1 max-content;
 }
 
 .mobile-resolution-group .ms-shape__label {
@@ -4045,8 +4047,20 @@ button:disabled {
   gap: 3px 8px;
 }
 
-.mobile-catalog-card-body > .mobile-catalog-card-title {
+.mobile-catalog-card-body > .mobile-catalog-card-titleline {
   flex-basis: 100%;
+}
+
+.mobile-catalog-card-titleline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mobile-catalog-card-glyph {
+  flex: 0 0 auto;
+  color: var(--mold-text-dim);
 }
 
 /* The style's name is a plain word: sans, one line, at the row scale the

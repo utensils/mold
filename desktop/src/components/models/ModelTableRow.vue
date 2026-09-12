@@ -5,7 +5,7 @@ import { familyLabel } from "@studio/lib/modelFamily";
 
 import Tooltip from "@ui/components/Tooltip.vue";
 
-import SourceGlyph from "../generate/SourceGlyph.vue";
+import SourceGlyph from "@ui/components/SourceGlyph.vue";
 import ModelFootprintBar from "./ModelFootprintBar.vue";
 import { isOpaqueModelId } from "../../lib/models";
 import { openExternal } from "../../lib/openExternal";

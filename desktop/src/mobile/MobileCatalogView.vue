@@ -46,6 +46,8 @@ import {
 import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 import { reviewedMiniMaxH3ModelAccess } from "@studio/lib/minimaxH3Inventory";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import SourceGlyph from "@ui/components/SourceGlyph.vue";
+import { wireSourceGlyph } from "@studio/lib/modelSource";
 import { modelKindLabel, modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
 import {
   planModelInstall,
@@ -1515,7 +1517,14 @@ const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDi
             <span class="mobile-catalog-card-body">
               <!-- The friendly name leads, the way StyleMenu names a style;
                    the runnable id follows only when it says something else. -->
-              <span class="mobile-catalog-card-title">{{ entryRowName(entry) }}</span>
+              <span class="mobile-catalog-card-titleline">
+                <SourceGlyph
+                  :source="wireSourceGlyph(entry.source)"
+                  :size="12"
+                  class="mobile-catalog-card-glyph"
+                />
+                <span class="mobile-catalog-card-title">{{ entryRowName(entry) }}</span>
+              </span>
               <span
                 v-if="entryRowName(entry) !== entry.name"
                 class="mobile-catalog-card-id"

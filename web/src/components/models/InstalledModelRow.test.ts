@@ -120,6 +120,28 @@ describe("InstalledModelRow", () => {
     expect(idle.find("[data-test=loaded-badge]").exists()).toBe(false);
   });
 
+  it("shows a source glyph before the name, following modelSource", () => {
+    const w = mount(InstalledModelRow, {
+      props: {
+        model: makeModel({
+          name: "flux-dev:q8",
+          hf_repo: "black-forest-labs/FLUX.1-dev",
+        }),
+      },
+    });
+    expect(w.find("svg[data-source='hf']").exists()).toBe(true);
+
+    const civitai = mount(InstalledModelRow, {
+      props: { model: makeModel({ name: "cv:8001", hf_repo: "" }) },
+    });
+    expect(civitai.find("svg[data-source='civitai']").exists()).toBe(true);
+
+    const local = mount(InstalledModelRow, {
+      props: { model: makeModel({ name: "my-lora.safetensors", hf_repo: "" }) },
+    });
+    expect(local.find("svg[data-source='local']").exists()).toBe(true);
+  });
+
   it("emits open when the row is clicked", async () => {
     const w = mount(InstalledModelRow, { props: { model: makeModel() } });
     await w.find("[data-test=installed-row]").trigger("click");

@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
-import SourceGlyph from "../generate/SourceGlyph.vue";
+import SourceGlyph from "@ui/components/SourceGlyph.vue";
 import ModelFamilyPlaceholder from "./ModelFamilyPlaceholder.vue";
 import {
   catalogFetchCaption,

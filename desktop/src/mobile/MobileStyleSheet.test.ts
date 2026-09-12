@@ -63,6 +63,9 @@ describe("mobile style sheet chrome", () => {
     expect(menu.classes()).toContain("ms-model__menu--touch");
     const ids = wrapper.findAll("[data-test='model-option-id']").map((row) => row.text());
     expect(ids).toEqual([models[0]!.name, models[1]!.name]);
+    // The sheet fills no #glyph slot itself, so every row carries the
+    // menu's own default source glyph.
+    expect(wrapper.findAll("svg[data-source]")).toHaveLength(models.length);
 
     await wrapper.findAll("[data-test='model-option-id']")[1]!.trigger("click");
     expect(wrapper.emitted("pick")?.[0]?.[0]).toMatchObject({ name: models[1]!.name });

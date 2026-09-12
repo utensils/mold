@@ -19,7 +19,7 @@ import { modelSource } from "@studio/lib/modelSource";
 import { formatEta, formatGB, formatRate, percent } from "../../lib/format";
 import { PLATFORM_UI } from "../../lib/platform";
 import { modelDisplayNameForId } from "../../lib/models";
-import SourceGlyph from "../generate/SourceGlyph.vue";
+import SourceGlyph from "@ui/components/SourceGlyph.vue";
 import type { DownloadJobStatus } from "../../lib/api/types";
 
 const downloads = useDownloadsStore();

@@ -13,6 +13,8 @@ import { modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
 import DrawerPanel from "@ui/components/DrawerPanel.vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import Icon from "@ui/components/Icon.vue";
+import SourceGlyph from "@ui/components/SourceGlyph.vue";
+import { modelSource, type ModelSource } from "@studio/lib/modelSource";
 import { useCatalog } from "../../composables/useCatalog";
 import { useHostRouting } from "../../composables/useHostRouting";
 import { useModelInstallTargets } from "../../composables/useModelInstallTargets";
@@ -310,6 +312,14 @@ const source = computed(() => {
   const e = metadataEntry.value;
   if (e) return e.source === "civitai" ? "Civitai" : "Hugging Face";
   return installedModel.value?.hf_repo || "local";
+});
+/** The glyph beside the Source row's value — `null` when there is no Source
+ *  row at all (neither a catalog entry nor an installed model). */
+const sourceGlyph = computed<ModelSource | null>(() => {
+  const e = metadataEntry.value;
+  if (e) return e.source === "civitai" ? "civitai" : "hf";
+  if (installedModel.value) return modelSource(installedModel.value);
+  return null;
 });
 
 /** Key/value rows. A field the server didn't send is omitted outright — a
@@ -716,7 +726,16 @@ function onRetry() {
         <div v-if="metaRows.length" class="md__rows" data-test="meta-rows">
           <div v-for="row in metaRows" :key="row.key" class="md__row">
             <span class="md__row-key">{{ row.key }}</span>
-            <span class="md__row-val">{{ row.val }}</span>
+            <span class="md__row-val">
+              <SourceGlyph
+                v-if="row.key === 'Source' && sourceGlyph"
+                :source="sourceGlyph"
+                :size="12"
+                class="md__row-glyph"
+                aria-hidden="true"
+              />
+              <span class="md__row-val-text">{{ row.val }}</span>
+            </span>
           </div>
         </div>
 
@@ -1078,10 +1097,23 @@ function onRetry() {
 }
 
 .md__row-val {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  /* A flex item's automatic minimum size is its min-content width, not 0 —
+   * `word-break: break-all` keeps that small today, but this is one fewer
+   * thing to get right if that rule ever changes. */
+  min-width: 0;
   font-family: var(--f-mono);
   font-size: 0.75rem;
   text-align: right;
   word-break: break-all;
+}
+
+.md__row-glyph {
+  flex: 0 0 auto;
+  color: var(--mold-text-dim);
 }
 
 .md__action {

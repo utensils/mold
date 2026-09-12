@@ -47,7 +47,11 @@ const clamped = computed(() => Math.min(100, Math.max(0, props.value)));
 
 <style scoped>
 .ms-bar {
-  background: var(--mold-bg-deep);
+  /* `--mold-bg-deep` is the same colour as `--mold-panel`
+   * (ui/mold-desktop.css), which a machine card uses as its own background —
+   * the track vanished there. A token-relative tint contrasts on both
+   * `--mold-panel` and `--mold-surface` instead of matching either exactly. */
+  background: color-mix(in srgb, var(--mold-text) 14%, transparent);
   /* Micro-radius below the control scale, per the prototype telemetry bars. */
   border-radius: 4px;
   overflow: hidden;

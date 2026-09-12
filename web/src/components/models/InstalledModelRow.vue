@@ -10,10 +10,12 @@ import { computed } from "vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
+import SourceGlyph from "@ui/components/SourceGlyph.vue";
 import Tooltip from "@ui/components/Tooltip.vue";
 import type { ModelInfoExtended } from "../../types";
 import { styleDisplayName } from "@studio/lib/styleLabel";
 import { modelKindValue } from "@studio/lib/modelMetadata";
+import { modelSource } from "@studio/lib/modelSource";
 import { useModelInstallTargets } from "../../composables/useModelInstallTargets";
 import { formatGB } from "../../util/format";
 
@@ -39,6 +41,7 @@ const installHint = computed(() => {
 
 /** The friendly name leads; the runnable id stays below it in mono. */
 const displayName = computed(() => styleDisplayName(props.model));
+const glyphSource = computed(() => modelSource(props.model));
 /** Every row on this shelf is a style, so "Checkpoint" says nothing. Only a
  *  row that is something else — a LoRA, a VAE, an upscaler — earns a badge. */
 const badgeKind = computed(() => {
@@ -68,6 +71,7 @@ const getLabel = "Get it";
       </span>
       <span class="row__body">
         <span class="row__head">
+          <SourceGlyph :source="glyphSource" :size="12" class="row__glyph" />
           <span class="row__name" data-test="installed-row-name">{{
             displayName
           }}</span>
@@ -220,6 +224,11 @@ const getLabel = "Get it";
   flex-wrap: wrap;
   gap: 9px;
   min-width: 0;
+}
+
+.row__glyph {
+  flex: 0 0 auto;
+  color: var(--mold-text-dim);
 }
 
 .row__name {

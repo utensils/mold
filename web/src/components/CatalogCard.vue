@@ -10,6 +10,8 @@ import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import { catalogPullLabel, catalogSizeInfo } from "@studio/lib/catalogLabel";
 import Icon from "@ui/components/Icon.vue";
+import SourceGlyph from "@ui/components/SourceGlyph.vue";
+import { wireSourceGlyph } from "@studio/lib/modelSource";
 import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 import { RUNTIME_UNAVAILABLE_BADGE } from "@studio/lib/modelRuntimeAvailability";
 import type { ModelRuntimeNotice } from "@studio/lib/modelRuntimeAvailability";
@@ -256,7 +258,16 @@ const pullLabel = computed(() => {
       :aria-label="detailsAriaLabel"
       @click="emit('open')"
     >
-      <span class="card__name">{{ props.entry.name }}</span>
+      <span class="card__nameline-head">
+        <!-- `wireSourceGlyph` guards the wire field the same way the phone's
+             catalog card does — see its doc comment in modelSource.ts. -->
+        <SourceGlyph
+          :source="wireSourceGlyph(props.entry.source)"
+          :size="12"
+          class="card__glyph"
+        />
+        <span class="card__name">{{ props.entry.name }}</span>
+      </span>
       <span
         v-if="props.entry.id !== props.entry.name"
         class="card__id"
@@ -525,6 +536,18 @@ const pullLabel = computed(() => {
   gap: 4px;
   min-width: 0;
   margin-bottom: 14px;
+}
+
+.card__nameline-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.card__glyph {
+  flex: 0 0 auto;
+  color: var(--mold-text-dim);
 }
 
 .card__name {

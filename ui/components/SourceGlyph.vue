@@ -9,12 +9,18 @@ import type { ModelSource } from "@studio/lib/modelSource";
  * size) and the blue hexagonal C (paths from Civitai's open-source Logo
  * component). Local files keep the neutral currentColor disk monogram.
  */
-const props = withDefaults(defineProps<{ source: ModelSource; size?: number }>(), {
-  size: 12,
-});
+const props = withDefaults(
+  defineProps<{ source: ModelSource; size?: number }>(),
+  {
+    size: 12,
+  },
+);
 
 const label = computed(
-  () => ({ hf: "Hugging Face", civitai: "Civitai", local: "Local file" })[props.source],
+  () =>
+    ({ hf: "Hugging Face", civitai: "Civitai", local: "Local file" })[
+      props.source
+    ],
 );
 
 // Gradient ids must be document-unique — this glyph renders once per row.
@@ -28,13 +34,15 @@ const uid = useId();
     viewBox="8.46 3 77.5 77.5"
     :width="size"
     :height="size"
-    class="shrink-0"
     role="img"
     :aria-label="label"
     :data-source="source"
   >
     <title>{{ label }}</title>
-    <path fill="#FFD21E" d="M47.21 76.5a34.75 34.75 0 1 0 0-69.5 34.75 34.75 0 0 0 0 69.5Z" />
+    <path
+      fill="#FFD21E"
+      d="M47.21 76.5a34.75 34.75 0 1 0 0-69.5 34.75 34.75 0 0 0 0 69.5Z"
+    />
     <path
       fill="#FF9D0B"
       d="M81.96 41.75a34.75 34.75 0 1 0-69.5 0 34.75 34.75 0 0 0 69.5 0Zm-73.5 0a38.75 38.75 0 1 1 77.5 0 38.75 38.75 0 0 1-77.5 0Z"
@@ -65,7 +73,6 @@ const uid = useId();
     viewBox="0.2 1.6 20 20"
     :width="size"
     :height="size"
-    class="shrink-0"
     role="img"
     :aria-label="label"
     :data-source="source"
@@ -81,7 +88,10 @@ const uid = useId();
         <stop offset="1" stop-color="#0A20C9" />
       </linearGradient>
     </defs>
-    <path :fill="`url(#cv-inner-${uid})`" d="M1.5,6.6v10l8.7,5l8.7-5v-10l-8.7-5L1.5,6.6z" />
+    <path
+      :fill="`url(#cv-inner-${uid})`"
+      d="M1.5,6.6v10l8.7,5l8.7-5v-10l-8.7-5L1.5,6.6z"
+    />
     <path
       :fill="`url(#cv-outer-${uid})`"
       d="M10.2,4.7l5.9,3.4V15l-5.9,3.4L4.2,15V8.1L10.2,4.7 M10.2,1.6l-8.7,5v10l8.7,5l8.7-5v-10C18.8,6.6,10.2,1.6,10.2,1.6z"
@@ -98,13 +108,19 @@ const uid = useId();
     viewBox="0 0 12 12"
     :width="size"
     :height="size"
-    class="shrink-0"
     role="img"
     :aria-label="label"
     :data-source="source"
   >
     <title>{{ label }}</title>
-    <ellipse cx="6" cy="3.4" rx="4.6" ry="1.9" fill="currentColor" opacity="0.35" />
+    <ellipse
+      cx="6"
+      cy="3.4"
+      rx="4.6"
+      ry="1.9"
+      fill="currentColor"
+      opacity="0.35"
+    />
     <path
       d="M1.4 3.4 v5.2 c0 1.05 2.06 1.9 4.6 1.9 s4.6 -0.85 4.6 -1.9 v-5.2"
       fill="none"
@@ -114,3 +130,9 @@ const uid = useId();
     />
   </svg>
 </template>
+
+<style scoped>
+svg {
+  flex-shrink: 0;
+}
+</style>

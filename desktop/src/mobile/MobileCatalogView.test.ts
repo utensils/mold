@@ -1744,6 +1744,23 @@ describe("MobileCatalogView", () => {
     );
   });
 
+  it("shows a source glyph on the catalog card, from entry.source", async () => {
+    searchCatalog.mockResolvedValue(
+      searchResponse([
+        entry("Portrait Base", { source: "hf" }),
+        entry("Dreamy Photoreal", { source: "civitai" }),
+      ]),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const cards = wrapper.findAll("[data-test='mobile-catalog-card']");
+    const hfCard = cards.find((candidate) => candidate.text().includes("Portrait Base"))!;
+    const civitaiCard = cards.find((candidate) => candidate.text().includes("Dreamy Photoreal"))!;
+    expect(hfCard.find("svg[data-source='hf']").exists()).toBe(true);
+    expect(civitaiCard.find("svg[data-source='civitai']").exists()).toBe(true);
+  });
+
   it("preserves a mature summary classification when fetched detail reports false", async () => {
     searchCatalog.mockResolvedValue(
       searchResponse([
