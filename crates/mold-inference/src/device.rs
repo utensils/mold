@@ -1867,15 +1867,34 @@ const FLUX2_DENOISE_LIVE_MLP_MULTIPLE: u64 = 6;
 ///
 /// Three quantizations spanning 15 GB of weights agree inside 1.3%, which is
 /// what says the term is a property of the TOKEN COUNT and not of the
-/// checkpoint — and the derived live set alone prices it at 1.98 GB, so the
+/// checkpoint — and the derived live set alone prices it at 1.53 GB, so the
 /// retention is real and this is the one constant in the model that is fitted
 /// rather than read off the forward pass. `flux2-dev:fp8` measures 3.91 GB at
 /// the same shape because its per-forward widen holds one linear's working-
 /// dtype copy beside the stream; that 0.9 GB sits inside
 /// `MEMORY_BUDGET_HEADROOM` rather than being charged a second time, so the
 /// fp8 tier's admission decision is unchanged.
-const FLUX2_DENOISE_ALLOCATOR_RETENTION_NUMERATOR: u64 = 3;
-const FLUX2_DENOISE_ALLOCATOR_RETENTION_DENOMINATOR: u64 = 2;
+///
+/// **Fitted on the FLASH arm, because that is the arm the readings were taken
+/// on.** The same session's log reports `fast_still_default=Flash`, and the
+/// planner asks [`flux_effective_attention_backend`], so the number these
+/// three readings have to reproduce is the one with no score pair in it:
+/// `49/25 x` the 1.529 GB stream is 3.00 GB, within 0.8% of all three. The
+/// earlier `3/2` was fitted against `stream + math scores` and so reproduced
+/// them only on an arm plato does not run — on plato itself it charged
+/// 2.29 GB for a measured 3.00 GB, three quarters of the gap #1707 is about.
+///
+/// The MATH arm is DERIVED from this fit, never measured: the flash charge
+/// plus the `[heads, chunk, joint]` score pair at its own exact size, so it
+/// can only be higher (3.45 GB at the same shape). The retention multiplies
+/// the stream only, because the stream is what the three readings contain —
+/// compounding a fitted allocator factor over a tile that was not part of the
+/// fit charges a math build 0.43 GB it has never been shown to need, which on
+/// plato's own card is the difference between a resident fp8 [dev] and one
+/// streaming its blocks at the documented 3-5x penalty. Measuring the math
+/// arm is what would let this tighten or widen; an argument is not.
+const FLUX2_DENOISE_ALLOCATOR_RETENTION_NUMERATOR: u64 = 49;
+const FLUX2_DENOISE_ALLOCATOR_RETENTION_DENOMINATOR: u64 = 25;
 
 /// The FLUX.2 transformer dimensions the denoise working set is a function of.
 ///
@@ -1983,11 +2002,16 @@ pub fn flux2_denoise_activation_bytes(
             .saturating_mul(joint_tokens)
             .saturating_mul(dtype),
     };
+    // The retention factor is fitted over the STREAM alone, because that is
+    // the arm it was measured on — see
+    // `FLUX2_DENOISE_ALLOCATOR_RETENTION_NUMERATOR`. Math's score pair is
+    // added at its own exact size on top, which keeps the derived arm strictly
+    // above the measured one without compounding a fit it was never part of.
     stream
-        .saturating_add(scores)
         .saturating_mul(batch)
         .saturating_mul(FLUX2_DENOISE_ALLOCATOR_RETENTION_NUMERATOR)
         / FLUX2_DENOISE_ALLOCATOR_RETENTION_DENOMINATOR
+        + scores.saturating_mul(batch)
 }
 
 /// [`flux2_denoise_activation_bytes`] from a canvas, for the callers that have
@@ -7594,9 +7618,39 @@ mod flux2_denoise_budget_tests {
         }
     }
 
+    /// The arm the measurement was taken on is the arm the fit has to
+    /// reproduce. plato's own log for these renders reports
+    /// `fast_still_default=Flash`, and the planner asks
+    /// `flux_effective_attention_backend()`, so the charge these three numbers
+    /// pin is the one with NO score pair in it.
     #[test]
-    fn the_dev_budget_brackets_every_runtime_plato_measured() {
+    fn the_dev_flash_budget_reproduces_every_runtime_plato_measured() {
         let budget = flux2_denoise_activation_bytes_for_canvas(
+            Flux2ActivationGeometry::dev(),
+            1024,
+            1024,
+            1,
+            2,
+            AttentionBackend::Flash,
+        );
+        for measured in PLATO_1024_RUNTIME_BYTES {
+            assert!(
+                budget >= measured * 95 / 100 && budget <= measured * 105 / 100,
+                "{budget} must sit within 5% of the measured {measured}"
+            );
+        }
+        // And it is an order of magnitude above what the area model charged,
+        // which is the whole of #1707's plan-side defect.
+        assert!(budget > 10 * activation_bytes(1024, 1024, 1, 2, ActivationFamily::Flux2Dit));
+    }
+
+    /// The math arm is DERIVED from the flash fit, not measured: the same
+    /// retention over a live set that also holds the score pair. It can only
+    /// be higher, and it must still sit inside a factor of two of the reading
+    /// the other arm produced.
+    #[test]
+    fn the_dev_math_budget_is_the_flash_one_with_its_score_pair_on_top() {
+        let math = flux2_denoise_activation_bytes_for_canvas(
             Flux2ActivationGeometry::dev(),
             1024,
             1024,
@@ -7604,15 +7658,24 @@ mod flux2_denoise_budget_tests {
             2,
             AttentionBackend::Math,
         );
+        let flash = flux2_denoise_activation_bytes_for_canvas(
+            Flux2ActivationGeometry::dev(),
+            1024,
+            1024,
+            1,
+            2,
+            AttentionBackend::Flash,
+        );
+        assert!(
+            math > flash,
+            "math materializes a score pair flash never does: {math} vs {flash}"
+        );
         for measured in PLATO_1024_RUNTIME_BYTES {
             assert!(
-                budget >= measured * 95 / 100 && budget <= measured * 2,
-                "{budget} must sit within a factor of two of the measured {measured}"
+                math >= measured && math <= measured * 2,
+                "{math} must stay above the measured {measured} and inside a factor of two"
             );
         }
-        // And it is an order of magnitude above what the area model charged,
-        // which is the whole of #1707's plan-side defect.
-        assert!(budget > 10 * activation_bytes(1024, 1024, 1, 2, ActivationFamily::Flux2Dit));
     }
 
     #[test]
@@ -7622,25 +7685,27 @@ mod flux2_denoise_budget_tests {
         let math = flux2_denoise_activation_bytes(dev, joint, 1, 2, AttentionBackend::Math);
         let flash = flux2_denoise_activation_bytes(dev, joint, 1, 2, AttentionBackend::Flash);
         let tile = 2 * dev.num_heads * FLUX_ATTENTION_QUERY_CHUNK * joint * 2;
-        assert_eq!(math - flash, tile * 3 / 2);
+        // Exactly one tile, at its own size: the allocator retention is fitted
+        // over the stream, which is the only thing plato's readings contain.
+        assert_eq!(math - flash, tile);
     }
 
     #[test]
     fn the_budget_is_linear_in_the_packed_sequence_the_dtype_and_the_batch() {
         let dev = Flux2ActivationGeometry::dev();
         let one = flux2_denoise_activation_bytes(dev, 4608, 1, 2, AttentionBackend::Math);
-        assert_eq!(
+        // To within the single truncation the retention's integer division
+        // performs on each side — doubling an input may move the remainder.
+        for doubled in [
             flux2_denoise_activation_bytes(dev, 9216, 1, 2, AttentionBackend::Math),
-            one * 2
-        );
-        assert_eq!(
             flux2_denoise_activation_bytes(dev, 4608, 1, 4, AttentionBackend::Math),
-            one * 2
-        );
-        assert_eq!(
             flux2_denoise_activation_bytes(dev, 4608, 2, 2, AttentionBackend::Math),
-            one * 2
-        );
+        ] {
+            assert!(
+                doubled.abs_diff(one * 2) <= 1,
+                "{doubled} must be twice {one}"
+            );
+        }
     }
 
     #[test]

@@ -2975,6 +2975,17 @@ mod fail_closed_tests {
             "the nine completed prints at this shape must stay admissible (planned {})",
             budget.peak_memory_bytes
         );
+        // And on the arm plato itself ran, which is the arm the 3.0 GB denoise
+        // charge was fitted to: 40.34 GB planned against a 46.1 GB card.
+        let flash = platos_flash_arm_peak(budget.peak_memory_bytes, 0);
+        assert!(
+            flash >= MEASURED_HIGH_WATER_BYTES,
+            "the flash-arm plan {flash} must cover the {MEASURED_HIGH_WATER_BYTES} plato measured"
+        );
+        assert!(
+            flash <= PLATO_L40S_AVAILABLE_BYTES * 9 / 10,
+            "the flash-arm plan {flash} must stay admissible on plato's own card"
+        );
     }
 
     /// The same tier and canvas with ONE reference image is the shape that
@@ -3001,6 +3012,46 @@ mod fail_closed_tests {
              refused on a 46.1 GB card, not admitted (planned {})",
             budget.peak_memory_bytes
         );
+        // The refusal is what the flash arm — plato's own — produces too:
+        // 43.34 GB against a 41.49 GB admissible ceiling.
+        let flash = platos_flash_arm_peak(budget.peak_memory_bytes, 1);
+        assert!(
+            flash > PLATO_L40S_AVAILABLE_BYTES * 9 / 10,
+            "the flash-arm plan {flash} must still be refused on plato's card"
+        );
+    }
+
+    /// The plan plato's own build produced, derived from the plan THIS build
+    /// produced.
+    ///
+    /// Every figure these fixtures pin was measured on plato, whose log for
+    /// those renders reports `fast_still_default=Flash`; the planner asks
+    /// `flux_effective_attention_backend()`, so plato planned on the FLASH
+    /// arm. A test binary built without the flash kernels resolves to math,
+    /// which charges one score pair more for the same stream. On this path the
+    /// peak is `base_peak + activation` and neither tier's residency decision
+    /// moves between the arms, so the difference between the two plans is
+    /// exactly the difference between the two activation figures. Returns the
+    /// plan unchanged on a flash-compiled build.
+    fn platos_flash_arm_peak(peak: u64, references: u64) -> u64 {
+        use mold_inference::attention::AttentionBackend;
+        use mold_inference::device::{
+            flux2_denoise_activation_bytes_for_canvas, flux2_reference_scaled_activation_bytes,
+            flux_effective_attention_backend, Flux2ActivationGeometry,
+        };
+        const PIXELS: u64 = 1024 * 1024;
+        let arm = |backend| {
+            let base = flux2_denoise_activation_bytes_for_canvas(
+                Flux2ActivationGeometry::dev(),
+                1024,
+                1024,
+                1,
+                2,
+                backend,
+            );
+            flux2_reference_scaled_activation_bytes(base, PIXELS, references * PIXELS)
+        };
+        peak - (arm(flux_effective_attention_backend()) - arm(AttentionBackend::Flash))
     }
 
     /// The fp8 tier renders at this shape today and must keep doing so. Its own
@@ -3026,6 +3077,21 @@ mod fail_closed_tests {
             MEASURED_HIGH_WATER_BYTES
         );
         assert_eq!(budget.fits_available_memory, Some(true));
+        // The decision that must not move is the one plato's own arm makes:
+        // 40.79 GB planned, resident, admitted.
+        let flash = platos_flash_arm_peak(budget.peak_memory_bytes, 0);
+        assert!(
+            flash >= MEASURED_HIGH_WATER_BYTES,
+            "the flash-arm plan {flash} must cover the {MEASURED_HIGH_WATER_BYTES} plato measured"
+        );
+        assert!(
+            flash <= PLATO_L40S_AVAILABLE_BYTES * 9 / 10,
+            "the flash-arm plan {flash} must keep the fp8 tier admissible"
+        );
+        assert!(
+            !budget.block_offload,
+            "the fp8 tier must stay resident on this card, not stream its blocks"
+        );
     }
 
     /// The correction is the FLUX.2 family's alone. A FLUX.1 render at the same
