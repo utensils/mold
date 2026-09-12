@@ -365,6 +365,50 @@ grep -Fq "github.event_name == 'pull_request'" <<< "$metal_block" \
 grep -Fq "needs.changes.outputs.trusted_release_pr != 'true'" <<< "$metal_block" \
   || fail "the Metal compile runs on generated release PRs"
 
+# The `cuda` and `metal` cfg arms gate the SAME mold-cli call sites into
+# mold-server (`execution_plan::materialize_request`,
+# `execution_plan::validate_before_cuda` sit behind
+# `#[cfg(any(feature = "cuda", feature = "metal"))]`). `metal-check` compiles
+# one of those arms on macOS; after the CUDA toolkit job was retired NOTHING on
+# the pull-request route compiled the other, and `cargo check -p mold-ai
+# --no-default-features` type-checks neither -- so a mold-server signature
+# change can land green and break every shipping CUDA build with E0061.
+# `cuda-typecheck` is that missing arm. It is a `cargo check`, not a release
+# build: the retired 40-minute forced-local job is still refused above.
+cuda_typecheck_block="$(extract_job "$ci" cuda-typecheck)"
+[[ -n "$cuda_typecheck_block" ]] \
+  || fail "no pull-request job compiles the CUDA cfg arm of the mold-cli/mold-server seam"
+grep -Fq "github.event_name == 'pull_request'" <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck does not protect relevant pull requests"
+grep -Fq "needs.changes.outputs.trusted_release_pr != 'true'" <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck runs on generated release PRs"
+grep -Fq "needs.changes.outputs.cuda_typecheck == 'true'" <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck is not gated on the crates that can break the CUDA cfg arm"
+grep -Fq "cargo check -p mold-ai --features cuda," <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck does not compile mold-ai with the cuda feature"
+grep -Fq "Jimver/cuda-toolkit@" <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck has no nvcc: candle-kernels' build script cannot emit PTX without it"
+grep -Fq 'CUDA_COMPUTE_CAP:' <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck does not pin a compute capability for the PTX build"
+# The Actions cache store sits at its 10 GB ceiling. This job RESTORES the
+# `rust` job's key and must never save: a new key would evict the union cache
+# every pull request restores.
+grep -Fq 'save-if: false' <<< "$cuda_typecheck_block" \
+  || fail "the CUDA typecheck saves a rust-cache key while the Actions store is at its ceiling"
+cuda_typecheck_keys="$(grep -o 'shared-key: [A-Za-z0-9_-]*' <<< "$cuda_typecheck_block" | sort -u)"
+[[ "$cuda_typecheck_keys" == "shared-key: workspace-default" ]] \
+  || fail "the CUDA typecheck must restore the shared workspace-default key and introduce none of its own"
+cuda_typecheck_filter="$(extract_filter "$ci" cuda_typecheck)"
+for reached in \
+  "'crates/mold-cli/**'" \
+  "'crates/mold-server/**'" \
+  "'crates/mold-inference/**'" \
+  "'Cargo.toml'" \
+  "'Cargo.lock'"; do
+  grep -Fq -- "$reached" <<< "$cuda_typecheck_filter" \
+    || fail "the CUDA typecheck filter does not reach $reached"
+done
+
 require_text "$ci" \
   "cargo clippy -p mold-ai --features flash-attn -- -D warnings" \
   "the flash-attn binary wiring is only typechecked"

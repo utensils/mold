@@ -42,6 +42,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       rust_format: ${{ steps.filter.outputs.rust_format }}
       gpu: ${{ steps.filter.outputs.gpu }}
+      cuda_typecheck: ${{ steps.filter.outputs.cuda_typecheck }}
       h3_cuda_server: ${{ steps.filter.outputs.h3_cuda_server }}
       website: ${{ steps.filter.outputs.website }}
       web: ${{ steps.filter.outputs.web }}
@@ -121,6 +122,18 @@ jobs:
               - 'crates/mold-inference/**'
               - 'crates/mold-server/**'
               - 'crates/mold-tui/**'
+            # The `cuda` and `metal` cfg arms gate the SAME mold-cli call
+            # sites into mold-server, so this is the seam `metal-check` covers
+            # from the other side: the CLI, the server whose signatures it
+            # calls, the inference crate both reach, and the manifests that
+            # change how any of them resolve.
+            cuda_typecheck:
+              - 'crates/mold-cli/**'
+              - 'crates/mold-server/**'
+              - 'crates/mold-inference/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
             website:
               - 'website/**'
             web:
@@ -853,6 +866,76 @@ jobs:
   #         mkdir -p "$RUNNER_TEMP/cuda-driver-stub"
   #         ln -s /usr/local/cuda/lib64/stubs/libcuda.so "$RUNNER_TEMP/cuda-driver-stub/libcuda.so.1"
   #         LD_LIBRARY_PATH="$RUNNER_TEMP/cuda-driver-stub:${LD_LIBRARY_PATH:-}" bash scripts/test-h3-cuda-server.sh
+
+  # `#[cfg(any(feature = "cuda", feature = "metal"))]` guards the mold-cli call
+  # sites into `mold_server::execution_plan` (`materialize_request`,
+  # `validate_before_cuda`). `metal-check` below compiles ONE of those two arms;
+  # this job is the other. Without it the pull-request route's whole answer for
+  # that seam is a default-feature build that type-checks NEITHER arm, so a
+  # mold-server signature change lands green while every shipping CUDA artifact
+  # fails with E0061 -- which is exactly what happened, unnoticed, for several
+  # commits.
+  #
+  # Deliberately a `cargo check`: nothing here links, runs a kernel, or needs a
+  # GPU. nvcc is required all the same, because candle-kernels' build script
+  # emits PTX before any Rust in the CUDA graph can be checked. The retired
+  # 40-minute forced-local CUDA job is not coming back; shipped artifacts still
+  # compile in the release workflows.
+  cuda-typecheck:
+    name: CUDA forced-local typecheck
+    timeout-minutes: 45
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.changes.outputs.trusted_release_pr != 'true' &&
+      needs.changes.outputs.cuda_typecheck == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # candle-kernels emits PTX for one capability. sm_89 is the default
+      # shipped target; the cfg arm being type-checked is capability-neutral.
+      CUDA_COMPUTE_CAP: "89"
+      # A hosted runner has no driver. `cargo check` links nothing, so this is
+      # only insurance for a build script that probes for libcuda: it finds the
+      # toolkit's stub rather than nothing at all.
+      LIBRARY_PATH: /usr/local/cuda/lib64/stubs
+      # rust-cache hashes every CARGO_*/RUST* value into the key it restores,
+      # so this MUST match `rust` exactly or the restore below misses.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v6
+      - name: Free runner disk space
+        # The local CUDA installer needs several GB the hosted image spends on
+        # toolchains this job never uses.
+        run: |
+          set -euxo pipefail
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            "$AGENT_TOOLSDIRECTORY"
+          df -h
+      - name: Install Rust build deps
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev protobuf-compiler
+      - uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.8.1"
+          method: local
+          log-file-suffix: pr-cuda-typecheck
+          linux-local-args: '["--toolkit"]'
+          use-github-cache: false
+          use-local-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      # RESTORE ONLY. The Actions cache store is at its 10 GB ceiling, so this
+      # job must not own a key: it reads the union cache `rust` writes on main
+      # for the crates a CUDA build shares with it, and recompiles the rest.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace-default
+          save-if: false
+      - name: Typecheck the CUDA forced-local and server paths
+        run: cargo check -p mold-ai --features cuda,preview,expand,tui,webp,mp4,metrics,mdns
 
   metal-check:
     name: Metal forced-local typecheck
