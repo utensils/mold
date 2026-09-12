@@ -349,3 +349,28 @@ step` — and names no cause, because the budget is the only one a real render
   durable `--ic-lora-control` render reached the engine with no control adapter
   at all; only the older single-worker path carried it. Both conversions now
   carry it, and a source-level check keeps every future one honest.
+- **An out-of-memory refusal names the number it actually refused you for.**
+  Three refusals in the campaign's hardware run read `still 0.0 GB short
+  (requires 43.00 GB, 46.72 GB available)` — the available figure is larger than
+  the required one, so the message said the request fit and was refused anyway.
+  Admission compares a plan against an admission ceiling (90% of the device's
+  usable memory) that the message never printed. A refusal now names the peak,
+  the ceiling, how far over it is, and what the ceiling is a fraction of, and a
+  shortfall is never reported as `0.0 GB`.
+- **A render is no longer refused because of a measurement taken on a different
+  card.** The scheduler applies a learned memory peak from previous runs of the
+  same shape, keyed by model family rather than by device — so a figure recorded
+  on a 46 GB GPU could be applied to a job on a smaller one and refuse it
+  permanently, whatever its own plan needed. The learned figure is now bounded by
+  what the device can actually provide; it still raises an estimate that is too
+  low, which is what it is there for.
+- **Dependency preparation and the scheduler now read the same VRAM budget.**
+  Preparation planned against the raw driver reading while everything downstream
+  subtracted `MOLD_RESERVE_VRAM_MB`, so on a machine with a large reserve a plan
+  could be built that the machine had already been told not to allow — and a
+  FLUX.2 job that should have been streamed or refused was instead planned
+  resident and then blocked with no explanation.
+- **A refusal that could not stream the transformer says so.** The planner's
+  reason — for FLUX.2, that GGUF tiers have no block-streaming path — now travels
+  with the held job, instead of being dropped when the queue composes the message
+  a caller finally reads.
