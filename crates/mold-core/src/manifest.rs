@@ -2916,14 +2916,14 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             "flux2-dev-Q6_K.gguf",
             27_396_232_160,
             "0a662e0303d65b7da4741c7bc54bbccd4d7fc17b23e71ced36d177467f4a0ef1",
-            "FLUX.2 [dev] Q6 GGUF — fits a 32 GB GPU with room for activations",
+            "FLUX.2 [dev] Q6 GGUF — ~33 GB resident; needs a 40 GB-class GPU",
         ),
         (
             "q4",
             "flux2-dev-Q4_K_M.gguf",
             19_959_731_168,
             "5f7ac6649e2f5e21a49a6f83931a67530bd887e2d34379c3da1d0f0406501de1",
-            "FLUX.2 [dev] Q4 GGUF — smallest dev tier, runs on a 24 GB GPU",
+            "FLUX.2 [dev] Q4 GGUF — smallest dev tier, ~25 GB resident; needs a 32 GB-class GPU",
         ),
     ] {
         let mut files = shared_flux2_dev_open_files();

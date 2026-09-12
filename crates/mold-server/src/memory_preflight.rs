@@ -3130,6 +3130,113 @@ mod fail_closed_tests {
         );
     }
 
+    /// The card each FLUX.2 [dev] GGUF tier actually needs, which is what the
+    /// manifest description and `website/models/flux2.md` now say.
+    ///
+    /// A GGUF tier has no block-streaming path, so every byte of it is
+    /// resident and the planner adds the ~3.0 GB denoise working set #1707
+    /// measured, the VAE, and the 2 GB budget headroom on top of the
+    /// checkpoint. `flux2-dev:q4` was documented as running on a 24 GB GPU
+    /// and `:q6` as fitting a 32 GB one on the strength of the checkpoint
+    /// size alone; neither is admitted there. The figures below are the
+    /// planner's own, so a doc claim and the refusal can never disagree
+    /// again.
+    #[test]
+    fn the_dev_gguf_tiers_need_the_card_the_docs_now_name() {
+        // usable bytes after the 90% cap and the default reserve, for the
+        // card class named in each doc row.
+        const CARD_24GB_USABLE_BYTES: u64 = 23_600_000_000;
+        const CARD_32GB_USABLE_BYTES: u64 = 31_500_000_000;
+        const CARD_40GB_USABLE_BYTES: u64 = 39_500_000_000;
+        const CARD_48GB_USABLE_BYTES: u64 = 47_500_000_000;
+
+        let plan = |file: &str, bytes: u64, model: &str, available: u64| {
+            let dir = tempfile::tempdir().unwrap();
+            let model_paths = flux2_dev_paths(dir.path(), file, bytes);
+            let mut req = flux2_dev_request(None);
+            req.model = model.to_string();
+            let budget = flux2_budget(&req, &model_paths, available);
+            assert!(
+                !budget.block_offload,
+                "{model} is GGUF: the engine has no streamed path for it"
+            );
+            (budget.fits_available_memory, budget.peak_memory_bytes)
+        };
+
+        // q4 — the "runs on a 24 GB GPU" claim. It does not.
+        let (fits_24, q4_peak) = plan(
+            "flux2-dev-Q4_K_M.gguf",
+            19_959_731_168,
+            "flux2-dev:q4",
+            CARD_24GB_USABLE_BYTES,
+        );
+        assert_eq!(
+            fits_24,
+            Some(false),
+            "flux2-dev:q4 plans {q4_peak} bytes, which a 24 GB card cannot hold"
+        );
+        assert!(
+            q4_peak > 24_000_000_000,
+            "the doc says ~25 GB; the planner says {q4_peak}"
+        );
+        let (fits_32, _) = plan(
+            "flux2-dev-Q4_K_M.gguf",
+            19_959_731_168,
+            "flux2-dev:q4",
+            CARD_32GB_USABLE_BYTES,
+        );
+        assert_eq!(
+            fits_32,
+            Some(true),
+            "a 32 GB card is the smallest the docs may name for q4"
+        );
+
+        // q6 — the "fits a 32 GB GPU with room for activations" claim. The
+        // activations are exactly what it has no room for.
+        let (fits_32, q6_peak) = plan(
+            "flux2-dev-Q6_K.gguf",
+            27_396_232_160,
+            "flux2-dev:q6",
+            CARD_32GB_USABLE_BYTES,
+        );
+        assert_eq!(
+            fits_32,
+            Some(false),
+            "flux2-dev:q6 plans {q6_peak} bytes, which a 32 GB card cannot hold"
+        );
+        let (fits_40, _) = plan(
+            "flux2-dev-Q6_K.gguf",
+            27_396_232_160,
+            "flux2-dev:q6",
+            CARD_40GB_USABLE_BYTES,
+        );
+        assert_eq!(
+            fits_40,
+            Some(true),
+            "a 40 GB card is the smallest the docs may name for q6"
+        );
+
+        // q8 — the tier the campaign measured on plato's 46 GB L40S.
+        let (fits_40, q8_peak) = plan(
+            "flux2-dev-Q8_0.gguf",
+            35_002_602_464,
+            "flux2-dev:q8",
+            CARD_40GB_USABLE_BYTES,
+        );
+        assert_eq!(
+            fits_40,
+            Some(false),
+            "flux2-dev:q8 plans {q8_peak} bytes, past a 40 GB card"
+        );
+        let (fits_48, _) = plan(
+            "flux2-dev-Q8_0.gguf",
+            35_002_602_464,
+            "flux2-dev:q8",
+            CARD_48GB_USABLE_BYTES,
+        );
+        assert_eq!(fits_48, Some(true), "q8 is a 46/48 GB-class tier");
+    }
+
     /// One budget, two readers. Admission planned against the raw free sample
     /// while every pre-load gate reads `free - reserved_vram_bytes()`, so a
     /// plan admitted inside the reserve was refused at load.

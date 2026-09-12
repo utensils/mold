@@ -318,3 +318,15 @@ step` — and names no cause, because the budget is the only one a real render
   stack now travels with the job for planning, so those renders are planned
   sequentially with the adapter counted. Local renders (`--local`) were never
   affected.
+
+- **The FLUX.2 [dev] tier descriptions now name the card each one actually
+  needs.** `flux2-dev:q4` was described as the tier that "runs on a 24 GB GPU"
+  and `:q6` as fitting a 32 GB one, on the strength of the checkpoint size
+  alone. A GGUF tier has no block-streaming path, so every byte of it is
+  resident and the render also holds a ~3 GB denoise working set, the VAE and
+  the planner's safety headroom: q4 needs ~25 GB (a 32 GB-class card), q6 ~33 GB
+  (40 GB-class) and q8 ~40 GB (46/48 GB-class). On 24 GB the [dev] tiers that
+  run are the safetensors ones — `flux2-dev:fp8` and `:bf16`, which stream
+  their transformer blocks from host RAM at the documented 3-5x slowdown — and
+  every Klein tier. `mold list`, the model page and the API all say so, and an
+  oversized GGUF request is refused at submit time naming both figures.
