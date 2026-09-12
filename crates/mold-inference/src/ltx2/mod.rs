@@ -34,6 +34,20 @@ pub use runtime::{ltx2_transformer_weight_sizes, Ltx2TransformerWeightSizes};
 // rather than keeping a second chance to be off by one.
 pub(crate) use pipeline::stitch_extend_frames;
 
+/// The reference-video downscale factor an IC-LoRA stack declares.
+///
+/// Read from each adapter's own safetensors metadata, exactly as upstream's
+/// `read_lora_reference_downscale_factor`
+/// (`packages/ltx-pipelines/src/ltx_pipelines/iclora_utils.py:30-35`) does;
+/// conflicting factors across a stack are an error. Published because the
+/// admission seam must snap the canvas onto the grid this factor implies
+/// (`mold_core::validation::materialize_ltx2_reference_canvas`) BEFORE the
+/// plan, the estimate and the queue row are frozen, and it must read the same
+/// answer the engine will.
+pub fn reference_video_downscale_factor(loras: &[mold_core::LoraWeight]) -> anyhow::Result<usize> {
+    lora::reference_video_downscale_factor(loras)
+}
+
 /// Whether the resolved checkpoint set contains both the audio VAE and
 /// vocoder tensors required for native LTX-2 audio output.
 pub fn audio_output_supported(paths: &mold_core::ModelPaths) -> bool {

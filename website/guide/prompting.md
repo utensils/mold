@@ -1296,6 +1296,11 @@ mold run ltx-2-19b-distilled:fp8 "a canyon flyover" --pipeline keyframe --frames
 # Camera-control preset
 mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control dolly-in
 
+# Union / Motion Track control: the guide is already Canny, depth, pose or trajectory overlays -- mold does not preprocess it.
+# These ref0.5 adapters read the guide at half the conditioned stage, so both axes must be multiples of 128; mold snaps the
+# canvas down and says so when they are not (the 1216x704 default renders at 1152x640).
+mold run ltx-2.3-22b-distilled:fp8 "a dancer follows the guide" --ic-lora-control union --video canny-guide.mp4 --width 1152 --height 640
+
 # Lip dub: re-voice a clip. Frames and fps come from the reference video; both axes must be multiples of 64
 mold run ltx-2.3-22b-distilled:fp8 "she says: the harbour freezes every winter" --ic-lora-control lipdub --video speaker.mp4 --width 704 --height 448
 

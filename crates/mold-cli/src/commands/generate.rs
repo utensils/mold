@@ -1741,6 +1741,7 @@ pub async fn run(
         require_local_request_model_activation(&req, &config)?;
         materialize_local_builtin_control(&mut req, &config).await?;
         materialize_local_builtin_camera_controls(&mut req, &config).await?;
+        materialize_local_ltx2_reference_canvas(&mut req);
     } else {
         // Several photographs and true CFG are additive fields an older server
         // would DROP rather than reject, rendering a print with no face in it
@@ -1918,6 +1919,12 @@ pub async fn run(
         }
     }
     let displayed_guidance = guidance_caps.fixed_scale.unwrap_or(effective_guidance);
+    // Report the canvas the REQUEST carries, not the one resolved before the
+    // materializations ran: a forced-local IC-LoRA control render is snapped
+    // onto its reference grid after the request is built, and printing the
+    // pre-snap figure here would contradict both the snap advisory and the
+    // saved print.
+    let (effective_width, effective_height) = (req.width, req.height);
     if is_h3 {
         status!(
             "{} Generating {}x{} ({} sigma points / {} model evaluations, no CFG)",
@@ -2302,6 +2309,31 @@ where
     ordered.extend(request.take_caller_lora_stack());
     request.loras = Some(ordered);
     Ok(())
+}
+
+/// Snap a forced-local IC-LoRA control render onto the canvas its reference
+/// video can be encoded at.
+///
+/// The server does this in `routes::prepare_generation_inner` after the same
+/// two materializations; without a local counterpart `--local` would render a
+/// canvas the remote path refuses to, and fail inside the VAE after paying
+/// for the Gemma encode. Both read the same two authorities:
+/// `mold_inference::ltx2::reference_video_downscale_factor` for the adapters'
+/// declared factor and `mold_core::validation::materialize_ltx2_reference_canvas`
+/// for the grid.
+fn materialize_local_ltx2_reference_canvas(request: &mut GenerateRequest) {
+    let stack = request.caller_lora_stack();
+    if stack.is_empty() {
+        return;
+    }
+    let Ok(factor) = mold_inference::ltx2::reference_video_downscale_factor(&stack) else {
+        return;
+    };
+    if let Some(advisory) =
+        mold_core::validation::materialize_ltx2_reference_canvas(request, factor as u32)
+    {
+        status!("{} {}", theme::icon_info(), advisory);
+    }
 }
 
 /// Download any built-in `camera-control:<id>` adapter the request names.
@@ -2848,6 +2880,7 @@ async fn generate_remote_inner(
                     let mut local_request = req.clone();
                     materialize_local_builtin_control(&mut local_request, config).await?;
                     materialize_local_builtin_camera_controls(&mut local_request, config).await?;
+                    materialize_local_ltx2_reference_canvas(&mut local_request);
                     generate_local(
                         &local_request,
                         config,

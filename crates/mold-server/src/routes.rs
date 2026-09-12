@@ -1691,6 +1691,16 @@ async fn prepare_generation_inner(
         )));
     }
     materialize_builtin_ltx2_camera_controls(state, &planned_camera_controls).await?;
+    // Now that the whole adapter stack is on the request, snap the canvas
+    // onto the grid an IC-LoRA reference video can be encoded on. This is the
+    // last moment it can happen: the frozen execution plan, the memory
+    // estimate, the queue row and the saved provenance are all resolved from
+    // the request after this point, so a canvas changed any later would leave
+    // every one of them describing a render that never happened.
+    if let Some(advisory) = materialize_ltx2_reference_canvas(request) {
+        tracing::info!("{advisory}");
+        warnings.other.push(advisory);
+    }
     // Durable admission accepts a request naming a server-local adapter and
     // preparation may run minutes — or a restart — later, so the path is
     // re-asked HERE rather than trusted from admission. A LoRA that has since
@@ -2167,6 +2177,31 @@ async fn apply_lip_dub_reference_timing(
         tracing::info!("{warning}");
     }
     Ok(timing.warnings)
+}
+
+/// Snap an IC-LoRA control render onto the canvas its reference video can be
+/// encoded at.
+///
+/// A `ref0.5` IC-LoRA conditions on a reference at half the conditioned
+/// stage's resolution, and that half must still land on the video VAE's 32px
+/// latent grid — `mold_core::validation::ltx2_reference_axis_is_aligned` has
+/// the upstream citations. mold's LTX-2 manifest default is 1216x704, whose
+/// stage-1 grid is 19x11, so `--ic-lora-control union` failed inside the VAE
+/// at the tier's OWN default canvas after paying for the Gemma encode.
+///
+/// The factor is read from the adapters' own safetensors metadata through
+/// `mold_inference::ltx2::reference_video_downscale_factor` — the same
+/// authority the engine asks — rather than from a table keyed on the control
+/// id, so a caller's own `--lora` carrying the metadata is covered too. An
+/// unreadable adapter answers nothing here and the engine's guard still
+/// refuses by name; this seam never fails a request.
+fn materialize_ltx2_reference_canvas(request: &mut mold_core::GenerateRequest) -> Option<String> {
+    let stack = crate::queue_media::effective_request_loras(request);
+    if stack.is_empty() {
+        return None;
+    }
+    let factor = mold_inference::ltx2::reference_video_downscale_factor(&stack).ok()?;
+    mold_core::validation::materialize_ltx2_reference_canvas(request, factor as u32)
 }
 
 async fn materialize_builtin_ltx2_control(

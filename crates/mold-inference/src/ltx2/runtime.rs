@@ -2123,6 +2123,38 @@ fn append_condition_from_video_latents(
     })
 }
 
+/// Refuse a conditioned stage whose IC-LoRA reference cannot be VAE-encoded.
+///
+/// See the call site for why upstream's divisibility test is not enough. The
+/// message names the largest stage shape at or below this one that works, so
+/// a caller who reached the engine unsnapped is told the repair rather than
+/// reading a tensor-reshape mismatch.
+fn reference_grid_is_encodable(
+    pixel_shape: VideoPixelShape,
+    reference_downscale_factor: usize,
+) -> Result<()> {
+    let stride = mold_core::validation::LTX2_SPATIAL_LATENT_STRIDE as usize;
+    // One reference latent cell is `stride * factor` pixels of this stage, so
+    // the stage extent has to be a whole number of them.
+    let cell = stride * reference_downscale_factor;
+    let aligned = |axis: usize| axis >= cell && axis.is_multiple_of(cell);
+    if aligned(pixel_shape.width) && aligned(pixel_shape.height) {
+        return Ok(());
+    }
+    let floor = |axis: usize| axis - (axis % cell);
+    anyhow::bail!(
+        "native LTX-2 IC-LoRA reference video cannot be encoded at this stage's {width}x{height}: \
+         the adapter conditions on a reference at 1/{reference_downscale_factor} of it, so each \
+         axis must be a whole number of {cell}px — the video VAE's {stride}px latent cell times \
+         that factor. The largest stage shape at or below this one that works is {}x{}; on a \
+         two-stage recipe the requested canvas is twice that.",
+        floor(pixel_shape.width),
+        floor(pixel_shape.height),
+        width = pixel_shape.width,
+        height = pixel_shape.height,
+    )
+}
+
 /// Whether a stage has any visual conditioning to ingest at all.
 ///
 /// Also the probe predicate: a run with no conditioning does no GPU work here
@@ -2311,17 +2343,20 @@ fn maybe_load_stage_video_conditioning_inner(
             )
         })?;
         let reference_downscale_factor = lora::reference_video_downscale_factor(&plan.loras)?;
-        if !pixel_shape.width.is_multiple_of(reference_downscale_factor)
-            || !pixel_shape
-                .height
-                .is_multiple_of(reference_downscale_factor)
-        {
-            anyhow::bail!(
-                "native LTX-2 IC-LoRA output dimensions ({}x{}) must be divisible by reference_downscale_factor ({reference_downscale_factor})",
-                pixel_shape.width,
-                pixel_shape.height
-            );
-        }
+        // Upstream checks only `height % scale` / `width % scale`
+        // (`iclora_utils.py:111-116`), which is necessary and not sufficient:
+        // the reference is then VAE-ENCODED, so `1/scale` of this stage must
+        // also land on the VAE's own 32px spatial grid. It does at upstream's
+        // IC-LoRA defaults (1024x1536) and it does not at mold's LTX-2
+        // manifest default of 1216x704, whose stage-1 grid is an odd 19x11 —
+        // a reference of 9.5 x 5.5 latent cells, which `SpaceToDepthDownsample`
+        // (`video_vae/sampling.py:41-49`) and candle's `reshape` alike refuse.
+        // `validation::materialize_ltx2_reference_canvas` snaps the canvas at
+        // admission so this is the backstop, not the first line of defence —
+        // but it must still name the repair, because a hand-built plan, a
+        // caller's own `--lora` carrying the metadata, or an older client can
+        // all arrive here unsnapped.
+        reference_grid_is_encodable(pixel_shape, reference_downscale_factor)?;
         let ref_width = pixel_shape.width / reference_downscale_factor;
         let ref_height = pixel_shape.height / reference_downscale_factor;
         let (_metadata, decoded_frames) = media::decode_video_frames(Path::new(video_path))?;
@@ -13597,6 +13632,41 @@ mod tests {
                  such as camera-motion presets"
             );
         }
+    }
+
+    /// The exact failure from the campaign UAT (defect 5). At the LTX-2.3
+    /// distilled tier's own default canvas of 1216x704 the conditioned stage
+    /// is 608x352, and a `ref0.5` adapter's reference is 304x176 — 9.5 x 5.5
+    /// of the video VAE's 32px latent cells. The VAE's last spatial
+    /// compression then reshaped `[1, 1024, 14, 11, 19]` into
+    /// `[1, 1024, 7, 2, 5, 2, 9, 2]` and failed, 64 seconds of Gemma encode
+    /// into the render. The guard refuses it up front and names the repair.
+    #[test]
+    fn an_odd_reference_grid_is_refused_before_the_vae_sees_it() {
+        let shape = |width: usize, height: usize| super::VideoPixelShape {
+            batch: 1,
+            frames: 49,
+            height,
+            width,
+            fps: 24.0,
+        };
+
+        // 1216x704 -> stage 1 608x352 -> reference 304x176: not whole cells.
+        let error = super::reference_grid_is_encodable(shape(608, 352), 2).unwrap_err();
+        let message = format!("{error}");
+        assert!(message.contains("608x352"), "{message}");
+        assert!(message.contains("576x320"), "{message}");
+        assert!(message.contains("64px"), "{message}");
+
+        // 1152x640 -> stage 1 576x320 -> reference 288x160 = 9 x 5 cells.
+        super::reference_grid_is_encodable(shape(576, 320), 2).unwrap();
+
+        // Factor 1 is every ordinary adapter and only needs the VAE's own
+        // stride, which every admitted LTX-2 canvas already has.
+        super::reference_grid_is_encodable(shape(608, 352), 1).unwrap();
+
+        // An axis below one whole reference cell has no encoding at all.
+        assert!(super::reference_grid_is_encodable(shape(32, 320), 2).is_err());
     }
 
     #[test]
