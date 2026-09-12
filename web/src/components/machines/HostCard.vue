@@ -130,6 +130,15 @@ function reconnect(event: Event) {
   emit("reconnect", props.host.id);
 }
 
+/*
+ * A nested button's native Enter fires a `click` that bubbles to the card, so
+ * every control inside the card stops both the click and the keydown that
+ * produced it. Retry is Retry; it is not also "open the machine".
+ */
+function swallow(event: Event) {
+  event.stopPropagation();
+}
+
 function openContextMenu(event: MouseEvent) {
   const opener = (event.currentTarget as HTMLElement)
     .closest("[data-test=host-card]")
@@ -152,10 +161,24 @@ function openContextMenu(event: MouseEvent) {
     <div class="ms-shimmer hc-skel hc-skel--bar" />
   </CardSurface>
 
-  <CardSurface v-else>
+  <CardSurface
+    v-else
+    class="hc-card"
+    :class="{ 'hc-card--open': !disconnected }"
+  >
+    <!-- The whole card is the door, the way a print tile is (GalleryCard).
+         A disconnected card has nothing to open, so it is not a control at
+         all and carries no role, no tab stop and no hover affordance. -->
     <div
       class="hc"
+      :class="{ 'hc--open': !disconnected }"
       data-test="host-card"
+      :role="disconnected ? undefined : 'button'"
+      :tabindex="disconnected ? undefined : 0"
+      :aria-label="disconnected ? undefined : `Open ${host.name}`"
+      @click="open"
+      @keydown.enter.prevent="open"
+      @keydown.space.prevent="open"
       @contextmenu.prevent.stop="openContextMenu"
     >
       <div class="hc__head">
@@ -165,8 +188,9 @@ function openContextMenu(event: MouseEvent) {
           type="button"
           class="hc__name hc__open"
           data-test="host-open"
+          tabindex="-1"
           :aria-label="`Open ${host.name}`"
-          @click="open"
+          @click.stop="open"
         >
           <span data-test="host-name">{{ host.name }}</span>
         </button>
@@ -180,7 +204,9 @@ function openContextMenu(event: MouseEvent) {
           :aria-label="`Actions for ${host.name}`"
           aria-haspopup="menu"
           :aria-expanded="actionsOpen ?? false"
-          @click="openContextMenu"
+          @click.stop="openContextMenu"
+          @keydown.enter.stop
+          @keydown.space.stop
         >
           <Icon name="more" :size="18" />
         </button>
@@ -197,6 +223,8 @@ function openContextMenu(event: MouseEvent) {
             class="hc__retry"
             data-test="host-reconnect"
             @click="reconnect"
+            @keydown.enter.stop="swallow"
+            @keydown.space.stop="swallow"
           >
             Connect
           </button>
@@ -221,6 +249,8 @@ function openContextMenu(event: MouseEvent) {
             class="hc__retry"
             data-test="host-retry"
             @click="retry"
+            @keydown.enter.stop="swallow"
+            @keydown.space.stop="swallow"
           >
             Retry
           </button>
@@ -243,6 +273,18 @@ function openContextMenu(event: MouseEvent) {
 <style scoped>
 .hc {
   color: var(--rebate);
+}
+.hc--open {
+  cursor: pointer;
+}
+/* The tint belongs to the whole card, so it sits on the CardSurface rather
+   than on `.hc`, which is inset by the card's own padding. */
+.hc-card--open:hover {
+  background: color-mix(in srgb, var(--rebate) 4%, transparent);
+}
+.hc:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
 }
 
 .hc__head {

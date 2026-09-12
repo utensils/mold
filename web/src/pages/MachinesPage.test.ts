@@ -196,16 +196,17 @@ describe("MachinesPage", () => {
     expect(opener.attributes("aria-expanded")).toBe("false");
   });
 
+  // Retry now legitimately sits inside a card that is itself a control, so
+  // the question is no longer "is it nested" but "does it stay to itself".
   it("keeps Retry keyboard events separate from opening machine details", async () => {
     poll.loading.value = false;
     const w = mountPage();
     const retry = w.get('[data-test="host-retry"]');
-    expect(retry.element.closest('[role="button"]')).toBeNull();
     await retry.trigger("keydown", { key: "Enter" });
     await retry.trigger("click");
     expect(poll.refresh).toHaveBeenCalledTimes(1);
     expect(pushMock).not.toHaveBeenCalled();
-    await w.get('[data-test="host-open"]').trigger("click");
+    await w.get('[data-test="host-card"]').trigger("click");
     expect(pushMock).toHaveBeenCalledTimes(1);
   });
 
