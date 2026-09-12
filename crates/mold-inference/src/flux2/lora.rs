@@ -80,6 +80,31 @@ pub(crate) enum Flux2LoraTarget {
         row_offset: usize,
         row_size: usize,
     },
+    /// Apply the WHOLE delta to a row-slice of the candle tensor — the exact
+    /// INVERSE of `Splat`, and the direction the diffusers-to-BFL mapping
+    /// needs.
+    ///
+    /// A diffusers adapter names `attn.to_q` / `to_k` / `to_v` separately, so
+    /// its `B` is `[h, rank]`; the BFL/GGUF transformer asks for the FUSED
+    /// `double_blocks.{i}.img_attn.qkv.weight`, which is `[3h, h]`. The delta
+    /// belongs at rows `component * h .. (component + 1) * h` of the base.
+    ///
+    /// `Splat` was used for this and is the wrong operation: it slices the
+    /// DELTA and adds it to all of the base, so it computed `b_rows / 3`
+    /// (1365 for a 4096-wide adapter, not even a whole row count), compared
+    /// that against the base's 12288 rows, and skipped with a WARN. On a 9B
+    /// GGUF tier that silently dropped 24 of the adapter's 32 layers while the
+    /// log still reported them applied. The doc comment on
+    /// `map_diffusers_double_block` has always described this as a "FusedSlice
+    /// of `img_attn.qkv`" — a variant that was never written until now.
+    BaseSlice {
+        candle_key: String,
+        /// Which of `components` equal row-slabs of the BASE this delta lands
+        /// on. The slab width comes from the base at apply time, because only
+        /// the base knows it.
+        component: usize,
+        components: usize,
+    },
 }
 
 impl Flux2LoraTarget {
@@ -87,6 +112,7 @@ impl Flux2LoraTarget {
         match self {
             Self::Direct { candle_key } => candle_key,
             Self::Splat { candle_key, .. } => candle_key,
+            Self::BaseSlice { candle_key, .. } => candle_key,
         }
     }
 }
@@ -355,35 +381,35 @@ fn map_diffusers_double_block(rest: &str, space: Flux2KeySpace) -> Vec<Flux2Lora
         // The Bfl arms below encode component index in `row_offset` and 0 size
         // as a sentinel meaning "this is the c-th of three equal Q/K/V slabs"
         // — the patch-builder resolves the absolute slice at build time.
-        ("attn.to_q", Flux2KeySpace::Bfl) => vec![Flux2LoraTarget::Splat {
+        ("attn.to_q", Flux2KeySpace::Bfl) => vec![Flux2LoraTarget::BaseSlice {
             candle_key: format!("double_blocks.{idx}.img_attn.qkv.weight"),
-            row_offset: 0,
-            row_size: 0,
+            component: 0,
+            components: 3,
         }],
-        ("attn.to_k", Flux2KeySpace::Bfl) => vec![Flux2LoraTarget::Splat {
+        ("attn.to_k", Flux2KeySpace::Bfl) => vec![Flux2LoraTarget::BaseSlice {
             candle_key: format!("double_blocks.{idx}.img_attn.qkv.weight"),
-            row_offset: 1,
-            row_size: 0,
+            component: 1,
+            components: 3,
         }],
-        ("attn.to_v", Flux2KeySpace::Bfl) => vec![Flux2LoraTarget::Splat {
+        ("attn.to_v", Flux2KeySpace::Bfl) => vec![Flux2LoraTarget::BaseSlice {
             candle_key: format!("double_blocks.{idx}.img_attn.qkv.weight"),
-            row_offset: 2,
-            row_size: 0,
+            component: 2,
+            components: 3,
         }],
-        ("attn.add_q_proj", Flux2KeySpace::Bfl) => vec![Flux2LoraTarget::Splat {
+        ("attn.add_q_proj", Flux2KeySpace::Bfl) => vec![Flux2LoraTarget::BaseSlice {
             candle_key: format!("double_blocks.{idx}.txt_attn.qkv.weight"),
-            row_offset: 0,
-            row_size: 0,
+            component: 0,
+            components: 3,
         }],
-        ("attn.add_k_proj", Flux2KeySpace::Bfl) => vec![Flux2LoraTarget::Splat {
+        ("attn.add_k_proj", Flux2KeySpace::Bfl) => vec![Flux2LoraTarget::BaseSlice {
             candle_key: format!("double_blocks.{idx}.txt_attn.qkv.weight"),
-            row_offset: 1,
-            row_size: 0,
+            component: 1,
+            components: 3,
         }],
-        ("attn.add_v_proj", Flux2KeySpace::Bfl) => vec![Flux2LoraTarget::Splat {
+        ("attn.add_v_proj", Flux2KeySpace::Bfl) => vec![Flux2LoraTarget::BaseSlice {
             candle_key: format!("double_blocks.{idx}.txt_attn.qkv.weight"),
-            row_offset: 2,
-            row_size: 0,
+            component: 2,
+            components: 3,
         }],
         ("attn.add_q_proj", Flux2KeySpace::Diffusers) => vec![Flux2LoraTarget::Direct {
             candle_key: format!("transformer_blocks.{idx}.attn.add_q_proj.weight"),
@@ -488,7 +514,10 @@ pub(crate) struct Flux2LoraSpec<'a> {
 
 fn resolve_rows(target: &Flux2LoraTarget, b_rows: usize) -> Option<(usize, usize)> {
     match target {
-        Flux2LoraTarget::Direct { .. } => None,
+        // Neither resolves against the DELTA's rows: `Direct` uses the whole
+        // thing, and `BaseSlice`'s slab width is a property of the base, which
+        // only `apply_patch_f32` has in hand.
+        Flux2LoraTarget::Direct { .. } | Flux2LoraTarget::BaseSlice { .. } => None,
         Flux2LoraTarget::Splat {
             row_size,
             row_offset,
@@ -568,29 +597,76 @@ fn compute_delta(patch: &Flux2LoraPatch, target_dev: &Device) -> candle_core::Re
 /// Apply a `Flux2LoraPatch` to a base tensor (`base_full_rows` is `B @ A`'s
 /// full row count when computed on the full B). Mutates an F32 working
 /// tensor in place. The caller handles dtype conversions.
+/// A merge that cannot be performed is an ERROR, never a skip.
+///
+/// Every arm used to have a way of quietly doing nothing — `Splat` warned and
+/// returned the base unchanged, and `Direct` let candle's own `shape mismatch
+/// in add` speak for it. Both are silent partial merges from where the user
+/// stands: the log said `32 patches on 16 tensors, 0 skipped`, the GGUF
+/// counter said `32 applied`, and the render either died with a message about
+/// two anonymous shapes or produced an image with a fraction of the adapter in
+/// it. A render that cannot apply the adapter it was asked for must say so and
+/// name the tensor.
 fn apply_patch_f32(
     base_f32: &Tensor,
     delta_full: &Tensor,
     patch: &Flux2LoraPatch,
 ) -> candle_core::Result<Tensor> {
+    let key = patch.target.candle_key();
     match &patch.target {
-        Flux2LoraTarget::Direct { .. } => base_f32 + delta_full,
+        Flux2LoraTarget::Direct { .. } => {
+            if base_f32.dims() != delta_full.dims() {
+                return Err(candle_core::Error::Msg(format!(
+                    "Flux.2 LoRA: adapter delta {:?} does not fit tensor '{key}' {:?}; \
+                     the adapter does not match this checkpoint",
+                    delta_full.dims(),
+                    base_f32.dims(),
+                )));
+            }
+            base_f32 + delta_full
+        }
         Flux2LoraTarget::Splat { .. } => {
             let (offset, size) = patch
                 .resolved_rows
                 .expect("Splat patch must have resolved_rows");
-            // Slice rows [offset..offset+size] of delta_full and add to ALL of base.
-            let delta_slice = delta_full.narrow(0, offset, size)?;
             let base_rows = base_f32.dim(0)?;
             if base_rows != size {
-                tracing::warn!(
-                    base_rows,
-                    delta_rows = size,
-                    "Flux.2 LoRA Splat: base row count != delta row count, skipping"
-                );
-                return Ok(base_f32.clone());
+                return Err(candle_core::Error::Msg(format!(
+                    "Flux.2 LoRA: fused adapter delta splits into {size}-row slabs but tensor \
+                     '{key}' has {base_rows} rows; the adapter does not match this checkpoint"
+                )));
             }
+            // Rows [offset..offset+size] of the delta, added to ALL of base.
+            let delta_slice = delta_full.narrow(0, offset, size)?;
             base_f32 + &delta_slice
+        }
+        Flux2LoraTarget::BaseSlice {
+            component,
+            components,
+            ..
+        } => {
+            let base_rows = base_f32.dim(0)?;
+            let slab = base_rows / components;
+            if slab * components != base_rows || delta_full.dim(0)? != slab {
+                return Err(candle_core::Error::Msg(format!(
+                    "Flux.2 LoRA: per-projection adapter delta has {} rows but tensor '{key}' \
+                     holds {components} slabs of {slab} ({base_rows} rows); the adapter does not \
+                     match this checkpoint",
+                    delta_full.dim(0)?,
+                )));
+            }
+            // The whole delta lands on slab `component`; the others pass
+            // through untouched, so the tensor is rebuilt from its parts.
+            let mut slabs = Vec::with_capacity(*components);
+            for index in 0..*components {
+                let part = base_f32.narrow(0, index * slab, slab)?;
+                slabs.push(if index == *component {
+                    (&part + delta_full)?
+                } else {
+                    part
+                });
+            }
+            Tensor::cat(&slabs, 0)
         }
     }
 }
@@ -1007,22 +1083,30 @@ mod tests {
         }
     }
 
+    /// A diffusers per-projection name meeting a BFL fused tensor is a
+    /// `BaseSlice`, not a `Splat`.
+    ///
+    /// It was a `Splat` — which slices the DELTA — and that is backwards for
+    /// this direction: the delta is one projection wide and the base is three,
+    /// so the merge computed `b_rows / 3` and skipped every time.
     #[test]
-    fn peft_canonical_diffusers_qkv_splat_in_bfl_space() {
-        let stem = "transformer.transformer_blocks.4.attn.to_q";
-        let targets = map_flux2_lora_key(stem, Flux2KeySpace::Bfl);
-        assert_eq!(targets.len(), 1);
-        match &targets[0] {
-            Flux2LoraTarget::Splat {
-                candle_key,
-                row_offset,
-                row_size,
-            } => {
-                assert_eq!(candle_key, "double_blocks.4.img_attn.qkv.weight");
-                assert_eq!(*row_offset, 0);
-                assert_eq!(*row_size, 0, "0 = sentinel for thirds-split");
+    fn peft_canonical_diffusers_qkv_targets_a_base_slice_in_bfl_space() {
+        for (leaf, expected_component) in [("to_q", 0), ("to_k", 1), ("to_v", 2)] {
+            let stem = format!("transformer.transformer_blocks.4.attn.{leaf}");
+            let targets = map_flux2_lora_key(&stem, Flux2KeySpace::Bfl);
+            assert_eq!(targets.len(), 1);
+            match &targets[0] {
+                Flux2LoraTarget::BaseSlice {
+                    candle_key,
+                    component,
+                    components,
+                } => {
+                    assert_eq!(candle_key, "double_blocks.4.img_attn.qkv.weight");
+                    assert_eq!(*component, expected_component, "{leaf}");
+                    assert_eq!(*components, 3);
+                }
+                other => panic!("expected BaseSlice for {leaf}, got {other:?}"),
             }
-            _ => panic!("expected Splat"),
         }
     }
 
@@ -1161,6 +1245,161 @@ mod tests {
                 Some((bucket[0].resolved_rows.unwrap().0, 2))
             );
         }
+    }
+
+    /// A diffusers-named per-projection adapter meeting a BFL/GGUF fused
+    /// `qkv` lands on ITS OWN third of the base and leaves the other two
+    /// untouched.
+    ///
+    /// This is the `Flux.2 LoRA Splat: base row count != delta row count,
+    /// skipping` case. The adapter from the campaign UAT is exactly this
+    /// shape — `transformer.transformer_blocks.{0..7}.attn.{to_q,to_k,to_v,
+    /// to_out.0}`, rank 32 — and on the 9B GGUF tier 24 of its 32 layers
+    /// silently did nothing while the loader reported `32 applied`, because
+    /// `Splat` sliced the DELTA (4096 / 3 = 1365 rows, not even a whole row
+    /// count) and compared that against the fused tensor's 12288.
+    #[test]
+    fn a_diffusers_projection_lands_on_its_own_slab_of_the_fused_qkv() {
+        let dev = Device::Cpu;
+        // Per-projection delta: B [4, 2] @ A [2, 4] of ones -> [4, 4] of 2.
+        let adapter = {
+            let mut layers = HashMap::new();
+            layers.insert(
+                "transformer.transformer_blocks.0.attn.to_k".to_string(),
+                LoraLayer {
+                    a: Tensor::full(1.0f32, (2, 4), &dev).unwrap(),
+                    b: Tensor::full(1.0f32, (4, 2), &dev).unwrap(),
+                    alpha: None,
+                },
+            );
+            LoraAdapter { layers, rank: 2 }
+        };
+        let specs = [Flux2LoraSpec {
+            adapter: &adapter,
+            scale: 1.0,
+            path_hash: 1,
+        }];
+
+        let (patches, skipped) = build_patches(&specs, Flux2KeySpace::Bfl);
+        assert_eq!(skipped, 0);
+        let bucket = &patches["double_blocks.0.img_attn.qkv.weight"];
+        assert_eq!(bucket.len(), 1);
+        assert!(
+            matches!(
+                bucket[0].target,
+                Flux2LoraTarget::BaseSlice {
+                    component: 1,
+                    components: 3,
+                    ..
+                }
+            ),
+            "to_k is the SECOND slab of the fused qkv, got {:?}",
+            bucket[0].target
+        );
+
+        // Fused base: [3 * 4, 4] of zeros.
+        let base = Tensor::zeros((12, 4), DType::F32, &dev).unwrap();
+        let delta = compute_delta(&bucket[0], &dev).unwrap();
+        let merged = apply_patch_f32(&base, &delta, &bucket[0]).unwrap();
+        assert_eq!(merged.dims(), &[12, 4]);
+
+        let rows: Vec<f32> = merged
+            .sum(1)
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .into_iter()
+            .collect();
+        // Q slab untouched, K slab carries 4 * 2.0 per row, V slab untouched.
+        assert_eq!(&rows[0..4], &[0.0, 0.0, 0.0, 0.0], "Q slab must not move");
+        assert_eq!(&rows[4..8], &[8.0, 8.0, 8.0, 8.0], "K slab carries it");
+        assert_eq!(&rows[8..12], &[0.0, 0.0, 0.0, 0.0], "V slab must not move");
+    }
+
+    /// A merge that cannot be performed is an ERROR that names the tensor,
+    /// never a skip and never two anonymous shapes.
+    #[test]
+    fn a_merge_that_cannot_be_performed_is_refused_by_name() {
+        let dev = Device::Cpu;
+        let patch = |target: Flux2LoraTarget, resolved_rows| Flux2LoraPatch {
+            a: Tensor::full(1.0f32, (2, 4), &dev).unwrap(),
+            b: Tensor::full(1.0f32, (4, 2), &dev).unwrap(),
+            effective_scale: 1.0,
+            target,
+            lora_path_hash: 0,
+            resolved_rows,
+        };
+        let delta = Tensor::full(2.0f32, (4, 4), &dev).unwrap();
+
+        // Direct against a differently shaped tensor — the `shape mismatch in
+        // add, lhs: [3072, 3072], rhs: [4096, 4096]` the campaign UAT saw.
+        let direct = patch(
+            Flux2LoraTarget::Direct {
+                candle_key: "double_blocks.0.img_attn.proj.weight".to_string(),
+            },
+            None,
+        );
+        let base = Tensor::zeros((3, 3), DType::F32, &dev).unwrap();
+        let err = apply_patch_f32(&base, &delta, &direct)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("img_attn.proj.weight"), "{err}");
+        assert!(err.contains("does not match this checkpoint"), "{err}");
+
+        // Splat whose slab does not fill the base — used to warn and return
+        // the base unchanged.
+        let splat = patch(
+            Flux2LoraTarget::Splat {
+                candle_key: "transformer_blocks.0.attn.to_q.weight".to_string(),
+                row_offset: 0,
+                row_size: 0,
+            },
+            Some((0, 1)),
+        );
+        let err = apply_patch_f32(&base, &delta, &splat)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("attn.to_q.weight"), "{err}");
+        assert!(err.contains("does not match this checkpoint"), "{err}");
+
+        // BaseSlice whose delta is not one slab wide.
+        let slice = patch(
+            Flux2LoraTarget::BaseSlice {
+                candle_key: "double_blocks.0.img_attn.qkv.weight".to_string(),
+                component: 0,
+                components: 3,
+            },
+            None,
+        );
+        let base = Tensor::zeros((9, 4), DType::F32, &dev).unwrap();
+        let err = apply_patch_f32(&base, &delta, &slice)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("img_attn.qkv.weight"), "{err}");
+        assert!(err.contains("does not match this checkpoint"), "{err}");
+    }
+
+    /// The Kohya fused-QKV direction is the one `Splat` was written for and it
+    /// is unchanged: a `[3h, rank]` delta splits across three `[h, h]`
+    /// tensors.
+    #[test]
+    fn the_fused_to_separate_direction_still_splits_the_delta() {
+        let dev = Device::Cpu;
+        let adapter = synthetic_kohya_adapter("lora_unet_double_blocks_0_img_attn_qkv", 1.0, 1.0);
+        let specs = [Flux2LoraSpec {
+            adapter: &adapter,
+            scale: 1.0,
+            path_hash: 1,
+        }];
+        let (patches, _) = build_patches(&specs, Flux2KeySpace::Diffusers);
+        let bucket = &patches["transformer_blocks.0.attn.to_v.weight"];
+        // B is [6, 2], so each slab is 2 rows and V is the third.
+        assert_eq!(bucket[0].resolved_rows, Some((4, 2)));
+
+        let base = Tensor::zeros((2, 4), DType::F32, &dev).unwrap();
+        let delta = compute_delta(&bucket[0], &dev).unwrap();
+        let merged = apply_patch_f32(&base, &delta, &bucket[0]).unwrap();
+        assert_eq!(merged.dims(), &[2, 4]);
     }
 
     #[test]
