@@ -82,7 +82,9 @@ describe("MachineCard", () => {
     );
     const bar = wrapper.findComponent(ProgressBar);
     expect(bar.props("height")).toBe(5);
-    expect(Math.round(bar.props("value"))).toBe(62);
+    // `props()` is typed `unknown` on a cold typecheck (the Nix sandbox has no
+    // tsbuildinfo), so read it as a number before rounding.
+    expect(Math.round(Number(bar.props("value")))).toBe(62);
   });
 
   it("shows no meter for a machine that reports no memory", () => {
