@@ -33,7 +33,9 @@ export function detectWebPlatform(raw: string | undefined): Platform {
 function browserPlatform(): string | undefined {
   const nav = globalThis.navigator as
     (Navigator & { userAgentData?: { platform?: string } }) | undefined;
-  return nav?.userAgentData?.platform ?? nav?.platform;
+  // `||`, not `??`: a privacy-hardened browser can expose `userAgentData`
+  // with an EMPTY platform string, and the classic field still knows.
+  return nav?.userAgentData?.platform || nav?.platform;
 }
 
 export const CURRENT_PLATFORM = detectWebPlatform(browserPlatform());

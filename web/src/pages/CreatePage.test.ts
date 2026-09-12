@@ -1619,7 +1619,10 @@ describe("CreatePage layout and behavior", () => {
     );
   });
 
-  it("fetches a settled print from a keyed machine for the canvas", async () => {
+  it("streams a settled print from a keyed machine through the media ticket", async () => {
+    // The same door the Lightbox uses: an <img>/<video> cannot send the key,
+    // so a keyed machine issues a short-lived ticket and the clip can
+    // Range-stream instead of being buffered whole into memory.
     const studio = addHost({
       url: "http://studio:7680",
       name: "Studio",
@@ -1634,30 +1637,26 @@ describe("CreatePage layout and behavior", () => {
     const originalFetch = globalThis.fetch;
     const fetchMock = vi.fn(async (_input: RequestInfo | URL) => ({
       ok: true,
-      blob: async () => new Blob(["png-bytes"]),
+      status: 200,
+      json: async () => ({ token: "t1", expires_at: 1_700_000_000 }),
     }));
     globalThis.fetch = fetchMock as never;
-    const createObjectURL = vi.fn((_blob: Blob) => "blob:print-1");
-    const revokeObjectURL = vi.fn();
-    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
     try {
       const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
       await flushPromises();
       const canvas = wrapper.getComponent({ name: "ResultCanvas" });
-      expect(canvas.props("resultSrc")).toBe("blob:print-1");
       expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
-        `http://studio:7680/api/gallery/image/${encodeURIComponent(entry.filename)}`,
+        "http://studio:7680/api/gallery/media-token",
       );
-      // The canvas moving on releases the object URL.
-      streamJobsRef.value = [
-        { ...finishedCanvasJob(), id: "canvas-next", startedAt: 20 },
-      ];
-      await flushPromises();
-      expect(revokeObjectURL).toHaveBeenCalledWith("blob:print-1");
+      const src = String(canvas.props("resultSrc"));
+      expect(src.startsWith("http://studio:7680/api/gallery/image/")).toBe(
+        true,
+      );
+      expect(src).toContain("media_token=t1");
+      expect(src).toContain("expires=1700000000");
+      expect(src).not.toContain("sk-studio");
     } finally {
       globalThis.fetch = originalFetch;
-      vi.unstubAllGlobals();
-      vi.stubGlobal("prompt", vi.fn());
     }
   });
 

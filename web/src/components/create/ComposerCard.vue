@@ -119,8 +119,9 @@ const expandLabel = computed(() =>
 // Both chords are the platform's own: ⌘ on Apple, Ctrl elsewhere. The ↵ glyph
 // carries its own span (it is set larger than the modifier), so Generate
 // spells its chord as the bare modifier plus that span.
-const expandChord = computed(() => shortcutLabel("E"));
-const modifierLabel = computed(() => shortcutLabel(""));
+// The platform is fixed at import, so these are plain strings.
+const expandChord = shortcutLabel("E");
+const modifierLabel = shortcutLabel("");
 const generateDisabled = computed(
   () => !props.cancellable && (props.busy || Boolean(props.disabledReason)),
 );

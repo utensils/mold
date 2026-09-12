@@ -161,8 +161,8 @@ size, or exact dimensions yourself.
 On every surface, a **↺ Reset** in the Create settings header puts every
 generation setting back to the selected style's defaults: shape, resolution,
 detail, how tight to your words, seed, add-on looks, the source and identity
-photos, and every More-settings group. Only your prompt, title, and style stay,
-and the count returns to one. On the web it is undoable from the toast it
+photos, and every More-settings group. Only your prompt, title, filing, and
+style stay, and the count returns to one. On the web it is undoable from the toast it
 raises.
 
 ## Identity Photos (PuLID)

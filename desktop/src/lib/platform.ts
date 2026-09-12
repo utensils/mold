@@ -6,12 +6,18 @@
  */
 import {
   normalizePlatform,
-  platformUi,
+  platformUi as platformUiFor,
   primaryModifierPressed as primaryModifierPressedOn,
   type Platform,
 } from "@studio/lib/platform";
 
-export { normalizePlatform, platformUi };
+export { normalizePlatform };
+
+/** The shared conventions, defaulting to the platform THIS shell detected —
+ * a bare `platformUi()` must never quietly mean "unknown" on a Mac. */
+export function platformUi(raw: string | Platform | undefined = CURRENT_PLATFORM) {
+  return platformUiFor(raw);
+}
 export type { DesktopPlatform } from "@studio/lib/platform";
 
 export function detectPlatform(
@@ -35,7 +41,7 @@ export function applyPlatformAttribute(root: HTMLElement, platform: Platform = C
   root.dataset.platform = platform;
 }
 
-export const PLATFORM_UI = platformUi(CURRENT_PLATFORM);
+export const PLATFORM_UI = platformUiFor(CURRENT_PLATFORM);
 
 export function shortcutLabel(key: string): string {
   return `${PLATFORM_UI.modifierLabel}${key}`;

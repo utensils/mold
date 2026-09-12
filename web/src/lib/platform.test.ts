@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { detectWebPlatform } from "./platform";
 
 describe("detectWebPlatform", () => {
@@ -27,6 +27,23 @@ describe("detectWebPlatform", () => {
     expect(detectWebPlatform(undefined)).toBe("unknown");
     expect(detectWebPlatform("")).toBe("unknown");
     expect(detectWebPlatform("Android")).toBe("unknown");
+  });
+});
+
+describe("browser detection", () => {
+  it("falls through an empty UA-Client-Hints platform to navigator.platform", async () => {
+    vi.resetModules();
+    vi.stubGlobal("navigator", {
+      userAgentData: { platform: "" },
+      platform: "MacIntel",
+    });
+    try {
+      const { CURRENT_PLATFORM } = await import("./platform");
+      expect(CURRENT_PLATFORM).toBe("macos");
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
   });
 });
 

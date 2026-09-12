@@ -181,9 +181,9 @@ import { downloadVideoExport } from "@studio/lib/videoExport";
 
 import { fetchMergedGallery } from "../lib/multiHostGallery";
 import {
-  directMediaUrl,
   fetchGalleryBlob,
-  needsAuthedMedia,
+  MediaUpgradeRequiredError,
+  resolveStreamableSrc,
 } from "../lib/galleryMedia";
 import {
   fetchH3BoundaryMedia,
@@ -2481,12 +2481,13 @@ function resultHostId(): string {
   );
 }
 /**
- * A settled still or clip with no inline bytes is drawn from its host: a
- * direct URL on a keyless machine, a fetched object URL on a keyed one (the
- * `<img>` cannot send the key). Revoked the moment the canvas moves on.
+ * A settled still or clip with no inline bytes is drawn from its host through
+ * the same door the Lightbox uses: a direct URL on a keyless machine, the
+ * short-lived `media_token` ticket on a keyed one, so a clip Range-streams
+ * instead of buffering whole into memory. A ticket URL is a plain string,
+ * nothing to revoke.
  */
 const hostedResultSrc = ref("");
-let revokeHostedResult: (() => void) | null = null;
 let hostedResultToken = 0;
 watch(
   () => {
@@ -2500,33 +2501,26 @@ watch(
   async (key) => {
     hostedResultToken += 1;
     const token = hostedResultToken;
-    revokeHostedResult?.();
-    revokeHostedResult = null;
     hostedResultSrc.value = "";
     if (!key) return;
     const [hostId, filename] = key.split("\u0000") as [string, string];
     const host = listHosts().find((h) => h.id === hostId);
     if (!host) return;
-    if (!needsAuthedMedia(host)) {
-      hostedResultSrc.value = directMediaUrl(host, filename);
-      return;
-    }
     try {
-      const blob = await fetchGalleryBlob(host, filename);
+      const src = await resolveStreamableSrc(host, filename);
       if (token !== hostedResultToken) return;
-      const url = URL.createObjectURL(blob);
-      hostedResultSrc.value = url;
-      revokeHostedResult = () => URL.revokeObjectURL(url);
-    } catch {
-      // The canvas stays empty; Download names the failure when asked.
+      hostedResultSrc.value = src;
+    } catch (err) {
+      if (token !== hostedResultToken) return;
+      // The canvas stays empty; an older keyed machine is told why, the way
+      // the Lightbox says it.
+      if (err instanceof MediaUpgradeRequiredError) {
+        toast("error", "Connect a newer Mold machine to show this print.");
+      }
     }
   },
   { immediate: true },
 );
-onBeforeUnmount(() => {
-  revokeHostedResult?.();
-  revokeHostedResult = null;
-});
 
 /** The MIME type a print's own bytes carry, for a print never fetched. */
 function galleryItemMimeType(item: GalleryImage): string {
