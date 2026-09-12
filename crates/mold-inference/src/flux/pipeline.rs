@@ -92,6 +92,61 @@ fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool, transformer_is_fp8: boo
     }
 }
 
+/// Device bytes a loaded FLUX.1 transformer occupies.
+///
+/// `fs::metadata(transformer).len()` is the right answer only while the
+/// loader leaves the checkpoint's dtype alone, and it does not always.
+///
+/// * A **GGUF** checkpoint keeps its GGML dtype on the card on BOTH LoRA
+///   paths. The bypass registry (the default — `MOLD_LORA_BYPASS` is
+///   `Auto` unless it reads `off`/`0`/`false`) never touches the base
+///   weights at all, and the legacy `off` merge in
+///   [`super::lora::gguf_lora_var_builder`] dequantizes each patched tensor
+///   to CPU F32, adds the delta, and `quantize_onto`s it straight back to
+///   the ORIGINAL GGML dtype — deliberately, "to avoid the 2x VRAM
+///   inflation that storing as F16 would cause". So the file length is
+///   exact for both, and this returns it.
+/// * A **dense safetensors** checkpoint is materialized at
+///   [`flux_runtime_dtype`], which is NOT the storage dtype off CUDA: a
+///   BF16 file loads at F32, so 23.8 GB of checkpoint is 47.6 GB of
+///   weights. Charging the file length there lets a card Keep a
+///   transformer it can no longer hold, which is #276's failure with a
+///   different cause.
+///
+/// `dense_parameter_count` is `None` when the header could not be read, and
+/// then this falls back to TODAY's behaviour — the file length — rather
+/// than guessing, exactly as every other residency decision does on a
+/// reading it does not have.
+fn transformer_resident_bytes_for(
+    is_quantized: bool,
+    checkpoint_file_bytes: u64,
+    dense_parameter_count: Option<u64>,
+    loaded_dtype: DType,
+) -> u64 {
+    if is_quantized {
+        return checkpoint_file_bytes;
+    }
+    match dense_parameter_count {
+        Some(parameters) => {
+            parameters.saturating_mul(crate::device::dtype_bytes(loaded_dtype) as u64)
+        }
+        None => checkpoint_file_bytes,
+    }
+}
+
+/// Total elements across every tensor in a safetensors checkpoint.
+///
+/// Read once at load and recorded on [`LoadedFlux`], because the residency
+/// decision is taken per render and must not re-open the file to answer.
+fn safetensors_parameter_count(path: &std::path::Path) -> Result<u64> {
+    let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path])? };
+    Ok(tensors
+        .tensors()
+        .iter()
+        .map(|(_, view)| view.shape().iter().product::<usize>() as u64)
+        .sum())
+}
+
 /// The activation dtype a GGUF FLUX transformer is built and run at.
 ///
 /// `flux_runtime_dtype` already answers BF16 on CUDA for a quantized model;
@@ -1097,6 +1152,11 @@ struct LoadedFlux {
     /// budget needs it, because #276's OOM was reported with LoRAs attached
     /// and the budget charged only the checkpoint file.
     lora_resident_bytes: u64,
+    /// Device bytes the transformer's weights occupy while resident — see
+    /// [`transformer_resident_bytes_for`]. Recorded at load because the
+    /// answer depends on the checkpoint's HEADER, which the per-render
+    /// residency decision must not re-open the file to read.
+    transformer_resident_bytes: u64,
 }
 
 /// Fingerprint of a single LoRA adapter (path + scale). Used to detect
@@ -1253,9 +1313,7 @@ impl FluxEngine {
         if loaded.flux_model.is_none() {
             return 0;
         }
-        std::fs::metadata(&loaded.transformer_path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0)
+        loaded.transformer_resident_bytes
     }
 
     fn free_gpu_state_before_vae_decode(
@@ -1617,6 +1675,31 @@ impl FluxEngine {
             )?);
             FluxTransformer::BF16(flux::model::Flux::new(&flux_cfg, flux_vb)?)
         };
+        // What the card is holding, which the file length answers only while
+        // the loader leaves the checkpoint's dtype alone. A dense checkpoint
+        // is materialized at `gpu_dtype`, which off CUDA is F32 whatever the
+        // file stores; a GGUF keeps its GGML dtype on both LoRA paths.
+        let transformer_resident_bytes = transformer_resident_bytes_for(
+            is_quantized,
+            std::fs::metadata(&transformer_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+            if is_quantized {
+                None
+            } else {
+                safetensors_parameter_count(&transformer_path)
+                    .inspect_err(|error| {
+                        tracing::warn!(
+                            path = %transformer_path.display(),
+                            %error,
+                            "could not read the transformer's parameter count; the residency \
+                             budget falls back to the checkpoint's file length"
+                        );
+                    })
+                    .ok()
+            },
+            gpu_dtype,
+        );
         self.base
             .progress
             .stage_done(xformer_label, xformer_stage.elapsed());
@@ -1787,6 +1870,7 @@ impl FluxEngine {
             transformer_path,
             t5_encoder_path: resolved_t5_path,
             lora_resident_bytes,
+            transformer_resident_bytes,
         });
 
         tracing::info!(model = %self.base.model_name, "all model components loaded successfully");
@@ -3605,8 +3689,8 @@ mod tests {
     use super::{
         build_gguf_transformer, effective_loras, flux_rms_norm_scale_aliases, flux_runtime_dtype,
         flux_transformer_var_builder, gguf_transformer_dtype, park_cond_to_cpu,
-        render_state_dtype_for, should_use_offload_bypass_registry, FluxTransformer,
-        LoraBypassMode, ProgressReporter,
+        render_state_dtype_for, should_use_offload_bypass_registry, transformer_resident_bytes_for,
+        FluxTransformer, LoraBypassMode, ProgressReporter, FLUX1_ATTENTION_HEADS,
     };
     use crate::{InferenceEngine, LoadStrategy};
     use candle_core::{DType, Device, Result, Tensor};
@@ -3859,6 +3943,138 @@ mod tests {
             identity.is_active(),
             "and the render keeps its conditioning"
         );
+    }
+
+    /// What the residency budget charges for the weights is what the DEVICE
+    /// is holding, which is the checkpoint file only when the loader does not
+    /// widen it.
+    ///
+    /// A GGUF checkpoint stays in its GGML dtype on the card on BOTH LoRA
+    /// paths — the bypass registry never touches the base weights, and the
+    /// legacy `MOLD_LORA_BYPASS=off` merge dequantizes to CPU F32, adds the
+    /// delta, and `quantize_onto`s straight back to the ORIGINAL dtype, so
+    /// the file length is exact there too.
+    ///
+    /// A dense safetensors checkpoint is a different story:
+    /// `flux_runtime_dtype` answers F32 off CUDA, so a BF16 file is TWICE its
+    /// own length once resident, and `fs::metadata().len()` understates a
+    /// 23.8 GB checkpoint by 23.8 GB. That is the case where a card would
+    /// Keep a transformer that no longer fits.
+    #[test]
+    fn the_weight_term_follows_the_loaded_dtype_not_the_file_length() {
+        // FLUX.1 dev: ~11.9 B parameters, shipped as a 23.8 GB BF16
+        // safetensors and a 12.6 GB Q8_0 GGUF.
+        const PARAMS: u64 = 11_900_000_000;
+        const BF16_FILE: u64 = 23_800_000_000;
+        const Q8_FILE: u64 = 12_600_000_000;
+
+        // Quantized: the file length, on both LoRA paths, because neither
+        // changes the on-device dtype. `dense_parameter_count` is irrelevant.
+        assert_eq!(
+            transformer_resident_bytes_for(true, Q8_FILE, None, DType::BF16),
+            Q8_FILE
+        );
+        assert_eq!(
+            transformer_resident_bytes_for(true, Q8_FILE, Some(PARAMS), DType::F32),
+            Q8_FILE,
+            "a GGUF's weights stay quantized however the activations run"
+        );
+
+        // Dense at the dtype it was stored at: unchanged from today.
+        assert_eq!(
+            transformer_resident_bytes_for(false, BF16_FILE, Some(PARAMS), DType::BF16),
+            PARAMS * 2
+        );
+
+        // Dense WIDENED to F32 — the Metal/CPU answer — is twice the file.
+        assert_eq!(
+            transformer_resident_bytes_for(false, BF16_FILE, Some(PARAMS), DType::F32),
+            PARAMS * 4
+        );
+
+        // An unreadable header falls back to TODAY'S behaviour, the file
+        // length, rather than guessing.
+        assert_eq!(
+            transformer_resident_bytes_for(false, BF16_FILE, None, DType::F32),
+            BF16_FILE
+        );
+    }
+
+    /// The 24 GiB rows, on the decision the budget actually makes.
+    ///
+    /// Both LoRA paths on a Q8 checkpoint KEEP at 1024°, because both hold
+    /// the same quantized bytes. The row that flips is the widened dense one:
+    /// charged at its file length a 46 GiB L40S keeps 23.8 GB of weights it
+    /// is actually holding 47.6 GB of.
+    #[test]
+    fn the_widened_checkpoint_drops_where_the_file_length_kept() {
+        use crate::device::{
+            still_transformer_residency, ActivationFamily, StillTransformerBudget, UsableFreeVram,
+            STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+        };
+
+        const PARAMS: u64 = 11_900_000_000;
+        const BF16_FILE: u64 = 23_800_000_000;
+        const Q8_FILE: u64 = 12_600_000_000;
+        // `usable_free_vram_bytes`'s reserve-adjusted totals for the two cards
+        // the campaign measures on, in the binary units `nvidia-smi` reports.
+        const RTX_4090_USABLE: u64 = (24_564 - 400) * 1024 * 1024;
+        const L40S_USABLE: u64 = (46_068 - 400) * 1024 * 1024;
+
+        let budget = |transformer_bytes: u64, dtype_bytes: u32| StillTransformerBudget {
+            transformer_bytes,
+            companion_resident_bytes: 0,
+            activation_bytes: crate::device::flux_activation_budget_bytes_for(
+                1024,
+                1024,
+                1,
+                dtype_bytes,
+                ActivationFamily::FluxDit,
+                FLUX1_ATTENTION_HEADS,
+                crate::attention::AttentionBackend::Math,
+            ),
+            vae_decode_peak_bytes: crate::device::flux_vae_decode_peak_bytes(
+                1024,
+                1024,
+                dtype_bytes,
+            ),
+            runtime_headroom_bytes: STILL_RESIDENCY_RUNTIME_HEADROOM_BYTES,
+        };
+
+        // A Q8 checkpoint keeps on a 24 GiB card whichever LoRA path built
+        // it: `is_quantized` is what both paths hand this function, and the
+        // legacy merge requantizes, so the answer is one figure, not two.
+        let quantized = transformer_resident_bytes_for(true, Q8_FILE, Some(PARAMS), DType::BF16);
+        assert_eq!(quantized, Q8_FILE);
+        assert!(
+            still_transformer_residency(
+                &budget(quantized, 2),
+                UsableFreeVram::Measured(RTX_4090_USABLE)
+            )
+            .keeps(),
+            "a Q8 transformer is 12.6 GB on the card on the bypass path and on the \
+             legacy merge path alike"
+        );
+
+        // The widened dense checkpoint, charged honestly, does NOT fit an
+        // L40S — and the file length said it did.
+        let by_file = still_transformer_residency(
+            &budget(BF16_FILE, 4),
+            UsableFreeVram::Measured(L40S_USABLE),
+        );
+        assert!(
+            by_file.keeps(),
+            "the file length is what made this row a Keep"
+        );
+
+        let honest = transformer_resident_bytes_for(false, BF16_FILE, Some(PARAMS), DType::F32);
+        let by_residency =
+            still_transformer_residency(&budget(honest, 4), UsableFreeVram::Measured(L40S_USABLE));
+        assert!(
+            !by_residency.keeps(),
+            "47.6 GB of F32 weights cannot stay resident on a 46 GiB card"
+        );
+        assert!(by_residency.shortfall_bytes() > 0);
     }
 
     /// The variable's precedence, including the part that CHANGED: unset now
