@@ -348,6 +348,7 @@ export function sourceConditioningValidationError(
     hasEndFrame: caps.supportsEndFrame && Boolean(form.endFrame),
     frames: caps.supportsVideo ? form.frames : null,
     model: form.model,
+    outputKind: canvasless ? "mesh" : caps.supportsVideo ? "video" : "image",
   });
 }
 

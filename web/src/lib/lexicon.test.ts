@@ -27,6 +27,7 @@ import loraPicker from "../components/LoraPicker.vue?raw";
 import lightbox from "../components/gallery/Lightbox.vue?raw";
 import appNav from "../components/shell/AppNav.vue?raw";
 import commands from "./commands.ts?raw";
+import sourceImageCapabilitySource from "@studio/lib/sourceImageCapability.ts?raw";
 
 /*
  * The binding lexicon (docs/design/README.md §2) on the web surface. Desktop's
@@ -169,5 +170,36 @@ describe("lexicon — the shell", () => {
     // The wordmark is lowercase mono; the product name in a sentence stays Mold.
     expect(appNav).not.toMatch(/brand__word[^>]*>\s*Mold\b/);
     expect(appNav).toMatch(/brand__word[^>]*>\s*mold\b/);
+  });
+});
+
+/**
+ * `studio/lib/sourceImageCapability.ts` is not a Vue template, so the
+ * Styles/Machines template-text scan above never reaches its returned
+ * sentences — that gap is exactly how "This checkpoint is image-to-video
+ * only…" escaped the lexicon. This scans the module's own string and
+ * template literals directly (comments are not quoted, so they cannot
+ * trip it), against the generic never-say words rather than the two
+ * Styles/Machines-page-specific ones (`/\bmodel page\b/i`, `/\bPull\b/`,
+ * `/\binstalled\b/i`, `/\bInstall\b/`) that name UI this module has none of.
+ */
+describe("lexicon — source-image advisory copy", () => {
+  it("never says host, model, or checkpoint in a returned sentence", () => {
+    const literals = [
+      ...sourceImageCapabilitySource.matchAll(/"((?:[^"\\]|\\.)*)"/g),
+      ...sourceImageCapabilitySource.matchAll(/`((?:[^`\\]|\\.)*)`/g),
+    ].map((m) => m[1]!);
+    const sentences = literals.filter((s) => s.length > 20);
+    expect(sentences.length).toBeGreaterThan(0);
+    const genericBanned = NEVER_SAID_ON_STYLES_AND_MACHINES.filter((re) =>
+      [/\bhost\b/i, /\bmodels?\b/i, /\bcheckpoints?\b/i].some(
+        (allowed) => allowed.source === re.source,
+      ),
+    );
+    for (const sentence of sentences) {
+      for (const banned of genericBanned) {
+        expect(sentence, String(banned)).not.toMatch(banned);
+      }
+    }
   });
 });

@@ -1334,6 +1334,11 @@ const sourceConditioningError = computed<string | null>(() =>
           ? form.state.value.frames
           : null,
         model: form.state.value.model,
+        outputKind: capabilities.value.canvasless
+          ? "mesh"
+          : capabilities.value.supportsVideo
+            ? "video"
+            : "image",
       }),
 );
 
