@@ -60,7 +60,12 @@ pub(crate) fn parse_nonfinite_flag(value: Option<&str>) -> bool {
 ///
 /// `Ok(())` without the flag, before any work at all, so the default path
 /// costs a boolean.
-pub(crate) fn check_step_is_finite(tensor: &Tensor, what: &str, step: usize) -> anyhow::Result<()> {
+pub(crate) fn check_step_is_finite(
+    tensor: &Tensor,
+    what: &str,
+    step: usize,
+    hint: Option<&str>,
+) -> anyhow::Result<()> {
     if !nonfinite_check_enabled() {
         return Ok(());
     }
@@ -72,7 +77,7 @@ pub(crate) fn check_step_is_finite(tensor: &Tensor, what: &str, step: usize) -> 
     if total.is_finite() {
         return Ok(());
     }
-    Err(nonfinite_error(what, step))
+    Err(nonfinite_error(what, step, hint))
 }
 
 /// The bail, as a value, so its CLASS is testable without the flag.
@@ -80,12 +85,37 @@ pub(crate) fn check_step_is_finite(tensor: &Tensor, what: &str, step: usize) -> 
 /// It is marked model-specific: a NaN is a fact about this checkpoint at this
 /// shape, and three of them used to degrade the whole DEVICE for a minute and
 /// refuse every other model on a single-GPU host.
-pub(crate) fn nonfinite_error(what: &str, step: usize) -> anyhow::Error {
-    crate::failure_class::model_specific_error(format!(
-        "non-finite {what} at denoise step {step} (MOLD_FLUX_DEBUG_NONFINITE); \
-         re-run with MOLD_FLUX2_QMATMUL=0 to take the per-forward dequant arm"
-    ))
+pub(crate) fn nonfinite_error(what: &str, step: usize, hint: Option<&str>) -> anyhow::Error {
+    crate::failure_class::model_specific_error(nonfinite_message(what, step, hint))
 }
+
+/// The bail's text, as a pure function, so what it advises is testable without
+/// a render.
+///
+/// **A hint is offered only where the arm it names is actually running.** The
+/// message used to end in `re-run with MOLD_FLUX2_QMATMUL=0 to take the
+/// per-forward dequant arm` unconditionally — on FLUX.1, on a BF16 FLUX.2
+/// tier, and on a dev tier whose fault was nothing to do with a matmul. The
+/// campaign UAT then hit a NaN on `flux2-dev:fp8`, which loads
+/// `(GPU, BF16, single-file remap)` and carries no quantized matmul at all,
+/// and spent its first pass following advice that could not have applied. Bad
+/// advice on a diagnostic is worse than none: this is the message someone
+/// reads at the exact moment they know least about what went wrong.
+pub(crate) fn nonfinite_message(what: &str, step: usize, hint: Option<&str>) -> String {
+    let mut message =
+        format!("non-finite {what} at denoise step {step} (MOLD_FLUX_DEBUG_NONFINITE)");
+    if let Some(hint) = hint {
+        message.push_str("; ");
+        message.push_str(hint);
+    }
+    message
+}
+
+/// The one hint the FLUX.2 quantized arm may offer, and only while it is the
+/// arm in use. See [`nonfinite_message`].
+pub(crate) const FLUX2_QMATMUL_HINT: &str =
+    "this tier is running the GGUF quantized-matmul fast path — re-run with \
+     MOLD_FLUX2_QMATMUL=0 to take the per-forward dequant arm";
 
 #[cfg(test)]
 mod tests {
@@ -134,7 +164,7 @@ mod tests {
     /// seconds with "no enabled, healthy GPU device is available".
     #[test]
     fn the_bail_is_marked_model_specific() {
-        let error = nonfinite_error("prediction", 3);
+        let error = nonfinite_error("prediction", 3, None);
         assert!(crate::failure_class::is_model_specific_failure(&error));
         assert!(
             error
@@ -150,6 +180,27 @@ mod tests {
     fn the_check_is_inert_when_the_flag_is_off() {
         let nan = Tensor::from_vec(vec![f32::NAN; 4], 4, &Device::Cpu).unwrap();
         assert!(!nonfinite_check_enabled(), "the flag must default off");
-        assert!(check_step_is_finite(&nan, "prediction", 3).is_ok());
+        assert!(check_step_is_finite(&nan, "prediction", 3, None).is_ok());
+    }
+
+    /// The bail names the flag that produced it and, by default, advises
+    /// nothing — because there is nothing true to advise. A hint is appended
+    /// only when the caller is actually running the arm it names.
+    #[test]
+    fn the_bail_only_advises_an_arm_that_is_running() {
+        let plain = nonfinite_message("prediction", 0, None);
+        assert_eq!(
+            plain,
+            "non-finite prediction at denoise step 0 (MOLD_FLUX_DEBUG_NONFINITE)"
+        );
+        assert!(
+            !plain.contains("MOLD_FLUX2_QMATMUL"),
+            "a tier with no quantized matmul must not be told to turn one off: {plain}"
+        );
+
+        let quantized = nonfinite_message("prediction", 7, Some(FLUX2_QMATMUL_HINT));
+        assert!(quantized
+            .starts_with("non-finite prediction at denoise step 7 (MOLD_FLUX_DEBUG_NONFINITE); "));
+        assert!(quantized.contains("MOLD_FLUX2_QMATMUL=0"));
     }
 }

@@ -61,7 +61,7 @@ pub(crate) fn parse_flux2_qmatmul(value: Option<&str>) -> bool {
 
 /// Process-frozen `MOLD_FLUX2_QMATMUL`, read once through the
 /// admission-frozen environment.
-fn flux2_qmatmul_enabled() -> bool {
+pub(crate) fn flux2_qmatmul_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         let enabled =

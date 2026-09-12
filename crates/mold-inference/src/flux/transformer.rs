@@ -150,7 +150,7 @@ impl FluxTransformer {
                 _ => pred,
             };
             // Off by default and a boolean when off; see `crate::flux_debug`.
-            crate::flux_debug::check_step_is_finite(&pred, "prediction", absolute_step)?;
+            crate::flux_debug::check_step_is_finite(&pred, "prediction", absolute_step, None)?;
             img = (img + &pred * (t_prev - t_curr))?;
 
             // Inpainting: blend preserved regions back at current noise level

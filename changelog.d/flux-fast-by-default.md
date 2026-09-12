@@ -302,3 +302,7 @@ step` — and names no cause, because the budget is the only one a real render
   first encode of a process now streams from the mapping as it always did, and
   the park is taken from the second onwards, when the reuse it is buying is
   real. Nothing about the rendered pixels changes either way.
+- **The non-finite bail no longer gives advice that cannot apply.** It used to
+  end every failure with "re-run with `MOLD_FLUX2_QMATMUL=0`", including on
+  FLUX.1 and on `flux2-dev:fp8`, which carries no quantized matmul at all. The
+  suggestion now appears only when that fast path is the arm actually running.

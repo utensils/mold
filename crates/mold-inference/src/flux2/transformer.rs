@@ -2320,6 +2320,23 @@ impl Flux2TransformerWrapper {
         }
     }
 
+    /// The advice the non-finite bail may offer for THIS transformer, or
+    /// `None`.
+    ///
+    /// Only a GGUF tier actually running the MMQ fast path has a quantized
+    /// matmul to turn off. A BF16 tier, a streamed one, and an FP8 single-file
+    /// remap (`flux2-dev:fp8`, which the campaign UAT bailed on) carry none,
+    /// and telling their operator to set `MOLD_FLUX2_QMATMUL=0` sends them
+    /// after an arm that was never in the render.
+    fn nonfinite_hint(&self) -> Option<&'static str> {
+        match self {
+            Self::Quantized(_) if super::quantized_transformer::flux2_qmatmul_enabled() => {
+                Some(crate::flux_debug::FLUX2_QMATMUL_HINT)
+            }
+            _ => None,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn denoise(
         &self,
@@ -2449,7 +2466,12 @@ impl Flux2TransformerWrapper {
             // would silently mis-shape them.
             let pred = pred.narrow(1, 0, img.dim(1)?)?;
             // Off by default and a boolean when off; see `crate::flux_debug`.
-            crate::flux_debug::check_step_is_finite(&pred, "prediction", step)?;
+            crate::flux_debug::check_step_is_finite(
+                &pred,
+                "prediction",
+                step,
+                self.nonfinite_hint(),
+            )?;
             img = (img + &pred * (t_prev - t_curr))?;
 
             // Inpainting: blend preserved regions back at current noise level
