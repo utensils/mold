@@ -1,1 +1,0 @@
-- **Preserve original export filenames.** Desktop 3-D model and animation exports now keep the original file stem when changing formats, matching web and mobile and avoiding model-only names when seed metadata loses precision.

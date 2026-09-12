@@ -1,1 +1,0 @@
-- **Correct local prompt expansion decoding.** Local expansion now samples its first generated token from the full prompt prefill, instead of forwarding the prompt's final token twice and sampling from the wrong next-token distribution.

@@ -1,1 +1,0 @@
-- **Keep command search useful offline.** Failed catalog searches offer Retry without closing the palette, while local commands remain available. Selection follows command identity as results change, and web labels reflow within narrow and enlarged-text viewports.

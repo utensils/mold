@@ -1,1 +1,0 @@
-- **Preserve unfinished settings edits.** Saving or resetting one setting keeps edits in other rows. Failed refreshes retain the existing form with Retry, profile changes cannot leave the old profile editable, and failed profile creation retains the typed name. Configuration text reflows at enlarged sizes and toggles have larger touch targets.

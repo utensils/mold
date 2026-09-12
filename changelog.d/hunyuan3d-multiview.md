@@ -1,1 +1,0 @@
-- Add Hunyuan3D 2mv and 2mv Turbo shape generation from semantically named front, left, back, and right images across the server, desktop, web, mobile, CLI, and MCP surfaces.

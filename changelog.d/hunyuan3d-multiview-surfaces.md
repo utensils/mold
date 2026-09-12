@@ -1,1 +1,0 @@
-- **Complete Hunyuan3D multiview authoring in terminal and Discord.** The TUI now exposes profile-gated semantic front/left/back/right inputs, and the Discord bot adds a dedicated `/mesh` command for single-view and named multiview generation ([#1496](https://github.com/utensils/mold/issues/1496)).

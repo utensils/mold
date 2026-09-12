@@ -1,1 +1,0 @@
-- **Reliable partial prompt batches.** Prompt batches now keep collecting when the expansion model returns fewer prompts than requested, instead of failing after three productive completions. Retries that add no new prompts remain bounded, and server logs report completion counts to help diagnose failures.
