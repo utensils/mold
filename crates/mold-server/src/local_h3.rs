@@ -113,6 +113,8 @@ mod runtime {
             config,
             request,
             Some(inputs),
+            // Local H3 holds the caller's own request; nothing was sealed.
+            None,
         )?;
         let grant = inputs
             .h3_private_ingress_grant

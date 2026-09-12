@@ -1872,7 +1872,7 @@ pub fn eligible_devices_for_request(
     if let Some(alias) = unresolvable_camera_control_alias(config, request) {
         return Err(ExecutionPlanError::UnresolvableLora { alias });
     }
-    let loras = effective_loras(config, request);
+    let loras = effective_loras(config, request, None);
     let artifacts = concrete_artifacts_for_family(&paths, &family, &loras, &engine_config);
     let normalized = config.effective_placement(&request.model, request.placement.as_ref());
     let effective = effective_constraints(&normalized, &artifacts);
@@ -2068,7 +2068,7 @@ fn resolve_execution_plans_with_policy(
     if let Some(alias) = unresolvable_camera_control_alias(config, request) {
         return Err(ExecutionPlanError::UnresolvableLora { alias });
     }
-    let effective_loras = effective_loras(config, request);
+    let effective_loras = effective_loras(config, request, projection);
     let admission_engine_config =
         mold_inference::FrozenEngineConfig::resolve_for_request(request, config);
     if let Some(prepared) = prepared {
@@ -2478,7 +2478,7 @@ pub(crate) fn preparation_authority_fingerprint(
         )
         .as_bytes(),
     );
-    hash.update(format!("{:?}", effective_loras(config, request)).as_bytes());
+    hash.update(format!("{:?}", effective_loras(config, request, None)).as_bytes());
     hash.update(
         serde_json::to_vec(&normalized_request)
             .expect("GenerateRequest serialization is infallible")
@@ -2527,7 +2527,7 @@ pub(crate) fn warm_execution_equivalence_cache(
                 .map(|manifest| manifest.family.clone())
         })
         .unwrap_or_else(|| "unknown".to_string());
-    let loras = effective_loras(config, request);
+    let loras = effective_loras(config, request, None);
     let mut paths = BTreeSet::new();
     for inputs in prepared.by_device.values() {
         paths.extend(
@@ -2680,6 +2680,12 @@ pub(crate) fn warm_installed_artifact_facts(models_dir: &Path) -> usize {
     warmed
 }
 
+/// `projection` is the sealed-media view of the job being dispatched, and it
+/// is REQUIRED wherever one exists: the worker validates before hydration, so
+/// its `request` is the scrubbed clone whose `loras` were emptied at
+/// publication. Comparing that against a plan whose `effective_loras` came
+/// from the same projection is the only way the two can agree — pass `None`
+/// only where the request genuinely carries its own stack.
 pub fn validate_before_cuda(
     plan: &ResolvedExecutionPlan,
     worker_device_id: &str,
@@ -2687,6 +2693,7 @@ pub fn validate_before_cuda(
     config: &Config,
     request: &GenerateRequest,
     prepared: Option<&PreparedExecutionInputs>,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> Result<(), ExecutionPlanError> {
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if let Some(prepared) = prepared.filter(|prepared| prepared.h3_private_ingress_grant.is_some())
@@ -2713,7 +2720,7 @@ pub fn validate_before_cuda(
     let current_paths = ModelPaths::resolve(model, config).ok_or_else(|| {
         ExecutionPlanError::PlanInvalidated("model paths are no longer resolvable".into())
     })?;
-    let current_loras = effective_loras(config, request);
+    let current_loras = effective_loras(config, request, projection);
     let current_engine_config =
         mold_inference::FrozenEngineConfig::resolve_for_request(request, config);
     if current_paths != plan.admission_paths
@@ -3091,7 +3098,7 @@ fn concrete_artifacts_for_family(
 /// and then agrees with itself everywhere, so the render proceeds with the
 /// preset silently absent. Admission calls this first and refuses instead.
 fn unresolvable_camera_control_alias(config: &Config, request: &GenerateRequest) -> Option<String> {
-    effective_lora_requests(config, request)
+    effective_lora_requests(config, request, None)
         .into_iter()
         .find_map(|lora| {
             let id = lora.path.strip_prefix("camera-control:")?;
@@ -3116,9 +3123,25 @@ fn resolved_camera_control_path(config: &Config, id: &str) -> Option<PathBuf> {
 /// The LoRA stack a request actually asks for, before alias resolution:
 /// explicit `loras`, else the legacy single `lora`, else the model config's
 /// own default.
+/// The adapter stack this render will actually merge.
+///
+/// The `projection` arm is not a nicety: a durable job's plan is resolved from
+/// the SCRUBBED request (`durable_queue_feeder` publishes
+/// `scrubbed_clone()`, which empties `loras` because the adapter is an
+/// authority field sealed into the encrypted media set), so on that path the
+/// request carries nothing and the sealed stack is the only description of the
+/// render there is. Reading only the request charged no adapter bytes and left
+/// `request_has_lora` false, which for flux2 and z-image froze an `Eager`
+/// strategy into a plan whose engine merges the LoRA as the transformer is
+/// BUILT — a decision only the sequential path can honour.
+///
+/// It is a FALLBACK, in this order, so a projection can never add an adapter
+/// to a render that has none: the request's own stack wins wherever it
+/// survived, and the config default stays last.
 fn effective_lora_requests(
     config: &Config,
     request: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> Vec<mold_core::LoraWeight> {
     request
         .loras
@@ -3126,6 +3149,11 @@ fn effective_lora_requests(
         .filter(|stack| !stack.is_empty())
         .cloned()
         .or_else(|| request.lora.clone().map(|lora| vec![lora]))
+        .or_else(|| {
+            projection
+                .filter(|projection| projection.has_loras())
+                .map(|projection| projection.loras.clone())
+        })
         .or_else(|| {
             config
                 .resolved_model_config(&request.model)
@@ -3140,9 +3168,13 @@ fn effective_lora_requests(
         .unwrap_or_default()
 }
 
-fn effective_loras(config: &Config, request: &GenerateRequest) -> Vec<PlannedLora> {
+fn effective_loras(
+    config: &Config,
+    request: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> Vec<PlannedLora> {
     const ZERO_SCALE_EPS: f64 = 1e-8;
-    effective_lora_requests(config, request)
+    effective_lora_requests(config, request, projection)
         .into_iter()
         .filter(|lora| lora.scale.abs() > ZERO_SCALE_EPS)
         .map(|lora| {
@@ -7310,7 +7342,7 @@ mod tests {
             let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
                 .unwrap()
                 .remove(0);
-            validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None).unwrap();
+            validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None, None).unwrap();
         }
     }
 
@@ -7330,11 +7362,11 @@ mod tests {
             placement.advanced.unwrap().transformer,
             DeviceRef::Device { .. }
         ));
-        validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None).unwrap();
+        validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None, None).unwrap();
 
         std::fs::write(root.path().join("transformer-q4.gguf"), vec![1_u8; 2048]).unwrap();
         assert!(matches!(
-            validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None),
+            validate_before_cuda(&plan, "cuda:0", 0, &config, &request, None, None),
             Err(ExecutionPlanError::PlanInvalidated(_))
         ));
     }
@@ -7444,9 +7476,140 @@ mod tests {
 
         config.models.get_mut("test:q4").unwrap().is_schnell = Some(false);
         assert!(matches!(
-            validate_before_cuda(&request_plan, "cuda:0", 0, &config, &request, None),
+            validate_before_cuda(&request_plan, "cuda:0", 0, &config, &request, None, None),
             Err(ExecutionPlanError::PlanInvalidated(_))
         ));
+    }
+
+    /// A durable LoRA render is planned from a request whose `loras` the
+    /// queue-media seal already emptied, so the plan must read the adapter
+    /// off the PROJECTION that travels beside it.
+    ///
+    /// `durable_queue_feeder` publishes `scrubbed_clone()` and the coordinator
+    /// resolves the frozen plan from that copy. Reading only the request meant
+    /// `request_has_lora` was false on every durable `--lora` render: no
+    /// `ComponentRole::Lora` artifact, no adapter bytes charged, and — for
+    /// flux2 and z-image, whose LoRA merge happens as the transformer is
+    /// BUILT — an `Eager` strategy frozen into a plan the engine then has to
+    /// render sequentially anyway.
+    #[test]
+    fn a_scrubbed_durable_lora_request_is_planned_from_its_projection() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            sparse_file(&root.path().join(name), GIB);
+        }
+        let adapter = root.path().join("style.safetensors");
+        sparse_file(&adapter, GIB / 4);
+        let config = config(root.path(), "flux2", None);
+
+        let mut authored = request(None);
+        authored.loras = Some(vec![mold_core::LoraWeight {
+            path: adapter.display().to_string(),
+            scale: 0.8,
+            expert: None,
+        }]);
+        let authored_plan =
+            resolve_execution_plans(&config, &authored, &devices(&[48 * GIB]), false)
+                .expect("the authored request plans")
+                .remove(0);
+        assert_eq!(
+            authored_plan.engine_load_strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "control: a flux2 LoRA request is planned sequentially when the \
+             request still carries the adapter"
+        );
+        assert!(authored_plan
+            .components
+            .contains_key(&ComponentRole::Lora(0)));
+
+        // What the coordinator actually receives.
+        let scrubbed = request(None);
+        assert!(scrubbed.loras.is_none() && scrubbed.lora.is_none());
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            loras: vec![mold_core::LoraWeight {
+                path: adapter.display().to_string(),
+                scale: 0.8,
+                expert: None,
+            }],
+            ..Default::default()
+        };
+        let durable_plan = resolve_execution_plans_for_coordinator_with_projection(
+            &config,
+            &scrubbed,
+            &devices(&[48 * GIB]),
+            false,
+            None,
+            Some(&projection),
+        )
+        .expect("the durable request plans")
+        .remove(0);
+
+        assert_eq!(
+            durable_plan.engine_load_strategy,
+            mold_inference::LoadStrategy::Sequential,
+            "the sealed adapter must reach the load-strategy decision"
+        );
+        assert_eq!(
+            durable_plan.effective_loras.len(),
+            1,
+            "the plan records the adapter that will actually be merged"
+        );
+        assert_eq!(durable_plan.effective_loras[0].path, adapter);
+        assert!(
+            durable_plan
+                .components
+                .contains_key(&ComponentRole::Lora(0)),
+            "the adapter's bytes must be charged to the plan"
+        );
+        assert_eq!(
+            durable_plan.execution_equivalence_fingerprint,
+            authored_plan.execution_equivalence_fingerprint,
+            "the same render must fingerprint the same whether the adapter \
+             arrived inline or sealed"
+        );
+    }
+
+    /// The fallback is a fallback: a request that still carries its own stack
+    /// wins, so a projection can never add an adapter to a render that
+    /// dropped one.
+    #[test]
+    fn the_request_stack_outranks_the_projection() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            sparse_file(&root.path().join(name), GIB);
+        }
+        let authored = root.path().join("authored.safetensors");
+        let sealed = root.path().join("sealed.safetensors");
+        sparse_file(&authored, GIB / 4);
+        sparse_file(&sealed, GIB / 4);
+        let config = config(root.path(), "flux2", None);
+
+        let mut request = request(None);
+        request.loras = Some(vec![mold_core::LoraWeight {
+            path: authored.display().to_string(),
+            scale: 1.0,
+            expert: None,
+        }]);
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            loras: vec![mold_core::LoraWeight {
+                path: sealed.display().to_string(),
+                scale: 1.0,
+                expert: None,
+            }],
+            ..Default::default()
+        };
+        let plan = resolve_execution_plans_for_coordinator_with_projection(
+            &config,
+            &request,
+            &devices(&[48 * GIB]),
+            false,
+            None,
+            Some(&projection),
+        )
+        .expect("plans")
+        .remove(0);
+
+        assert_eq!(plan.effective_loras[0].path, authored);
     }
 
     #[test]
@@ -8128,7 +8291,7 @@ mod tests {
                 .all(|component| component.predicted_vram_bytes > 0),
             "every concrete GPU component must expose a non-zero weight estimate"
         );
-        validate_before_cuda(plan, "cuda:0", 0, &config, &request, None).unwrap();
+        validate_before_cuda(plan, "cuda:0", 0, &config, &request, None, None).unwrap();
     }
 
     #[test]
@@ -8210,7 +8373,16 @@ mod tests {
         .unwrap()
         .remove(0);
         assert_eq!(plan.admission_paths, paths);
-        validate_before_cuda(&plan, "cuda:0", 0, &cold_config, &request, Some(&prepared)).unwrap();
+        validate_before_cuda(
+            &plan,
+            "cuda:0",
+            0,
+            &cold_config,
+            &request,
+            Some(&prepared),
+            None,
+        )
+        .unwrap();
     }
 
     #[test]

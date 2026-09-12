@@ -49,6 +49,18 @@ impl DeferredQueueMedia {
         &self.projection
     }
 
+    /// Record the adapter stack this job will merge, for the planner.
+    ///
+    /// Called by `durable_queue_feeder` at the one moment it holds both the
+    /// HYDRATED request and the job about to be published — immediately
+    /// before `scrubbed_clone()` empties `loras`. The execution plan is
+    /// resolved from that scrubbed copy, so this is the only description of
+    /// the render's adapters the planner can read; see
+    /// `QueueMediaProjection::loras`.
+    pub fn project_sealed_loras(&mut self, loras: Vec<mold_core::LoraWeight>) {
+        self.projection.loras = loras;
+    }
+
     pub fn media_set_ref(&self) -> &MediaSetRef {
         &self.media_set
     }

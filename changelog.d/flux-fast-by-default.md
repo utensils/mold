@@ -306,3 +306,15 @@ step` — and names no cause, because the budget is the only one a real render
   end every failure with "re-run with `MOLD_FLUX2_QMATMUL=0`", including on
   FLUX.1 and on `flux2-dev:fp8`, which carries no quantized matmul at all. The
   suggestion now appears only when that fast path is the arm actually running.
+
+- **A LoRA now reaches the planner on a server render, so the GPU memory plan
+  and the load strategy describe the render that actually runs.** A durable
+  job's adapter is sealed into the encrypted media set and removed from the
+  request before the job reaches the scheduler, and the execution plan is built
+  from that copy — so every `--lora` render over the server was planned as if
+  it had none: the adapter's bytes were never charged against the card, and
+  FLUX.2 and Z-Image, which merge a LoRA as the transformer is built, were
+  given an eager load plan only their sequential path can honour. The sealed
+  stack now travels with the job for planning, so those renders are planned
+  sequentially with the adapter counted. Local renders (`--local`) were never
+  affected.

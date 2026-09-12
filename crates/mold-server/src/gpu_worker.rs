@@ -1035,6 +1035,7 @@ fn validate_grant_before_acceptance(
                 &config,
                 &job.request,
                 job.prepared_execution_inputs.as_ref(),
+                job.deferred_media.as_ref().map(|media| media.projection()),
             )
         }
         OwnerWork::ChainStage(job) => {
@@ -1050,6 +1051,8 @@ fn validate_grant_before_acceptance(
                 worker.gpu.ordinal,
                 &job.config,
                 &job.stage_req,
+                None,
+                // A chain stage carries its own request, never a sealed set.
                 None,
             )
         }
@@ -1585,6 +1588,10 @@ fn validate_scheduled_generation_before_cuda(
         &config,
         &job.request,
         job.prepared_execution_inputs.as_ref(),
+        // This runs BEFORE `hydrate_dispatch_media`, so `job.request` is the
+        // scrubbed clone and the sealed set is the only place the adapter
+        // stack still exists.
+        job.deferred_media.as_ref().map(|media| media.projection()),
     )
 }
 
@@ -1616,6 +1623,8 @@ fn validate_scheduled_chain_stage_before_cuda(
         worker.gpu.ordinal,
         &job.config,
         &job.stage_req,
+        None,
+        // A chain stage carries its own request, never a sealed set.
         None,
     )
 }

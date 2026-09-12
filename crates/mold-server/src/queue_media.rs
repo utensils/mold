@@ -123,6 +123,25 @@ pub(crate) fn lora_would_be_lost_on_publication(
     }
 }
 
+/// The adapter stack a request will actually merge, singular field folded in.
+///
+/// Read at the ONE moment the durable feeder holds a hydrated request and has
+/// not yet scrubbed it, so the planner can be told what the render merges.
+/// `execution_plan::effective_lora_requests` applies the same
+/// singular-then-plural precedence to the request it is given; this is that
+/// rule at the seal.
+pub(crate) fn effective_request_loras(
+    request: &mold_core::GenerateRequest,
+) -> Vec<mold_core::LoraWeight> {
+    request
+        .loras
+        .as_ref()
+        .filter(|stack| !stack.is_empty())
+        .cloned()
+        .or_else(|| request.lora.clone().map(|lora| vec![lora]))
+        .unwrap_or_default()
+}
+
 /// A process-private authority that media extraction cannot make durable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessPrivateAuthority {
@@ -1040,6 +1059,11 @@ pub fn project_request_media(
             ) => {
                 projection.audio_path = true;
             }
+            // `QueueMediaProjection::loras` is deliberately NOT derived here:
+            // it is not part of the sealed record, so a projection built from
+            // records and one decoded from the store would disagree about a
+            // field neither can round-trip. The durable feeder is its single
+            // writer, through `DeferredQueueMedia::project_sealed_loras`.
             _ => {}
         }
     }
@@ -1918,6 +1942,61 @@ mod tests {
                 staged: 1
             })
         ));
+    }
+
+    /// The stack the planner must be told about, read at the seal.
+    ///
+    /// `scrubbed_clone` empties `loras` before the job reaches the scheduler,
+    /// and the frozen execution plan is resolved from that scrubbed copy — so
+    /// the durable feeder reads the effective stack here, one line earlier,
+    /// and stamps it onto the projection that travels beside the job. Without
+    /// it no durable `--lora` render was planned with an adapter at all: no
+    /// adapter bytes charged, and for flux2 and z-image an `Eager` strategy
+    /// frozen into a plan only the sequential path can honour.
+    #[test]
+    fn the_effective_stack_folds_the_singular_field_in_and_keeps_merge_order() {
+        let build = |value: serde_json::Value| -> mold_core::GenerateRequest {
+            let mut body = serde_json::json!({
+                "prompt": "x",
+                "model": "flux2-klein:q8",
+                "width": 1024,
+                "height": 1024,
+                "steps": 4
+            });
+            for (key, item) in value.as_object().unwrap() {
+                body[key] = item.clone();
+            }
+            serde_json::from_value(body).unwrap()
+        };
+
+        let plural = build(serde_json::json!({
+            "loras": [
+                {"path": "/models/loras/style.safetensors", "scale": 0.8},
+                {"path": "/models/loras/detail.safetensors", "scale": 1.0}
+            ]
+        }));
+        let stack = effective_request_loras(&plural);
+        assert_eq!(
+            stack
+                .iter()
+                .map(|lora| lora.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/models/loras/style.safetensors",
+                "/models/loras/detail.safetensors"
+            ],
+            "order is merge order and must be preserved"
+        );
+        assert_eq!(stack[0].scale, 0.8);
+
+        let singular = build(serde_json::json!({
+            "lora": {"path": "/models/loras/only.safetensors", "scale": 0.5}
+        }));
+        assert_eq!(effective_request_loras(&singular).len(), 1);
+
+        // A present-but-empty stack is not an adapter, and neither is absence.
+        assert!(effective_request_loras(&build(serde_json::json!({"loras": []}))).is_empty());
+        assert!(effective_request_loras(&build(serde_json::json!({}))).is_empty());
     }
 
     #[test]

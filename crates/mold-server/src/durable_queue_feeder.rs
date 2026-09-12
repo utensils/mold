@@ -1034,7 +1034,7 @@ async fn feed_available(
             row.target_device_id.as_deref(),
             |device_id| crate::queue_journal::resolve_pinned_ordinal(state, device_id),
         );
-        let deferred_media = if let Some(set_id) = row.media_set_id.as_ref() {
+        let mut deferred_media = if let Some(set_id) = row.media_set_id.as_ref() {
             let Some(lifecycle) = state.queue_journal.queue_media_lifecycle() else {
                 drop(reservation);
                 retain_for_retry(ticket, shutdown).await;
@@ -1201,6 +1201,20 @@ async fn feed_available(
                  restored for this attempt and the render will not use it — resubmit the \
                  request on this build to apply it"
             );
+        }
+        // Hand the adapter stack to the PLANNER before the scrub takes it.
+        //
+        // The frozen execution plan is resolved from the scrubbed copy below,
+        // so without this the planner saw no adapter on any durable `--lora`
+        // render: no adapter bytes charged, and for flux2 and z-image — whose
+        // LoRA merges as the transformer is BUILT — an `Eager` strategy
+        // frozen into a plan only the sequential path can honour. The stack
+        // read here is the effective one, the server's own materialized
+        // control adapter included, because preparation has already run.
+        if let Some(media) = deferred_media.as_mut() {
+            media.project_sealed_loras(crate::queue_media::effective_request_loras(
+                &preparation_request,
+            ));
         }
         // Publish only a payload-free copy. Dropping the RAII owner before the
         // staging lease preserves scrub-before-release on success; unwind and
@@ -1431,6 +1445,38 @@ async fn feed_available(
 
 #[cfg(test)]
 mod tests {
+    /// The stamp must land BEFORE the scrub, because the scrub is what takes
+    /// the stack away.
+    ///
+    /// The execution plan is resolved from the published, scrubbed request,
+    /// so the projection stamped here is the planner's only description of a
+    /// durable render's adapters. Reversing these two lines silently returns
+    /// to planning every `--lora` job as if it had none — an `Eager` strategy
+    /// for a flux2 or z-image render the engine can only execute
+    /// sequentially, and no adapter bytes charged anywhere. Ordering is not
+    /// something a unit test on either function alone can see, so it is
+    /// asserted over this file's own source, as the H3 allocation boundary
+    /// is.
+    #[test]
+    fn the_adapter_stack_is_stamped_before_publication_scrubs_it() {
+        let whole = include_str!("durable_queue_feeder.rs");
+        let source = &whole[..whole.find("\n#[cfg(test)]").unwrap_or(whole.len())];
+        let stamp = source
+            .find("project_sealed_loras(")
+            .expect("the feeder must hand the adapter stack to the planner");
+        let scrub = source
+            .find("preparation_request.scrubbed_clone()")
+            .expect("the feeder publishes a scrubbed copy");
+        assert!(
+            stamp < scrub,
+            "the stack must be read while the request still carries it"
+        );
+        assert!(
+            !source[stamp..scrub].contains("scrubbed_clone"),
+            "nothing may scrub between the read and the publication"
+        );
+    }
+
     /// The whole durable round trip a built-in-control render takes.
     ///
     /// `prepare_generation_inner` prepends the built-in LTX-2 control adapter
