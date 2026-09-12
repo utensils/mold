@@ -3427,6 +3427,75 @@ pub(crate) fn gpu_compute_dtype(device: &candle_core::Device) -> candle_core::DT
     }
 }
 
+// ---------------------------------------------------------------------------
+// Transformer residency: what the card is HOLDING, not what the file weighs
+// ---------------------------------------------------------------------------
+
+/// Device bytes a loaded diffusion transformer occupies.
+///
+/// `fs::metadata(checkpoint).len()` is the right answer only while the loader
+/// leaves the checkpoint's dtype alone, and it does not always. Shared by
+/// FLUX.1 and FLUX.2 because the two arms are the same arms:
+///
+/// * A **quantized** checkpoint (GGUF, and FLUX.2's NVFP4 streaming tier)
+///   keeps its storage dtype on the card on BOTH LoRA paths. The bypass
+///   registry (the default — `MOLD_LORA_BYPASS` is `Auto` unless it reads
+///   `off`/`0`/`false`) never touches the base weights at all, and the legacy
+///   `off` merge in `flux::lora::gguf_lora_var_builder` dequantizes each
+///   patched tensor to CPU F32, adds the delta, and `quantize_onto`s it
+///   straight back to the ORIGINAL GGML dtype — deliberately, "to avoid the 2x
+///   VRAM inflation that storing as F16 would cause". So the file length is
+///   exact for both, and this returns it.
+/// * A **dense safetensors** checkpoint is materialized at `loaded_dtype`,
+///   which is NOT the storage dtype off CUDA: [`gpu_dtype`] is F32 on every
+///   non-CUDA device, so a BF16 file loads at F32 and 23.8 GB of checkpoint is
+///   47.6 GB of weights. Charging the file length there lets a card Keep a
+///   transformer it can no longer hold, which is #276's failure with a
+///   different cause. The same arithmetic covers FLUX.2's FP8 tiers from the
+///   other side: an fp8 slab widened once at load holds TWO bytes per
+///   parameter where the file holds one, which is exactly what
+///   `flux2_fp8_widen_extra_resident_bytes_for_checkpoint` teaches the server
+///   estimators to charge — so the caller passes the dtype the weights are
+///   actually held at (`F8E4M3` for a tier that did not widen) and both sides
+///   land on the same figure.
+///
+/// `dense_parameter_count` is `None` when the header could not be read, and
+/// then this falls back to the file length rather than guessing, exactly as
+/// every other residency decision does on a reading it does not have.
+pub(crate) fn transformer_resident_bytes_for(
+    is_quantized: bool,
+    checkpoint_file_bytes: u64,
+    dense_parameter_count: Option<u64>,
+    loaded_dtype: candle_core::DType,
+) -> u64 {
+    if is_quantized {
+        return checkpoint_file_bytes;
+    }
+    match dense_parameter_count {
+        // The dtype's STORAGE width, not `dtype_bytes` — that one answers the
+        // activation question, where a sub-byte float still travels as two
+        // bytes, and these are weights at rest. The two agree on F32/BF16/F16
+        // and differ on exactly the case this has to get right: an FP8 slab
+        // that declined the load-time widen is one byte per parameter.
+        Some(parameters) => parameters.saturating_mul(loaded_dtype.size_in_bytes() as u64),
+        None => checkpoint_file_bytes,
+    }
+}
+
+/// Total elements across every tensor of a safetensors checkpoint, sharded or
+/// not.
+///
+/// Read once at load, because the residency decision is taken per render and
+/// must not re-open the file to answer.
+pub(crate) fn safetensors_parameter_count(paths: &[std::path::PathBuf]) -> anyhow::Result<u64> {
+    let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(paths)? };
+    Ok(tensors
+        .tensors()
+        .iter()
+        .map(|(_, view)| view.shape().iter().product::<usize>() as u64)
+        .sum())
+}
+
 /// Select the optimal dtype for GPU inference (CUDA-only BF16 variant).
 ///
 /// - CUDA: BF16 (well-supported by tensor cores, standard for diffusion)

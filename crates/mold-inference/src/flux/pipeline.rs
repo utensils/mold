@@ -92,61 +92,6 @@ fn flux_runtime_dtype(is_cuda: bool, is_quantized: bool, transformer_is_fp8: boo
     }
 }
 
-/// Device bytes a loaded FLUX.1 transformer occupies.
-///
-/// `fs::metadata(transformer).len()` is the right answer only while the
-/// loader leaves the checkpoint's dtype alone, and it does not always.
-///
-/// * A **GGUF** checkpoint keeps its GGML dtype on the card on BOTH LoRA
-///   paths. The bypass registry (the default — `MOLD_LORA_BYPASS` is
-///   `Auto` unless it reads `off`/`0`/`false`) never touches the base
-///   weights at all, and the legacy `off` merge in
-///   [`super::lora::gguf_lora_var_builder`] dequantizes each patched tensor
-///   to CPU F32, adds the delta, and `quantize_onto`s it straight back to
-///   the ORIGINAL GGML dtype — deliberately, "to avoid the 2x VRAM
-///   inflation that storing as F16 would cause". So the file length is
-///   exact for both, and this returns it.
-/// * A **dense safetensors** checkpoint is materialized at
-///   [`flux_runtime_dtype`], which is NOT the storage dtype off CUDA: a
-///   BF16 file loads at F32, so 23.8 GB of checkpoint is 47.6 GB of
-///   weights. Charging the file length there lets a card Keep a
-///   transformer it can no longer hold, which is #276's failure with a
-///   different cause.
-///
-/// `dense_parameter_count` is `None` when the header could not be read, and
-/// then this falls back to TODAY's behaviour — the file length — rather
-/// than guessing, exactly as every other residency decision does on a
-/// reading it does not have.
-fn transformer_resident_bytes_for(
-    is_quantized: bool,
-    checkpoint_file_bytes: u64,
-    dense_parameter_count: Option<u64>,
-    loaded_dtype: DType,
-) -> u64 {
-    if is_quantized {
-        return checkpoint_file_bytes;
-    }
-    match dense_parameter_count {
-        Some(parameters) => {
-            parameters.saturating_mul(crate::device::dtype_bytes(loaded_dtype) as u64)
-        }
-        None => checkpoint_file_bytes,
-    }
-}
-
-/// Total elements across every tensor in a safetensors checkpoint.
-///
-/// Read once at load and recorded on [`LoadedFlux`], because the residency
-/// decision is taken per render and must not re-open the file to answer.
-fn safetensors_parameter_count(path: &std::path::Path) -> Result<u64> {
-    let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path])? };
-    Ok(tensors
-        .tensors()
-        .iter()
-        .map(|(_, view)| view.shape().iter().product::<usize>() as u64)
-        .sum())
-}
-
 /// The activation dtype a GGUF FLUX transformer is built and run at.
 ///
 /// `flux_runtime_dtype` already answers BF16 on CUDA for a quantized model;
@@ -1153,7 +1098,8 @@ struct LoadedFlux {
     /// and the budget charged only the checkpoint file.
     lora_resident_bytes: u64,
     /// Device bytes the transformer's weights occupy while resident — see
-    /// [`transformer_resident_bytes_for`]. Recorded at load because the
+    /// [`crate::device::transformer_resident_bytes_for`]. Recorded at load
+    /// because the
     /// answer depends on the checkpoint's HEADER, which the per-render
     /// residency decision must not re-open the file to read.
     transformer_resident_bytes: u64,
@@ -1679,7 +1625,7 @@ impl FluxEngine {
         // the loader leaves the checkpoint's dtype alone. A dense checkpoint
         // is materialized at `gpu_dtype`, which off CUDA is F32 whatever the
         // file stores; a GGUF keeps its GGML dtype on both LoRA paths.
-        let transformer_resident_bytes = transformer_resident_bytes_for(
+        let transformer_resident_bytes = crate::device::transformer_resident_bytes_for(
             is_quantized,
             std::fs::metadata(&transformer_path)
                 .map(|metadata| metadata.len())
@@ -1687,7 +1633,7 @@ impl FluxEngine {
             if is_quantized {
                 None
             } else {
-                safetensors_parameter_count(&transformer_path)
+                crate::device::safetensors_parameter_count(std::slice::from_ref(&transformer_path))
                     .inspect_err(|error| {
                         tracing::warn!(
                             path = %transformer_path.display(),
@@ -3689,9 +3635,10 @@ mod tests {
     use super::{
         build_gguf_transformer, effective_loras, flux_rms_norm_scale_aliases, flux_runtime_dtype,
         flux_transformer_var_builder, gguf_transformer_dtype, park_cond_to_cpu,
-        render_state_dtype_for, should_use_offload_bypass_registry, transformer_resident_bytes_for,
-        FluxTransformer, LoraBypassMode, ProgressReporter, FLUX1_ATTENTION_HEADS,
+        render_state_dtype_for, should_use_offload_bypass_registry, FluxTransformer,
+        LoraBypassMode, ProgressReporter, FLUX1_ATTENTION_HEADS,
     };
+    use crate::device::transformer_resident_bytes_for;
     use crate::{InferenceEngine, LoadStrategy};
     use candle_core::{DType, Device, Result, Tensor};
     use candle_nn::VarBuilder;

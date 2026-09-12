@@ -183,6 +183,23 @@ pub struct Flux2Engine {
     /// that says "nothing is eagerly resident" — and because the engine is
     /// what the model cache owns, so `unload()` is what releases this.
     retained_transformer: Option<RetainedFlux2Transformer>,
+    /// What the transformer checkpoint is, for the residency arithmetic —
+    /// resolved once and memoized, because it costs a `stat` per shard, a
+    /// format probe and a safetensors header parse, and the residency
+    /// question is asked on every render.
+    xformer_residency_facts: OnceLock<XformerResidencyFacts>,
+}
+
+/// The checkpoint-side inputs to [`crate::device::transformer_resident_bytes_for`].
+#[derive(Clone, Copy)]
+struct XformerResidencyFacts {
+    /// GGUF, or the NVFP4 streaming tier: weights that keep their stored
+    /// width on the card, for which the file length IS the resident figure.
+    is_quantized: bool,
+    file_bytes: u64,
+    /// `None` when the header could not be read, which falls the decision
+    /// back to the file length rather than to a guess.
+    dense_parameter_count: Option<u64>,
 }
 
 /// A GPU-resident FLUX.2 transformer kept between sequential renders, with
@@ -296,20 +313,42 @@ pub fn resolve_flux2_config(
     }
 }
 
-/// On-disk bytes of the transformer, sharded or not.
-///
-/// This is the resident figure for both arms: a GGUF stays quantized on the
-/// card, and a BF16 safetensors is materialized one for one.
-fn xformer_component_bytes(paths: &mold_core::ModelPaths) -> u64 {
-    let files: &[std::path::PathBuf] = if paths.transformer_shards.is_empty() {
+/// Every file the transformer is stored in, sharded or not.
+fn xformer_component_files(paths: &mold_core::ModelPaths) -> &[std::path::PathBuf] {
+    if paths.transformer_shards.is_empty() {
         std::slice::from_ref(&paths.transformer)
     } else {
         paths.transformer_shards.as_slice()
-    };
-    files
+    }
+}
+
+/// On-disk bytes of the transformer, sharded or not.
+///
+/// This is what a PRE-load gate spends — the bytes that have to be read, and
+/// what the FP8 widen policy's own three-copy arithmetic is denominated in.
+/// It is NOT the resident figure: see [`xformer_resident_bytes`].
+fn xformer_component_bytes(paths: &mold_core::ModelPaths) -> u64 {
+    xformer_component_files(paths)
         .iter()
         .filter_map(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
         .sum()
+}
+
+/// Total elements across every shard of a dense FLUX.2 transformer.
+///
+/// `None` when the header could not be read — see
+/// [`crate::device::transformer_resident_bytes_for`], which then falls back to
+/// the file length rather than guessing.
+fn dense_parameter_count(paths: &mold_core::ModelPaths) -> Option<u64> {
+    crate::device::safetensors_parameter_count(xformer_component_files(paths))
+        .inspect_err(|error| {
+            tracing::warn!(
+                %error,
+                "could not read the Flux.2 transformer's parameter count; the residency budget \
+                 falls back to the checkpoint's file length"
+            );
+        })
+        .ok()
 }
 
 /// A hash of the resolved architecture, for the retained slot's guard.
@@ -435,6 +474,7 @@ impl Flux2Engine {
             shared_pool,
             dev_text_encoder: None,
             retained_transformer: None,
+            xformer_residency_facts: OnceLock::new(),
         }
     }
 
@@ -499,6 +539,7 @@ impl Flux2Engine {
             shared_pool,
             dev_text_encoder: None,
             retained_transformer: None,
+            xformer_residency_facts: OnceLock::new(),
         })
     }
 
@@ -1107,6 +1148,50 @@ impl Flux2Engine {
             Ok(super::single_file::Flux2SingleFileFormat::BflNative)
                 | Ok(super::single_file::Flux2SingleFileFormat::BflNativeRoot)
                 | Ok(super::single_file::Flux2SingleFileFormat::Nvfp4)
+        )
+    }
+
+    /// Device bytes this engine's transformer occupies, held at `weight_dtype`.
+    ///
+    /// The file length is the resident figure only while the loader leaves the
+    /// checkpoint's dtype alone, and FLUX.2 has two ways it does not:
+    /// `crate::engine::gpu_dtype` is F32 on every non-CUDA device, so a BF16
+    /// Klein-9B is ~36 GB of weights on a Mac rather than its ~18 GB file; and
+    /// an FP8 tier widened once at load holds two bytes per parameter where
+    /// the file holds one, which is exactly what
+    /// `flux2_fp8_widen_extra_resident_bytes_for_checkpoint` teaches the
+    /// server estimators to charge. Charging the file in either case lets the
+    /// card Keep a transformer it can no longer hold — #276's failure with
+    /// `4fc27b19`'s own cause — so the rule is
+    /// [`crate::device::transformer_resident_bytes_for`], the one FLUX.1
+    /// takes, asked with the dtype the weights are actually held at.
+    ///
+    /// `weight_dtype` is the loaded transformer's own answer
+    /// ([`super::transformer::Flux2TransformerWrapper::resident_weight_dtype`])
+    /// wherever there is one; a pre-load estimate passes the working dtype,
+    /// which charges the widened figure and so errs on the side the card
+    /// cannot OOM on.
+    ///
+    /// The checkpoint-side inputs cost a `stat` per shard, a format probe and
+    /// a safetensors header parse, so they are resolved once and memoized: the
+    /// residency question is asked on every render, and FLUX.1 records the
+    /// same facts on its loaded state for the same reason.
+    fn xformer_resident_bytes(&self, weight_dtype: DType) -> u64 {
+        let facts = self.xformer_residency_facts.get_or_init(|| {
+            let is_quantized = self.is_gguf_transformer() || self.is_nvfp4_single_file();
+            XformerResidencyFacts {
+                is_quantized,
+                file_bytes: xformer_component_bytes(&self.base.paths),
+                dense_parameter_count: (!is_quantized)
+                    .then(|| dense_parameter_count(&self.base.paths))
+                    .flatten(),
+            }
+        });
+        crate::device::transformer_resident_bytes_for(
+            facts.is_quantized,
+            facts.file_bytes,
+            facts.dense_parameter_count,
+            weight_dtype,
         )
     }
 
@@ -1732,7 +1817,12 @@ impl Flux2Engine {
                 let park = Self::decide_mistral_prefix_residency(
                     &encoder_device,
                     encoder_dtype,
-                    xformer_component_bytes(&self.base.paths),
+                    // Pre-load: the transformer this is making room for has
+                    // not been built, so there is nothing to ask which dtype
+                    // it settled at. The working dtype charges the widened
+                    // figure, which parks the prefix sooner rather than
+                    // leaving the card short.
+                    self.xformer_resident_bytes(gpu_dtype),
                     self.dev_text_encoder
                         .as_ref()
                         .map_or(0, |encoder| encoder.parked_bytes()),
@@ -2205,23 +2295,39 @@ impl Flux2Engine {
         // is the same budget the eager path weighs — not a rule about which
         // generate path is running.
         drop(inpaint_ctx);
+        // What the card is HOLDING, which the file length answers only while
+        // the loader leaves the checkpoint's dtype alone — the transformer is
+        // built by now, so it names the dtype its own weights settled at. A
+        // streamed transformer keeps the same bounded working set the
+        // preflight was charged.
+        let xformer_resident_size = {
+            let held = self.xformer_resident_bytes(transformer.resident_weight_dtype(gpu_dtype));
+            if self.block_offload_enabled() {
+                held.min(crate::device::STREAMING_TRANSFORMER_CAP_BYTES)
+            } else {
+                held
+            }
+        };
         let budget = self.still_transformer_budget(
             req,
             gpu_dtype,
             crate::device::resolve_vae_dtype(gpu_dtype),
             &flux2_cfg,
-            xformer_size,
+            xformer_resident_size,
         );
         // Sampled with the transformer still resident, so its bytes are added
         // back: the budget is defined against the card as if nothing this
         // render loaded were on it.
-        let usable_free =
-            crate::device::usable_free_for_residency(&device, self.base.gpu_ordinal, xformer_size);
+        let usable_free = crate::device::usable_free_for_residency(
+            &device,
+            self.base.gpu_ordinal,
+            xformer_resident_size,
+        );
         let residency = crate::device::still_transformer_residency(&budget, usable_free);
         if residency.keeps() {
             self.retained_transformer = Some(RetainedFlux2Transformer {
                 transformer,
-                device_bytes: xformer_size,
+                device_bytes: xformer_resident_size,
                 ordinal: self.base.gpu_ordinal,
                 dtype: gpu_dtype,
                 lora_fingerprint,
@@ -2367,8 +2473,21 @@ impl Flux2Engine {
             self.load()?;
         }
         // Derived before the `loaded` borrow below, because the residency
-        // question needs `self` and the encode loop needs `&mut loaded`.
-        let transformer_bytes = xformer_component_bytes(&self.base.paths);
+        // question needs `self` and the encode loop needs `&mut loaded`. The
+        // transformer is on the card by now, so it answers for the dtype its
+        // own weights are held at rather than being charged its file length.
+        let transformer_weight_dtype = self
+            .base
+            .loaded
+            .as_ref()
+            .and_then(|loaded| {
+                loaded
+                    .transformer
+                    .as_ref()
+                    .map(|transformer| transformer.resident_weight_dtype(loaded.dtype))
+            })
+            .unwrap_or(DType::BF16);
+        let transformer_bytes = self.xformer_resident_bytes(transformer_weight_dtype);
         let encoder_peak_bytes = self.text_encoder_peak_bytes(
             self.base
                 .loaded
@@ -2932,6 +3051,85 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokenizers::models::bpe::BPE;
+
+    /// The FLUX.2 residency budget charges the weights the card is holding.
+    ///
+    /// `4fc27b19` fixed this for FLUX.1 and left FLUX.2 charging the
+    /// checkpoint's file length, under a comment asserting the claim that
+    /// commit disproved. Two cases: a dense checkpoint off CUDA is
+    /// materialized at F32 whatever the file stores, and an FP8 tier widened
+    /// at load holds two bytes per parameter where the file holds one. Both
+    /// are the same under-charge — the card Keeps a transformer it can no
+    /// longer hold — and the second is the figure `e5919ced` already taught
+    /// the SERVER estimators, so the engine agreeing is the point.
+    #[test]
+    fn the_residency_budget_follows_the_dtype_the_weights_are_held_at() {
+        use crate::device::transformer_resident_bytes_for;
+        use crate::flux2::transformer::{
+            flux2_fp8_checkpoint_bytes, flux2_fp8_widen_extra_resident_bytes, Flux2Config,
+        };
+
+        // The FP8 checkpoint size IS one byte per parameter, so it doubles as
+        // the parameter count both halves of this test need.
+        let parameters = flux2_fp8_checkpoint_bytes(&Flux2Config::klein_9b());
+        let bf16_file = parameters * 2;
+
+        // A Mac. `device::gpu_dtype` is F32 on every non-CUDA device.
+        assert_eq!(
+            transformer_resident_bytes_for(false, bf16_file, Some(parameters), DType::F32),
+            parameters * 4,
+            "a BF16 Klein-9B is materialized at F32 off CUDA — twice its file"
+        );
+        assert_eq!(
+            transformer_resident_bytes_for(false, bf16_file, Some(parameters), DType::BF16),
+            bf16_file,
+            "on CUDA the same checkpoint's weights are its file, byte for byte"
+        );
+
+        // An FP8 tier that widened at load, and the server's own extra for it.
+        let fp8_file = parameters;
+        let widened =
+            transformer_resident_bytes_for(false, fp8_file, Some(parameters), DType::BF16);
+        assert_eq!(widened, parameters * 2, "two bytes per parameter");
+        let idle_46gb = 43 * 1024 * 1024 * 1024;
+        assert_eq!(
+            widened,
+            fp8_file + flux2_fp8_widen_extra_resident_bytes(fp8_file, idle_46gb, None),
+            "the engine's residency figure is the server estimator's file-plus-widen"
+        );
+
+        // The same tier on a card that could not afford the widen keeps its
+        // packed slab, which the loaded layer reports as F8E4M3.
+        assert_eq!(
+            transformer_resident_bytes_for(false, fp8_file, Some(parameters), DType::F8E4M3),
+            fp8_file,
+        );
+        let crowded_24gb = 10 * 1024 * 1024 * 1024;
+        assert_eq!(
+            flux2_fp8_widen_extra_resident_bytes(fp8_file, crowded_24gb, None),
+            0,
+            "and the server charges no extra there either"
+        );
+
+        // A GGUF keeps its GGML dtype on the card, so nothing moves.
+        let q8_file = 9_000_000_000;
+        assert_eq!(
+            transformer_resident_bytes_for(true, q8_file, None, DType::F32),
+            q8_file
+        );
+        assert_eq!(
+            transformer_resident_bytes_for(true, q8_file, Some(parameters), DType::BF16),
+            q8_file,
+            "a parameter count cannot re-price a quantized checkpoint"
+        );
+
+        // An unreadable header falls back to the file length rather than a
+        // guess, exactly as every other residency decision does.
+        assert_eq!(
+            transformer_resident_bytes_for(false, bf16_file, None, DType::F32),
+            bf16_file
+        );
+    }
 
     fn temp_test_dir(prefix: &str) -> PathBuf {
         let suffix = SystemTime::now()

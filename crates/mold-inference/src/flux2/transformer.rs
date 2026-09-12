@@ -93,6 +93,24 @@ pub(crate) enum Flux2Linear {
 }
 
 impl Flux2Linear {
+    /// The dtype this layer's weight is HELD at.
+    ///
+    /// Only [`Self::Fp8`] — an FP8 slab that declined the load-time widen —
+    /// differs from the working dtype the layer was built with: it keeps one
+    /// byte per parameter and casts on every forward, so the checkpoint's own
+    /// file length is its resident figure. [`Self::Fp8Widened`] holds
+    /// `vb.dtype()`, and [`Self::Standard`] was materialized at it.
+    /// [`Self::Nvfp4Streaming`] keeps its packed weights on the HOST and is
+    /// charged as a quantized tier, which never asks this.
+    pub(crate) fn resident_weight_dtype(&self, loaded_dtype: DType) -> DType {
+        match self {
+            Self::Fp8 { .. } => DType::F8E4M3,
+            Self::Standard(_) | Self::Fp8Widened { .. } | Self::Nvfp4Streaming { .. } => {
+                loaded_dtype
+            }
+        }
+    }
+
     fn load_with_bias(
         in_dim: usize,
         out_dim: usize,
@@ -1944,6 +1962,13 @@ impl OffloadedFlux2Transformer {
 }
 
 impl Flux2Transformer {
+    /// See [`Flux2TransformerWrapper::resident_weight_dtype`]. The widen is
+    /// uniform across the network — one decision, taken once in `new` and
+    /// handed to every layer — so the first linear answers for all of them.
+    pub(crate) fn resident_weight_dtype(&self, loaded_dtype: DType) -> DType {
+        self.img_in.resident_weight_dtype(loaded_dtype)
+    }
+
     pub fn new(cfg: &Flux2Config, vb: VarBuilder) -> Result<Self> {
         // Resolved once, before the first weight lands, because the budget it
         // reads is the card's free VRAM ahead of the load.
@@ -2256,6 +2281,26 @@ fn batchable_positional_embedding(img_ids: &Tensor) -> bool {
 }
 
 impl Flux2TransformerWrapper {
+    /// The dtype this transformer's weights are actually HELD at.
+    ///
+    /// Everything but an FP8 tier that declined the widen holds its weights at
+    /// the working dtype it was loaded with, so the residency budget can be
+    /// derived from the checkpoint's parameter count. An FP8 slab that stayed
+    /// packed ([`Flux2Fp8Widen::PerForward`]) holds ONE byte per parameter and
+    /// casts per forward, which is the file's own figure — and the widen is
+    /// resolved once, from the card's free VRAM BEFORE the load, so it cannot
+    /// be re-derived afterwards against a card the weights are already on. The
+    /// loaded transformer is therefore the only honest authority, and this is
+    /// how it answers.
+    pub(crate) fn resident_weight_dtype(&self, loaded_dtype: DType) -> DType {
+        match self {
+            Self::BF16(transformer) => transformer.resident_weight_dtype(loaded_dtype),
+            // Streamed and quantized weights are charged at their file length,
+            // which never consults this.
+            Self::Offloaded(_) | Self::Quantized(_) => loaded_dtype,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn denoise(
         &self,
@@ -2448,6 +2493,46 @@ impl Flux2TransformerWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the card is HOLDING, per layer.
+    ///
+    /// The residency budget derives the transformer's device bytes from the
+    /// checkpoint's parameter count times the dtype its weights are held at,
+    /// and for an FP8 tier that dtype is the WIDEN's answer, not the working
+    /// dtype: a widened slab is two bytes per parameter where the file is one,
+    /// and a slab that declined the widen is still the file's own figure. The
+    /// widen is resolved from the card's free VRAM BEFORE the load, so it
+    /// cannot be re-derived afterwards — only the built layer knows.
+    #[test]
+    fn only_an_unwidened_fp8_layer_departs_from_the_working_dtype() {
+        let device = candle_core::Device::Cpu;
+        let weight = Tensor::zeros((2, 2), DType::F32, &device).unwrap();
+        let standard = Flux2Linear::Standard(candle_nn::Linear::new(weight.clone(), None));
+        assert_eq!(standard.resident_weight_dtype(DType::F32), DType::F32);
+        assert_eq!(standard.resident_weight_dtype(DType::BF16), DType::BF16);
+
+        let widened = Flux2Linear::Fp8Widened {
+            weight: weight.clone(),
+            scale: None,
+            bias: None,
+        };
+        assert_eq!(
+            widened.resident_weight_dtype(DType::BF16),
+            DType::BF16,
+            "a widened slab holds the working dtype — two bytes per parameter"
+        );
+
+        let packed = Flux2Linear::Fp8 {
+            weight,
+            scale: None,
+            bias: None,
+        };
+        assert_eq!(
+            packed.resident_weight_dtype(DType::BF16),
+            DType::F8E4M3,
+            "a slab that declined the widen is still one byte per parameter"
+        );
+    }
 
     /// Denoise the tiny synthetic transformer for one step, optionally with an
     /// unconditional branch. Returns the resulting latent as f32.

@@ -155,7 +155,13 @@
   a per-render VRAM measurement and is reported in the server log rather than
   hashed into the plan. The GGUF activation width and the FLUX.2 CFG shape ARE
   the resolved answers, so two renders that differ in either are never filed as
-  the same execution.
+  the same execution. That budget charges what the card is HOLDING rather than
+  what the checkpoint weighs on disk, on both families: off CUDA a dense
+  checkpoint is materialized at F32 whatever the file stores, so a BF16
+  Klein-9B is ~36 GB of weights on a Mac and not its ~18 GB file, and a FLUX.2
+  FP8 tier widened once at load holds two bytes per parameter where the file
+  holds one — the same figure the server's own estimates charge. A GGUF keeps
+  its quantized bytes and is unchanged.
 - **A FLUX identity render no longer fails at the first denoise step.** The
   eager `--id-image` path kept its own copy of the old rule that a quantized
   FLUX transformer runs its state tensors in F32. Once the GGUF path stopped
