@@ -305,9 +305,26 @@ pub(crate) fn check_planned_memory_budget(
     model_name: &str,
     predicted_peak_bytes: u64,
     available_bytes: u64,
+    physical_capacity_bytes: Option<u64>,
     suggestion: &str,
 ) -> Result<(), ApiError> {
     if predicted_peak_bytes > available_bytes {
+        // Naming a cause is only useful if it is the cause. When the peak is
+        // above the DEVICE'S OWN capacity, nothing was contended and nothing
+        // will be released — the 24 GB simulation in the 2026-09-11 audit read
+        // "memory pressure changed after scheduler admission" on a card with
+        // nothing else on it at all. Say what is true: this shape does not fit
+        // this device.
+        if physical_capacity_bytes.is_some_and(|capacity| predicted_peak_bytes > capacity) {
+            return Err(ApiError::insufficient_memory(format!(
+                "model '{}' execution plan peak ~{:.1} GB exceeds this GPU's ~{:.1} GB usable \
+                 capacity, so no amount of waiting will make it fit. {}",
+                model_name,
+                predicted_peak_bytes as f64 / 1_000_000_000.0,
+                available_bytes as f64 / 1_000_000_000.0,
+                suggestion,
+            )));
+        }
         return Err(ApiError::insufficient_memory(format!(
             "model '{}' frozen execution plan peak ~{:.1} GB no longer fits the current ~{:.1} GB \
              physical memory budget; {}. Retry after other GPU work releases memory. {}",
@@ -374,12 +391,14 @@ fn check_planned_memory_budget_with_resident(
     predicted_peak_bytes: u64,
     free_bytes: u64,
     resident_vram_bytes: u64,
+    physical_capacity_bytes: Option<u64>,
     suggestion: &str,
 ) -> Result<(), ApiError> {
     check_planned_memory_budget(
         model_name,
         predicted_peak_bytes,
         free_bytes.saturating_add(resident_vram_bytes),
+        physical_capacity_bytes,
         suggestion,
     )
 }
@@ -1418,6 +1437,8 @@ pub(crate) fn preflight_planned_memory_guard(
             predicted_peak_bytes,
             free,
             active_vram_bytes,
+            mold_inference::device::total_vram_bytes(gpu_ordinal)
+                .map(|total| total.saturating_sub(mold_inference::device::reserved_vram_bytes())),
             &rejection_suggestion_for_model(hint, model_name),
         )
     }
@@ -1430,6 +1451,7 @@ pub(crate) fn preflight_planned_memory_guard(
                 predicted_peak_bytes,
                 available,
                 0,
+                None,
                 rejection_suggestion(hint),
             );
         }
@@ -1441,6 +1463,7 @@ pub(crate) fn preflight_planned_memory_guard(
                 predicted_peak_bytes,
                 available,
                 active_vram_bytes,
+                None,
                 rejection_suggestion(hint),
             );
         }
@@ -1526,6 +1549,8 @@ pub(crate) fn preflight_planned_memory_guard_after_drop(
             model_name,
             predicted_peak_bytes,
             available,
+            mold_inference::device::total_vram_bytes(gpu_ordinal)
+                .map(|total| total.saturating_sub(mold_inference::device::reserved_vram_bytes())),
             rejection_suggestion(hint),
         )
     }
@@ -1538,6 +1563,7 @@ pub(crate) fn preflight_planned_memory_guard_after_drop(
                 model_name,
                 predicted_peak_bytes,
                 available,
+                None,
                 rejection_suggestion(hint),
             );
         }
@@ -2665,6 +2691,7 @@ mod fail_closed_tests {
                 "cv:2925935",
                 frozen_offload_peak,
                 fresh_available,
+                None,
                 rejection_suggestion(None),
             )
             .is_ok(),
@@ -2675,6 +2702,7 @@ mod fail_closed_tests {
                 "cv:2925935",
                 frozen_offload_peak,
                 parked_free.saturating_add(reclaimable_active),
+                None,
                 rejection_suggestion(None),
             )
             .is_ok(),
@@ -2688,6 +2716,9 @@ mod fail_closed_tests {
             "planned",
             8_300_000_000,
             8_200_000_000,
+            // A card with capacity to spare: the plan lost memory to something
+            // else, which is the one case the pressure wording is true of.
+            Some(24_000_000_000),
             rejection_suggestion(None),
         )
         .expect_err("new pressure after admission must reject the frozen plan");
@@ -2709,6 +2740,7 @@ mod fail_closed_tests {
             frozen_peak,
             activation_and_workspace,
             resident_vram,
+            None,
             rejection_suggestion(None),
         )
         .is_ok());
@@ -2717,6 +2749,7 @@ mod fail_closed_tests {
             frozen_peak,
             activation_and_workspace - 1,
             resident_vram,
+            None,
             rejection_suggestion(None),
         )
         .is_err());
@@ -4727,7 +4760,7 @@ mod metal_policy_tests {
         let resident = 24 * gib;
         let admits = |sample: &MetalMemorySnapshot, credit| {
             let available = metal_available_from_sample(Some(sample), credit)?.unwrap();
-            check_planned_memory_budget_with_resident("warm", 30 * gib, available, 0, "")
+            check_planned_memory_budget_with_resident("warm", 30 * gib, available, 0, None, "")
         };
         assert!(admits(&sample, resident).is_ok());
         assert!(

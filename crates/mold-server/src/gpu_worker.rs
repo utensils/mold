@@ -5402,11 +5402,35 @@ fn ensure_model_ready_sync_inner_guarded(
 /// observed peak therefore passed the worker gate and died two minutes later
 /// in CUDA (#641). A zero envelope means no learned evidence and must never
 /// weaken the frozen plan.
+///
+/// `physical_budget_bytes` is the card's capacity minus the driver reserve,
+/// and it is a CEILING ON THE ENVELOPE, never on the frozen plan. The envelope
+/// is learned from observations, and an observation that cannot fit the device
+/// it was taken on is not a measurement of the shape — it is the record of a
+/// run that reached the card. #1707: two OOMs pushed a `flux2-dev:q8` envelope
+/// to 46,554,677,248 bytes on a ~46.1 GB L40S, the recheck refused every retry
+/// with `~46.5 GB no longer fits the current ~46.1 GB`, and the 5 % decay could
+/// not fire because a refusal produces no new sample. Clamping makes the
+/// envelope say the most it honestly can — "all of it" — and leaves a genuine
+/// shortfall to the frozen plan, which this never lowers. Zero means the
+/// capacity could not be read, and an unmeasurable card keeps today's answer.
 pub(crate) fn planned_recheck_peak_bytes(
     predicted_vram_peak_bytes: u64,
     learned_vram_envelope_bytes: u64,
+    physical_budget_bytes: u64,
 ) -> u64 {
-    predicted_vram_peak_bytes.max(learned_vram_envelope_bytes)
+    let envelope = if physical_budget_bytes == 0 {
+        learned_vram_envelope_bytes
+    } else {
+        learned_vram_envelope_bytes.min(physical_budget_bytes)
+    };
+    predicted_vram_peak_bytes.max(envelope)
+}
+
+/// The card's capacity minus the driver reserve, or `0` when it cannot be read.
+pub(crate) fn physical_vram_budget_bytes(gpu: &device::DiscoveredGpu) -> u64 {
+    gpu.total_vram_bytes
+        .saturating_sub(mold_inference::device::reserved_vram_bytes())
 }
 
 /// Reclaim the ordinary retained-engine residency, then prove the exact
@@ -5540,6 +5564,9 @@ pub(crate) fn validate_private_h3_physical_capacity(
         model_name,
         predicted_device_peak_bytes,
         available_device_bytes,
+        // The private H3 gate proves its own allocation-free evidence against a
+        // fresh sample; it carries no separate capacity reading.
+        None,
         crate::memory_preflight::rejection_suggestion(None),
     )?;
     crate::memory_preflight::check_planned_host_budget(
@@ -5565,6 +5592,7 @@ fn ensure_model_ready_sync_inner(
         planned_recheck_peak_bytes(
             planned.predicted_vram_peak_bytes,
             planned.learned_vram_envelope_bytes,
+            physical_vram_budget_bytes(&worker.gpu),
         )
     });
     let planned_execution_fingerprint = planned_load.map(|planned| planned.execution_fingerprint);
@@ -13244,18 +13272,86 @@ mod tests {
     #[test]
     fn planned_recheck_uses_the_larger_of_static_and_learned_vram() {
         assert_eq!(
-            planned_recheck_peak_bytes(11_548_381_184, 24_884_805_632),
+            planned_recheck_peak_bytes(11_548_381_184, 24_884_805_632, 25_000_000_000),
             24_884_805_632,
             "the learned envelope must win when it is the conservative one"
         );
         assert_eq!(
-            planned_recheck_peak_bytes(24_884_805_632, 0),
+            planned_recheck_peak_bytes(24_884_805_632, 0, 25_000_000_000),
             24_884_805_632,
             "no learned evidence must never weaken the frozen plan"
         );
         assert_eq!(
-            planned_recheck_peak_bytes(20_000_000_000, 12_000_000_000),
+            planned_recheck_peak_bytes(20_000_000_000, 12_000_000_000, 25_000_000_000),
             20_000_000_000
+        );
+    }
+
+    /// #1707: the envelope a FAILED run leaves behind is the card, not the
+    /// shape, and a recheck peak above the card can never clear — so every
+    /// retry is refused until the row ages out.
+    #[test]
+    fn a_learned_envelope_above_the_card_is_clamped_to_it() {
+        const PLATO_L40S_BUDGET: u64 = 46_100_000_000;
+        assert_eq!(
+            planned_recheck_peak_bytes(37_600_000_000, 46_554_677_248, PLATO_L40S_BUDGET),
+            PLATO_L40S_BUDGET,
+            "an envelope that cannot fit the card says at most 'all of it'"
+        );
+        assert_eq!(
+            planned_recheck_peak_bytes(48_000_000_000, 46_554_677_248, PLATO_L40S_BUDGET),
+            48_000_000_000,
+            "a frozen plan above the card is a real refusal and is never lowered"
+        );
+        assert_eq!(
+            planned_recheck_peak_bytes(37_600_000_000, 46_554_677_248, 0),
+            46_554_677_248,
+            "an unmeasurable card keeps today's answer"
+        );
+    }
+
+    /// The refusal must describe what happened. On the 24 GB simulation the
+    /// loader said "memory pressure changed after scheduler admission" with
+    /// nothing else on the card at all.
+    #[test]
+    fn a_peak_above_the_cards_capacity_is_not_reported_as_memory_pressure() {
+        let error = crate::memory_preflight::check_planned_memory_budget(
+            "flux2-dev:q8",
+            37_600_000_000,
+            26_200_000_000,
+            Some(26_200_000_000),
+            "try a smaller variant",
+        )
+        .expect_err("a peak above the card must refuse");
+        assert!(
+            error.error.contains("46.1 GB")
+                || !error
+                    .error
+                    .contains(crate::memory_preflight::ADMISSION_PRESSURE_MARKER),
+            "a card that was never contended must not be reported as contended: {}",
+            error.error
+        );
+        assert!(
+            error.error.contains("37.6 GB") && error.error.contains("26.2 GB"),
+            "the refusal must name the peak and the budget: {}",
+            error.error
+        );
+
+        // Real contention keeps the pressure wording.
+        let error = crate::memory_preflight::check_planned_memory_budget(
+            "flux2-dev:q8",
+            37_600_000_000,
+            26_200_000_000,
+            Some(46_100_000_000),
+            "try a smaller variant",
+        )
+        .expect_err("a peak above what is free must refuse");
+        assert!(
+            error
+                .error
+                .contains(crate::memory_preflight::ADMISSION_PRESSURE_MARKER),
+            "a card with capacity to spare really did lose it to something: {}",
+            error.error
         );
     }
 
@@ -13431,6 +13527,7 @@ mod tests {
                 "ltx2-19b",
                 24 << 30,
                 1 << 30,
+                Some(48u64 << 30),
                 crate::memory_preflight::rejection_suggestion(None),
             )
             .expect_err("device pressure rejects")
