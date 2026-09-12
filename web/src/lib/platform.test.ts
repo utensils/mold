@@ -44,4 +44,13 @@ describe("shortcutLabel and primaryModifierPressed", () => {
     expect(primaryModifierPressed(primary)).toBe(true);
     expect(primaryModifierPressed({ ...primary, altKey: true })).toBe(false);
   });
+
+  it("spells a Shift chord in the platform's own grammar", async () => {
+    // ⌘⇧N on a Mac, Ctrl+Shift+N elsewhere — the Library's New collection
+    // keycap must not hard-code the Mac glyphs.
+    const { PLATFORM_UI, shiftShortcutLabel } = await import("./platform");
+    expect(shiftShortcutLabel("N")).toBe(
+      `${PLATFORM_UI.modifierLabel}${PLATFORM_UI.shiftLabel}N`,
+    );
+  });
 });

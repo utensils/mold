@@ -45,6 +45,11 @@ export function shortcutLabel(key: string): string {
   return `${PLATFORM_UI.modifierLabel}${key}`;
 }
 
+/** This platform's spelling of a primary-modifier + Shift chord, e.g. `⌘⇧N` / `Ctrl+Shift+N`. */
+export function shiftShortcutLabel(key: string): string {
+  return `${PLATFORM_UI.modifierLabel}${PLATFORM_UI.shiftLabel}${key}`;
+}
+
 /** This browser's primary modifier: Command on Apple platforms, Control elsewhere. */
 export function primaryModifierPressed(
   event: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "altKey">,
