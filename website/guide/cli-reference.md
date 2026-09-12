@@ -998,10 +998,10 @@ every `mold system` verb it targets the local machine rather than `MOLD_HOST`,
 and it takes `--output-dir <PATH>` (defaulting to this host's configured
 gallery) and `--json`:
 
-| Command     | Behavior                                                                                              |
-| ----------- | ----------------------------------------------------------------------------------------------------- |
+| Command     | Behavior                                                                                                                    |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `status`    | Report the store's on-disk version, generation, delta-log size, whether a writer is live, and whether a downgrade is needed |
-| `downgrade` | Fold a version-3 store back to version 2 so a mold older than 0.29 can publish against the home again |
+| `downgrade` | Fold a version-3 store back to version 2 so a mold older than 0.29 can publish against the home again                       |
 
 Storage version 3 is opt-in (`gallery.authority_log`). Run `downgrade` with the
 newer build, before rolling one back. It is idempotent, verifies the result by
