@@ -10716,12 +10716,16 @@ mod tests {
     async fn a_retained_transformer_is_credited_to_the_device_it_sits_on() {
         const FREE: u64 = 5 << 30;
         const RETAINED: u64 = 14 << 30;
+        // The scheduler plans against the same reserve-adjusted budget the
+        // loader reads (`schedulable_available_vram_bytes`), so the driver
+        // reserve comes off the sampled figure before any credit is added.
+        let usable_free = FREE - mold_inference::device::reserved_vram_bytes();
         let (coordinator, ..) = unschedulable_test_coordinator(FREE).await;
         let worker = coordinator.state.gpu_pool.worker_snapshot()[0].clone();
 
         assert_eq!(
             coordinator.device_snapshots()[0].available_vram_bytes,
-            FREE,
+            usable_free,
             "an empty cache credits nothing"
         );
 
@@ -10729,7 +10733,7 @@ mod tests {
 
         assert_eq!(
             coordinator.device_snapshots()[0].available_vram_bytes,
-            FREE + RETAINED,
+            usable_free + RETAINED,
             "the retained transformer is capacity: reused by its own model, \
              released for any other"
         );
@@ -10742,7 +10746,10 @@ mod tests {
             .unwrap()
             .release_retained_residency_except(None)
             .expect("the retained slot is reclaimable");
-        assert_eq!(coordinator.device_snapshots()[0].available_vram_bytes, FREE);
+        assert_eq!(
+            coordinator.device_snapshots()[0].available_vram_bytes,
+            usable_free
+        );
     }
 
     /// hal9000's exact host shape on 2026-08-27 — `MemAvailable` 19.9 GB of
