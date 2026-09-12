@@ -11,6 +11,7 @@ import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import { catalogPullLabel, catalogSizeInfo } from "@studio/lib/catalogLabel";
 import Icon from "@ui/components/Icon.vue";
 import SourceGlyph from "@ui/components/SourceGlyph.vue";
+import { wireSourceGlyph } from "@studio/lib/modelSource";
 import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 import { RUNTIME_UNAVAILABLE_BADGE } from "@studio/lib/modelRuntimeAvailability";
 import type { ModelRuntimeNotice } from "@studio/lib/modelRuntimeAvailability";
@@ -258,7 +259,13 @@ const pullLabel = computed(() => {
       @click="emit('open')"
     >
       <span class="card__nameline-head">
-        <SourceGlyph :source="props.entry.source" :size="12" class="card__glyph" />
+        <!-- `wireSourceGlyph` guards the wire field the same way the phone's
+             catalog card does — see its doc comment in modelSource.ts. -->
+        <SourceGlyph
+          :source="wireSourceGlyph(props.entry.source)"
+          :size="12"
+          class="card__glyph"
+        />
         <span class="card__name">{{ props.entry.name }}</span>
       </span>
       <span

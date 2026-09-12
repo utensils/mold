@@ -47,7 +47,7 @@ import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 import { reviewedMiniMaxH3ModelAccess } from "@studio/lib/minimaxH3Inventory";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import SourceGlyph from "@ui/components/SourceGlyph.vue";
-import type { ModelSource } from "@studio/lib/modelSource";
+import { wireSourceGlyph } from "@studio/lib/modelSource";
 import { modelKindLabel, modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
 import {
   planModelInstall,
@@ -578,14 +578,6 @@ function entryStyleName(entry: MobileCatalogEntry): string {
  */
 function entryRowName(entry: MobileCatalogEntry): string {
   return source.value === "installed" ? entryStyleName(entry) : entryTitle(entry);
-}
-
-/** `entry.source` is already classified the way the glyph wants it — via
- *  `modelSource` for an installed row (`installedModelToEntry`), or straight
- *  off the wire for a catalog row — but its type stays a plain `string`
- *  because `CatalogEntry` is shared with server responses. */
-function entryGlyphSource(entry: MobileCatalogEntry): ModelSource {
-  return entry.source === "civitai" || entry.source === "hf" ? entry.source : "local";
 }
 
 function entryAccessibilityLabel(entry: MobileCatalogEntry): string {
@@ -1527,7 +1519,7 @@ const { dragging, panelStyle, backdropStyle, beginDismiss, moveDismiss, finishDi
                    the runnable id follows only when it says something else. -->
               <span class="mobile-catalog-card-titleline">
                 <SourceGlyph
-                  :source="entryGlyphSource(entry)"
+                  :source="wireSourceGlyph(entry.source)"
                   :size="12"
                   class="mobile-catalog-card-glyph"
                 />

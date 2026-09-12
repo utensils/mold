@@ -14,3 +14,17 @@ export function modelSource(model: {
   if (model.hf_repo) return "hf";
   return "local";
 }
+
+/**
+ * Narrows a catalog entry's own `source` field to a glyph. `CatalogEntryWire`
+ * types it `"hf" | "civitai"` on the wire, but the desktop/mobile
+ * `CatalogEntry` union (which also carries an installed row already
+ * classified through `modelSource` above, `"local"` included) types the same
+ * field as a plain `string` — so a caller trusting either type without a
+ * runtime guard has nothing stopping a value it did not expect. This is the
+ * ONE guard for a wire/union `source` string, used everywhere one becomes a
+ * glyph, so the two call sites cannot silently diverge.
+ */
+export function wireSourceGlyph(source: string): ModelSource {
+  return source === "civitai" || source === "hf" ? source : "local";
+}
