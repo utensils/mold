@@ -2281,6 +2281,21 @@ const MEMORY_BUDGET_HEADROOM: u64 = 2_000_000_000; // 2GB
 /// allocator slack; activations are budgeted separately.
 pub const STREAMING_TRANSFORMER_CAP_BYTES: u64 = 6_000_000_000;
 
+/// What the residency budget charges for a transformer the card is HOLDING.
+/// Block offload streams the blocks through a bounded working set and keeps
+/// the checkpoint host-mapped (Scheduler V2's host ledger accounts for that
+/// half), so the charge is capped at [`STREAMING_TRANSFORMER_CAP_BYTES`];
+/// a resident transformer is charged at the bytes its weights settled at.
+/// Both FLUX.2 residency sites ask this so the cap cannot drift between
+/// them — and so the cap is a tested fact rather than a repeated `min`.
+pub fn resident_transformer_charge_bytes(held_bytes: u64, block_offload: bool) -> u64 {
+    if block_offload {
+        held_bytes.min(STREAMING_TRANSFORMER_CAP_BYTES)
+    } else {
+        held_bytes
+    }
+}
+
 // ── Placement resolution ─────────────────────────────────────────────────────
 
 /// Resolve a caller-supplied `DeviceRef` override into a concrete candle
@@ -3943,6 +3958,34 @@ pub fn memory_status_string() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Block offload streams the transformer through a bounded working set,
+    /// so charging the whole checkpoint to the card would refuse residency
+    /// on exactly the cards that enabled offload; a resident transformer is
+    /// charged at what its weights settled at. Both FLUX.2 residency sites
+    /// go through this function, so the cap is one fact rather than two
+    /// `min`s that can drift apart.
+    #[test]
+    fn the_residency_charge_is_capped_only_when_the_blocks_stream() {
+        use super::{resident_transformer_charge_bytes, STREAMING_TRANSFORMER_CAP_BYTES};
+        let held = 4 * STREAMING_TRANSFORMER_CAP_BYTES;
+        assert_eq!(
+            resident_transformer_charge_bytes(held, true),
+            STREAMING_TRANSFORMER_CAP_BYTES,
+            "a streamed transformer is charged its bounded working set"
+        );
+        assert_eq!(
+            resident_transformer_charge_bytes(held, false),
+            held,
+            "a resident transformer is charged the bytes it holds"
+        );
+        let small = STREAMING_TRANSFORMER_CAP_BYTES / 2;
+        assert_eq!(
+            resident_transformer_charge_bytes(small, true),
+            small,
+            "the cap never inflates a transformer smaller than the working set"
+        );
+    }
+
     use super::*;
 
     /// The two Wan calibrations must each reproduce the renders they were

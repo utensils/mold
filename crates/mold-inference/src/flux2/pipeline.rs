@@ -2180,11 +2180,10 @@ impl Flux2Engine {
         // Block offload reserves a bounded GPU working set; the full
         // transformer remains host-mapped and is accounted by Scheduler V2's
         // host-memory ledger.
-        let resident_xformer_size = if self.block_offload_enabled() {
-            xformer_size.min(crate::device::STREAMING_TRANSFORMER_CAP_BYTES)
-        } else {
-            xformer_size
-        };
+        let resident_xformer_size = crate::device::resident_transformer_charge_bytes(
+            xformer_size,
+            self.block_offload_enabled(),
+        );
         let flux2_cfg = self.resolve_config()?;
         let lora_fingerprint = flux2_lora_fingerprint(&self.pending_loras);
         let config_hash = flux2_config_hash(&flux2_cfg);
@@ -2300,14 +2299,10 @@ impl Flux2Engine {
         // built by now, so it names the dtype its own weights settled at. A
         // streamed transformer keeps the same bounded working set the
         // preflight was charged.
-        let xformer_resident_size = {
-            let held = self.xformer_resident_bytes(transformer.resident_weight_dtype(gpu_dtype));
-            if self.block_offload_enabled() {
-                held.min(crate::device::STREAMING_TRANSFORMER_CAP_BYTES)
-            } else {
-                held
-            }
-        };
+        let xformer_resident_size = crate::device::resident_transformer_charge_bytes(
+            self.xformer_resident_bytes(transformer.resident_weight_dtype(gpu_dtype)),
+            self.block_offload_enabled(),
+        );
         let budget = self.still_transformer_budget(
             req,
             gpu_dtype,

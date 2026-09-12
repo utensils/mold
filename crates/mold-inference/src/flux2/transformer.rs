@@ -2295,8 +2295,11 @@ impl Flux2TransformerWrapper {
     pub(crate) fn resident_weight_dtype(&self, loaded_dtype: DType) -> DType {
         match self {
             Self::BF16(transformer) => transformer.resident_weight_dtype(loaded_dtype),
-            // Streamed and quantized weights are charged at their file length,
-            // which never consults this.
+            // Quantized weights are charged at their file length, which never
+            // consults this. Streamed weights DO consult it — the held figure
+            // is then capped at the streaming working set by
+            // `device::resident_transformer_charge_bytes` — and settle at the
+            // dtype they were loaded at, so the loaded dtype is the answer.
             Self::Offloaded(_) | Self::Quantized(_) => loaded_dtype,
         }
     }
