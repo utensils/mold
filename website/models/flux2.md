@@ -58,7 +58,7 @@ storage requirements even when GPU residency is bounded.
 | `flux2-dev:q4`   | 20 GB | ~25 GB  | no    | Smallest dev tier; 32 GB-class GPU  |
 | `flux2-dev:q6`   | 27 GB | ~33 GB  | no    | 40 GB-class GPU                     |
 | `flux2-dev:q8`   | 35 GB | ~40 GB  | no    | Near-BF16 quality; 46/48 GB-class   |
-| `flux2-dev:fp8`  | 35 GB | streams | no    | Mixed FP8 — BF16 attention, FP8 MLP |
+| `flux2-dev:fp8`  | 35 GB | ~41 GB  | no    | Mixed FP8; one file, 46/48 GB-class |
 | `flux2-dev:bf16` | 65 GB | streams | yes   | Full precision, 7 shards            |
 
 Sizes are the transformer alone. Every tier also pulls the Mistral3 encoder,
@@ -71,14 +71,21 @@ plus the VAE and the planner's safety headroom. A card that merely matches
 the file size is refused at submit time with both figures named.
 
 The bare name `flux2-dev` means `flux2-dev:bf16`; name a tag for the others.
-Only the safetensors tiers (`bf16`, `fp8`) block-offload when a CUDA GPU
-cannot hold the transformer — streaming their blocks from host RAM at a
-documented 3-5x slowdown, which is what makes them the dev tiers that run on
-a 24 GB card. **A GGUF tier has no streaming path at all**, so it must be
-fully resident and its **Needs** figure above is a hard floor; mold refuses
-it at admission rather than after a two-minute load, and says that the format
-is the reason. If you want [dev] on 24 GB, use `flux2-dev:fp8` and expect it
-to be slow; every Klein tier fits comfortably.
+
+**Only `flux2-dev:bf16` can block-offload**, because block streaming reads the
+transformer shard by shard and `bf16` is the only [dev] tier published as
+sharded weights (7 shards). Streaming them from host RAM costs the documented
+3-5x slowdown and asks the HOST for the room the GPU is not giving — the whole
+65 GB checkpoint has to fit in system RAM. Every other [dev] tier is a single
+file that is loaded whole: the GGUF tiers by format, and `flux2-dev:fp8`
+because its checkpoint is one BFL-native safetensors file with nothing to
+stream. For all of them the **Needs** figure above is a hard floor, and mold
+refuses an oversized request at submit time — naming the peak, the card, and
+that the layout is why it could not stream — rather than after a two-minute
+load.
+
+**No FLUX.2 [dev] tier fits a 24 GB card.** The smallest, `flux2-dev:q4`, needs
+~25 GB. On 24 GB use a Klein tier; every one of them fits comfortably.
 
 Only `flux2-dev:bf16` is gated: it comes from Black Forest Labs'
 [FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev) repo, which

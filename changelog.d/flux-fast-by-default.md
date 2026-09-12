@@ -344,11 +344,14 @@ step` — and names no cause, because the budget is the only one a real render
   alone. A GGUF tier has no block-streaming path, so every byte of it is
   resident and the render also holds a ~3 GB denoise working set, the VAE and
   the planner's safety headroom: q4 needs ~25 GB (a 32 GB-class card), q6 ~33 GB
-  (40 GB-class) and q8 ~40 GB (46/48 GB-class). On 24 GB the [dev] tiers that
-  run are the safetensors ones — `flux2-dev:fp8` and `:bf16`, which stream
-  their transformer blocks from host RAM at the documented 3-5x slowdown — and
-  every Klein tier. `mold list`, the model page and the API all say so, and an
-  oversized GGUF request is refused at submit time naming both figures.
+  (40 GB-class) and q8 ~40 GB (46/48 GB-class). `flux2-dev:fp8` is in the same
+  position for a different reason — its checkpoint is one BFL-native file with
+  nothing to stream — so it needs ~41 GB and a 46/48 GB-class card too. Only
+  `flux2-dev:bf16` block-offloads, because it is the one [dev] tier published as
+  sharded weights, and streaming it asks the HOST for the whole 65 GB. **No
+  [dev] tier fits a 24 GB card**; on 24 GB use a Klein tier. `mold list`, the
+  model page and the API all say so, and an oversized request is refused at
+  submit time naming both figures.
 
 - **A built-in LTX-2 control adapter now survives the trip to the GPU on the
   default scheduler.** The server resolves that adapter during preparation,
