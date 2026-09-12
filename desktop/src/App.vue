@@ -45,6 +45,7 @@ import { useGalleryStore } from "./stores/gallery";
 import { useHostsStore } from "./stores/hosts";
 import { useHostStatusStore } from "./stores/hostStatus";
 import { useJobsStore } from "./stores/jobs";
+import { useLandedPrintsStore } from "./stores/landedPrints";
 import { useGenerationStore } from "./stores/generation";
 import { useLibraryPrefsStore } from "./stores/libraryPrefs";
 import { useToastStore } from "./stores/toasts";
@@ -81,6 +82,7 @@ const queueTransfer = provideHeldQueueTransfer(
 
 const hostStatus = useHostStatusStore();
 const jobs = useJobsStore();
+const landed = useLandedPrintsStore();
 const libraryPrefs = useLibraryPrefsStore();
 
 // App-wide server-event subscription (live gallery). Re-probe whenever the
@@ -134,11 +136,14 @@ async function listenForNotificationActions() {
   openNotificationAction(await ipc.takeNotificationAction().catch(() => null));
 }
 
-// Dock badge mirrors THIS app's active jobs, event-driven (no poll lag) and
-// cleared the moment the last job settles.
+// Dock badge counts prints that landed on ANY connected machine, made by any
+// client, while this app was in the background — and clears the moment the
+// window comes back. It deliberately does not mirror this app's own queue: a
+// long clip left a number nobody could clear, and work another machine did
+// never showed at all.
 watch(
-  () => [generation.pending.length, appPrefs.dockBadge] as const,
-  ([pending, enabled]) => void ipc.setDockBadge(dockBadgeValue(pending, enabled)),
+  () => [landed.count, appPrefs.dockBadge] as const,
+  ([count, enabled]) => void ipc.setDockBadge(dockBadgeValue(count, enabled)),
 );
 
 // Cross-surface notifications. A generation finishing while the user
@@ -377,7 +382,11 @@ function suppressChromeSelection(e: Event) {
 }
 
 function reconcileDurableOnWake() {
-  if (document.visibilityState === "visible") void generation.reconcileDurableAll();
+  if (document.visibilityState !== "visible") return;
+  // The person is looking: whatever landed while they were away has been
+  // announced, so the badge has done its job.
+  landed.markSeen();
+  void generation.reconcileDurableAll();
 }
 
 onMounted(async () => {

@@ -361,9 +361,7 @@ describe("generation queueing", () => {
    */
   it("counts its own finished print for the Dock badge", async () => {
     const { useLandedPrintsStore } = await import("./landedPrints");
-    const noteLanded = vi
-      .spyOn(useLandedPrintsStore(), "noteLanded")
-      .mockImplementation(() => {});
+    const noteLanded = vi.spyOn(useLandedPrintsStore(), "noteLanded").mockImplementation(() => {});
     const store = useGenerationStore();
     const { jobs, settled } = store.submitBatch({ ...req }, 1, null, chainDecision);
     await flushPromises();

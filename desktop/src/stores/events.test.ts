@@ -501,9 +501,7 @@ describe("fleet-wide event streams", () => {
     vi.spyOn(generation, "detachSharedDurableEventHost").mockImplementation(() => {});
     const applyAdded = vi.spyOn(gallery, "applyAdded").mockImplementation(() => {});
     const { useLandedPrintsStore } = await import("./landedPrints");
-    const noteLanded = vi
-      .spyOn(useLandedPrintsStore(), "noteLanded")
-      .mockImplementation(() => {});
+    const noteLanded = vi.spyOn(useLandedPrintsStore(), "noteLanded").mockImplementation(() => {});
     const events = useEventsStore();
     await events.subscribe();
     const [primary, plato] = vi.mocked(sseStream).mock.calls.map(([, options]) => options!);

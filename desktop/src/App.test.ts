@@ -32,6 +32,7 @@ import { useGenerationStore } from "./stores/generation";
 import { useHostsStore } from "./stores/hosts";
 import { useHostStatusStore } from "./stores/hostStatus";
 import { useJobsStore } from "./stores/jobs";
+import { useLandedPrintsStore } from "./stores/landedPrints";
 import { useLibraryPrefsStore } from "./stores/libraryPrefs";
 import { useUpdaterStore } from "./stores/updater";
 
@@ -107,6 +108,53 @@ describe("App — launch", () => {
     await mountApp();
 
     expect(fetchAll).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * The Dock badge answers "what landed while you were away", fleet-wide, and
+ * clears the moment the window comes back — the way a messages badge does.
+ * It deliberately no longer counts this app's own pending jobs: a long clip
+ * left a standing number nobody could clear, and work another machine did
+ * never showed at all.
+ */
+describe("App — Dock badge", () => {
+  it("badges prints that landed while the app was in the background", async () => {
+    const { ipc } = await import("./lib/ipc");
+    await mountApp();
+    const landed = useLandedPrintsStore();
+
+    landed.unseen = ["local:a.png", "plato:b.png"];
+    await nextTick();
+
+    expect(ipc.setDockBadge).toHaveBeenLastCalledWith(2);
+  });
+
+  it("clears the badge when the window comes back", async () => {
+    const { ipc } = await import("./lib/ipc");
+    await mountApp();
+    const landed = useLandedPrintsStore();
+    landed.unseen = ["local:a.png"];
+    await nextTick();
+    expect(ipc.setDockBadge).toHaveBeenLastCalledWith(1);
+
+    window.dispatchEvent(new Event("focus"));
+    await nextTick();
+
+    expect(landed.count).toBe(0);
+    expect(ipc.setDockBadge).toHaveBeenLastCalledWith(null);
+  });
+
+  it("never badges this app's own pending queue", async () => {
+    const { ipc } = await import("./lib/ipc");
+    await mountApp();
+    vi.mocked(ipc.setDockBadge).mockClear();
+    const generation = useGenerationStore();
+
+    generation.jobs.push({ status: "developing" } as never);
+    await nextTick();
+
+    expect(ipc.setDockBadge).not.toHaveBeenCalled();
   });
 });
 

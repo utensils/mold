@@ -59,7 +59,7 @@ const BEHAVIOUR_TOGGLES = [
   {
     key: "dockBadge",
     label: "App badge",
-    help: "Show this app's active job count on its launcher icon.",
+    help: "Show how many prints landed on your machines while this app was in the background.",
   },
   {
     key: "saveRemoteOutputs",

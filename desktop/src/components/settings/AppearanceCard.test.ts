@@ -18,6 +18,20 @@ beforeEach(() => {
  * pinned in `studio/components/settings/ThemePicker.test.ts`.
  */
 
+/*
+ * The App badge stopped counting this app's queue. The help sentence is the
+ * only place the app says what it means, so it moves with it.
+ */
+describe("Settings ▸ Look app badge", () => {
+  it("says the badge counts prints that landed while the app was away", () => {
+    const wrapper = mount(AppearanceCard);
+    expect(wrapper.text()).toContain(
+      "Show how many prints landed on your machines while this app was in the background.",
+    );
+    expect(wrapper.text()).not.toContain("active job count");
+  });
+});
+
 describe("Settings ▸ Look theme cards", () => {
   it("paints each card's swatch band from that theme's own map", () => {
     const wrapper = mount(AppearanceCard);
