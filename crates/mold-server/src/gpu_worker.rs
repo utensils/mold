@@ -5276,6 +5276,66 @@ fn preflight_planned_memory_guard_with_eviction(
     )
 }
 
+/// Release another model's retained transformer, once, for a swap gate that
+/// has just refused.
+///
+/// `unload_active` drops the ONE entry the cache calls active, and the
+/// after-drop gates then read the driver with no reclaimable footprint at all
+/// — correctly, because anything still on the card at that point is pressure
+/// rather than credit. What that misses is a SECOND engine that is
+/// GPU-resident because it is retaining a transformer: `evict_lru_parked`
+/// skips it by residency, `unload_active` has already spent its one shot, and
+/// the gate refuses against bytes mold is holding by choice and could hand
+/// back in a moment.
+///
+/// Returns whether anything was released, so the caller retries exactly once
+/// per released engine and refuses with the post-release reading otherwise.
+fn release_another_models_retained_slot(
+    worker: &GpuWorker,
+    cache_key: &str,
+    model_name: &str,
+) -> Result<bool, crate::routes::ApiError> {
+    let reclaimed = {
+        let mut cache = worker
+            .model_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.release_retained_residency_except(Some(cache_key))
+    };
+    let Some((reclaimed_name, freed)) = reclaimed else {
+        return Ok(false);
+    };
+    tracing::info!(
+        gpu = worker.gpu.ordinal,
+        target_model = %model_name,
+        reclaimed_model = %reclaimed_name,
+        freed_mb = freed / 1024 / 1024,
+        "released a retained transformer at the swap gate to make room"
+    );
+    #[cfg(feature = "cuda")]
+    device::post_drop_free_vram_bytes(worker.gpu.ordinal).map_err(device_memory_api_error)?;
+    Ok(true)
+}
+
+/// Run an after-drop swap gate, releasing other models' retained transformers
+/// until it passes or there is nothing left to release.
+fn preflight_after_drop_releasing_retained(
+    worker: &GpuWorker,
+    cache_key: &str,
+    model_name: &str,
+    mut guard: impl FnMut() -> Result<(), crate::routes::ApiError>,
+) -> Result<(), crate::routes::ApiError> {
+    loop {
+        let error = match guard() {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        if !release_another_models_retained_slot(worker, cache_key, model_name)? {
+            return Err(error);
+        }
+    }
+}
+
 fn preflight_planned_memory_guard_with_eviction_using(
     cache_lock: &std::sync::Mutex<crate::model_cache::ModelCache>,
     cache_key: &str,
@@ -5811,12 +5871,18 @@ fn ensure_model_ready_sync_inner(
         if let Some(ref paths) = preflight_paths {
             match planned_peak_bytes {
                 Some(predicted_peak_bytes) => {
-                    crate::memory_preflight::preflight_planned_memory_guard_after_drop(
-                        model_name,
-                        worker.incremental_wan_peak(predicted_peak_bytes, cuda_peak_baseline, 0),
-                        worker.gpu.ordinal,
-                        hint,
-                    )
+                    preflight_after_drop_releasing_retained(worker, cache_key, model_name, || {
+                        crate::memory_preflight::preflight_planned_memory_guard_after_drop(
+                            model_name,
+                            worker.incremental_wan_peak(
+                                predicted_peak_bytes,
+                                cuda_peak_baseline,
+                                0,
+                            ),
+                            worker.gpu.ordinal,
+                            hint,
+                        )
+                    })
                 }
                 None => crate::memory_preflight::preflight_memory_guard_after_drop_for_request(
                     model_name,
@@ -6079,12 +6145,14 @@ fn ensure_model_ready_sync_inner(
     }
     match planned_peak_bytes {
         Some(predicted_peak_bytes) => {
-            crate::memory_preflight::preflight_planned_memory_guard_after_drop(
-                model_name,
-                worker.incremental_wan_peak(predicted_peak_bytes, cuda_peak_baseline, 0),
-                worker.gpu.ordinal,
-                hint,
-            )
+            preflight_after_drop_releasing_retained(worker, cache_key, model_name, || {
+                crate::memory_preflight::preflight_planned_memory_guard_after_drop(
+                    model_name,
+                    worker.incremental_wan_peak(predicted_peak_bytes, cuda_peak_baseline, 0),
+                    worker.gpu.ordinal,
+                    hint,
+                )
+            })
         }
         None => crate::memory_preflight::preflight_memory_guard_after_drop_for_request(
             model_name,
@@ -9007,6 +9075,101 @@ mod tests {
         assert_eq!(*observed_credit.lock().unwrap(), Some(6 << 30));
         assert!(error.error.contains("injected fresh-pressure rejection"));
         assert!(cache.lock().unwrap().contains("hot-cache"));
+    }
+
+    /// The SWAP gate reclaims too, not just the planned-budget guard.
+    ///
+    /// `unload_active` drops the ONE entry the cache calls active and the
+    /// after-drop gates then read the driver with no reclaimable footprint —
+    /// correct, because anything still there is pressure rather than credit.
+    /// What it missed is a SECOND engine that is GPU-resident because it is
+    /// RETAINING a transformer: `evict_lru_parked` skips it by residency,
+    /// `unload_active` has spent its one shot, and the gate refused against
+    /// bytes mold was holding by choice — the shape of UAT final-2's F4d,
+    /// where a kept FLUX.1 transformer stood in front of a klein plan under a
+    /// tight reserve.
+    #[test]
+    fn the_swap_gate_releases_another_models_retained_transformer_before_refusing() {
+        struct Retaining(u64);
+        impl InferenceEngine for Retaining {
+            fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+                unreachable!("a swap-gate test never renders")
+            }
+            fn model_name(&self) -> &str {
+                "flux-dev:q8"
+            }
+            fn is_loaded(&self) -> bool {
+                true
+            }
+            fn load(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn resident_vram_bytes(&self) -> Option<u64> {
+                (self.0 > 0).then_some(self.0)
+            }
+            fn release_retained_residency(&mut self) -> u64 {
+                std::mem::take(&mut self.0)
+            }
+        }
+
+        const RETAINED: u64 = 18 << 30;
+        let worker = single_worker_pool_with_parked("unused", Duration::ZERO);
+        {
+            let mut cache = worker.model_cache.lock().unwrap();
+            cache.insert_loaded("flux-dev:q8".to_string(), Box::new(Retaining(RETAINED)), 0);
+        }
+
+        let attempts = Arc::new(Mutex::new(0usize));
+        let seen = attempts.clone();
+        let cache_for_guard = worker.model_cache.clone();
+        preflight_after_drop_releasing_retained(
+            &worker,
+            "flux2-klein:q8",
+            "flux2-klein:q8",
+            || {
+                *seen.lock().unwrap() += 1;
+                let held = cache_for_guard.lock().unwrap().retained_residency_bytes();
+                if held == 0 {
+                    Ok(())
+                } else {
+                    Err(crate::routes::ApiError::insufficient_memory(
+                        "the other model's transformer is still on the card",
+                    ))
+                }
+            },
+        )
+        .expect("releasing the other model's retained slot admits the swap");
+
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            2,
+            "one refusal against the held bytes, then one pass against a clear card"
+        );
+        let cache = worker.model_cache.lock().unwrap();
+        assert!(
+            cache.contains("flux-dev:q8"),
+            "the other engine survives: only the weights it was holding went back"
+        );
+        assert_eq!(cache.retained_residency_bytes(), 0);
+    }
+
+    /// And it refuses honestly when there is nothing left to release, rather
+    /// than looping.
+    #[test]
+    fn the_swap_gate_refuses_once_nothing_is_left_to_release() {
+        let worker = single_worker_pool_with_parked("unused", Duration::ZERO);
+        let attempts = Arc::new(Mutex::new(0usize));
+        let seen = attempts.clone();
+        let error = preflight_after_drop_releasing_retained(&worker, "wanted", "wanted", || {
+            *seen.lock().unwrap() += 1;
+            Err(crate::routes::ApiError::insufficient_memory(
+                "nothing mold holds can help this",
+            ))
+        })
+        .expect_err("an empty cache cannot rescue the gate");
+
+        assert_eq!(*attempts.lock().unwrap(), 1, "asked once, refused once");
+        assert!(error.error.contains("nothing mold holds can help this"));
     }
 
     /// The other half of the wedge: a request for a DIFFERENT model, on a
