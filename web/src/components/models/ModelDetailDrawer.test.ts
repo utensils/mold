@@ -623,10 +623,13 @@ describe("ModelDetailDrawer", () => {
       const sourceRow = w
         .findAll(".md__row")
         .find((row) => row.get(".md__row-key").text() === "Source")!;
-      // The glyph's own <title> duplicates the word for accessibility, so the
-      // row's plain text still reads as "Civitai" beside the mark.
-      expect(sourceRow.get(".md__row-val").text()).toContain("Civitai");
-      expect(sourceRow.find("svg[data-source='civitai']").exists()).toBe(true);
+      // The value already spells the source out, so the glyph beside it is
+      // decoration, not the sole carrier of the fact — hidden from assistive
+      // tech (aria-hidden) so a screen reader announces "Civitai" once, not
+      // "Civitai Civitai" from the glyph's own <title>.
+      expect(sourceRow.get(".md__row-val-text").text()).toBe("Civitai");
+      const glyph = sourceRow.get("svg[data-source='civitai']");
+      expect(glyph.attributes("aria-hidden")).toBe("true");
     });
 
     it("renders trained words as chips", () => {

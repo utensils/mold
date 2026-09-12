@@ -732,8 +732,9 @@ function onRetry() {
                 :source="sourceGlyph"
                 :size="12"
                 class="md__row-glyph"
+                aria-hidden="true"
               />
-              {{ row.val }}
+              <span class="md__row-val-text">{{ row.val }}</span>
             </span>
           </div>
         </div>
@@ -1100,6 +1101,10 @@ function onRetry() {
   align-items: center;
   justify-content: flex-end;
   gap: 5px;
+  /* A flex item's automatic minimum size is its min-content width, not 0 —
+   * `word-break: break-all` keeps that small today, but this is one fewer
+   * thing to get right if that rule ever changes. */
+  min-width: 0;
   font-family: var(--f-mono);
   font-size: 0.75rem;
   text-align: right;
