@@ -8,7 +8,11 @@ import { useNotificationsStore } from "@studio/stores/notifications";
 import type { DownloadJob } from "../lib/api/types";
 
 vi.mock("../lib/api/catalog", () => ({ startCatalogDownload: vi.fn() }));
-vi.mock("../lib/notify", () => ({ notifyPulled: vi.fn(), notifyPullFailed: vi.fn() }));
+vi.mock("../lib/notify", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/notify")>()),
+  notifyPulled: vi.fn(),
+  notifyPullFailed: vi.fn(),
+}));
 
 const failed = (overrides: Partial<DownloadJob> = {}): DownloadJob => ({
   id: "a",

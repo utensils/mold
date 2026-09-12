@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { watch } from "vue";
 import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 import { sseStream } from "../lib/api/sse";
 import type { ServerEvent } from "../lib/api/types";
@@ -6,26 +7,79 @@ import { useGalleryStore } from "./gallery";
 import { useGenerationStore } from "./generation";
 import { useHostsStore } from "./hosts";
 import { useJobsStore } from "./jobs";
+import { useLandedPrintsStore } from "./landedPrints";
 
 /** Old-server fallback: refetch cadence while the queue is non-empty. */
 const POLL_INTERVAL_MS = 5_000;
 const authoritativeRefreshes = new WeakMap<object, Promise<void>>();
 
+type HostStream = {
+  abort: AbortController;
+  /** The machine this stream was opened against, as `hostIdentity` spells it. */
+  identity: string;
+};
+
+type Subscription = {
+  /** One live `/api/events` per ready machine, keyed by host id. */
+  streams: Map<string, HostStream>;
+  /**
+   * host id → the identity that answered 401/403/404. `sseStream` throws on a
+   * terminal status rather than retrying, so reopening it on the next fleet
+   * change would be a connection per change forever. Cleared the moment that
+   * machine's address, key or server identity changes, which is a new machine
+   * to try.
+   */
+  silent: Map<string, string>;
+  /** Stops the `hosts.all` watch that opens and closes them. */
+  stopWatch: (() => void) | null;
+};
+
+/** Everything about a machine that decides whether its stream must be redone. */
+function hostIdentity(host: {
+  baseUrl: string | null;
+  apiKey: string | null;
+  instanceId: string | null;
+}): string {
+  return JSON.stringify([host.baseUrl, host.apiKey, host.instanceId]);
+}
+
+/*
+ * Kept off the store's reactive state on purpose: an `AbortController` behind a
+ * reactive proxy hands `fetch` a proxied `signal`, and the WeakMap is keyed by
+ * the store instance so a fresh Pinia starts clean (the same shape
+ * `authoritativeRefreshes` already uses).
+ */
+const subscriptions = new WeakMap<object, Subscription>();
+
+function subscriptionFor(store: object): Subscription {
+  let sub = subscriptions.get(store);
+  if (!sub) {
+    sub = { streams: new Map(), silent: new Map(), stopWatch: null };
+    subscriptions.set(store, sub);
+  }
+  return sub;
+}
+
 /**
- * App-wide subscriber to `GET /api/events` — one SSE connection that keeps
- * the gallery live while generations run anywhere (this window, another
- * client, the queue). Servers without the endpoint (capability probe says
- * so) fall back to polling the gallery while jobs are pending; probing
- * first matters because `sseStream` with `retry: true` would hammer a 404
- * forever.
+ * App-wide subscriber to `GET /api/events` — one SSE connection per READY
+ * machine, so the gallery stays live while generations run anywhere (this
+ * window, another client, the queue) and the Dock badge can count prints that
+ * land on any of them while the app is away.
+ *
+ * Only the primary's frames change app state: the gallery store holds the
+ * primary's bucket and the queue chips read the primary's queue. A secondary's
+ * frames feed the durable job tracker and the landed-print count and nothing
+ * else. The capability probe asks the PRIMARY and decides only whether the
+ * old-server gallery poller runs, which is a primary-only fallback; the
+ * streams themselves open for every ready machine, because a machine without
+ * the endpoint answers 404 and `terminalHttpStatuses` closes it once rather
+ * than letting `retry: true` hammer it.
  */
 export const useEventsStore = defineStore("events", {
   state: () => ({
     subscribed: false,
     /** True when the connected server streams `/api/events`. */
     live: false,
-    abort: null as AbortController | null,
-    sharedHostId: null as string | null,
     pollTimer: null as ReturnType<typeof setInterval> | null,
     refreshScheduled: false,
     refreshAgain: false,
@@ -46,14 +100,21 @@ export const useEventsStore = defineStore("events", {
       }
       if (!this.subscribed) return; // unsubscribed while probing
       this.live = available;
-      if (available) this.openStream();
-      else this.startPolling();
+      // Every ready machine gets a stream whatever the PRIMARY answered: the
+      // probe asks one machine, and reading its answer as the fleet's silenced
+      // every modern remote behind one primary that predates the endpoint. A
+      // machine without `/api/events` answers 404, which `terminalHttpStatuses`
+      // closes once instead of retrying.
+      this.openStreams();
+      // The old-server fallback refetches the PRIMARY's gallery bucket, so the
+      // primary's own answer is exactly the question it settles.
+      if (!available) this.startPolling();
     },
     unsubscribe() {
-      this.abort?.abort();
-      this.abort = null;
-      if (this.sharedHostId) useGenerationStore().detachSharedDurableEventHost(this.sharedHostId);
-      this.sharedHostId = null;
+      const sub = subscriptionFor(this);
+      sub.stopWatch?.();
+      sub.stopWatch = null;
+      for (const hostId of [...sub.streams.keys()]) this.closeHostStream(hostId);
       if (this.pollTimer) clearInterval(this.pollTimer);
       this.pollTimer = null;
       this.subscribed = false;
@@ -67,38 +128,115 @@ export const useEventsStore = defineStore("events", {
       this.unsubscribe();
       await this.subscribe();
     },
-    openStream() {
-      const primary = useHostsStore().primaryHost;
-      if (!primary?.baseUrl) {
-        this.live = false;
-        this.startPolling();
-        return;
+    /**
+     * Open the fleet's streams and keep them matched to it. A machine that
+     * goes away, changes address or rotates its key has its stream closed and
+     * a fresh one opened; the watch is what bounds `retry: true` against a
+     * host nobody is connected to any more.
+     */
+    openStreams() {
+      const hosts = useHostsStore();
+      this.syncHostStreams();
+      const sub = subscriptionFor(this);
+      sub.stopWatch?.();
+      sub.stopWatch = watch(
+        // JSON, so no id, address or key can alias another tuple — and no
+        // control characters in the source, which would make git call this
+        // file binary and hide it from every diff and every search.
+        () =>
+          JSON.stringify(
+            hosts.all.map((host) => [
+              host.id,
+              host.status,
+              host.baseUrl,
+              host.apiKey,
+              host.instanceId,
+            ]),
+          ),
+        () => this.syncHostStreams(),
+      );
+    },
+    syncHostStreams() {
+      const sub = subscriptionFor(this);
+      const ready = useHostsStore().all.filter(
+        (host) => host.status === "ready" && Boolean(host.baseUrl),
+      );
+      const wanted = new Map(ready.map((host) => [host.id, hostIdentity(host)]));
+      for (const [hostId, stream] of [...sub.streams]) {
+        const unchanged = wanted.get(hostId) === stream.identity && !stream.abort.signal.aborted;
+        if (!unchanged) this.closeHostStream(hostId);
       }
+      // A machine that changed in any way is a new machine to try, so its
+      // "no event stream" note goes with the old identity.
+      for (const [hostId, identity] of [...sub.silent]) {
+        if (wanted.get(hostId) !== identity) sub.silent.delete(hostId);
+      }
+      for (const host of ready) {
+        const identity = hostIdentity(host);
+        if (sub.streams.has(host.id) || sub.silent.get(host.id) === identity) continue;
+        this.openHostStream(host.id, host.baseUrl!, host.apiKey ?? null, identity);
+      }
+    },
+    closeHostStream(hostId: string) {
+      const streams = subscriptionFor(this).streams;
+      const stream = streams.get(hostId);
+      if (!stream) return;
+      streams.delete(hostId);
+      stream.abort.abort();
+      // Hand the machine back: `ensureDurableHostStream` stands down while the
+      // shared subscription claims it, so a missed detach strands every
+      // durable job on that machine with no events at all.
+      useGenerationStore().detachSharedDurableEventHost(hostId);
+    },
+    openHostStream(hostId: string, baseUrl: string, apiKey: string | null, identity: string) {
       const abort = new AbortController();
-      this.abort = abort;
-      this.sharedHostId = primary.id;
-      useGenerationStore().attachSharedDurableEventHost(primary.id);
+      subscriptionFor(this).streams.set(hostId, { abort, identity });
+      useGenerationStore().attachSharedDurableEventHost(hostId);
       void sseStream("/api/events", {
-        target: { baseUrl: primary.baseUrl, apiKey: primary.apiKey },
+        target: { baseUrl, apiKey },
         signal: abort.signal,
         retry: true,
         terminalHttpStatuses: [401, 403, 404],
         onOpen: () => {
-          this.refreshAuthoritativePrimary();
+          if (this.isPrimary(hostId)) this.refreshAuthoritativePrimary();
         },
         onEvent: (event, data) => {
-          useGenerationStore().onDurableEvent(primary.id, event, data);
+          useGenerationStore().onDurableEvent(hostId, event, data);
           if (event !== "event" && event !== "message") return;
+          let frame: ServerEvent;
           try {
-            this.apply(JSON.parse(data) as ServerEvent);
+            frame = JSON.parse(data) as ServerEvent;
           } catch {
-            /* skip malformed frame */
+            return; /* skip malformed frame */
           }
+          // Fleet-wide: a print is a print whichever machine made it, and the
+          // badge is the only consumer that cares about the others. A print
+          // that was trashed or deleted — including one a machine published
+          // and then trashed because Save every result was off — never landed.
+          if (frame.type === "gallery_added")
+            useLandedPrintsStore().noteLanded(hostId, frame.filename);
+          else if (frame.type === "gallery_trashed" || frame.type === "gallery_removed")
+            useLandedPrintsStore().forgetLanded(frame.filename);
+          if (this.isPrimary(hostId)) this.apply(frame);
         },
         onClose: () => {
-          if (!abort.signal.aborted) useGenerationStore().onDurableEventClose(primary.id);
+          if (abort.signal.aborted) return;
+          // `retry: true` means reaching here at all is the end of this
+          // machine's stream, not a blip: a terminal status threw. Remember
+          // the identity that went quiet so the next fleet change does not
+          // walk straight back into it, and hand the machine back so the
+          // durable tracker can open its own.
+          const sub = subscriptionFor(this);
+          if (sub.streams.get(hostId)?.abort === abort) {
+            sub.silent.set(hostId, identity);
+            this.closeHostStream(hostId);
+          }
+          useGenerationStore().onDurableEventClose(hostId);
         },
       });
+    },
+    isPrimary(hostId: string): boolean {
+      return useHostsStore().primaryHost?.id === hostId;
     },
     apply(ev: ServerEvent) {
       const gallery = useGalleryStore();

@@ -79,6 +79,7 @@ vi.mock("../lib/api/client", () => ({
 vi.mock("../lib/notify", () => ({
   notifyGenerated: vi.fn(),
   notifyGenerationFailed: vi.fn(),
+  appIsBackground: () => false,
 }));
 
 const saveOutputBytes = vi.fn().mockResolvedValue("saved.png");

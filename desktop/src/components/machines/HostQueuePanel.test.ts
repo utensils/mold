@@ -10,7 +10,11 @@ vi.mock("../../lib/api/client", () => ({
   currentTarget: () => ({ baseUrl: "http://127.0.0.1:49152", apiKey: null }),
 }));
 vi.mock("../../lib/api/sse", () => ({ sseStream: vi.fn() }));
-vi.mock("../../lib/notify", () => ({ notifyGenerated: vi.fn(), notifyGenerationFailed: vi.fn() }));
+vi.mock("../../lib/notify", () => ({
+  notifyGenerated: vi.fn(),
+  notifyGenerationFailed: vi.fn(),
+  appIsBackground: () => false,
+}));
 vi.mock("../../lib/ipc", () => ({ inTauri: () => false, ipc: {} }));
 
 import HostQueuePanel from "./HostQueuePanel.vue";
