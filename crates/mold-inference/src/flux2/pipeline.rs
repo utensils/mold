@@ -1322,6 +1322,7 @@ impl Flux2Engine {
         encoder_dtype: DType,
         transformer_bytes: u64,
         already_parked_bytes: u64,
+        prior_encodes: u32,
     ) -> super::text_encoder_residency::TextEncoderResidency {
         use super::text_encoder_residency as residency;
         let device = if encoder_device.is_metal() {
@@ -1331,18 +1332,23 @@ impl Flux2Engine {
         } else {
             residency::TextEncoderDevice::Cpu
         };
-        residency::decide_text_encoder_residency(&residency::TextEncoderResidencyInputs {
-            encoder_bytes: residency::mistral3_prefix_bytes(encoder_dtype),
-            transformer_bytes,
-            // An unmeasurable host reads as zero, which the decision answers
-            // with `StreamFromMmap` — today's behaviour.
-            host_total_bytes: crate::flux::pinned::total_system_ram_bytes().unwrap_or(0),
-            host_available_bytes: crate::device::available_host_ram_bytes().unwrap_or(0),
-            pinned_cap_bytes: crate::flux::pinned::pinned_cap_bytes(),
-            keep_te_ram: crate::device::keep_te_ram_mode(),
-            device,
-            already_parked_bytes,
-        })
+        let budget =
+            residency::decide_text_encoder_residency(&residency::TextEncoderResidencyInputs {
+                encoder_bytes: residency::mistral3_prefix_bytes(encoder_dtype),
+                transformer_bytes,
+                // An unmeasurable host reads as zero, which the decision answers
+                // with `StreamFromMmap` — today's behaviour.
+                host_total_bytes: crate::flux::pinned::total_system_ram_bytes().unwrap_or(0),
+                host_available_bytes: crate::device::available_host_ram_bytes().unwrap_or(0),
+                pinned_cap_bytes: crate::flux::pinned::pinned_cap_bytes(),
+                keep_te_ram: crate::device::keep_te_ram_mode(),
+                device,
+                already_parked_bytes,
+            });
+        // The budget answers "is there room"; this answers "is there reuse".
+        // Mistral3's park is a fresh read of the shards, unlike Qwen3's, so
+        // the first encode of a process must not pay for it.
+        residency::mistral3_prefix_residency(budget, prior_encodes)
     }
 
     /// Peak device bytes this checkpoint's conditioner holds while it runs.
@@ -1855,6 +1861,9 @@ impl Flux2Engine {
                     self.dev_text_encoder
                         .as_ref()
                         .map_or(0, |encoder| encoder.parked_bytes()),
+                    self.dev_text_encoder
+                        .as_ref()
+                        .map_or(0, |encoder| encoder.encodes_completed()),
                 );
                 let encoder = self
                     .dev_text_encoder

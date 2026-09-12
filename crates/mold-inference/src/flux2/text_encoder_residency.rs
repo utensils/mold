@@ -399,6 +399,48 @@ pub fn decide_text_encoder_residency(inputs: &TextEncoderResidencyInputs) -> Tex
     TextEncoderResidency::HostParked { pinned }
 }
 
+/// Narrow the budget's answer by whether THIS process has any reuse to sell.
+///
+/// The budget answers "is there room", which is the whole question for Qwen3:
+/// that encoder is MATERIALIZED, so its park is a device-to-host copy of
+/// weights already in memory and costs a few seconds once. Mistral3's park is
+/// not that. Its streamed path never materializes the prefix at all, so
+/// parking it is a fresh 34.7 GB read of the shards, and the first request is
+/// asked to pay that read for a saving only the SECOND request can collect.
+///
+/// Measured on plato (4x L40S, 1.5 TB RAM, ZFS), `flux2-dev:q8` at 1024²,
+/// with the prefetch race fixed:
+///
+/// | | park | encode | cumulative encode cost over N renders |
+/// |---|---|---|---|
+/// | mapped (`MOLD_KEEP_TE_RAM=0`) | — | **7.5 s** | `7.5N` |
+/// | parked before the first encode (the old default) | **29.1 s** | **1.8 s** | `29.1 + 1.8N` |
+/// | parked once a first encode has happened | 29.1 s (at render 2) | 1.8 s | `34.8 + 1.8N` |
+///
+/// The old default breaks even at the sixth render of one process and is a
+/// flat 29.1 s loss on every one-shot — which is what `mold run --local` and
+/// every cold CLI render is. Waiting for evidence of reuse costs a long-lived
+/// server one extra mapped encode (7.5 s, break-even moves from 5.1 to 6.1
+/// renders) and costs a one-shot nothing at all.
+///
+/// This is a scheduling decision and nothing else: a parked encode and a
+/// mapped one produce byte-identical conditioning, which is what
+/// `fix-parkon.png` and `fix-parkoff.png` pin at the same sha256. In
+/// particular it is NOT the fix for the NaN conditioning — that is
+/// `encoders::mistral3::stream_layers`'s `settle`, and the park path is still
+/// taken by every warm process.
+pub fn mistral3_prefix_residency(
+    budget: TextEncoderResidency,
+    prior_encodes: u32,
+) -> TextEncoderResidency {
+    match budget {
+        TextEncoderResidency::HostParked { .. } if prior_encodes == 0 => {
+            TextEncoderResidency::StreamFromMmap
+        }
+        other => other,
+    }
+}
+
 /// Whether a materialized Qwen3 encoder should stay in host RAM between
 /// requests.
 ///
@@ -443,6 +485,41 @@ pub fn qwen3_park_residency(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// The first encode of a process never parks, because there is nothing yet
+    /// to amortize the read against; the second and later ones take whatever
+    /// the budget said.
+    #[test]
+    fn a_mistral3_park_waits_for_evidence_that_it_will_be_reused() {
+        for pinned in [true, false] {
+            let afforded = TextEncoderResidency::HostParked { pinned };
+            assert_eq!(
+                mistral3_prefix_residency(afforded, 0),
+                TextEncoderResidency::StreamFromMmap,
+                "the first encode must not pay a 34.7 GB read for a saving it cannot collect"
+            );
+            for prior in [1u32, 2, 17] {
+                assert_eq!(
+                    mistral3_prefix_residency(afforded, prior),
+                    afforded,
+                    "a process that has already encoded keeps the budget's answer"
+                );
+            }
+        }
+    }
+
+    /// The gate only ever narrows. A host the budget refused is never parked
+    /// because it has encoded a lot — the refusal is about room, and no amount
+    /// of reuse creates any.
+    #[test]
+    fn the_reuse_gate_never_turns_a_refusal_into_a_park() {
+        for prior in [0u32, 1, 99] {
+            assert_eq!(
+                mistral3_prefix_residency(TextEncoderResidency::StreamFromMmap, prior),
+                TextEncoderResidency::StreamFromMmap
+            );
+        }
+    }
 
     const GIB: u64 = 1024 * 1024 * 1024;
     /// Decimal GB — the unit a machine's RAM is advertised in, and the one the

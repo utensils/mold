@@ -295,3 +295,10 @@ step` — and names no cause, because the budget is the only one a real render
   layer is handed on. A parked render and an unparked one are byte-identical
   again (verified at the same sha256 on an L40S, both `:q8` and `:fp8`), and
   `MOLD_KEEP_TE_RAM=0` is no longer a workaround anybody needs.
+- **That park now waits until there is a second render to pay for it.**
+  Reading 34.7 GB of shards into host RAM costs about 29 s and saves about
+  6 s per encode afterwards, so it only breaks even around the sixth render of
+  one process — and a one-shot `mold run` could never collect any of it. The
+  first encode of a process now streams from the mapping as it always did, and
+  the park is taken from the second onwards, when the reuse it is buying is
+  real. Nothing about the rendered pixels changes either way.

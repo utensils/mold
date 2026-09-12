@@ -366,6 +366,11 @@ pub(crate) struct Mistral3Encoder {
     dtype: DType,
     /// The prefix held in host RAM, when the residency budget allowed it.
     parked: Option<ParkedPrefix>,
+    /// Encodes this shell has completed, which is the evidence
+    /// [`residency::mistral3_prefix_residency`] reads before it will pay for a
+    /// park. Atomic because `encode` takes `&self` and the shell is held
+    /// across threads by the engine cache.
+    encodes: std::sync::atomic::AtomicU32,
 }
 
 impl Mistral3Encoder {
@@ -383,7 +388,13 @@ impl Mistral3Encoder {
             device: device.clone(),
             dtype,
             parked: None,
+            encodes: std::sync::atomic::AtomicU32::new(0),
         })
+    }
+
+    /// Encodes this shell has completed in this process.
+    pub(crate) fn encodes_completed(&self) -> u32 {
+        self.encodes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether this shell was built for `device` at `dtype`.
@@ -550,6 +561,10 @@ impl Mistral3Encoder {
         let output = Tensor::cat(&captured, D::Minus1)?
             .to_device(target_device)?
             .to_dtype(target_dtype)?;
+        // Counted only on success: a failed encode is not evidence that a
+        // 34.7 GB park would have been reused.
+        self.encodes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok((output, token_count))
     }
 }
