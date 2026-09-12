@@ -1787,6 +1787,10 @@ pub enum ExecutionPlanError {
         /// The ceiling THAT rejection's peak was compared against, so a
         /// scheduler-side refusal prints the pair the decision used.
         admissible_ceiling_bytes: Option<u64>,
+        /// That rejection's remediation, so a refusal the scheduler composes
+        /// itself still carries the planner's reason — for FLUX.2, why the
+        /// transformer could not stream.
+        advice: Option<String>,
         /// Stable IDs of the devices that were actually considered for this
         /// request. Physical-impossibility classification must not borrow
         /// capacity from a sibling excluded by placement or preparation.
@@ -2419,6 +2423,7 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
             reason: "no request-eligible device produced a concrete execution plan".to_string(),
             required_peak_bytes: 0,
             admissible_ceiling_bytes: None,
+            advice: None,
             eligible_device_ids: Vec::new(),
         };
     }
@@ -2459,6 +2464,7 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
         reason,
         required_peak_bytes: cheapest.map_or(0, |rejection| rejection.predicted_peak_bytes),
         admissible_ceiling_bytes: cheapest.map(|rejection| rejection.admissible_ceiling_bytes),
+        advice: cheapest.and_then(|rejection| rejection.advice.clone()),
         eligible_device_ids: rejections
             .iter()
             .map(|rejection| rejection.device_id.clone())

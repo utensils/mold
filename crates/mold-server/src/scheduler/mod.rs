@@ -709,6 +709,8 @@ struct MemoryBlock {
     /// came from a plan. `None` for a host block, whose comparison really is
     /// against `headroom_bytes`.
     admissible_ceiling_bytes: Option<u64>,
+    /// See `VramShortfall::advice`.
+    advice: Option<String>,
     /// Evictable ZFS ARC the SAME sample counted into `headroom_bytes`
     /// (#1439); only a host block carries one, and only on ZFS.
     reclaimable_zfs_arc_bytes: Option<u64>,
@@ -853,6 +855,11 @@ struct VramShortfall {
     /// `execution_plan::DeviceInfeasibility::admissible_ceiling_bytes`. `None`
     /// only for a refusal that named no device at all.
     admissible_ceiling_bytes: Option<u64>,
+    /// The planner's own remediation for the cheapest rejection — for FLUX.2,
+    /// why the transformer could not stream. It rides the BLOCK because on the
+    /// idle-hold path the block's message is the one the user reads and the
+    /// planner's error text is never surfaced (D7b, 2026-09-12).
+    advice: Option<String>,
     eligible_device_ids: Vec<String>,
 }
 
@@ -3841,6 +3848,7 @@ impl Coordinator {
             if let crate::execution_plan::ExecutionPlanError::InsufficientVram {
                 required_peak_bytes,
                 admissible_ceiling_bytes,
+                advice,
                 eligible_device_ids,
                 ..
             } = &error
@@ -3855,6 +3863,7 @@ impl Coordinator {
                     &VramShortfall {
                         required_peak_bytes: *required_peak_bytes,
                         admissible_ceiling_bytes: *admissible_ceiling_bytes,
+                        advice: advice.clone(),
                         eligible_device_ids: eligible_device_ids.clone(),
                     },
                     &device_facts,
@@ -4094,6 +4103,7 @@ impl Coordinator {
                         // The host ledger really does compare against the
                         // headroom it prints.
                         admissible_ceiling_bytes: None,
+                        advice: None,
                         reclaimable_zfs_arc_bytes,
                         reclaim: ReclaimAttempt::NotStarted,
                     });
@@ -4142,6 +4152,7 @@ impl Coordinator {
                 block.required_bytes = shortfall.required_peak_bytes;
                 block.headroom_bytes = device.available_vram_bytes;
                 block.admissible_ceiling_bytes = shortfall.admissible_ceiling_bytes;
+                block.advice = shortfall.advice.clone();
                 moved
             }
             _ => {
@@ -4158,6 +4169,7 @@ impl Coordinator {
                     required_bytes: shortfall.required_peak_bytes,
                     headroom_bytes: device.available_vram_bytes,
                     admissible_ceiling_bytes: shortfall.admissible_ceiling_bytes,
+                    advice: shortfall.advice.clone(),
                     reclaimable_zfs_arc_bytes: None,
                     reclaim: ReclaimAttempt::NotStarted,
                 });
@@ -4192,6 +4204,7 @@ impl Coordinator {
                 block.required_bytes = shortfall.required_peak_bytes;
                 block.headroom_bytes = device.available_vram_bytes;
                 block.admissible_ceiling_bytes = shortfall.admissible_ceiling_bytes;
+                block.advice = shortfall.advice.clone();
             }
             _ => {
                 tracing::warn!(
@@ -4207,6 +4220,7 @@ impl Coordinator {
                     required_bytes: shortfall.required_peak_bytes,
                     headroom_bytes: device.available_vram_bytes,
                     admissible_ceiling_bytes: shortfall.admissible_ceiling_bytes,
+                    advice: shortfall.advice.clone(),
                     reclaimable_zfs_arc_bytes: None,
                     reclaim: ReclaimAttempt::NotStarted,
                 });
@@ -4916,7 +4930,12 @@ impl Coordinator {
                             timing_with_static_floors(estimate, static_estimate);
                         let host_bytes =
                             candidate_host_demand_bytes(warm_resident, &plan, &estimate);
-                        let incremental_vram = plan.incremental_vram_demand(estimate.vram_bytes);
+                        let incremental_vram =
+                            plan.incremental_vram_demand(learned_demand_within_the_budget(
+                                plan.total_vram_demand_bytes(),
+                                estimate.vram_bytes,
+                                plan.admitted_available_vram_bytes,
+                            ));
                         let candidate = CandidatePlacement::new(
                             DeviceId::new(plan.device_id),
                             ExecutionFingerprint::new(plan.execution_fingerprint),
@@ -7366,13 +7385,17 @@ fn memory_shortfall_reason(pending: &PendingGeneration) -> Option<String> {
     if outcome.sample_failed {
         return None;
     }
-    Some(crate::host_reclaim::shortfall_message(
+    let message = crate::host_reclaim::shortfall_message(
         outcome,
         block.required_bytes,
         block.headroom_bytes,
         block.admissible_ceiling_bytes,
         block.reclaimable_zfs_arc_bytes,
-    ))
+    );
+    Some(match block.advice.as_deref() {
+        Some(advice) if !advice.is_empty() => format!("{message} ({advice})"),
+        _ => message,
+    })
 }
 
 fn memory_shortfall_rejection_message(
@@ -7932,6 +7955,36 @@ fn device_class(worker: &GpuWorker) -> String {
     format!("{backend}:{capability}:{gib}gb")
 }
 
+/// The demand a candidate publishes, with the learned envelope bounded by the
+/// budget the plan was admitted against.
+///
+/// `EstimateStore::estimate` returns `max(static, decayed observed peak)`, and
+/// the observation is keyed by SHAPE and FAMILY, not by the device it was taken
+/// on: a bucket learned on a 46 GB card is applied verbatim to the same shape on
+/// a card with 25 GB usable. On the 2026-09-12 24 GB simulation that is exactly
+/// what happened — a `flux2-dev:q8` success on this home recorded
+/// `vram_high_water_bytes = 42,630,905,856`, the family bucket handed it to a
+/// `flux2-dev:fp8` request whose own plan was far smaller, and the lane gate
+/// refused `requires 42.63 GB, 25.12 GB available`. No offload was considered
+/// and none would have helped: the PLAN was never the thing that did not fit.
+///
+/// An envelope above what the device can give is not evidence about this render
+/// — it cannot be satisfied at all, so it can only turn a feasible plan into a
+/// permanent refusal. Bounding it keeps every case it exists for (#641: a
+/// learned peak ABOVE a too-small static estimate still wins) and removes the
+/// one it cannot serve. The plan's own static demand is never lowered, and a
+/// zero budget means "not measured" and keeps today's answer.
+fn learned_demand_within_the_budget(
+    static_demand_bytes: u64,
+    learned_demand_bytes: u64,
+    admitted_available_vram_bytes: u64,
+) -> u64 {
+    if admitted_available_vram_bytes == 0 {
+        return static_demand_bytes.max(learned_demand_bytes);
+    }
+    static_demand_bytes.max(learned_demand_bytes.min(admitted_available_vram_bytes))
+}
+
 /// Memory a scheduled work item commits, given what its kind actually does.
 ///
 /// The learned estimator prices every kind the same way, from recorded
@@ -8022,6 +8075,7 @@ fn classify_generation_plan_failure(
         crate::execution_plan::ExecutionPlanError::InsufficientVram {
             required_peak_bytes,
             admissible_ceiling_bytes,
+            advice,
             eligible_device_ids,
             ..
         } => {
@@ -8040,6 +8094,7 @@ fn classify_generation_plan_failure(
                     vram_shortfall: Some(VramShortfall {
                         required_peak_bytes: *required_peak_bytes,
                         admissible_ceiling_bytes: *admissible_ceiling_bytes,
+                        advice: advice.clone(),
                         eligible_device_ids: eligible_device_ids.clone(),
                     }),
                 })
@@ -11309,6 +11364,88 @@ mod tests {
         );
     }
 
+    /// D7b, second half: the planner knows WHY a GGUF FLUX.2 tier could not be
+    /// streamed, and on the idle-hold path that reason never reached the user —
+    /// the block's own message is what is surfaced, and it carried only
+    /// numbers. The advice now rides the shortfall onto the block.
+    #[test]
+    fn the_planners_reason_rides_the_block_a_user_actually_reads() {
+        let error = crate::execution_plan::insufficient_vram_error(&[
+            crate::execution_plan::DeviceInfeasibility {
+                device_id: "cuda:0".to_string(),
+                predicted_peak_bytes: 25_409_210_663,
+                available_bytes: 24_650_000_000,
+                admissible_ceiling_bytes: 22_185_000_000,
+                advice: Some(
+                    "streaming was not possible: Flux.2 block-level offload is only planned \
+                     for BF16/FP transformers; GGUF variants already use quantized \
+                     transformer paths"
+                        .to_string(),
+                ),
+            },
+        ]);
+        let crate::execution_plan::ExecutionPlanError::InsufficientVram {
+            advice,
+            admissible_ceiling_bytes,
+            required_peak_bytes,
+            ..
+        } = &error
+        else {
+            panic!("an insufficient-VRAM refusal");
+        };
+        assert_eq!(*required_peak_bytes, 25_409_210_663);
+        assert_eq!(*admissible_ceiling_bytes, Some(22_185_000_000));
+        assert!(
+            advice
+                .as_deref()
+                .is_some_and(|advice| advice.contains("GGUF")),
+            "the reason the tier could not stream must survive into the typed error: {advice:?}"
+        );
+    }
+
+    /// D7a, 2026-09-12: `flux2-dev:fp8` on a 24 GB simulation was refused
+    /// `requires 42.63 GB, 25.12 GB available` with no offload line, and the
+    /// figure was not the plan's — it was `vram_high_water_bytes` from a
+    /// `flux2-dev:q8` success recorded on the same home against a 46 GB card,
+    /// reaching fp8 through the family bucket. An envelope the device cannot
+    /// satisfy is not evidence about this render; it can only turn a feasible
+    /// plan into a permanent refusal.
+    #[test]
+    fn a_learned_envelope_above_the_admitted_budget_cannot_refuse_a_plan_that_fits() {
+        const MEASURED_ON_A_46GB_CARD: u64 = 42_630_905_856;
+        const TWENTY_FOUR_GB_SIMULATION: u64 = 25_118_024_704;
+
+        // A streamed plan that fits is published at the budget, not at an
+        // envelope from another card.
+        assert_eq!(
+            learned_demand_within_the_budget(
+                13_000_000_000,
+                MEASURED_ON_A_46GB_CARD,
+                TWENTY_FOUR_GB_SIMULATION,
+            ),
+            TWENTY_FOUR_GB_SIMULATION,
+        );
+
+        // #641's case is untouched: a learned peak ABOVE a too-small static
+        // estimate still wins, as long as the device could actually give it.
+        assert_eq!(
+            learned_demand_within_the_budget(11_548_381_184, 24_884_805_632, 25_769_803_776),
+            24_884_805_632,
+        );
+
+        // The plan's own demand is never lowered.
+        assert_eq!(
+            learned_demand_within_the_budget(30_000_000_000, 12_000_000_000, 25_000_000_000),
+            30_000_000_000,
+        );
+
+        // An unmeasured budget keeps today's answer.
+        assert_eq!(
+            learned_demand_within_the_budget(13_000_000_000, MEASURED_ON_A_46GB_CARD, 0),
+            MEASURED_ON_A_46GB_CARD,
+        );
+    }
+
     #[tokio::test]
     async fn a_vram_shortfall_that_survives_reclaim_is_held_naming_the_device() {
         let (mut coordinator, worker, worker_rx, mut result_rx, _root) =
@@ -12681,6 +12818,7 @@ mod tests {
                 reason: "metal:0 is currently busy".to_string(),
                 required_peak_bytes: 20 * GIB,
                 admissible_ceiling_bytes: Some(18 * GIB),
+                advice: None,
                 eligible_device_ids: vec!["metal:0".to_string()],
             },
             &BTreeMap::from([("metal:0".to_string(), 24 * GIB)]),
@@ -12725,6 +12863,7 @@ mod tests {
                 reason: "both CUDA lanes are currently busy".to_string(),
                 required_peak_bytes: 18 * GIB,
                 admissible_ceiling_bytes: Some(16 * GIB),
+                advice: None,
                 eligible_device_ids: vec!["cuda:0".to_string(), "cuda:1".to_string()],
             },
             &BTreeMap::from([
@@ -19220,6 +19359,7 @@ mod tests {
                 reason: "larger than every device".to_string(),
                 required_peak_bytes: 33_474_340_818,
                 admissible_ceiling_bytes: Some(21_474_836_480),
+                advice: None,
                 eligible_device_ids: vec!["cuda:0".to_string()],
             },
             &BTreeMap::from([("cuda:0".to_string(), RTX_4090_TOTAL)]),
@@ -19251,6 +19391,7 @@ mod tests {
                     reason: "currently short of VRAM".to_string(),
                     required_peak_bytes: 12 * GIB,
                     admissible_ceiling_bytes: Some(10 * GIB),
+                    advice: None,
                     eligible_device_ids: eligible_device_ids
                         .iter()
                         .map(|id| (*id).to_string())
