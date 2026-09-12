@@ -5971,12 +5971,10 @@ describe("CreatePage left column order", () => {
     // Expand, then hand-edit the prompt: the expansion goes stale and its
     // alert — the only place Re-expand / Generate anyway / Restore live —
     // renders under the composer.
+    // Batch 1 rewrites in place (no dialog): the mocked machine answers
+    // one variation and the composer installs it.
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "a lighthouse in storm light");
-    await nextTick();
+    await flushPromises();
     wrapper
       .getComponent({ name: "ComposerCard" })
       .vm.$emit("update:prompt", "a hand-edited storm lighthouse");
