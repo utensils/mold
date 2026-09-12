@@ -40,10 +40,12 @@ export function promptSource(
   };
 }
 
-export function remixDimensionsForTask(
-  task: ExpandTask,
-  styleLocked = false,
-): RemixDimension[] {
+/**
+ * The remix axes a task can vary. "style" is the remix-by-style axis; the
+ * composer preset that once locked it out is retired on every surface, so
+ * nothing narrows this set but the task itself.
+ */
+export function remixDimensionsForTask(task: ExpandTask): RemixDimension[] {
   let allowed: RemixDimension[];
   switch (task) {
     case "text-to-image":
@@ -70,16 +72,11 @@ export function remixDimensionsForTask(
       allowed = ["movement"];
       break;
   }
-  return styleLocked
-    ? allowed.filter((dimension) => dimension !== "style")
-    : allowed;
+  return allowed;
 }
 
-export function defaultRemixDimensions(
-  task: ExpandTask,
-  styleLocked = false,
-): RemixDimension[] {
-  return remixDimensionsForTask(task, styleLocked);
+export function defaultRemixDimensions(task: ExpandTask): RemixDimension[] {
+  return remixDimensionsForTask(task);
 }
 
 /**

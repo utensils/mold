@@ -302,10 +302,10 @@ export async function hydrateGenerationTemplate(
   persistence?: TemplateMediaPersistence,
 ): Promise<{ form: GenerateFormState; sourceMissing: boolean }> {
   const form = JSON.parse(JSON.stringify(template.form)) as GenerateFormState;
-  // The composer's preset strip is retired: a preset a template saved before
-  // then would restyle the prompt on every Generate with no control left to
-  // show or clear it. Never silently change a request.
-  form.stylePreset = null;
+  // The composer's preset strip is retired and the field with it: a preset a
+  // template saved before then would restyle the prompt on every Generate
+  // with no control left to show or clear it. Never silently change a request.
+  delete (form as unknown as Record<string, unknown>).stylePreset;
   // Legacy byte-free attachment markers must not masquerade as usable source
   // images. New templates rebuild the ordered list from durable assets below.
   form.imageAttachments = [];

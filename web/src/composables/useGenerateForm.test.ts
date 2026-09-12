@@ -337,16 +337,19 @@ describe("useGenerateForm", () => {
     expect(form.state.value).toMatchObject({ version: 3, prompt: "" });
   });
 
-  it("drops a saved stylePreset — the strip that showed it is gone", () => {
+  it("drops a saved stylePreset — the field that carried it is gone", () => {
     // A draft saved before the preset strip was retired would otherwise
-    // restyle every prompt with no control left to show or clear it.
+    // restyle every prompt with no control left to show or clear it. The
+    // field itself no longer exists, so the stored key must not survive the
+    // restore and the prompt must go out exactly as it was typed.
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({ version: 3, prompt: "a cat", stylePreset: "cinematic" }),
     );
     const form = useGenerateForm();
-    expect(form.state.value.stylePreset).toBeNull();
+    expect("stylePreset" in form.state.value).toBe(false);
     expect(form.state.value.prompt).toBe("a cat");
+    expect(form.toRequest().prompt).toBe("a cat");
   });
 
   it("upgrades a version 3 camera picker value into the visible LoRA stack", () => {
@@ -394,41 +397,22 @@ describe("useGenerateForm", () => {
     expect(form.state.value.loras).toEqual(loras);
   });
 
-  it("toRequest bakes the shared kit's style template without mutating the prompt", () => {
-    const form = useGenerateForm();
-    form.state.value.model = "flux2-klein:q4";
-    form.state.value.prompt = "a lighthouse in a storm";
-    form.state.value.stylePreset = "cinematic";
-    expect(form.toRequest().prompt).toBe(
-      "cinematic film still of a lighthouse in a storm, cinematic lighting, anamorphic, dramatic mood, subtle film grain",
-    );
-    // The textarea content itself is never rewritten by the style row.
-    expect(form.state.value.prompt).toBe("a lighthouse in a storm");
-  });
-
-  it("toRequest merges the preset's curated negative for families that take one", () => {
+  /*
+   * The preset strip is retired on every surface, so nothing composes a
+   * template into the outgoing prompt or appends a curated negative any more:
+   * what the user typed is what the wire carries, in both fields.
+   */
+  it("toRequest sends the typed prompt and the typed negative verbatim", () => {
     const form = useGenerateForm();
     form.state.value.model = "sdxl-base:fp16";
     form.state.value.modelFamily = "sdxl";
     form.state.value.prompt = "a lighthouse in a storm";
     form.state.value.negativePrompt = "text";
-    form.state.value.stylePreset = "cinematic";
-    // User fragments first, preset fragments appended.
-    expect(form.toRequest().negative_prompt).toBe(
-      "text, anime, cartoon, graphic, washed out",
-    );
-    // The visible negative field is untouched — composition happens on the way out.
+    const request = form.toRequest();
+    expect(request.prompt).toBe("a lighthouse in a storm");
+    expect(request.negative_prompt).toBe("text");
+    expect(form.state.value.prompt).toBe("a lighthouse in a storm");
     expect(form.state.value.negativePrompt).toBe("text");
-  });
-
-  it("toRequest never ships a preset negative to a family that rejects one", () => {
-    const form = useGenerateForm();
-    form.state.value.model = "flux2-klein:q4";
-    form.state.value.modelFamily = "flux2";
-    form.state.value.prompt = "a lighthouse in a storm";
-    form.state.value.negativePrompt = "text";
-    form.state.value.stylePreset = "cinematic";
-    expect(form.toRequest().negative_prompt).toBeNull();
   });
 
   describe("advertised default negative prompt (#787)", () => {
@@ -747,12 +731,15 @@ describe("useGenerateForm", () => {
     });
   });
 
-  it("toRequest sends the bare prompt when no style preset is active", () => {
+  it("toRequest sends the bare prompt to a family that takes no negative", () => {
     const form = useGenerateForm();
     form.state.value.model = "flux2-klein:q4";
+    form.state.value.modelFamily = "flux2";
     form.state.value.prompt = "a lighthouse in a storm";
-    form.state.value.stylePreset = null;
-    expect(form.toRequest().prompt).toBe("a lighthouse in a storm");
+    form.state.value.negativePrompt = "text";
+    const request = form.toRequest();
+    expect(request.prompt).toBe("a lighthouse in a storm");
+    expect(request.negative_prompt).toBeNull();
   });
 
   it("discards a snapshot with a mismatched version to avoid stale schemas", () => {
@@ -1254,13 +1241,13 @@ describe("useGenerateForm", () => {
     expect(form.state.value.gifPreview).toBe(false);
   });
 
-  it("resetSettings preserves the prompt, style, and model while resetting Batch", () => {
+  it("resetSettings preserves the prompt, title, and model while resetting Batch", () => {
     const form = useGenerateForm();
     const model = makeModel({ name: "sdxl:fp16", family: "sdxl" });
     form.applyModelDefaults(model);
     Object.assign(form.state.value, {
       prompt: "a lighthouse in a storm",
-      stylePreset: "cinematic",
+      title: "Storm light",
       batchSize: 4,
       steps: 3,
     });
@@ -1268,11 +1255,62 @@ describe("useGenerateForm", () => {
     form.resetSettings(model);
 
     expect(form.state.value.prompt).toBe("a lighthouse in a storm");
-    expect(form.state.value.stylePreset).toBe("cinematic");
+    expect(form.state.value.title).toBe("Storm light");
     expect(form.state.value.model).toBe("sdxl:fp16");
     expect(form.state.value.modelFamily).toBe("sdxl");
     expect(form.state.value.batchSize).toBe(1);
     expect(form.state.value.steps).toBe(20);
+  });
+
+  /*
+   * Reset is "reset everything": every generation setting on the Create page
+   * goes back to the model's defaults, add-on looks included — they are edited
+   * from their own row now, but they are still a setting of this render, and a
+   * Reset that left one attached would send a look the user believed cleared.
+   * Only the prompt, the title and the model survive.
+   */
+  it("resetSettings returns every setting to default, add-on looks included", () => {
+    const form = useGenerateForm();
+    const model = makeModel({ name: "sdxl:fp16", family: "sdxl" });
+    form.applyModelDefaults(model);
+    Object.assign(form.state.value, {
+      prompt: "a lighthouse in a storm",
+      title: "Storm light",
+      loras: [{ path: "film-grain.safetensors", scale: 0.8, trainedWords: [] }],
+      imageAttachments: [
+        { kind: "upload", filename: "source.png", base64: "AAAA" },
+      ],
+      identityImage: { kind: "upload", filename: "face.png", base64: "BBBB" },
+      identityWeight: 0.9,
+      seedMode: "fixed",
+      seed: 1234,
+      cameraControl: "dolly-in",
+      width: 1536,
+      height: 640,
+      strength: 0.42,
+      negativePrompt: "text",
+      batchSize: 4,
+    });
+
+    form.resetSettings(model);
+
+    const defaults = form.state.value;
+    expect(defaults.prompt).toBe("a lighthouse in a storm");
+    expect(defaults.title).toBe("Storm light");
+    expect(defaults.model).toBe("sdxl:fp16");
+    expect(defaults.modelFamily).toBe("sdxl");
+    expect(defaults.loras).toEqual([]);
+    expect(defaults.imageAttachments).toEqual([]);
+    expect(defaults.identityImage).toBeNull();
+    expect(defaults.identityWeight).toBeNull();
+    expect(defaults.seedMode).toBe("random");
+    expect(defaults.seed).toBeNull();
+    expect(defaults.cameraControl).toBeNull();
+    expect(defaults.width).toBe(1024);
+    expect(defaults.height).toBe(1024);
+    expect(defaults.strength).toBe(0.75);
+    expect(defaults.negativePrompt).toBe("");
+    expect(defaults.batchSize).toBe(1);
   });
 
   it("resetSettings falls back to plain defaults with no resolved model row", () => {
@@ -2590,7 +2628,6 @@ describe("generate form serialization helpers", () => {
   ): GenerateFormState {
     return {
       version: 3,
-      stylePreset: null,
       prompt: "a cat",
       negativePrompt: "",
       model: "flux-dev:q4",

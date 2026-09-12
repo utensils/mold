@@ -158,7 +158,6 @@ import {
   isQwenImageEditFamily,
   useGenerateForm,
 } from "../composables/useGenerateForm";
-import { mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
   activeCanvasJob,
   latestUnresolvedError,
@@ -696,17 +695,6 @@ function onRecentMenuKeydown(event: KeyboardEvent) {
 // editable variations reviewed in the canvas before queueing.
 const prevPrompt = ref<string | null>(null);
 const prevOriginalPrompt = ref<string | null>(null);
-/**
- * The style state a quick expansion's bake-and-clear replaced: the chip it
- * dropped, and the negative prompt before and after the preset's curated
- * fragments merged in. Undo re-arms it; `baked` lets the negative half bow out
- * when the user has edited the field since.
- */
-const prevStyle = ref<{
-  preset: string | null;
-  negativeBefore: string;
-  negativeBaked: string;
-} | null>(null);
 const expanded = computed(() => prevPrompt.value !== null);
 const variations = ref<string[]>([]);
 const queueingVariations = ref(false);
@@ -940,12 +928,6 @@ function expansionTaskForCurrentOutput(
 ): ExpandTask {
   return expansionTaskForRequest(currentFamily.value, request);
 }
-// The composer's style chip steers the main-prompt expansion as natural
-// language.
-const expandStyleDirective = computed(() =>
-  styleHint(form.state.value.stylePreset ?? ""),
-);
-
 // Drawer state (mirrors LibraryPage).
 const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
@@ -1864,7 +1846,6 @@ function onNewPrint() {
   fileUnder.reset();
   form.state.value.prompt = "";
   form.state.value.originalPrompt = null;
-  form.state.value.stylePreset = null;
   form.state.value.imageAttachments = [];
   form.state.value.endFrame = null;
   form.state.value.maskImage = null;
@@ -1875,17 +1856,18 @@ function onNewPrint() {
   pendingVariationBatch.value = null;
   prevPrompt.value = null;
   prevOriginalPrompt.value = null;
-  prevStyle.value = null;
   composerError.value = null;
   preprocessingStatus.value = null;
   void nextTick(() => composerCardRef.value?.focus?.());
 }
 
-// Controls rail "Reset" (spec §06): put every generation setting back to the
-// current model's defaults. The prompt, style, and model stay while Batch
-// returns to one. Prepared work remains retained and becomes explicitly stale;
-// nothing leaves the browser, so an undo toast is enough and a blocking confirm
-// would be heavier than the action deserves.
+// Controls rail "Reset" (spec §06): put EVERY generation setting on this page
+// back to the current model's defaults — the add-on looks included, which are
+// edited from their own row but are still a setting of this render. The
+// prompt, the title and the model stay while Batch returns to one. Prepared
+// work remains retained and becomes explicitly stale; nothing leaves the
+// browser, so an undo toast is enough and a blocking confirm would be heavier
+// than the action deserves.
 function onResetSettings() {
   clearRetainedSourceReuseIntent();
   // resetSettings swaps in a freshly built state object, so the previous one is
@@ -3776,14 +3758,12 @@ async function onExpand() {
       if (expansion.missing) return;
       expandOn = expansion.route;
       const submitRoute = normalizeSubmitRoute(expandOn);
-      const style = styleHint(form.state.value.stylePreset ?? "");
       composerError.value = null;
       const response = await expandPrompt(
         {
           prompt: sourcePrompt,
           model_family: family,
           variations: count,
-          ...(style ? { style } : {}),
           task,
           context: expansionContextForRequest(
             family,
@@ -3909,10 +3889,6 @@ function applyRemix(payload: { prompt: string; response: RemixResponseWire }) {
         )?.dimensions ?? [],
     },
   };
-  // Remix, like Expand, weaves the active style into the returned prompt.
-  // Clear the chip to avoid applying it twice and retain its curated negative
-  // in the request; undo restores both through the established snapshot.
-  bakeStyleAndClear();
   showRemix.value = false;
 }
 
@@ -3962,24 +3938,6 @@ async function prepareRemixBatch(response: RemixResponseWire) {
   showRemix.value = false;
 }
 
-/**
- * Bake-and-clear owes the user the preset's curated negative: the chip is
- * about to be dropped, so submit-time composition will never see it again.
- * The look itself already reached the prompt — through the server's expansion
- * directive, or through the baked variation text — so only the negative half
- * has nowhere else to live. Returns the pre-bake negative for undo.
- */
-function bakeStyleAndClear() {
-  const preset = form.state.value.stylePreset;
-  const negativeBefore = form.state.value.negativePrompt;
-  const negativeBaked = mergeStyleNegative(negativeBefore, preset ?? "", {
-    supportsNegativePrompt: capabilities.value.supportsNegativePrompt,
-  });
-  form.state.value.negativePrompt = negativeBaked;
-  form.state.value.stylePreset = null;
-  prevStyle.value = { preset, negativeBefore, negativeBaked };
-}
-
 function applyExpandedPrompt(v: string) {
   prevPrompt.value = form.state.value.prompt;
   prevOriginalPrompt.value = form.state.value.originalPrompt ?? null;
@@ -3994,31 +3952,19 @@ function applyExpandedPrompt(v: string) {
   };
   form.state.value.originalPrompt = form.state.value.prompt.trim();
   form.state.value.prompt = v;
-  // Same bake-and-clear as the desktop app: the rewrite absorbed the look, so
-  // leaving the chip lit would apply it twice at submit.
-  bakeStyleAndClear();
 }
 
 /**
- * Drop every trace of a quick expansion without touching the prompt text:
- * the frozen route snapshot, the undo, and the chip and negative fragments
- * the bake merged in — unless the user has edited the negative since, which
- * is theirs to keep. Undo goes through here and then puts the original prompt
- * back; a history recall goes through here and then installs the recalled
- * prompt, so no stale banner can point at a rewrite that is no longer shown.
+ * Drop every trace of a quick expansion without touching the prompt text: the
+ * frozen route snapshot and the undo. Undo goes through here and then puts the
+ * original prompt back; a history recall goes through here and then installs
+ * the recalled prompt, so no stale banner can point at a rewrite that is no
+ * longer shown.
  */
 function releaseQuickExpansion() {
   if (prevPrompt.value === null && quickPrepared.value === null) return;
-  const style = prevStyle.value;
-  if (style) {
-    form.state.value.stylePreset = style.preset;
-    if (form.state.value.negativePrompt === style.negativeBaked) {
-      form.state.value.negativePrompt = style.negativeBefore;
-    }
-  }
   prevPrompt.value = null;
   prevOriginalPrompt.value = null;
-  prevStyle.value = null;
   quickPrepared.value = null;
   pendingVariationBatch.value = null;
 }
@@ -4041,9 +3987,6 @@ function useVariation(index: number) {
     preparedBatch.value?.rootPrompt ??
     preparedBatch.value?.sourcePrompt ??
     null;
-  // The variation text already carries the baked look, so the chip clears —
-  // and the preset's curated negative comes with it.
-  bakeStyleAndClear();
   variations.value = [];
   preparedBatch.value = null;
 }
@@ -4474,7 +4417,6 @@ function openJob(job: Job) {
     form.state.value.prompt = request.prompt;
   }
   form.state.value.originalPrompt = request.original_prompt ?? null;
-  form.state.value.stylePreset = null;
   form.state.value.expand = {
     enabled: false,
     variations: 1,
@@ -5601,7 +5543,6 @@ onBeforeUnmount(() => {
       :prompt="form.state.value.prompt"
       :expand="form.state.value.expand"
       :current-model="currentModel"
-      :style-directive="expandStyleDirective"
       :task="expandTask"
       :context="expandContext"
       :target="expandRoute?.target"
@@ -5620,7 +5561,6 @@ onBeforeUnmount(() => {
       :family="currentFamily"
       :task="remixTask"
       :context="remixContext"
-      :style="styleHint(form.state.value.stylePreset ?? '')"
       :prompt-ignored="promptTransformBlocked !== null"
       :target="normalizeSubmitRoute(remixRoute)?.target"
       @close="showRemix = false"

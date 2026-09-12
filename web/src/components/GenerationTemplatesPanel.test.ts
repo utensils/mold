@@ -16,7 +16,6 @@ function makeForm(
 ): GenerateFormState {
   return {
     version: 3,
-    stylePreset: null,
     prompt: "template prompt",
     negativePrompt: "",
     model: "flux-dev:q4",
