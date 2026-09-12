@@ -74,6 +74,7 @@ vi.mock("../lib/api/client", () => ({
 vi.mock("../lib/notify", () => ({
   notifyGenerated: vi.fn(),
   notifyGenerationFailed: vi.fn(),
+  appIsBackground: () => false,
 }));
 
 import { useGenerationStore } from "./generation";
@@ -349,6 +350,32 @@ describe("generation queueing", () => {
 
     expect(jobs[0]).toMatchObject({ status: "error", error: "Cancelled", result: null });
     expect(jobs[0]!.resultUrl).toBeNull();
+  });
+
+  /*
+   * The Dock badge counts prints that landed while the app was away, and the
+   * fleet's `/api/events` streams are its main source. A machine whose stream
+   * was never live (no durable job there yet, or the app just launched) would
+   * otherwise contribute nothing, so this app's own completion counts too —
+   * the key is machine + file name, so the stream's frame dedupes against it.
+   */
+  it("counts its own finished print for the Dock badge", async () => {
+    const { useLandedPrintsStore } = await import("./landedPrints");
+    const noteLanded = vi
+      .spyOn(useLandedPrintsStore(), "noteLanded")
+      .mockImplementation(() => {});
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch({ ...req }, 1, null, chainDecision);
+    await flushPromises();
+
+    openStreams[0]!.onEvent("chain_job", chainComplete({ seed: 77 }));
+    openStreams[0]!.resolve();
+    await settled;
+
+    expect(jobs[0]!.status).toBe("complete");
+    // Unrouted means the local primary engine, which is the same "local" id
+    // the shared subscription keys that machine's frames under.
+    expect(noteLanded).toHaveBeenCalledWith("local", "sequence-77.mp4");
   });
 
   it("ignores buffered completion frames after the store resets", async () => {

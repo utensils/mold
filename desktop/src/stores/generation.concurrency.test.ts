@@ -25,6 +25,7 @@ vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
 vi.mock("../lib/notify", () => ({
   notifyGenerated: effectMocks.notifyGenerated,
   notifyGenerationFailed: effectMocks.notifyGenerationFailed,
+  appIsBackground: () => false,
 }));
 vi.mock("../lib/gallery/media", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/gallery/media")>()),

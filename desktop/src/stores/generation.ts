@@ -19,6 +19,7 @@ import {
 import { useAppPrefsStore } from "./appPrefs";
 import { useGalleryStore } from "./gallery";
 import { useHostsStore } from "./hosts";
+import { useLandedPrintsStore } from "./landedPrints";
 import type {
   ChainProgressEvent,
   CompleteEvent,
@@ -1095,6 +1096,13 @@ export const useGenerationStore = defineStore("generation", {
       const completed = jobs.filter((job) => job.status === "complete" && job.result?.filename);
       if (completed.length > 0 && claim("native-notification")) {
         notifyGenerated(completed[0]!.prompt, completed[0]!.result?.filename);
+        // The Dock badge's own source is the fleet's `/api/events` streams;
+        // this covers a machine whose stream was never live. Keyed on machine
+        // + file name, so the frame and this agree on one print.
+        const landed = useLandedPrintsStore();
+        for (const job of completed) {
+          landed.noteLanded(record.tracker.hostId, job.result?.filename);
+        }
       } else {
         const failed = jobs.find(
           (job) =>
@@ -1550,6 +1558,15 @@ export const useGenerationStore = defineStore("generation", {
           if (completed) notifyGenerated(completed.prompt, completed.result?.filename);
           else if (failed?.error && !failed.interrupted && !isCancelledError(failed.error)) {
             notifyGenerationFailed(describeTransportError(failed.error, failed.hostLabel));
+          }
+          // Same as the durable path: count every print this batch landed, on
+          // the machine that made it. An unrouted job is the local primary
+          // engine, whose shared stream keys its frames under "local".
+          const landed = useLandedPrintsStore();
+          for (const job of jobs) {
+            if (job.status === "complete") {
+              landed.noteLanded(job.hostId ?? "local", job.result?.filename);
+            }
           }
           // Consumers such as the iPhone UI promote the returned result in
           // their own promise callback. Defer housekeeping until that callback
