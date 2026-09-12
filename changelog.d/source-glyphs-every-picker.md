@@ -9,7 +9,7 @@
   tiles now sit in a grid that shrinks each one to fit instead.
 - **A meter's track is visible again wherever it sits on a panel.** Its
   track color matched a panel's own background on the machine card, the
-  host detail page, the activity strip, the cold-start guide, the downloads
+  machine details page, the activity strip, the cold-start guide, the downloads
   list, and the phone's queue card, so a render's progress meter read as
   empty space until the fill caught up. The track now uses a color that
   contrasts on every panel and surface tone.
