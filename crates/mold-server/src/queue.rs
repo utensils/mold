@@ -3494,7 +3494,16 @@ async fn run_queue_dispatcher_with_tuning_inner(
             job.deferred_media.as_ref().map(|media| media.projection()),
         );
         if let Some(err_msg) =
-            crate::gpu_pool::model_unschedulable_message(&model_name, Some(&shape_bucket))
+            crate::gpu_pool::model_unschedulable_message(&model_name, Some(&shape_bucket)).or_else(
+                || {
+                    // Held on every device after its own repeated failures: the
+                    // refusal names the model, and the devices stay healthy.
+                    crate::gpu_pool::model_specific_hold_message(
+                        &model_name,
+                        &state.gpu_pool.worker_ordinals(),
+                    )
+                },
+            )
         {
             tracing::warn!(model = %model_name, "{err_msg}");
             durable_generation_settlement::fail_async(

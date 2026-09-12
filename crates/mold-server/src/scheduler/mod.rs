@@ -1933,6 +1933,18 @@ impl Coordinator {
             reject_generation(&self.state, job, error);
             return;
         }
+        // A model every device is holding after its own repeated failures is
+        // refused BY NAME. Without this the job simply has no candidate plan
+        // and waits for the idle grace to bound it with an untyped
+        // "no schedulable device", which is the device's sentence for the
+        // model's problem.
+        if let Some(error) = crate::gpu_pool::model_specific_hold_message(
+            &job.request.model,
+            &self.state.gpu_pool.worker_ordinals(),
+        ) {
+            reject_generation(&self.state, job, error);
+            return;
+        }
         if let Err(error) = self
             .state
             .gpu_pool

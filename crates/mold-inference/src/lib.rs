@@ -17,6 +17,7 @@ pub mod error;
 #[cfg(feature = "expand")]
 pub mod expand;
 mod factory;
+pub mod failure_class;
 pub mod flux;
 pub mod flux2;
 /// Opt-in per-step non-finite diagnostics shared by both FLUX families.
@@ -152,6 +153,10 @@ pub use error::InferenceError;
 pub use factory::{
     create_engine, create_engine_with_frozen_config, create_engine_with_pool,
     factory_family_availability, FactoryFamilyAvailability, FrozenEngineConfig,
+};
+pub use failure_class::{
+    is_model_specific_failure, message_is_model_specific_failure, model_specific_error,
+    MODEL_SPECIFIC_FAILURE_MARKER,
 };
 pub use flux::FluxEngine;
 /// Extra resident bytes a FLUX.2 fp8 checkpoint costs when the engine widens

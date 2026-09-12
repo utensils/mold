@@ -72,10 +72,19 @@ pub(crate) fn check_step_is_finite(tensor: &Tensor, what: &str, step: usize) -> 
     if total.is_finite() {
         return Ok(());
     }
-    anyhow::bail!(
+    Err(nonfinite_error(what, step))
+}
+
+/// The bail, as a value, so its CLASS is testable without the flag.
+///
+/// It is marked model-specific: a NaN is a fact about this checkpoint at this
+/// shape, and three of them used to degrade the whole DEVICE for a minute and
+/// refuse every other model on a single-GPU host.
+pub(crate) fn nonfinite_error(what: &str, step: usize) -> anyhow::Error {
+    crate::failure_class::model_specific_error(format!(
         "non-finite {what} at denoise step {step} (MOLD_FLUX_DEBUG_NONFINITE); \
          re-run with MOLD_FLUX2_QMATMUL=0 to take the per-forward dequant arm"
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -116,6 +125,23 @@ mod tests {
         assert!(!finite(vec![1.0, f32::NAN, 3.5, 0.0]));
         assert!(!finite(vec![1.0, f32::INFINITY, 3.5, 0.0]));
         assert!(!finite(vec![f32::INFINITY, f32::NEG_INFINITY, 0.0, 0.0]));
+    }
+
+    /// A non-finite prediction is the MODEL's fault, never the card's.
+    ///
+    /// Three of these in a row used to trip the server's device breaker,
+    /// which on a single-GPU host refused every other model for sixty
+    /// seconds with "no enabled, healthy GPU device is available".
+    #[test]
+    fn the_bail_is_marked_model_specific() {
+        let error = nonfinite_error("prediction", 3);
+        assert!(crate::failure_class::is_model_specific_failure(&error));
+        assert!(
+            error
+                .to_string()
+                .contains("non-finite prediction at denoise step 3"),
+            "the diagnostic still leads with the step it found: {error:#}"
+        );
     }
 
     /// With the flag off — the default in this test process — the check is a

@@ -133,10 +133,21 @@ quantization, or force a lower-memory path such as adaptive `--offload` or
 
 ## Worker Degraded State
 
-If `/api/status` shows a GPU worker with `"state": "degraded"`, that worker hit
-several consecutive failures and is cooling down briefly. New jobs route to
-healthy workers when possible. Server logs include the original error; inspect
-them before changing models or deleting files.
+If `/api/status` shows a GPU worker with `"state": "degraded"` — or
+`/api/devices` reports `"health": "degraded"`, `"schedulable": false` and
+`"unschedulable_reason": "device_degraded"` — that worker hit three consecutive
+failures and is cooling down for 60 seconds. New jobs route to healthy workers
+when possible. Server logs include the original error; inspect them before
+changing models or deleting files.
+
+Only failures that say something about the **device** count: driver faults,
+CUDA errors, and out-of-memory. A failure the engine reports as belonging to
+the model or the request — a non-finite (NaN) prediction, for instance — holds
+that **model on that GPU** instead, with the same three-strike, 60-second
+shape. The device stays healthy and schedulable, every other model keeps
+rendering on it, and the refusal names the model rather than the GPU. A
+successful render of that model clears its strikes. On a multi-GPU host the
+held model is simply routed to another card.
 
 ## Model Download Problems
 

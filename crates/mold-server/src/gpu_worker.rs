@@ -3568,7 +3568,7 @@ fn run_claimed_h3_generation(
                 return reject_claimed_h3_generation_message(job, message);
             }
             release_prepared_and_trim(&mut prepared);
-            record_failure(worker);
+            record_counted_failure(worker, &model_name, &format!("{error:#}"));
             reject_claimed_h3_generation_message(
                 job,
                 format!("generation error: {}", clean_error_message(&error)),
@@ -3682,6 +3682,7 @@ fn finish_claimed_h3_success(
     };
     worker.consecutive_failures.store(0, Ordering::SeqCst);
     crate::gpu_pool::clear_model_cuda_oom(&job.model);
+    crate::gpu_pool::clear_model_specific_failures(&job.model, worker.gpu.ordinal);
     finish_generation_success(job, output.response, image, None, None);
     true
 }
@@ -3995,7 +3996,7 @@ fn settle_identity_extraction_failure(
     // would take the whole machine out of rotation for a minute, telling the
     // person who supplied them an unrelated story about GPU health.
     if !error.user_input {
-        record_failure(worker);
+        record_counted_failure(worker, model_name, &error.message);
     }
     format!("face-identity conditioning failed: {error}")
 }
@@ -4366,7 +4367,7 @@ fn process_job_with_sink(
             err_msg,
         );
         if count_worker_failure {
-            record_failure(worker);
+            record_counted_failure(worker, &model_name, &format!("{e:#}"));
         }
         return false;
     }
@@ -4566,6 +4567,8 @@ fn process_job_with_sink(
             // Reset failure counter on success.
             worker.consecutive_failures.store(0, Ordering::SeqCst);
             crate::gpu_pool::clear_model_cuda_oom(&model_name);
+            // "Consecutive" means consecutive for the model hold too.
+            crate::gpu_pool::clear_model_specific_failures(&model_name, worker.gpu.ordinal);
 
             // Attach GPU ordinal to response.
             response.gpu = Some(ordinal);
@@ -4796,7 +4799,7 @@ fn process_job_with_sink(
             let err_msg = request.redact_staging_paths(err_msg);
             tracing::warn!(gpu = ordinal, model = %model_name, %err_msg, "generation failed");
             if count_worker_failure {
-                record_failure(worker);
+                record_counted_failure(worker, &model_name, &format!("{e:#}"));
             }
             // A retained job's stream ends with a terminal frame rather than a
             // quiet close: a quiet close leaves the desktop app in `loading`
@@ -6180,6 +6183,31 @@ fn ensure_owner_thread(worker: &GpuWorker) -> anyhow::Result<()> {
         ),
         None => anyhow::bail!("GPU {} owner thread is not initialized", worker.gpu.ordinal),
     }
+}
+
+/// Route a counted failure to the breaker it is actually about.
+///
+/// The device breaker takes a card out of rotation for sixty seconds, which
+/// is the right answer for a card that is wedged or faulting (#245, and the
+/// OOM history behind #276) and the wrong one for a checkpoint that produces
+/// a NaN. Three `flux2-dev:q8` non-finite bails on a single-GPU host left
+/// `/api/devices` reporting `health: "degraded"`, `schedulable: false`,
+/// `unschedulable_reason: "device_degraded"`, and answered the next twelve
+/// requests — for OTHER models — with "no enabled, healthy GPU device is
+/// available".
+///
+/// A failure the ENGINE marked as its own goes to the `(device, model)` hold
+/// instead, which has the same three-strike, sixty-second shape and leaves the
+/// device healthy for every other model. Everything else still counts against
+/// the device, deliberately: a classifier that had to recognise every device
+/// fault would fail open on the one nobody anticipated, and failing open here
+/// means continuing to schedule onto a broken card.
+fn record_counted_failure(worker: &GpuWorker, model_name: &str, message: &str) {
+    if mold_inference::message_is_model_specific_failure(message) {
+        crate::gpu_pool::record_model_specific_failure(model_name, worker.gpu.ordinal);
+        return;
+    }
+    record_failure(worker);
 }
 
 fn record_failure(worker: &GpuWorker) {
@@ -8758,6 +8786,30 @@ mod tests {
         fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
             Err(anyhow::Error::new(mold_inference::InferenceCancelled)
                 .context("generation aborted"))
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// An engine whose every render fails with a fixed message.
+    struct FailingGenerateEngine {
+        name: String,
+        error: String,
+    }
+
+    impl InferenceEngine for FailingGenerateEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            Err(anyhow::anyhow!("{}", self.error))
         }
 
         fn model_name(&self) -> &str {
@@ -12136,6 +12188,154 @@ mod tests {
         finish_generation_success(job, fake_response(), fake_image(), None, None);
 
         assert!(journal.list_all().is_empty());
+    }
+
+    /// Run one doomed render of `model` on `worker` and return its message.
+    async fn render_failing_model(
+        worker: &Arc<GpuWorker>,
+        model: &str,
+        error: &str,
+        attempt: usize,
+    ) -> String {
+        worker.model_cache.lock().unwrap().insert_loaded(
+            model.to_string(),
+            Box::new(FailingGenerateEngine {
+                name: model.to_string(),
+                error: error.to_string(),
+            }),
+            123,
+        );
+        let mut request = fake_upscale_job(Config::default(), "unused").request;
+        request.model = model.to_string();
+        request.upscale_model = None;
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(queue_tx);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let worker_for_job = worker.clone();
+        let model_owned = model.to_string();
+        tokio::task::spawn_blocking(move || {
+            let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+            process_job(
+                &worker_for_job,
+                GpuJob {
+                    id: format!("{model_owned}-{attempt}"),
+                    durable_queue_rank: None,
+                    model: model_owned.clone(),
+                    request,
+                    deferred_media: None,
+                    materialized_control_lora: None,
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx,
+                    output_dir: None,
+                    config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+                    metadata_db: Arc::new(None),
+                    gallery_publication_gate:
+                        crate::batch_transaction::GalleryPublicationGate::default(),
+                    queue: queue.clone(),
+                    registry: JobRegistry::new(),
+                    events: crate::events::EventBroadcaster::new(),
+                    execution_plan: None,
+                    prepared_execution_inputs: None,
+                    h3_prepared_attempt: None,
+                    lease: None,
+                    journal: None,
+                },
+                &scheduler_tx,
+                1,
+                None,
+            );
+        })
+        .await
+        .unwrap();
+        match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("a failing engine unexpectedly generated"),
+        }
+    }
+
+    /// A model that renders NaN is not a broken GPU.
+    ///
+    /// Three `flux2-dev:q8` non-finite bails on a single-GPU host used to
+    /// report `health: "degraded"`, `schedulable: false`,
+    /// `unschedulable_reason: "device_degraded"` and answer the next twelve
+    /// requests — for OTHER models — with "no enabled, healthy GPU device is
+    /// available". The failure is the model's, so the hold is the model's.
+    #[tokio::test]
+    async fn three_model_specific_failures_hold_the_model_and_leave_the_device_schedulable() {
+        crate::gpu_pool::clear_model_specific_failures_for_tests();
+        let worker = single_worker_pool_with_parked("parked", Duration::ZERO);
+        let model = "breaker-nonfinite-model";
+        let error = mold_inference::model_specific_error(
+            "non-finite prediction at denoise step 3 (MOLD_FLUX_DEBUG_NONFINITE)",
+        )
+        .to_string();
+
+        for attempt in 0..3 {
+            let message = render_failing_model(&worker, model, &error, attempt).await;
+            assert!(
+                message.contains("non-finite prediction"),
+                "the render fails with its own reason, got: {message}"
+            );
+        }
+
+        assert_eq!(
+            worker.consecutive_failures.load(Ordering::SeqCst),
+            0,
+            "a model's numerical failure must never count against the device"
+        );
+        assert!(
+            !worker.is_degraded(),
+            "the device stays healthy and schedulable"
+        );
+        assert_eq!(
+            crate::gpu_pool::model_specific_hold_ordinals(model),
+            vec![0],
+            "the model is held on the device it failed on"
+        );
+        assert!(
+            crate::gpu_pool::failed_ordinals_for_model("breaker-other-model").is_empty(),
+            "another model must still be routable to this device"
+        );
+        let refusal = crate::gpu_pool::model_specific_hold_message(model, &[0])
+            .expect("the only device holds this model");
+        assert!(
+            refusal.contains(model) && !refusal.contains("healthy GPU device is available"),
+            "the refusal names the model, not the device: {refusal}"
+        );
+
+        crate::gpu_pool::clear_model_specific_failures_for_tests();
+    }
+
+    /// The other half of the same rule: an unmarked failure is still the
+    /// device's, and three of them still degrade it exactly as before.
+    #[tokio::test]
+    async fn three_unmarked_failures_still_degrade_the_device() {
+        crate::gpu_pool::clear_model_specific_failures_for_tests();
+        let worker = single_worker_pool_with_parked("parked", Duration::ZERO);
+        let model = "breaker-cuda-model";
+
+        for attempt in 0..3 {
+            render_failing_model(
+                &worker,
+                model,
+                "DriverError(CUDA_ERROR_INVALID_VALUE, \"invalid argument\")",
+                attempt,
+            )
+            .await;
+        }
+
+        assert_eq!(worker.consecutive_failures.load(Ordering::SeqCst), 3);
+        assert!(
+            worker.is_degraded(),
+            "a device-class failure must still take the card out of rotation"
+        );
+        assert!(
+            crate::gpu_pool::model_specific_hold_ordinals(model).is_empty(),
+            "an unmarked failure is not a model hold"
+        );
+
+        crate::gpu_pool::clear_model_specific_failures_for_tests();
     }
 
     /// A shutdown abort is a deliberate cancellation, not evidence that this

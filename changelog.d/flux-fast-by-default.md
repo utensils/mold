@@ -211,3 +211,19 @@
   retry. The gate now asks the same question the render asks and simply defers
   the preload, so the adapter is applied by the sequential load that follows.
   Plain FLUX.2 renders and the FLUX.1 LoRA path are unchanged.
+
+- **One model's numerical failure no longer takes the whole GPU out of
+  service.** A worker that failed three times in a row was marked degraded and
+  stopped scheduling anything for 60 seconds — the right answer for a card that
+  is wedged or faulting, and the wrong one for a checkpoint that produces a
+  NaN. Three non-finite `flux2-dev:q8` renders on a single-GPU host left
+  `/api/devices` reporting `health: "degraded"` and answered the next twelve
+  requests, for other models, with "no enabled, healthy GPU device is
+  available". Failures the engine reports as belonging to the model or the
+  request now hold that **model on that GPU** instead, with the same
+  three-strike, 60-second shape: the device stays healthy and schedulable,
+  every other model keeps rendering on it, a multi-GPU host routes the held
+  model to another card, the refusal names the model rather than the GPU, and
+  a successful render clears the strikes. Driver faults, CUDA errors and
+  out-of-memory still count against the device exactly as before, as does any
+  failure the engine has not classified.

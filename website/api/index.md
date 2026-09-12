@@ -2114,6 +2114,14 @@ the desired preference remains enabled, health is unavailable, and
 restart after correcting the driver/device fault. A delayed ready, stopped, or
 completion event from the predecessor cannot mutate or reap the replacement.
 
+`unschedulable_reason` also reports `device_degraded` while a device is in its
+60-second cooldown after three consecutive **device-class** failures (driver
+faults, CUDA errors, out-of-memory). A failure the engine reports as specific
+to the model or the request — a non-finite prediction, for example — never
+reaches this state: it holds that model on that device instead, the device
+stays `healthy` and `schedulable`, and the refusal for the held model names
+the model.
+
 Runtime mutation requires scheduler V2. In legacy, observe, or maintenance
 mode, disabling still returns `409`, but enabling a persistently-disabled,
 startup-selected device records the preference for the next boot. The first
