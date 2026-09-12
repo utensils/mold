@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { nextTick } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { useEventsStore } from "./events";
 import { useGalleryStore } from "./gallery";
@@ -398,5 +399,197 @@ describe("old-server fallback poller", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/*
+ * The Dock badge counts prints that landed on ANY connected machine while the
+ * app was away, so the shared subscription is fleet-wide: one `/api/events`
+ * per ready machine. Everything else stays primary-only — the gallery store
+ * holds the primary's bucket, and the queue chips read the primary's queue.
+ */
+describe("fleet-wide event streams", () => {
+  /** Local primary + two ready remotes. */
+  async function connectFleet() {
+    const gallery = connectWithBucket();
+    const { useHostsStore } = await import("./hosts");
+    const hosts = useHostsStore();
+    hosts.extras = [
+      {
+        id: "plato",
+        label: "plato",
+        url: "http://plato:7680",
+        apiKey: "plato-key",
+        status: "ready",
+        error: null,
+        instanceId: "i-plato",
+      },
+      {
+        id: "hal",
+        label: "hal",
+        url: "http://hal:7680",
+        apiKey: null,
+        status: "ready",
+        error: null,
+        instanceId: "i-hal",
+      },
+    ];
+    return { gallery, hosts };
+  }
+
+  function streamTargets() {
+    return vi.mocked(sseStream).mock.calls.map(([path, options]) => [path, options?.target]);
+  }
+
+  it("opens one stream per ready machine and attaches each to the durable tracker", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    await connectFleet();
+    const generation = useGenerationStore();
+    const attach = vi
+      .spyOn(generation, "attachSharedDurableEventHost")
+      .mockImplementation(() => {});
+    const events = useEventsStore();
+
+    await events.subscribe();
+
+    expect(streamTargets()).toEqual([
+      ["/api/events", { baseUrl: "http://127.0.0.1:49152", apiKey: null }],
+      ["/api/events", { baseUrl: "http://plato:7680", apiKey: "plato-key" }],
+      ["/api/events", { baseUrl: "http://hal:7680", apiKey: null }],
+    ]);
+    for (const call of vi.mocked(sseStream).mock.calls) {
+      expect(call[1]?.terminalHttpStatuses).toEqual([401, 403, 404]);
+    }
+    expect(attach.mock.calls.map(([id]) => id)).toEqual(["local", "plato", "hal"]);
+    events.unsubscribe();
+  });
+
+  it("closes and detaches a machine that stops being ready, and reopens it when it returns", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    const { hosts } = await connectFleet();
+    const generation = useGenerationStore();
+    vi.spyOn(generation, "attachSharedDurableEventHost").mockImplementation(() => {});
+    const detach = vi
+      .spyOn(generation, "detachSharedDurableEventHost")
+      .mockImplementation(() => {});
+    const events = useEventsStore();
+    await events.subscribe();
+    const platoSignal = vi.mocked(sseStream).mock.calls[1]![1]!.signal!;
+
+    hosts.extras[0]!.status = "error";
+    await nextTick();
+
+    expect(platoSignal.aborted).toBe(true);
+    expect(detach).toHaveBeenCalledWith("plato");
+    expect(vi.mocked(sseStream)).toHaveBeenCalledTimes(3);
+
+    hosts.extras[0]!.status = "ready";
+    await nextTick();
+    expect(vi.mocked(sseStream)).toHaveBeenCalledTimes(4);
+    expect(vi.mocked(sseStream).mock.calls[3]![1]!.target).toEqual({
+      baseUrl: "http://plato:7680",
+      apiKey: "plato-key",
+    });
+    events.unsubscribe();
+  });
+
+  it("counts a landed print on every machine but files it into the gallery only from the primary", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    const { gallery } = await connectFleet();
+    const generation = useGenerationStore();
+    vi.spyOn(generation, "attachSharedDurableEventHost").mockImplementation(() => {});
+    vi.spyOn(generation, "detachSharedDurableEventHost").mockImplementation(() => {});
+    const applyAdded = vi.spyOn(gallery, "applyAdded").mockImplementation(() => {});
+    const { useLandedPrintsStore } = await import("./landedPrints");
+    const noteLanded = vi
+      .spyOn(useLandedPrintsStore(), "noteLanded")
+      .mockImplementation(() => {});
+    const events = useEventsStore();
+    await events.subscribe();
+    const [primary, plato] = vi.mocked(sseStream).mock.calls.map(([, options]) => options!);
+
+    const frame = (filename: string) =>
+      JSON.stringify({ type: "gallery_added", filename, image: { filename, timestamp: 1 } });
+    primary!.onEvent?.("message", frame("mine.png"));
+    expect(applyAdded).toHaveBeenCalledTimes(1);
+    expect(noteLanded).toHaveBeenCalledWith("local", "mine.png");
+
+    plato!.onEvent?.("message", frame("theirs.png"));
+    expect(noteLanded).toHaveBeenCalledWith("plato", "theirs.png");
+    // The gallery store holds the PRIMARY's bucket; a remote print reaches it
+    // through the merged fetch, never through another machine's frame.
+    expect(applyAdded).toHaveBeenCalledTimes(1);
+    events.unsubscribe();
+  });
+
+  it("leaves every non-gallery frame from a secondary machine alone", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    await connectFleet();
+    const generation = useGenerationStore();
+    vi.spyOn(generation, "attachSharedDurableEventHost").mockImplementation(() => {});
+    vi.spyOn(generation, "detachSharedDurableEventHost").mockImplementation(() => {});
+    const { useJobsStore } = await import("./jobs");
+    const jobs = useJobsStore();
+    jobs.queues["local"] = {
+      hostId: "local",
+      entries: [],
+      paused: false,
+      caps: { canPause: true, canCancelAll: true, canReorder: false },
+      gpuOrdinals: [],
+      error: null,
+    };
+    const events = useEventsStore();
+    await events.subscribe();
+    const plato = vi.mocked(sseStream).mock.calls[1]![1]!;
+
+    plato.onEvent?.("message", JSON.stringify({ type: "queue_paused" }));
+
+    expect(jobs.queues["local"]?.paused).toBe(false);
+    events.unsubscribe();
+  });
+
+  /*
+   * `generation.ensureDurableHostStream` refuses to open its own stream for a
+   * machine the shared subscription claims. Leaving one attached after an
+   * unsubscribe strands every durable job on it with no events at all.
+   */
+  it("detaches every machine on unsubscribe", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    await connectFleet();
+    const generation = useGenerationStore();
+    vi.spyOn(generation, "attachSharedDurableEventHost").mockImplementation(() => {});
+    const detach = vi
+      .spyOn(generation, "detachSharedDurableEventHost")
+      .mockImplementation(() => {});
+    const events = useEventsStore();
+    await events.subscribe();
+
+    events.unsubscribe();
+
+    expect(detach.mock.calls.map(([id]) => id).sort()).toEqual(["hal", "local", "plato"]);
+  });
+
+  it("stops watching the fleet after unsubscribe", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    const { hosts } = await connectFleet();
+    const generation = useGenerationStore();
+    vi.spyOn(generation, "attachSharedDurableEventHost").mockImplementation(() => {});
+    vi.spyOn(generation, "detachSharedDurableEventHost").mockImplementation(() => {});
+    const events = useEventsStore();
+    await events.subscribe();
+    events.unsubscribe();
+
+    hosts.extras.push({
+      id: "new",
+      label: "new",
+      url: "http://new:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: "i-new",
+    });
+    await nextTick();
+
+    expect(vi.mocked(sseStream)).toHaveBeenCalledTimes(3);
   });
 });
