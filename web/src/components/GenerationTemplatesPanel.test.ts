@@ -35,7 +35,6 @@ function makeForm(
     scheduler: null,
     cfgPlus: false,
     outputFormat: "png",
-    expand: { enabled: false, variations: 1, familyOverride: null },
     imageAttachments: [],
     maskImage: null,
     controlImage: null,

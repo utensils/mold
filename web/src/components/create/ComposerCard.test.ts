@@ -420,3 +420,63 @@ describe("ComposerCard action row", () => {
     expect(base).not.toContain("position:");
   });
 });
+
+/*
+ * A rewrite runs on a MACHINE, so while it runs the composer says which one —
+ * desktop's `ExpandControl` progress line, word for word, in a live region.
+ * Web used to open a dialog with an "Expanding…" button instead, which said
+ * nothing about where the work was happening.
+ */
+describe("ComposerCard — the rewrite's progress", () => {
+  it("names the machine while a batch-1 rewrite runs, in a live region", () => {
+    const wrapper = factory({
+      running: true,
+      expansionHostLabel: "Studio 4090",
+    });
+    const status = wrapper.get("[data-test='composer-expand-progress']");
+    expect(status.text()).toBe("Writing more on Studio 4090…");
+    expect(status.attributes("role")).toBe("status");
+    expect(status.attributes("aria-live")).toBe("polite");
+  });
+
+  it("counts the versions while a prepared batch runs", () => {
+    expect(
+      factory({
+        running: true,
+        batchSize: 3,
+        expansionHostLabel: "Studio 4090",
+      })
+        .get("[data-test='composer-expand-progress']")
+        .text(),
+    ).toBe("Writing 3 versions on Studio 4090…");
+  });
+
+  it("falls back to the selected machine when none is named yet", () => {
+    expect(
+      factory({ running: true })
+        .get("[data-test='composer-expand-progress']")
+        .text(),
+    ).toBe("Writing more on the selected machine…");
+  });
+
+  it("says nothing and keeps both transforms live when nothing is running", () => {
+    const wrapper = factory();
+    expect(
+      wrapper.find("[data-test='composer-expand-progress']").exists(),
+    ).toBe(false);
+    expect(
+      wrapper.get("[data-test='composer-expand']").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it("refuses a second rewrite — by click or by chord — while one is running", async () => {
+    const wrapper = factory({ running: true });
+    expect(
+      wrapper.get("[data-test='composer-expand']").attributes("disabled"),
+    ).toBe("");
+    await wrapper
+      .get("[data-test='composer-prompt']")
+      .trigger("keydown", { key: "e", metaKey: true });
+    expect(wrapper.emitted("expand")).toBeUndefined();
+  });
+});

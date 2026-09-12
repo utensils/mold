@@ -306,6 +306,9 @@ export async function hydrateGenerationTemplate(
   // template saved before then would restyle the prompt on every Generate
   // with no control left to show or clear it. Never silently change a request.
   delete (form as unknown as Record<string, unknown>).stylePreset;
+  // Same rule for generate-time expansion, retired with its dialog: a starter
+  // saved while the checkbox existed would arm a rewrite nothing can show.
+  delete (form as unknown as Record<string, unknown>).expand;
   // Legacy byte-free attachment markers must not masquerade as usable source
   // images. New templates rebuild the ordered list from durable assets below.
   form.imageAttachments = [];

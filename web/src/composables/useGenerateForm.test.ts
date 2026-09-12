@@ -352,6 +352,25 @@ describe("useGenerateForm", () => {
     expect(form.toRequest().prompt).toBe("a cat");
   });
 
+  it("drops a saved expand block — web no longer asks the machine at generate time", () => {
+    // Generate-time expansion is retired: it rewrote the prompt on the
+    // machine and the words never appeared in the composer. A draft saved
+    // while the checkbox existed must load without the key, and the request
+    // must carry no `expand` field at all.
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 3,
+        prompt: "a cat",
+        expand: { enabled: true, variations: 3, familyOverride: "sdxl" },
+      }),
+    );
+    const form = useGenerateForm();
+    expect("expand" in form.state.value).toBe(false);
+    expect(form.state.value.prompt).toBe("a cat");
+    expect("expand" in form.toRequest()).toBe(false);
+  });
+
   it("upgrades a version 3 camera picker value into the visible LoRA stack", () => {
     localStorage.setItem(
       STORAGE_KEY,
@@ -1377,7 +1396,6 @@ describe("useGenerateForm", () => {
       strength: 0.8,
       frames: null,
       fps: null,
-      expand: { enabled: true, variations: 3, familyOverride: null },
       imageAttachments: [
         { kind: "upload", filename: "src.png", base64: "AAAA" },
       ],
@@ -1398,7 +1416,6 @@ describe("useGenerateForm", () => {
       scheduler: "ddim",
       strength: 0.8,
       source_image: "AAAA",
-      expand: true,
     });
     expect(wire.edit_images).toBeUndefined();
   });
@@ -1794,11 +1811,13 @@ describe("useGenerateForm", () => {
     expect(form.state.value.imageAttachments).toEqual([]);
   });
 
-  it("toRequest omits expand entirely when disabled (server treats missing/false the same, but this keeps payload minimal)", () => {
+  it("never asks the machine to expand at generate time", () => {
+    // Web's `expand: true` was the only client sending it, and the rewrite it
+    // produced never appeared in the composer. "Write more for me" rewrites in
+    // place instead, so the wire carries no such field on any path.
     const form = useGenerateForm();
-    form.state.value.expand.enabled = false;
-    const wire = form.toRequest();
-    expect(wire.expand).toBeUndefined();
+    form.state.value.prompt = "a cat";
+    expect("expand" in form.toRequest()).toBe(false);
   });
 
   it("toRequest maps empty negativePrompt to null so server skips CFG", () => {
@@ -2647,7 +2666,6 @@ describe("generate form serialization helpers", () => {
       scheduler: null,
       cfgPlus: false,
       outputFormat: "png",
-      expand: { enabled: false, variations: 1, familyOverride: null },
       imageAttachments: [],
       maskImage: null,
       controlImage: null,

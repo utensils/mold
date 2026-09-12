@@ -128,4 +128,12 @@ if grep -REn --include='*.ts' --include='*.vue' '\$\{[^}]*length\} machines`' we
   fail "the availability tag's wording belongs to studio/lib/modelAvailability.ts"
 fi
 
+# Why reviewed prompt work went stale is ONE rule, studio/lib/preparedExpansion.ts,
+# and the surfaces only bind their own form state to it. A path list cannot catch
+# a second copy inside a view, so guard the sentence the rule emits.
+if grep -REn --include='*.ts' --include='*.vue' 'Source prompt changed after these variations were prepared' web/src desktop/src ui |
+  grep -v '\.test\.'; then
+  fail "the stale-reason wording belongs to studio/lib/preparedExpansion.ts"
+fi
+
 echo "frontend-architecture: ok"

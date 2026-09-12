@@ -31,7 +31,6 @@ import {
   restoredNegativePrompt,
 } from "@studio/lib/negativePrompt";
 import { projectResolution } from "../components/create/resolutionProjection";
-import ExpandModal from "../components/ExpandModal.vue";
 import RemixModal from "../components/RemixModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
 import ReferenceCropModal from "@studio/components/ReferenceCropModal.vue";
@@ -283,6 +282,11 @@ import {
 } from "@studio/lib/modelDisplay";
 import { modelAvailabilityTag } from "@studio/lib/modelAvailability";
 import {
+  preparedExpansionStaleReasons,
+  quickExpansionStaleReasons,
+  type StaleHostTarget,
+} from "@studio/lib/preparedExpansion";
+import {
   AUTO_TARGET_ID,
   CAPABLE_TARGET_ID,
   pickAutoHost,
@@ -305,7 +309,6 @@ import {
 import { planModelInstall } from "@studio/lib/modelInstallTargets";
 import { classifyMissingModelHold } from "@studio/api/generationPlacement";
 import type {
-  ExpandFormState,
   GalleryImage,
   GenerateRequestWire,
   ModelInfoExtended,
@@ -343,7 +346,6 @@ const galleryEntries = ref<GalleryImage[]>([]);
 const promptHistory = ref<string[]>([]);
 const muted = ref(loadMuted());
 
-const showExpand = ref(false);
 const showRemix = ref(false);
 const remixRoute = ref<HostRoute | null>(null);
 const remixTask = ref<ExpandTask>("text-to-image");
@@ -702,10 +704,10 @@ const expanded = computed(() => prevPrompt.value !== null);
 const variations = ref<string[]>([]);
 const queueingVariations = ref(false);
 const preparingVariations = ref(false);
-const expandRoute = ref<HostRoute | null>(null);
-/** Where the PRINT goes while `expandRoute` may point at the machine that has
- *  the expander. Quick work freezes this one — never the rewrite's host. */
-const expandPrintRoute = ref<HostRoute | null>(null);
+/** A batch-1 rewrite is in flight, and the machine doing the writing. The
+ *  composer names it in a live line, desktop's `ExpandControl` sentence. */
+const expandingPrompt = ref(false);
+const expansionHostLabel = ref<string | null>(null);
 /** The same split for Remix, which runs on the expander too. */
 const remixPrintRoute = ref<HostRoute | null>(null);
 interface QuickPreparedExpansion {
@@ -771,8 +773,59 @@ function sameRoute(
   return sameHostRoute(frozen, current);
 }
 
+/*
+ * Why reviewed work no longer matches the form is ONE rule, shared with
+ * desktop (`@studio/lib/preparedExpansion`). What stays here is the binding:
+ * this page's form state, its style names, and its machine registry.
+ */
+
+/** This server's own name in the registry, the relative-dispatch machine. */
+function originMachineLabel(): string | null {
+  return (
+    routing.hosts.value.find((host) => host.id === ORIGIN_HOST_ID)?.label ??
+    null
+  );
+}
+
+/** Desktop's policy shape: Auto is `null` there, `"auto"` in the browser. */
+function selectionPolicy(targetId: string): string | null {
+  return targetId === AUTO_TARGET_ID ? null : targetId;
+}
+
+function styleLabels(): ReadonlyMap<string, string> {
+  return new Map(
+    models.value.map((model) => [
+      model.name,
+      modelDisplayNameForId(model.name, models.value),
+    ]),
+  );
+}
+
+/** The machines this browser can actually reach, as the shared rule reads them. */
+function machineRegistryForStaleness(): {
+  readyHostIds: ReadonlySet<string>;
+  hostLabels: ReadonlyMap<string, string>;
+  hostTargets: ReadonlyMap<string, StaleHostTarget>;
+} {
+  const readyHostIds = new Set<string>();
+  const hostLabels = new Map<string, string>();
+  const hostTargets = new Map<string, StaleHostTarget>();
+  for (const host of routing.hosts.value) {
+    hostLabels.set(host.id, host.label);
+    if (host.status !== "ready") continue;
+    readyHostIds.add(host.id);
+    const route = resolveRoute(routing.hosts.value, host.id);
+    if (route)
+      hostTargets.set(host.id, {
+        baseUrl: route.target.baseUrl,
+        apiKey: route.target.apiKey ?? null,
+        instanceId: route.instanceId ?? null,
+      });
+  }
+  return { readyHostIds, hostLabels, hostTargets };
+}
+
 function preparedStaleReasons(batch: PreparedWebBatch): string[] {
-  const reasons: string[] = [];
   const currentSource =
     batch.kind === "remix"
       ? promptSource(
@@ -781,39 +834,47 @@ function preparedStaleReasons(batch: PreparedWebBatch): string[] {
           batch.sourceKind === "original" ? "original" : "current",
         ).prompt
       : form.state.value.prompt.trim();
-  if (currentSource !== batch.sourcePrompt)
-    reasons.push("Source prompt changed after these variations were prepared.");
-  if (form.state.value.model !== batch.model)
-    reasons.push(
-      `Model changed from "${modelDisplayNameForId(batch.model, models.value)}" to "${modelDisplayNameForId(form.state.value.model, models.value)}".`,
-    );
-  if (currentFamily.value !== batch.family)
-    reasons.push(
-      `Model family changed from "${batch.family}" to "${currentFamily.value}".`,
-    );
-  const currentTask = expansionTaskForCurrentOutput(
-    form.toRequest(currentModel.value),
+  const request = form.toRequest(currentModel.value);
+  const reasons = preparedExpansionStaleReasons(
+    {
+      ...(batch.kind ? { kind: batch.kind } : {}),
+      sourcePrompt: batch.sourcePrompt,
+      ...(batch.remixDimensions
+        ? { dimensions: batch.remixDimensions.flat() }
+        : {}),
+      ...(batch.conditioningFingerprint !== undefined
+        ? { conditioningFingerprint: batch.conditioningFingerprint }
+        : {}),
+      model: batch.model,
+      family: batch.family,
+      task: batch.task,
+      requestedCount: batch.requestedCount,
+      selectedHostPolicy: selectionPolicy(batch.selectedHostPolicy),
+      route: batch.route,
+    },
+    {
+      sourcePrompt: currentSource,
+      ...(batch.remixDimensions
+        ? { dimensions: batch.remixDimensions.flat() }
+        : {}),
+      ...(batch.conditioningFingerprint !== undefined
+        ? { conditioningFingerprint: conditioningFingerprint(request) }
+        : {}),
+      model: form.state.value.model,
+      family: currentFamily.value,
+      task: expansionTaskForCurrentOutput(request),
+      requestedCount: form.state.value.batchSize,
+      selectedHostPolicy: selectionPolicy(routing.targetId.value),
+      modelLabels: styleLabels(),
+      ...machineRegistryForStaleness(),
+    },
   );
-  if (currentTask !== batch.task)
-    reasons.push(`Conditioning changed from ${batch.task} to ${currentTask}.`);
+  // A machine that is still reachable can stop being the route Auto would
+  // choose; the print goes to the FROZEN one, so say so before it does.
   if (
-    batch.conditioningFingerprint !== undefined &&
-    conditioningFingerprint(form.toRequest(currentModel.value)) !==
-      batch.conditioningFingerprint
+    routing.targetId.value === batch.selectedHostPolicy &&
+    !sameRoute(batch.route, routing.resolve(batch.model))
   )
-    reasons.push(
-      "Conditioning media changed after these remixes were prepared.",
-    );
-  if (form.state.value.batchSize !== batch.requestedCount)
-    reasons.push(
-      `Batch changed from ${batch.requestedCount} to ${form.state.value.batchSize}.`,
-    );
-  if (routing.targetId.value !== batch.selectedHostPolicy)
-    reasons.push(
-      "The Run on selection changed after these variations were prepared.",
-    );
-  const currentRoute = routing.resolve(batch.model);
-  if (!sameRoute(batch.route, currentRoute))
     reasons.push(
       `${batch.route?.label ?? "This server"} is no longer the prepared generation route.`,
     );
@@ -821,25 +882,13 @@ function preparedStaleReasons(batch: PreparedWebBatch): string[] {
 }
 
 function quickStaleReasons(snapshot: QuickPreparedExpansion): string[] {
-  const reasons: string[] = [];
-  if (form.state.value.prompt.trim() !== snapshot.expandedPrompt)
-    reasons.push("Expanded prompt changed after it was prepared.");
-  if (form.state.value.model !== snapshot.model)
-    reasons.push(
-      `Model changed from "${modelDisplayNameForId(snapshot.model, models.value)}" to "${modelDisplayNameForId(form.state.value.model, models.value)}".`,
-    );
-  if (currentFamily.value !== snapshot.family)
-    reasons.push(
-      `Model family changed from "${snapshot.family}" to "${currentFamily.value}".`,
-    );
-  const currentTask = expansionTaskForCurrentOutput(
-    form.toRequest(currentModel.value),
-  );
-  if (currentTask !== snapshot.task)
-    reasons.push(
-      `Conditioning changed from ${snapshot.task} to ${currentTask}.`,
-    );
-  return reasons;
+  return quickExpansionStaleReasons(snapshot, {
+    expandedPrompt: form.state.value.prompt.trim(),
+    model: form.state.value.model,
+    family: currentFamily.value,
+    task: expansionTaskForCurrentOutput(form.toRequest(currentModel.value)),
+    modelLabels: styleLabels(),
+  });
 }
 
 function quickRouteIsCurrent(snapshot: QuickPreparedExpansion): boolean {
@@ -3841,6 +3890,8 @@ async function onExpand() {
       const expansion = expansionTargetFor(route);
       if (expansion.missing) return;
       expandOn = expansion.route;
+      expansionHostLabel.value =
+        expandOn?.label ?? route.label ?? originMachineLabel();
       const submitRoute = normalizeSubmitRoute(expandOn);
       composerError.value = null;
       const response = await expandPrompt(
@@ -3887,24 +3938,84 @@ async function onExpand() {
       composerError.value = message;
     } finally {
       preparingVariations.value = false;
+      expansionHostLabel.value = null;
     }
     return;
   }
-  // batch = 1: server enrichment via the Expand modal, applied in place.
+  // batch = 1: ONE variation, written on a machine and installed straight in
+  // the prompt bed with undo beside it — desktop's `expandForCurrentBatch`.
+  // There is no dialog: a count for a one-print render and a family override
+  // were controls nobody could answer, and the checkbox armed a generate-time
+  // rewrite whose words never appeared in the composer.
+  if (expandingPrompt.value) return;
   const route = resolveSubmitRoute();
   if (route === false) return;
   const expansion = expansionTargetFor(route);
   if (expansion.missing) return;
-  expandRoute.value = cloneRoute(expansion.route);
-  expandPrintRoute.value = cloneRoute(route);
+  const expandOn = expansion.route;
+  const submitRoute = normalizeSubmitRoute(expandOn);
+  const sourcePrompt = form.state.value.prompt.trim();
+  const model = form.state.value.model;
+  const family = currentFamily.value;
+  const selectedHostPolicy = routing.targetId.value;
   const expandRequest = form.toRequest(currentModel.value);
-  expandTask.value = expansionTaskForCurrentOutput(expandRequest);
-  expandContext.value = expansionContextForRequest(
-    currentFamily.value,
+  const task = expansionTaskForCurrentOutput(expandRequest);
+  const context = expansionContextForRequest(
+    family,
     expandRequest,
     activeRecipe.value,
   );
-  showExpand.value = true;
+  expandingPrompt.value = true;
+  // A single-machine browser dispatches relatively (`route` is null), so the
+  // machine still has to be NAMED — a progress line that says "the selected
+  // machine" on a one-machine install says nothing at all.
+  expansionHostLabel.value =
+    expandOn?.label ?? route?.label ?? originMachineLabel();
+  composerError.value = null;
+  try {
+    const response = await expandPrompt(
+      {
+        prompt: sourcePrompt,
+        model_family: family,
+        variations: 1,
+        task,
+        context,
+      },
+      undefined,
+      submitRoute?.target,
+    );
+    const prompts = validateExpandedPrompts(response.expanded, 1, {
+      promptIgnored: promptTransformBlocked.value !== null,
+    });
+    // Quick work has no review surface, so a rewrite that lands after the
+    // inputs moved would silently install words written for something else.
+    const currentTask = expansionTaskForCurrentOutput(
+      form.toRequest(currentModel.value),
+    );
+    if (
+      form.state.value.prompt.trim() !== sourcePrompt ||
+      form.state.value.model !== model ||
+      currentFamily.value !== family ||
+      currentTask !== task ||
+      routing.targetId.value !== selectedHostPolicy
+    ) {
+      composerError.value =
+        "The prompt, style, or machine changed while the rewrite was running. Write more for me again to use the current inputs.";
+      return;
+    }
+    expandTask.value = task;
+    expandContext.value = context;
+    applyExpandedPrompt(prompts[0]!, route);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const missing = parseMissingExpandModel(message);
+    if (missing)
+      offerExpansionPull(missing, expandOn?.hostId ?? ORIGIN_HOST_ID);
+    composerError.value = message;
+  } finally {
+    expandingPrompt.value = false;
+    expansionHostLabel.value = null;
+  }
 }
 
 async function onRemix() {
@@ -4022,7 +4133,9 @@ async function prepareRemixBatch(response: RemixResponseWire) {
   showRemix.value = false;
 }
 
-function applyExpandedPrompt(v: string) {
+/** Install a rewrite in the prompt bed, freezing the GENERATION route — never
+ *  the machine that only wrote the words. */
+function applyExpandedPrompt(v: string, printRoute: HostRoute | null) {
   prevPrompt.value = form.state.value.prompt;
   prevOriginalPrompt.value = form.state.value.originalPrompt ?? null;
   quickPrepared.value = {
@@ -4032,7 +4145,7 @@ function applyExpandedPrompt(v: string) {
     family: currentFamily.value,
     task: expandTask.value,
     selectedHostPolicy: routing.targetId.value,
-    route: cloneRoute(expandPrintRoute.value ?? expandRoute.value),
+    route: cloneRoute(printRoute),
   };
   form.state.value.originalPrompt = form.state.value.prompt.trim();
   form.state.value.prompt = v;
@@ -4501,11 +4614,6 @@ function openJob(job: Job) {
     form.state.value.prompt = request.prompt;
   }
   form.state.value.originalPrompt = request.original_prompt ?? null;
-  form.state.value.expand = {
-    enabled: false,
-    variations: 1,
-    familyOverride: null,
-  };
   form.state.value.sourceFitPolicy =
     parseSourceFitPolicy(request.source_fit) ?? defaultSourceFitPolicy();
   form.state.value.cameraControl = null;
@@ -5183,6 +5291,8 @@ onBeforeUnmount(() => {
           :busy-label="placementStatus ?? 'Planning generation…'"
           :disabled-reason="generationInputBlocker"
           :expanded="expanded"
+          :running="expandingPrompt || preparingVariations"
+          :expansion-host-label="expansionHostLabel"
           :prompt-optional="canSkipPrompt"
           :required-placeholder="requiredPromptPlaceholder"
           :placeholder="composerPromptPlaceholder"
@@ -5641,22 +5751,6 @@ onBeforeUnmount(() => {
         </div>
       </component>
     </div>
-    <ExpandModal
-      :open="showExpand"
-      :prompt="form.state.value.prompt"
-      :expand="form.state.value.expand"
-      :current-model="currentModel"
-      :task="expandTask"
-      :context="expandContext"
-      :target="expandRoute?.target"
-      @update:expand="(v: ExpandFormState) => (form.state.value.expand = v)"
-      @apply-prompt="applyExpandedPrompt"
-      @close="
-        showExpand = false;
-        expandRoute = null;
-        expandPrintRoute = null;
-      "
-    />
     <RemixModal
       :open="showRemix"
       :prompt="form.state.value.prompt"

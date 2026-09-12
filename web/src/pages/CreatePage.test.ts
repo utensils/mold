@@ -3251,7 +3251,7 @@ describe("CreatePage layout and behavior", () => {
     expect(submitMock).not.toHaveBeenCalled();
   });
 
-  it("opens prompt expansion while an earlier print is running", async () => {
+  it("rewrites the prompt while an earlier print is running", async () => {
     streamJobsRef.value = [
       {
         id: "already-running",
@@ -3294,13 +3294,12 @@ describe("CreatePage layout and behavior", () => {
     await nextTick();
 
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
-    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
-      true,
-    );
+    await flushPromises();
+    expect(expandPromptMock).toHaveBeenCalledTimes(1);
+    expect(form.state.value.prompt).toBe("north light");
   });
 
-  it("preserves reviewed variations as stale when the model changes", async () => {
+  it("preserves reviewed variations as stale when the style changes", async () => {
     hostModelsMock.mockResolvedValue([
       installedModelRow("flux-dev:q4", "flux"),
     ]);
@@ -3322,7 +3321,7 @@ describe("CreatePage layout and behavior", () => {
     await flushPromises();
 
     expect(submitMock).not.toHaveBeenCalled();
-    expect(wrapper.text()).toContain("Model changed");
+    expect(wrapper.text()).toContain("Style changed");
     expect(
       wrapper.getComponent({ name: "ResultCanvas" }).props("variations"),
     ).toHaveLength(3);
@@ -3347,11 +3346,13 @@ describe("CreatePage layout and behavior", () => {
     await nextTick();
 
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
+    await flushPromises();
 
-    const modal = wrapper.getComponent({ name: "ExpandModal" });
-    expect(modal.props("open")).toBe(true);
-    expect(Object.keys(modal.props())).not.toContain("styleDirective");
+    const [payload] = expandPromptMock.mock.calls[0] as unknown as [
+      Record<string, unknown>,
+    ];
+    expect(Object.keys(payload)).not.toContain("style");
+    expect(Object.keys(payload)).not.toContain("styleDirective");
   });
 
   it("resolves image-conditioned video expansion without sending source bytes", async () => {
@@ -3368,11 +3369,13 @@ describe("CreatePage layout and behavior", () => {
     await nextTick();
 
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
+    await flushPromises();
 
-    const modal = wrapper.getComponent({ name: "ExpandModal" });
-    expect(modal.props("task")).toBe("image-to-video");
-    expect(JSON.stringify(modal.props())).not.toContain("secret-image-bytes");
+    const [payload] = expandPromptMock.mock.calls[0] as unknown as [
+      Record<string, unknown>,
+    ];
+    expect(payload.task).toBe("image-to-video");
+    expect(JSON.stringify(payload)).not.toContain("secret-image-bytes");
   });
 
   /*
@@ -3390,12 +3393,12 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.negativePrompt = "text";
     await nextTick();
 
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["storm light over a cinematic coast"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over a cinematic coast");
-    await nextTick();
+    await flushPromises();
 
     expect(form.state.value.prompt).toBe("storm light over a cinematic coast");
     expect(form.state.value.negativePrompt).toBe("text");
@@ -3407,6 +3410,144 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.negativePrompt).toBe("text");
   });
 
+  /*
+   * Batch 1 is desktop's "Write more for me": one request for ONE variation,
+   * applied straight to the prompt bed with undo beside it. Web used to open a
+   * dialog with a checkbox, a 1/3/5 count and a family override — a count of
+   * five for a one-print render was a 500 from the machine, and the checkbox
+   * armed a generate-time rewrite whose result never appeared in the composer.
+   */
+  it("rewrites the prompt in place, asking the machine for exactly one version", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    const [payload] = expandPromptMock.mock.calls[0] as unknown as [
+      Record<string, unknown>,
+    ];
+    expect(payload).toMatchObject({
+      prompt: "a lighthouse",
+      model_family: "flux",
+      variations: 1,
+      task: "text-to-image",
+    });
+    expect(form.state.value.prompt).toBe("north light");
+    expect(form.state.value.originalPrompt).toBe("a lighthouse");
+    expect(submitMock).not.toHaveBeenCalled();
+
+    await wrapper.get("[data-test='composer-undo']").trigger("click");
+    await nextTick();
+    expect(form.state.value.prompt).toBe("a lighthouse");
+    expect(form.state.value.originalPrompt).toBeNull();
+  });
+
+  it("keeps no prompt-expansion dialog on the page at all", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.findComponent({ name: "ExpandModal" }).exists()).toBe(false);
+  });
+
+  /*
+   * Desktop's mid-flight guard: a rewrite that lands after the style moved
+   * would install words written for a different checkpoint. Refuse it by
+   * name and leave the composer exactly as the person left it.
+   */
+  it("refuses a rewrite whose style changed while it was running", async () => {
+    let release!: (value: { original: string; expanded: string[] }) => void;
+    expandPromptMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+      installedModelRow("sdxl-base:fp16", "sdxl"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    await nextTick();
+    release({ original: "a lighthouse", expanded: ["north light"] });
+    await flushPromises();
+
+    expect(form.state.value.prompt).toBe("a lighthouse");
+    expect(form.state.value.originalPrompt).toBeNull();
+    expect(wrapper.find("[data-test='composer-undo']").exists()).toBe(false);
+    expect(wrapper.text()).toContain("changed while the rewrite was running");
+  });
+
+  it("names the machine in the composer while the rewrite runs", async () => {
+    let release!: (value: { original: string; expanded: string[] }) => void;
+    expandPromptMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    const composer = wrapper.getComponent({ name: "ComposerCard" });
+    expect(composer.props("running")).toBe(true);
+    expect(composer.props("expansionHostLabel")).toBe("this server");
+    expect(wrapper.get("[data-test='composer-expand-progress']").text()).toBe(
+      "Writing more on this server…",
+    );
+
+    release({ original: "a lighthouse", expanded: ["north light"] });
+    await flushPromises();
+    expect(composer.props("running")).toBe(false);
+  });
+
+  it("states an expansion failure in the composer instead of a dialog", async () => {
+    expandPromptMock.mockRejectedValueOnce(new Error("expander is busy"));
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    expect(form.state.value.prompt).toBe("a lighthouse");
+    expect(wrapper.text()).toContain("expander is busy");
+  });
   it("retires dormant original-prompt provenance when a new prompt is authored", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
@@ -3454,12 +3595,12 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a lighthouse";
     await nextTick();
 
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["a lighthouse in storm light"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "a lighthouse in storm light");
-    await nextTick();
+    await flushPromises();
 
     wrapper
       .getComponent({ name: "ComposerCard" })
@@ -3585,10 +3726,12 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.modelFamily = fluxModel.family;
     form.state.value.prompt = "a lighthouse";
     await nextTick();
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["storm light over the harbor"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await flushPromises();
     await nextTick();
     form.applyModelDefaults(catalogModel);
     await nextTick();
@@ -3633,10 +3776,12 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a lighthouse";
     form.state.value.negativePrompt = "text";
     await nextTick();
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["storm light over the harbor"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await flushPromises();
     await nextTick();
     expect(form.state.value.originalPrompt).toBe("a lighthouse");
     expect(wrapper.find("[data-test='composer-undo']").exists()).toBe(true);
@@ -3690,10 +3835,12 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.modelFamily = fluxModel.family;
     form.state.value.prompt = "a lighthouse";
     await nextTick();
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["storm light over the harbor"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await flushPromises();
     await nextTick();
 
     wrapper
@@ -3741,10 +3888,12 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a lighthouse";
     await nextTick();
 
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["storm light over the harbor"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await flushPromises();
     await nextTick();
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
@@ -3791,10 +3940,12 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a lighthouse";
     await nextTick();
 
+    expandPromptMock.mockResolvedValueOnce({
+      original: form.state.value.prompt,
+      expanded: ["storm light over the harbor"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await flushPromises();
     useHostRouting().setTarget(ORIGIN_HOST_ID);
     await nextTick();
 
@@ -4233,6 +4384,12 @@ describe("CreatePage layout and behavior", () => {
 });
 
 // ── Multi-host generation routing (spec §08) ────────────────────────────────
+/** The explicit machine an `/api/expand` call went to (arg 3), or `undefined`
+ *  where the origin's relative dispatch is used. */
+function expandTargetOfCall(index: number): unknown {
+  return (expandPromptMock.mock.calls[index] as unknown as unknown[])?.[2];
+}
+
 describe("CreatePage host routing", () => {
   const flux = {
     name: "flux2-klein:q4",
@@ -4261,6 +4418,18 @@ describe("CreatePage host routing", () => {
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
+    // The expansion mock is module-level: without this, one describe's calls
+    // are still on the list when the next reads `calls[0]`.
+    expandPromptMock.mockClear();
+    expandPromptMock.mockImplementation(
+      async (request: { variations: number }) => ({
+        original: "a lighthouse",
+        expanded: ["north light", "storm light", "harbor light"].slice(
+          0,
+          request.variations,
+        ),
+      }),
+    );
     promptHistoryApiMock.mockReset();
     promptHistoryApiMock.mockResolvedValue({ entries: [] });
     placementPreviewMock.mockReset();
@@ -4386,9 +4555,7 @@ describe("CreatePage host routing", () => {
     await wrapper.get("[data-test='composer-expand']").trigger("click");
     await flushPromises();
 
-    const modal = wrapper.getComponent({ name: "ExpandModal" });
-    expect(modal.props("open")).toBe(true);
-    expect(modal.props("target")).toEqual({
+    expect(expandTargetOfCall(0)).toEqual({
       baseUrl: "http://studio:7680",
       apiKey: "sk-studio",
     });
@@ -4416,9 +4583,9 @@ describe("CreatePage host routing", () => {
     await flushPromises();
 
     // Unknown is never "missing": the route the generation earned is kept.
-    expect(
-      wrapper.getComponent({ name: "ExpandModal" }).props("target"),
-    ).toEqual({ baseUrl: "http://localhost:3000" });
+    expect(expandTargetOfCall(0)).toEqual({
+      baseUrl: "http://localhost:3000",
+    });
   });
 
   it("keeps the print on the generation machine after a rerouted quick expansion", async () => {
@@ -4440,16 +4607,18 @@ describe("CreatePage host routing", () => {
     form.state.value.prompt = "a lighthouse";
     await nextTick();
 
+    expandPromptMock.mockResolvedValueOnce({
+      original: "a lighthouse",
+      expanded: ["storm light over the harbor"],
+    });
     await wrapper.get("[data-test='composer-expand']").trigger("click");
     await flushPromises();
-    expect(
-      wrapper.getComponent({ name: "ExpandModal" }).props("target"),
-    ).toEqual({ baseUrl: "http://studio:7680", apiKey: "sk-studio" });
+    expect(expandTargetOfCall(0)).toEqual({
+      baseUrl: "http://studio:7680",
+      apiKey: "sk-studio",
+    });
+    expect(form.state.value.prompt).toBe("storm light over the harbor");
 
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "storm light over the harbor");
-    await nextTick();
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
 
@@ -4506,9 +4675,8 @@ describe("CreatePage host routing", () => {
     await wrapper.get("[data-test='composer-expand']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
-      false,
-    );
+    expect(expandPromptMock).not.toHaveBeenCalled();
+    expect(form.state.value.prompt).toBe("a lighthouse");
     expect(wrapper.get("[data-test='web-expansion-pull']").text()).toContain(
       "qwen3-expand:q8",
     );
@@ -4537,9 +4705,7 @@ describe("CreatePage host routing", () => {
     await wrapper.get("[data-test='composer-expand']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
-      false,
-    );
+    expect(expandPromptMock).not.toHaveBeenCalled();
     const notice = wrapper.get("[data-test='web-expansion-pull']");
     expect(notice.text()).toContain("qwen3-expand:q8");
     expect(notice.text()).toContain("Studio");
@@ -5145,6 +5311,7 @@ describe("CreatePage 3-D mesh prints", () => {
       queue: { heterogeneous_batch_max_outputs: 64 },
     });
     submitMock.mockClear();
+    expandPromptMock.mockClear();
     routeQuery.value = {};
   });
 
@@ -5330,9 +5497,7 @@ describe("CreatePage 3-D mesh prints", () => {
     expect(useNotifications().toasts.map((item) => item.text)).toContain(
       PROMPT_IGNORED_TRANSFORM_REASON,
     );
-    expect(wrapper.getComponent({ name: "ExpandModal" }).props("open")).toBe(
-      false,
-    );
+    expect(expandPromptMock).not.toHaveBeenCalled();
     // The host has no expander at all in this fixture, so the pre-fix path
     // would have raised the pull offer before ever looking at the recipe.
     expect(wrapper.find("[data-test='web-expansion-pull']").exists()).toBe(
@@ -5419,12 +5584,14 @@ function pageStubs() {
         "busyLabel",
         "disabledReason",
         "expanded",
+        "running",
+        "expansionHostLabel",
         "placeholder",
         "promptOptional",
         "transformBlockedReason",
       ],
       template:
-        '<div><slot name="style"/><slot name="shape"/><slot name="count"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="transformBlockedReason" data-test="page-transform-blocked">{{ transformBlockedReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-remix" @click="$emit(\'remix\')">remix</button><button v-if="expanded" data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
+        '<div><slot name="style"/><slot name="shape"/><slot name="count"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><p v-if="transformBlockedReason" data-test="page-transform-blocked">{{ transformBlockedReason }}</p><p v-if="cancellable">{{ busyLabel }}</p><button data-test="composer-submit" @click="$emit(cancellable ? \'cancel\' : \'submit\')">{{ cancellable ? "Cancel" : "Generate" }}</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-remix" @click="$emit(\'remix\')">remix</button><button v-if="expanded" data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button><p v-if="running" role="status" data-test="composer-expand-progress">{{ expansionHostLabel ? (`Writing more on ${expansionHostLabel}\u2026`) : "Writing more on the selected machine\u2026" }}</p></div>',
       // The page calls these through its template ref on submit / new-print;
       // a stub without them throws an unhandled TypeError mid-run.
       methods: { record: vi.fn(), focus: vi.fn() },
@@ -5471,11 +5638,6 @@ function pageStubs() {
       props: ["jobs"],
       emits: ["cancel", "retry", "dismiss", "open", "shared-open"],
       template: "<div data-test='activity-stub' />",
-    },
-    ExpandModal: {
-      name: "ExpandModal",
-      props: ["open", "prompt", "expand", "currentModel", "task", "target"],
-      template: "<div />",
     },
     ImagePickerModal: {
       name: "ImagePickerModal",
@@ -5552,6 +5714,7 @@ describe("CreatePage prompt gate", () => {
     resetNotifications();
     listCollectionsMock.mockReset().mockResolvedValue([]);
     listTagsMock.mockReset().mockResolvedValue([]);
+    expandPromptMock.mockClear();
     hostCapabilitiesMock.mockReset().mockResolvedValue({});
     routeQuery.value = {};
   });
@@ -5808,12 +5971,10 @@ describe("CreatePage left column order", () => {
     // Expand, then hand-edit the prompt: the expansion goes stale and its
     // alert — the only place Re-expand / Generate anyway / Restore live —
     // renders under the composer.
+    // Batch 1 rewrites in place (no dialog): the mocked machine answers
+    // one variation and the composer installs it.
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
-    wrapper
-      .getComponent({ name: "ExpandModal" })
-      .vm.$emit("apply-prompt", "a lighthouse in storm light");
-    await nextTick();
+    await flushPromises();
     wrapper
       .getComponent({ name: "ComposerCard" })
       .vm.$emit("update:prompt", "a hand-edited storm lighthouse");

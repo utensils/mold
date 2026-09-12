@@ -39,7 +39,6 @@ function makeForm(
     scheduler: null,
     cfgPlus: false,
     outputFormat: "png",
-    expand: { enabled: false, variations: 1, familyOverride: null },
     imageAttachments: [],
     maskImage: null,
     controlImage: null,
@@ -101,6 +100,21 @@ describe("a template's retired fields", () => {
     );
     const hydrated = await hydrateGenerationTemplate(saved, persistence);
     expect("stylePreset" in hydrated.form).toBe(false);
+  });
+
+  it("never hands a saved expand block back to the live form", async () => {
+    // Generate-time expansion is retired; a starter saved while the dialog's
+    // checkbox existed would otherwise arm a rewrite nothing on screen shows.
+    const persistence = memoryMedia();
+    const legacy = makeForm() as GenerateFormState & Record<string, unknown>;
+    legacy.expand = { enabled: true, variations: 3, familyOverride: null };
+    const saved = await saveGenerationTemplateWithMedia(
+      "Expanded",
+      legacy,
+      persistence,
+    );
+    const hydrated = await hydrateGenerationTemplate(saved, persistence);
+    expect("expand" in hydrated.form).toBe(false);
   });
 });
 
