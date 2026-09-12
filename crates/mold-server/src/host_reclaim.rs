@@ -329,6 +329,24 @@ pub(crate) enum ReclaimScope {
     Device(usize),
 }
 
+impl ReclaimScope {
+    /// What this reclaim is short OF, in the vocabulary the scheduler's own
+    /// `MemoryBlockKind::noun` uses.
+    ///
+    /// `reclaim_headroom` serves both scopes, and it used to name HOST bytes
+    /// in every line — so a DEVICE reclaim for a 39.3 GB FLUX.2 plan reported
+    /// `required_host_bytes=39295838176 available_host_bytes=10737908736` on a
+    /// machine with 251 GB of RAM. Those are VRAM figures wearing a host
+    /// label, and a reader who trusts the label goes looking for a host-memory
+    /// bug that is not there.
+    pub(crate) fn memory_noun(self) -> &'static str {
+        match self {
+            Self::Host => "host memory",
+            Self::Device(_) => "device memory",
+        }
+    }
+}
+
 async fn reclaim_candidates(
     state: &AppState,
     requested_model: &str,
@@ -500,18 +518,26 @@ async fn reclaim_headroom(
     if targets.is_empty() {
         tracing::info!(
             model = %requested_model,
-            required_host_bytes = needed_headroom_bytes,
-            available_host_bytes = before,
-            "host headroom is short and the model cache holds nothing reclaimable"
+            memory = scope.memory_noun(),
+            required_bytes = needed_headroom_bytes,
+            available_bytes = before,
+            // The requested model is never its own reclaim target
+            // (`plan_reclaim` drops it), so a repeat of the model that is
+            // already cached reads as "nothing reclaimable" even when that
+            // engine is holding the whole card. Say so, rather than leaving
+            // the reader to infer an empty cache.
+            skipped_requested_model = true,
+            "headroom is short and the model cache holds nothing else reclaimable"
         );
         return outcome;
     }
     tracing::info!(
         model = %requested_model,
-        required_host_bytes = needed_headroom_bytes,
-        available_host_bytes = before,
+        memory = scope.memory_noun(),
+        required_bytes = needed_headroom_bytes,
+        available_bytes = before,
         reclaimable = targets.len(),
-        "host headroom is short; releasing cached models before refusing"
+        "headroom is short; releasing cached models before refusing"
     );
     for target in targets {
         match evict_target(state, &target).await {
@@ -555,8 +581,9 @@ async fn reclaim_headroom(
         tracing::info!(
             model = %target.model,
             ordinal = ?target.ordinal,
-            available_host_bytes = now,
-            "released a cached model for host headroom"
+            memory = scope.memory_noun(),
+            available_bytes = now,
+            "released a cached model for headroom"
         );
         if now >= needed_headroom_bytes {
             break;
@@ -604,6 +631,24 @@ mod tests {
 
     /// Evicting the model being admitted would turn a warm admission into a
     /// cold reload of the very weights the request is waiting for.
+    /// A device reclaim never reports host bytes.
+    ///
+    /// `reclaim_headroom` serves both scopes from one body, and every line in
+    /// it was `*_host_bytes`. On the single-GPU host that is how a 39.3 GB
+    /// VRAM shortfall came to be logged as `required_host_bytes` beside
+    /// `available_host_bytes=10737908736` on a machine with 251 GB of RAM,
+    /// pointing the reader at the wrong pool entirely.
+    #[test]
+    fn a_reclaim_names_the_memory_it_is_short_of() {
+        assert_eq!(ReclaimScope::Host.memory_noun(), "host memory");
+        assert_eq!(ReclaimScope::Device(3).memory_noun(), "device memory");
+        assert_ne!(
+            ReclaimScope::Device(0).memory_noun(),
+            ReclaimScope::Host.memory_noun(),
+            "the two pools must never read alike in a log line"
+        );
+    }
+
     #[test]
     fn the_requested_model_is_never_a_reclaim_target() {
         let candidates = targets_from(
