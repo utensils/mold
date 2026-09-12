@@ -5276,6 +5276,35 @@ fn preflight_planned_memory_guard_with_eviction(
     )
 }
 
+/// Park the active model for a swap, and SAY SO.
+///
+/// This is the ordinary, overwhelmingly common way memory comes back on the
+/// swap path, and it was the one release mold never reported. Part G measured
+/// it: 18.8 GB of FLUX.1 left the card in the two seconds between
+/// `dispatched job` and `loading model...` with nothing written, while the two
+/// paths that fire far more rarely — the retained-slot reclaim and the LRU
+/// eviction — each log a line. An operator reading that log can account for
+/// every byte except the biggest one.
+fn unload_active_for_swap(worker: &GpuWorker, for_model: &str) -> bool {
+    let unloaded = worker
+        .model_cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unload_active();
+    let Some(unloaded) = unloaded else {
+        return false;
+    };
+    worker.set_resident_model(None);
+    tracing::info!(
+        gpu = worker.gpu.ordinal,
+        model = %unloaded.model,
+        freed_mb = unloaded.vram_bytes / 1024 / 1024,
+        for_model = %for_model,
+        "released the active model at the swap gate"
+    );
+    true
+}
+
 /// Release another model's retained transformer, once, for a swap gate that
 /// has just refused.
 ///
@@ -5862,12 +5891,7 @@ fn ensure_model_ready_sync_inner(
         }
 
         // Unload active model first.
-        {
-            let mut cache = worker.model_cache.lock().unwrap();
-            if cache.unload_active().is_some() {
-                worker.set_resident_model(None);
-            }
-        }
+        unload_active_for_swap(worker, model_name);
         if let Some(ref paths) = preflight_paths {
             match planned_peak_bytes {
                 Some(predicted_peak_bytes) => {
@@ -6137,12 +6161,7 @@ fn ensure_model_ready_sync_inner(
     .map_err(|e| anyhow::anyhow!(e.error))?;
 
     // Unload active model first.
-    {
-        let mut cache = worker.model_cache.lock().unwrap();
-        if cache.unload_active().is_some() {
-            worker.set_resident_model(None);
-        }
-    }
+    unload_active_for_swap(worker, model_name);
     match planned_peak_bytes {
         Some(predicted_peak_bytes) => {
             preflight_after_drop_releasing_retained(worker, cache_key, model_name, || {
@@ -6401,7 +6420,7 @@ pub fn unload_blocking(worker: &GpuWorker) -> anyhow::Result<Option<String>> {
             ),
         }
     }
-    Ok(unloaded)
+    Ok(unloaded.map(|unloaded| unloaded.model))
 }
 
 fn evict_cached_model_blocking(
@@ -9075,6 +9094,100 @@ mod tests {
         assert_eq!(*observed_credit.lock().unwrap(), Some(6 << 30));
         assert!(error.error.contains("injected fresh-pressure rejection"));
         assert!(cache.lock().unwrap().contains("hot-cache"));
+    }
+
+    /// The swap path SAYS it released the active model.
+    ///
+    /// Part G: 18.8 GB of FLUX.1 left the card in the two seconds between
+    /// `dispatched job` and `loading model...` with nothing written — the
+    /// retained-slot reclaim and the LRU eviction each log, and the path that
+    /// does the work in the ordinary case did not. Captured through a real
+    /// subscriber rather than asserted on a return value, because the defect
+    /// was precisely that the value was never turned into a line.
+    #[test]
+    fn the_swap_path_logs_the_active_model_it_released() {
+        #[derive(Clone, Default)]
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedWriter {
+            type Writer = SharedWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        struct Loaded;
+        impl InferenceEngine for Loaded {
+            fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+                unreachable!("a log test never renders")
+            }
+            fn model_name(&self) -> &str {
+                "flux-dev:q8"
+            }
+            fn is_loaded(&self) -> bool {
+                true
+            }
+            fn load(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        const MEASURED: u64 = 18 << 30;
+        let worker = single_worker_pool_with_parked("unused", Duration::ZERO);
+        {
+            let mut cache = worker.model_cache.lock().unwrap();
+            cache.insert_loaded("flux-dev:q8".to_string(), Box::new(Loaded), MEASURED);
+        }
+
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(writer.clone())
+            .finish();
+        let released = {
+            let _subscriber = tracing::subscriber::set_default(subscriber);
+            unload_active_for_swap(&worker, "flux2-klein:q8")
+        };
+
+        assert!(released, "an active engine was there to release");
+        let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("released the active model at the swap gate"),
+            "{output}"
+        );
+        assert!(output.contains("model=flux-dev:q8"), "{output}");
+        assert!(
+            output.contains(&format!("freed_mb={}", MEASURED / 1024 / 1024)),
+            "{output}"
+        );
+        assert!(output.contains("for_model=flux2-klein:q8"), "{output}");
+
+        // Nothing to release says nothing, and says so honestly.
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(writer.clone())
+            .finish();
+        let released = {
+            let _subscriber = tracing::subscriber::set_default(subscriber);
+            unload_active_for_swap(&worker, "flux2-klein:q8")
+        };
+        assert!(!released);
+        let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            !output.contains("released the active model at the swap gate"),
+            "{output}"
+        );
     }
 
     /// The SWAP gate reclaims too, not just the planned-budget guard.

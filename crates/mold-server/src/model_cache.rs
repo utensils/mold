@@ -40,6 +40,20 @@ pub struct ReclaimableEntry {
     pub vram_bytes: u64,
 }
 
+/// The engine `unload_active` parked, and what it gave back.
+///
+/// The bytes travel with the name because the caller is the only one that
+/// knows what the release was FOR, and a release nobody can see is the same
+/// to an operator as a release that did not happen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnloadedActiveModel {
+    pub model: String,
+    /// The entry's credited device footprint at the moment it was parked —
+    /// the load-time measurement, or the engine's own retained report where
+    /// that is larger.
+    pub vram_bytes: u64,
+}
+
 /// Result of returning a checked-out cache entry.
 pub struct RestoreOutcome {
     /// The restored entry changed from GPU-resident to parked while checked out.
@@ -351,22 +365,32 @@ impl ModelCache {
     /// Unload the current GPU-resident model (if any) to make room for a new one.
     /// The engine is parked (retains tokenizers/caches) for faster reload.
     /// Returns the name of the unloaded model.
-    pub fn unload_active(&mut self) -> Option<String> {
+    pub fn unload_active(&mut self) -> Option<UnloadedActiveModel> {
         let active_name = self
             .entries
             .values()
             .find(|e| e.residency == ModelResidency::Gpu)
             .map(|e| e.model_name.clone());
 
-        if let Some(ref name) = active_name {
-            if let Some(entry) = self.entries.get_mut(name) {
-                entry.engine.unload();
-                entry.residency = ModelResidency::Parked;
-                entry.vram_bytes = 0;
-            }
-        }
+        let name = active_name?;
+        let entry = self.entries.get_mut(&name)?;
+        // What this is about to hand back, read BEFORE the unload zeroes it.
+        // It used to be discarded, which is why the biggest single release on
+        // the swap path — an 18.8 GB FLUX.1 transformer leaving the card for a
+        // klein render — was written nowhere at all: the reclaim and eviction
+        // paths each log, and this one, which does the work in the ordinary
+        // case, said nothing.
+        let vram_bytes = entry
+            .vram_bytes
+            .max(entry.engine.resident_vram_bytes().unwrap_or(0));
+        entry.engine.unload();
+        entry.residency = ModelResidency::Parked;
+        entry.vram_bytes = 0;
         self.debug_check_invariants();
-        active_name
+        Some(UnloadedActiveModel {
+            model: name,
+            vram_bytes,
+        })
     }
 
     /// Drop all entries, returning all engines for cleanup. Also clears
@@ -874,6 +898,41 @@ mod tests {
         assert!(cache.contains("model-c"));
     }
 
+    /// `unload_active` reports what it freed.
+    ///
+    /// It zeroes `vram_bytes` on the way past and used to return only the
+    /// name, so the bytes were gone before any caller could name them — which
+    /// is why the biggest single release on the swap path (18.8 GB of FLUX.1
+    /// leaving the card for a klein render, UAT final-2 Part G) was written
+    /// nowhere at all.
+    #[test]
+    fn unload_active_reports_the_bytes_it_freed() {
+        const MEASURED: u64 = 18 << 30;
+        let mut cache = ModelCache::new(2);
+        cache.insert(Box::new(MockEngine::new("flux-dev:q8")), MEASURED);
+
+        let unloaded = cache.unload_active().expect("an active engine");
+        assert_eq!(unloaded.model, "flux-dev:q8");
+        assert_eq!(
+            unloaded.vram_bytes, MEASURED,
+            "the credit as it stood the instant before the unload"
+        );
+        assert_eq!(cache.active_vram_bytes(), 0);
+    }
+
+    /// A RETAINING engine whose load delta measured nothing still reports the
+    /// bytes it is holding — the sequential FLUX.2 shape, where `insert` is
+    /// priced at zero and everything arrived during `generate`.
+    #[test]
+    fn unload_active_reports_a_retaining_engines_own_bytes() {
+        const RETAINED: u64 = 34 << 30;
+        let mut cache = ModelCache::new(2);
+        cache.insert(Box::new(RetainingEngine::new("flux2-dev:q8", RETAINED)), 0);
+
+        let unloaded = cache.unload_active().expect("an active engine");
+        assert_eq!(unloaded.vram_bytes, RETAINED);
+    }
+
     #[test]
     fn unload_active() {
         let mut cache = ModelCache::new(3);
@@ -881,7 +940,10 @@ mod tests {
         assert_eq!(cache.active_model(), Some("model-a"));
 
         let unloaded = cache.unload_active();
-        assert_eq!(unloaded.as_deref(), Some("model-a"));
+        assert_eq!(
+            unloaded.map(|unloaded| unloaded.model).as_deref(),
+            Some("model-a")
+        );
         assert_eq!(cache.active_model(), None);
         // Still in cache, just unloaded
         assert!(cache.contains("model-a"));

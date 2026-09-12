@@ -2065,7 +2065,8 @@ pub(crate) async fn ensure_model_ready(
                 #[cfg(feature = "metrics")]
                 crate::metrics::clear_model_loaded(&active_name);
                 tracing::info!(
-                    from = %active_name,
+                    from = %active_name.model,
+                    freed_mb = active_name.vram_bytes / 1024 / 1024,
                     to = %model_name,
                     "unloaded active model to reload cached model"
                 );
@@ -2336,8 +2337,12 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
                 free_vram_bytes = ?free_after_drop,
                 "legacy model unloaded; sampled post-drop VRAM"
             );
-            tracing::info!(model = %name, "model unloaded via API");
-            format!("unloaded {name}")
+            tracing::info!(
+                model = %name.model,
+                freed_mb = name.vram_bytes / 1024 / 1024,
+                "model unloaded via API"
+            );
+            format!("unloaded {}", name.model)
         }
         None => "no model loaded".to_string(),
     }
@@ -2362,11 +2367,12 @@ async fn create_and_load_engine(
     {
         let mut cache = state.model_cache.lock().await;
         let result = cache.unload_active();
-        if let Some(ref name) = result {
+        if let Some(ref unloaded) = result {
             #[cfg(feature = "metrics")]
-            crate::metrics::clear_model_loaded(name);
+            crate::metrics::clear_model_loaded(&unloaded.model);
             tracing::info!(
-                from = %name,
+                from = %unloaded.model,
+                freed_mb = unloaded.vram_bytes / 1024 / 1024,
                 to = %model_name,
                 "unloading active model before loading new one"
             );
