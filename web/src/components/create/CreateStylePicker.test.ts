@@ -144,6 +144,22 @@ describe("CreateStylePicker menu", () => {
     wrapper.unmount();
   });
 
+  it("shows a source glyph for a style with an hf_repo", async () => {
+    const wrapper = mountPicker({
+      models: [model({ name: "cv:23423432", hf_repo: "" }), model({
+        name: "flux-dev:q8",
+        family: "flux",
+        hf_repo: "black-forest-labs/FLUX.1-dev",
+        description: "",
+      })],
+    });
+    await open(wrapper);
+    expect(
+      document.body.querySelector("svg[data-source='hf']"),
+    ).not.toBeNull();
+    wrapper.unmount();
+  });
+
   it("keeps a downloaded-but-unrunnable style visible and refuses it by name", async () => {
     const wrapper = mountPicker({
       models: [model({ runtime_available: false })],

@@ -193,6 +193,43 @@ describe("StyleMenu rows", () => {
     });
     expect(wrapper.findAll(".glyph-stub")).toHaveLength(1);
   });
+
+  it("draws a source glyph per row by default, following modelSource", () => {
+    const wrapper = mountMenu({
+      models: [
+        model({ name: "cv:8001", family: "sdxl" }),
+        model({
+          name: "flux-dev:q8",
+          family: "flux",
+          hf_repo: "black-forest-labs/FLUX.1-dev",
+        }),
+        model({ name: "my-lora.safetensors", family: "sdxl" }),
+      ],
+    });
+    const byId = new Map(
+      wrapper
+        .findAll("[data-test='model-option-id']")
+        .map((idNode, i) => [
+          idNode.text(),
+          wrapper
+            .findAll("[data-test='model-option-name']")
+            [i]!.element.closest(".ms-model__option")!
+            .querySelector("svg")!
+            .getAttribute("data-source"),
+        ]),
+    );
+    expect(byId.get("cv:8001")).toBe("civitai");
+    expect(byId.get("flux-dev:q8")).toBe("hf");
+    expect(byId.get("my-lora.safetensors")).toBe("local");
+  });
+
+  it("draws no default glyph when the host fills the slot itself", () => {
+    const wrapper = mount(StyleMenu, {
+      props: { models: [model()], selected: null },
+      slots: { glyph: '<i class="glyph-stub" />' },
+    });
+    expect(wrapper.find("svg[data-source]").exists()).toBe(false);
+  });
 });
 
 describe("StyleMenu filter", () => {
