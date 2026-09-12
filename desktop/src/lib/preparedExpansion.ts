@@ -1,5 +1,4 @@
 import type { HostRoute } from "../stores/hosts";
-import { resolveStyleId, stylePresetLabel } from "./stylePresets";
 import { createUuid } from "@studio/lib/id";
 import type { ExpandContext, ExpandTask } from "@studio/lib/expandTask";
 import { type RemixDimension, type RemixSourceKind } from "@studio/lib/promptTransform";
@@ -21,9 +20,6 @@ export interface PreparedExpansionInputs {
   /** Frozen generation facts sent with the rewrite (additive). */
   context?: ExpandContext;
   requestedCount: number;
-  /** Style-preset chip active when the expansion was requested (`null` = none).
-   * Frozen with the batch — prepared work keeps the chip as its indicator. */
-  stylePreset: string | null;
   selectedHostPolicy: HostSelectionPolicy;
 }
 
@@ -51,9 +47,6 @@ export interface QuickExpansionSnapshot {
   model: string;
   family: string;
   task: ExpandTask;
-  /** Chip active when the quick expansion was requested — the bake-and-clear
-   * apply clears the live chip, and undo restores it from here. */
-  stylePreset: string | null;
   selectedHostPolicy: HostSelectionPolicy;
   /** The frozen GENERATION authority — where the print is submitted. */
   route: HostRoute;
@@ -131,28 +124,6 @@ export function hostSelectionLabel(
   return hostLabels.get(policy) ?? policy;
 }
 
-/** Legacy chip ids (e.g. "photographic") equal their canonical twin. */
-function canonicalStyle(id: string | null): string | null {
-  return id ? resolveStyleId(id) : null;
-}
-
-/** "Style changed from X to Y." plus removal/addition variants; empty when equal. */
-function styleStaleReason(frozen: string | null, current: string | null): string | null {
-  const frozenStyle = canonicalStyle(frozen);
-  const currentStyle = canonicalStyle(current);
-  if (frozenStyle === currentStyle) return null;
-  if (frozenStyle && currentStyle) {
-    return `Style changed from ${stylePresetLabel(frozenStyle)} to ${stylePresetLabel(currentStyle)}.`;
-  }
-  if (frozenStyle) {
-    return `Style ${stylePresetLabel(frozenStyle)} was removed after these variations were prepared.`;
-  }
-  if (currentStyle) {
-    return `Style ${stylePresetLabel(currentStyle)} was added after these variations were prepared.`;
-  }
-  return null;
-}
-
 function knownInstanceIdsDiffer(
   frozen: string | null | undefined,
   current: string | null | undefined,
@@ -192,8 +163,6 @@ export function preparedExpansionStaleReasons(
   ) {
     reasons.push("Remix dimensions changed after these variations were prepared.");
   }
-  const styleReason = styleStaleReason(batch.stylePreset, current.stylePreset);
-  if (styleReason) reasons.push(styleReason);
   if (current.requestedCount !== batch.requestedCount) {
     reasons.push(`Batch changed from ${batch.requestedCount} to ${current.requestedCount}.`);
   }

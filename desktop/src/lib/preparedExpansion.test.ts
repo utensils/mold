@@ -23,7 +23,6 @@ const inputs: PreparedExpansionInputs = {
   family: "flux",
   task: "text-to-image",
   requestedCount: 3,
-  stylePreset: null,
   selectedHostPolicy: null,
 };
 
@@ -95,7 +94,6 @@ describe("prepared expansion lifecycle", () => {
       family: "sdxl",
       task: "image-to-video",
       requestedCount: 5,
-      stylePreset: null,
       selectedHostPolicy: "capable",
       readyHostIds: new Set([route.hostId]),
       hostLabels: new Map([[route.hostId, route.label]]),
@@ -179,43 +177,15 @@ describe("prepared expansion lifecycle", () => {
     ).toEqual([]);
   });
 
-  it("names style changes, removals, and additions as specifically named stale work", () => {
-    const host = {
-      readyHostIds: new Set([route.hostId]),
-      hostLabels: new Map([[route.hostId, route.label]]),
-    };
-    const styled = createPreparedExpansionBatch(
-      { ...inputs, stylePreset: "cinematic" },
-      route,
-      ["one", "two", "three"],
-      1,
-    );
+  it("no longer has a style axis, so a legacy frozen preset stales nothing", () => {
+    // Prepared work saved before the preset retired still carries the key.
+    // It is not a staleness axis any more and must produce no reason.
+    const legacy = createPreparedExpansionBatch(inputs, route, ["one", "two", "three"], 1);
+    (legacy as unknown as Record<string, unknown>)["stylePreset"] = "cinematic";
 
     expect(
-      preparedExpansionStaleReasons(styled, { ...inputs, ...host, stylePreset: "anime" }),
-    ).toEqual(["Style changed from Cinematic to Anime."]);
-    expect(
-      preparedExpansionStaleReasons(styled, { ...inputs, ...host, stylePreset: null }),
-    ).toEqual(["Style Cinematic was removed after these variations were prepared."]);
-
-    const unstyled = createPreparedExpansionBatch(inputs, route, ["one", "two", "three"], 1);
-    expect(
-      preparedExpansionStaleReasons(unstyled, { ...inputs, ...host, stylePreset: "anime" }),
-    ).toEqual(["Style Anime was added after these variations were prepared."]);
-  });
-
-  it("treats a legacy style id and its canonical twin as the same frozen style", () => {
-    const styled = createPreparedExpansionBatch(
-      { ...inputs, stylePreset: "photographic" },
-      route,
-      ["one", "two", "three"],
-      1,
-    );
-
-    expect(
-      preparedExpansionStaleReasons(styled, {
+      preparedExpansionStaleReasons(legacy, {
         ...inputs,
-        stylePreset: "photoreal",
         readyHostIds: new Set([route.hostId]),
         hostLabels: new Map([[route.hostId, route.label]]),
       }),
@@ -249,7 +219,6 @@ describe("prepared expansion lifecycle", () => {
           model: inputs.model,
           family: inputs.family,
           task: inputs.task,
-          stylePreset: null,
           selectedHostPolicy: null,
           route,
         },
@@ -275,7 +244,6 @@ describe("prepared expansion lifecycle", () => {
       model: inputs.model,
       family: inputs.family,
       task: inputs.task,
-      stylePreset: null,
       selectedHostPolicy: null,
       route,
     };
@@ -302,7 +270,6 @@ describe("prepared expansion lifecycle", () => {
           model: inputs.model,
           family: inputs.family,
           task: inputs.task,
-          stylePreset: null,
           selectedHostPolicy: null,
           route: { ...route, instanceId: null },
         },

@@ -2835,7 +2835,6 @@ describe("resetFormToModelDefaults", () => {
     form.seed = "1234";
     form.strength = 0.2;
     form.upscaleModel = "esrgan";
-    form.stylePreset = "cinematic";
     form.sourceImage = "SRC";
     form.sourceImageName = "pic.png";
     form.loras = [{ path: "/l.safetensors", name: "l", scale: 0.8, trainedWords: [] }];
@@ -2862,7 +2861,6 @@ describe("resetFormToModelDefaults", () => {
     expect(form.seed).toBe(defaults.seed);
     expect(form.strength).toBe(defaults.strength);
     expect(form.upscaleModel).toBe(defaults.upscaleModel);
-    expect(form.stylePreset).toBe(defaults.stylePreset);
     expect(form.sourceImage).toBeNull();
     expect(form.sourceImageName).toBeNull();
     expect(form.loras).toEqual([]);
@@ -3694,5 +3692,24 @@ describe("buildRequest — an additive recipe carries both wells at once", () =>
       [],
     );
     expect(form.referenceWeight).toBe(0.75);
+  });
+});
+
+describe("the retired style preset", () => {
+  it("is not a form field any more", () => {
+    expect("stylePreset" in newGenerateForm()).toBe(false);
+  });
+
+  it("changes nothing when a pre-redesign draft or template still carries one", () => {
+    // A persisted draft, a saved template or a reused print from before the
+    // preset retired may still hold the key. It must ride along inert: an
+    // invisible prompt rewriter is exactly what the retirement removed.
+    const clean = newGenerateForm();
+    clean.prompt = "a lighthouse at dusk";
+    clean.model = "sdxl:base";
+    clean.family = "sdxl";
+    const legacy = cloneGenerateForm(clean);
+    (legacy as unknown as Record<string, unknown>)["stylePreset"] = "cinematic";
+    expect(buildRequest(legacy)).toEqual(buildRequest(clean));
   });
 });

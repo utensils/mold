@@ -76,10 +76,12 @@ describe("MobilePromptTools", () => {
     expect(wrapper.emitted("update:remixSource")?.at(-1)).toEqual(["current"]);
   });
 
-  it("removes Style from text Remix dimensions while a style is locked", () => {
+  it("offers Style among text Remix dimensions — no composer preset locks it out", () => {
+    // The remix Style axis is the model's own look, not the retired composer
+    // preset; nothing on the form may remove it any more.
     const form = reactive(newGenerateForm());
     form.prompt = "small owl";
-    form.stylePreset = "cinematic";
+    (form as unknown as Record<string, unknown>)["stylePreset"] = "cinematic";
     const wrapper = mount(MobilePromptTools, {
       props: {
         form,
@@ -92,7 +94,7 @@ describe("MobilePromptTools", () => {
     });
     const dimensions = wrapper.get(".mobile-remix-dimensions").text();
     expect(dimensions).toContain("Movement");
-    expect(dimensions).not.toContain("Style");
+    expect(dimensions).toContain("Style");
   });
 
   it("preserves Recent prompts and refreshes them for the selected target", async () => {
