@@ -62,6 +62,13 @@
   print recorded none. Every LoRA-capable family was affected, FLUX.1 and
   FLUX.2 included; a LoRA beside an image, mask or video source always worked,
   and `--local` was never affected.
+- **An LTX-2 built-in control render applies its control adapter again.** The
+  server resolves the built-in IC-LoRA itself, after durable admission has
+  already sealed the request's media set, so the publication scrub took it with
+  the caller's adapters and nothing could hand it back: `--control depth` and
+  its siblings rendered over the server with no control adapter at all. The
+  adapter now travels with the job and is restored at dispatch, ahead of the
+  caller's own stack rather than instead of it.
 - **A `--lora` render now requires the encrypted request-media store.** This is
   the other side of the fix above: because the adapter is sealed like any other
   request authority, a host whose durable media store is unavailable answers

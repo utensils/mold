@@ -2240,18 +2240,24 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     // bundle opaque through all queueing and cancellation-before-start paths,
     // then hydrate off Tokio immediately before reference/model preparation.
     let job_id = job.id.clone();
+    let materialized_control_lora = job.materialized_control_lora.take();
     let hydrated_media_lease = if let Some(deferred) = job.deferred_media.take() {
         let expected_job_id = job_id.clone();
         let mut request = job.request.clone();
         match tokio::task::spawn_blocking(move || {
-            let result = deferred.hydrate_into(&expected_job_id, &mut request);
+            let result = crate::queue_media_runtime::hydrate_dispatch_media(
+                &expected_job_id,
+                &mut request,
+                Some(deferred),
+                materialized_control_lora,
+            );
             (request, result)
         })
         .await
         {
             Ok((request, Ok(lease))) => {
                 job.request = request;
-                Some(lease)
+                lease
             }
             Ok((_request, Err(error))) => {
                 durable_generation_settlement::fail_hydration_async(job, &job_id, error).await;
@@ -2268,6 +2274,12 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             }
         }
     } else {
+        // No sealed set to overlay, so nothing can conflict — the adapter is
+        // simply put back.
+        crate::queue_media_runtime::prepend_materialized_control_lora(
+            &mut job.request,
+            materialized_control_lora,
+        );
         None
     };
     // The ordered references are bound from THIS hydration, under this lease;
@@ -3618,6 +3630,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
             model: model_name.clone(),
             request: job.request,
             deferred_media: job.deferred_media,
+            materialized_control_lora: job.materialized_control_lora,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
@@ -4016,6 +4029,7 @@ fn generation_from_legacy_gpu_job(job: GpuJob) -> GenerationJob {
         durable_queue_rank: job.durable_queue_rank,
         request: job.request,
         deferred_media: job.deferred_media,
+        materialized_control_lora: job.materialized_control_lora,
         completion_payload: job.completion_payload,
         progress_tx: job.progress_tx,
         result_tx: job.result_tx,
@@ -4445,7 +4459,7 @@ mod tests {
             .expect("attempt cancellation installation");
         let slot = body.find("mark_running").expect("single-worker slot claim");
         let hydrate = body
-            .find("deferred.hydrate_into")
+            .find("queue_media_runtime::hydrate_dispatch_media")
             .expect("slot-bound durable hydration");
         let binding = body
             .find("inference_bindings_for_request")
@@ -4735,6 +4749,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("mock-model"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: Some(progress_tx),
             result_tx,
@@ -4824,6 +4839,7 @@ mod tests {
             durable_queue_rank: None,
             request: serde_json::from_str(&request_json).unwrap(),
             deferred_media: Some(deferred),
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: Some(progress_tx),
             result_tx,
@@ -5617,6 +5633,7 @@ mod tests {
             model: request.model.clone(),
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -7831,6 +7848,7 @@ mod tests {
             model: "busy-model".to_string(),
             request: fake_request("busy-model"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: filler_result_tx,
@@ -7864,6 +7882,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -7916,6 +7935,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -7999,6 +8019,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request(model),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
@@ -8016,6 +8037,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request(model),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
@@ -8276,6 +8298,7 @@ mod tests {
                 durable_queue_rank: None,
                 request: fake_request(model),
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -8351,6 +8374,7 @@ mod tests {
                 durable_queue_rank: None,
                 request: fake_request(&format!("model-{id}")),
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -8411,6 +8435,7 @@ mod tests {
                 durable_queue_rank: None,
                 request: fake_request(&format!("model-{i}")),
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -8518,6 +8543,7 @@ mod tests {
                 durable_queue_rank: None,
                 request: fake_request(&format!("model-{i}")),
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -8651,6 +8677,7 @@ mod tests {
             durable_queue_rank: None,
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -8694,6 +8721,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -8775,6 +8803,7 @@ mod tests {
                     durable_queue_rank: None,
                     request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -8943,6 +8972,7 @@ mod tests {
                         durable_queue_rank: None,
                         request: fake_request("flux-dev:q4"),
                         deferred_media: None,
+                        materialized_control_lora: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx,
@@ -9061,6 +9091,7 @@ mod tests {
                     durable_queue_rank: None,
                     request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -9158,6 +9189,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -9219,6 +9251,7 @@ mod tests {
                         durable_queue_rank: None,
                         request: fake_request("flux-dev:q4"),
                         deferred_media: None,
+                        materialized_control_lora: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx,
@@ -9283,6 +9316,7 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,

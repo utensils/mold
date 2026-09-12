@@ -68,6 +68,14 @@ pub struct GenerationJob {
     /// Authenticated durable media remains opaque until this job owns its
     /// execution slot or concrete device lease.
     pub deferred_media: Option<crate::queue_media_runtime::DeferredQueueMedia>,
+    /// The built-in LTX-2 IC-LoRA this job's preparation resolved, carried
+    /// separately from the request because the publication scrub wipes `loras`
+    /// and the sealed media set — resolved before preparation ran — has no
+    /// record of it. Restored onto the request by
+    /// `queue_media_runtime::hydrate_dispatch_media`, AFTER hydration: the
+    /// overlay refuses a request that already carries `loras`, so putting it
+    /// back any earlier fails the job outright.
+    pub materialized_control_lora: Option<mold_core::LoraWeight>,
     pub completion_payload: SseCompletionPayload,
     /// Channel to send SSE progress/complete/error events (None for non-streaming).
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
@@ -1063,6 +1071,7 @@ mod tests {
             durable_queue_rank: None,
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,

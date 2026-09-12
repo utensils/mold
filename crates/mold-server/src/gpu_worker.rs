@@ -4084,16 +4084,17 @@ fn process_job_with_sink(
     // concrete device lease. Hydrate authenticated media now—not while it is
     // queued, preparing dependencies, retrying transport, or waiting for the
     // owner thread—and retain the staging owner for the complete attempt.
-    let hydrated_media_lease = if let Some(deferred) = job.deferred_media.take() {
-        match deferred.hydrate_into(&job_id, &mut job.request) {
-            Ok(lease) => Some(lease),
-            Err(error) => {
-                durable_generation_settlement::fail_hydration_blocking(job, &job_id, error);
-                return false;
-            }
+    let hydrated_media_lease = match crate::queue_media_runtime::hydrate_dispatch_media(
+        &job_id,
+        &mut job.request,
+        job.deferred_media.take(),
+        job.materialized_control_lora.take(),
+    ) {
+        Ok(lease) => lease,
+        Err(error) => {
+            durable_generation_settlement::fail_hydration_blocking(job, &job_id, error);
+            return false;
         }
-    } else {
-        None
     };
     // The ordered references are bound from THIS hydration, under this lease;
     // no job field carries a reference set across admission or dispatch.
@@ -6693,7 +6694,7 @@ mod tests {
             .find("install_running_cancellation")
             .expect("attempt cancellation installation");
         let hydrate = body
-            .find("deferred.hydrate_into")
+            .find("queue_media_runtime::hydrate_dispatch_media")
             .expect("lease-bound durable hydration");
         let binding = body
             .find("inference_bindings_for_request")
@@ -6866,6 +6867,7 @@ mod tests {
                         durable_queue_rank: None,
                         request: request.clone(),
                         deferred_media: None,
+                        materialized_control_lora: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx: placeholder_tx,
@@ -6889,6 +6891,7 @@ mod tests {
             model: request.model.clone(),
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: Some(progress_tx),
             result_tx,
@@ -9006,6 +9009,7 @@ mod tests {
             model: request.model.clone(),
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: crate::state::SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -9335,6 +9339,7 @@ mod tests {
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -10204,6 +10209,7 @@ mod tests {
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -10337,6 +10343,7 @@ mod tests {
                     model: request.model.clone(),
                     request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -10975,6 +10982,7 @@ mod tests {
                     model: "test:q4".to_string(),
                     request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -11528,6 +11536,7 @@ mod tests {
                     durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -11550,6 +11559,7 @@ mod tests {
                 model: "lifecycle".to_string(),
                 request,
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -11825,6 +11835,7 @@ mod tests {
                     durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -11851,6 +11862,7 @@ mod tests {
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
+                materialized_control_lora: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: Some(progress_tx),
                 result_tx,
@@ -12035,6 +12047,7 @@ mod tests {
             model: "mock-model".to_string(),
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -12102,6 +12115,7 @@ mod tests {
             model: "mock-model".to_string(),
             request,
             deferred_media: None,
+            materialized_control_lora: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -12156,6 +12170,7 @@ mod tests {
                     model: "cancel-model".to_string(),
                     request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -12225,6 +12240,7 @@ mod tests {
                     durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -12251,6 +12267,7 @@ mod tests {
                     model: "panic-model".to_string(),
                     request: panic_request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -12298,6 +12315,7 @@ mod tests {
                     durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -12322,6 +12340,7 @@ mod tests {
                     model: "panic-model".to_string(),
                     request,
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -12746,6 +12765,7 @@ mod tests {
                     durable_queue_rank: None,
                     request: job.request.clone(),
                     deferred_media: None,
+                    materialized_control_lora: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: dummy_tx,

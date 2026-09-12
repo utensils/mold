@@ -95,11 +95,32 @@ pub(crate) fn request_has_extractable_media(request: &mold_core::GenerateRequest
 /// than a hold because the row is otherwise renderable and holding it would
 /// strand work the operator cannot resume; resubmitting is what applies the
 /// adapter.
+///
+/// The server's own materialized control adapter is discounted: preparation
+/// prepends it into `loras` after admission, and it is carried across the
+/// scrub on the job rather than in the sealed set, so its presence is never
+/// evidence that something was lost. Asking about the request alone reported
+/// a loss on every built-in-control render, whose adapter is the one entry
+/// that always survives.
 pub(crate) fn lora_would_be_lost_on_publication(
     request: &mold_core::GenerateRequest,
     has_sealed_media: bool,
+    materialized_control_lora: Option<&mold_core::LoraWeight>,
 ) -> bool {
-    !has_sealed_media && (request.lora.is_some() || request.loras.is_some())
+    if has_sealed_media {
+        return false;
+    }
+    if request.lora.is_some() {
+        return true;
+    }
+    match request.loras.as_deref() {
+        None => false,
+        // A present-but-empty stack is still an authority the scrub collapses.
+        Some([]) => true,
+        Some(stack) => stack.iter().any(|entry| {
+            materialized_control_lora.is_none_or(|materialized| materialized.path != entry.path)
+        }),
+    }
 }
 
 /// A process-private authority that media extraction cannot make durable.
@@ -2583,14 +2604,52 @@ mod tests {
     #[test]
     fn an_unsealed_lora_row_is_reported_rather_than_silently_published() {
         let with_lora = request_carrying_only("lora");
-        assert!(lora_would_be_lost_on_publication(&with_lora, false));
-        assert!(!lora_would_be_lost_on_publication(&with_lora, true));
+        assert!(lora_would_be_lost_on_publication(&with_lora, false, None));
+        assert!(!lora_would_be_lost_on_publication(&with_lora, true, None));
 
         let with_stack = request_carrying_only("loras");
-        assert!(lora_would_be_lost_on_publication(&with_stack, false));
+        assert!(lora_would_be_lost_on_publication(&with_stack, false, None));
 
         let plain = request_carrying_only("source_image");
-        assert!(!lora_would_be_lost_on_publication(&plain, false));
+        assert!(!lora_would_be_lost_on_publication(&plain, false, None));
+    }
+
+    /// The server's own control adapter is never "lost": it rides the job
+    /// across the scrub and is restored after hydration. A stack holding only
+    /// that entry is therefore silence, while the caller's own adapter beside
+    /// it is still reported.
+    #[test]
+    fn the_materialized_control_adapter_is_not_counted_as_a_lost_lora() {
+        let materialized = mold_core::LoraWeight {
+            path: "/models/ltx2-control/union.safetensors".to_string(),
+            scale: 1.0,
+            expert: None,
+        };
+        let mut prepared = request_carrying_only("source_image");
+        prepared.loras = Some(vec![materialized.clone()]);
+        assert!(!lora_would_be_lost_on_publication(
+            &prepared,
+            false,
+            Some(&materialized)
+        ));
+        assert!(
+            lora_would_be_lost_on_publication(&prepared, false, None),
+            "with no adapter carried on the job the same stack IS lost"
+        );
+
+        prepared.loras = Some(vec![
+            materialized.clone(),
+            mold_core::LoraWeight {
+                path: "/loras/style.safetensors".to_string(),
+                scale: 0.8,
+                expert: None,
+            },
+        ]);
+        assert!(lora_would_be_lost_on_publication(
+            &prepared,
+            false,
+            Some(&materialized)
+        ));
     }
 
     #[test]

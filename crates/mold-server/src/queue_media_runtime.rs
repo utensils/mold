@@ -82,6 +82,59 @@ impl DeferredQueueMedia {
     }
 }
 
+/// Hydrate a dispatched job's sealed media, then restore the server-minted
+/// control adapter on top of whatever the sealed set handed back.
+///
+/// Both dispatchers (the GPU-pool worker and the single-worker loop) call this
+/// and nothing else, because the ORDER is the whole contract. The built-in
+/// LTX-2 IC-LoRA is resolved by preparation AFTER admission sealed the media
+/// set, so it cannot ride in the sealed set and the publication scrub wipes it
+/// from the request; the feeder therefore carries it on the job. Restoring it
+/// BEFORE hydration is what broke every durable built-in-control render:
+/// `rehydrate_request_media_into`'s precondition loop refuses a request that
+/// already carries `loras`, and `fail_hydration_blocking` turns that refusal
+/// into a failed job. Restoring it AFTER means the adapter never meets that
+/// precondition and is prepended onto the caller's own restored stack instead
+/// of replacing it.
+pub(crate) fn hydrate_dispatch_media(
+    expected_job_id: &str,
+    request: &mut mold_core::GenerateRequest,
+    deferred: Option<DeferredQueueMedia>,
+    materialized_control_lora: Option<mold_core::LoraWeight>,
+) -> Result<Option<HydratedQueueMediaLease>, DeferredQueueMediaError> {
+    let lease = match deferred {
+        Some(deferred) => Some(deferred.hydrate_into(expected_job_id, request)?),
+        None => None,
+    };
+    prepend_materialized_control_lora(request, materialized_control_lora);
+    Ok(lease)
+}
+
+/// Put the server's own control adapter back at the head of the stack.
+///
+/// The fold mirrors `routes::materialize_builtin_ltx2_control` exactly — the
+/// adapter first, then the legacy singular `lora`, then the plural stack —
+/// because that is the composition preparation itself performed before the
+/// scrub, and the engines resolve a present `loras` INSTEAD of `lora`
+/// (`effective_loras` prefers the plural). Leaving a hydrated singular beside
+/// the restored stack would silently drop the caller's adapter.
+pub(crate) fn prepend_materialized_control_lora(
+    request: &mut mold_core::GenerateRequest,
+    materialized: Option<mold_core::LoraWeight>,
+) {
+    let Some(materialized) = materialized else {
+        return;
+    };
+    let mut ordered = vec![materialized];
+    if let Some(lora) = request.lora.take() {
+        ordered.push(lora);
+    }
+    if let Some(loras) = request.loras.take() {
+        ordered.extend(loras);
+    }
+    request.loras = Some(ordered);
+}
+
 /// Owns every private staged path until the generation attempt finishes.
 /// Dropping the last holder removes the private staging tree; memory-only
 /// bytes remain on the request and are never materialized to a filesystem

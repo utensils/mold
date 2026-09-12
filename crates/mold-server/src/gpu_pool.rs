@@ -440,6 +440,10 @@ pub struct GpuJob {
     /// Opaque durable-media authority transferred without hydration by the
     /// scheduler. Only the leased worker may consume it.
     pub deferred_media: Option<crate::queue_media_runtime::DeferredQueueMedia>,
+    /// The server-minted LTX-2 control adapter this job's preparation
+    /// resolved. Restored onto the request with — and only with — the sealed
+    /// media set, in `queue_media_runtime::hydrate_dispatch_media`.
+    pub materialized_control_lora: Option<mold_core::LoraWeight>,
     pub completion_payload: crate::state::SseCompletionPayload,
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
     pub result_tx: tokio::sync::oneshot::Sender<Result<crate::state::GenerationJobResult, String>>,
