@@ -383,3 +383,12 @@ step` — and names no cause, because the budget is the only one a real render
   reason — for FLUX.2, that GGUF tiers have no block-streaming path — now travels
   with the held job, instead of being dropped when the queue composes the message
   a caller finally reads.
+- **A FLUX.2 render can no longer be admitted as "streamed" and then loaded
+  whole.** The engine's transformer loader had three paths and only one of them
+  looked at whether the plan had asked for block streaming, so a single-file
+  FLUX.2 [dev] checkpoint — the fp8 tiers — was loaded entirely onto the card
+  while admission had reserved a fraction of that. On a large GPU the render
+  simply worked and the disagreement was invisible; on a card the plan was
+  actually sized for it is an out-of-memory failure with admission's blessing.
+  That layout now refuses by name, in the engine and in the planner alike, so a
+  job is either planned for what will really happen or told why it cannot run.
