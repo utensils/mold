@@ -617,6 +617,18 @@ describe("ModelDetailDrawer", () => {
       expect(rows).toContain("Hugging Face");
     });
 
+    it("shows a source glyph beside the Source row's value, not instead of it", () => {
+      mockDetail.value = catalogDetail(makeEntry({ source: "civitai" }));
+      const w = mount(ModelDetailDrawer);
+      const sourceRow = w
+        .findAll(".md__row")
+        .find((row) => row.get(".md__row-key").text() === "Source")!;
+      // The glyph's own <title> duplicates the word for accessibility, so the
+      // row's plain text still reads as "Civitai" beside the mark.
+      expect(sourceRow.get(".md__row-val").text()).toContain("Civitai");
+      expect(sourceRow.find("svg[data-source='civitai']").exists()).toBe(true);
+    });
+
     it("renders trained words as chips", () => {
       mockDetail.value = catalogDetail(
         makeEntry({ trained_words: ["ohwx woman", "cinematic glow"] }),
