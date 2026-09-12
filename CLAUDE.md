@@ -29,7 +29,7 @@ cargo test -p mold-ai-core --lib <filter>    # single test/module; use the PACKA
 cargo test -p mold-ai-server --features mdns --lib mdns   # feature-gated modules (mdns, pulid, h3) never compile under --workspace
 cargo run -p mold-ai-core --bin generate_prompting_guides -- --check   # CI contract
 cargo +1.93 check -p mold-ai --locked --features preview,discord,expand,tui,metrics,webp,mp4,mdns,pulid   # MSRV gate (weekly msrv.yml, not on the merge path)
-cargo check -p mold-ai --features h3,cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight   # the PR-route cuda-typecheck (needs nvcc); a default-feature build type-checks none of the GPU cfg arms
+cargo check -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight   # the PR-route cuda-typecheck (needs nvcc); the h3 arm is covered by metal-check on macOS; a default-feature build type-checks none of the GPU cfg arms
 cargo run -p mold-ai-core --bin generate_generation_profiles -- --check   # CI contract
 bash scripts/tests/ci-routing-contract.sh                                 # CI contract
 bash scripts/tests/candle-single-identity.sh                              # every candle crate on ONE fork rev
