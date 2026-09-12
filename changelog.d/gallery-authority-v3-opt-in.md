@@ -15,6 +15,22 @@
   verifies the result by reading it back, parks the retired version-3
   directory rather than deleting it, and refuses if a mutation is still
   pending or the log tail is torn.
+- **`downgrade` now refuses while a server is publishing, instead of rewriting
+  the store under it.** Every mold process that can publish to a gallery holds
+  a writer lease on it for as long as it runs, and the downgrade refuses on
+  contention, naming the process and its pid and reporting that nothing was
+  changed; `status` shows `live writer` so you can see it first. The lease is
+  shared — several servers still share one home — and the operating system
+  releases it if a process is killed. Previously the command took only the
+  bookkeeping lock, which a server holds for the length of one publication, so
+  it waited for the gap between two prints and succeeded against a live
+  server; the server's next print then wrote version-3 bytes into the
+  version-2 directory and an older binary refused to start on that home.
+- **A commit can no longer land version-3 bytes under the version-2 name.**
+  Independently of the lease: a server whose version-3 store disappears
+  underneath it now re-establishes one beside the frozen version-2 store
+  instead of writing into it, and refuses the publication outright if it
+  cannot.
 - **Opting in writes a new store beside the old one, never over it.** The
   version-3 store gets its own directory and the version-2 one is left intact,
   so a rollback needs no restored backup. Note that while a version-2 writer

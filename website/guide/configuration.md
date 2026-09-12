@@ -630,8 +630,8 @@ where every binary is new enough, not for mixed ones. See
 [Shared homes and older binaries](#shared-homes-and-older-binaries).
 
 **Rolling back.** Run `mold system gallery-authority downgrade` with the NEWER
-build, while no server is writing to that output directory, before starting an
-older binary against the home. It takes the gallery bookkeeping lock, replays
+build, before starting an older binary against the home. It takes the gallery
+bookkeeping lock and the gallery's writer lease, replays
 the delta log onto the checkpoint, rewrites checkpoint, backup, and marker at
 version 2, and verifies by reading the result back; the retired version-3
 directory is parked beside the store rather than deleted. It is idempotent, and
@@ -639,6 +639,25 @@ it refuses rather than guesses if a mutation is still pending or the log tail
 is torn — start `mold serve` once with a version-3-capable build to let
 recovery resolve those, stop it, then downgrade. Both subcommands take
 `--output-dir` (defaulting to this machine's configured gallery) and `--json`.
+
+**Stop every writer first, and the command checks.** A mold process that can
+publish to a gallery — a running `mold serve`, a local `mold run`, the desktop
+app — holds a writer lease on it for as long as that process lives, and
+`downgrade` refuses while one is held:
+
+```
+$ mold system gallery-authority downgrade
+Error: a mold process is still publishing into the gallery archive authority in
+/storage/mold/output — the lease records `mold serve` (pid 31245), held for 4m 2s
+(since epoch ms 1789202630592). Stop `mold serve` (and any local `mold run` or
+desktop app) on this $MOLD_HOME, then run the downgrade again. Nothing has been
+changed.
+```
+
+`mold system gallery-authority status` prints `live writer: yes (pid …)` for the
+same reason, so you can see it before you try. The lease is shared, so several
+servers keep sharing one home, and the operating system releases it if a process
+is killed — a crashed server never leaves the command blocked.
 
 ### Held-queue retention
 

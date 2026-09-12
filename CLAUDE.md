@@ -313,6 +313,31 @@ and an idempotent downgrade that replays the log, rewrites at v2, parks the v3
 directory, verifies by reading back, and refuses on a pending mutation or a
 torn tail.
 
+**A LIVE WRITER refuses it too, and a commit can never land v3 bytes under the
+v2 name.** Those three guards are crash-recovery conditions, and the
+bookkeeping flock the downgrade takes is held by a server only for the length
+of one commit — so taking it BLOCKING meant waiting for the gap between two
+prints and rewriting the store under a running `mold serve`, whose next
+publication then put a delta and a `{"version":3}` marker into the
+just-rewritten `gallery-authority-v2` and locked every older binary out of the
+home (UAT final-2, D9). Every process that opens the authority for WRITING
+(`load_or_initialize_with_authority_log` AND `commit_snapshot` — the
+publication gate's cache can be installed by `load_existing_read_only`, so a
+commit reaches the store with no recovery of its own) holds a SHARED flock on
+`.mold-batch-transactions/gallery-authority.writer-lease` for the life of the
+process; two servers still share a home, a crash releases it, and a writer that
+cannot take one warns and publishes anyway. `downgrade` takes it EXCLUSIVE with
+`try_lock` AFTER the bookkeeping flock — the order every writer takes them, so
+nothing waits on a lock another holder is queueing for — and refuses naming
+`mold serve` and the recorded pid; `status` reports the live writer. The second
+half stands without the lease: `cached_commit_tail` also requires the marker's
+VERSION to be the one this process writes (the generation can agree across a
+store swap), `recover_storage` routes on whether the RESOLVED store is already
+v3 rather than on its checkpoint's version and re-runs the upgrade beside the
+frozen v2 store, its crash-recovery marker writes stamp the version the store
+IS, and `ensure_v3_store_is_addressable` fails the commit outright rather than
+appending v3 bytes to a v2 store.
+
 ## Durable gallery source media
 
 Durable queue uploads do not die with their queue row. Publication first pins

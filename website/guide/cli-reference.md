@@ -1000,13 +1000,18 @@ gallery) and `--json`:
 
 | Command     | Behavior                                                                                              |
 | ----------- | ----------------------------------------------------------------------------------------------------- |
-| `status`    | Report the store's on-disk version, generation, delta-log size, and whether a downgrade is needed     |
+| `status`    | Report the store's on-disk version, generation, delta-log size, whether a writer is live, and whether a downgrade is needed |
 | `downgrade` | Fold a version-3 store back to version 2 so a mold older than 0.29 can publish against the home again |
 
 Storage version 3 is opt-in (`gallery.authority_log`). Run `downgrade` with the
-newer build while no server is writing to that output directory, before rolling
-one back. It is idempotent, verifies the result by reading it back, and refuses
-if a mutation is pending or the log tail is torn. See
+newer build, before rolling one back. It is idempotent, verifies the result by
+reading it back, and refuses if a mutation is pending or the log tail is torn.
+
+**Stop the server first — `downgrade` enforces it.** Any mold process that
+publishes to a gallery holds a writer lease on it for as long as it runs, and
+`downgrade` refuses while one is held, naming the process and its pid rather
+than rewriting the store under it. `status` reports `live writer` so you can see
+it before you try. See
 [Gallery authority storage](./configuration#gallery-authority-storage).
 
 ## `mold system metal-memory`
