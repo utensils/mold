@@ -2517,11 +2517,43 @@ describe("CreatePage layout and behavior", () => {
 
     expect(submitMock).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain(
-      "This checkpoint is image-to-video only. Attach a source image to use as the first frame.",
+      "This style is image-to-video only. Attach a source image to use as the first frame.",
     );
 
     form.state.value.imageAttachments = [
       { kind: "upload", filename: "open.png", base64: "FIRST" },
+    ];
+    await nextTick();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(submitMock).toHaveBeenCalled();
+  });
+
+  // A 3-D style reconstructs a shape from a picture — it is not an
+  // image-to-VIDEO checkpoint, and the advisory must say so.
+  it("holds Generate for a required 3-D style with the mesh-specific advisory", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("hunyuan3d-mini-turbo:fp16", "hunyuan3d"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "hunyuan3d-mini-turbo:fp16";
+    form.state.value.modelFamily = "hunyuan3d";
+    form.state.value.sourceImageCapability = "required";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain(
+      "This style builds from a picture. Attach a source image to give it a shape.",
+    );
+    expect(wrapper.text()).not.toContain("image-to-video");
+
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "reference.png", base64: "REFERENCE" },
     ];
     await nextTick();
     await wrapper.get("[data-test='composer-submit']").trigger("click");
@@ -2556,7 +2588,7 @@ describe("CreatePage layout and behavior", () => {
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).not.toContain("This checkpoint is image-to-video");
+    expect(wrapper.text()).not.toContain("This style is image-to-video");
     expect(submitMock).toHaveBeenCalled();
   });
 

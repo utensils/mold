@@ -128,7 +128,7 @@ describe("SourceMediaPanel — per-model source-image contract (#772)", () => {
       true,
     );
     expect(wrapper.get("[data-test='source-conditioning-error']").text()).toBe(
-      "This checkpoint is image-to-video only. Attach a source image to use as the first frame.",
+      "This style is image-to-video only. Attach a source image to use as the first frame.",
     );
   });
 

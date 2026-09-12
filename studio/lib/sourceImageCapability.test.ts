@@ -170,11 +170,53 @@ describe("sourceImageValidationError", () => {
         capability: "required",
         hasSourceImage: false,
       }),
-    ).toMatch(/image-to-video only/);
+    ).toBe(
+      "This style is image-to-video only. Attach a source image to use as the first frame.",
+    );
     expect(
       sourceImageValidationError({
         capability: "required",
         hasSourceImage: true,
+      }),
+    ).toBeNull();
+  });
+
+  // A 3-D style reconstructs a shape from a picture — it is not an
+  // image-to-VIDEO checkpoint, and the advisory must not say it is.
+  it("names the picture a required 3-D style builds a shape from", () => {
+    expect(
+      sourceImageValidationError({
+        capability: "required",
+        hasSourceImage: false,
+        outputKind: "mesh",
+      }),
+    ).toBe(
+      "This style builds from a picture. Attach a source image to give it a shape.",
+    );
+    expect(
+      sourceImageValidationError({
+        capability: "required",
+        hasSourceImage: true,
+        outputKind: "mesh",
+      }),
+    ).toBeNull();
+  });
+
+  // A still-image style that requires a source (e.g. an edit checkpoint)
+  // reads a picture, not a video's first frame.
+  it("names the picture a required still-image style works from", () => {
+    expect(
+      sourceImageValidationError({
+        capability: "required",
+        hasSourceImage: false,
+        outputKind: "image",
+      }),
+    ).toBe("This style needs a picture to work from. Attach a source image.");
+    expect(
+      sourceImageValidationError({
+        capability: "required",
+        hasSourceImage: true,
+        outputKind: "image",
       }),
     ).toBeNull();
   });
@@ -185,7 +227,9 @@ describe("sourceImageValidationError", () => {
         capability: "unsupported",
         hasSourceImage: true,
       }),
-    ).toMatch(/text-to-video only/);
+    ).toBe(
+      "This style is text-to-video only and does not accept a source image. Remove the image, or pick an image-to-video style.",
+    );
   });
 
   it("refuses an end frame without a first frame", () => {
