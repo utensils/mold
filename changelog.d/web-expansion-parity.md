@@ -1,7 +1,7 @@
 - **Write more for me rewrites the prompt in place on the web.** The browser's
   Create composer now does what the desktop app and the phone do: one rewrite
   on the machine, installed straight into the prompt bed with an `expanded ·
-  undo` chip beside it, and a live line naming the machine while it writes. The
+undo` chip beside it, and a live line naming the machine while it writes. The
   prompt-expansion dialog is gone, and with it its "Enable expansion before
   submit" checkbox, its 1/3/5 variation count (five prompts for a one-print
   render was a server error) and its model-family override. A rewrite that
