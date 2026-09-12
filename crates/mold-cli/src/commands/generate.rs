@@ -3270,7 +3270,13 @@ async fn generate_local_batch(
                 let mut engine = None;
                 let _ = event_tx.send(LocalOwnerEvent::Ready(ordinal));
                 while let Ok(Some((index, mut request))) = command_rx.recv() {
-                    mold_server::execution_plan::materialize_request(&execution_plan, &mut request);
+                    // A forced-local render seals nothing, so no overlay is
+                    // pending and the plan's resolved stack is written now.
+                    mold_server::execution_plan::materialize_request(
+                        &execution_plan,
+                        &mut request,
+                        false,
+                    );
                     let result = (|| -> Result<GenerateResponse> {
                         #[cfg(feature = "h3")]
                         if is_h3 {

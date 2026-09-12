@@ -255,6 +255,9 @@ pub(crate) fn build_local_engine_from_plan(
         config,
         request,
         Some(prepared),
+        // A local render carries its LoRAs inline; there is no sealed
+        // projection to read the stack from.
+        None,
     )?;
     let sampled_current_free = mold_inference::device::free_vram_bytes(plan.device_ordinal)
         .ok_or_else(|| {
