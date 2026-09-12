@@ -2,8 +2,8 @@
 /*
  * Composer card (Mold Studio Create) — the prompt bed. Autogrow textarea, a
  * mono summary line with an inline "expanded · undo" affordance, and the
- * chip + Write-more / Generate action row. Generate carries the ⌘↵ keycap;
- * ⌘↵ / Ctrl+↵ inside the textarea submits.
+ * chip + Write-more / Generate action row. Generate carries the primary
+ * modifier + ↵ keycap, and that chord inside the textarea submits.
  *
  * The action row's first three positions are SLOTS — `style`, `shape`,
  * `count` — because the style picker, the resolved output shape and the batch
@@ -30,6 +30,7 @@ import {
 } from "@studio/lib/promptCycler";
 import { OPTIONAL_PROMPT_PLACEHOLDER } from "@studio/lib/promptRequirement";
 import type { PromptAuthoringSource } from "@studio/lib/promptProvenance";
+import { primaryModifierPressed, shortcutLabel } from "../../lib/platform";
 
 const props = withDefaults(
   defineProps<{
@@ -115,6 +116,11 @@ const promptFieldPlaceholder = computed(
 const expandLabel = computed(() =>
   props.batchSize > 1 ? `Write ${props.batchSize} for me` : "Write more for me",
 );
+// Both chords are the platform's own: ⌘ on Apple, Ctrl elsewhere. The ↵ glyph
+// carries its own span (it is set larger than the modifier), so Generate
+// spells its chord as the bare modifier plus that span.
+const expandChord = computed(() => shortcutLabel("E"));
+const modifierLabel = computed(() => shortcutLabel(""));
 const generateDisabled = computed(
   () => !props.cancellable && (props.busy || Boolean(props.disabledReason)),
 );
@@ -144,15 +150,15 @@ function onInput(event: Event) {
 }
 
 function onKeydown(event: KeyboardEvent) {
-  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+  if (primaryModifierPressed(event) && event.key === "Enter") {
     event.preventDefault();
     if (!generateDisabled.value) submitOrCancel();
     return;
   }
-  // ⌘E / Ctrl+E is desktop's shortcut for the same rewrite, and the chip
-  // carries the keycap — so the keycap has to be true here too.
+  // ⌘E (Ctrl+E off a Mac) is desktop's shortcut for the same rewrite, and the
+  // chip carries the keycap — so the keycap has to be true here too.
   if (
-    (event.metaKey || event.ctrlKey) &&
+    primaryModifierPressed(event) &&
     (event.key === "e" || event.key === "E")
   ) {
     event.preventDefault();
@@ -260,7 +266,7 @@ watch(
       >
         <Icon name="sparkle" :size="15" />
         {{ expandLabel }}
-        <Keycap>⌘E</Keycap>
+        <Keycap>{{ expandChord }}</Keycap>
       </button>
       <button
         type="button"
@@ -286,7 +292,9 @@ watch(
           :stroke-width="2"
         />
         {{ cancellable ? "Cancel" : "Generate" }}
-        <Keycap on-accent>⌘<span class="composer__return">↵</span></Keycap>
+        <Keycap on-accent
+          >{{ modifierLabel }}<span class="composer__return">↵</span></Keycap
+        >
       </button>
       <span
         v-if="cancellable"

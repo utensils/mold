@@ -1,19 +1,24 @@
-export type DesktopPlatform = "macos" | "linux" | "windows" | "unknown";
+/*
+ * The desktop shell's platform binding. The conventions themselves (the
+ * modifier, its spellings, this machine's name) are shared with the web SPA in
+ * `@studio/lib/platform`; what lives here is how the DESKTOP learns which
+ * platform it is running on, and everything bound to that answer.
+ */
+import {
+  normalizePlatform,
+  platformUi,
+  primaryModifierPressed as primaryModifierPressedOn,
+  type Platform,
+} from "@studio/lib/platform";
 
-export function normalizePlatform(raw: string | undefined): DesktopPlatform {
-  const platform = raw?.trim().toLowerCase();
-  if (!platform) return "unknown";
-  if (platform.includes("mac") || platform.includes("darwin")) return "macos";
-  if (platform.includes("linux")) return "linux";
-  if (platform.includes("win")) return "windows";
-  return "unknown";
-}
+export { normalizePlatform, platformUi };
+export type { DesktopPlatform } from "@studio/lib/platform";
 
 export function detectPlatform(
   tauriPlatform: string | undefined,
   browserPlatform: string | undefined,
   isTauri: boolean,
-): DesktopPlatform {
+): Platform {
   return normalizePlatform(tauriPlatform || (isTauri ? browserPlatform : undefined));
 }
 
@@ -26,38 +31,11 @@ export const CURRENT_PLATFORM = detectPlatform(
   "__TAURI_INTERNALS__" in globalThis,
 );
 
-export function applyPlatformAttribute(
-  root: HTMLElement,
-  platform: DesktopPlatform = CURRENT_PLATFORM,
-) {
+export function applyPlatformAttribute(root: HTMLElement, platform: Platform = CURRENT_PLATFORM) {
   root.dataset.platform = platform;
 }
 
-export function platformUi(raw: string | DesktopPlatform | undefined = CURRENT_PLATFORM) {
-  const platform = normalizePlatform(raw === "unknown" ? undefined : raw);
-  const isMacOS = platform === "macos";
-  return {
-    isMacOS,
-    modifier: isMacOS ? "Meta" : "Control",
-    modifierLabel: isMacOS ? "⌘" : "Ctrl+",
-    // Shift is a glyph inside the macOS chord and a named word inside the
-    // Ctrl one, so it cannot be spelled by concatenating onto modifierLabel.
-    shiftLabel: isMacOS ? "⇧" : "Shift+",
-    // Option is a glyph on macOS and a named word everywhere else, for the
-    // same reason Shift is.
-    altLabel: isMacOS ? "⌥" : "Alt+",
-    deviceLabel: isMacOS ? "This Mac" : "This device",
-    // Each platform's own name for the app that opens a folder. "file manager"
-    // is the honest generic on Linux, where there is no single one.
-    fileManagerLabel: isMacOS
-      ? "Finder"
-      : platform === "windows"
-        ? "File Explorer"
-        : "file manager",
-  } as const;
-}
-
-export const PLATFORM_UI = platformUi();
+export const PLATFORM_UI = platformUi(CURRENT_PLATFORM);
 
 export function shortcutLabel(key: string): string {
   return `${PLATFORM_UI.modifierLabel}${key}`;
@@ -74,9 +52,9 @@ export function shiftShortcutLabel(key: string): string {
   return `${PLATFORM_UI.modifierLabel}${PLATFORM_UI.shiftLabel}${key}`;
 }
 
+/** This machine's primary modifier, bound to the platform the shell detected. */
 export function primaryModifierPressed(
   event: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "altKey">,
 ): boolean {
-  if (event.altKey) return false;
-  return PLATFORM_UI.isMacOS ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+  return primaryModifierPressedOn(event, CURRENT_PLATFORM);
 }
