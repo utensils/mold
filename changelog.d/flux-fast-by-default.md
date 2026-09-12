@@ -93,7 +93,7 @@
   than roughly double. mold falls back to the old two forwards when the doubled
   activations would not fit beside the weights on this card; the progress line
   names which shape ran — `one batched forward per step` or `two forwards per
-  step` — and names no cause, because the budget is the only one a real render
+step` — and names no cause, because the budget is the only one a real render
   meets. (Both branches must also be the same length, but every Klein prompt is
   padded to a fixed 512 rows, so that gate survives only as a structural guard.)
   `--guidance 1` still skips the branch entirely.
@@ -200,7 +200,6 @@
   This is a behaviour change for anyone who was unknowingly rendering without
   their adapter — use a diffusers/PEFT or Kohya export of the same LoRA.
 
-
 - **A FLUX.2 LoRA render is no longer refused on a card big enough to load the
   model eagerly.** The preload gate read the engine's configured load strategy
   while the render itself is chosen by the request — a LoRA is merged into the
@@ -227,3 +226,39 @@
   a successful render clears the strikes. Driver faults, CUDA errors and
   out-of-memory still count against the device exactly as before, as does any
   failure the engine has not classified.
+- **FLUX.2 renders are planned against the transformer that runs them, so a
+  FLUX.2 [dev] job no longer runs out of GPU memory two minutes into the
+  denoise** ([#1707](https://github.com/utensils/mold/issues/1707)). The memory
+  a FLUX.2 denoise needs was estimated with FLUX.1's per-pixel model, which
+  knows nothing about the transformer's width: 273 MB charged at 1024x1024 for
+  a working set three quantizations independently measure at ~3.0 GB. On a
+  46 GB L40S that let `flux2-dev:q8` be admitted at ~38 GB and die in CUDA
+  partway through the denoise, while the same shape had completed nine times
+  before. Every FLUX.2 tier is now priced from its own geometry, and a render
+  that cannot fit is refused at submit time with a reason instead of after a
+  two-minute load. The same shape with a reference image — the one that failed
+  — is now refused up front.
+- **A failed render no longer teaches the planner that its shape needs the
+  whole card.** The learned memory envelope absorbed the high-water mark of
+  attempts that ran OUT of memory, which is a measurement of the GPU, not of
+  the job. After two failures, `flux2-dev:q8` was re-planned at ~46.5 GB on a
+  ~46.1 GB card and every retry was refused with a figure that could never fit,
+  until the row aged out. Failures are still recorded, and a shape that has
+  never succeeded still learns a floor from them; a shape with completed runs
+  keeps the evidence those runs produced.
+- **Out-of-memory messages say what actually happened.** A plan that exceeds
+  the GPU's own capacity now says so and names both figures, instead of
+  reporting "memory pressure changed after scheduler admission" on a card
+  nothing else was using. A FLUX.2 job that could not stream its transformer
+  says why — GGUF tiers have no block-streaming path — rather than leaving it
+  to be guessed.
+- **The scheduler and the model loader now agree on how much VRAM is
+  available.** Admission planned against the raw driver reading while every
+  pre-load check subtracted the reserve set by `MOLD_RESERVE_VRAM_MB`, so a job
+  could be admitted and then refused at load with nothing having changed. The
+  reserve is now subtracted once, where the scheduler's capacity is computed.
+- A malformed or truncated `.safetensors` file no longer takes the server down.
+  Probing a FLUX.2 checkpoint's header trusted the length the file declared and
+  allocated it, so a placeholder or a half-finished download could abort the
+  process; an unreadable header is now handled the same way an unrecognised one
+  always was.
