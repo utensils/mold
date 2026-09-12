@@ -13,6 +13,7 @@ const swipeActionRowComponent = readFileSync("../studio/components/SwipeActionRo
 const galleryViewerComponent = readFileSync("src/mobile/MobileGalleryViewer.vue", "utf8");
 
 const tokens = readFileSync("../ui/tokens.css", "utf8");
+const shapePickerComponent = readFileSync("../ui/components/ShapePicker.vue", "utf8");
 
 describe("mobile theme swatches", () => {
   it("copy each theme's chrome, content, telemetry, and accent hexes from ui/tokens.css", () => {
@@ -486,14 +487,49 @@ describe("mobile safe areas", () => {
     expect(value?.[1]).not.toMatch(/text-overflow:\s*ellipsis\s*;/);
   });
 
-  it("lets shape tiles grow for larger labels while preserving the touch floor", () => {
+  /*
+   * The shared ShapePicker (ui/components/ShapePicker.vue) owns column
+   * sizing as a CSS grid; the mobile group used to ALSO fight over width
+   * with `flex: 1 1 max-content` and a 60px `min-width` left over from the
+   * pre-grid flex row. Both were dead weight after the grid landed —
+   * `flex-*` properties do nothing on a grid item — and the min-width
+   * actively broke layout: the grid's own `minmax(48px, 1fr)` floor gives
+   * each of the five tiles as little as 48px at a picker width in the
+   * 268–322px band (five tracks is what `auto-fill` computes there), and a
+   * child demanding 60px inside a 48px track overflows the row instead of
+   * shrinking or wrapping. The mobile group now decides ONLY the touch
+   * target's height and padding — the shared grid decides width — so there
+   * is one authority for sizing, not two disagreeing ones.
+   */
+  it("leaves tile width to the shared grid and only touch-tunes height", () => {
     const group = css.match(/\.mobile-resolution-group \.ms-shape\s*\{([^}]*)\}/s);
     const choice = css.match(/\.mobile-resolution-group \.ms-shape__btn\s*\{([^}]*)\}/s);
 
     expect(group?.[1]).toMatch(/gap:\s*7px\s*;/);
-    expect(choice?.[1]).toMatch(/min-width:\s*60px\s*;/);
     expect(choice?.[1]).toMatch(/min-height:\s*72px\s*;/);
-    expect(choice?.[1]).toMatch(/flex:\s*1 1 max-content\s*;/);
+    // No more width override: the shared grid's own minmax floor is what
+    // sizes the tile, and a flex property here would be inert on a grid item.
+    expect(choice?.[1]).not.toMatch(/min-width\s*:/);
+    expect(choice?.[1]).not.toMatch(/flex\s*:/);
+  });
+
+  it("fits five shape tiles inside a 268–322px picker without overflow", () => {
+    const shapeBlockStart = shapePickerComponent.indexOf(".ms-shape {");
+    const shapeBlockEnd = shapePickerComponent.indexOf(".ms-shape__btn {");
+    expect(shapeBlockStart).toBeGreaterThanOrEqual(0);
+    expect(shapeBlockEnd).toBeGreaterThan(shapeBlockStart);
+    const shapeBlock = shapePickerComponent.slice(shapeBlockStart, shapeBlockEnd);
+
+    const trackMin = Number(shapeBlock.match(/minmax\((\d+)px,\s*1fr\)/)?.[1]);
+    const gap = Number(shapeBlock.match(/gap:\s*(\d+)px/)?.[1]);
+    expect(trackMin).toBeGreaterThan(0);
+    expect(gap).toBeGreaterThan(0);
+
+    const TILE_COUNT = 5;
+    const required = TILE_COUNT * trackMin + (TILE_COUNT - 1) * gap;
+    for (const width of [268, 295, 322]) {
+      expect(required).toBeLessThanOrEqual(width);
+    }
   });
 
   it("keeps the kit tier segments at touch size with legible sublabels", () => {

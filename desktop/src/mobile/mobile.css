@@ -1073,12 +1073,14 @@ textarea.control {
 }
 
 .mobile-resolution-group .ms-shape__btn {
-  min-width: 60px;
+  /* Width is the shared grid's decision (ui/components/ShapePicker.vue's
+   * `minmax(48px, 1fr)` track), not this override's — a `min-width` here
+   * cannot grow a track and only forces the tile past it, overflowing the
+   * row instead of shrinking or wrapping with everything else. */
   min-height: 72px;
   width: auto;
   height: auto;
   padding: 7px;
-  flex: 1 1 max-content;
 }
 
 .mobile-resolution-group .ms-shape__label {

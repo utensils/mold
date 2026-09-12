@@ -102,14 +102,19 @@ function onKeydown(event: KeyboardEvent) {
 <style scoped>
 .ms-shape {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(48px, 1fr));
+  /* `auto-fill`, not `auto-fit`: `auto-fit` collapses empty tracks and hands
+   * their width to the occupied ones, so tiles grow well past their authored
+   * size at a wide container. `auto-fill` keeps every track — occupied or
+   * not — at the minimum plus its even share of the remainder, so the tiles
+   * stay close to their authored size everywhere and only the narrowest
+   * rail (five tracks exactly) shrinks them at all. */
+  grid-template-columns: repeat(auto-fill, minmax(48px, 1fr));
   gap: 7px;
 }
 
 .ms-shape__btn {
   width: auto;
   min-width: 0;
-  max-width: 72px;
   height: 60px;
   display: flex;
   flex-direction: column;
