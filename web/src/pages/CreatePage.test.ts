@@ -5614,6 +5614,77 @@ describe("CreatePage prompt gate", () => {
  * in the page header beside the h1. The header keeps the title, the notice and
  * the 3-D workflows link.
  */
+/*
+ * The composer's summary and the rail's shape chips read ONE resolver. The
+ * summary used to run its own legacy `projectResolution` lookup, so a 1216×704
+ * canvas read "Custom" in the composer while the ShapePicker beside it showed
+ * 16:9 lit — two readings of the same canvas, on the same screen.
+ */
+describe("CreatePage composer summary", () => {
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  /** The real ComposerCard, so the summary is the one a person reads. */
+  function composerStubs() {
+    const stubs = pageStubs() as Record<string, unknown>;
+    delete stubs.ComposerCard;
+    return stubs;
+  }
+
+  it("names the shape the ShapePicker lit, never 'Custom'", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: composerStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.width = 1216;
+    form.state.value.height = 704;
+    await nextTick();
+
+    const summary = wrapper.get("[data-test='composer-summary']").text();
+    // The legacy lookup knew five ratios and called this one "Custom".
+    expect(summary).not.toContain("Custom");
+    // The chip beside it is the same resolver's answer; the two agree.
+    const family = wrapper.get(".shape-chip__label").text();
+    expect(summary).toContain(`${family} · 1216×704`);
+  });
+
+  it("carries the resolver's own approximate mark, once", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: composerStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.width = 1216;
+    form.state.value.height = 704;
+    await nextTick();
+    const summary = wrapper.get("[data-test='composer-summary']").text();
+    const family = wrapper.get(".shape-chip__label").text();
+    // One mark, from the resolver; ComposerCard appends the size after it.
+    expect(summary.startsWith("≈")).toBe(true);
+    expect(summary).toContain(`≈${family} · 1216×704`);
+    expect(summary.match(/≈/g)).toHaveLength(1);
+  });
+});
+
 describe("CreatePage kind strip placement", () => {
   beforeEach(async () => {
     hostRoutingTesting.reset();

@@ -58,7 +58,7 @@ import { defaultUpscaler } from "../components/create/advanced/upscalers";
 import { blobToBase64 } from "../lib/base64";
 import { HeldPullOffers } from "../lib/heldPullOffers";
 import Icon from "@ui/components/Icon.vue";
-import { ASPECTS } from "@ui/lib/resolution";
+
 import {
   effectiveGenerationRecipe,
   recipeIsCanvasless,
@@ -1897,10 +1897,6 @@ function onResetSettings() {
 const projection = computed(() =>
   projectResolution(form.state.value.width, form.state.value.height),
 );
-const aspectLabel = computed(
-  () =>
-    ASPECTS.find((a) => a.id === projection.value.aspectId)?.label ?? "Custom",
-);
 
 const advCount = computed(() =>
   advancedActiveCount({
@@ -1976,6 +1972,19 @@ const shapeChipLabel = computed(() => {
       ?.label ?? shape.badge
   );
 });
+/*
+ * The composer's summary reads the SAME resolver as the chip beside it. It
+ * used to run the legacy `projectResolution` lookup of its own, which knows
+ * only five ratios and answered "Custom" for a 1216×704 canvas while the
+ * rail's ShapePicker showed its nearest family lit — two readings of one
+ * canvas on one screen. `≈` is the resolver's own mark for a lit family that
+ * is only the nearest match; `ComposerCard` appends the pixel size after it
+ * and adds no second mark.
+ */
+const aspectLabel = computed(
+  () => `${outputShape.value.approximate ? "≈" : ""}${shapeChipLabel.value}`,
+);
+
 const shapeChipSublabel = computed(() => {
   const { width, height } = form.state.value;
   if (!width || !height) return "";
