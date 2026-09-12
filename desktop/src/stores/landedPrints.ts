@@ -15,24 +15,26 @@ import { appIsBackground } from "../lib/notify";
 export const useLandedPrintsStore = defineStore("landedPrints", {
   state: () => ({
     /** `${hostId}:${filename}` per unseen print. One machine can publish the
-     *  same file name as another, so the machine is part of the key. */
-    unseen: [] as string[],
+     *  same file name as another, so the machine is part of the key. A Set,
+     *  because a machine rendering overnight makes this thousands of keys and
+     *  every frame asks whether it already holds one. */
+    unseen: new Set<string>(),
   }),
   getters: {
-    count: (state): number => state.unseen.length,
+    count: (state): number => state.unseen.size,
   },
   actions: {
     noteLanded(hostId: string, filename: string | null | undefined): void {
       if (!filename || !appIsBackground()) return;
       const key = `${hostId}:${filename}`;
-      if (this.unseen.includes(key)) return;
+      if (this.unseen.has(key)) return;
       // Replaced, never mutated in place: this runs from SSE callbacks.
-      this.unseen = [...this.unseen, key];
+      this.unseen = new Set(this.unseen).add(key);
     },
     /** The window came back — the badge has done its job. */
     markSeen(): void {
-      if (this.unseen.length === 0) return;
-      this.unseen = [];
+      if (this.unseen.size === 0) return;
+      this.unseen = new Set();
     },
   },
 });

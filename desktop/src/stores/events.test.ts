@@ -188,13 +188,15 @@ describe("events subscription", () => {
     await vi.waitFor(() => expect(refreshHost).toHaveBeenCalledTimes(2));
   });
 
-  it("does not open the stream on servers without the capability", async () => {
+  it("falls back to the primary poller when the primary does not stream events", async () => {
     vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(false));
     const events = useEventsStore();
 
     await events.subscribe();
 
     expect(events.live).toBe(false);
+    expect(events.pollTimer).not.toBeNull();
+    // Nothing is connected, so there is no machine to stream from either.
     expect(sseStream).not.toHaveBeenCalled();
     events.unsubscribe();
   });
@@ -565,6 +567,41 @@ describe("fleet-wide event streams", () => {
     events.unsubscribe();
 
     expect(detach.mock.calls.map(([id]) => id).sort()).toEqual(["hal", "local", "plato"]);
+  });
+
+  /*
+   * The capability probe asks the PRIMARY, and the old-server poller it gates
+   * is primary-only too. Reading its answer as the fleet's silenced every
+   * modern machine behind one machine that predates the endpoint, so the
+   * streams open regardless: a machine without `/api/events` answers 404 and
+   * `terminalHttpStatuses` closes it once instead of retrying.
+   */
+  it("still streams from a modern machine when the primary predates /api/events", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(false));
+    await connectFleet();
+    const generation = useGenerationStore();
+    vi.spyOn(generation, "attachSharedDurableEventHost").mockImplementation(() => {});
+    vi.spyOn(generation, "detachSharedDurableEventHost").mockImplementation(() => {});
+    const { useLandedPrintsStore } = await import("./landedPrints");
+    const noteLanded = vi.spyOn(useLandedPrintsStore(), "noteLanded").mockImplementation(() => {});
+    const events = useEventsStore();
+
+    await events.subscribe();
+
+    expect(events.live).toBe(false);
+    expect(events.pollTimer).not.toBeNull();
+    expect(streamTargets()).toEqual([
+      ["/api/events", { baseUrl: "http://127.0.0.1:49152", apiKey: null }],
+      ["/api/events", { baseUrl: "http://plato:7680", apiKey: "plato-key" }],
+      ["/api/events", { baseUrl: "http://hal:7680", apiKey: null }],
+    ]);
+
+    vi.mocked(sseStream).mock.calls[1]![1]!.onEvent?.(
+      "message",
+      JSON.stringify({ type: "gallery_added", filename: "theirs.png" }),
+    );
+    expect(noteLanded).toHaveBeenCalledWith("plato", "theirs.png");
+    events.unsubscribe();
   });
 
   it("stops watching the fleet after unsubscribe", async () => {
