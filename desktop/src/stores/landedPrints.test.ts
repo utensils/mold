@@ -41,12 +41,57 @@ describe("landed prints", () => {
     expect(landed.count).toBe(1);
   });
 
-  /* Two machines can publish the same filename; they are two prints. */
-  it("keys on the machine as well as the file name", () => {
+  /*
+   * A remote print that auto-saves to this Mac keeps the origin's file name,
+   * and the import raises its own `gallery_added` here. That is ONE print with
+   * two copies — exactly what the Library's All view collapses into one tile —
+   * so the badge must not say two.
+   */
+  it("counts a print once however many machines hold a copy of it", () => {
     const landed = useLandedPrintsStore();
-    landed.noteLanded("local", "a.png");
     landed.noteLanded("plato", "a.png");
-    expect(landed.count).toBe(2);
+    landed.noteLanded("local", "a.png");
+    expect(landed.count).toBe(1);
+  });
+
+  /*
+   * The mirror imports BOTH names when the gallery renamed the copy, so a
+   * second `gallery_added` arrives here under a name nothing has seen. The one
+   * place that knows those names are one print is the mirror loop, which says
+   * so before it imports.
+   */
+  it("does not count a copy this app announced it was importing", () => {
+    const landed = useLandedPrintsStore();
+    landed.noteLanded("plato", "a.png");
+    landed.expectCopy("a.png");
+    landed.expectCopy("a-1.png");
+
+    landed.noteLanded("local", "a.png");
+    landed.noteLanded("local", "a-1.png");
+
+    expect(landed.count).toBe(1);
+  });
+
+  it("counts an unrelated print that happens to follow an expected copy", () => {
+    const landed = useLandedPrintsStore();
+    landed.expectCopy("a-1.png");
+    landed.noteLanded("local", "a-1.png");
+    // The expectation is consumed, so the NEXT print under that name counts.
+    landed.noteLanded("local", "a-1.png");
+    expect(landed.count).toBe(1);
+  });
+
+  /* A print the person declined to keep never landed. */
+  it("forgets a print that was trashed or removed", () => {
+    const landed = useLandedPrintsStore();
+    landed.noteLanded("plato", "a.png");
+    landed.noteLanded("plato", "b.png");
+
+    landed.forgetLanded("a.png");
+
+    expect(landed.count).toBe(1);
+    landed.forgetLanded("never-counted.png");
+    expect(landed.count).toBe(1);
   });
 
   it("ignores a frame with no file name", () => {

@@ -124,7 +124,10 @@ describe("App — Dock badge", () => {
     await mountApp();
     const landed = useLandedPrintsStore();
 
-    landed.unseen = new Set(["local:a.png", "plato:b.png"]);
+    landed.unseen = new Map([
+      ["a.png", "local"],
+      ["b.png", "plato"],
+    ]);
     await nextTick();
 
     expect(ipc.setDockBadge).toHaveBeenLastCalledWith(2);
@@ -134,7 +137,7 @@ describe("App — Dock badge", () => {
     const { ipc } = await import("./lib/ipc");
     await mountApp();
     const landed = useLandedPrintsStore();
-    landed.unseen = new Set(["local:a.png"]);
+    landed.unseen = new Map([["a.png", "local"]]);
     await nextTick();
     expect(ipc.setDockBadge).toHaveBeenLastCalledWith(1);
 

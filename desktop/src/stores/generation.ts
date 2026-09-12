@@ -1091,15 +1091,15 @@ export const useGenerationStore = defineStore("generation", {
         persistDurableRecords();
         return true;
       };
+      const landed = useLandedPrintsStore();
       // A known completion keeps its effects whatever a sibling's authority
       // did later; an unknown outcome is advisory and announces nothing.
       const completed = jobs.filter((job) => job.status === "complete" && job.result?.filename);
       if (completed.length > 0 && claim("native-notification")) {
         notifyGenerated(completed[0]!.prompt, completed[0]!.result?.filename);
         // The Dock badge's own source is the fleet's `/api/events` streams;
-        // this covers a machine whose stream was never live. Keyed on machine
-        // + file name, so the frame and this agree on one print.
-        const landed = useLandedPrintsStore();
+        // this covers a machine whose stream was never live. The ledger is
+        // keyed on the file name, so the frame and this agree on one print.
         for (const job of completed) {
           landed.noteLanded(record.tracker.hostId, job.result?.filename);
         }
@@ -1145,6 +1145,11 @@ export const useGenerationStore = defineStore("generation", {
             if (!job.remote || !job.mirrorRemoteOutput || !saveRemoteOutputs || !claim(effect)) {
               continue;
             }
+            // This Mac's copy raises its own `gallery_added` on the local
+            // stream. The print was counted on the machine that made it, and
+            // only this loop knows the copy's name is the same print — a
+            // renamed copy arrives under a name nothing has seen.
+            landed.expectCopy(filename);
             try {
               // The durable child names only the file; the origin's gallery
               // row is where its prompt, seed, dimensions, and timing live.

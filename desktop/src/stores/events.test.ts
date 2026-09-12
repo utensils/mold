@@ -454,15 +454,21 @@ describe("fleet-wide event streams", () => {
 
     await events.subscribe();
 
-    expect(streamTargets()).toEqual([
-      ["/api/events", { baseUrl: "http://127.0.0.1:49152", apiKey: null }],
-      ["/api/events", { baseUrl: "http://plato:7680", apiKey: "plato-key" }],
-      ["/api/events", { baseUrl: "http://hal:7680", apiKey: null }],
-    ]);
+    // Order-free: which machine is dialled first is not a contract.
+    expect(streamTargets()).toHaveLength(3);
+    expect(streamTargets()).toEqual(
+      expect.arrayContaining([
+        ["/api/events", { baseUrl: "http://127.0.0.1:49152", apiKey: null }],
+        ["/api/events", { baseUrl: "http://plato:7680", apiKey: "plato-key" }],
+        ["/api/events", { baseUrl: "http://hal:7680", apiKey: null }],
+      ]),
+    );
     for (const call of vi.mocked(sseStream).mock.calls) {
       expect(call[1]?.terminalHttpStatuses).toEqual([401, 403, 404]);
     }
-    expect(attach.mock.calls.map(([id]) => id)).toEqual(["local", "plato", "hal"]);
+    expect(attach.mock.calls.map(([id]) => id)).toEqual(
+      expect.arrayContaining(["local", "plato", "hal"]),
+    );
     events.unsubscribe();
   });
 
@@ -519,6 +525,34 @@ describe("fleet-wide event streams", () => {
     // The gallery store holds the PRIMARY's bucket; a remote print reaches it
     // through the merged fetch, never through another machine's frame.
     expect(applyAdded).toHaveBeenCalledTimes(1);
+    events.unsubscribe();
+  });
+
+  /*
+   * A print the person declined to keep never landed. With Save every result
+   * off the machine publishes the print and then trashes it, so `gallery_added`
+   * and `gallery_trashed` both go out; counting only the first would badge a
+   * print nobody kept. Removal is fleet-wide for the same reason the count is.
+   */
+  it("forgets a print that was trashed or removed, on any machine", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    await connectFleet();
+    const generation = useGenerationStore();
+    vi.spyOn(generation, "attachSharedDurableEventHost").mockImplementation(() => {});
+    vi.spyOn(generation, "detachSharedDurableEventHost").mockImplementation(() => {});
+    const { useLandedPrintsStore } = await import("./landedPrints");
+    const forgetLanded = vi
+      .spyOn(useLandedPrintsStore(), "forgetLanded")
+      .mockImplementation(() => {});
+    const events = useEventsStore();
+    await events.subscribe();
+    const plato = vi.mocked(sseStream).mock.calls[1]![1]!;
+
+    plato.onEvent?.("message", JSON.stringify({ type: "gallery_trashed", filename: "a.png" }));
+    plato.onEvent?.("message", JSON.stringify({ type: "gallery_removed", filename: "b.png" }));
+
+    expect(forgetLanded).toHaveBeenCalledWith("a.png");
+    expect(forgetLanded).toHaveBeenCalledWith("b.png");
     events.unsubscribe();
   });
 
@@ -590,11 +624,14 @@ describe("fleet-wide event streams", () => {
 
     expect(events.live).toBe(false);
     expect(events.pollTimer).not.toBeNull();
-    expect(streamTargets()).toEqual([
-      ["/api/events", { baseUrl: "http://127.0.0.1:49152", apiKey: null }],
-      ["/api/events", { baseUrl: "http://plato:7680", apiKey: "plato-key" }],
-      ["/api/events", { baseUrl: "http://hal:7680", apiKey: null }],
-    ]);
+    expect(streamTargets()).toHaveLength(3);
+    expect(streamTargets()).toEqual(
+      expect.arrayContaining([
+        ["/api/events", { baseUrl: "http://127.0.0.1:49152", apiKey: null }],
+        ["/api/events", { baseUrl: "http://plato:7680", apiKey: "plato-key" }],
+        ["/api/events", { baseUrl: "http://hal:7680", apiKey: null }],
+      ]),
+    );
 
     vi.mocked(sseStream).mock.calls[1]![1]!.onEvent?.(
       "message",
@@ -602,6 +639,114 @@ describe("fleet-wide event streams", () => {
     );
     expect(noteLanded).toHaveBeenCalledWith("plato", "theirs.png");
     events.unsubscribe();
+  });
+
+  /*
+   * The `unchanged` comparison in `syncHostStreams` is the whole reopen
+   * contract. Only its `status` arm had a test, so a refactor that dropped the
+   * key or the address comparison would have passed everything on this branch —
+   * and a machine whose key rotated server-side would have kept streaming with
+   * the old one until it 401'd.
+   */
+  it.each([
+    [
+      "address",
+      { url: "http://plato-2:7680" },
+      { baseUrl: "http://plato-2:7680", apiKey: "plato-key" },
+    ],
+    ["key", { apiKey: "rotated" }, { baseUrl: "http://plato:7680", apiKey: "rotated" }],
+    [
+      "server identity",
+      { instanceId: "i-plato-reinstalled" },
+      { baseUrl: "http://plato:7680", apiKey: "plato-key" },
+    ],
+  ])("reopens a machine's stream when its %s changes", async (_what, patch, expected) => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    const { hosts } = await connectFleet();
+    const generation = useGenerationStore();
+    vi.spyOn(generation, "attachSharedDurableEventHost").mockImplementation(() => {});
+    vi.spyOn(generation, "detachSharedDurableEventHost").mockImplementation(() => {});
+    const events = useEventsStore();
+    await events.subscribe();
+    const before = vi.mocked(sseStream).mock.calls[1]![1]!.signal!;
+
+    Object.assign(hosts.extras[0]!, patch);
+    await nextTick();
+
+    expect(before.aborted).toBe(true);
+    expect(vi.mocked(sseStream)).toHaveBeenCalledTimes(4);
+    expect(vi.mocked(sseStream).mock.calls[3]![1]!.target).toEqual(expected);
+    events.unsubscribe();
+  });
+
+  /*
+   * A machine that answers 401, 403 or 404 closes for good — `sseStream`
+   * throws rather than retrying. Leaving its entry in the map made
+   * `syncHostStreams` read it as live forever, and left the machine claimed,
+   * so `ensureDurableHostStream` stood down too: zero streams, no badge, no
+   * live events for its durable jobs, until its address happened to change.
+   */
+  it("hands back a machine whose stream closed for good, and does not reopen it", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    const { hosts } = await connectFleet();
+    const generation = useGenerationStore();
+    vi.spyOn(generation, "attachSharedDurableEventHost").mockImplementation(() => {});
+    const detach = vi
+      .spyOn(generation, "detachSharedDurableEventHost")
+      .mockImplementation(() => {});
+    const closed = vi.spyOn(generation, "onDurableEventClose").mockImplementation(() => {});
+    const events = useEventsStore();
+    await events.subscribe();
+    const plato = vi.mocked(sseStream).mock.calls[1]![1]!;
+
+    plato.onClose?.(new Error("HTTP 404"));
+
+    expect(plato.signal!.aborted).toBe(true);
+    expect(detach).toHaveBeenCalledWith("plato");
+    expect(closed).toHaveBeenCalledWith("plato");
+
+    // An unrelated fleet change must not walk straight back into the 404.
+    hosts.extras[1]!.status = "error";
+    await nextTick();
+    expect(vi.mocked(sseStream)).toHaveBeenCalledTimes(3);
+
+    // A new address is a new machine to try.
+    hosts.extras[0]!.url = "http://plato-2:7680";
+    await nextTick();
+    expect(vi.mocked(sseStream)).toHaveBeenCalledTimes(4);
+    expect(vi.mocked(sseStream).mock.calls[3]![1]!.target).toEqual({
+      baseUrl: "http://plato-2:7680",
+      apiKey: "plato-key",
+    });
+    events.unsubscribe();
+  });
+
+  /*
+   * Every other fleet case mocks the attach/detach pair, and the interlock
+   * with `ensureDurableHostStream` is the entire reason the detach exists. This
+   * one runs the real functions end to end: a full subscribe / fleet-change /
+   * unsubscribe cycle opens exactly the shared streams and nothing else.
+   */
+  it("runs the real durable-tracker handback without opening a stream of its own", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    const { hosts } = await connectFleet();
+    const generation = useGenerationStore();
+    const events = useEventsStore();
+
+    await events.subscribe();
+    expect(vi.mocked(sseStream)).toHaveBeenCalledTimes(3);
+
+    // While the shared subscription claims a machine, the durable tracker
+    // stands down for it.
+    generation.ensureDurableHostStream("plato");
+    expect(vi.mocked(sseStream)).toHaveBeenCalledTimes(3);
+
+    hosts.extras[0]!.status = "error";
+    await nextTick();
+    expect(vi.mocked(sseStream)).toHaveBeenCalledTimes(3);
+
+    events.unsubscribe();
+    expect(vi.mocked(sseStream)).toHaveBeenCalledTimes(3);
   });
 
   it("stops watching the fleet after unsubscribe", async () => {
