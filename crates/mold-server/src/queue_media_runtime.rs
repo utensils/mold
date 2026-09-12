@@ -94,8 +94,9 @@ impl DeferredQueueMedia {
     }
 }
 
-/// Hydrate a dispatched job's sealed media, then restore the server-minted
-/// control adapter on top of whatever the sealed set handed back.
+/// Hydrate a dispatched job's sealed media, then restore the two adapters the
+/// sealed set cannot hand back: the server-minted control adapter on top of
+/// whatever it did, and the plan's own stack when it handed back none.
 ///
 /// Both dispatchers (the GPU-pool worker and the single-worker loop) call this
 /// and nothing else, because the ORDER is the whole contract. The built-in
@@ -113,13 +114,46 @@ pub(crate) fn hydrate_dispatch_media(
     request: &mut mold_core::GenerateRequest,
     deferred: Option<DeferredQueueMedia>,
     materialized_control_lora: Option<mold_core::LoraWeight>,
+    planned_loras: &[mold_core::LoraWeight],
 ) -> Result<Option<HydratedQueueMediaLease>, DeferredQueueMediaError> {
     let lease = match deferred {
         Some(deferred) => Some(deferred.hydrate_into(expected_job_id, request)?),
         None => None,
     };
     prepend_materialized_control_lora(request, materialized_control_lora);
+    apply_planned_default_loras(request, planned_loras);
     Ok(lease)
+}
+
+/// Put back the one adapter no sealed set can hand back.
+///
+/// `execution_plan::materialize_request` is the only production writer of the
+/// per-model `config.models.<model>.lora` default onto a request, and on a
+/// durable render with an overlay still pending it correctly writes nothing —
+/// `rehydrate_request_media_into` refuses a request that already carries
+/// `loras`. For the CALLER's adapter that is safe, because the sealed set is
+/// the authority and hydration restores it. A config default is not a request
+/// field: admission seals nothing for it, so skipping the write dropped it
+/// with nothing behind it, and the plan charged an adapter the render never
+/// merged.
+///
+/// The precedence is `effective_lora_requests`', unchanged: the request's own
+/// stack wins, then its legacy singular, then what the plan resolved. So this
+/// writes ONLY into a request that carries no adapter at all after hydration
+/// — which is exactly the case where the plan's stack can only have come from
+/// the config default — and is a no-op on every path where
+/// `materialize_request` already wrote the same stack.
+pub(crate) fn apply_planned_default_loras(
+    request: &mut mold_core::GenerateRequest,
+    planned: &[mold_core::LoraWeight],
+) {
+    if planned.is_empty() {
+        return;
+    }
+    if request.lora.is_some() || request.loras.as_ref().is_some_and(|set| !set.is_empty()) {
+        return;
+    }
+    request.loras = Some(planned.to_vec());
 }
 
 /// Put the server's own control adapter back at the head of the stack.

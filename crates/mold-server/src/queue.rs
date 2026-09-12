@@ -2245,11 +2245,15 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         let expected_job_id = job_id.clone();
         let mut request = job.request.clone();
         match tokio::task::spawn_blocking(move || {
+            // No planned stack here: the legacy single-worker loop carries no
+            // frozen execution plan at all, so nothing ever materialized one
+            // onto its request and there is none to restore.
             let result = crate::queue_media_runtime::hydrate_dispatch_media(
                 &expected_job_id,
                 &mut request,
                 Some(deferred),
                 materialized_control_lora,
+                &[],
             );
             (request, result)
         })

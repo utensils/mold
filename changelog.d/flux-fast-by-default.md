@@ -69,6 +69,14 @@
   its siblings rendered over the server with no control adapter at all. The
   adapter now travels with the job and is restored at dispatch, ahead of the
   caller's own stack rather than instead of it.
+- **A per-model default LoRA is applied again on a render that carries a source
+  image.** An adapter set once with `mold config set models.<model>.lora` is not
+  part of any request, so nothing in the durable queue's encrypted media set
+  could hand it back at dispatch — and a render carrying conditioning media
+  (img2img, inpaint, a control image, a video source, references or keyframes)
+  reached the GPU with no adapter at all, while the plan had already reserved
+  its memory. The default is now restored at dispatch, and a `--lora` passed
+  with the request still wins over it exactly as it does locally.
 - **A `--lora` render now requires the encrypted request-media store.** This is
   the other side of the fix above: because the adapter is sealed like any other
   request authority, a host whose durable media store is unavailable answers

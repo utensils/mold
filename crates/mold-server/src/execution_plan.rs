@@ -2884,10 +2884,12 @@ pub fn materialized_placement(plan: &ResolvedExecutionPlan) -> DevicePlacement {
 /// `b7c841cc` fixed for the server's own control adapter, and which a plan
 /// that now knows the caller's adapter (from the sealed projection) would
 /// otherwise re-create for every durable `--lora` render. On that path the
-/// sealed set IS the authority: hydration restores the caller's stack and
+/// sealed set IS the authority: hydration restores the caller's stack,
 /// `prepend_materialized_control_lora` puts the server's adapter back at its
-/// head. The plan's copy exists to be charged and fingerprinted, not to be
-/// written back.
+/// head, and `apply_planned_default_loras` then supplies this same stack for
+/// the one adapter neither of those can produce — the per-model config
+/// default, which is not a request field and so is sealed by nothing. The
+/// plan's copy is written back AFTER the overlay, never before it.
 ///
 /// Everything else the plan materializes — the placement above all — is
 /// written either way, because none of it is an authority field.
@@ -2906,18 +2908,27 @@ pub fn materialize_request(
     if sealed_media_pending {
         return;
     }
-    let loras = plan
-        .effective_loras
+    let loras = materialized_lora_stack(plan);
+    request.lora = None;
+    request.loras = (!loras.is_empty()).then_some(loras);
+}
+
+/// The plan's resolved adapter stack in the shape a request carries it.
+///
+/// One derivation, read by [`materialize_request`] and — after hydration, for
+/// the one adapter no sealed set can hand back — by
+/// `queue_media_runtime::apply_planned_default_loras`. `expert` is dropped
+/// because the plan resolves a path and a scale and nothing else; an expert
+/// binding belongs to the request the caller wrote.
+pub(crate) fn materialized_lora_stack(plan: &ResolvedExecutionPlan) -> Vec<mold_core::LoraWeight> {
+    plan.effective_loras
         .iter()
         .map(|lora| mold_core::LoraWeight {
             path: lora.path.to_string_lossy().into_owned(),
             scale: lora.scale(),
-
             expert: None,
         })
-        .collect::<Vec<_>>();
-    request.lora = None;
-    request.loras = (!loras.is_empty()).then_some(loras);
+        .collect()
 }
 
 fn concrete_artifacts_for_family(
@@ -7565,9 +7576,12 @@ mod tests {
             "everything else the plan materializes is unaffected"
         );
 
-        // With nothing left to overlay, the plan still writes the stack the
-        // engine must load — a config-default adapter reaches the engine this
-        // way and no other.
+        // With nothing left to overlay, the plan writes the stack the engine
+        // must load. On the durable path the same stack is re-applied after
+        // hydration instead — see
+        // `queue_media_runtime::apply_planned_default_loras`, which is what
+        // carries the config default, the one adapter the sealed set never
+        // holds.
         let mut settled = scrubbed.clone();
         materialize_request(&plan, &mut settled, false);
         assert_eq!(
@@ -7710,6 +7724,127 @@ mod tests {
         .remove(0);
 
         assert_eq!(plan.effective_loras[0].path, authored);
+    }
+
+    /// The per-model config default is the one adapter the sealed set never
+    /// carries, so skipping the materialization write must not drop it.
+    ///
+    /// A config default is not a request field: admission seals nothing for
+    /// it, hydration restores nothing for it, and `materialize_request` was
+    /// the only thing that ever put it on the request. On a durable render
+    /// that carries conditioning media the write is correctly skipped for the
+    /// SEALED stack, so the default now reaches the engine the way the
+    /// server's own control adapter does — re-applied after hydration, from
+    /// the plan that charged it.
+    #[test]
+    fn a_config_default_adapter_survives_a_pending_overlay() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            sparse_file(&root.path().join(name), GIB);
+        }
+        let adapter = root.path().join("house-style.safetensors");
+        sparse_file(&adapter, GIB / 4);
+        let mut config = config(root.path(), "flux2", None);
+        let model = config.models.get_mut("test:q4").unwrap();
+        model.lora = Some(adapter.display().to_string());
+        model.lora_scale = Some(0.7);
+
+        // The durable shape: the request carries no adapter of its own and a
+        // sealed media set is still due.
+        let scrubbed = request(None);
+        let plan = resolve_execution_plans_for_coordinator_with_projection(
+            &config,
+            &scrubbed,
+            &devices(&[48 * GIB]),
+            false,
+            None,
+            None,
+        )
+        .expect("plans")
+        .remove(0);
+        assert_eq!(
+            plan.effective_loras.len(),
+            1,
+            "the plan charges the config default"
+        );
+
+        let mut pending_overlay = scrubbed.clone();
+        materialize_request(&plan, &mut pending_overlay, true);
+        assert!(
+            pending_overlay.loras.is_none() && pending_overlay.lora.is_none(),
+            "hydration still refuses a request that already carries an adapter"
+        );
+
+        // What dispatch does after the overlay has landed.
+        crate::queue_media_runtime::apply_planned_default_loras(
+            &mut pending_overlay,
+            &materialized_lora_stack(&plan),
+        );
+        let stack = pending_overlay
+            .loras
+            .as_ref()
+            .expect("the config default reaches the engine");
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack[0].path, adapter.display().to_string());
+        assert!((stack[0].scale - 0.7).abs() < f64::EPSILON);
+        assert_eq!(
+            effective_loras(&config, &pending_overlay, None),
+            plan.effective_loras,
+            "the request the engine runs and the plan that charged it must \
+             describe the same adapter"
+        );
+    }
+
+    /// A caller's own adapter outranks the config default on the durable path
+    /// exactly as it does inline: hydration restores the sealed stack first,
+    /// and the default is never added beside it.
+    #[test]
+    fn a_sealed_caller_adapter_outranks_the_config_default() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            sparse_file(&root.path().join(name), GIB);
+        }
+        let default_adapter = root.path().join("house-style.safetensors");
+        let caller_adapter = root.path().join("callers.safetensors");
+        sparse_file(&default_adapter, GIB / 4);
+        sparse_file(&caller_adapter, GIB / 4);
+        let mut config = config(root.path(), "flux2", None);
+        let model = config.models.get_mut("test:q4").unwrap();
+        model.lora = Some(default_adapter.display().to_string());
+        model.lora_scale = Some(0.7);
+
+        let scrubbed = request(None);
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            loras: vec![mold_core::LoraWeight {
+                path: caller_adapter.display().to_string(),
+                scale: 0.8,
+                expert: None,
+            }],
+            ..Default::default()
+        };
+        let plan = resolve_execution_plans_for_coordinator_with_projection(
+            &config,
+            &scrubbed,
+            &devices(&[48 * GIB]),
+            false,
+            None,
+            Some(&projection),
+        )
+        .expect("plans")
+        .remove(0);
+        assert_eq!(plan.effective_loras[0].path, caller_adapter);
+
+        // Hydration restores the caller's stack; the default must not join it.
+        let mut hydrated = scrubbed.clone();
+        materialize_request(&plan, &mut hydrated, true);
+        hydrated.loras = Some(projection.loras.clone());
+        crate::queue_media_runtime::apply_planned_default_loras(
+            &mut hydrated,
+            &materialized_lora_stack(&plan),
+        );
+        let stack = hydrated.loras.as_ref().expect("the caller's stack");
+        assert_eq!(stack.len(), 1, "no second adapter is added: {stack:?}");
+        assert_eq!(stack[0].path, caller_adapter.display().to_string());
     }
 
     #[test]

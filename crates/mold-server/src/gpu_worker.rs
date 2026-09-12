@@ -4094,11 +4094,21 @@ fn process_job_with_sink(
     // concrete device lease. Hydrate authenticated media now—not while it is
     // queued, preparing dependencies, retrying transport, or waiting for the
     // owner thread—and retain the staging owner for the complete attempt.
+    // The plan's own stack, so the one adapter no sealed set can hand back —
+    // the per-model config default — reaches the engine that was planned with
+    // it. Derived from the frozen plan rather than carried as a second field:
+    // `h3_private_ingress_grant` recovers the same way at this seam.
+    let planned_loras = job
+        .execution_plan
+        .as_ref()
+        .map(crate::execution_plan::materialized_lora_stack)
+        .unwrap_or_default();
     let hydrated_media_lease = match crate::queue_media_runtime::hydrate_dispatch_media(
         &job_id,
         &mut job.request,
         job.deferred_media.take(),
         job.materialized_control_lora.take(),
+        &planned_loras,
     ) {
         Ok(lease) => lease,
         Err(error) => {

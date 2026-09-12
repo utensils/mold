@@ -1543,6 +1543,7 @@ mod tests {
             &mut published,
             Some(deferred),
             Some(adapter.clone()),
+            &[],
         )
         .expect("a built-in-control render must hydrate, not fail its job");
         assert!(lease.is_some());
@@ -1607,6 +1608,7 @@ mod tests {
             &mut published,
             Some(deferred),
             Some(adapter.clone()),
+            &[],
         )
         .expect("a built-in-control render must hydrate, not fail its job");
 
@@ -1622,6 +1624,113 @@ mod tests {
         assert_eq!(stack[0].path, adapter.path);
         assert_eq!(stack[1].path, "/loras/only.safetensors");
         assert_eq!(stack[1].scale, 0.6);
+    }
+
+    /// A per-model config default reaches the engine on the durable path.
+    ///
+    /// It is the one adapter no sealed set can hand back — admission seals
+    /// only request fields, and a config default is not one — so
+    /// `materialize_request` was the only thing that ever put it on the
+    /// request, and skipping that write for a pending overlay dropped it with
+    /// nothing behind it. Dispatch re-applies the plan's own stack after
+    /// hydration, from the plan that charged its bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_config_default_adapter_is_applied_after_the_overlay_lands() {
+        let home = tempfile::tempdir().unwrap();
+        let submitted: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat on a porch",
+            "model": "flux2-dev:q8",
+            "width": 512,
+            "height": 512,
+            "steps": 8,
+            "guidance": 3.0,
+            "source_image": "c291cmNlLWJ5dGVz",
+        }))
+        .unwrap();
+        let (deferred, request_json) = crate::queue_media_runtime::seal_request_for_test(
+            home.path(),
+            "config-default-lora",
+            submitted,
+            None,
+        );
+        let mut published: mold_core::GenerateRequest =
+            serde_json::from_str(&request_json).unwrap();
+        let planned = vec![mold_core::LoraWeight {
+            path: "/loras/house-style.safetensors".to_string(),
+            scale: 0.7,
+            expert: None,
+        }];
+
+        crate::queue_media_runtime::hydrate_dispatch_media(
+            "config-default-lora",
+            &mut published,
+            Some(deferred),
+            None,
+            &planned,
+        )
+        .expect("the render must hydrate");
+
+        assert!(
+            published.source_image.is_some(),
+            "the sealed source image is restored"
+        );
+        let stack = published
+            .loras
+            .as_ref()
+            .expect("the config default reaches the engine's lora resolution");
+        assert_eq!(stack.len(), 1, "{stack:?}");
+        assert_eq!(stack[0].path, "/loras/house-style.safetensors");
+        assert_eq!(stack[0].scale, 0.7);
+    }
+
+    /// And the caller's own sealed adapter still outranks it, exactly as it
+    /// does on the inline path: the plan resolved the CALLER's stack, so
+    /// re-applying it after hydration restores no second adapter.
+    #[cfg(unix)]
+    #[test]
+    fn a_sealed_caller_adapter_is_not_joined_by_the_planned_stack() {
+        let home = tempfile::tempdir().unwrap();
+        let submitted: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat on a porch",
+            "model": "flux2-dev:q8",
+            "width": 512,
+            "height": 512,
+            "steps": 8,
+            "guidance": 3.0,
+            "source_image": "c291cmNlLWJ5dGVz",
+            "loras": [{"path": "/loras/callers.safetensors", "scale": 0.8}],
+        }))
+        .unwrap();
+        let (deferred, request_json) = crate::queue_media_runtime::seal_request_for_test(
+            home.path(),
+            "caller-lora",
+            submitted,
+            None,
+        );
+        let mut published: mold_core::GenerateRequest =
+            serde_json::from_str(&request_json).unwrap();
+        // The plan resolved the caller's adapter off the projection, which is
+        // the stack dispatch hands back.
+        let planned = vec![mold_core::LoraWeight {
+            path: "/loras/callers.safetensors".to_string(),
+            scale: 0.8,
+            expert: None,
+        }];
+
+        crate::queue_media_runtime::hydrate_dispatch_media(
+            "caller-lora",
+            &mut published,
+            Some(deferred),
+            None,
+            &planned,
+        )
+        .expect("the render must hydrate");
+
+        let stack = published.loras.as_ref().expect("the caller's own stack");
+        assert_eq!(stack.len(), 1, "no adapter is added beside it: {stack:?}");
+        assert_eq!(stack[0].path, "/loras/callers.safetensors");
+        assert_eq!(stack[0].scale, 0.8);
     }
 
     /// And a render that materialized nothing is left exactly as hydration
