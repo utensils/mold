@@ -202,6 +202,270 @@ fn wal_path(root: &Path) -> PathBuf {
     authority_dir(root).join(WAL_FILE)
 }
 
+/// The advisory lease a process holds for as long as it may still COMMIT to
+/// this authority.
+///
+/// The bookkeeping flock proves only that nobody is mid-commit. A server takes
+/// it for the few milliseconds of one publication and hands it straight over
+/// between prints, so `downgrade` — which took it BLOCKING — simply waited for
+/// the gap and succeeded against a live `mold serve` (UAT final-2, D9). The
+/// still-running server then wrote version-3 bytes into the version-2
+/// directory the downgrade had just rewritten, and the older binary the
+/// rollback was FOR refused to start on that home. The three guards that
+/// existed — a pending marker, an unresolved WAL, a torn log tail — are all
+/// crash-recovery conditions; none of them asks whether a writer is ALIVE.
+///
+/// This file asks that, and it answers for the lifetime of the writing
+/// process rather than the length of a commit: SHARED for every writer, so two
+/// servers keep sharing a `$MOLD_HOME` exactly as they do now, and EXCLUSIVE
+/// and non-blocking for `downgrade`, which refuses on contention. The lock is
+/// advisory and released by the OS when the holder exits or is killed, so a
+/// crashed server never leaves the door locked behind it.
+const WRITER_LEASE_FILE: &str = "gallery-authority.writer-lease";
+
+pub(crate) fn writer_lease_file_name() -> &'static str {
+    WRITER_LEASE_FILE
+}
+
+/// The lease lives beside the stores rather than inside one: the active store
+/// directory changes under an upgrade and a downgrade, which is precisely the
+/// moment the lease has to stay the same file.
+fn writer_lease_path(root: &Path) -> PathBuf {
+    root.join(crate::batch_transaction::TRANSACTION_DIR)
+        .join(WRITER_LEASE_FILE)
+}
+
+/// Who is holding the lease, for the refusal message. Advisory only — the LOCK
+/// is the authority, this is the prose beside it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WriterLeaseRecord {
+    pid: u32,
+    /// `mold serve`, `mold run`, … — argv[0]'s file name and its first
+    /// argument, which is what an operator has to go and stop.
+    program: String,
+    since_ms: u64,
+}
+
+fn writer_lease_record() -> WriterLeaseRecord {
+    let mut args = std::env::args();
+    let program = args
+        .next()
+        .map(|arg0| {
+            Path::new(&arg0)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or(arg0)
+        })
+        .unwrap_or_else(|| "mold".to_owned());
+    let program = match args.next() {
+        Some(subcommand) if !subcommand.starts_with('-') => format!("{program} {subcommand}"),
+        _ => program,
+    };
+    WriterLeaseRecord {
+        pid: std::process::id(),
+        program,
+        since_ms: mold_core::time::now_epoch_ms_u64(),
+    }
+}
+
+/// A held writer lease. Dropping it releases the lock; so does exiting.
+#[derive(Debug)]
+pub(crate) struct WriterLease {
+    file: std::fs::File,
+}
+
+impl Drop for WriterLease {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
+fn open_writer_lease_file(root: &Path) -> anyhow::Result<std::fs::File> {
+    let path = writer_lease_path(root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening gallery authority writer lease {}", path.display()))
+}
+
+/// Stamp who we are into the lease body, in place.
+///
+/// In place, and never through a rename: the lock belongs to the INODE, so
+/// replacing the file would hand the next `try_lock_exclusive` an unlocked one
+/// and silently undo the whole interlock.
+fn stamp_writer_lease(file: &std::fs::File) -> anyhow::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let mut bytes = serde_json::to_vec(&writer_lease_record())?;
+    bytes.push(b'\n');
+    let mut handle = file;
+    handle.seek(SeekFrom::Start(0))?;
+    handle.write_all(&bytes)?;
+    handle.flush()?;
+    file.set_len(bytes.len() as u64)?;
+    Ok(())
+}
+
+fn read_writer_lease_record(root: &Path) -> Option<WriterLeaseRecord> {
+    serde_json::from_slice(&fs::read(writer_lease_path(root)).ok()?).ok()
+}
+
+/// Take the SHARED writer lease for this root. Several writers hold it at
+/// once; only a downgrade is excluded.
+pub(crate) fn acquire_writer_lease(root: &Path) -> anyhow::Result<WriterLease> {
+    let file = open_writer_lease_file(root)?;
+    fs2::FileExt::lock_shared(&file).with_context(|| {
+        format!(
+            "taking the gallery authority writer lease {}",
+            writer_lease_path(root).display()
+        )
+    })?;
+    let lease = WriterLease { file };
+    if let Err(error) = stamp_writer_lease(&lease.file) {
+        // The body is advisory; the lock is not. A refusal that cannot name
+        // the holder is still a refusal.
+        tracing::debug!(%error, "could not stamp the gallery authority writer lease");
+    }
+    Ok(lease)
+}
+
+/// The leases this PROCESS holds, one per canonical gallery root.
+///
+/// `None` records a root whose lease could not be taken — a filesystem with no
+/// advisory locking, say. That is warned about once and then never retried,
+/// because publication must not fail for want of an interlock; the
+/// write-version guard in `commit_snapshot` is the half that does not depend
+/// on locking at all.
+fn held_writer_leases(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Option<WriterLease>>> {
+    static HELD: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, Option<WriterLease>>>,
+    > = std::sync::OnceLock::new();
+    HELD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Hold the writer lease for this root until the process exits.
+///
+/// Called from every door that opens the authority for WRITING —
+/// `load_or_initialize_with_authority_log` and `commit_snapshot` — rather than
+/// from the server entry point, because the publication gate's process cache
+/// can be installed by `load_existing_read_only` and a commit then reaches the
+/// store without any startup recovery of its own. The lease belongs to the
+/// process, not to the bookkeeping guard: the guard is exactly the thing that
+/// is NOT held between prints.
+pub(crate) fn hold_writer_lease(root: &Path) {
+    let mut held = held_writer_leases()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if held.contains_key(root) {
+        return;
+    }
+    match acquire_writer_lease(root) {
+        Ok(lease) => {
+            held.insert(root.to_path_buf(), Some(lease));
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                root = %root.display(),
+                "could not hold the gallery archive authority writer lease; \
+                 `mold system gallery-authority downgrade` will not be refused while this \
+                 process is publishing"
+            );
+            held.insert(root.to_path_buf(), None);
+        }
+    }
+}
+
+/// Release this process's writer lease for a root.
+///
+/// Production calls it nowhere: a writer holds its lease until it exits, which
+/// is the whole contract. Tests use it to play the operator's own sequence —
+/// stop the writer, then downgrade.
+#[cfg(test)]
+pub(crate) fn release_writer_lease(root: &Path) {
+    let canonical = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    held_writer_leases()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(&canonical);
+}
+
+/// How long a lease has been held, in the shape a person reads.
+fn writer_lease_age(since_ms: u64) -> String {
+    let elapsed = mold_core::time::now_epoch_ms_u64().saturating_sub(since_ms) / 1_000;
+    if elapsed >= 60 {
+        format!("{}m {}s", elapsed / 60, elapsed % 60)
+    } else {
+        format!("{elapsed}s")
+    }
+}
+
+/// Name the live writer for a refusal.
+fn writer_lease_holder(root: &Path) -> String {
+    match read_writer_lease_record(root) {
+        Some(record) => format!(
+            "the lease records `{}` (pid {}), held for {} (since epoch ms {})",
+            record.program,
+            record.pid,
+            writer_lease_age(record.since_ms),
+            record.since_ms
+        ),
+        None => format!("the lease is held in {}", writer_lease_path(root).display()),
+    }
+}
+
+/// Take the EXCLUSIVE writer lease, or refuse.
+///
+/// Non-blocking on purpose. The caller already holds the bookkeeping flock, so
+/// waiting here would mean holding one lock while queueing for another that a
+/// writer takes in the opposite order.
+fn acquire_exclusive_writer_lease(root: &Path) -> anyhow::Result<WriterLease> {
+    let file = open_writer_lease_file(root)?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(WriterLease { file }),
+        Err(error) if error.kind() == fs2::lock_contended_error().kind() => anyhow::bail!(
+            "a mold process is still publishing into the gallery archive authority in {} — {}. \
+             Stop `mold serve` (and any local `mold run` or desktop app) on this $MOLD_HOME, then \
+             run the downgrade again. Nothing has been changed.",
+            root.display(),
+            writer_lease_holder(root)
+        ),
+        Err(error) => Err(anyhow::Error::new(error).context(format!(
+            "taking the gallery authority writer lease {}",
+            writer_lease_path(root).display()
+        ))),
+    }
+}
+
+/// Is some process holding the writer lease right now?
+///
+/// Asked by `status` only, and answered by trying to take the exclusive lease
+/// and immediately dropping it. A `false` is "nobody at this instant", not a
+/// promise about the next one — the refusal in `downgrade` is what actually
+/// holds the door.
+fn live_writer_record(root: &Path) -> Option<WriterLeaseRecord> {
+    if !writer_lease_path(root).is_file() {
+        return None;
+    }
+    match acquire_exclusive_writer_lease(root) {
+        Ok(lease) => {
+            drop(lease);
+            None
+        }
+        Err(_) => Some(read_writer_lease_record(root).unwrap_or(WriterLeaseRecord {
+            pid: 0,
+            program: "mold".to_owned(),
+            since_ms: 0,
+        })),
+    }
+}
+
 fn digest_json<T: Serialize>(value: &T) -> anyhow::Result<String> {
     let bytes = serde_json::to_vec(value)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -1172,9 +1436,21 @@ pub struct DowngradeOutcome {
 /// quiescent: a pending v2 mutation, and a torn or non-contiguous log tail.
 /// Both are resolved by letting a mold that understands v3 recover the store
 /// once, which is what `mold serve` does at startup.
+///
+/// And it refuses while a WRITER IS ALIVE. Those two guards are crash-recovery
+/// conditions; neither of them, nor the bookkeeping flock this takes first,
+/// says anything about a running server. The flock is held only for the length
+/// of one commit, so taking it blocking meant waiting for the gap between two
+/// prints and then rewriting the store under a server that was still
+/// publishing (UAT final-2, D9). The writer lease is what a live process
+/// holds between commits.
 pub fn downgrade_to_legacy_storage(root: &Path) -> anyhow::Result<DowngradeOutcome> {
     let guard = crate::batch_transaction::acquire_gallery_bookkeeping_lock(root)?;
     let root = guard.canonical_root();
+    // Bookkeeping first, then the lease, and the lease non-blocking: a writer
+    // takes them in that same order, so nothing here ever waits on a lock
+    // somebody else is waiting to hand over.
+    let _writer_lease = acquire_exclusive_writer_lease(root)?;
 
     let marker = read_marker(root)?;
     let Some(snapshot) = read_checkpoint(root)? else {
@@ -1347,6 +1623,15 @@ pub struct AuthorityStorageStatus {
     pub log_bytes: u64,
     pub pending_mutation: bool,
     pub torn_log_tail: bool,
+    /// Whether a process is holding the writer lease right now — which is the
+    /// one thing that decides whether a downgrade will be allowed at all.
+    pub live_writer: bool,
+    /// The live writer's pid, when its lease body records one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_writer_pid: Option<u32>,
+    /// When that writer took its lease, in epoch milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_writer_since_ms: Option<u64>,
     /// The version-2 store, when one exists and is not the active one.
     ///
     /// The divergence this whole switch is about is invisible if the status
@@ -1391,6 +1676,9 @@ pub fn storage_status(root: &Path) -> anyhow::Result<AuthorityStorageStatus> {
     let log_store = (authority_dir_v3(root) != active)
         .then(|| store_facts(&authority_dir_v3(root)))
         .flatten();
+    // Asked whether or not a store exists: "is something publishing here" is
+    // the question that decides whether the downgrade below will be allowed.
+    let writer = live_writer_record(root);
     if !active.is_dir() {
         return Ok(AuthorityStorageStatus {
             present: false,
@@ -1401,6 +1689,9 @@ pub fn storage_status(root: &Path) -> anyhow::Result<AuthorityStorageStatus> {
             log_bytes: 0,
             pending_mutation: false,
             torn_log_tail: false,
+            live_writer: writer.is_some(),
+            live_writer_pid: writer.as_ref().map(|record| record.pid),
+            live_writer_since_ms: writer.as_ref().map(|record| record.since_ms),
             legacy_store,
             log_store,
         });
@@ -1423,6 +1714,9 @@ pub fn storage_status(root: &Path) -> anyhow::Result<AuthorityStorageStatus> {
         log_bytes: mutation_log_bytes(root),
         pending_mutation: marker.is_some_and(|marker| marker.pending.is_some()),
         torn_log_tail: scan.map(|scan| scan.discarded > 0).unwrap_or(false),
+        live_writer: writer.is_some(),
+        live_writer_pid: writer.as_ref().map(|record| record.pid),
+        live_writer_since_ms: writer.as_ref().map(|record| record.since_ms),
         legacy_store,
         log_store,
     })
@@ -1526,6 +1820,10 @@ pub(crate) fn load_or_initialize_with_authority_log(
 ) -> anyhow::Result<LoadedAuthority> {
     guard.ensure_root(root)?;
     let root = guard.canonical_root();
+    // This process is about to recover, initialize, or repair the store, and
+    // it will go on committing to it for as long as it runs. Say so, for the
+    // whole of that lifetime.
+    hold_writer_lease(root);
     let mut snapshot = match recover_storage(root, authority_log)? {
         Some(snapshot) => snapshot,
         None => {
@@ -1739,6 +2037,10 @@ pub(crate) fn commit_snapshot(
 ) -> anyhow::Result<u64> {
     guard.ensure_root(root)?;
     let root = guard.canonical_root();
+    // Not only in `load_or_initialize`: the publication gate's process cache
+    // can be installed by `load_existing_read_only`, so a commit reaches this
+    // store without this process ever having recovered it.
+    hold_writer_lease(root);
     let current = match cached_commit_tail(root, expected_generation)? {
         Some(tail) => tail,
         None => {
@@ -2497,6 +2799,18 @@ mod tests {
         );
     }
 
+    /// Play the operator's own sequence before a downgrade: the writing
+    /// process EXITS.
+    ///
+    /// Every downgrade test below publishes from THIS process first, which now
+    /// holds the writer lease for the life of the process exactly as a running
+    /// `mold serve` does. Releasing it is what a stopped server does, and
+    /// without it the downgrade refuses — which is the point of the interlock,
+    /// pinned separately by `downgrade_refuses_while_a_writer_holds_the_home`.
+    fn stop_the_writer(dir: &Path) {
+        release_writer_lease(dir);
+    }
+
     fn publish(
         dir: &Path,
         guard: &GalleryBookkeepingGuard,
@@ -2846,6 +3160,7 @@ mod tests {
         assert!(mutation_log_path(dir.path()).exists());
         drop(guard);
 
+        stop_the_writer(dir.path());
         let outcome = downgrade_to_legacy_storage(dir.path()).unwrap();
         assert_eq!(outcome.generation, generation);
         assert_eq!(outcome.replayed_records, 3);
@@ -2993,6 +3308,7 @@ mod tests {
         assert!(v2.join(MUTATION_LOG_FILE).exists());
         forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
 
+        stop_the_writer(dir.path());
         let outcome = downgrade_to_legacy_storage(dir.path()).unwrap();
         assert_eq!(outcome.generation, generation);
         assert_eq!(outcome.replayed_records, 3);
@@ -3033,6 +3349,7 @@ mod tests {
 
         // Idempotent: running the repair twice is not an error.
         forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
+        stop_the_writer(dir.path());
         let again = downgrade_to_legacy_storage(dir.path()).unwrap();
         assert_eq!(again.generation, generation);
         assert_eq!(again.replayed_records, 0);
@@ -3147,6 +3464,7 @@ mod tests {
         .unwrap();
         forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
 
+        stop_the_writer(dir.path());
         let error = downgrade_to_legacy_storage(dir.path())
             .expect_err("a downgrade that would lose prints must refuse");
         let message = format!("{error:#}");
@@ -3198,6 +3516,7 @@ mod tests {
         atomic_write_bytes(&v2_dir.join(CHECKPOINT_FILE), &envelope).unwrap();
         forget_authority_tail(&fs::canonicalize(dir.path()).unwrap());
 
+        stop_the_writer(dir.path());
         let outcome = downgrade_to_legacy_storage(dir.path()).unwrap();
         assert_eq!(outcome.generation, generation);
         let stored = read_checkpoint_at(&v2_dir.join(CHECKPOINT_FILE)).unwrap();
@@ -3225,6 +3544,7 @@ mod tests {
             .unwrap();
         file.set_len(log.len() as u64 - 8).unwrap();
         drop(file);
+        stop_the_writer(dir.path());
         let error = downgrade_to_legacy_storage(dir.path())
             .unwrap_err()
             .to_string();
@@ -3250,10 +3570,120 @@ mod tests {
             },
         )
         .unwrap();
+        stop_the_writer(dir.path());
         let error = downgrade_to_legacy_storage(dir.path())
             .unwrap_err()
             .to_string();
         assert!(error.contains("pending"), "unexpected error: {error}");
+    }
+
+    /// The D9 interlock: a live writer refuses the downgrade.
+    ///
+    /// Measured on UAT final-2: with a v3 server up on 7683, `downgrade`
+    /// succeeded, because it took the bookkeeping flock BLOCKING and the
+    /// server holds that flock only during a commit. Nothing asked whether a
+    /// writer was alive.
+    #[test]
+    fn downgrade_refuses_while_a_writer_holds_the_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let initial = load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
+        let mut index = initial.index;
+        let generation = publish(dir.path(), &guard, &mut index, initial.generation, "p.png");
+        // The server drops the bookkeeping guard between prints — that is
+        // exactly the gap the downgrade used to walk through — but it is still
+        // running, and still holding its writer lease.
+        drop(guard);
+
+        let error = downgrade_to_legacy_storage(dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("mold serve"),
+            "the refusal must name what to stop: {error}"
+        );
+        assert!(
+            error.contains("Nothing has been changed"),
+            "the refusal must say the store is untouched: {error}"
+        );
+
+        // And nothing was: the v3 store is still the live one, at its own
+        // generation, with its log intact.
+        assert_eq!(authority_dir(dir.path()), authority_dir_v3(dir.path()));
+        assert!(mutation_log_path(dir.path()).exists());
+        assert_eq!(
+            read_marker(dir.path())
+                .unwrap()
+                .unwrap()
+                .committed_generation,
+            generation
+        );
+
+        // The writer exits, and the same command goes through.
+        stop_the_writer(dir.path());
+        let outcome = downgrade_to_legacy_storage(dir.path()).unwrap();
+        assert_eq!(outcome.generation, generation);
+        assert_eq!(
+            read_checkpoint_at(&legacy_authority_dir(dir.path()).join(CHECKPOINT_FILE))
+                .unwrap()
+                .version,
+            LEGACY_STORAGE_VERSION
+        );
+    }
+
+    /// Two servers share a `$MOLD_HOME` today and must keep doing so: the
+    /// writer lease is SHARED. Either one alone still refuses the downgrade.
+    #[test]
+    fn two_writers_share_the_home_and_either_one_refuses_the_downgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
+        drop(guard);
+        let canonical = fs::canonicalize(dir.path()).unwrap();
+        // This process already holds one. A second server's lease is another
+        // shared lock on the same file, which must simply be granted.
+        let second = acquire_writer_lease(&canonical).expect("a second writer shares the lease");
+        let third = acquire_writer_lease(&canonical).expect("and a third");
+        drop(third);
+
+        assert!(downgrade_to_legacy_storage(dir.path()).is_err());
+        // One of the two stops; the other still holds the door.
+        stop_the_writer(dir.path());
+        assert!(
+            downgrade_to_legacy_storage(dir.path()).is_err(),
+            "the surviving writer must still refuse"
+        );
+        drop(second);
+        downgrade_to_legacy_storage(dir.path()).expect("the last writer is gone");
+    }
+
+    /// `status` is what an operator reads BEFORE running the downgrade, so it
+    /// has to answer the question the downgrade will answer.
+    #[test]
+    fn status_reports_whether_a_writer_is_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        load_or_initialize_with_authority_log(dir.path(), &guard, true, || {
+            Ok(CommittedArchiveIndex::default())
+        })
+        .unwrap();
+        drop(guard);
+
+        let status = storage_status(dir.path()).unwrap();
+        assert!(status.live_writer, "this process is publishing here");
+        assert_eq!(status.live_writer_pid, Some(std::process::id()));
+        assert!(status.live_writer_since_ms.is_some_and(|since| since > 0));
+
+        stop_the_writer(dir.path());
+        let status = storage_status(dir.path()).unwrap();
+        assert!(!status.live_writer);
+        assert_eq!(status.live_writer_pid, None);
     }
 
     #[test]

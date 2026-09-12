@@ -31,9 +31,12 @@ pub enum GalleryAuthorityAction {
     ///
     /// Storage version 3 is opt-in (`gallery.authority_log`) because a mold
     /// older than 0.29 reads only version 2 and refuses to publish against a
-    /// v3 store. Run this with the NEWER build, while no server is writing,
-    /// before rolling one back or before starting an older binary against a
-    /// shared $MOLD_HOME.
+    /// v3 store. Run this with the NEWER build, before rolling one back or
+    /// before starting an older binary against a shared $MOLD_HOME.
+    ///
+    /// It refuses while any mold process holds this gallery's writer lease —
+    /// stop `mold serve` (and any local `mold run` or desktop app) first.
+    /// `status` reports whether one is live.
     Downgrade {
         /// Gallery directory; defaults to this machine's configured output dir
         #[arg(long, value_name = "PATH")]
@@ -136,6 +139,21 @@ fn gallery_authority_status(output_dir: Option<&std::path::Path>, json: bool) ->
         "  mutation log: {} record(s), {} bytes",
         status.log_records, status.log_bytes
     );
+    // The one line that says whether a downgrade will be allowed at all. The
+    // three format facts above describe the store; this describes the machine.
+    if status.live_writer {
+        println!(
+            "  live writer: yes{} — `downgrade` will refuse until it stops",
+            match (status.live_writer_pid, status.live_writer_since_ms) {
+                (Some(pid), Some(since)) if pid != 0 =>
+                    format!(" (pid {pid}, lease taken at epoch ms {since})"),
+                (Some(pid), None) if pid != 0 => format!(" (pid {pid})"),
+                _ => String::new(),
+            }
+        );
+    } else {
+        println!("  live writer: none");
+    }
     if status.pending_mutation {
         println!("  pending mutation: yes — start `mold serve` once to resolve it");
     }
