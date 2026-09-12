@@ -5010,9 +5010,10 @@ onBeforeUnmount(() => {
       data-test="generate-workspace"
       class="grid gap-6 min-[900px]:grid-cols-[minmax(0,1fr)_320px]"
     >
-      <!-- Left column: activity, the picture, the sticky composer, then
-           everything that scrolls UNDER it. Nothing on this path may set an
-           `overflow` — a `sticky` child is inert inside one. -->
+      <!-- Left column, top to bottom: the kind strip, the picture, the sticky
+           composer, then everything that scrolls UNDER it — the work in
+           flight, then Recent. Nothing on this path may set an `overflow` —
+           a `sticky` child is inert inside one. -->
       <main class="flex min-w-0 flex-col gap-4">
         <!-- The kind strip is the first row of the LEFT column, left-aligned
              above the picture (the mock), with the print's name beside it.
