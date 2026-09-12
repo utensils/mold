@@ -123,23 +123,19 @@ pub(crate) fn lora_would_be_lost_on_publication(
     }
 }
 
-/// The adapter stack a request will actually merge, singular field folded in.
+/// The adapter stack a request will actually merge.
 ///
 /// Read at the ONE moment the durable feeder holds a hydrated request and has
 /// not yet scrubbed it, so the planner can be told what the render merges.
-/// `execution_plan::effective_lora_requests` applies the same
-/// singular-then-plural precedence to the request it is given; this is that
-/// rule at the seal.
+/// `GenerateRequest::caller_lora_stack` is the precedence
+/// (`loras` wins, `lora` is the fallback, never both);
+/// `execution_plan::effective_lora_requests` applies the same rule to the
+/// request it is given, then falls back to the projection and the config
+/// default. This is that rule at the seal.
 pub(crate) fn effective_request_loras(
     request: &mold_core::GenerateRequest,
 ) -> Vec<mold_core::LoraWeight> {
-    request
-        .loras
-        .as_ref()
-        .filter(|stack| !stack.is_empty())
-        .cloned()
-        .or_else(|| request.lora.clone().map(|lora| vec![lora]))
-        .unwrap_or_default()
+    request.caller_lora_stack()
 }
 
 /// A process-private authority that media extraction cannot make durable.

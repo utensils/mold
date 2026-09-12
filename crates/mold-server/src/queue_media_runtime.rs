@@ -159,11 +159,13 @@ pub(crate) fn apply_planned_default_loras(
 /// Put the server's own control adapter back at the head of the stack.
 ///
 /// The fold mirrors `routes::materialize_builtin_ltx2_control` exactly — the
-/// adapter first, then the legacy singular `lora`, then the plural stack —
-/// because that is the composition preparation itself performed before the
-/// scrub, and the engines resolve a present `loras` INSTEAD of `lora`
-/// (`effective_loras` prefers the plural). Leaving a hydrated singular beside
-/// the restored stack would silently drop the caller's adapter.
+/// adapter first, then the caller's own stack from whichever well carries it
+/// — because that is the composition preparation itself performed before the
+/// scrub. Both read the one authority, `GenerateRequest::take_caller_lora_stack`:
+/// the engines resolve a present `loras` INSTEAD of `lora`, so leaving a
+/// hydrated singular beside the restored stack would silently drop the
+/// caller's adapter, and concatenating the two wells recorded and merged one
+/// `mold run --lora` twice.
 pub(crate) fn prepend_materialized_control_lora(
     request: &mut mold_core::GenerateRequest,
     materialized: Option<mold_core::LoraWeight>,
@@ -172,12 +174,7 @@ pub(crate) fn prepend_materialized_control_lora(
         return;
     };
     let mut ordered = vec![materialized];
-    if let Some(lora) = request.lora.take() {
-        ordered.push(lora);
-    }
-    if let Some(loras) = request.loras.take() {
-        ordered.extend(loras);
-    }
+    ordered.extend(request.take_caller_lora_stack());
     request.loras = Some(ordered);
 }
 
@@ -624,6 +621,135 @@ mod tests {
             "source_video_path": path.to_string_lossy()
         }))
         .unwrap()
+    }
+
+    fn lora(path: &str, scale: f64) -> mold_core::LoraWeight {
+        mold_core::LoraWeight {
+            path: path.to_string(),
+            scale,
+            expert: None,
+        }
+    }
+
+    fn bare_request() -> mold_core::GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "control render",
+            "model": "ltx-2.3-22b-distilled:fp8",
+            "width": 1152,
+            "height": 640,
+            "steps": 8,
+            "guidance": 1.0
+        }))
+        .unwrap()
+    }
+
+    /// `mold run --lora X` on an ltx2 model writes X into BOTH `lora` and
+    /// `loras` (`run::resolve_effective_loras_for_family`), and this seam used
+    /// to concatenate the two wells — so a control render's provenance listed
+    /// the caller's adapter twice and `Ltx2LoraRegistry` merged it twice, at
+    /// double its scale. The wells are alternatives: plural wins, singular is
+    /// the fallback, and the composed stack is the control adapter plus the
+    /// caller's stack ONCE.
+    #[test]
+    fn the_control_adapter_rides_above_one_copy_of_the_callers_stack() {
+        let mut request = bare_request();
+        request.lora = Some(lora("/loras/dolly-in.safetensors", 1.0));
+        request.loras = Some(vec![lora("/loras/dolly-in.safetensors", 1.0)]);
+
+        prepend_materialized_control_lora(
+            &mut request,
+            Some(lora("/control/union.safetensors", 1.0)),
+        );
+
+        assert!(request.lora.is_none());
+        let stack = request.loras.clone().unwrap();
+        assert_eq!(
+            stack
+                .iter()
+                .map(|lora| lora.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/control/union.safetensors", "/loras/dolly-in.safetensors"],
+        );
+    }
+
+    /// The legacy singular is DROPPED, never appended, when a plural stack is
+    /// present: `effective_lora_requests`, `queue_media::effective_request_loras`
+    /// and `mold_inference::ltx2::lora::normalize_loras` all resolve one well
+    /// or the other, so concatenating resurrected an adapter no engine would
+    /// ever have merged.
+    #[test]
+    fn a_plural_stack_outranks_the_legacy_singular_at_the_dispatch_seam() {
+        let mut request = bare_request();
+        request.lora = Some(lora("/loras/legacy.safetensors", 0.6));
+        request.loras = Some(vec![lora("/loras/style.safetensors", 0.8)]);
+
+        prepend_materialized_control_lora(
+            &mut request,
+            Some(lora("/control/union.safetensors", 1.0)),
+        );
+
+        let stack = request.loras.clone().unwrap();
+        assert_eq!(
+            stack
+                .iter()
+                .map(|lora| lora.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/control/union.safetensors", "/loras/style.safetensors"],
+        );
+    }
+
+    /// With no plural stack the legacy singular is still the caller's adapter.
+    #[test]
+    fn the_legacy_singular_alone_still_rides_under_the_control_adapter() {
+        let mut request = bare_request();
+        request.lora = Some(lora("/loras/legacy.safetensors", 0.6));
+
+        prepend_materialized_control_lora(
+            &mut request,
+            Some(lora("/control/union.safetensors", 1.0)),
+        );
+
+        let stack = request.loras.clone().unwrap();
+        assert_eq!(
+            stack
+                .iter()
+                .map(|lora| lora.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/control/union.safetensors", "/loras/legacy.safetensors"],
+        );
+    }
+
+    /// The seam as a whole: no sealed set, a control adapter, a plan stack
+    /// that already contains both. The plan's copy must not be appended on
+    /// top of the composed stack.
+    #[test]
+    fn hydrate_dispatch_media_composes_each_adapter_once() {
+        let mut request = bare_request();
+        request.lora = Some(lora("/loras/dolly-in.safetensors", 1.0));
+        request.loras = Some(vec![lora("/loras/dolly-in.safetensors", 1.0)]);
+        let planned = vec![
+            lora("/control/union.safetensors", 1.0),
+            lora("/loras/dolly-in.safetensors", 1.0),
+        ];
+
+        let lease = hydrate_dispatch_media(
+            "job-1",
+            &mut request,
+            None,
+            Some(lora("/control/union.safetensors", 1.0)),
+            &planned,
+        )
+        .unwrap();
+
+        assert!(lease.is_none());
+        let stack = request.loras.clone().unwrap();
+        assert_eq!(
+            stack
+                .iter()
+                .map(|lora| lora.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/control/union.safetensors", "/loras/dolly-in.safetensors"],
+        );
     }
 
     #[test]

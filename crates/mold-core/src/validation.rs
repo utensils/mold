@@ -3213,7 +3213,11 @@ fn validate_generate_request_after_activation_with(
         if req.source_video.is_none() && req.source_video_path.is_none() {
             return Err("ic_lora_control requires source_video or source_video_path".to_string());
         }
-        let user_loras = usize::from(req.lora.is_some()) + req.loras.as_ref().map_or(0, Vec::len);
+        // `caller_lora_stack`, not the two wells added together: a single
+        // `mold run --lora X` on an ltx2 model fills BOTH with the same
+        // adapter, so summing them charged one adapter twice and put the
+        // four-slot ceiling at two real LoRAs beside the control.
+        let user_loras = req.caller_lora_stack().len();
         if user_loras + 1 > 4 {
             return Err(
                 "ic_lora_control plus custom LoRAs exceeds the four-LoRA stack limit".to_string(),
@@ -9240,6 +9244,28 @@ mod tests {
         assert!(validate_generate_request(&req)
             .unwrap_err()
             .contains("four-LoRA"));
+
+        // The ceiling counts ADAPTERS, not wells. `mold run --lora X` on an
+        // ltx2 model fills `lora` and `loras` with the same adapter, and
+        // adding the two together charged it twice - so three real LoRAs
+        // beside the control read as five and were refused.
+        req.loras = Some(
+            (0..3)
+                .map(|index| crate::LoraWeight {
+                    path: format!("/loras/{index}.safetensors"),
+                    scale: 1.0,
+
+                    expert: None,
+                })
+                .collect(),
+        );
+        req.lora = Some(crate::LoraWeight {
+            path: "/loras/0.safetensors".to_string(),
+            scale: 1.0,
+
+            expert: None,
+        });
+        validate_generate_request(&req).unwrap();
     }
 
     // ── lip-dub ─────────────────────────────────────────────────────────────

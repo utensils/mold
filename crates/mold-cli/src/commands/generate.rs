@@ -2299,10 +2299,7 @@ where
 
         expert: None,
     }];
-    if let Some(legacy) = request.lora.take() {
-        ordered.push(legacy);
-    }
-    ordered.extend(request.loras.take().unwrap_or_default());
+    ordered.extend(request.take_caller_lora_stack());
     request.loras = Some(ordered);
     Ok(())
 }
@@ -5562,10 +5559,68 @@ mod tests {
         assert_eq!(download_calls.load(Ordering::Relaxed), 0);
         assert!(request.lora.is_none());
         let loras = request.loras.unwrap();
+        // The control adapter first, then the caller's stack from ONE well.
+        // A present `loras` is what every reader resolves, so the legacy
+        // singular is dropped rather than concatenated behind it: keeping
+        // both is how a single `--lora` — which `mold run` writes into BOTH
+        // wells for an ltx2 model — was recorded and merged twice.
+        assert_eq!(loras.len(), 2);
         assert_eq!(loras[0].path, adapter_path.to_string_lossy());
         assert_eq!(loras[0].scale, 1.0);
-        assert_eq!(loras[1].path, "/loras/legacy.safetensors");
-        assert_eq!(loras[2].path, "/loras/style.safetensors");
+        assert_eq!(loras[1].path, "/loras/style.safetensors");
+    }
+
+    /// `mold run --lora X` on an ltx2 model fills `lora` AND `loras` with the
+    /// same adapter (`run::resolve_effective_loras_for_family`). The control
+    /// fold must still produce exactly two entries.
+    #[tokio::test]
+    async fn local_control_fold_records_one_caller_lora_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            models_dir: temp.path().display().to_string(),
+            ..Default::default()
+        };
+        let adapter = mold_core::ltx2_control::resolve_control_adapter(
+            mold_core::ltx2_control::Ltx2ControlProfile::Ltx2_19bDistilled,
+            "union",
+        )
+        .unwrap();
+        let manifest = mold_core::manifest::find_manifest(adapter.download_model).unwrap();
+        let adapter_path = temp.path().join(mold_core::manifest::storage_path(
+            manifest,
+            &manifest.files[0],
+        ));
+        std::fs::create_dir_all(adapter_path.parent().unwrap()).unwrap();
+        std::fs::write(&adapter_path, b"installed").unwrap();
+        mold_core::download::write_sha256_marker(&adapter_path, "test").unwrap();
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "test",
+            "model": "ltx-2-19b-distilled:fp8",
+            "width": 960,
+            "height": 576,
+            "steps": 8,
+            "guidance": 3.0,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "source_video_path": "/guide.mp4",
+            "pipeline": "ic-lora",
+            "ic_lora_control": "union",
+            "lora": { "path": "/loras/dolly-in.safetensors", "scale": 1.0 },
+            "loras": [{ "path": "/loras/dolly-in.safetensors", "scale": 1.0 }]
+        }))
+        .unwrap();
+
+        materialize_local_builtin_control_with(&mut request, &config, temp.path(), |_| async {
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .await
+        .unwrap();
+
+        assert!(request.lora.is_none());
+        let loras = request.loras.unwrap();
+        assert_eq!(loras.len(), 2, "the caller's adapter is recorded once");
+        assert_eq!(loras[0].path, adapter_path.to_string_lossy());
+        assert_eq!(loras[1].path, "/loras/dolly-in.safetensors");
     }
 
     #[test]

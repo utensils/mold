@@ -2167,6 +2167,48 @@ pub struct GenerateRequest {
 }
 
 impl GenerateRequest {
+    /// The caller's adapter stack, taken out of whichever well carries it.
+    ///
+    /// `loras` and `lora` are ALTERNATIVES, not two halves of one stack.
+    /// Every reader resolves a present plural stack *instead of* the legacy
+    /// singular and never concatenates them —
+    /// `mold_inference::ltx2::lora::normalize_loras`,
+    /// `execution_plan::effective_lora_requests`,
+    /// `queue_media::effective_request_loras`, and
+    /// `OutputMetadata::from_generate_request` all spell it
+    /// `loras.or(lora.map(|l| vec![l]))`.
+    ///
+    /// Only the three folds that prepend the server's own built-in IC-LoRA
+    /// ever read both wells, and they concatenated them. `mold run --lora`
+    /// on an `ltx2` model fills BOTH wells with the SAME adapter
+    /// (`run::resolve_effective_loras_for_family` keeps the singular for
+    /// older hosts and adds the plural for the camera-control append), so a
+    /// control render recorded and — since `Ltx2LoraRegistry` accumulates one
+    /// `Vec<LinearLoraAdapter>` per layer — MERGED that adapter twice, at
+    /// double its requested scale. Where the two wells disagreed it was worse
+    /// the other way: the fold resurrected a singular adapter no reader would
+    /// ever have applied.
+    ///
+    /// Empties both wells so the caller can compose the one stack the request
+    /// will carry.
+    pub fn take_caller_lora_stack(&mut self) -> Vec<LoraWeight> {
+        let taken = self.caller_lora_stack();
+        self.lora = None;
+        self.loras = None;
+        taken
+    }
+
+    /// [`Self::take_caller_lora_stack`] without emptying the wells, for a
+    /// reader that only needs to know which adapters this request names.
+    pub fn caller_lora_stack(&self) -> Vec<LoraWeight> {
+        self.loras
+            .as_ref()
+            .filter(|stack| !stack.is_empty())
+            .cloned()
+            .or_else(|| self.lora.clone().map(|lora| vec![lora]))
+            .unwrap_or_default()
+    }
+
     /// Whether this print stays in the library once published. Only an
     /// explicit `save_to_gallery: false` says no; absent is the default yes.
     pub fn saves_to_gallery(&self) -> bool {
@@ -5863,6 +5905,71 @@ impl GpuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `loras` and `lora` are alternatives. Every reader spells the
+    /// precedence `loras.or(lora)`; only the IC-LoRA control folds ever read
+    /// both, and concatenating them recorded and merged one `mold run --lora`
+    /// twice (it writes the same adapter into both wells for an `ltx2` model).
+    #[test]
+    fn take_caller_lora_stack_reads_one_well_and_empties_both() {
+        fn request(lora: Option<&str>, loras: Option<&[&str]>) -> GenerateRequest {
+            let mut req: GenerateRequest = serde_json::from_value(serde_json::json!({
+                "prompt": "a cat",
+                "model": "ltx-2.3-22b-distilled:fp8",
+                "width": 1152,
+                "height": 640,
+                "steps": 8,
+                "guidance": 1.0,
+                "batch_size": 1
+            }))
+            .unwrap();
+            req.lora = lora.map(|path| LoraWeight {
+                path: path.to_string(),
+                scale: 1.0,
+                expert: None,
+            });
+            req.loras = loras.map(|stack| {
+                stack
+                    .iter()
+                    .map(|path| LoraWeight {
+                        path: (*path).to_string(),
+                        scale: 1.0,
+                        expert: None,
+                    })
+                    .collect()
+            });
+            req
+        }
+        fn paths(mut req: GenerateRequest) -> Vec<String> {
+            let taken = req.take_caller_lora_stack();
+            assert!(req.lora.is_none(), "the singular well is emptied");
+            assert!(req.loras.is_none(), "the plural well is emptied");
+            taken.into_iter().map(|lora| lora.path).collect()
+        }
+
+        // The same adapter in both wells — what `mold run --lora X` sends for
+        // an ltx2 model — is ONE adapter.
+        assert_eq!(
+            paths(request(Some("/a.safetensors"), Some(&["/a.safetensors"]))),
+            ["/a.safetensors"]
+        );
+        // A present plural stack wins outright; the singular is not appended.
+        assert_eq!(
+            paths(request(Some("/a.safetensors"), Some(&["/b.safetensors"]))),
+            ["/b.safetensors"]
+        );
+        // The singular is the fallback, exactly as every reader has it.
+        assert_eq!(
+            paths(request(Some("/a.safetensors"), None)),
+            ["/a.safetensors"]
+        );
+        // An EMPTY plural stack is not a stack.
+        assert_eq!(
+            paths(request(Some("/a.safetensors"), Some(&[]))),
+            ["/a.safetensors"]
+        );
+        assert!(paths(request(None, None)).is_empty());
+    }
 
     /// Additive: a print written before the field parses to `None`, and the
     /// field never appears in JSON unless it was measured, so older clients

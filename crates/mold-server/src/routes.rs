@@ -2222,13 +2222,13 @@ async fn materialize_builtin_ltx2_control(
 
         expert: None,
     };
+    // The adapter first, then the caller's own stack — taken from whichever
+    // well carries it, never both. `take_caller_lora_stack` is the one
+    // authority on that precedence; concatenating `lora` and `loras` recorded
+    // and merged a single `--lora` twice on every `ltx2` control render,
+    // because `mold run` fills both wells with it.
     let mut ordered = vec![materialized.clone()];
-    if let Some(lora) = request.lora.take() {
-        ordered.push(lora);
-    }
-    if let Some(loras) = request.loras.take() {
-        ordered.extend(loras);
-    }
+    ordered.extend(request.take_caller_lora_stack());
     request.loras = Some(ordered);
     Ok(materialized)
 }
@@ -12869,11 +12869,54 @@ mod tests {
 
         assert!(request.lora.is_none());
         let loras = request.loras.unwrap();
-        assert_eq!(loras.len(), 3);
+        // The adapter, then the caller's stack from ONE well. A present
+        // `loras` is what every reader resolves, so the legacy singular is
+        // dropped rather than appended behind it: concatenating the two is
+        // how a single `mold run --lora` — which fills BOTH wells for an
+        // ltx2 model — was recorded and merged twice.
+        assert_eq!(loras.len(), 2);
         assert_eq!(loras[0].path, adapter_path.to_string_lossy());
         assert_eq!(loras[0].scale, 1.0);
-        assert_eq!(loras[1].path, "/loras/legacy.safetensors");
-        assert_eq!(loras[2].path, "/loras/style.safetensors");
+        assert_eq!(loras[1].path, "/loras/style.safetensors");
+    }
+
+    /// `mold run --lora X` on an ltx2 model sends X in `lora` AND in `loras`
+    /// (`run::resolve_effective_loras_for_family`), so the control fold must
+    /// still record exactly two adapters.
+    #[tokio::test]
+    async fn built_in_control_records_one_caller_lora_once() {
+        let state = AppState::for_tests();
+        let temp = tempfile::tempdir().unwrap();
+        let adapter_path = temp.path().join("control.safetensors");
+        std::fs::write(&adapter_path, b"installed").unwrap();
+        mold_core::download::write_sha256_marker(&adapter_path, "test").unwrap();
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "test",
+            "model": "ltx-2-19b-distilled:fp8",
+            "width": 960,
+            "height": 576,
+            "steps": 8,
+            "guidance": 3.0,
+            "batch_size": 1,
+            "lora": { "path": "/loras/dolly-in.safetensors", "scale": 1.0 },
+            "loras": [{ "path": "/loras/dolly-in.safetensors", "scale": 1.0 }]
+        }))
+        .unwrap();
+        let adapter = mold_core::ltx2_control::resolve_control_adapter(
+            mold_core::ltx2_control::Ltx2ControlProfile::Ltx2_19bDistilled,
+            "union",
+        )
+        .unwrap();
+
+        materialize_builtin_ltx2_control(&state, &mut request, adapter, adapter_path.clone())
+            .await
+            .unwrap();
+
+        assert!(request.lora.is_none());
+        let loras = request.loras.unwrap();
+        assert_eq!(loras.len(), 2, "the caller's adapter is recorded once");
+        assert_eq!(loras[0].path, adapter_path.to_string_lossy());
+        assert_eq!(loras[1].path, "/loras/dolly-in.safetensors");
     }
 
     struct TrackingUpscaler {
