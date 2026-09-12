@@ -4982,41 +4982,6 @@ onBeforeUnmount(() => {
       >
         {{ output.title.value }}
       </h1>
-      <SegmentedControl
-        wrap
-        :model-value="output.kind.value"
-        :options="output.options"
-        label="Output type"
-        data-test="web-output-kind"
-        @update:model-value="output.selectKind"
-      />
-      <!-- The print's name, inline beside the kind strip: click to edit, Enter
-           or blur commits, Escape reverts. It rides every request as `title`
-           and an invalid one blocks Generate (`validatePrintTitle`). -->
-      <label class="create-title" data-test="print-title-field">
-        <span class="sr-only">Print title</span>
-        <input
-          :value="form.state.value.title ?? ''"
-          type="text"
-          maxlength="160"
-          placeholder="Untitled print"
-          aria-label="Print title"
-          class="create-title__input"
-          data-test="print-title"
-          @input="onTitleInput(($event.target as HTMLInputElement).value)"
-          @focus="enterTitle"
-          @blur="commitTitle"
-          @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
-          @keydown.escape="revertTitle"
-        />
-        <span
-          v-if="titleError"
-          class="create-title__error"
-          role="alert"
-          data-test="print-title-error"
-          >{{ titleError }}</span
-        >
-      </label>
       <p v-if="output.notice.value" role="status" class="text-sm text-ink-2">
         {{ output.notice.value }}
         <router-link
@@ -5040,6 +5005,51 @@ onBeforeUnmount(() => {
            everything that scrolls UNDER it. Nothing on this path may set an
            `overflow` — a `sticky` child is inert inside one. -->
       <main class="flex min-w-0 flex-col gap-4">
+        <!-- The kind strip is the first row of the LEFT column, left-aligned
+             above the picture (the mock), with the print's name beside it.
+             `min-width: 0` only: an `overflow` anywhere on this path makes
+             the composer's `position: sticky` inert. -->
+        <div class="create-kindbar">
+          <SegmentedControl
+            wrap
+            :model-value="output.kind.value"
+            :options="output.options"
+            label="Output type"
+            data-test="web-output-kind"
+            @update:model-value="output.selectKind"
+          />
+          <!-- The print's name, inline beside the kind strip: click to edit,
+               Enter or blur commits, Escape reverts. It rides every request as
+               `title` and an invalid one blocks Generate
+               (`validatePrintTitle`). -->
+          <label class="create-title" data-test="print-title-field">
+            <span class="sr-only">Print title</span>
+            <input
+              :value="form.state.value.title ?? ''"
+              type="text"
+              maxlength="160"
+              placeholder="Untitled print"
+              aria-label="Print title"
+              class="create-title__input"
+              data-test="print-title"
+              @input="onTitleInput(($event.target as HTMLInputElement).value)"
+              @focus="enterTitle"
+              @blur="commitTitle"
+              @keydown.enter.prevent="
+                ($event.target as HTMLInputElement).blur()
+              "
+              @keydown.escape="revertTitle"
+            />
+            <span
+              v-if="titleError"
+              class="create-title__error"
+              role="alert"
+              data-test="print-title-error"
+              >{{ titleError }}</span
+            >
+          </label>
+        </div>
+
         <ActivityStrip
           :jobs="localActivityJobs"
           :shared="sharedActivityRows"
@@ -5781,15 +5791,20 @@ onBeforeUnmount(() => {
   gap: 16px;
   margin-bottom: 24px;
 }
-.create-header h1 {
-  flex: 1 1 180px;
-}
-.create-header :deep(.ms-seg) {
-  flex: 0 1 520px;
-  min-width: 0;
-}
 .create-header p {
   flex-basis: 100%;
+}
+/* `min-width: 0` only, never `overflow` — see the template comment. */
+.create-kindbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+.create-kindbar :deep(.ms-seg) {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 /* `min-width: 0` only. An `overflow` here would make the composer's
  * `position: sticky` silently inert — that is the whole rule of this page. */
@@ -5802,7 +5817,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  flex: 1 1 200px;
+  flex: 1 1 220px;
 }
 .create-title__input {
   width: 100%;
@@ -5950,12 +5965,6 @@ onBeforeUnmount(() => {
   font-size: var(--mold-fs-xs);
   padding: 0;
   cursor: pointer;
-}
-
-@media (max-width: 899px) {
-  .create-header :deep(.ms-seg) {
-    flex-basis: 100%;
-  }
 }
 
 .recent-context {

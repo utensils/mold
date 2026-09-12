@@ -2229,12 +2229,15 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.prompt = "a cat";
     await nextTick();
 
-    // The field is inline beside the kind strip now, in the page header,
-    // rather than on a row of its own between the picture and the composer.
+    // The field is inline beside the kind strip, and the strip moved out of
+    // the page header onto the left column's own first row (the mock).
     const title = wrapper.get("[data-test='print-title']");
     expect(title.attributes("placeholder")).toBe("Untitled print");
-    expect(wrapper.get(".create-header").element.contains(title.element)).toBe(
+    expect(wrapper.get(".create-kindbar").element.contains(title.element)).toBe(
       true,
+    );
+    expect(wrapper.get(".create-header").element.contains(title.element)).toBe(
+      false,
     );
     await title.setValue("  Smurf 04  ");
     expect(form.state.value.title).toBe("  Smurf 04  ");
@@ -5602,5 +5605,87 @@ describe("CreatePage prompt gate", () => {
     };
     await nextTick();
     expect(blockerText(wrapper)).toBeNull();
+  });
+});
+
+/*
+ * The kind strip is the first row of the LEFT column, left-aligned above the
+ * picture (`docs/design/mold-studio-web.dc.html:97-108`), not a chip floating
+ * in the page header beside the h1. The header keeps the title, the notice and
+ * the 3-D workflows link.
+ */
+describe("CreatePage kind strip placement", () => {
+  beforeEach(async () => {
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    setActivePinia(createPinia());
+    takeGenerationHandoff();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    listCollectionsMock.mockReset().mockResolvedValue([]);
+    listTagsMock.mockReset().mockResolvedValue([]);
+    hostCapabilitiesMock.mockReset().mockResolvedValue({});
+    routeQuery.value = {};
+  });
+
+  it("puts the strip and the print title on the left column's first row", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const workspace = wrapper.get("[data-test='generate-workspace']").element;
+    const kindbar = wrapper.get(".create-kindbar").element;
+    const strip = wrapper.get("[data-test='web-output-kind']").element;
+    const title = wrapper.get("[data-test='print-title-field']").element;
+    const header = wrapper.get(".create-header").element;
+
+    expect(kindbar.contains(strip)).toBe(true);
+    expect(kindbar.contains(title)).toBe(true);
+    expect(header.contains(strip)).toBe(false);
+    expect(workspace.contains(kindbar)).toBe(true);
+
+    // First child of the left column, ahead of the activity strip and canvas.
+    const left = workspace.firstElementChild!;
+    expect(left.firstElementChild).toBe(kindbar);
+  });
+
+  it("keeps the h1, the notice and the 3-D link in the header", async () => {
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const header = wrapper.get(".create-header").element;
+    expect(
+      header.contains(wrapper.get("[data-test='phone-create-title']").element),
+    ).toBe(true);
+  });
+
+  it("still draws the strip above the picture when the column is narrow", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    hostModelsMock.mockResolvedValue([
+      installedModelRow("flux-dev:q4", "flux"),
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const strip = wrapper.get("[data-test='web-output-kind']").element;
+    const canvas = wrapper.find("[data-test='result-canvas']").exists()
+      ? wrapper.get("[data-test='result-canvas']").element
+      : wrapper.get("[data-test='cold-start-stub']").element;
+    expect(
+      strip.compareDocumentPosition(canvas) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    vi.unstubAllGlobals();
   });
 });
