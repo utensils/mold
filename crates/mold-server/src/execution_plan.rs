@@ -2261,6 +2261,10 @@ fn resolve_private_h3_execution_plans(
                 device_id: device.id,
                 predicted_peak_bytes: evidence.predicted_device_peak_bytes(),
                 available_bytes: available_device_bytes,
+                // The H3 evidence judges itself against the device bytes it
+                // was handed, with no separate admission cap, so the ceiling
+                // the decision used IS that figure.
+                admissible_ceiling_bytes: available_device_bytes,
                 advice: Some(format!(
                     "private admission evidence no longer fits: {error:#}"
                 )),
