@@ -265,3 +265,19 @@ step` — and names no cause, because the budget is the only one a real render
   allocated it, so a placeholder or a half-finished download could abort the
   process; an unreadable header is now handled the same way an unrecognised one
   always was.
+- **A retained transformer no longer wedges the queue behind itself.** A FLUX.2
+  [dev] engine holds ~34 GB of weights on a card with room for them, and
+  admission was offered raw free VRAM: the IDENTICAL next request — the one
+  that would have reused those weights without loading anything — was reported
+  `queued generation is blocked on memory` once a second, forever, and so was a
+  request for any other model or family. Two things were wrong. The cache's
+  credit was clipped to the host's per-process VRAM attribution, which reads as
+  zero wherever that query cannot see mold's own pid; the engines are now asked
+  directly and their answer is a floor under that clip, never a term added to
+  it. And a generation whose plan resolver refused every device reached the
+  planner with no placement to compare, which the plan pass read as "not
+  blocked" and used to erase the block that had just been recorded — taking the
+  idle reclaim and the bounded refusal with it. Now the same-model repeat is
+  admitted immediately and reuses the weights, a different model's request
+  releases them at dispatch and keeps the other engine's prompt cache, and
+  anything genuinely too large is refused with numbers instead of waiting.
