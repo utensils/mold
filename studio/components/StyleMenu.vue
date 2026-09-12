@@ -27,8 +27,8 @@ import type { StyleMenuModel } from "../lib/styleMenu";
  * refusal reason are INJECTED by the host. The source glyph is drawn by the
  * menu itself from `modelSource(model)` — `studio/` may import `@ui`
  * (precedent: `MeshWorkflowStudio.vue`, `NotificationsCenter.vue`) — and a
- * host may still override it through the `glyph` slot, which desktop does
- * to add its own tone classes. The rule behind the availability tag is now
+ * host may still override it through the `glyph` slot, though none of the
+ * three does any more. The rule behind the availability tag is now
  * ONE shared rule,
  * `@studio/lib/modelAvailability`, but it still arrives as a function: the
  * menu cannot reach a machine list, and each surface spells reachability and
@@ -314,6 +314,12 @@ onMounted(() => {
       @click="pickMissing"
       @mousemove="activeIndex = 0"
     >
+      <!-- No real style to draw a source glyph for — a blank, same-width
+           stand-in keeps this row's name lined up with every other row's. -->
+      <span
+        class="ms-model__glyph ms-model__glyph--spacer"
+        aria-hidden="true"
+      />
       <span class="ms-model__body">
         <span class="ms-model__name" :title="phantomLabel">{{
           phantomLabel
@@ -501,7 +507,14 @@ onMounted(() => {
 /* The default glyph, drawn when a host does not fill the slot itself. */
 .ms-model__glyph {
   margin-top: 2px;
-  color: var(--mold-text-dim);
+  color: var(--mold-text-dim, #9ca3af);
+}
+/* The phantom row draws no glyph — nothing is known to point one at — but
+ * still reserves its width so the row's name lines up with every other. */
+.ms-model__glyph--spacer {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
 }
 /* A style id is one long unbroken token. It WRAPS rather than being cut: the
  * id is the thing a person copies, so an ellipsis makes the row useless. */

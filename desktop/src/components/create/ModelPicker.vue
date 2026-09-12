@@ -4,21 +4,20 @@ import { useRouter } from "vue-router";
 import type { ModelEntry } from "../../lib/api/types";
 import { modelDisplayName, modelDisplayNameForId } from "../../lib/models";
 import { modelAvailabilityTag } from "@studio/lib/modelAvailability";
-import { modelSource } from "@studio/lib/modelSource";
 import { formatGB } from "../../lib/format";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import StyleMenu from "@studio/components/StyleMenu.vue";
-import SourceGlyph from "@ui/components/SourceGlyph.vue";
 
 /**
  * The Mold Studio installed-model picker — the ONE style picker on Create.
  *
  * This is the POPOVER SHELL: open state, placement, outside-pointerdown and
- * Escape dismissal, the availability-refresh on open, the router push behind
- * Browse more, and the desktop-only source glyphs. The LIST inside it is
+ * Escape dismissal, the availability-refresh on open, and the router push
+ * behind Browse more. The LIST inside it is
  * `@studio/components/StyleMenu.vue`, shared byte-for-byte with web's Create
- * chip and the phone's Style sheet — one menu, three hosts.
+ * chip and the phone's Style sheet — one menu, three hosts — and it draws its
+ * own source glyph per row by default, so this shell fills no `glyph` slot.
  *
  * The trigger is a SLOT: the composer's Style chip opens it in place, above
  * the composer (`placement="up"`), so there is no second selector anywhere.
@@ -207,11 +206,7 @@ onBeforeUnmount(() => {
       @pick="pick"
       @pick-missing="pickMissing"
       @browse="browse"
-    >
-      <template #glyph="{ model }">
-        <SourceGlyph :source="modelSource(model)" class="mt-0.5 shrink-0 text-fg-dim" />
-      </template>
-    </StyleMenu>
+    />
   </div>
 </template>
 

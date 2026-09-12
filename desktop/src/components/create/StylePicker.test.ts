@@ -89,6 +89,15 @@ describe("StylePicker — the chip is the picker", () => {
     expect(stylePickerSource).toContain('placement="up"');
   });
 
+  it("draws a source glyph per row from the shared menu's own default", async () => {
+    useModelStore().all = [model];
+    const wrapper = mountPicker(useGenerateFormStore().form);
+    await wrapper.get('[data-test="style-chip"]').trigger("click");
+    expect(wrapper.get('[data-test="model-picker-menu"]').find("svg[data-source]").exists()).toBe(
+      true,
+    );
+  });
+
   it("picks a style into the shared form and closes", async () => {
     useModelStore().all = [model];
     const form = useGenerateFormStore().form;

@@ -370,6 +370,19 @@ describe("StyleMenu phantom row", () => {
     ]);
   });
 
+  it("lines its name up with every other row's, which now indents for a source glyph", () => {
+    const wrapper = mountMenu({
+      models: [model()],
+      missingModel: "wan22-ti2v-5b:fp16",
+    });
+    const phantom = wrapper.get("[data-test='model-option-missing']");
+    // A blank, same-width stand-in for the glyph every real row draws by
+    // default — never a visible mark, since nothing is known to point it at.
+    const spacer = phantom.get(".ms-model__glyph--spacer");
+    expect(spacer.attributes("aria-hidden")).toBe("true");
+    expect(spacer.find("svg").exists()).toBe(false);
+  });
+
   it("is suppressed while filtering and when a real style is selected", async () => {
     const selected = mountMenu({
       models: [model()],
