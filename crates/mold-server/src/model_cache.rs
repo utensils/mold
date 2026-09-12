@@ -400,6 +400,30 @@ impl ModelCache {
         resident.saturating_add(self.in_flight_active_vram_bytes)
     }
 
+    /// Device VRAM this cache's engines are RETAINING speculatively, asked of
+    /// the engines themselves.
+    ///
+    /// This is the same number `active_vram_bytes` reports for those entries,
+    /// read from a different authority on purpose. `vram_bytes` is a stored
+    /// figure — a load-time delta that `restore` may raise — and admission
+    /// clips it to third-party process attribution
+    /// (`reclaimable_model_cache_bytes`) precisely because a stored counter
+    /// can go stale. A retained transformer cannot: the engine is asked now,
+    /// and it answers only for weights `release_retained_residency` will hand
+    /// straight back. So this is first-party evidence admission may credit
+    /// WITHOUT that clip, which is what keeps a 35 GB retained transformer
+    /// from reading as zero free capacity on a host whose per-process VRAM
+    /// attribution is unavailable.
+    ///
+    /// Checked-out engines are absent by construction ([`Self::take`] removes
+    /// the entry), so this never credits weights a running generation owns.
+    pub fn retained_residency_bytes(&self) -> u64 {
+        self.entries
+            .values()
+            .filter_map(|entry| entry.engine.resident_vram_bytes())
+            .fold(0, u64::saturating_add)
+    }
+
     /// The currently GPU-loaded model name.
     pub fn active_model(&self) -> Option<&str> {
         self.entries

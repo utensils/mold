@@ -3207,17 +3207,18 @@ impl Coordinator {
                 // a generation is already running even if the local lease or
                 // in-flight counter is temporarily absent.
                 let has_active_work = active_lease.is_some() || device.active_work;
-                let measured_cache_bytes = worker
+                let (measured_cache_bytes, retained_residency_bytes) = worker
                     .map(|worker| {
-                        worker
+                        let cache = worker
                             .model_cache
                             .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .active_vram_bytes()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        (cache.active_vram_bytes(), cache.retained_residency_bytes())
                     })
-                    .unwrap_or(0);
-                let reclaimable_cache_bytes = reclaimable_model_cache_bytes(
+                    .unwrap_or((0, 0));
+                let reclaimable_cache_bytes = reclaimable_device_credit_bytes(
                     measured_cache_bytes,
+                    retained_residency_bytes,
                     device.sampled_mold_vram_bytes,
                 );
                 let mut warm = BTreeSet::new();
@@ -8380,6 +8381,34 @@ pub(crate) fn reclaimable_model_cache_bytes(
     })
 }
 
+/// Everything on a device that is mold's own to hand back, as one number.
+///
+/// Two kinds of evidence with two different standards of proof, which is why
+/// this is not one `min`:
+///
+/// * `measured_cache_bytes` is STORED — a load-time delta the cache carries
+///   until the entry goes away — so it is clipped to the third-party
+///   per-process attribution. A stale counter must not invent capacity the
+///   operating system says this process does not own.
+/// * `retained_residency_bytes` is ASKED, now, of the engines holding the
+///   weights, and names exactly what `release_retained_residency` will return.
+///   It is a FLOOR under the clip rather than a term added to it, so it can
+///   never raise the answer above what mold actually measured.
+///
+/// The floor is the fix for UAT final-2 (2026-09-12): the per-process query
+/// answers `Some(0)` wherever it cannot see this pid, and zero clipped a
+/// 34 878 MiB retained FLUX.2 transformer down to nothing — so the identical
+/// next request, which would have REUSED those very weights, was offered raw
+/// free VRAM and blocked on a card that had room for it three times over.
+pub(crate) fn reclaimable_device_credit_bytes(
+    measured_cache_bytes: u64,
+    retained_residency_bytes: u64,
+    sampled_mold_bytes: Option<u64>,
+) -> u64 {
+    reclaimable_model_cache_bytes(measured_cache_bytes, sampled_mold_bytes)
+        .max(retained_residency_bytes)
+}
+
 /// Effective capacity for serialized work on a device. While work is active,
 /// the sampler's Mold-owned bytes belong to work that must finish before the
 /// next lease can start, so those bytes are future-reclaimable.
@@ -10573,6 +10602,147 @@ mod tests {
             Ok(())
         }
         fn unload(&mut self) {}
+    }
+
+    /// The retained floor survives every shape the attribution can take, and
+    /// never exceeds what mold measured.
+    #[test]
+    fn a_retained_transformer_is_credited_however_the_process_sample_reads() {
+        const RETAINED: u64 = 34 << 30;
+        const OTHER_CACHED: u64 = 2 << 30;
+
+        // Attribution absent (Metal, a CUDA telemetry fallback): the stored
+        // measurement already contains the retained slot.
+        assert_eq!(
+            reclaimable_device_credit_bytes(RETAINED + OTHER_CACHED, RETAINED, None),
+            RETAINED + OTHER_CACHED
+        );
+
+        // Attribution honest: the clip is not reached and the floor is inert.
+        assert_eq!(
+            reclaimable_device_credit_bytes(
+                RETAINED + OTHER_CACHED,
+                RETAINED,
+                Some(RETAINED + OTHER_CACHED + (1 << 30))
+            ),
+            RETAINED + OTHER_CACHED
+        );
+
+        // Attribution unavailable, reported as zero: the retained slot stands
+        // and the wedge does not happen. The parked sibling stays clipped away
+        // — a stored counter the sample contradicts is still not evidence.
+        assert_eq!(
+            reclaimable_device_credit_bytes(RETAINED + OTHER_CACHED, RETAINED, Some(0)),
+            RETAINED
+        );
+
+        // Nothing retained: exactly the old answer, in both directions.
+        assert_eq!(reclaimable_device_credit_bytes(OTHER_CACHED, 0, Some(0)), 0);
+        assert_eq!(
+            reclaimable_device_credit_bytes(OTHER_CACHED, 0, None),
+            OTHER_CACHED
+        );
+    }
+
+    /// A FLUX.2 [dev] engine between renders: nothing eagerly loaded, and a
+    /// transformer held on the card for the next request.
+    ///
+    /// Faithful to `Flux2Engine`: `is_loaded` is true while the retained slot
+    /// is full (the cache classifies residency from exactly that), and
+    /// `resident_vram_bytes` answers only for the retained slot.
+    struct RetainingTestEngine {
+        name: String,
+        retained: u64,
+    }
+
+    impl RetainingTestEngine {
+        fn boxed(name: &str, retained: u64) -> Box<dyn mold_inference::InferenceEngine> {
+            Box::new(Self {
+                name: name.to_string(),
+                retained,
+            })
+        }
+    }
+
+    impl mold_inference::InferenceEngine for RetainingTestEngine {
+        fn generate(
+            &mut self,
+            _req: &mold_core::GenerateRequest,
+        ) -> anyhow::Result<mold_core::GenerateResponse> {
+            unreachable!("a credit test never runs inference")
+        }
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+        fn is_loaded(&self) -> bool {
+            self.retained > 0
+        }
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn unload(&mut self) {
+            self.retained = 0;
+        }
+        fn resident_vram_bytes(&self) -> Option<u64> {
+            (self.retained > 0).then_some(self.retained)
+        }
+        fn release_retained_residency(&mut self) -> u64 {
+            std::mem::take(&mut self.retained)
+        }
+    }
+
+    /// Put a retained transformer on `worker` the way production does: the
+    /// load measured nothing (a sequential load returns immediately) and the
+    /// credit is raised by the restore that closes the take window.
+    fn retain_on_worker(worker: &Arc<GpuWorker>, model: &str, retained: u64) {
+        let mut cache = worker.model_cache.lock().unwrap();
+        cache.insert(RetainingTestEngine::boxed(model, retained), 0);
+        let taken = cache.take(model).expect("the engine was just inserted");
+        cache.restore(taken);
+        assert_eq!(cache.retained_residency_bytes(), retained);
+    }
+
+    /// The retained transformer is capacity, and admission must see it even
+    /// where per-process VRAM attribution cannot.
+    ///
+    /// UAT final-2, 2026-09-12: a `flux2-dev:q8` engine held 34 878 MiB on an
+    /// L40S between renders and the IDENTICAL next request — the one that
+    /// would have REUSED those weights — was offered `headroom_bytes` equal to
+    /// raw free VRAM and blocked forever. `reclaimable_model_cache_bytes`
+    /// clips mold's own cache credit to the sampled per-process figure, which
+    /// reads `Some(0)` wherever that query cannot see this pid, and zero
+    /// clips everything away.
+    #[tokio::test]
+    async fn a_retained_transformer_is_credited_to_the_device_it_sits_on() {
+        const FREE: u64 = 5 << 30;
+        const RETAINED: u64 = 14 << 30;
+        let (coordinator, ..) = unschedulable_test_coordinator(FREE).await;
+        let worker = coordinator.state.gpu_pool.worker_snapshot()[0].clone();
+
+        assert_eq!(
+            coordinator.device_snapshots()[0].available_vram_bytes,
+            FREE,
+            "an empty cache credits nothing"
+        );
+
+        retain_on_worker(&worker, "flux2-dev:q8", RETAINED);
+
+        assert_eq!(
+            coordinator.device_snapshots()[0].available_vram_bytes,
+            FREE + RETAINED,
+            "the retained transformer is capacity: reused by its own model, \
+             released for any other"
+        );
+
+        // Releasing it takes the credit away again — the number tracks the
+        // card, not a one-way marker.
+        worker
+            .model_cache
+            .lock()
+            .unwrap()
+            .release_retained_residency_except(None)
+            .expect("the retained slot is reclaimable");
+        assert_eq!(coordinator.device_snapshots()[0].available_vram_bytes, FREE);
     }
 
     /// hal9000's exact host shape on 2026-08-27 — `MemAvailable` 19.9 GB of
