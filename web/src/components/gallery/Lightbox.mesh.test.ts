@@ -137,6 +137,39 @@ afterEach(() => {
 });
 
 describe("Lightbox 3-D prints", () => {
+  // The exports are the point of a 3-D print. They sit on the card, visible,
+  // not two clicks deep behind "More actions" — the overflow keeps only the
+  // material assets and the destructive entry.
+  it("shows the exports on the card, without opening the overflow", async () => {
+    mockCapabilities(["obj", "stl", "gif"]);
+    const wrapper = mountWide();
+    await flushPromises();
+    const row = wrapper.get("[data-test='mesh-exports']");
+    expect(
+      row.findAll("[data-test^='mesh-export-']").map((entry) => entry.text()),
+    ).toEqual(["Export as OBJ…", "Export as STL…", "Export turntable…"]);
+    expect(wrapper.find(".lb__menu").exists()).toBe(false);
+  });
+
+  it("shows the same row in the mobile sheet", async () => {
+    mockCapabilities(["obj", "gif"]);
+    const wrapper = mountNarrow();
+    await flushPromises();
+    expect(wrapper.find(".lb__full").exists()).toBe(true);
+    const row = wrapper.get("[data-test='mesh-exports']");
+    expect(
+      row.findAll("[data-test^='mesh-export-']").map((entry) => entry.text()),
+    ).toEqual(["Export as OBJ…", "Export turntable…"]);
+    expect(wrapper.find(".lb__menu").exists()).toBe(false);
+  });
+
+  it("renders no export row for a raster print", async () => {
+    mockCapabilities(["obj", "stl"]);
+    const wrapper = mountWide({ item: still });
+    await flushPromises();
+    expect(wrapper.find("[data-test='mesh-exports']").exists()).toBe(false);
+  });
+
   it("offers every material asset carried by the gallery row", async () => {
     mockCapabilities([]);
     const wrapper = mountWide({
@@ -223,7 +256,6 @@ describe("Lightbox 3-D prints", () => {
     mockCapabilities(["obj", "stl", "ply"]);
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     const labels = wrapper
       .findAll("[data-test^='mesh-export-']")
       .map((entry) => entry.text());
@@ -238,7 +270,6 @@ describe("Lightbox 3-D prints", () => {
     mockCapabilities([]);
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     expect(wrapper.findAll("[data-test^='mesh-export-']")).toHaveLength(0);
   });
 
@@ -256,7 +287,6 @@ describe("Lightbox 3-D prints", () => {
     });
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
     await flushPromises();
 
@@ -275,7 +305,6 @@ describe("Lightbox 3-D prints", () => {
     }));
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     await wrapper.get("[data-test='mesh-export-obj']").trigger("click");
     await flushPromises();
     expect(wrapper.get("[data-test='mesh-export-error']").text()).toBe(
@@ -301,7 +330,6 @@ describe("Lightbox 3-D prints", () => {
     }));
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     await wrapper.get("[data-test='mesh-export-obj']").trigger("click");
     await flushPromises();
     expect(wrapper.get("[data-test='mesh-export-error']").text()).toBe(
@@ -313,7 +341,6 @@ describe("Lightbox 3-D prints", () => {
     mockCapabilities(["obj", "gif", "webp"]);
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     // One entry for the animation family, not one per container.
     expect(wrapper.findAll("[data-test^='mesh-export-']").length).toBe(2);
     await wrapper.get("[data-test='mesh-export-animation']").trigger("click");
@@ -329,7 +356,6 @@ describe("Lightbox 3-D prints", () => {
     mockCapabilities(["glb", "obj", "gif"]);
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     const labels = wrapper
       .findAll("[data-test^='mesh-export-']")
       .map((entry) => entry.text());
@@ -352,7 +378,6 @@ describe("Lightbox 3-D prints", () => {
     await flushPromises();
     await wrapper.setProps({ item: secondMesh });
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     const labels = wrapper
       .findAll("[data-test^='mesh-export-']")
       .map((entry) => entry.text());
@@ -383,7 +408,11 @@ describe("Lightbox 3-D prints (mobile full-screen)", () => {
       .findAll("[role='menuitem']")
       .map((entry) => entry.text());
     expect(labels.some((label) => /upscale/i.test(label))).toBe(false);
-    expect(labels).toContain("Export as OBJ…");
+    // The exports are no longer in here at all; they are on the card.
+    expect(labels.some((label) => /^Export as/.test(label))).toBe(false);
+    expect(wrapper.get("[data-test='mesh-export-obj']").text()).toBe(
+      "Export as OBJ…",
+    );
   });
 
   it("keeps the Upscale entry for a raster print", async () => {
@@ -405,7 +434,6 @@ describe("Lightbox 3-D prints (mobile full-screen)", () => {
     }));
     const wrapper = mountNarrow();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     await wrapper.get("[data-test='mesh-export-obj']").trigger("click");
     await flushPromises();
     expect(wrapper.get("[data-test='mesh-export-error']").text()).toBe(
@@ -437,7 +465,6 @@ describe("Lightbox 3-D geometry options", () => {
     mockCapabilities(["obj", "stl", "gif"], undefined, GEOMETRY);
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
     await flushPromises();
 
@@ -461,7 +488,6 @@ describe("Lightbox 3-D geometry options", () => {
     });
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
     await flushPromises();
     await wrapper.get("[data-test='mesh-geometry-size-200']").setValue();
@@ -496,7 +522,6 @@ describe("Lightbox 3-D geometry options", () => {
     });
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
     await flushPromises();
 
@@ -513,7 +538,6 @@ describe("Lightbox 3-D geometry options", () => {
     mockCapabilities(["stl", "gif"], undefined, GEOMETRY);
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     await wrapper.get("[data-test='mesh-export-animation']").trigger("click");
     await flushPromises();
     expect(wrapper.find("[data-test='mesh-export-dialog']").exists()).toBe(
@@ -538,7 +562,6 @@ describe("Lightbox 3-D geometry options", () => {
     });
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     await wrapper.get("[data-test='mesh-export-usdz']").trigger("click");
     await flushPromises();
     expect(wrapper.find("[data-test='mesh-export-dialog']").exists()).toBe(
@@ -562,7 +585,6 @@ describe("Lightbox 3-D geometry options", () => {
     } as unknown as ServerCapabilities);
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
     await flushPromises();
     expect(wrapper.find("[data-test='mesh-export-dialog']").exists()).toBe(
@@ -585,7 +607,6 @@ describe("Lightbox 3-D geometry options", () => {
     );
     const wrapper = mountWide();
     await flushPromises();
-    await wrapper.get("[aria-label='More actions']").trigger("click");
     await wrapper.get("[data-test='mesh-export-stl']").trigger("click");
     await flushPromises();
     await wrapper
