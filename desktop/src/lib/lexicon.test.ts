@@ -525,3 +525,39 @@ describe("lexicon — view copy and assistive labels", () => {
     }
   });
 });
+
+/**
+ * `studio/lib/sourceImageCapability.ts` is not a Vue template, so the
+ * template-text scans above never reach its returned sentences — that gap is
+ * how "This checkpoint is image-to-video only…" escaped the lexicon. Scan the
+ * module's own string and template literals against the generic never-say
+ * words (host, model, checkpoint); the Styles-page-specific ones name UI this
+ * module has none of.
+ */
+describe("lexicon — source-image advisory copy", () => {
+  // Vitest runs from `desktop/`, like the native-menu read above.
+  const source = readFileSync("../studio/lib/sourceImageCapability.ts", "utf8");
+
+  it("never says host, model, or checkpoint in a returned sentence", () => {
+    // Doc comments quote identifiers in backticks (`/api/models[].source_image`);
+    // strip every comment first so only code-level literals are read.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const literals = [
+      ...code.matchAll(/"((?:[^"\\]|\\.)*)"/g),
+      ...code.matchAll(/`((?:[^`\\]|\\.)*)`/g),
+    ].map((m) => m[1]!);
+    const sentences = literals.filter((s) => s.length > 20);
+    expect(sentences.length).toBeGreaterThan(0);
+    const genericBanned = NEVER_SAID_ON_STYLES_AND_MACHINES.filter((re) =>
+      [/\bhost\b/i, /\bmodels?\b/i, /\bcheckpoints?\b/i].some(
+        (allowed) => allowed.source === re.source,
+      ),
+    );
+    expect(genericBanned.length).toBeGreaterThan(0);
+    for (const sentence of sentences) {
+      for (const banned of genericBanned) {
+        expect(sentence, String(banned)).not.toMatch(banned);
+      }
+    }
+  });
+});

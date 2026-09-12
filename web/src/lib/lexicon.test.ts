@@ -185,9 +185,14 @@ describe("lexicon — the shell", () => {
  */
 describe("lexicon — source-image advisory copy", () => {
   it("never says host, model, or checkpoint in a returned sentence", () => {
+    // Doc comments quote identifiers in backticks (`/api/models[].source_image`);
+    // strip every comment first so only code-level literals are read.
+    const code = sourceImageCapabilitySource
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
     const literals = [
-      ...sourceImageCapabilitySource.matchAll(/"((?:[^"\\]|\\.)*)"/g),
-      ...sourceImageCapabilitySource.matchAll(/`((?:[^`\\]|\\.)*)`/g),
+      ...code.matchAll(/"((?:[^"\\]|\\.)*)"/g),
+      ...code.matchAll(/`((?:[^`\\]|\\.)*)`/g),
     ].map((m) => m[1]!);
     const sentences = literals.filter((s) => s.length > 20);
     expect(sentences.length).toBeGreaterThan(0);
