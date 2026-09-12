@@ -163,7 +163,8 @@ pub use flux::FluxEngine;
 /// it once at load, so a server-side estimate charges what the card will
 /// actually hold. See `flux2::transformer`.
 pub use flux2::transformer::{
-    flux2_fp8_widen_extra_resident_bytes, flux2_fp8_widen_extra_resident_bytes_for_checkpoint,
+    flux2_activation_geometry_for_checkpoint, flux2_fp8_widen_extra_resident_bytes,
+    flux2_fp8_widen_extra_resident_bytes_for_checkpoint,
 };
 pub use flux2::Flux2Engine;
 pub use h3_factory::{

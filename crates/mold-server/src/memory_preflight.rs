@@ -135,6 +135,20 @@ fn flux2_fp8_widen_extra_bytes(
     )
 }
 
+/// The FLUX.2 denoise geometry this checkpoint will run at, or `None` when the
+/// build recognises no variant in it and the estimate keeps its previous
+/// pixel-area answer.
+///
+/// Resolved through the engine's own `Flux2Config` probe, beside
+/// `flux2_fp8_widen_extra_bytes`, which resolves the widen gate the same way
+/// and for the same reason.
+fn flux2_activation_geometry(
+    model_name: &str,
+    paths: &ModelPaths,
+) -> Option<mold_inference::device::Flux2ActivationGeometry> {
+    mold_inference::flux2_activation_geometry_for_checkpoint(&paths.transformer, model_name)
+}
+
 fn large_flux2_bf16_should_auto_offload(
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
@@ -1944,14 +1958,43 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     // scope. A distill adapter refuses the step cache, so it decides whether
     // the cache's retained tensors are charged (#1482).
     let wan_distilled = crate::wan_admission::wan_distill_is_active(paths);
+    // Derived here for the same reason wan's geometry is: this is where
+    // `paths` is in scope, and the denoise budget is a function of the
+    // transformer's own width rather than of the canvas.
+    let flux2_geometry = hint
+        .filter(|h| h.family == ActivationFamily::Flux2Dit)
+        .and_then(|_| flux2_activation_geometry(&req.model, paths));
     let activation = request_sensitive_activation_memory_with_wan_geometry(
         req,
         hint,
         qwen_quantized,
         wan_geometry,
         wan_distilled,
+        flux2_geometry,
         projection,
     );
+    // The SAME request without the FLUX.2 denoise model, and it answers a
+    // different question: `eager_peak` below asks whether every component can
+    // be resident AT ONCE, which is the encoder-placement decision. A FLUX.2
+    // text encoder is `DropReload` — it is gone before the first denoise step
+    // — so its co-residency is a question about WEIGHTS, and folding a 3 GB
+    // denoise working set into it auto-parks the Mistral3 conditioner onto the
+    // CPU of an idle 46 GB card, which is the 78.8 s F32 encode this campaign
+    // exists to remove. Identical to `activation` for every other family, so
+    // no other placement decision moves.
+    let co_residency_activation = if flux2_geometry.is_some() {
+        request_sensitive_activation_memory_with_wan_geometry(
+            req,
+            hint,
+            qwen_quantized,
+            wan_geometry,
+            wan_distilled,
+            None,
+            projection,
+        )
+    } else {
+        activation
+    };
     let conservative_block_offload = server_offload_enabled_for_paths_with_request(
         paths,
         hint,
@@ -2037,6 +2080,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
                 qwen_quantized,
                 wan_geometry,
                 wan_distilled,
+                flux2_geometry,
                 projection,
             );
             let peak = if wan && offload_policy.metal {
@@ -2158,7 +2202,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
         mold_inference::LoadStrategy::Eager,
         streamed_encoder_charge,
     )
-    .saturating_add(activation)
+    .saturating_add(co_residency_activation)
     .saturating_add(fp8_widen_bytes);
     let under_memory_pressure = available_memory_bytes
         .is_some_and(|available| eager_peak > available.saturating_mul(9) / 10);
@@ -2265,6 +2309,7 @@ fn request_sensitive_activation_memory(
         None,
         false,
         None,
+        None,
     )
 }
 
@@ -2326,6 +2371,7 @@ fn request_sensitive_activation_memory_with_wan_geometry(
     qwen_quantized: bool,
     wan_geometry: Option<mold_inference::device::WanActivationGeometry>,
     wan_distilled: bool,
+    flux2_geometry: Option<mold_inference::device::Flux2ActivationGeometry>,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> u64 {
     let batch = u64::from(req.batch_size.max(1));
@@ -2362,6 +2408,24 @@ fn request_sensitive_activation_memory_with_wan_geometry(
         // chunk is largest — see `crate::hunyuan3d_admission`.
         crate::hunyuan3d_admission::activation_peak_bytes(
             crate::hunyuan3d_admission::Hunyuan3dShape::from_request(req),
+        )
+    } else if let Some(geometry) =
+        flux2_geometry.filter(|_| hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit))
+    {
+        // FLUX.2 prices its denoise from the transformer's own geometry, not
+        // from the canvas: the family's peak site is a single block's fused
+        // `3h + 2 x mlp` projection, which at [dev]'s 6144-wide stream is
+        // 165,888 elements per joint token — a working set the FLUX.1 area
+        // factor above under-charges by an order of magnitude (#1707). The
+        // reference tail below scales these same bytes, so the base is the
+        // no-reference sequence.
+        mold_inference::device::flux2_denoise_activation_bytes_for_canvas(
+            geometry,
+            req.width,
+            req.height,
+            hint.map_or(1, |h| h.batch),
+            hint.map_or(2, |h| h.dtype_bytes),
+            mold_inference::device::flux_effective_attention_backend(),
         )
     } else if hint.is_some_and(|h| h.family.streaming_transformer()) {
         // Cold-cache fallback: no checkpoint header has been read here, so the
@@ -2541,7 +2605,7 @@ mod fail_closed_tests {
         let hint = Some(hint(ActivationFamily::Flux2Dit));
         assert_eq!(
             request_sensitive_activation_memory_with_wan_geometry(
-                &hydrated, hint, false, None, false, None,
+                &hydrated, hint, false, None, false, None, None,
             ),
             request_sensitive_activation_memory_with_wan_geometry(
                 &sanitized,
@@ -2549,6 +2613,7 @@ mod fail_closed_tests {
                 false,
                 None,
                 false,
+                None,
                 Some(&projection),
             )
         );
@@ -2568,7 +2633,7 @@ mod fail_closed_tests {
         unreadable.edit_images = vec![ProjectedImageDimensions::UnreadableHeader];
         assert_eq!(
             request_sensitive_activation_memory_with_wan_geometry(
-                &hydrated, hint, false, None, false, None,
+                &hydrated, hint, false, None, false, None, None,
             ),
             request_sensitive_activation_memory_with_wan_geometry(
                 &sanitized,
@@ -2576,6 +2641,7 @@ mod fail_closed_tests {
                 false,
                 None,
                 false,
+                None,
                 Some(&unreadable),
             )
         );
@@ -2771,6 +2837,184 @@ mod fail_closed_tests {
             false,
         )
         .is_err());
+    }
+
+    /// plato's `flux2-dev:q8` install, byte for byte: the Q8_0 GGUF, the shared
+    /// FLUX.2 VAE and the BF16 Mistral3 conditioner.
+    fn flux2_dev_paths(dir: &Path, transformer_name: &str, transformer_bytes: u64) -> ModelPaths {
+        let transformer = dir.join(transformer_name);
+        std::fs::File::create(&transformer)
+            .unwrap()
+            .set_len(transformer_bytes)
+            .unwrap();
+        let vae = dir.join("flux2-vae.safetensors");
+        std::fs::File::create(&vae)
+            .unwrap()
+            .set_len(336_213_556)
+            .unwrap();
+        let text_encoder = dir.join("mistral_3_small_flux2_bf16.safetensors");
+        std::fs::File::create(&text_encoder)
+            .unwrap()
+            .set_len(35_584_897_447)
+            .unwrap();
+        let mut model_paths = paths(transformer.to_str().unwrap());
+        model_paths.transformer = transformer;
+        model_paths.vae = vae;
+        model_paths.text_encoder_files = vec![text_encoder];
+        model_paths
+    }
+
+    fn flux2_dev_request(edit_images: Option<Vec<String>>) -> GenerateRequest {
+        let mut value = serde_json::json!({
+            "prompt": "a photorealistic portrait of an astronaut on a beach at golden hour",
+            "model": "flux2-dev:q8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 50,
+            "batch_size": 1
+        });
+        if let Some(images) = edit_images {
+            value["edit_images"] = serde_json::json!(images);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn flux2_budget(
+        req: &GenerateRequest,
+        model_paths: &ModelPaths,
+        available: u64,
+    ) -> GenerationMemoryBudget {
+        estimate_generation_memory_for_request(
+            req,
+            model_paths,
+            Some(hint(ActivationFamily::Flux2Dit)),
+            offload(AdmissionPolicy::Disabled),
+            Some(available),
+            false,
+            false,
+        )
+    }
+
+    /// plato (4x L40S, #1707). `flux2-dev:q8` at 1024x1024 / batch 1 measured a
+    /// **38,359,007,232 byte** process VRAM high water on the BF16 GGUF path
+    /// (`scheduler_estimates`, 2026-09-12 02:23:48Z) and **42,515,562,496** on
+    /// the F32 one production still runs. Admission planned ~37.6 GB for both,
+    /// because the activation term was FLUX.1's pixel-area factor — 273 MB for
+    /// a working set three quantizations independently measure at ~3.0 GB.
+    ///
+    /// The plan must cover the measured peak and still fit the card, because
+    /// nine prints at this exact shape completed on this machine.
+    #[test]
+    fn flux2_dev_q8_is_planned_above_the_peak_plato_measured() {
+        const PLATO_L40S_AVAILABLE_BYTES: u64 = 46_100_000_000;
+        const MEASURED_HIGH_WATER_BYTES: u64 = 38_359_007_232;
+        let dir = tempfile::tempdir().unwrap();
+        let model_paths = flux2_dev_paths(dir.path(), "flux2-dev-Q8_0.gguf", 35_002_602_464);
+        let budget = flux2_budget(
+            &flux2_dev_request(None),
+            &model_paths,
+            PLATO_L40S_AVAILABLE_BYTES,
+        );
+
+        assert!(
+            budget.peak_memory_bytes >= MEASURED_HIGH_WATER_BYTES,
+            "planned {} must cover the {} plato measured",
+            budget.peak_memory_bytes,
+            MEASURED_HIGH_WATER_BYTES
+        );
+        assert_eq!(
+            budget.fits_available_memory,
+            Some(true),
+            "the nine completed prints at this shape must stay admissible (planned {})",
+            budget.peak_memory_bytes
+        );
+    }
+
+    /// The same tier and canvas with ONE reference image is the shape that
+    /// OOM'd: its failed attempts recorded a 46,554,677,248 byte high water on
+    /// a card with ~46.1 GB usable. References are appended to the packed
+    /// sequence, so the denoise working set scales with them — admission has to
+    /// refuse before the load rather than two minutes into the denoise.
+    #[test]
+    fn flux2_dev_q8_with_a_reference_no_longer_fits_platos_card() {
+        const PLATO_L40S_AVAILABLE_BYTES: u64 = 46_100_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let model_paths = flux2_dev_paths(dir.path(), "flux2-dev-Q8_0.gguf", 35_002_602_464);
+        let reference = base64::engine::general_purpose::STANDARD.encode(png(1024, 1024));
+        let budget = flux2_budget(
+            &flux2_dev_request(Some(vec![reference])),
+            &model_paths,
+            PLATO_L40S_AVAILABLE_BYTES,
+        );
+
+        assert_eq!(
+            budget.fits_available_memory,
+            Some(false),
+            "a reference render whose measured high water was 46.55 GB must be \
+             refused on a 46.1 GB card, not admitted (planned {})",
+            budget.peak_memory_bytes
+        );
+    }
+
+    /// The fp8 tier renders at this shape today and must keep doing so. Its own
+    /// measured high water on the BF16 path is 39,701,184,512 bytes — higher
+    /// than q8's, because the per-forward widen holds a working-dtype copy of
+    /// one linear beside the stream — and that difference is absorbed by
+    /// `MEMORY_BUDGET_HEADROOM` rather than charged a second time.
+    #[test]
+    fn flux2_dev_fp8_keeps_its_admission_decision_at_platos_shape() {
+        const PLATO_L40S_AVAILABLE_BYTES: u64 = 46_100_000_000;
+        const MEASURED_HIGH_WATER_BYTES: u64 = 39_701_184_512;
+        let dir = tempfile::tempdir().unwrap();
+        let model_paths =
+            flux2_dev_paths(dir.path(), "flux2_dev_fp8mixed.safetensors", 35_455_599_592);
+        let mut req = flux2_dev_request(None);
+        req.model = "flux2-dev:fp8".to_string();
+        let budget = flux2_budget(&req, &model_paths, PLATO_L40S_AVAILABLE_BYTES);
+
+        assert!(
+            budget.peak_memory_bytes >= MEASURED_HIGH_WATER_BYTES,
+            "planned {} must cover the {} plato measured",
+            budget.peak_memory_bytes,
+            MEASURED_HIGH_WATER_BYTES
+        );
+        assert_eq!(budget.fits_available_memory, Some(true));
+    }
+
+    /// The correction is the FLUX.2 family's alone. A FLUX.1 render at the same
+    /// canvas keeps the pixel-area number it has always been planned with.
+    #[test]
+    fn the_flux2_denoise_charge_never_reaches_flux1() {
+        let dir = tempfile::tempdir().unwrap();
+        let transformer = dir.path().join("flux1-dev-Q8_0.gguf");
+        std::fs::File::create(&transformer)
+            .unwrap()
+            .set_len(12_000_000_000)
+            .unwrap();
+        let mut model_paths = paths(transformer.to_str().unwrap());
+        model_paths.transformer = transformer;
+        let req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "flux-dev:q8",
+            "width": 1024,
+            "height": 1024,
+            "steps": 20,
+            "batch_size": 1
+        }))
+        .unwrap();
+        let budget = estimate_generation_memory_for_request(
+            &req,
+            &model_paths,
+            Some(hint(ActivationFamily::FluxDit)),
+            offload(AdmissionPolicy::Disabled),
+            Some(24_000_000_000),
+            false,
+            false,
+        );
+        assert_eq!(
+            budget.activation_memory_bytes,
+            mold_inference::device::activation_bytes(1024, 1024, 1, 2, ActivationFamily::FluxDit)
+        );
     }
 
     #[test]
@@ -4593,10 +4837,20 @@ mod streamed_text_encoder_tests {
         );
 
         let answer = budget("flux2-dev:q8", &model_paths, 46 * GIB);
+        // The generic per-request workspace, NOT `activation_memory_bytes`:
+        // since #1707 that field carries FLUX.2's denoise working set, which
+        // is spent after this `DropReload` encoder is already gone. The
+        // co-residency question the eager peak asks is about weights.
+        let co_residency_activation =
+            mold_inference::device::activation_bytes(1024, 1024, 1, 2, ActivationFamily::Flux2Dit);
         assert_eq!(
             answer.eager_peak_memory_bytes,
-            streamed.saturating_add(answer.activation_memory_bytes),
+            streamed.saturating_add(co_residency_activation),
             "the eager peak must price the streamed encoder, not its shards"
+        );
+        assert!(
+            answer.activation_memory_bytes > co_residency_activation,
+            "the denoise budget is the larger, separate figure the peak carries"
         );
         assert!(
             file_priced - streamed > 30 * GIB,
@@ -4638,7 +4892,15 @@ mod streamed_text_encoder_tests {
                 &model_paths,
                 mold_inference::LoadStrategy::Eager,
             )
-            .saturating_add(answer.activation_memory_bytes)
+            // The co-residency workspace, not the denoise one — see
+            // `flux2_dev_eager_peak_charges_the_streamed_prefix_not_the_encoder_file`.
+            .saturating_add(mold_inference::device::activation_bytes(
+                1024,
+                1024,
+                1,
+                2,
+                ActivationFamily::Flux2Dit,
+            ))
         );
     }
 }

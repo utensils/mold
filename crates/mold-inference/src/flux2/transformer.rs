@@ -598,6 +598,22 @@ pub fn flux2_fp8_widen_extra_resident_bytes_for_checkpoint(
     )
 }
 
+/// The denoise activation geometry for a CHECKPOINT, resolved exactly as the
+/// engine resolves its config.
+///
+/// The twin of `flux2_fp8_widen_extra_resident_bytes_for_checkpoint`, and it
+/// exists for the same reason: the planner must size a FLUX.2 render from the
+/// `Flux2Config` the transformer will actually be built with, not from a name
+/// heuristic of its own. `None` means the checkpoint names no variant this
+/// build knows, and the caller keeps its previous estimate.
+pub fn flux2_activation_geometry_for_checkpoint(
+    transformer: &std::path::Path,
+    model_name: &str,
+) -> Option<crate::device::Flux2ActivationGeometry> {
+    super::pipeline::resolve_flux2_config(transformer, model_name)
+        .map(|cfg| crate::device::Flux2ActivationGeometry::from_config(&cfg))
+}
+
 /// `MOLD_FLUX2_FP8_CACHE`: `1` forces the widened arm, `0` forces the
 /// per-forward one, anything else (including unset) defers to the budget.
 ///

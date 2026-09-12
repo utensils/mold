@@ -1821,6 +1821,195 @@ pub fn flux_activation_budget_bytes_for(
     base.saturating_add(scores)
 }
 
+/// Elements of the residual stream one FLUX.2 single-stream block holds live,
+/// per joint token, expressed as a multiple of `hidden_size`.
+///
+/// Read straight off `flux2::transformer::SingleStreamBlock::forward`, which
+/// is the family's peak site because its fused `to_qkv_mlp_proj` is by far the
+/// widest tensor any block materializes. Live at once, in order: `xs`, the
+/// modulated `x_mod`, the contiguous `q` and `k` copies and the `v` view
+/// (`3 x h`), and `linear2`'s output — nine `h`-wide tensors. The fused
+/// projection's own `3 x h` share is counted here too, which is where the
+/// ninth comes from; its `2 x mlp` share is counted below.
+const FLUX2_DENOISE_LIVE_HIDDEN_MULTIPLE: u64 = 9;
+
+/// The same live set's `mlp_size` share: the fused projection's `2 x mlp`
+/// SwiGLU half, plus the `mlp_gate`, `mlp_val` and `mlp_out` tensors the block
+/// then derives from it, minus the one the `Tensor::cat` reuses — six.
+const FLUX2_DENOISE_LIVE_MLP_MULTIPLE: u64 = 6;
+
+/// What candle's CUDA allocator holds beyond the tensors named above, as a
+/// fraction of them.
+///
+/// The derived live set is what is *reachable* at the peak instant; the figure
+/// a card reports — and the figure admission has to survive — is the process's
+/// VRAM high-water, which also carries every block-loop allocation the
+/// allocator has not handed back. Fitted to three independent readings of the
+/// same shape on plato (4x L40S), taken from `scheduler_estimates`'
+/// `vram_high_water_bytes` on the BF16 GGUF path at 1024x1024, minus each
+/// tier's own resident weights:
+///
+/// | tier | high water | weights | runtime |
+/// | --- | --- | --- | --- |
+/// | `flux2-dev:q4` | 23,293,067,264 | 20,295,944,724 | **3.00 GB** |
+/// | `flux2-dev:q6` | 30,708,596,736 | 27,732,445,716 | **2.98 GB** |
+/// | `flux2-dev:q8` | 38,359,007,232 | 35,338,816,020 | **3.02 GB** |
+///
+/// The q8 row decomposes further, from the same session's residency log: the
+/// engine RETAINS 34,878 MiB (36.57 GB) on the card between renders, so ~1.2 GB
+/// of that 3.02 is CUDA context and pool the checkpoint's file length never
+/// named, and ~1.8 GB is the denoise's own incremental high water. Charging
+/// the whole 3.0 GB here leaves `MEMORY_BUDGET_HEADROOM`'s 2 GB as pure
+/// allocator margin rather than splitting it, which over-reserves by roughly
+/// that 2 GB on a warm card. That is deliberate and is the direction #1707
+/// asks for: the shape this prices OOM'd twice at ~38 GB planned against a
+/// ~46 GB card. Tightening it needs its own measurement, not an argument.
+///
+/// Three quantizations spanning 15 GB of weights agree inside 1.3%, which is
+/// what says the term is a property of the TOKEN COUNT and not of the
+/// checkpoint — and the derived live set alone prices it at 1.98 GB, so the
+/// retention is real and this is the one constant in the model that is fitted
+/// rather than read off the forward pass. `flux2-dev:fp8` measures 3.91 GB at
+/// the same shape because its per-forward widen holds one linear's working-
+/// dtype copy beside the stream; that 0.9 GB sits inside
+/// `MEMORY_BUDGET_HEADROOM` rather than being charged a second time, so the
+/// fp8 tier's admission decision is unchanged.
+const FLUX2_DENOISE_ALLOCATOR_RETENTION_NUMERATOR: u64 = 3;
+const FLUX2_DENOISE_ALLOCATOR_RETENTION_DENOMINATOR: u64 = 2;
+
+/// The FLUX.2 transformer dimensions the denoise working set is a function of.
+///
+/// Deliberately three numbers rather than a borrowed `Flux2Config`: this is a
+/// budget input, and the planner resolves it from the checkpoint through
+/// `flux2::pipeline::resolve_flux2_config` exactly as the FP8 widen gate
+/// already does, so plan and engine cannot size the same render differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Flux2ActivationGeometry {
+    /// `Flux2Config::hidden_size`.
+    pub hidden_size: u64,
+    /// `hidden_size x mlp_ratio`, the SwiGLU width.
+    pub mlp_size: u64,
+    /// `Flux2Config::num_heads`, the score tile's leading dimension.
+    pub num_heads: u64,
+}
+
+impl Flux2ActivationGeometry {
+    /// FLUX.2 \[dev]: `hidden_size` 6144, `mlp_ratio` 3.0, 48 heads.
+    pub const fn dev() -> Self {
+        Self {
+            hidden_size: 6144,
+            mlp_size: 18432,
+            num_heads: 48,
+        }
+    }
+
+    /// FLUX.2 \[klein] 4B: `hidden_size` 3072, `mlp_ratio` 3.0, 24 heads.
+    pub const fn klein() -> Self {
+        Self {
+            hidden_size: 3072,
+            mlp_size: 9216,
+            num_heads: 24,
+        }
+    }
+
+    /// FLUX.2 \[klein] 9B: `hidden_size` 4096, `mlp_ratio` 3.0, 32 heads.
+    pub const fn klein_9b() -> Self {
+        Self {
+            hidden_size: 4096,
+            mlp_size: 12288,
+            num_heads: 32,
+        }
+    }
+
+    /// The geometry of a resolved checkpoint config.
+    ///
+    /// One derivation, so the budget can never be sized from a different
+    /// `Flux2Config` than the one the transformer is built with — the rule
+    /// `flux2_fp8_widen_extra_resident_bytes_for_checkpoint` already states
+    /// for the widen gate.
+    pub fn from_config(cfg: &crate::flux2::transformer::Flux2Config) -> Self {
+        Self {
+            hidden_size: cfg.hidden_size as u64,
+            mlp_size: (cfg.hidden_size as f64 * cfg.mlp_ratio) as u64,
+            num_heads: cfg.num_heads as u64,
+        }
+    }
+
+    /// Elements the peak block holds live per joint token.
+    pub const fn live_elements_per_token(&self) -> u64 {
+        FLUX2_DENOISE_LIVE_HIDDEN_MULTIPLE * self.hidden_size
+            + FLUX2_DENOISE_LIVE_MLP_MULTIPLE * self.mlp_size
+    }
+}
+
+/// Device bytes a FLUX.2 denoise holds beside its weights.
+///
+/// [`activation_bytes`]'s pixel-area factor is FLUX.1's, fitted at
+/// `hidden_size` 3072 with no fused SwiGLU projection at all, and it prices
+/// 1024x1024 at 273 MB. FLUX.2 \[dev] runs the same canvas through a 6144-wide
+/// stream whose single blocks materialize a `3h + 2 x mlp` = 55,296-element
+/// row per token, and plato measured 2.98-3.02 GB — an order of magnitude the
+/// area model cannot see, because nothing in it scales with the transformer's
+/// width. Admission charging 273 MB for 3 GB is what let `flux2-dev:q8` be
+/// planned at ~38 GB on a 46 GB L40S and die two minutes into the denoise
+/// (#1707).
+///
+/// `joint_tokens` is the packed sequence the blocks actually attend over:
+/// image tokens plus [`FLUX_TEXT_TOKENS`], plus every reference group a
+/// FLUX.2 edit appends. That is why it is a token count and not a canvas —
+/// `flux2_reference_scaled_activation_bytes` scales the same bytes by the same
+/// ratio on the request side.
+///
+/// The score term matches [`flux_activation_budget_bytes_for`]'s exactly, for
+/// the same reason: math materializes `[heads, chunk, joint]` twice and flash
+/// materializes neither.
+pub fn flux2_denoise_activation_bytes(
+    geometry: Flux2ActivationGeometry,
+    joint_tokens: u64,
+    batch: u32,
+    dtype_bytes: u32,
+    backend: crate::attention::AttentionBackend,
+) -> u64 {
+    let dtype = u64::from(dtype_bytes.max(1));
+    let batch = u64::from(batch.max(1));
+    let stream = joint_tokens
+        .saturating_mul(geometry.live_elements_per_token())
+        .saturating_mul(dtype);
+    let scores = match backend {
+        crate::attention::AttentionBackend::Flash => 0,
+        crate::attention::AttentionBackend::Math => 2u64
+            .saturating_mul(geometry.num_heads.max(1))
+            .saturating_mul(FLUX_ATTENTION_QUERY_CHUNK)
+            .saturating_mul(joint_tokens)
+            .saturating_mul(dtype),
+    };
+    stream
+        .saturating_add(scores)
+        .saturating_mul(batch)
+        .saturating_mul(FLUX2_DENOISE_ALLOCATOR_RETENTION_NUMERATOR)
+        / FLUX2_DENOISE_ALLOCATOR_RETENTION_DENOMINATOR
+}
+
+/// [`flux2_denoise_activation_bytes`] from a canvas, for the callers that have
+/// one: the joint sequence is the packed image grid plus the padded text
+/// stream.
+pub fn flux2_denoise_activation_bytes_for_canvas(
+    geometry: Flux2ActivationGeometry,
+    width: u32,
+    height: u32,
+    batch: u32,
+    dtype_bytes: u32,
+    backend: crate::attention::AttentionBackend,
+) -> u64 {
+    flux2_denoise_activation_bytes(
+        geometry,
+        flux_token_count(width, height).saturating_add(FLUX_TEXT_TOKENS),
+        batch,
+        dtype_bytes,
+        backend,
+    )
+}
+
 /// The attention backend a FLUX.1 / FLUX.2 render on this process will
 /// actually execute.
 ///
@@ -7180,6 +7369,132 @@ mod tests {
         assert!(
             auto.same_device(&resolved),
             "create_device vs resolve_gpu_ordinal"
+        );
+    }
+}
+#[cfg(test)]
+mod flux2_denoise_budget_tests {
+    use super::{
+        activation_bytes, flux2_denoise_activation_bytes,
+        flux2_denoise_activation_bytes_for_canvas, ActivationFamily, Flux2ActivationGeometry,
+        FLUX_ATTENTION_QUERY_CHUNK, FLUX_TEXT_TOKENS,
+    };
+    use crate::attention::AttentionBackend;
+
+    /// plato's process VRAM high water minus each tier's own resident weights,
+    /// at 1024x1024 / batch 1 on the BF16 GGUF path. Three quantizations, one
+    /// working set — see `FLUX2_DENOISE_ALLOCATOR_RETENTION_NUMERATOR`.
+    const PLATO_1024_RUNTIME_BYTES: [u64; 3] = [
+        // flux2-dev:q4 — 23,293,067,264 - 20,295,944,724
+        2_997_122_540,
+        // flux2-dev:q6 — 30,708,596,736 - 27,732,445,716
+        2_976_151_020,
+        // flux2-dev:q8 — 38,359,007,232 - 35,338,816,020
+        3_020_191_212,
+    ];
+
+    #[test]
+    fn the_live_set_is_read_off_the_single_stream_block() {
+        let dev = Flux2ActivationGeometry::dev();
+        // 9 x 6144 + 6 x 18432. The fused `to_qkv_mlp_proj` row alone is
+        // 3 x 6144 + 2 x 18432 = 55,296 of it.
+        assert_eq!(dev.live_elements_per_token(), 165_888);
+        assert_eq!(
+            Flux2ActivationGeometry::klein().live_elements_per_token(),
+            82_944
+        );
+        assert_eq!(
+            Flux2ActivationGeometry::klein_9b().live_elements_per_token(),
+            110_592
+        );
+    }
+
+    #[test]
+    fn every_geometry_is_the_config_the_engine_builds() {
+        for (cfg, geometry) in [
+            (
+                crate::flux2::transformer::Flux2Config::dev(),
+                Flux2ActivationGeometry::dev(),
+            ),
+            (
+                crate::flux2::transformer::Flux2Config::klein(),
+                Flux2ActivationGeometry::klein(),
+            ),
+            (
+                crate::flux2::transformer::Flux2Config::klein_9b(),
+                Flux2ActivationGeometry::klein_9b(),
+            ),
+        ] {
+            assert_eq!(Flux2ActivationGeometry::from_config(&cfg), geometry);
+        }
+    }
+
+    #[test]
+    fn the_dev_budget_brackets_every_runtime_plato_measured() {
+        let budget = flux2_denoise_activation_bytes_for_canvas(
+            Flux2ActivationGeometry::dev(),
+            1024,
+            1024,
+            1,
+            2,
+            AttentionBackend::Math,
+        );
+        for measured in PLATO_1024_RUNTIME_BYTES {
+            assert!(
+                budget >= measured * 95 / 100 && budget <= measured * 2,
+                "{budget} must sit within a factor of two of the measured {measured}"
+            );
+        }
+        // And it is an order of magnitude above what the area model charged,
+        // which is the whole of #1707's plan-side defect.
+        assert!(budget > 10 * activation_bytes(1024, 1024, 1, 2, ActivationFamily::Flux2Dit));
+    }
+
+    #[test]
+    fn flash_charges_no_score_tile_and_math_charges_exactly_one() {
+        let dev = Flux2ActivationGeometry::dev();
+        let joint = 4096 + FLUX_TEXT_TOKENS;
+        let math = flux2_denoise_activation_bytes(dev, joint, 1, 2, AttentionBackend::Math);
+        let flash = flux2_denoise_activation_bytes(dev, joint, 1, 2, AttentionBackend::Flash);
+        let tile = 2 * dev.num_heads * FLUX_ATTENTION_QUERY_CHUNK * joint * 2;
+        assert_eq!(math - flash, tile * 3 / 2);
+    }
+
+    #[test]
+    fn the_budget_is_linear_in_the_packed_sequence_the_dtype_and_the_batch() {
+        let dev = Flux2ActivationGeometry::dev();
+        let one = flux2_denoise_activation_bytes(dev, 4608, 1, 2, AttentionBackend::Math);
+        assert_eq!(
+            flux2_denoise_activation_bytes(dev, 9216, 1, 2, AttentionBackend::Math),
+            one * 2
+        );
+        assert_eq!(
+            flux2_denoise_activation_bytes(dev, 4608, 1, 4, AttentionBackend::Math),
+            one * 2
+        );
+        assert_eq!(
+            flux2_denoise_activation_bytes(dev, 4608, 2, 2, AttentionBackend::Math),
+            one * 2
+        );
+    }
+
+    #[test]
+    fn klein_is_never_charged_devs_stream() {
+        let joint = 4096 + FLUX_TEXT_TOKENS;
+        assert!(
+            flux2_denoise_activation_bytes(
+                Flux2ActivationGeometry::klein(),
+                joint,
+                1,
+                2,
+                AttentionBackend::Math
+            ) < flux2_denoise_activation_bytes(
+                Flux2ActivationGeometry::dev(),
+                joint,
+                1,
+                2,
+                AttentionBackend::Math
+            )
         );
     }
 }
