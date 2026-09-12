@@ -83,7 +83,7 @@ impl HostReclaimOutcome {
         }
         Some(format!(
             "released {} by unloading {}",
-            gb1(self.released_bytes),
+            nonzero_gb1(self.released_bytes),
             plural_models(self.evicted.len())
         ))
     }
@@ -191,6 +191,17 @@ pub(crate) fn shortfall_message(
 fn over(bytes: u64) -> String {
     if bytes >= 1_000_000_000 {
         gb2(bytes)
+    } else {
+        format!("{} MB", (bytes as f64 / 1_000_000.0).round() as u64)
+    }
+}
+
+/// `gb1`, except that a positive figure below a gigabyte is reported in
+/// megabytes rather than rounded to the `0.0 GB` this module now refuses to
+/// print anywhere.
+fn nonzero_gb1(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 || bytes == 0 {
+        gb1(bytes)
     } else {
         format!("{} MB", (bytes as f64 / 1_000_000.0).round() as u64)
     }

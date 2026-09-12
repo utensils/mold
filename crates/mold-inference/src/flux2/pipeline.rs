@@ -424,7 +424,18 @@ pub fn flux2_block_offload_unsupported_reason(
              have no block-streaming path",
         );
     }
-    match flux2_offload_decision(true, is_gguf, is_nvfp4, has_lora) {
+    // The engine's own test, on the same file, so the planner can never promise
+    // a streamed load the loader would silently turn into a resident one.
+    let is_bfl_native_single_file = !is_gguf
+        && transformer
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+        && matches!(
+            super::single_file::detect_format(transformer),
+            Ok(super::single_file::Flux2SingleFileFormat::BflNative)
+        );
+    match flux2_offload_decision_for(true, is_gguf, is_nvfp4, has_lora, is_bfl_native_single_file) {
         Flux2OffloadDecision::Unsupported(reason) => Some(reason),
         Flux2OffloadDecision::Disabled | Flux2OffloadDecision::Selected => None,
     }
@@ -436,11 +447,39 @@ fn flux2_offload_decision(
     is_nvfp4: bool,
     has_lora: bool,
 ) -> Flux2OffloadDecision {
+    flux2_offload_decision_for(forced_offload, is_gguf, is_nvfp4, has_lora, false)
+}
+
+/// The whole decision, including the layout the streamed loader needs.
+///
+/// `is_bfl_native_single_file` is load-bearing and was missing: `load_transformer`
+/// dispatches GGUF, then BFL-native single file, then everything else — and ONLY
+/// the last arm reads `block_offload_enabled()`. A single-file fp8 [dev]
+/// checkpoint therefore loaded WHOLE while the plan said `StreamedBlocks`, so
+/// admission reserved a ~8 GB streamed working set and the engine put 35 GB on
+/// the card. On the 46 GB host of the 2026-09-12 24 GB simulation that merely
+/// hid the divergence; on a real 24 GB card it is the OOM admission exists to
+/// prevent. The layout cannot stream, so it is refused HERE, where the server's
+/// `flux2_block_offload_unsupported_reason` reads the same answer and plans a
+/// refusal instead of a promise.
+fn flux2_offload_decision_for(
+    forced_offload: bool,
+    is_gguf: bool,
+    is_nvfp4: bool,
+    has_lora: bool,
+    is_bfl_native_single_file: bool,
+) -> Flux2OffloadDecision {
     if !forced_offload {
         return Flux2OffloadDecision::Disabled;
     }
     if is_nvfp4 {
         return Flux2OffloadDecision::Disabled;
+    }
+    if is_bfl_native_single_file {
+        return Flux2OffloadDecision::Unsupported(
+            "Flux.2 block-level offload streams sharded diffusers weights; a BFL-native \
+             single-file checkpoint is loaded whole and cannot be streamed",
+        );
     }
     if is_gguf {
         return Flux2OffloadDecision::Unsupported(
@@ -990,6 +1029,19 @@ impl Flux2Engine {
             ))
         } else if self.is_bfl_native_single_file() {
             let is_nvfp4 = self.is_nvfp4_single_file();
+            // A plan that says "stream" and a loader that loads whole is an
+            // admitted peak the render then exceeds. Fail loudly instead: the
+            // server resolves the same refusal through
+            // `flux2_block_offload_unsupported_reason` and never plans one.
+            if let Flux2OffloadDecision::Unsupported(reason) = flux2_offload_decision_for(
+                self.block_offload_enabled(),
+                false,
+                is_nvfp4,
+                has_lora,
+                true,
+            ) {
+                anyhow::bail!("{reason}");
+            }
             // Civitai / ComfyUI single-file checkpoints carry BFL-native
             // tensor names (`model.diffusion_model.*`); the diffusers
             // `Flux2Transformer::new` consumer is wrapped over a
@@ -3992,6 +4044,72 @@ mod tests {
         );
 
         fs::remove_dir_all(dir).ok();
+    }
+
+    /// The plan is frozen for a reason: whatever the engine does about memory,
+    /// it may not do LESS than the plan promised without saying so.
+    ///
+    /// `load_transformer` dispatches GGUF, then BFL-native single file, then
+    /// everything else, and only the last arm ever reads
+    /// `block_offload_enabled()`. A single-file fp8 [dev] checkpoint therefore
+    /// loaded WHOLE under a plan that said `StreamedBlocks` — admission
+    /// reserved a streamed working set and the engine put the entire 35 GB
+    /// checkpoint on the card. The 2026-09-12 24 GB simulation ran on a host
+    /// with 45 GB physically free, so it rendered and hid the divergence; a
+    /// real 24 GB card would have OOM'd exactly as #1707 did.
+    #[test]
+    fn a_single_file_checkpoint_refuses_the_streamed_plan_it_cannot_honour() {
+        assert_eq!(
+            flux2_offload_decision_for(true, false, false, false, true),
+            Flux2OffloadDecision::Unsupported(
+                "Flux.2 block-level offload streams sharded diffusers weights; a BFL-native \
+                 single-file checkpoint is loaded whole and cannot be streamed",
+            ),
+            "a layout the loader cannot stream must refuse, never load whole"
+        );
+        // Sharded diffusers weights are the layout the streamed loader is for.
+        assert_eq!(
+            flux2_offload_decision_for(true, false, false, false, false),
+            Flux2OffloadDecision::Selected
+        );
+        // And nothing changes for a render that never asked to stream.
+        assert_eq!(
+            flux2_offload_decision_for(false, false, false, false, true),
+            Flux2OffloadDecision::Disabled
+        );
+    }
+
+    /// The server reads the engine's answer for the file it will actually load,
+    /// so a plan can never promise a stream the loader turns into a resident
+    /// load.
+    #[test]
+    fn the_exported_reason_refuses_a_single_file_checkpoint_by_its_header() {
+        let dir = temp_test_dir("mold-flux2-singlefile-offload");
+        let path = dir.join("flux2_dev_fp8mixed.safetensors");
+        write_bfl_native_single_file_header(&path);
+        let reason = flux2_block_offload_unsupported_reason(&path, false)
+            .expect("a BFL-native single file cannot stream its blocks");
+        assert!(reason.contains("single-file"), "{reason}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A minimal BFL-native single-file header: the marker keys
+    /// `single_file::detect_format` looks for, and no tensor data.
+    fn write_bfl_native_single_file_header(path: &std::path::Path) {
+        use std::io::Write;
+        let header = serde_json::json!({
+            "model.diffusion_model.img_in.weight": {
+                "dtype": "F32", "shape": [6144, 128], "data_offsets": [0, 0]
+            },
+            "model.diffusion_model.double_blocks.0.img_attn.to_out.weight": {
+                "dtype": "F32", "shape": [6144, 6144], "data_offsets": [0, 0]
+            },
+        });
+        let mut bytes = serde_json::to_vec(&header).unwrap();
+        bytes.resize(bytes.len().next_multiple_of(8), b' ');
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(&(bytes.len() as u64).to_le_bytes()).unwrap();
+        file.write_all(&bytes).unwrap();
     }
 
     #[test]
