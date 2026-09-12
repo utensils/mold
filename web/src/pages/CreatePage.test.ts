@@ -1599,6 +1599,68 @@ describe("CreatePage layout and behavior", () => {
     }
   });
 
+  it("draws a settled print from its keyless host when the canvas holds no bytes", async () => {
+    // A restored done job (persist strips the base64) and a durable completion
+    // both reach the canvas with no `image`; the old source was
+    // `data:image/png;base64,undefined` — a broken picture on every reload.
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [finishedCanvasJob({ image: undefined })];
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+    expect(canvas.props("mode")).toBe("result");
+    expect(canvas.props("resultSrc")).toBe(
+      `/api/gallery/image/${encodeURIComponent(entry.filename)}`,
+    );
+    expect(String(canvas.props("resultVideoSrc") ?? "")).not.toContain(
+      "undefined",
+    );
+  });
+
+  it("fetches a settled print from a keyed machine for the canvas", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "sk-studio",
+    });
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [
+      { ...finishedCanvasJob({ image: undefined }), hostId: studio.id },
+    ];
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => ({
+      ok: true,
+      blob: async () => new Blob(["png-bytes"]),
+    }));
+    globalThis.fetch = fetchMock as never;
+    const createObjectURL = vi.fn((_blob: Blob) => "blob:print-1");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    try {
+      const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+      await flushPromises();
+      const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+      expect(canvas.props("resultSrc")).toBe("blob:print-1");
+      expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+        `http://studio:7680/api/gallery/image/${encodeURIComponent(entry.filename)}`,
+      );
+      // The canvas moving on releases the object URL.
+      streamJobsRef.value = [
+        { ...finishedCanvasJob(), id: "canvas-next", startedAt: 20 },
+      ];
+      await flushPromises();
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:print-1");
+    } finally {
+      globalThis.fetch = originalFetch;
+      vi.unstubAllGlobals();
+      vi.stubGlobal("prompt", vi.fn());
+    }
+  });
+
   it("never lets a refused Make 4 leak into the next plain Generate", async () => {
     // Review finding: the count lived in a page-level ref that `onSubmit`'s
     // early return (another submission still planning) never cleared, so the

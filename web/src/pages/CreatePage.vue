@@ -180,7 +180,11 @@ import { copyTextToClipboard } from "@studio/lib/notificationClipboard";
 import { downloadVideoExport } from "@studio/lib/videoExport";
 
 import { fetchMergedGallery } from "../lib/multiHostGallery";
-import { fetchGalleryBlob } from "../lib/galleryMedia";
+import {
+  directMediaUrl,
+  fetchGalleryBlob,
+  needsAuthedMedia,
+} from "../lib/galleryMedia";
 import {
   fetchH3BoundaryMedia,
   h3BoundariesNeedingMedia,
@@ -1880,7 +1884,7 @@ function onResetSettings() {
   form.resetSettings(currentModel.value ?? null);
   canvasIntent.value = "model-default";
   undoableAction({
-    text: "Settings reset to model defaults",
+    text: "Settings reset to the style's defaults",
     undo: () => {
       form.state.value = previous;
       canvasIntent.value = previousIntent;
@@ -2260,12 +2264,17 @@ const resultSrc = computed(() => {
   }
   if (r.video_thumbnail) return `data:image/png;base64,${r.video_thumbnail}`;
   if (r.format === "mp4") return "";
+  // No inline bytes: persist strips them from a restored job and a durable
+  // completion never carries them. The print is drawn from its host instead
+  // of building `data:image/png;base64,undefined`.
+  if (!r.image) return hostedResultSrc.value;
   return `data:image/${r.format};base64,${r.image}`;
 });
 /** The playable artifact for a video print. Never construct data:image/mp4. */
 const resultVideoSrc = computed(() => {
   const r = latestDone.value?.result;
-  if (!r || r.format !== "mp4" || !r.image) return "";
+  if (!r || r.format !== "mp4") return "";
+  if (!r.image) return hostedResultSrc.value;
   return `data:video/mp4;base64,${r.image}`;
 });
 /** The playable artifact for an audio-only print; empty for every other kind. */
@@ -2363,11 +2372,7 @@ const canMakeVariations = computed(() => {
 function printLink(): string | null {
   const filename = resultFilename.value;
   if (!filename) return null;
-  const hostId =
-    (canvasPrintRow.value as (GalleryImage & { hostId?: string }) | null)
-      ?.hostId ??
-    latestDone.value?.hostId ??
-    ORIGIN_HOST_ID;
+  const hostId = resultHostId();
   const origin =
     typeof window === "undefined" ? "http://localhost" : window.location.origin;
   return libraryLink(origin, { print: filename, printHost: hostId });
@@ -2407,11 +2412,7 @@ async function downloadResult(): Promise<void> {
   }
   const filename = resultFilename.value;
   if (!filename) return;
-  const hostId =
-    (row as (GalleryImage & { hostId?: string }) | null)?.hostId ??
-    latestDone.value?.hostId ??
-    ORIGIN_HOST_ID;
-  const host = listHosts().find((h) => h.id === hostId);
+  const host = listHosts().find((h) => h.id === resultHostId());
   if (!host) {
     toast("error", "That machine isn't connected anymore.");
     return;
@@ -2468,6 +2469,63 @@ const canvasPrintRow = computed<GalleryImage | null>(() => {
       item.timestamp >= startedAtSeconds,
   );
   return candidates.length === 1 ? (candidates[0] ?? null) : null;
+});
+/** The machine the canvas print lives on: the Library row's, else the job's,
+ * else the origin — the one answer Download, Copy link and the canvas share. */
+function resultHostId(): string {
+  return (
+    (canvasPrintRow.value as (GalleryImage & { hostId?: string }) | null)
+      ?.hostId ??
+    latestDone.value?.hostId ??
+    ORIGIN_HOST_ID
+  );
+}
+/**
+ * A settled still or clip with no inline bytes is drawn from its host: a
+ * direct URL on a keyless machine, a fetched object URL on a keyed one (the
+ * `<img>` cannot send the key). Revoked the moment the canvas moves on.
+ */
+const hostedResultSrc = ref("");
+let revokeHostedResult: (() => void) | null = null;
+let hostedResultToken = 0;
+watch(
+  () => {
+    const r = latestDone.value?.result;
+    if (!r || r.image || isMeshCompletion(r) || isAudioCompletion(r)) {
+      return "";
+    }
+    const filename = resultFilename.value;
+    return filename ? `${resultHostId()}\u0000${filename}` : "";
+  },
+  async (key) => {
+    hostedResultToken += 1;
+    const token = hostedResultToken;
+    revokeHostedResult?.();
+    revokeHostedResult = null;
+    hostedResultSrc.value = "";
+    if (!key) return;
+    const [hostId, filename] = key.split("\u0000") as [string, string];
+    const host = listHosts().find((h) => h.id === hostId);
+    if (!host) return;
+    if (!needsAuthedMedia(host)) {
+      hostedResultSrc.value = directMediaUrl(host, filename);
+      return;
+    }
+    try {
+      const blob = await fetchGalleryBlob(host, filename);
+      if (token !== hostedResultToken) return;
+      const url = URL.createObjectURL(blob);
+      hostedResultSrc.value = url;
+      revokeHostedResult = () => URL.revokeObjectURL(url);
+    } catch {
+      // The canvas stays empty; Download names the failure when asked.
+    }
+  },
+  { immediate: true },
+);
+onBeforeUnmount(() => {
+  revokeHostedResult?.();
+  revokeHostedResult = null;
 });
 
 /** The MIME type a print's own bytes carry, for a print never fetched. */
