@@ -687,8 +687,11 @@ such as `/generate` and `/catalog` render Page Not Found:
   lacks `gallery.organize` / `gallery.trash` (an older server, or
   `MOLD_DB_DISABLE=1`) shows none of this and keeps the permanent-delete
   wording.
-- Prompt expansion modal offers live preview + variation picker (requires
-  `qwen3-expand` installed on the server).
+- **Write more for me** rewrites the prompt in place, with an `expanded · undo`
+  chip beside it and a live line naming the machine while it writes (requires
+  `qwen3-expand` installed on that machine). There is no expansion dialog and
+  no generate-time expansion setting: the words you send are the words on
+  screen.
 - Prompt, model, size, steps, guidance, and batch persist in `localStorage`.
 - Modal and sheet workflows contain keyboard focus, lock background scrolling,
   close on Escape, and restore focus to the control that opened them. The
