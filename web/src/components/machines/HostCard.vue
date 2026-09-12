@@ -115,8 +115,23 @@ const lastSeenLabel = computed(() => {
   return `last seen ${mins}m ago`;
 });
 
+/*
+ * The Machines page closes an open context menu on `pointerdown` anywhere
+ * outside it, and the `click` that completes that gesture then lands on this
+ * card. Dismissing a menu must dismiss it, not navigate — so the door notes
+ * whether a menu was open when the press began, and refuses that one click.
+ */
+let pressDismissedMenu = false;
+function onDoorPointerDown() {
+  pressDismissedMenu = props.actionsOpen === true;
+}
+
 function open() {
   if (disconnected.value) return;
+  if (pressDismissedMenu) {
+    pressDismissedMenu = false;
+    return;
+  }
   emit("open", props.host.id);
 }
 
@@ -128,15 +143,6 @@ function retry(event: Event) {
 function reconnect(event: Event) {
   event.stopPropagation();
   emit("reconnect", props.host.id);
-}
-
-/*
- * A nested button's native Enter fires a `click` that bubbles to the card, so
- * every control inside the card stops both the click and the keydown that
- * produced it. Retry is Retry; it is not also "open the machine".
- */
-function swallow(event: Event) {
-  event.stopPropagation();
 }
 
 function openContextMenu(event: MouseEvent) {
@@ -166,37 +172,28 @@ function openContextMenu(event: MouseEvent) {
     class="hc-card"
     :class="{ 'hc-card--open': !disconnected }"
   >
-    <!-- The whole card is the door, the way a print tile is (GalleryCard).
-         A disconnected card has nothing to open, so it is not a control at
-         all and carries no role, no tab stop and no hover affordance. -->
     <div
       class="hc"
-      :class="{ 'hc--open': !disconnected }"
       data-test="host-card"
-      :role="disconnected ? undefined : 'button'"
-      :tabindex="disconnected ? undefined : 0"
-      :aria-label="disconnected ? undefined : `Open ${host.name}`"
-      @click="open"
-      @keydown.enter.prevent="open"
-      @keydown.space.prevent="open"
       @contextmenu.prevent.stop="openContextMenu"
     >
+      <!-- The whole card opens the machine, but the card is not the control:
+           `role="button"` prunes every descendant from the accessibility
+           tree, and this card's whole payload IS its readouts. A real button
+           stretched over the card keeps them announced, gives Enter and Space
+           for free, and leaves Retry / Connect / "…" outside any control. -->
+      <button
+        v-if="!disconnected"
+        type="button"
+        class="hc__door"
+        data-test="host-open"
+        :aria-label="`Open ${host.name}`"
+        @pointerdown="onDoorPointerDown"
+        @click="open"
+      ></button>
       <div class="hc__head">
         <StatusDot :state="dotState" />
-        <button
-          v-if="!disconnected"
-          type="button"
-          class="hc__name hc__open"
-          data-test="host-open"
-          tabindex="-1"
-          :aria-label="`Open ${host.name}`"
-          @click.stop="open"
-        >
-          <span data-test="host-name">{{ host.name }}</span>
-        </button>
-        <span v-else class="hc__name" data-test="host-name">{{
-          host.name
-        }}</span>
+        <span class="hc__name" data-test="host-name">{{ host.name }}</span>
         <button
           type="button"
           class="hc__actions"
@@ -223,8 +220,8 @@ function openContextMenu(event: MouseEvent) {
             class="hc__retry"
             data-test="host-reconnect"
             @click="reconnect"
-            @keydown.enter.stop="swallow"
-            @keydown.space.stop="swallow"
+            @keydown.enter.stop
+            @keydown.space.stop
           >
             Connect
           </button>
@@ -249,8 +246,8 @@ function openContextMenu(event: MouseEvent) {
             class="hc__retry"
             data-test="host-retry"
             @click="retry"
-            @keydown.enter.stop="swallow"
-            @keydown.space.stop="swallow"
+            @keydown.enter.stop
+            @keydown.space.stop
           >
             Retry
           </button>
@@ -274,17 +271,49 @@ function openContextMenu(event: MouseEvent) {
 .hc {
   color: var(--rebate);
 }
-.hc--open {
+
+/* The door is absolutely placed against the CARD, so the card is what it
+   covers and what its focus ring traces — `.hc` is inset by the card's own
+   padding. `CardSurface` paints its own `--mold-bg` fill, so the hover tint
+   must mix INTO that fill: mixing against `transparent` would replace it with
+   a wash over the page behind, which is deeper than the card in every theme
+   and made a hovered card sink instead of lift. */
+.hc-card--open {
+  position: relative;
+}
+.hc-card--open:hover {
+  background: color-mix(in srgb, var(--mold-text) 4%, var(--mold-bg));
+}
+.hc__door {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  border-radius: inherit;
   cursor: pointer;
 }
-/* The tint belongs to the whole card, so it sits on the CardSurface rather
-   than on `.hc`, which is inset by the card's own padding. */
-.hc-card--open:hover {
-  background: color-mix(in srgb, var(--mold-text) 4%, transparent);
-}
-.hc:focus-visible {
+.hc__door:focus-visible {
   outline: 2px solid var(--mold-border-focus);
   outline-offset: 2px;
+}
+/* Everything a person reads sits ABOVE the door so it is never dimmed by it,
+   but passes its clicks THROUGH, or the door would only be the card's margins
+   and a press on the GPU line — the middle of the card — would do nothing.
+   The three real controls take their clicks back. The cost is that the
+   address cannot be selected by dragging across it; navigating instead of
+   selecting was the worse of the two. */
+.hc__head,
+.hc__gpu,
+.hc__row,
+.hc__offline {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+}
+.hc__actions,
+.hc__retry {
+  pointer-events: auto;
 }
 
 .hc__head {
@@ -294,23 +323,16 @@ function openContextMenu(event: MouseEvent) {
   gap: 10px;
 }
 
-.hc__actions,
-.hc__open {
+.hc__actions {
+  min-width: 44px;
   min-height: 44px;
+  display: grid;
+  place-items: center;
+  margin-left: auto;
   border: 0;
   background: transparent;
   color: inherit;
   cursor: pointer;
-}
-.hc__open {
-  text-align: left;
-  padding: 0;
-}
-.hc__actions {
-  min-width: 44px;
-  display: grid;
-  place-items: center;
-  margin-left: auto;
 }
 .hc__name {
   flex: 1;

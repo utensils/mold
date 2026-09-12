@@ -44,8 +44,14 @@ const emit = defineEmits<{ "update:modelValue": [value: number] }>();
 
 const open = ref(false);
 const count = computed(() => (props.locked ? 1 : props.modelValue));
-const title = computed(() =>
-  props.locked ? (props.lockedReason ?? undefined) : "How many to make",
+/*
+ * One name for the panel and for the chip's hover text: the question pressing
+ * the chip answers. A locked panel offers no count, so announcing it as "How
+ * many to make" asked something it does not ask; and the chip's `title` used
+ * to repeat the reason the popover now carries.
+ */
+const panelLabel = computed(() =>
+  props.locked ? "Why one at a time" : "How many to make",
 );
 
 function toggle() {
@@ -59,7 +65,7 @@ function toggle() {
     v-model:open="open"
     class="make-chip__anchor"
     placement="top-start"
-    label="How many to make"
+    :label="panelLabel"
   >
     <template #trigger>
       <button
@@ -69,7 +75,7 @@ function toggle() {
         aria-haspopup="dialog"
         :aria-expanded="open"
         :disabled="disabled"
-        :title="title"
+        :title="panelLabel"
         @click="toggle"
       >
         Make {{ count }}

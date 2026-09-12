@@ -163,6 +163,23 @@ describe("Lightbox 3-D prints", () => {
     expect(wrapper.find(".lb__menu").exists()).toBe(false);
   });
 
+  // The dead button sits directly above the new export row on a phone, so it
+  // has to say why it is dead there too — not only in the wide panel.
+  it("explains the dead Use as source in both branches", async () => {
+    mockCapabilities([]);
+    for (const mountOne of [mountWide, mountNarrow]) {
+      const wrapper = mountOne();
+      await flushPromises();
+      const button = wrapper
+        .findAll("button")
+        .find((candidate) => candidate.text() === "Use as source")!;
+      expect(button.attributes("title")).toBe(
+        "A 3-D mesh cannot condition a render — source images are pixels.",
+      );
+      wrapper.unmount();
+    }
+  });
+
   it("renders no export row for a raster print", async () => {
     mockCapabilities(["obj", "stl"]);
     const wrapper = mountWide({ item: still });

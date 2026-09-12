@@ -1395,6 +1395,11 @@ async function performVideoExport(options: VideoExportOptions) {
               class="lb__quiet"
               :class="{ 'lb__quiet--off': isMeshFile }"
               :disabled="isMeshFile"
+              :title="
+                isMeshFile
+                  ? 'A 3-D mesh cannot condition a render — source images are pixels.'
+                  : undefined
+              "
               @click="onUseSource"
             >
               Use as source
@@ -1853,19 +1858,8 @@ async function performVideoExport(options: VideoExportOptions) {
   width: 100%;
   margin-top: 10px;
 }
-/* "Download" / "Save" is an `<a role="button">`, and an anchor is an inline
-   box: as a flex item it stretched to the row's height but kept its label on
-   the first line, sitting at the top of a 44px row beside two centred
-   `<button>`s. `inline-flex` + centring on both axes makes every child of the
-   row lay its own label out the same way. `flex: 1 1 auto` sizes from the
-   content and `white-space: nowrap` keeps "Use as source" on one line;
-   `.lb__pair`'s `flex-wrap: wrap` still breaks the ROW on a phone. */
 .lb__quiet {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  white-space: nowrap;
-  flex: 1 1 auto;
+  flex: 1 1 5rem;
   min-width: 0;
   min-height: 44px;
   border: 1px solid var(--ce);
@@ -1879,6 +1873,26 @@ async function performVideoExport(options: VideoExportOptions) {
   text-decoration: none;
   cursor: pointer;
   transition: background var(--dur-quick) var(--ease);
+}
+/* "Download" / "Save" is an `<a role="button">`, and an anchor is an inline
+   box: as a flex item it stretched to the row's height but kept its label on
+   the first line, sitting at the top of a 44px row beside two centred
+   `<button>`s. `inline-flex` + centring on both axes makes every child of the
+   row lay its own label out the same way. `flex: 1 1 auto` sizes from the
+   content and `white-space: nowrap` keeps "Use as source" on one line;
+   `.lb__pair`'s `flex-wrap: wrap` still breaks the ROW on a phone, and a label
+   too wide for its line truncates rather than spilling past its border.
+
+   Scoped to the ROW on purpose: `.lb__quiet` is also used as a direct child of
+   `.lb__panel`, which is a COLUMN, and there a `flex-basis` is a height. */
+.lb__pair > .lb__quiet {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
 }
 .lb__quiet:hover {
   background: color-mix(in srgb, var(--rebate) 6%, transparent);

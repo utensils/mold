@@ -58,7 +58,6 @@ import { defaultUpscaler } from "../components/create/advanced/upscalers";
 import { blobToBase64 } from "../lib/base64";
 import { HeldPullOffers } from "../lib/heldPullOffers";
 import Icon from "@ui/components/Icon.vue";
-
 import {
   effectiveGenerationRecipe,
   recipeIsCanvasless,
@@ -1985,10 +1984,15 @@ const aspectLabel = computed(
   () => `${outputShape.value.approximate ? "≈" : ""}${shapeChipLabel.value}`,
 );
 
+/* The chip's own contract (`ShapeChip.vue`) is that its sublabel arrives
+ * "already marked `≈` when the resolver called it approximate". It never was,
+ * so an off-ladder canvas read `16:9` on the chip and `≈16:9` in the summary
+ * an inch away. Both readings carry the resolver's mark now. */
 const shapeChipSublabel = computed(() => {
   const { width, height } = form.state.value;
   if (!width || !height) return "";
-  return width === height ? String(width) : `${width}×${height}`;
+  const size = width === height ? String(width) : `${width}×${height}`;
+  return outputShape.value.approximate ? `≈${size}` : size;
 });
 
 /**
@@ -5031,8 +5035,9 @@ onBeforeUnmount(() => {
       <main class="flex min-w-0 flex-col gap-4">
         <!-- The kind strip is the first row of the LEFT column, left-aligned
              above the picture (the mock), with the print's name beside it.
-             `min-width: 0` only: an `overflow` anywhere on this path makes
-             the composer's `position: sticky` inert. -->
+             `min-width: 0` and nothing else: the row must be free to shrink
+             below its content, or the title field's basis would push the
+             strip out of the column. -->
         <div class="create-kindbar">
           <SegmentedControl
             wrap
@@ -5223,21 +5228,6 @@ onBeforeUnmount(() => {
           :estimate="fetchGenerationEstimate"
         />
 
-        <!-- The work in flight, under the prompt box it came from and above
-             Recent. It used to open the column, above the picture, so pressing
-             Generate pushed the composer down the page. Still inside the same
-             left column: nothing on this path may set an `overflow`. -->
-        <ActivityStrip
-          :jobs="localActivityJobs"
-          :shared="sharedActivityRows"
-          :queue-status="routing.queueStatus.value"
-          @cancel="cancelPrint"
-          @retry="retryPrint"
-          @dismiss="stream.remove"
-          @open="openJob"
-          @shared-open="openLiveWork"
-        />
-
         <div
           v-if="quickConflictReasons.length"
           class="rounded-control border border-stop/45 bg-stop/10 px-3 py-2.5 text-sm leading-relaxed text-stop"
@@ -5348,6 +5338,24 @@ onBeforeUnmount(() => {
         >
           {{ singleShotPreservationNote }}
         </div>
+
+        <!-- The work in flight: under the prompt box it came from, and under
+             the prompt box's OWN readouts and alerts — the estimate, a stale
+             expansion with its three buttons, a held pull, a submit failure,
+             the chain cue. A queue grows, and it must not push the alert about
+             what you are typing a screenful away from the box you type in.
+             Above Recent, and inside the same left column: nothing on this
+             path may set an `overflow`. -->
+        <ActivityStrip
+          :jobs="localActivityJobs"
+          :shared="sharedActivityRows"
+          :queue-status="routing.queueStatus.value"
+          @cancel="cancelPrint"
+          @retry="retryPrint"
+          @dismiss="stream.remove"
+          @open="openJob"
+          @shared-open="openLiveWork"
+        />
 
         <section>
           <div class="mb-2 flex items-center justify-between">
@@ -5822,7 +5830,15 @@ onBeforeUnmount(() => {
 .create-header p {
   flex-basis: 100%;
 }
-/* `min-width: 0` only, never `overflow` — see the template comment. */
+/* The 3-D workflows link sat at the header's right edge because the h1 used
+   to carry `flex: 1 1 180px`. That rule was doing two jobs and only one of
+   them left with the kind strip; this keeps the other. */
+.create-header > a {
+  margin-left: auto;
+}
+/* `min-width: 0` so the row can shrink below its content — see the template
+   comment. (This is a SIBLING of the composer, not one of its four
+   `overflow`-free ancestors, which `CreatePage.test.ts` audits by name.) */
 .create-kindbar {
   display: flex;
   align-items: center;

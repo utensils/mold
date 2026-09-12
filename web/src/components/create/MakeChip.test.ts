@@ -68,9 +68,9 @@ describe("MakeChip", () => {
     });
     const chip = wrapper.get("[data-test='make-chip']");
     expect(chip.text()).toContain("Make 1");
-    expect(chip.attributes("title")).toBe(
-      "Edit models render one print at a time.",
-    );
+    // The hover text says what pressing the chip shows; the popover carries
+    // the reason itself, so the two no longer say the same sentence.
+    expect(chip.attributes("title")).toBe("Why one at a time");
     wrapper.unmount();
   });
 
@@ -100,6 +100,24 @@ describe("MakeChip", () => {
     );
     // The batch sentence is about a batch; there is no batch here.
     expect(opened?.textContent).not.toContain("Each one is queued separately");
+    wrapper.unmount();
+  });
+
+  // A screen reader should not be asked "How many to make" by a panel that
+  // offers no count.
+  it("announces the locked panel for the question it answers", async () => {
+    const wrapper = factory({ modelValue: 4, locked: true });
+    await wrapper.get("[data-test='make-chip']").trigger("click");
+    const panel = document.body.querySelector("[role='dialog']");
+    expect(panel?.getAttribute("aria-label")).toBe("Why one at a time");
+    wrapper.unmount();
+  });
+
+  it("keeps the counting panel's own name when it is not locked", async () => {
+    const wrapper = factory();
+    await wrapper.get("[data-test='make-chip']").trigger("click");
+    const panel = document.body.querySelector("[role='dialog']");
+    expect(panel?.getAttribute("aria-label")).toBe("How many to make");
     wrapper.unmount();
   });
 
