@@ -1,0 +1,3 @@
+- **The composer's shortcuts follow the platform.** In the browser, Write more for me and Generate are ⌘E and ⌘↵ on a Mac, iPhone, or iPad and Ctrl+E / Ctrl+↵ everywhere else, and the keycaps say which applies. Ctrl+E is end-of-line on a Mac, so it is no longer bound there ([#1703](https://github.com/utensils/mold/pull/1703)).
+- **Reset resets everything.** The ↺ Reset on the Create rail puts every setting back to the style's defaults, add-on looks and the source and identity photos included; only the prompt, title, and style stay.
+- **The retired prompt-preset field is gone.** Saved drafts, starters, phone snapshots, and prepared variations no longer carry the old composer "Style" preset, and a draft saved with one loads clean.

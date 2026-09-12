@@ -55,7 +55,7 @@ Rule: **plain words in sans, technical truth in mono, on the same row.**
 | Repeat this look · Keep \| Surprise me                   | Seed, Fixed \| Random                   | Inspector, metadata  |
 | Start from a photo · How much to change it               | img2img, denoise strength               | Inspector            |
 | Generate                                                 | Submit, Add to queue, Render            | Primary action       |
-| Write more for me                                        | Expand prompt                           | Composer chip (⌘E)   |
+| Write more for me                                        | Expand prompt                           | Composer chip (⌘E; Ctrl+E off Apple) |
 | Being made / Waiting / Finished / Needs a download first | active, queued, done, blocked           | Queue                |
 | Machines · this mac · making images here                 | Hosts, target host                      | Nav, Machines        |
 | Connect a machine · Rent a GPU · billing begins now      | Add host, Provision pod                 | Machines             |

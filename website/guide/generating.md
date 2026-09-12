@@ -158,10 +158,11 @@ source image selects the closest model-valid size with the source's shape and
 keeps following it across model and pipeline changes until you pick a shape,
 size, or exact dimensions yourself.
 
-On every surface, a **↺ Reset** in the Create settings header restores the
-generation settings to the selected model's defaults (shape, resolution,
-detail, prompt strength, seed, and the Advanced groups) while keeping your
-prompt, model choice, and batch. On the web it is undoable from the toast it
+On every surface, a **↺ Reset** in the Create settings header puts every
+generation setting back to the selected style's defaults: shape, resolution,
+detail, how tight to your words, seed, add-on looks, the source and identity
+photos, and every More-settings group. Only your prompt, title, and style stay,
+and the count returns to one. On the web it is undoable from the toast it
 raises.
 
 ## Identity Photos (PuLID)
@@ -670,8 +671,11 @@ such as `/generate` and `/catalog` render Page Not Found:
   **Settings ▸ My images & trash ▸ Tag new prints with their title** (stored
   in this browser) turns the title chip off.
 - Shortcuts: **⌘K** / **Ctrl+K** opens the command palette from anywhere;
-  the print viewer binds **Esc** to close and **←** / **→** to step between
-  prints.
+  in the prompt box **⌘↵** generates and **⌘E** is Write more for me on a Mac,
+  iPhone, or iPad, and **Ctrl+↵** / **Ctrl+E** everywhere else (Ctrl+E is
+  end-of-line on a Mac, so it is never bound there); the keycaps on the composer
+  say which one applies. The print viewer binds **Esc** to close and **←** /
+  **→** to step between prints.
 - Destructive copy stays plain: **Empty trash**, **Delete forever**, and
   **Delete collection** use the app confirm dialog with a danger button and
   never a typed phrase; single and selected Trash are optimistic with a 6 s
