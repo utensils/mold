@@ -845,7 +845,13 @@ jobs:
           shared-key: workspace-default
           save-if: false
       - name: Typecheck the CUDA forced-local and server paths
-        run: cargo check -p mold-ai --features cuda,preview,expand,tui,webp,mp4,metrics,mdns
+        # The SHIPPING feature set minus `cudnn` (cudarc needs the cuDNN
+        # headers at build time and the toolkit action does not ship them;
+        # mold's own crates carry no `cudnn` cfg arm). `h3-cuda` matters: the
+        # private H3 arm guards 300+ cfg sites in mold-server and mold-cli,
+        # and the defect-7 fix on the FLUX campaign broke one of them while a
+        # `cuda`-only typecheck stayed green.
+        run: cargo check -p mold-ai --features h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
   metal-check:
     name: Metal forced-local typecheck
