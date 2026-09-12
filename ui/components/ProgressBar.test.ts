@@ -1,6 +1,10 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import ProgressBar from "./ProgressBar.vue";
+
+const source = readFileSync(resolve(__dirname, "./ProgressBar.vue"), "utf8");
 
 function make(value: number, extra: Record<string, unknown> = {}) {
   return mount(ProgressBar, { props: { value, ...extra } });
@@ -57,5 +61,27 @@ describe("ProgressBar", () => {
     expect(make(50, { height: 4 }).attributes("style")).toContain(
       "height: 4px",
     );
+  });
+});
+
+describe("ProgressBar track color (CSS pin)", () => {
+  /*
+   * `--mold-bg-deep` (the old track color) is the same colour as
+   * `--mold-panel` (ui/mold-desktop.css:52), which web's MachineCard uses as
+   * its background — so the track vanished on every machine card. A
+   * token-relative tint contrasts against both `--mold-panel` and
+   * `--mold-surface` instead of matching either one exactly.
+   */
+  it("gives .ms-bar a token-relative tint, not the old --mold-bg-deep track", () => {
+    const start = source.indexOf(".ms-bar {");
+    const end = source.indexOf("}", start);
+    const block = source.slice(start, end);
+    expect(block).toMatch(
+      /background:\s*color-mix\(in srgb,\s*var\(--mold-text\)\s*14%,\s*transparent\)/,
+    );
+    // The declaration itself must not fall back to the old track colour —
+    // a stray mention of it in an explanatory comment is fine.
+    const declaration = block.match(/^\s*background:.*$/m)![0];
+    expect(declaration).not.toMatch(/--mold-bg-deep/);
   });
 });
