@@ -243,6 +243,23 @@ impl mold_inference::InferenceEngine for PlannedInferenceEngine {
         self.inner.unload();
     }
 
+    /// Forwarded, not defaulted — the same rule as
+    /// `install_identity_embedding` below, and for a heavier reason: EVERY
+    /// scheduler-V2 engine is wrapped before it is inserted into the model
+    /// cache, so the cache never sees a bare engine in production. Defaulting
+    /// these two answered "nothing retained, nothing to release" for exactly
+    /// the jobs that retain and can release, which left a 34 GB FLUX.2 [dev]
+    /// transformer uncredited to admission AND unreachable by the reclaim,
+    /// while `is_loaded` (forwarded) kept the entry `ModelResidency::Gpu` so
+    /// the ordinary eviction skipped it as well.
+    fn resident_vram_bytes(&self) -> Option<u64> {
+        self.inner.resident_vram_bytes()
+    }
+
+    fn release_retained_residency(&mut self) -> u64 {
+        self.inner.release_retained_residency()
+    }
+
     fn set_on_progress(&mut self, callback: mold_inference::progress::ProgressCallback) {
         self.inner.set_on_progress(callback);
     }
@@ -8359,6 +8376,176 @@ mod tests {
         fn load(&mut self) -> anyhow::Result<()> {
             Ok(())
         }
+    }
+
+    /// A FLUX.2 [dev] engine as the cache actually receives it.
+    ///
+    /// Faithful to `Flux2Engine`: `load()` on the sequential strategy returns
+    /// without putting anything on the card, the transformer arrives during
+    /// `generate`, `is_loaded` is true while the retained slot is full, and
+    /// `resident_vram_bytes` answers only for that slot.
+    struct SequentialRetainingEngine {
+        retained: u64,
+    }
+
+    impl InferenceEngine for SequentialRetainingEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            unreachable!("the wiring test never renders")
+        }
+        fn model_name(&self) -> &str {
+            "flux2-dev:q8"
+        }
+        fn is_loaded(&self) -> bool {
+            // `EngineBase::is_loaded` answers true for a Sequential STRATEGY
+            // whether or not anything is resident, which is why the cache
+            // classifies such an engine `Gpu` from the moment it is inserted.
+            true
+        }
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn unload(&mut self) {
+            self.retained = 0;
+        }
+        fn resident_vram_bytes(&self) -> Option<u64> {
+            (self.retained > 0).then_some(self.retained)
+        }
+        fn release_retained_residency(&mut self) -> u64 {
+            std::mem::take(&mut self.retained)
+        }
+    }
+
+    /// The planned wrapper must not hide a retained transformer from the cache.
+    ///
+    /// EVERY scheduler-V2 job's engine is built, wrapped by
+    /// `record_planned_engine_mode`, and only then inserted into the model
+    /// cache — so the cache never holds a bare engine in production. The
+    /// wrapper forwarded `is_loaded` and `unload` but defaulted
+    /// `resident_vram_bytes` to `None` and `release_retained_residency` to
+    /// `0`, which is the whole retained-residency feature answering "nothing
+    /// here" for exactly the jobs that have something.
+    ///
+    /// The consequences compound. `restore` cannot raise a credit it is told
+    /// is absent, so `active_vram_bytes` stays at the sequential load's
+    /// measurement of ~0 and admission plans against raw free VRAM.
+    /// `release_retained_residency_except` filters candidates on
+    /// `resident_vram_bytes() > 0`, so it finds none and reclaims nothing.
+    /// And `is_loaded` IS forwarded, so the entry is `ModelResidency::Gpu`
+    /// and `evict_lru_parked_except` skips it too — leaving the LRU capacity
+    /// eviction as the only thing in the process that could ever move those
+    /// 34 GB off the card.
+    ///
+    /// This drives the REAL wrapper over the REAL cache, because a test that
+    /// wraps nothing proves only that the inner engine is correct — which it
+    /// always was.
+    #[test]
+    fn the_planned_wrapper_does_not_hide_a_retained_transformer_from_the_cache() {
+        const RETAINED: u64 = 34 << 30;
+        let mode = PlannedEngineMode {
+            load_strategy: mold_inference::LoadStrategy::Sequential,
+            block_offload: false,
+        };
+        let engine = record_planned_engine_mode(
+            Box::new(SequentialRetainingEngine { retained: RETAINED }),
+            mode,
+            "flux2-dev-q8-fingerprint",
+        );
+
+        assert_eq!(
+            engine.resident_vram_bytes(),
+            Some(RETAINED),
+            "the wrapper must answer for the engine it wraps"
+        );
+
+        // Production's sequence: insert priced by the load delta, which for a
+        // sequential engine measured nothing; then the take/restore window
+        // that a generation opens and closes.
+        let mut cache = ModelCache::new(3);
+        cache.insert(engine, 0);
+        let taken = cache.take("flux2-dev:q8").expect("the engine is cached");
+        cache.restore(taken);
+
+        assert_eq!(
+            cache.active_vram_bytes(),
+            RETAINED,
+            "admission plans against this number; zero is what refused the \
+             identical repeat on a card that was holding its weights"
+        );
+        assert_eq!(cache.retained_residency_bytes(), RETAINED);
+
+        let (name, freed) = cache
+            .release_retained_residency_except(None)
+            .expect("a wrapped retaining engine is reclaimable");
+        assert_eq!(name, "flux2-dev:q8");
+        assert_eq!(freed, RETAINED);
+        assert_eq!(cache.active_vram_bytes(), 0);
+        assert!(
+            cache.contains("flux2-dev:q8"),
+            "the engine survives its reclaim, wrapper and all"
+        );
+    }
+
+    /// Every method of the engine trait is answered by the planned wrapper.
+    ///
+    /// A SOURCE contract, because the defect is structural rather than
+    /// behavioural: `PlannedInferenceEngine` is a hand-written decorator over
+    /// a trait with defaults, so a method added to the trait — or, as here, a
+    /// method the decorator was written before — silently degrades to the
+    /// default for every scheduler-V2 job while compiling perfectly. The
+    /// wrapper's own comment on `install_identity_embedding` names this exact
+    /// hazard; two methods had already fallen into it.
+    ///
+    /// A method the wrapper deliberately answers ITSELF (the three
+    /// `configured_*` accessors, which describe the plan and not the inner
+    /// engine) is listed here by name, so choosing not to forward one stays a
+    /// decision somebody wrote down.
+    #[test]
+    fn the_planned_wrapper_answers_every_engine_trait_method() {
+        const ANSWERED_BY_THE_WRAPPER_ITSELF: &[&str] = &[
+            "configured_load_strategy",
+            "configured_block_offload",
+            "configured_execution_fingerprint",
+        ];
+
+        let trait_source = include_str!("../../mold-inference/src/engine.rs");
+        let trait_body = trait_source
+            .split("pub trait InferenceEngine")
+            .nth(1)
+            .expect("the trait is declared in engine.rs")
+            .split("\n}\n")
+            .next()
+            .expect("the trait declaration is closed");
+        let trait_methods = trait_body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("fn "))
+            .filter_map(|rest| rest.split('(').next())
+            .collect::<Vec<_>>();
+        assert!(
+            trait_methods.contains(&"resident_vram_bytes")
+                && trait_methods.contains(&"release_retained_residency"),
+            "the scan found no trait methods: {trait_methods:?}"
+        );
+
+        let wrapper_source = include_str!("gpu_worker.rs");
+        let wrapper_body = wrapper_source
+            .split("impl mold_inference::InferenceEngine for PlannedInferenceEngine {")
+            .nth(1)
+            .expect("the wrapper impl is in this file")
+            .split("\n}\n")
+            .next()
+            .expect("the wrapper impl is closed");
+
+        let missing = trait_methods
+            .iter()
+            .filter(|method| !wrapper_body.contains(&format!("fn {method}(")))
+            .filter(|method| !ANSWERED_BY_THE_WRAPPER_ITSELF.contains(method))
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "PlannedInferenceEngine silently defaults {missing:?} for every \
+             scheduler-V2 job. Forward each to `self.inner`, or list it in \
+             ANSWERED_BY_THE_WRAPPER_ITSELF with a reason."
+        );
     }
 
     #[test]
