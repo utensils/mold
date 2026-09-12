@@ -280,10 +280,10 @@ function openContextMenu(event: MouseEvent) {
 /* The tint belongs to the whole card, so it sits on the CardSurface rather
    than on `.hc`, which is inset by the card's own padding. */
 .hc-card--open:hover {
-  background: color-mix(in srgb, var(--rebate) 4%, transparent);
+  background: color-mix(in srgb, var(--mold-text) 4%, transparent);
 }
 .hc:focus-visible {
-  outline: 2px solid var(--safelight);
+  outline: 2px solid var(--mold-border-focus);
   outline-offset: 2px;
 }
 

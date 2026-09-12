@@ -5638,8 +5638,7 @@ describe("CreatePage composer summary", () => {
 
   /** The real ComposerCard, so the summary is the one a person reads. */
   function composerStubs() {
-    const stubs = pageStubs() as Record<string, unknown>;
-    delete stubs.ComposerCard;
+    const { ComposerCard: _dropped, ...stubs } = pageStubs();
     return stubs;
   }
 
