@@ -3468,6 +3468,30 @@ fn build_plan(
     }
     if memory.fits_available_memory != Some(true) {
         let mut advice = ltx2_shape_advice(context, device);
+        // A FLUX.2 tier that does not fit resident would normally be planned
+        // to stream its blocks. When it cannot, the refusal has to say so:
+        // the 2026-09-11 audit's 24 GB simulation refused `flux2-dev:q8` with
+        // nothing but "memory pressure changed after scheduler admission",
+        // which named a cause that had not happened and left out the one that
+        // had. The reason is the ENGINE's own, so plan and loader agree.
+        if !memory.block_offload {
+            if let Some(reason) = crate::memory_preflight::flux2_block_offload_unsupported_reason(
+                context.paths,
+                request_has_lora,
+            )
+            .filter(|_| {
+                context.family == "flux2"
+                    || hint.is_some_and(|hint| {
+                        hint.family == mold_inference::device::ActivationFamily::Flux2Dit
+                    })
+            }) {
+                let clause = format!("streaming was not possible: {reason}");
+                advice = Some(match advice {
+                    Some(existing) => format!("{existing}; {clause}"),
+                    None => clause,
+                });
+            }
+        }
         if recent_oom_reduced_budget {
             let cooldown = "this request is temporarily limited after a recent CUDA OOM; retry after the cooldown or reduce the output size".to_string();
             advice = Some(match advice {

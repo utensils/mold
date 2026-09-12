@@ -8330,6 +8330,10 @@ pub(crate) fn monotonic_ms() -> u64 {
 /// boundary: current driver-reported free bytes plus only the measured active
 /// cache entry that the same owner can unload or reuse. Other process and
 /// non-cache allocations are deliberately never treated as reclaimable.
+///
+/// This is the RAW capacity. The driver reserve is subtracted once, by
+/// [`schedulable_available_vram_bytes`], which is the figure execution
+/// planning consumes.
 pub(crate) fn effective_available_vram_bytes(
     sampled_free_bytes: u64,
     reclaimable_cache_bytes: u64,
@@ -8367,19 +8371,76 @@ pub(crate) fn schedulable_available_vram_bytes(
     has_active_work: bool,
     total_vram_bytes: u64,
 ) -> u64 {
+    schedulable_available_vram_bytes_with_reserve(
+        sampled_free_bytes,
+        reclaimable_cache_bytes,
+        sampled_mold_bytes,
+        has_active_work,
+        total_vram_bytes,
+        mold_inference::device::reserved_vram_bytes(),
+    )
+}
+
+/// [`schedulable_available_vram_bytes`] with the driver reserve supplied, so
+/// the policy is testable without the process environment.
+///
+/// The reserve is subtracted HERE because the LOADER subtracts it:
+/// `device::usable_free_vram_bytes_result`, which every pre-load gate reads,
+/// is `free - reserved_vram_bytes()`. Planning against the raw sample and
+/// loading against the reserved one is two budgets for one question, and the
+/// gap is exactly `MOLD_RESERVE_VRAM_MB`. The 2026-09-11 audit's 24 GB
+/// simulation is what that looks like at scale: with the reserve set to
+/// 22,000 MB the scheduler saw ~46 GB, admitted a 37.6 GB FLUX.2 [dev] plan,
+/// and the loader refused it against 26.2 GB — "the scheduler admitted a plan
+/// the loader then refused". At the 400 MB Linux default the same disagreement
+/// is small and silent, and it lands on exactly the plans that were already
+/// marginal, which is where #1707's shape sat.
+pub(crate) fn schedulable_available_vram_bytes_with_reserve(
+    sampled_free_bytes: u64,
+    reclaimable_cache_bytes: u64,
+    sampled_mold_bytes: Option<u64>,
+    has_active_work: bool,
+    total_vram_bytes: u64,
+    reserved_bytes: u64,
+) -> u64 {
     let immediate = effective_available_vram_bytes(
         sampled_free_bytes,
         reclaimable_cache_bytes,
         total_vram_bytes,
     );
-    if !has_active_work {
-        return immediate;
-    }
-    sampled_mold_bytes.map_or(immediate, |mold_bytes| {
+    let raw = if !has_active_work {
         immediate
-            .max(sampled_free_bytes.saturating_add(mold_bytes))
-            .min(total_vram_bytes)
-    })
+    } else {
+        sampled_mold_bytes.map_or(immediate, |mold_bytes| {
+            immediate
+                .max(sampled_free_bytes.saturating_add(mold_bytes))
+                .min(total_vram_bytes)
+        })
+    };
+    raw.saturating_sub(reserved_bytes)
+}
+
+/// The attribution policy alone, with no driver reserve.
+///
+/// Every assertion below is about which bytes count as reclaimable, not about
+/// the reserve — which is pinned once by
+/// `memory_preflight::fail_closed_tests::admission_and_the_loader_read_the_same_reserve_adjusted_budget`.
+#[cfg(test)]
+fn schedulable_capacity_without_reserve(
+    sampled_free_bytes: u64,
+    reclaimable_cache_bytes: u64,
+    sampled_mold_bytes: Option<u64>,
+    has_active_work: bool,
+    total_vram_bytes: u64,
+) -> u64 {
+    schedulable_available_vram_bytes_with_reserve(
+        sampled_free_bytes,
+        reclaimable_cache_bytes,
+        sampled_mold_bytes,
+        has_active_work,
+        total_vram_bytes,
+        0,
+    )
 }
 
 fn monotonic_deadline_ms(deadline: Instant) -> u64 {
@@ -11224,7 +11285,12 @@ mod tests {
             .all(|worker| worker.in_flight.load(Ordering::SeqCst) == 0));
         let device = &coordinator.device_snapshots()[0];
         assert_eq!(device.activity, DeviceActivity::Busy);
-        assert_eq!(device.available_vram_bytes, 24 << 30);
+        // Reserve-adjusted, because the loader's own gate is — see
+        // `schedulable_available_vram_bytes_with_reserve`.
+        assert_eq!(
+            device.available_vram_bytes,
+            (24u64 << 30) - mold_inference::device::reserved_vram_bytes()
+        );
 
         // Even without a usable attribution sample, the authoritative running
         // row still prevents a terminal idle classification.
@@ -12164,7 +12230,7 @@ mod tests {
         );
         assert_eq!(
             coordinator.device_snapshots()[0].available_vram_bytes,
-            5 << 30
+            (5u64 << 30) - mold_inference::device::reserved_vram_bytes()
         );
     }
 
@@ -12216,22 +12282,22 @@ mod tests {
         const GIB: u64 = 1 << 30;
 
         assert_eq!(
-            schedulable_available_vram_bytes(10 * GIB, 0, Some(14 * GIB), true, 24 * GIB),
+            schedulable_capacity_without_reserve(10 * GIB, 0, Some(14 * GIB), true, 24 * GIB),
             24 * GIB,
             "a sibling session should queue behind active Mold work"
         );
         assert_eq!(
-            schedulable_available_vram_bytes(10 * GIB, 0, Some(14 * GIB), false, 24 * GIB),
+            schedulable_capacity_without_reserve(10 * GIB, 0, Some(14 * GIB), false, 24 * GIB),
             10 * GIB,
             "idle Mold attribution is not automatically reclaimable"
         );
         assert_eq!(
-            schedulable_available_vram_bytes(10 * GIB, 0, None, true, 24 * GIB),
+            schedulable_capacity_without_reserve(10 * GIB, 0, None, true, 24 * GIB),
             10 * GIB,
             "unknown attribution must remain fail closed"
         );
         assert_eq!(
-            schedulable_available_vram_bytes(4 * GIB, 0, Some(14 * GIB), true, 24 * GIB),
+            schedulable_capacity_without_reserve(4 * GIB, 0, Some(14 * GIB), true, 24 * GIB),
             18 * GIB,
             "external allocations remain unavailable after active Mold work completes"
         );
@@ -12240,7 +12306,7 @@ mod tests {
     #[test]
     fn busy_unattributed_metal_pressure_is_transient_when_the_peak_fits_physically() {
         const GIB: u64 = 1 << 30;
-        let available = schedulable_available_vram_bytes(4 * GIB, 0, None, true, 24 * GIB);
+        let available = schedulable_capacity_without_reserve(4 * GIB, 0, None, true, 24 * GIB);
         assert_eq!(
             available,
             4 * GIB,
@@ -12286,7 +12352,7 @@ mod tests {
     fn busy_unattributed_cuda_lanes_keep_an_additional_fitting_job_waiting() {
         const GIB: u64 = 1 << 30;
         let available = (0..2)
-            .map(|_| schedulable_available_vram_bytes(3 * GIB, 0, None, true, 24 * GIB))
+            .map(|_| schedulable_capacity_without_reserve(3 * GIB, 0, None, true, 24 * GIB))
             .collect::<Vec<_>>();
         assert_eq!(available, vec![3 * GIB, 3 * GIB]);
 
@@ -12308,7 +12374,7 @@ mod tests {
     fn unattributed_external_allocations_are_not_dispatch_capacity() {
         const GIB: u64 = 1 << 30;
         assert_eq!(
-            schedulable_available_vram_bytes(3 * GIB, 0, None, false, 24 * GIB),
+            schedulable_capacity_without_reserve(3 * GIB, 0, None, false, 24 * GIB),
             3 * GIB,
             "neither physical total nor unknown process memory is immediate capacity"
         );
@@ -12320,7 +12386,7 @@ mod tests {
         let reclaimable = reclaimable_model_cache_bytes(16 * GIB, None);
         assert_eq!(reclaimable, 16 * GIB);
         assert_eq!(
-            schedulable_available_vram_bytes(4 * GIB, reclaimable, None, false, 24 * GIB),
+            schedulable_capacity_without_reserve(4 * GIB, reclaimable, None, false, 24 * GIB),
             20 * GIB,
             "the owner can evict its measured cache even when the OS cannot attribute the process"
         );
@@ -12352,7 +12418,7 @@ mod tests {
         let sampled_free = 46 * GIB - RETAINED;
 
         // Before: the cache reported nothing, so the card looked full.
-        let blind = schedulable_available_vram_bytes(
+        let blind = schedulable_capacity_without_reserve(
             sampled_free,
             reclaimable_model_cache_bytes(0, None),
             None,
@@ -12365,7 +12431,7 @@ mod tests {
         );
 
         // After: the retained transformer is first-party reclaimable evidence.
-        let credited = schedulable_available_vram_bytes(
+        let credited = schedulable_capacity_without_reserve(
             sampled_free,
             reclaimable_model_cache_bytes(RETAINED, None),
             None,
@@ -12439,7 +12505,10 @@ mod tests {
         );
 
         let idle = coordinator.device_snapshots().remove(0);
-        assert_eq!(idle.available_vram_bytes, 20 * GIB);
+        assert_eq!(
+            idle.available_vram_bytes,
+            20 * GIB - mold_inference::device::reserved_vram_bytes()
+        );
         assert!(idle
             .warm_execution_fingerprints
             .contains(&ExecutionFingerprint::new("warm-plan")));
@@ -12481,7 +12550,10 @@ mod tests {
             },
         );
         let busy = coordinator.device_snapshots().remove(0);
-        assert_eq!(busy.available_vram_bytes, 20 * GIB);
+        assert_eq!(
+            busy.available_vram_bytes,
+            20 * GIB - mold_inference::device::reserved_vram_bytes()
+        );
         assert_eq!(busy.available_at_ms, Some(5_000));
         assert_eq!(
             busy.activity,

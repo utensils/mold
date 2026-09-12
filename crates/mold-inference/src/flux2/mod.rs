@@ -1,5 +1,5 @@
 pub(crate) mod lora;
-pub(crate) mod pipeline;
+pub mod pipeline;
 pub(crate) mod quantized_transformer;
 pub(crate) mod sampling;
 pub mod single_file;

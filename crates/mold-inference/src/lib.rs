@@ -159,6 +159,7 @@ pub use failure_class::{
     MODEL_SPECIFIC_FAILURE_MARKER,
 };
 pub use flux::FluxEngine;
+pub use flux2::pipeline::flux2_block_offload_unsupported_reason;
 /// Extra resident bytes a FLUX.2 fp8 checkpoint costs when the engine widens
 /// it once at load, so a server-side estimate charges what the card will
 /// actually hold. See `flux2::transformer`.

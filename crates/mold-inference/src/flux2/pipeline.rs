@@ -401,6 +401,35 @@ enum Flux2OffloadDecision {
     Unsupported(&'static str),
 }
 
+/// Why this FLUX.2 checkpoint cannot stream its blocks from host RAM, or
+/// `None` when it can.
+///
+/// The SAME gates `flux2_offload_decision` applies at load, exported so the
+/// planner refuses with the engine's own reason instead of a second copy of
+/// the predicate. #1707's sibling defect: the 2026-09-11 audit's 24 GB
+/// simulation refused `flux2-dev:q8` at the LOADER with "memory pressure
+/// changed after scheduler admission" on a card nothing else was using — the
+/// scheduler had admitted a plan the loader could not honour, and nothing in
+/// the refusal said that this tier has no streamed path at all.
+pub fn flux2_block_offload_unsupported_reason(
+    transformer: &std::path::Path,
+    has_lora: bool,
+) -> Option<&'static str> {
+    let lower = transformer.to_string_lossy().to_lowercase();
+    let is_gguf = lower.ends_with(".gguf");
+    let is_nvfp4 = lower.contains("nvfp4");
+    if is_nvfp4 {
+        return Some(
+            "Flux.2 NVFP4 transformers are already resident in their packed form and \
+             have no block-streaming path",
+        );
+    }
+    match flux2_offload_decision(true, is_gguf, is_nvfp4, has_lora) {
+        Flux2OffloadDecision::Unsupported(reason) => Some(reason),
+        Flux2OffloadDecision::Disabled | Flux2OffloadDecision::Selected => None,
+    }
+}
+
 fn flux2_offload_decision(
     forced_offload: bool,
     is_gguf: bool,

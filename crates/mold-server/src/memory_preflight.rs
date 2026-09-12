@@ -149,6 +149,18 @@ fn flux2_activation_geometry(
     mold_inference::flux2_activation_geometry_for_checkpoint(&paths.transformer, model_name)
 }
 
+/// Why this FLUX.2 checkpoint cannot stream its blocks, or `None` when it can.
+///
+/// A thin pass-through to `mold_inference::flux2_block_offload_unsupported_reason`
+/// so admission, the offload gate and the refusal text all read the engine's
+/// own decision. Non-FLUX.2 callers never reach it.
+pub(crate) fn flux2_block_offload_unsupported_reason(
+    paths: &ModelPaths,
+    request_has_lora: bool,
+) -> Option<&'static str> {
+    mold_inference::flux2_block_offload_unsupported_reason(&paths.transformer, request_has_lora)
+}
+
 fn large_flux2_bf16_should_auto_offload(
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
@@ -1820,8 +1832,11 @@ pub(crate) fn server_offload_enabled_for_paths_with_request(
 
     let transformer_is_gguf = transformer_path_is_gguf(paths);
 
-    if transformer_looks_nvfp4
-        && (transformer_looks_flux2 || hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit))
+    // FLUX.2 asks the ENGINE whether this checkpoint can stream at all, rather
+    // than keeping a second copy of the format predicate here. The two answers
+    // disagreeing is how a plan gets admitted that the loader cannot honour.
+    if (transformer_looks_flux2 || hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit))
+        && flux2_block_offload_unsupported_reason(paths, request_has_lora).is_some()
     {
         return false;
     }
@@ -1830,14 +1845,13 @@ pub(crate) fn server_offload_enabled_for_paths_with_request(
         && hint.is_some_and(|h| {
             matches!(
                 h.family,
-                ActivationFamily::Sd3Mmdit
-                    | ActivationFamily::ZImageDit
-                    | ActivationFamily::Flux2Dit
+                ActivationFamily::Sd3Mmdit | ActivationFamily::ZImageDit
             )
         })
     {
         return false;
     }
+    let _ = transformer_looks_nvfp4;
 
     forced_offload
         || large_flux_bf16_should_auto_offload(paths, hint, None, 0)
@@ -3047,6 +3061,115 @@ mod fail_closed_tests {
         assert_eq!(
             budget.activation_memory_bytes,
             mold_inference::device::activation_bytes(1024, 1024, 1, 2, ActivationFamily::FluxDit)
+        );
+    }
+
+    /// A 24 GB card, the shape the 2026-09-11 audit simulated with
+    /// `MOLD_RESERVE_VRAM_MB=22000`.
+    ///
+    /// The audit's finding was that both FLUX.2 [dev] tiers were refused BY THE
+    /// LOADER with "memory pressure changed after scheduler admission" on a
+    /// card nothing else was using. Two things were wrong: the scheduler and
+    /// the loader were reading different budgets, and nothing said that a GGUF
+    /// dev tier has no streamed path at all.
+    ///
+    /// What is true, and is now pinned: an fp8/BF16 dev tier does not fit
+    /// resident and STREAMS, so it is admitted; a GGUF tier cannot stream, so
+    /// it is refused — with the engine's own reason, at admission.
+    #[test]
+    fn on_a_24gb_card_a_streamable_dev_tier_is_admitted_and_a_gguf_one_is_not() {
+        const CARD_24GB_USABLE_BYTES: u64 = 23_600_000_000;
+        let dir = tempfile::tempdir().unwrap();
+
+        let streamable =
+            flux2_dev_paths(dir.path(), "flux2_dev_fp8mixed.safetensors", 35_455_599_592);
+        let mut req = flux2_dev_request(None);
+        req.model = "flux2-dev:fp8".to_string();
+        let budget = flux2_budget(&req, &streamable, CARD_24GB_USABLE_BYTES);
+        assert!(
+            budget.block_offload,
+            "a dev tier that cannot be resident on 24 GB must stream its blocks"
+        );
+        assert_eq!(
+            budget.fits_available_memory,
+            Some(true),
+            "the streamed working set fits a 24 GB card (planned {})",
+            budget.peak_memory_bytes
+        );
+        assert!(
+            flux2_block_offload_unsupported_reason(&streamable, false).is_none(),
+            "the engine streams this checkpoint, so the planner must not claim otherwise"
+        );
+
+        let quantized_dir = tempfile::tempdir().unwrap();
+        let gguf = flux2_dev_paths(
+            quantized_dir.path(),
+            "flux2-dev-Q4_K_M.gguf",
+            19_959_731_168,
+        );
+        let mut req = flux2_dev_request(None);
+        req.model = "flux2-dev:q4".to_string();
+        let budget = flux2_budget(&req, &gguf, CARD_24GB_USABLE_BYTES);
+        assert!(
+            !budget.block_offload,
+            "the FLUX.2 engine has no block-streaming path for GGUF; admission \
+             must never promise one"
+        );
+        assert_eq!(
+            budget.fits_available_memory,
+            Some(false),
+            "20.3 GB of resident weights plus a 3.0 GB denoise cannot fit a 24 GB \
+             card, and saying so at admission is the whole point (planned {})",
+            budget.peak_memory_bytes
+        );
+        let reason = flux2_block_offload_unsupported_reason(&gguf, false)
+            .expect("a GGUF dev tier must carry the engine's own refusal reason");
+        assert!(
+            reason.contains("GGUF"),
+            "the refusal must name the format, not blame memory pressure: {reason}"
+        );
+    }
+
+    /// One budget, two readers. Admission planned against the raw free sample
+    /// while every pre-load gate reads `free - reserved_vram_bytes()`, so a
+    /// plan admitted inside the reserve was refused at load.
+    #[test]
+    fn admission_and_the_loader_read_the_same_reserve_adjusted_budget() {
+        use crate::scheduler::schedulable_available_vram_bytes_with_reserve;
+        const TOTAL: u64 = 48_000_000_000;
+        const FREE: u64 = 46_500_000_000;
+        let budget = |reclaimable, reserve| {
+            schedulable_available_vram_bytes_with_reserve(
+                FREE,
+                reclaimable,
+                None,
+                false,
+                TOTAL,
+                reserve,
+            )
+        };
+
+        // The Linux default. A plan sized to the raw sample sits inside the
+        // reserve the loader will subtract.
+        assert_eq!(budget(0, 400_000_000), 46_100_000_000);
+        // The audit's 24 GB simulation: 22,000 MB reserved, and the two
+        // budgets differed by all of it.
+        assert_eq!(budget(0, 22_000_000_000), 24_500_000_000);
+        // Reclaimable cache is still credited, and the total is still the cap
+        // before the reserve comes off.
+        assert_eq!(budget(40_000_000_000, 400_000_000), TOTAL - 400_000_000);
+        // A reserve larger than what is free leaves nothing, never an
+        // underflow.
+        assert_eq!(
+            schedulable_available_vram_bytes_with_reserve(
+                1_000_000,
+                0,
+                None,
+                false,
+                TOTAL,
+                400_000_000
+            ),
+            0
         );
     }
 
