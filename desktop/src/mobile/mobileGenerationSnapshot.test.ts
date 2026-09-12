@@ -18,7 +18,6 @@ function prepared(): PreparedExpansionBatch {
     family: "flux",
     task: "text-to-image",
     requestedCount: 2,
-    stylePreset: null,
     selectedHostPolicy: "studio",
     dimensions: ["composition"],
     prompts: [
@@ -42,7 +41,6 @@ function quick(): QuickExpansionSnapshot {
     model: "flux:test",
     family: "flux",
     task: "text-to-image",
-    stylePreset: null,
     selectedHostPolicy: "studio",
     route: prepared().route,
   };
@@ -88,5 +86,14 @@ describe("mobile generation submission snapshots", () => {
     expect(snapshot.route.target.apiKey).toBe("secret");
     expect(quickSubmissionIsCurrent(snapshot, current, [])).toBe(true);
     expect(quickSubmissionIsCurrent(snapshot, { ...current, requestToken: 8 }, [])).toBe(false);
+  });
+
+  it("carries no style preset out of a snapshot written before it retired", () => {
+    const legacy = prepared();
+    (legacy as unknown as Record<string, unknown>)["stylePreset"] = "cinematic";
+    const snapshot = capturePreparedSubmission(legacy)!;
+
+    expect("stylePreset" in snapshot).toBe(false);
+    expect(preparedSubmissionIsCurrent(snapshot, legacy, [])).toBe(true);
   });
 });

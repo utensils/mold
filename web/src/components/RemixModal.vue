@@ -24,7 +24,6 @@ const props = defineProps<{
   task: ExpandTask;
   /** Generation facts frozen with the request (identity, canvas, frames). */
   context?: ExpandContextWire | null;
-  style?: string | null;
   /**
    * The resolved recipe IGNORES the prompt (no text encoder in the family),
    * so the host answers a transform with exactly ONE result — the guide's
@@ -48,16 +47,13 @@ const busy = ref(false);
 const error = ref<string | null>(null);
 const response = ref<RemixResponseWire | null>(null);
 const selected = ref<number[]>([]);
-const styleLocked = computed(() => Boolean(props.style?.trim()));
-const availableDimensions = computed(() =>
-  remixDimensionsForTask(props.task, styleLocked.value),
-);
+const availableDimensions = computed(() => remixDimensionsForTask(props.task));
 watch(
-  () => [props.open, props.task, props.style] as const,
+  () => [props.open, props.task] as const,
   ([open]) => {
     if (!open) return;
     sourceKind.value = props.originalPrompt?.trim() ? "original" : "current";
-    dimensions.value = defaultRemixDimensions(props.task, styleLocked.value);
+    dimensions.value = defaultRemixDimensions(props.task);
     response.value = null;
     selected.value = [];
     error.value = null;
@@ -90,7 +86,6 @@ async function remix() {
         variations: 3,
         task: props.task,
         ...(props.context ? { context: props.context } : {}),
-        ...(props.style?.trim() ? { style: props.style.trim() } : {}),
         dimensions: dimensions.value,
       },
       undefined,

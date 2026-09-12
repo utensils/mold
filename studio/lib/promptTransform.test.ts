@@ -60,10 +60,14 @@ describe("prompt remix contract", () => {
     },
   );
 
-  it("removes style whenever a style constraint is locked", () => {
-    expect(defaultRemixDimensions("text-to-image", true)).not.toContain(
-      "style",
-    );
+  /*
+   * "Style" here is the remix-by-style AXIS, not the retired composer preset:
+   * the preset that once locked it is gone from every surface, so a
+   * text-prompt task always offers the axis.
+   */
+  it("keeps the style axis — no preset can lock it any more", () => {
+    expect(defaultRemixDimensions("text-to-image")).toContain("style");
+    expect(defaultRemixDimensions("text-to-video")).toContain("style");
   });
 
   it("requires exactly three non-empty variants", () => {

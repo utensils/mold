@@ -1110,13 +1110,11 @@ const preparedStaleReasons = computed(() => {
           kind: "remix" as const,
           ...(form.originalPrompt ? { rootPrompt: form.originalPrompt } : {}),
           sourceKind: remixSource.value,
-          dimensions: defaultRemixDimensions(expansionTaskForRequest(form.family, request), false),
+          dimensions: defaultRemixDimensions(expansionTaskForRequest(form.family, request)),
           conditioningFingerprint: conditioningFingerprint(request),
         }
       : {}),
     requestedCount: effectiveBatchSize.value,
-    // This surface has no style preset to freeze or to go stale on.
-    stylePreset: null,
     selectedHostPolicy: stickyTarget.value,
     readyHostIds: new Set(
       hosts.all.filter((host) => host.status === "ready").map((host) => host.id),
@@ -1515,10 +1513,11 @@ async function loadTemplate(template: GenerationTemplate) {
   keepingPrintIdentity(form, () =>
     Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, installedModels.value)),
   );
-  // A template saved before the redesign carries a style preset, and this
-  // surface has no control that would show one. Restoring it would put back an
-  // invisible prompt rewriter: the words on screen would not be the words sent.
-  form.stylePreset = "";
+  // A template saved before the style preset retired still carries its id.
+  // Restoring it would put back an invisible prompt rewriter — the words on
+  // screen would not be the words sent — and re-saving would persist it, so
+  // the dead key is dropped rather than left on the form.
+  delete (form as unknown as Record<string, unknown>)["stylePreset"];
   // A template is PARAMETERS, not a capability snapshot. One saved before the
   // snapshot existed (or on another host) carries none, and applying it over
   // a Hunyuan3D form left the mesh recipe's `glb` pin and zero canvas in
@@ -2377,7 +2376,6 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     task: expansionTaskForRequest(form.family, request),
     context: expansionContextForRequest(form.family, request, promptRecipeFromForm(form)),
     requestedCount: count,
-    stylePreset: null,
     selectedHostPolicy: stickyTarget.value,
   };
 }
@@ -2397,7 +2395,7 @@ async function remixForCurrentPrompt(replacePrepared = false) {
   const request = buildRequest(form);
   const task = expansionTaskForRequest(form.family, request);
   const source = promptSource(form.prompt, form.originalPrompt, remixSource.value);
-  const dimensions = defaultRemixDimensions(task, false);
+  const dimensions = defaultRemixDimensions(task);
   // Match the Batch value the composer actually presents. Capability/source
   // constraints can force the effective value to one while preserving the
   // user's saved raw preference for a later compatible model.
@@ -2446,7 +2444,6 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         model: form.model,
         family: form.family,
         task,
-        stylePreset: null,
         selectedHostPolicy: stickyTarget.value,
         route: frozenGenerationRoute(printRoute, route),
         ...expansionRouteProvenance(printRoute, route),
@@ -2476,7 +2473,6 @@ async function remixForCurrentPrompt(replacePrepared = false) {
         family: form.family,
         task,
         requestedCount,
-        stylePreset: null,
         selectedHostPolicy: stickyTarget.value,
       },
       frozenGenerationRoute(printRoute, route),
@@ -2675,7 +2671,6 @@ async function expandForCurrentBatch(
         model: inputs.model,
         family: inputs.family,
         task: inputs.task,
-        stylePreset: inputs.stylePreset,
         selectedHostPolicy: inputs.selectedHostPolicy,
         route: frozenGenerationRoute(printRoute, route),
         ...expansionRouteProvenance(printRoute, route),
@@ -2804,7 +2799,6 @@ function applyPreparedRemix(id: string) {
     model: batch.model,
     family: batch.family,
     task: batch.task,
-    stylePreset: batch.stylePreset,
     selectedHostPolicy: batch.selectedHostPolicy,
     route: { ...batch.route, target: { ...batch.route.target } },
     promptTransform: {

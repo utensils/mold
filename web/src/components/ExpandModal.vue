@@ -27,13 +27,6 @@ const props = defineProps<{
   prompt: string;
   expand: ExpandFormState;
   currentModel: ModelInfoExtended | null;
-  /**
-   * The composer's active style as a natural-language directive (`styleHint`)
-   * the server weaves into the expander's system message. Null for a chain
-   * stage — the style row belongs to the single-print composer, not to stage
-   * text — and never appended to the prompt itself.
-   */
-  styleDirective?: string | null;
   /** Resolved generation/conditioning policy for this prompt or clip. */
   task: ExpandTask;
   /** Generation facts frozen with the request (identity, canvas, frames). */
@@ -77,12 +70,10 @@ async function preview() {
   previewing.value = true;
   previewError.value = null;
   try {
-    const style = props.styleDirective?.trim();
     const request = {
       prompt: props.prompt,
       model_family: effectiveFamily.value,
       variations: props.expand.variations,
-      ...(style ? { style } : {}),
       task: props.task,
       ...(props.context ? { context: props.context } : {}),
     };

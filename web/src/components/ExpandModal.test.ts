@@ -37,22 +37,13 @@ describe("ExpandModal", () => {
     document.body.innerHTML = "";
   });
 
-  it("carries the composer's style directive into the expansion request", async () => {
-    const wrapper = factory({ styleDirective: "Cinematic look — anamorphic" });
-    await wrapper.get("[data-test='expand-preview']").trigger("click");
-    await flushPromises();
-
-    expect(expandPromptMock).toHaveBeenCalledWith({
-      prompt: "a lighthouse",
-      model_family: "flux",
-      variations: 1,
-      style: "Cinematic look — anamorphic",
-      task: "text-to-image",
-    });
-  });
-
-  it("omits the style entirely when no preset is active", async () => {
-    const wrapper = factory({ styleDirective: null });
+  /*
+   * The composer preset that supplied a style directive is retired, so the
+   * client never sends one. The server field survives for MCP; nothing here
+   * may put a look back into the rewrite behind the user's back.
+   */
+  it("never sends a style directive with the expansion request", async () => {
+    const wrapper = factory();
     await wrapper.get("[data-test='expand-preview']").trigger("click");
     await flushPromises();
 

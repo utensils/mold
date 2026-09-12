@@ -20,7 +20,6 @@ function makeForm(
 ): GenerateFormState {
   return {
     version: 3,
-    stylePreset: null,
     prompt: "cinematic cat",
     negativePrompt: "blurry",
     model: "flux-dev:q4",
@@ -89,16 +88,19 @@ function memoryMedia(): TemplateMediaPersistence & {
 
 describe("a template's retired fields", () => {
   it("never hands a saved stylePreset back to the live form", async () => {
-    // The composer's preset strip is retired; a template saved with one
-    // would restyle the prompt invisibly on every Generate.
+    // The composer's preset strip is retired and the field is gone; a
+    // template saved before then must load without the key rather than
+    // restyling the prompt invisibly on every Generate.
     const persistence = memoryMedia();
+    const legacy = makeForm() as GenerateFormState & Record<string, unknown>;
+    legacy.stylePreset = "cinematic";
     const saved = await saveGenerationTemplateWithMedia(
       "Cinematic",
-      makeForm({ stylePreset: "cinematic" }),
+      legacy,
       persistence,
     );
     const hydrated = await hydrateGenerationTemplate(saved, persistence);
-    expect(hydrated.form.stylePreset).toBeNull();
+    expect("stylePreset" in hydrated.form).toBe(false);
   });
 });
 

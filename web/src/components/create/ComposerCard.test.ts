@@ -1,8 +1,31 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import ComposerCard from "./ComposerCard.vue";
 import composerSource from "./ComposerCard.vue?raw";
 import { PROMPT_IGNORED_TRANSFORM_REASON } from "@studio/lib/promptTransform";
+
+/*
+ * The two composer chords are the platform's own: ⌘ on Apple, Ctrl elsewhere.
+ * On macOS Ctrl+E is move-to-end-of-line, so accepting either modifier took a
+ * key the system already owns. The suite drives the real conventions through a
+ * platform this test chooses, so both the gate and the keycap are pinned.
+ */
+const platform = vi.hoisted(() => ({ current: "macos" as "macos" | "linux" }));
+vi.mock("../../lib/platform", async () => {
+  const studio = await vi.importActual<typeof import("@studio/lib/platform")>(
+    "@studio/lib/platform",
+  );
+  return {
+    primaryModifierPressed: (event: KeyboardEvent) =>
+      studio.primaryModifierPressed(event, platform.current),
+    shortcutLabel: (key: string) =>
+      `${studio.platformUi(platform.current).modifierLabel}${key}`,
+  };
+});
+
+afterEach(() => {
+  platform.current = "macos";
+});
 
 function factory(
   props: Partial<InstanceType<typeof ComposerCard>["$props"]> & {
@@ -25,14 +48,29 @@ function factory(
 }
 
 describe("ComposerCard", () => {
-  it("submits on ⌘↵ / Ctrl+↵ inside the textarea", async () => {
+  it("submits on ⌘↵ on a Mac, and refuses the Ctrl chord the system owns", async () => {
     const wrapper = factory();
     const ta = wrapper.get("[data-test='composer-prompt']");
     await ta.trigger("keydown", { key: "Enter", metaKey: true });
     expect(wrapper.emitted("submit")).toHaveLength(1);
 
     await ta.trigger("keydown", { key: "Enter", ctrlKey: true });
-    expect(wrapper.emitted("submit")).toHaveLength(2);
+    expect(wrapper.emitted("submit")).toHaveLength(1);
+    expect(wrapper.get("[data-test='composer-submit']").text()).toContain("⌘↵");
+  });
+
+  it("submits on Ctrl+↵ off a Mac, and refuses the Command chord", async () => {
+    platform.current = "linux";
+    const wrapper = factory();
+    const ta = wrapper.get("[data-test='composer-prompt']");
+    await ta.trigger("keydown", { key: "Enter", ctrlKey: true });
+    expect(wrapper.emitted("submit")).toHaveLength(1);
+
+    await ta.trigger("keydown", { key: "Enter", metaKey: true });
+    expect(wrapper.emitted("submit")).toHaveLength(1);
+    expect(wrapper.get("[data-test='composer-submit']").text()).toContain(
+      "Ctrl+↵",
+    );
   });
 
   it("does not submit on a plain Enter", async () => {
@@ -332,8 +370,31 @@ describe("ComposerCard action row", () => {
     const blocked = factory({ transformBlockedReason: "No text encoder." });
     await blocked
       .get("[data-test='composer-prompt']")
-      .trigger("keydown", { key: "e", ctrlKey: true });
+      .trigger("keydown", { key: "e", metaKey: true });
     expect(blocked.emitted("expand")).toBeUndefined();
+  });
+
+  /*
+   * Ctrl+E is move-to-end-of-line on a Mac, so the rewrite chord may not take
+   * it there — and the keycap may not promise ⌘ on a machine with no ⌘ key.
+   */
+  it("leaves Ctrl+E to macOS, and spells the rewrite chord Ctrl+E off a Mac", async () => {
+    const mac = factory();
+    await mac
+      .get("[data-test='composer-prompt']")
+      .trigger("keydown", { key: "e", ctrlKey: true });
+    expect(mac.emitted("expand")).toBeUndefined();
+
+    platform.current = "linux";
+    const linux = factory();
+    const bed = linux.get("[data-test='composer-prompt']");
+    await bed.trigger("keydown", { key: "e", metaKey: true });
+    expect(linux.emitted("expand")).toBeUndefined();
+    await bed.trigger("keydown", { key: "E", ctrlKey: true });
+    expect(linux.emitted("expand")).toHaveLength(1);
+    expect(linux.get("[data-test='composer-expand']").text()).toContain(
+      "Ctrl+E",
+    );
   });
 
   /*

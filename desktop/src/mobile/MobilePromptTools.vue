@@ -54,9 +54,7 @@ const DIMENSION_LABELS: Record<RemixDimension, string> = {
   style: "Style",
 };
 
-const availableDimensions = computed(() =>
-  remixDimensionsForTask(props.task, Boolean(props.form.stylePreset?.trim())),
-);
+const availableDimensions = computed(() => remixDimensionsForTask(props.task));
 const hasOriginal = computed(() => Boolean(props.form.originalPrompt?.trim()));
 const sourceLabel = computed(() => {
   if (!hasOriginal.value) return "Remixing current prompt";

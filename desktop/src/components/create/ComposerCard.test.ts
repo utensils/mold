@@ -120,17 +120,15 @@ describe("ComposerCard", () => {
     expect(wrapper.emitted("expand")).toHaveLength(1);
   });
 
-  it("keeps a restored look preset on the form with no strip to show it", async () => {
-    // The preset strip is gone from the desktop composer — its word collided
-    // with the bound "Style" — and nothing here reads one any more. A
-    // persisted draft's preset rides along untouched and changes no request;
-    // the field survives for the phone, which still has its chips.
+  it("shows no look-preset strip, and ignores one a stale draft still carries", async () => {
+    // The preset strip is gone from every composer — its word collided with
+    // the bound "Style", which belongs to the model — and the field is gone
+    // with it. A key left by an older build must change nothing on screen.
     const form = baseForm();
-    form.stylePreset = "cinematic";
+    (form as unknown as Record<string, unknown>)["stylePreset"] = "cinematic";
     const wrapper = mountComposer(form);
     await wrapper.vm.$nextTick();
     expect(wrapper.find("[data-test='style-toggle']").exists()).toBe(false);
-    expect(form.stylePreset).toBe("cinematic");
     expect(form.prompt).toBe("a lighthouse");
   });
 

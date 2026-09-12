@@ -26,7 +26,6 @@ import {
   supportsNegativePrompt,
   supportsScheduler,
 } from "../lib/generateCapabilities";
-import { composeStyle } from "../lib/stylePresets";
 import { oneShotPromptForPrint } from "../lib/chainPrintReuse";
 import {
   defaultSourceFitPolicy,
@@ -149,7 +148,6 @@ function defaultForm(): GenerateFormState {
     prompt: "",
     title: null,
     originalPrompt: null,
-    stylePreset: null,
     negativePrompt: "",
     negativePromptDefault: "",
     negativeExplicitClear: false,
@@ -589,11 +587,14 @@ function modelDefaultsPatch(
  * the factory default, then to the selected model's own defaults on top.
  *
  * What survives is what the reset is *for* — the user is re-tuning a print they
- * are still composing: the prompt, the style preset, and the selected
+ * are still composing: the prompt, the title they gave it, and the selected
  * model/family. Batch is a general setting and returns to one; prepared work is
- * retained and becomes explicitly stale. Everything else — shape, resolution,
- * detail, prompt strength, seed, and every advanced field including source
- * media, LoRAs and the video suite — goes back to defaults.
+ * retained and becomes explicitly stale. EVERY other setting on the page goes
+ * back to defaults — shape, resolution, detail, prompt strength, seed, camera,
+ * identity, source media, the video suite, and the add-on looks. The looks are
+ * edited from their own row rather than the rail, but they are still a setting
+ * of this render, and a Reset that left one attached would send a look the
+ * user believed cleared.
  */
 export function settingsResetPatch(
   current: GenerateFormState,
@@ -602,7 +603,7 @@ export function settingsResetPatch(
   const base: GenerateFormState = {
     ...defaultForm(),
     prompt: current.prompt,
-    stylePreset: current.stylePreset,
+    title: current.title ?? null,
     model: current.model,
     modelFamily: current.modelFamily,
     batchSize: 1,
@@ -723,9 +724,6 @@ export function applyMetadataToForm(
     // called now.
     title: metadata.title ?? null,
     originalPrompt: metadata.original_prompt ?? null,
-    // Saved metadata already carries the fully-composed prompt (style extras
-    // included at generation time); re-applying a preset would double-append.
-    stylePreset: null,
     // Absence predates truthful recording: on a defaulted model it means the
     // default conditioned the render, so restore shows it rather than
     // silently flipping the reuse into an explicit empty-uncond opt-out.
@@ -1098,10 +1096,10 @@ function load(): GenerateFormState {
         ...defaultForm(),
         ...parsed,
       }),
-      // The preset strip is retired; a draft saved with one would restyle the
-      // prompt invisibly. Reuse already clears it for the same reason.
-      stylePreset: null,
     };
+    // The preset strip is retired and the field with it; a draft saved before
+    // then would otherwise carry a key nothing on screen can show or clear.
+    delete (restored as Record<string, unknown>).stylePreset;
     const camera = normalizeCameraMotionLoraState(
       restored.loras,
       restored.cameraControl,
@@ -1395,14 +1393,6 @@ export function useGenerateForm(): UseGenerateForm {
           MAX_LORA_STACK,
         );
       }
-      // The style preset is baked into the OUTGOING request — prompt template
-      // plus the preset's curated negative, merged after the user's own
-      // fragments and only for families that accept a negative prompt. Neither
-      // field on screen is rewritten.
-      const styled = composeStyle(s.prompt, s.stylePreset ?? "", {
-        supportsNegativePrompt: capabilities.supportsNegativePrompt,
-        negative: s.negativePrompt,
-      });
       // Stripped at the end: an audio-only pipeline renders no frames, so
       // every conditioning input and upscaler still sitting in the form is
       // something the server refuses. Doing it here rather than on the
@@ -1410,22 +1400,21 @@ export function useGenerateForm(): UseGenerateForm {
       // to `t2a` and back.
       const title = validatePrintTitle(s.title ?? "");
       const request: GenerateRequestWire = {
-        prompt: styled.prompt,
+        prompt: s.prompt,
         // The Create title rides every request this form builds (one-shot,
         // batch siblings, prepared variations). Absent when empty or
         // invalid so older servers and untitled prints behave as before.
         ...(title.ok && title.value ? { title: title.value } : {}),
-        ...(s.originalPrompt?.trim() &&
-        s.originalPrompt.trim() !== styled.prompt
+        ...(s.originalPrompt?.trim() && s.originalPrompt.trim() !== s.prompt
           ? { original_prompt: s.originalPrompt.trim() }
           : {}),
         // Tri-state (#787): text equal to the advertised default stays
         // absent (older servers behave identically), a cleared defaulted
-        // field ships the explicit "" opt-out, typed/styled text travels
+        // field ships the explicit "" opt-out, typed text travels
         // verbatim. `null` and omission both read as absent server-side.
         negative_prompt: capabilities.supportsNegativePrompt
           ? (negativePromptWireValue(
-              styled.negative ?? "",
+              s.negativePrompt,
               s.negativePromptDefault ?? "",
               s.negativeExplicitClear ?? false,
             ) ?? null)

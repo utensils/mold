@@ -17,7 +17,6 @@ import {
   settleConfirm,
   useNotifications,
 } from "../lib/toasts";
-import { styleHint } from "../lib/stylePresets";
 import { __testing__ as hostRoutingTesting } from "../composables/useHostRouting";
 import { useHostRouting } from "../composables/useHostRouting";
 import { usePullResume } from "../composables/usePullResume";
@@ -1600,6 +1599,67 @@ describe("CreatePage layout and behavior", () => {
     }
   });
 
+  it("draws a settled print from its keyless host when the canvas holds no bytes", async () => {
+    // A restored done job (persist strips the base64) and a durable completion
+    // both reach the canvas with no `image`; the old source was
+    // `data:image/png;base64,undefined` — a broken picture on every reload.
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [finishedCanvasJob({ image: undefined })];
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+    expect(canvas.props("mode")).toBe("result");
+    expect(canvas.props("resultSrc")).toBe(
+      `/api/gallery/image/${encodeURIComponent(entry.filename)}`,
+    );
+    expect(String(canvas.props("resultVideoSrc") ?? "")).not.toContain(
+      "undefined",
+    );
+  });
+
+  it("streams a settled print from a keyed machine through the media ticket", async () => {
+    // The same door the Lightbox uses: an <img>/<video> cannot send the key,
+    // so a keyed machine issues a short-lived ticket and the clip can
+    // Range-stream instead of being buffered whole into memory.
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "sk-studio",
+    });
+    hostModelsMock.mockResolvedValue([
+      installedModelRow(entry.metadata.model, "flux"),
+    ]);
+    streamJobsRef.value = [
+      { ...finishedCanvasJob({ image: undefined }), hostId: studio.id },
+    ];
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: "t1", expires_at: 1_700_000_000 }),
+    }));
+    globalThis.fetch = fetchMock as never;
+    try {
+      const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+      await flushPromises();
+      const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+      expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+        "http://studio:7680/api/gallery/media-token",
+      );
+      const src = String(canvas.props("resultSrc"));
+      expect(src.startsWith("http://studio:7680/api/gallery/image/")).toBe(
+        true,
+      );
+      expect(src).toContain("media_token=t1");
+      expect(src).toContain("expires=1700000000");
+      expect(src).not.toContain("sk-studio");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("never lets a refused Make 4 leak into the next plain Generate", async () => {
     // Review finding: the count lived in a page-level ref that `onSubmit`'s
     // early return (another submission still planning) never cleared, so the
@@ -1985,6 +2045,41 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.seed).toBe(42);
     expect(form.state.value.negativePrompt).toBe("blurry");
     expect(form.state.value.batchSize).toBe(4);
+  });
+
+  /*
+   * Reset is "reset everything": add-on looks are edited from their own row
+   * rather than the rail, but they are still a setting of this render, and a
+   * Reset that left one attached would send a look the user believed cleared.
+   * The undo puts them back with the rest.
+   */
+  it("clears the add-on looks on reset, and undo restores them", async () => {
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.ControlsAside = defineComponent({
+      name: "ControlsAside",
+      template:
+        "<aside data-test='controls-stub'><button data-test='controls-reset' @click=\"$emit('reset-settings')\">reset</button></aside>",
+    });
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+
+    const form = useGenerateForm();
+    const looks = [
+      { path: "film-grain.safetensors", scale: 0.8, trainedWords: [] },
+    ];
+    form.state.value.prompt = "a lighthouse in a storm";
+    form.state.value.loras = looks;
+
+    await wrapper.get("[data-test='controls-reset']").trigger("click");
+    expect(form.state.value.loras).toEqual([]);
+    expect(form.state.value.prompt).toBe("a lighthouse in a storm");
+
+    const notifications = useNotifications();
+    const settingsToast = notifications.toasts.find((t) =>
+      /settings/i.test(t.text),
+    );
+    runToastAction(settingsToast!.id);
+    expect(form.state.value.loras).toEqual(looks);
   });
 
   it("returns the canvas authority to the model on reset, and undo restores it (#1166)", async () => {
@@ -3195,7 +3290,13 @@ describe("CreatePage layout and behavior", () => {
     ).toHaveLength(3);
   });
 
-  it("sends the active style as a directive on the main-prompt expand", async () => {
+  /*
+   * The composer preset that once travelled as a natural-language style
+   * directive is retired, so the expansion request carries no look at all —
+   * neither in the prompt nor beside it. The batch-expand payload above is
+   * asserted with `toEqual`, which would fail on a style key.
+   */
+  it("opens the rewrite with no style directive to send", async () => {
     hostModelsMock.mockResolvedValue([
       installedModelRow("sdxl-base:fp16", "sdxl"),
     ]);
@@ -3205,7 +3306,6 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.model = "sdxl-base:fp16";
     form.state.value.modelFamily = "sdxl";
     form.state.value.prompt = "a lighthouse";
-    form.state.value.stylePreset = "cinematic";
     await nextTick();
 
     await wrapper.get("[data-test='composer-expand']").trigger("click");
@@ -3213,9 +3313,7 @@ describe("CreatePage layout and behavior", () => {
 
     const modal = wrapper.getComponent({ name: "ExpandModal" });
     expect(modal.props("open")).toBe(true);
-    // The chip travels as natural language the server weaves into the
-    // expander's system message — never as a literal prompt suffix.
-    expect(modal.props("styleDirective")).toBe(styleHint("cinematic"));
+    expect(Object.keys(modal.props())).not.toContain("styleDirective");
   });
 
   it("resolves image-conditioned video expansion without sending source bytes", async () => {
@@ -3239,7 +3337,12 @@ describe("CreatePage layout and behavior", () => {
     expect(JSON.stringify(modal.props())).not.toContain("secret-image-bytes");
   });
 
-  it("bakes and clears the chip when a quick expansion is applied", async () => {
+  /*
+   * A quick expansion rewrites the prompt and nothing else. The bake-and-clear
+   * that used to move a preset's curated negative into the form went with the
+   * preset; the negative the user typed is theirs, before and after undo.
+   */
+  it("rewrites only the prompt on a quick expansion, and undo puts it back", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     const form = useGenerateForm();
@@ -3247,7 +3350,6 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.modelFamily = "sdxl";
     form.state.value.prompt = "a lighthouse";
     form.state.value.negativePrompt = "text";
-    form.state.value.stylePreset = "cinematic";
     await nextTick();
 
     await wrapper.get("[data-test='composer-expand']").trigger("click");
@@ -3258,21 +3360,12 @@ describe("CreatePage layout and behavior", () => {
     await nextTick();
 
     expect(form.state.value.prompt).toBe("storm light over a cinematic coast");
-    // Bake-and-clear: the rewrite absorbed the look, so the chip drops — and
-    // the curated negative moves into the form, its only remaining home.
-    expect(form.state.value.stylePreset).toBeNull();
-    expect(form.state.value.negativePrompt).toBe(
-      "text, anime, cartoon, graphic, washed out",
-    );
-    // Applied exactly once — the cleared chip can't merge it again at submit.
-    expect(form.toRequest().negative_prompt).toBe(
-      "text, anime, cartoon, graphic, washed out",
-    );
+    expect(form.state.value.negativePrompt).toBe("text");
+    expect(form.toRequest().negative_prompt).toBe("text");
 
     await wrapper.get("[data-test='composer-undo']").trigger("click");
     await nextTick();
     expect(form.state.value.prompt).toBe("a lighthouse");
-    expect(form.state.value.stylePreset).toBe("cinematic");
     expect(form.state.value.negativePrompt).toBe("text");
   });
 
@@ -3382,7 +3475,7 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.originalPrompt).toBe("root lighthouse idea");
   });
 
-  it("bakes and clears an active style when a Remix is applied", async () => {
+  it("leaves the typed negative alone when a Remix is applied", async () => {
     hostModelsMock.mockResolvedValue([
       installedModelRow("sdxl-base:fp16", "sdxl"),
     ]);
@@ -3393,7 +3486,6 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.modelFamily = "sdxl";
     form.state.value.prompt = "a lighthouse";
     form.state.value.negativePrompt = "text";
-    form.state.value.stylePreset = "cinematic";
     await nextTick();
 
     wrapper.getComponent({ name: "ComposerCard" }).vm.$emit("remix");
@@ -3415,18 +3507,14 @@ describe("CreatePage layout and behavior", () => {
     });
     await nextTick();
 
-    expect(form.state.value.stylePreset).toBeNull();
-    expect(form.state.value.negativePrompt).toBe(
-      "text, anime, cartoon, graphic, washed out",
-    );
+    expect(form.state.value.negativePrompt).toBe("text");
     expect(form.toRequest()).toMatchObject({
       prompt: "storm light over a cinematic coast",
-      negative_prompt: "text, anime, cartoon, graphic, washed out",
+      negative_prompt: "text",
     });
 
     await wrapper.get("[data-test='composer-undo']").trigger("click");
     await nextTick();
-    expect(form.state.value.stylePreset).toBe("cinematic");
     expect(form.state.value.negativePrompt).toBe("text");
   });
 
@@ -3505,7 +3593,6 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.model = fluxModel.name;
     form.state.value.modelFamily = fluxModel.family;
     form.state.value.prompt = "a lighthouse";
-    form.state.value.stylePreset = "cinematic";
     form.state.value.negativePrompt = "text";
     await nextTick();
     await wrapper.get("[data-test='composer-expand']").trigger("click");
@@ -3514,7 +3601,6 @@ describe("CreatePage layout and behavior", () => {
       .vm.$emit("apply-prompt", "storm light over the harbor");
     await nextTick();
     expect(form.state.value.originalPrompt).toBe("a lighthouse");
-    expect(form.state.value.stylePreset).toBeNull();
     expect(wrapper.find("[data-test='composer-undo']").exists()).toBe(true);
 
     wrapper
@@ -3523,10 +3609,9 @@ describe("CreatePage layout and behavior", () => {
     await nextTick();
 
     // The recalled prompt is the user's own: no banner, no undo, no
-    // provenance, and the chip the bake cleared comes back with its negative.
+    // provenance, and the negative they typed is still theirs.
     expect(form.state.value.prompt).toBe("yesterday's harbour");
     expect(form.state.value.originalPrompt).toBeNull();
-    expect(form.state.value.stylePreset).toBe("cinematic");
     expect(form.state.value.negativePrompt).toBe("text");
     expect(
       wrapper.find("[data-test='web-quick-expansion-stale']").exists(),
@@ -3536,11 +3621,10 @@ describe("CreatePage layout and behavior", () => {
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
     expect(submitMock).toHaveBeenCalledTimes(1);
-    // The re-armed chip applies the look at submit, exactly as it would have
-    // before the expansion ever ran; nothing from the rewrite rides along.
+    // The recalled prompt goes out exactly as recalled; nothing from the
+    // abandoned rewrite rides along.
     const request = submitMock.mock.calls[0]?.[0];
-    expect(request.prompt).toContain("yesterday's harbour");
-    expect(request.prompt).toContain("cinematic");
+    expect(request.prompt).toBe("yesterday's harbour");
     expect(request.original_prompt).toBeUndefined();
     expect(request.prompt_transform).toBeUndefined();
   });
@@ -3692,7 +3776,7 @@ describe("CreatePage layout and behavior", () => {
     });
   });
 
-  it("carries the preset negative when a variation is adopted into the composer", async () => {
+  it("leaves the typed negative alone when a variation is adopted", async () => {
     hostModelsMock.mockResolvedValue([
       installedModelRow("sdxl-base:fp16", "sdxl"),
     ]);
@@ -3703,7 +3787,6 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.modelFamily = "sdxl";
     form.state.value.prompt = "a lighthouse";
     form.state.value.negativePrompt = "text";
-    form.state.value.stylePreset = "cinematic";
     form.state.value.batchSize = 3;
     await nextTick();
 
@@ -3714,13 +3797,8 @@ describe("CreatePage layout and behavior", () => {
     canvas.vm.$emit("use-variation", 0);
     await nextTick();
 
-    // The variation already carries the baked look, so the chip clears — the
-    // curated negative has to come with it.
     expect(form.state.value.prompt).toBe(variations[0]);
-    expect(form.state.value.stylePreset).toBeNull();
-    expect(form.state.value.negativePrompt).toBe(
-      "text, anime, cartoon, graphic, washed out",
-    );
+    expect(form.state.value.negativePrompt).toBe("text");
   });
 
   it("resets to a fresh print on the mold:new-print event, keeping the model", async () => {
@@ -5358,15 +5436,7 @@ function pageStubs() {
     },
     ExpandModal: {
       name: "ExpandModal",
-      props: [
-        "open",
-        "prompt",
-        "expand",
-        "currentModel",
-        "styleDirective",
-        "task",
-        "target",
-      ],
+      props: ["open", "prompt", "expand", "currentModel", "task", "target"],
       template: "<div />",
     },
     ImagePickerModal: {

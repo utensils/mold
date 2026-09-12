@@ -275,7 +275,6 @@ import {
 import { chunkForProbe, planPrewarm, type PrewarmCandidate } from "../lib/gallery/thumbnailPrewarm";
 import { isUpscaledImage } from "../lib/gallery/upscaled";
 import { percent } from "../lib/format";
-import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
   identityConditioningValidationError,
   meshTargetFacesValidationError,
@@ -648,7 +647,6 @@ interface MobileRemixReviewState {
   model: string;
   family: string;
   task: ReturnType<typeof expansionTaskForRequest>;
-  stylePreset: string | null;
   dimensions: RemixDimension[];
   conditioningFingerprint: string;
   selectedHostPolicy: string | null;
@@ -661,7 +659,6 @@ interface MobileRemixReviewState {
 interface MobileRemixUndoSnapshot {
   prompt: string;
   originalPrompt: string | null;
-  stylePreset: string;
 }
 
 interface MobileAppliedRemix {
@@ -1026,12 +1023,6 @@ const remixDimensions = ref<RemixDimension[]>([]);
 const remixReview = ref<MobileRemixReviewState | null>(null);
 const remixUndo = ref<MobileRemixUndoSnapshot | null>(null);
 const appliedRemix = ref<MobileAppliedRemix | null>(null);
-/**
- * The negative prompt before and after a bake-and-clear merged the preset's
- * curated fragments into it. Undo re-arms `before` alongside the prompt and
- * chip; `baked` lets it bow out when the user has since edited the field.
- */
-const quickExpansionNegative = ref<{ before: string; baked: string } | null>(null);
 const preparedSubmitting = ref(false);
 const preparationGuard = new PreparationRequestGuard();
 const submissionAttempts = new MobileSubmissionAttempts();
@@ -1729,15 +1720,12 @@ const currentExpansionTask = computed(() =>
   expansionTaskForRequest(form.family, buildRequest(form)),
 );
 watch(
-  [currentExpansionTask, () => form.stylePreset] as const,
-  ([task], previous) => {
-    const styleLocked = Boolean(form.stylePreset?.trim());
-    const available = remixDimensionsForTask(task, styleLocked);
+  currentExpansionTask,
+  (task, previous) => {
+    const available = remixDimensionsForTask(task);
     const retained = remixDimensions.value.filter((dimension) => available.includes(dimension));
     remixDimensions.value =
-      previous === undefined || retained.length === 0
-        ? defaultRemixDimensions(task, styleLocked)
-        : retained;
+      previous === undefined || retained.length === 0 ? defaultRemixDimensions(task) : retained;
   },
   { immediate: true },
 );
@@ -1827,7 +1815,6 @@ const preparedStaleReasons = computed(() => {
           conditioningFingerprint: conditioningFingerprint(buildRequest(form)),
         }
       : {}),
-    stylePreset: form.stylePreset || null,
     selectedHostPolicy: promptToolHostPolicy.value,
     readyHostIds: new Set(hosts.value.filter((host) => host.online).map((host) => host.id)),
     hostLabels: new Map(hosts.value.map((host) => [host.id, host.name])),
@@ -1898,8 +1885,6 @@ const remixStaleReasons = computed(() => {
     reasons.push(`Conditioning changed from ${review.task} to ${currentExpansionTask.value}.`);
   if (conditioningFingerprint(buildRequest(form)) !== review.conditioningFingerprint)
     reasons.push("Conditioning media changed after this remix was prepared.");
-  if ((form.stylePreset || null) !== review.stylePreset)
-    reasons.push("Style changed after this remix was prepared.");
   if (promptToolHostPolicy.value !== review.selectedHostPolicy)
     reasons.push("Selected machine changed after this remix was prepared.");
   if (JSON.stringify(remixDimensions.value) !== JSON.stringify(review.dimensions))
@@ -5722,7 +5707,6 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     // its prompt; the server derives the mode itself when it is absent.
     context: expansionContextForRequest(form.family, request, promptRecipeFromForm(form)),
     requestedCount: count,
-    stylePreset: form.stylePreset || null,
     selectedHostPolicy: promptToolHostPolicy.value,
   };
 }
@@ -5759,7 +5743,6 @@ function remixInputs(sourceKind: RemixSourceKind = remixSource.value): {
       family: form.family,
       task: currentExpansionTask.value,
       requestedCount: DEFAULT_REMIX_VARIATIONS,
-      stylePreset: form.stylePreset || null,
       selectedHostPolicy: promptToolHostPolicy.value,
     },
     remix,
@@ -6008,19 +5991,10 @@ function commitExpandedPrompts(
       model: inputs.model,
       family: inputs.family,
       task: inputs.task,
-      stylePreset: inputs.stylePreset,
       selectedHostPolicy: inputs.selectedHostPolicy,
       route: { ...route, target: { ...route.target } },
       ...promptToolProvenance(route, expansionRoute),
     };
-    // Bake-and-clear: the rewrite absorbed the style (the server received it
-    // as a directive), so the chip clears here — leaving it lit would apply
-    // the look twice at submit. Prepared batches below KEEP the chip: it is
-    // the frozen-style indicator for the reviewed set (a style change is a
-    // named staleness axis) and their submit path never re-composes it into
-    // the reviewed prompt text.
-    bakeStyleNegative(inputs.stylePreset ?? "", inputs.family);
-    form.stylePreset = "";
     if (replacePrepared) preparedBatch.value = null;
     clearExpansionRecovery(false);
     if (replacePrepared) restoreReplacementFocus(focus, "prompt");
@@ -6095,9 +6069,6 @@ async function expandForCurrentBatch(
   expansionRunning.value = true;
   expansionError.value = "";
   try {
-    // The active chip travels as a natural-language directive the server
-    // weaves into the expander's system message — never the literal suffix.
-    const styleDirective = styleHint(inputs.stylePreset ?? "");
     const response = await expandPrompt(
       inputs.sourcePrompt,
       {
@@ -6105,7 +6076,6 @@ async function expandForCurrentBatch(
         ...(inputs.family ? { modelFamily: inputs.family } : {}),
         task: inputs.task,
         ...(inputs.context ? { context: inputs.context } : {}),
-        ...(styleDirective ? { style: styleDirective } : {}),
       },
       expandOn.target,
     );
@@ -6122,7 +6092,6 @@ async function expandForCurrentBatch(
       current.family !== inputs.family ||
       current.task !== inputs.task ||
       current.requestedCount !== inputs.requestedCount ||
-      current.stylePreset !== inputs.stylePreset ||
       current.selectedHostPolicy !== inputs.selectedHostPolicy ||
       !sameFrozenHost(route, currentHost) ||
       !sameFrozenHost(
@@ -6131,7 +6100,7 @@ async function expandForCurrentBatch(
       )
     ) {
       expansionError.value =
-        "The prompt, model, style, Batch, or host changed while expansion was running. Expand again with the current inputs.";
+        "The prompt, model, Batch, or host changed while expansion was running. Expand again with the current inputs.";
       return;
     }
     commitExpandedPrompts(
@@ -6176,7 +6145,6 @@ function commitRemixReview(
     model: prepared.model,
     family: prepared.family,
     task: prepared.task,
-    stylePreset: prepared.stylePreset,
     dimensions: [...remix.dimensions],
     conditioningFingerprint: remix.conditioningFingerprint,
     selectedHostPolicy: prepared.selectedHostPolicy,
@@ -6237,7 +6205,6 @@ async function remixCurrent(
   expansionRunning.value = true;
   expansionError.value = "";
   try {
-    const styleDirective = styleHint(prepared.stylePreset ?? "");
     const response = await remixPrompt(
       {
         source_prompt: remix.sourcePrompt,
@@ -6247,7 +6214,6 @@ async function remixCurrent(
         variations: DEFAULT_REMIX_VARIATIONS,
         task: prepared.task,
         ...(prepared.context ? { context: prepared.context } : {}),
-        ...(styleDirective ? { style: styleDirective } : {}),
         dimensions: [...remix.dimensions],
       },
       expandOn.target,
@@ -6309,9 +6275,7 @@ function replacePreparedPrompts(useFrozenRoute: boolean): void {
     return;
   }
   remixSource.value = batch.sourceKind ?? "current";
-  remixDimensions.value = [
-    ...(batch.dimensions ?? defaultRemixDimensions(batch.task, Boolean(batch.stylePreset))),
-  ];
+  remixDimensions.value = [...(batch.dimensions ?? defaultRemixDimensions(batch.task))];
   void remixCurrent(
     useFrozenRoute
       ? { route: batch.route, expansionRoute: batch.expansionRoute ?? batch.route }
@@ -6338,7 +6302,6 @@ function rememberRemixUndo(): void {
   remixUndo.value = {
     prompt: form.prompt,
     originalPrompt: form.originalPrompt,
-    stylePreset: form.stylePreset,
   };
 }
 
@@ -6353,8 +6316,6 @@ function applyRemixSelection(): void {
     submissionAttempts.invalidate();
     form.prompt = selected[0]!.prompt.trim();
     form.originalPrompt = review.rootPrompt ?? review.sourcePrompt;
-    bakeStyleNegative(review.stylePreset ?? "", review.family);
-    form.stylePreset = "";
     quickExpansionOriginal.value = null;
     quickExpansionSnapshot.value = {
       requestToken: review.requestToken,
@@ -6363,7 +6324,6 @@ function applyRemixSelection(): void {
       model: review.model,
       family: review.family,
       task: review.task,
-      stylePreset: review.stylePreset,
       selectedHostPolicy: review.selectedHostPolicy,
       route: { ...review.route, target: { ...review.route.target } },
       ...promptToolProvenance(review.route, review.expansionRoute ?? review.route),
@@ -6392,7 +6352,6 @@ function applyRemixSelection(): void {
     family: review.family,
     task: review.task,
     requestedCount: selected.length,
-    stylePreset: review.stylePreset,
     selectedHostPolicy: review.selectedHostPolicy,
   };
   preparedBatch.value = createPreparedExpansionBatch(
@@ -6444,7 +6403,6 @@ function undoPromptPreparation(): void {
   preparationGuard.invalidate();
   form.prompt = snapshot.prompt;
   form.originalPrompt = snapshot.originalPrompt;
-  form.stylePreset = snapshot.stylePreset;
   remixUndo.value = null;
   appliedRemix.value = null;
   quickExpansionSnapshot.value = null;
@@ -6453,37 +6411,10 @@ function undoPromptPreparation(): void {
   clearExpansionRecovery();
 }
 
-/**
- * Bake-and-clear owes the user the preset's curated negative: the chip is
- * about to be dropped, so submit-time composition will never see it again.
- * The look itself already reached the rewritten prompt through the expansion
- * directive — only the negative half has nowhere else to live (mirrors
- * desktop).
- */
-function bakeStyleNegative(presetId: string, family: string): void {
-  quickExpansionNegative.value = null;
-  const merged = mergeStyleNegative(form.negativePrompt, presetId, {
-    supportsNegativePrompt: generationCapabilitiesForFamily(family).supportsNegativePrompt,
-  });
-  if (merged === form.negativePrompt) return;
-  quickExpansionNegative.value = { before: form.negativePrompt, baked: merged };
-  form.negativePrompt = merged;
-}
-
 function restoreQuickExpansion(): void {
   if (quickExpansionOriginal.value === null) return;
   submissionAttempts.invalidate();
   preparationGuard.invalidate();
-  // Undo re-arms the whole pre-expansion state, including the chip the
-  // bake-and-clear apply removed and the negative fragments it merged in —
-  // unless the user has edited the negative since, which is theirs to keep.
-  const snapshot = quickExpansionSnapshot.value;
-  if (snapshot) form.stylePreset = snapshot.stylePreset ?? "";
-  const negative = quickExpansionNegative.value;
-  if (negative && form.negativePrompt === negative.baked) {
-    form.negativePrompt = negative.before;
-  }
-  quickExpansionNegative.value = null;
   form.prompt = quickExpansionOriginal.value;
   form.originalPrompt = null;
   quickExpansionOriginal.value = null;
@@ -6593,11 +6524,6 @@ function collapsePreparedBatch(removedId: string): void {
   form.batchSize = 1;
   form.prompt = remaining.text;
   form.originalPrompt = batch.sourcePrompt;
-  // Same bake-and-clear rule as a quick apply: the surviving reviewed text
-  // absorbed the frozen style, so keeping the chip would re-apply the look —
-  // and the frozen style's negative moves into the form with it.
-  bakeStyleNegative(batch.stylePreset ?? "", batch.family);
-  form.stylePreset = "";
   quickExpansionOriginal.value = batch.sourcePrompt;
   quickExpansionSnapshot.value = null;
   if (restoreFocus) {
@@ -6728,9 +6654,6 @@ async function retryExpansionAfterPull(): Promise<void> {
   expansionRunning.value = true;
   expansionError.value = "";
   try {
-    // The immutable recovery record owns the style: a resumed pull re-requests
-    // with exactly the directive the user saw frozen, not the live chip.
-    const styleDirective = styleHint(recovery.inputs.stylePreset ?? "");
     const response = recovery.remix
       ? await remixPrompt(
           {
@@ -6741,7 +6664,6 @@ async function retryExpansionAfterPull(): Promise<void> {
             variations: DEFAULT_REMIX_VARIATIONS,
             task: recovery.inputs.task,
             ...(recovery.inputs.context ? { context: recovery.inputs.context } : {}),
-            ...(styleDirective ? { style: styleDirective } : {}),
             dimensions: [...recovery.remix.dimensions],
           },
           recovery.route.target,
@@ -6753,7 +6675,6 @@ async function retryExpansionAfterPull(): Promise<void> {
             ...(recovery.inputs.family ? { modelFamily: recovery.inputs.family } : {}),
             task: recovery.inputs.task,
             ...(recovery.inputs.context ? { context: recovery.inputs.context } : {}),
-            ...(styleDirective ? { style: styleDirective } : {}),
           },
           recovery.route.target,
         );
@@ -7044,19 +6965,6 @@ async function generate(): Promise<void> {
     draft.guidanceCapabilities,
     draft.sourceImageCapability,
   );
-  // The composer style preset is baked into the OUTGOING request at submit —
-  // the textarea and negative field are never mutated. Reviewed prepared
-  // prompts ship verbatim (the style already reached them through the
-  // expansion directive; staleness pins the chip to the frozen style), so the
-  // prompt half only applies to the ordinary path. The preset negative is
-  // separate from the reviewed prompt text and merges for BOTH paths, gated
-  // on the family's negative-prompt support (mirrors desktop).
-  const styled = composeStyle(draft.prompt, draft.stylePreset, {
-    supportsNegativePrompt: draftCaps.supportsNegativePrompt,
-    negative: draft.negativePrompt,
-  });
-  if (!preparedSubmission) draft.prompt = styled.prompt;
-  draft.negativePrompt = styled.negative ?? "";
   const batchSize = preparedSubmission
     ? preparedSubmission.prompts.length
     : draftCaps.forcesBatchSizeOne

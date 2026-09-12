@@ -99,16 +99,22 @@ describe("mobile composer persistence", () => {
   });
 
   it("never restores a saved prompt preset — the chips that showed it are gone", async () => {
-    // A draft saved before the preset strip was retired would restyle the
-    // prompt at submit with no control left to show or clear it.
+    // A draft written before the preset retired still carries the key. It
+    // would restyle the prompt at submit with no control left to show or
+    // clear it, so restore tolerates the extra key and drops it.
     const h = harness();
-    const form = newGenerateForm();
-    form.prompt = "a cat";
-    form.stylePreset = "cinematic";
-    expect(await h.draft.save(form, "manual")).toBe(true);
+    h.metadata.set(
+      MOBILE_COMPOSER_DRAFT_KEY,
+      JSON.stringify({
+        version: 1,
+        revision: "legacy-1",
+        canvasIntent: "manual",
+        form: { prompt: "a cat", stylePreset: "cinematic" },
+      }),
+    );
     const restored = await createMobileComposerDraft(h.dependencies).restore();
     expect(restored.form?.prompt).toBe("a cat");
-    expect(restored.form?.stylePreset).toBe("");
+    expect("stylePreset" in restored.form!).toBe(false);
   });
 
   it("commits media before metadata, and preserves the last good draft if media fails", async () => {
