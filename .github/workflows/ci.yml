@@ -848,16 +848,19 @@ jobs:
           shared-key: workspace-default
           save-if: false
       - name: Typecheck the CUDA forced-local and server paths
-        # Every cfg arm the shipping Linux build enables, spelled as `h3,cuda`
-        # rather than `h3-cuda`: mold's own crates carry no `h3-cuda`-only cfg
-        # site, and `h3-cuda` pulls in flash-attn's 53 nvcc kernels plus the
-        # fused H3 kernel, which a cold 4-vCPU runner could not finish inside
-        # 60 minutes (PR #1713's final run was cancelled at the timeout).
-        # `cudnn` is omitted because cudarc needs the cuDNN headers at build
-        # time and mold's crates carry no `cudnn` cfg arm. The `h3` arm matters:
-        # it guards 300+ cfg sites in mold-server and mold-cli, and a change
-        # broke one of them while a `cuda`-only typecheck stayed green.
-        run: cargo check -p mold-ai --features h3,cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
+        # The `cuda` cfg arm with every non-H3 shipping feature. The H3 arm is
+        # NOT here on purpose: mold-server's build fence accepts `h3` beside
+        # `cuda` only as the full reviewed `h3-cuda` set, and `h3-cuda` pulls
+        # in flash-attn's 53 nvcc kernels plus the fused H3 kernel, which a
+        # cold hosted runner cannot finish inside the timeout (PR #1713's
+        # final run was cancelled at 60 min; #1714's `h3,cuda` spelling was
+        # refused by the fence). The `h3` cfg sites — 300+ in mold-server and
+        # mold-cli, none of them `all(h3, cuda)` — are compiled on the PR route
+        # by `metal-check` (`h3,…,metal` on macOS), so the two jobs together
+        # cover every GPU cfg arm that ships. `cudnn` is omitted because cudarc
+        # needs the cuDNN headers at build time and mold's crates carry no
+        # `cudnn` cfg arm.
+        run: cargo check -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
   metal-check:
     name: Metal forced-local typecheck

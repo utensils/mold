@@ -68,6 +68,10 @@ pub fn prefetch_enabled_from_env() -> bool {
     }
 }
 
+// Only the Linux reader (and its tests) consult these; on Metal the host
+// question is answered by `available_system_memory_bytes`, and a helper that
+// no target calls is an error under the Metal clippy job.
+#[cfg(any(target_os = "linux", test))]
 /// Parse one `/proc/meminfo` field, in bytes.
 ///
 /// Pure so the platform reader is testable without a `/proc`: every fixture in
@@ -92,6 +96,10 @@ fn meminfo_field_bytes(field: &str) -> Option<u64> {
     parse_meminfo_field_bytes(&std::fs::read_to_string("/proc/meminfo").ok()?, field)
 }
 
+// Only the Linux reader (and its tests) consult these; on Metal the host
+// question is answered by `available_system_memory_bytes`, and a helper that
+// no target calls is an error under the Metal clippy job.
+#[cfg(any(target_os = "linux", test))]
 /// Headroom left inside this process's memory cgroup, given its limit and
 /// current charge.
 ///
@@ -108,6 +116,10 @@ fn cgroup_headroom_bytes(limit: Option<u64>, current: Option<u64>) -> Option<u64
     Some(limit.saturating_sub(current))
 }
 
+// Only the Linux reader (and its tests) consult these; on Metal the host
+// question is answered by `available_system_memory_bytes`, and a helper that
+// no target calls is an error under the Metal clippy job.
+#[cfg(any(target_os = "linux", test))]
 /// Parse a cgroup memory file that holds a single number, or the literal
 /// `max` (cgroup v2) / a sentinel at or above `PAGE_COUNTER_MAX` (cgroup v1,
 /// which writes `9223372036854771712` for "unlimited").
@@ -179,7 +191,10 @@ pub fn available_system_ram_bytes() -> Option<u64> {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+// macOS answers the host question through `available_system_memory_bytes`
+// and never calls this, so the stub exists only for the other non-Linux
+// targets — declaring it on macOS is dead code under `-D warnings`.
+#[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
 pub fn available_system_ram_bytes() -> Option<u64> {
     None
 }
