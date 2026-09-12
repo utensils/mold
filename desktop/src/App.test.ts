@@ -112,6 +112,87 @@ describe("App — launch", () => {
 });
 
 /*
+ * The subscription follows the FLEET, not this device. Remote-only is a
+ * supported configuration — the built-in engine off, or failed to start — and
+ * gating the whole subscription on `connection.ready` meant no machine got a
+ * stream and the badge counted nothing, on machines that were perfectly
+ * reachable. The capability probe and the old-server poller stay the
+ * primary's; only the subscription's lifecycle moves.
+ */
+describe("App — fleet event subscription", () => {
+  /** One ready remote, and this device's engine not running. */
+  function remoteOnlyFleet() {
+    const conn = useConnectionStore();
+    conn.info = null;
+    conn.status = "error";
+    useHostsStore().extras = [
+      {
+        id: "plato",
+        label: "plato",
+        url: "http://plato:7680",
+        apiKey: "plato-key",
+        status: "ready",
+        error: null,
+        instanceId: "i-plato",
+      },
+    ];
+  }
+
+  it("subscribes when a machine is ready even though this device's engine is not", async () => {
+    const events = useEventsStore();
+    const resubscribe = vi.spyOn(events, "resubscribe").mockResolvedValue(undefined);
+    await mountApp();
+    expect(useConnectionStore().ready).toBe(false);
+
+    remoteOnlyFleet();
+    await nextTick();
+
+    expect(resubscribe).toHaveBeenCalled();
+  });
+
+  it("does not tear the fleet's streams down when this device's engine drops", async () => {
+    const events = useEventsStore();
+    vi.spyOn(events, "resubscribe").mockResolvedValue(undefined);
+    await mountApp();
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "ready";
+    useHostsStore().extras = [
+      {
+        id: "plato",
+        label: "plato",
+        url: "http://plato:7680",
+        apiKey: "plato-key",
+        status: "ready",
+        error: null,
+        instanceId: "i-plato",
+      },
+    ];
+    await nextTick();
+    vi.mocked(events.unsubscribe).mockClear();
+
+    conn.status = "error";
+    await nextTick();
+
+    expect(events.unsubscribe).not.toHaveBeenCalled();
+  });
+
+  it("unsubscribes once no machine is ready", async () => {
+    vi.spyOn(useEventsStore(), "resubscribe").mockResolvedValue(undefined);
+    await mountApp();
+    const events = useEventsStore();
+    remoteOnlyFleet();
+    await nextTick();
+    vi.mocked(events.unsubscribe).mockClear();
+
+    useHostsStore().extras[0]!.status = "error";
+    await nextTick();
+
+    expect(events.unsubscribe).toHaveBeenCalled();
+  });
+});
+
+/*
  * The Dock badge answers "what landed while you were away", fleet-wide, and
  * clears the moment the window comes back — the way a messages badge does.
  * It deliberately no longer counts this app's own pending jobs: a long clip

@@ -85,12 +85,24 @@ const jobs = useJobsStore();
 const landed = useLandedPrintsStore();
 const libraryPrefs = useLibraryPrefsStore();
 
-// App-wide server-event subscription (live gallery). Re-probe whenever the
-// engine target changes — a different host may not support /api/events.
+// App-wide server-event subscription: the live gallery, and the Dock badge's
+// count of prints that landed anywhere. It follows the FLEET, not this device.
+// Remote-only is a supported configuration — the built-in engine off, or it
+// failed to start — and gating the subscription on `connection.ready` meant no
+// machine got a stream and the badge counted nothing, on machines that were
+// perfectly reachable; this device dropping later tore every remote's stream
+// down with it. Which machines get a stream is `syncHostStreams`'s decision;
+// the capability probe and the old-server poller stay the primary's, and the
+// primary's target changing still re-probes, because a different server may
+// not support /api/events.
 watch(
-  () => [connection.ready, connection.baseUrl] as const,
-  ([ready]) => {
-    if (ready) void events.resubscribe();
+  () =>
+    [
+      hostsStore.all.some((host) => host.status === "ready" && host.baseUrl),
+      connection.baseUrl,
+    ] as const,
+  ([anyReady]) => {
+    if (anyReady) void events.resubscribe();
     else events.unsubscribe();
   },
 );
