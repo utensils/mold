@@ -11,6 +11,1256 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-12
+
+- **FLUX.1 and FLUX.2 are fast by default on CUDA.** Both families now render
+  through FlashAttention-2 wherever the kernel is compiled in and their VAE
+  convolutions take cuDNN wherever that feature is compiled in. Every shipped
+  qualified Linux CUDA build compiles both — the sm86, sm89 and sm100 release
+  archives, the `mold`/`mold-sm86`/`mold-sm100` Nix packages, their container
+  and AUR builds, and the matching Linux desktop packages. Before this, only
+  the sm89 `h3-cuda` artifact carried the flash kernel, which left an RTX
+  3090/A40 and a B200 with this release's byte change and none of its speedup:
+  FLUX's math path folds the softmax scale into K whether or not the kernel is
+  there. **`mold-sm120` (RTX 50-series) deliberately stays on math attention**
+  — FlashAttention picks its tile from a runtime test that reads consumer
+  Blackwell as a datacenter part with far more shared memory than it has, and
+  nobody has measured the result on that hardware — so it takes the byte change
+  without the speedup until someone does. A binary you build yourself with
+  `--features cuda` and no `flash-attn`, and every Metal build, are in the same
+  position; add `flash-attn` to a source build's feature list on sm86, sm89 or
+  sm100.
+  Every other still family — SD1.5, SDXL, SD3, Qwen-Image, Z-Image, LTX-Video,
+  Hunyuan3D, MiniMax-H3 — keeps the byte-stable math/im2col defaults it has
+  always had, unchanged in every build.
+  `MOLD_ATTN=math` and `MOLD_CONV=im2col` remain the opt-outs and remain the
+  cross-build determinism contract going forward.
+- **A FLUX print archived before this release will not re-render byte-for-byte
+  after it, under any setting.** Flash attention, cuDNN convolutions and the
+  folded softmax scale all change reduction order, and restoring the old bytes
+  would mean keeping the code path this release deletes. Renders made from here
+  on are reproducible among themselves — same seed, same settings, same
+  backend, same bytes — and the execution plan records which convolution
+  backend and which attention kernel actually ran, so two renders that differ
+  are never silently filed as the same execution. Dense BF16 FLUX.1 is the one
+  exception: it attends through upstream Candle, which has no policy hook, so
+  it stays on math.
+- **FLUX.1 GGUF renders in BF16 on CUDA, through one transformer.** Every GGUF
+  load — with or without a LoRA — now goes through mold's own transformer;
+  the candle fork's quantized model, which the commonest no-LoRA render used
+  to take, carried no attention-backend switch and F32 norm weights, so that
+  render could reach neither FlashAttention nor half-precision activations
+  however the binary was built. The two were verified bit-identical before the
+  old path was deleted. Activations follow the working dtype instead of being
+  pinned to F32, which halves the bandwidth every matmul moves; the weights
+  stay quantized in VRAM exactly as before. `MOLD_WAN_FORCE_DMMV=1` still
+  forces F32, because the fallback it selects reads activations as f32.
+- **Flux.2 GGUF renders in BF16 and no longer scrubs NaN after every linear.**
+  The GGUF transformer wrapped all eighteen of its linear sites in a full-tensor
+  NaN compare, a zeros allocation and a `where_cond` — copied from SD3 without a
+  Flux.2 NaN ever having been observed, and measured at about half a second per
+  step. It is gone, and masking a non-finite value was the wrong shape anyway: a
+  transformer emitting NaN has a bug, and zeroing the element turns a loud
+  failure into a quietly wrong picture. `MOLD_FLUX_DEBUG_NONFINITE=1` replaces
+  it with one check per denoise STEP that names the step and fails — off by
+  default, and available for FLUX.1 too. Activations now follow the working
+  dtype (BF16 on CUDA) instead of being cast to F32 at the transformer
+  boundary; position ids stay F32, because the rotary embedding is built from
+  them. `MOLD_FLUX2_QMATMUL=0` restores the per-forward dequantization arm if a
+  render comes out wrong.
+- **A `--lora` on a prompt-only render is no longer a silent no-op over the
+  server.** Durable admission seals every request authority it later scrubs off
+  the copy it hands the GPU worker, but the predicate deciding whether to seal
+  anything at all counted only conditioning media — so a text-to-image render
+  with an adapter sealed nothing, lost the adapter on its way to the worker,
+  and produced pixels byte-identical to the same prompt with no LoRA while its
+  print recorded none. Every LoRA-capable family was affected, FLUX.1 and
+  FLUX.2 included; a LoRA beside an image, mask or video source always worked,
+  and `--local` was never affected.
+- **An LTX-2 built-in control render applies its control adapter again.** The
+  server resolves the built-in IC-LoRA itself, after durable admission has
+  already sealed the request's media set, so the publication scrub took it with
+  the caller's adapters and nothing could hand it back: `--control depth` and
+  its siblings rendered over the server with no control adapter at all. The
+  adapter now travels with the job and is restored at dispatch, ahead of the
+  caller's own stack rather than instead of it.
+- **A per-model default LoRA is applied again on a render that carries a source
+  image.** An adapter set once with `mold config set models.<model>.lora` is not
+  part of any request, so nothing in the durable queue's encrypted media set
+  could hand it back at dispatch — and a render carrying conditioning media
+  (img2img, inpaint, a control image, a video source, references or keyframes)
+  reached the GPU with no adapter at all, while the plan had already reserved
+  its memory. The default is now restored at dispatch, and a `--lora` passed
+  with the request still wins over it exactly as it does locally.
+- **A `--lora` render now requires the encrypted request-media store.** This is
+  the other side of the fix above: because the adapter is sealed like any other
+  request authority, a host whose durable media store is unavailable answers
+  `503 DURABLE_MEDIA_UNAVAILABLE` for a LoRA render instead of quietly
+  rendering without the adapter. Correct, and a visible behaviour change on a
+  degraded store — the render is refused rather than silently wrong.
+- **FLUX.2's FP8 tiers stop re-widening every weight on every forward.** An FP8
+  layer cast its whole one-byte-per-parameter slab up to the working dtype on
+  every call, so the tier chosen to save VRAM was paying full BF16 bandwidth
+  for its weights and allocating a transient full-size copy hundreds of times a
+  step. Where the card has the room the widening now happens ONCE at load and
+  the packed slab is dropped, which is bit-for-bit the same arithmetic — the
+  per-tensor scale still rides the matmul output, exactly where it did. The
+  decision is a measured budget with the card's free VRAM on one side, so a
+  24 GB card widens Klein-4B and leaves a 32 GB dev checkpoint alone;
+  `MOLD_FLUX2_FP8_CACHE=1` or `=0` forces it either way.
+- **An undistilled FLUX.2 [klein] base render guides in one forward per step
+  instead of two.** Both branches denoise the same latent, so they ride one
+  batch-2 forward and every weight is read once for the pair — Black Forest
+  Labs' own sampler does this and mold was following diffusers, which does not.
+  A guided base render is now much closer in cost to an unguided one rather
+  than roughly double. mold falls back to the old two forwards when the doubled
+  activations would not fit beside the weights on this card; the progress line
+  names which shape ran — `one batched forward per step` or `two forwards per
+step` — and names no cause, because the budget is the only one a real render
+  meets. (Both branches must also be the same length, but every Klein prompt is
+  padded to a fixed 512 rows, so that gate survives only as a structural guard.)
+  `--guidance 1` still skips the branch entirely.
+- **FLUX renders spend far less time in norms, rotary embeddings and the VAE's
+  attention.** Candle's fused normalization kernels were being missed
+  everywhere in both families — the Q/K norms ran on a transposed view and the
+  affine-less LayerNorms had no bias, and each miss cost about ten kernel
+  launches and seven passes over the tensor instead of one. The rotary
+  embedding now uses candle's fused interleaved kernel where the layout allows
+  and falls back to the previous arithmetic where it does not. FLUX.2's double
+  blocks issue one fused Q/K/V projection per stream rather than three, and the
+  VAE's mid-block attention no longer materialises a full 16384x16384 score
+  matrix during decode — the spike that used to push a loaded card into the
+  much slower tiled-decode recovery.
+- **Every FLUX.2 render's conditioning now matches Black Forest Labs.** Two
+  things were wrong and both changed the picture. Text tokens were all given
+  position zero, so the transformer could not tell the first word of a prompt
+  from the last; they now carry a running index on their own axis, which is
+  what BFL, diffusers and ComfyUI all do. And a FLUX.2 [klein] prompt was
+  handed to the transformer at whatever length it happened to tokenize to,
+  where upstream truncates and pads it to a fixed 512 rows and masks the
+  padding out of the language model — mold's FLUX.2 [dev] path already did
+  this, and now both tiers agree. **Klein and dev renders change**: the same
+  seed and settings produce a different, better-conditioned picture than the
+  same command did before this release. Prompt adherence improves most on long
+  prompts, where the missing positions cost the most. A side effect is that
+  every undistilled [klein] base render now takes the fast batched
+  classifier-free-guidance path, since both branches are the same length by
+  construction — the progress line reads "one batched forward per step".
+- **FLUX.1 computes its rotary embedding in float32, as upstream does.** It
+  previously built one in whatever dtype the render used, so a half-precision
+  render computed every sine and cosine of every token position with eight bits
+  of mantissa. FLUX.2 was already correct here.
+
+- **The FLUX transformer stays on the card when it fits.** Both families used
+  to drop it before every VAE decode and rebuild it on the next render,
+  whatever the GPU had room for — 8.4 s per print for a FLUX.1 Q8 and 34 s for
+  a FLUX.2 Q8 on an idle 46 GB card, and up to ~95 GB of host RAM for a LoRA
+  rebuild. The decision is now a measurement taken per render: the resident
+  checkpoint, the denoise workspace, the VAE decode workspace and an allocator
+  margin against the card's usable free VRAM. FLUX renders are capped at 1.8
+  megapixels (1328x1328 at the square), so across the whole range mold will
+  actually render the answer comes down to the checkpoint and the card: a 24 GB
+  card keeps a FLUX.1 Q8 tier (~12.6 GB) resident and never has room for the
+  BF16 one (~23.8 GB), a 46 GB card keeps the BF16 tier as well, and for FLUX.2
+  a 46 GB card keeps a 33 GB Q8 [dev] transformer where a 24 GB card never does
+  though it does keep a Q8 Klein tier, 4B or 9B. The
+  FLUX.2 sequential path — [dev], references, a LoRA, a source image — retains
+  it across renders too, reusing it only when the LoRA stack, the working
+  precision, the GPU and the resolved architecture all match, and releasing it
+  before the text encoder streams whenever the two would not fit together. A
+  prompt-cache hit runs no encoder at all, so repeated prompts and batches
+  render with neither a reload nor an encode. `MOLD_FLUX_KEEP_TRANSFORMER`
+  changes meaning: `0` (also `off`, `false`, `no`) forces the old drop, and `1`
+  (also `on`, `true`, `yes`) now means the same as the default, because an
+  explicit keep has always had to yield to a card that cannot afford it. **Both
+  families read it through one function** — FLUX.2 resolved the budget directly
+  and never read the variable at all, so on a card whose budget said "keep"
+  there was no way to say "don't". The execution fingerprint records the residency you ASKED
+  for — `0` is its own execution class and unset and `1` share the other — so a
+  forced drop is never filed with a budgeted render; the budget's own verdict is
+  a per-render VRAM measurement and is reported in the server log rather than
+  hashed into the plan. The GGUF activation width and the FLUX.2 CFG shape ARE
+  the resolved answers, so two renders that differ in either are never filed as
+  the same execution. That budget charges what the card is HOLDING rather than
+  what the checkpoint weighs on disk, on both families: off CUDA a dense
+  checkpoint is materialized at F32 whatever the file stores, so a BF16
+  Klein-9B is ~36 GB of weights on a Mac and not its ~18 GB file, and a FLUX.2
+  FP8 tier widened once at load holds two bytes per parameter where the file
+  holds one — the same figure the server's own estimates charge. A GGUF keeps
+  its quantized bytes and is unchanged.
+- **A FLUX identity render no longer fails at the first denoise step.** The
+  eager `--id-image` path kept its own copy of the old rule that a quantized
+  FLUX transformer runs its state tensors in F32. Once the GGUF path stopped
+  pinning F32, the PuLID adapter met BF16 activations with an F32 weight and
+  bias and every identity render died with "dtype mismatch in ternary op",
+  while the same request rendered on the previous build. One function now
+  answers what dtype a render's state tensors carry, and both the conditioning
+  cast and the identity site ask it.
+- **The desktop app's Speed & memory settings cover the new knobs.** Attention
+  backend, convolution backend, FLUX transformer residency, the Flux.2
+  quantized fast path, Flux.2 FP8 weight widening, PNG encoding and the
+  graphics memory held back for the driver (`MOLD_RESERVE_VRAM_MB`) join live
+  previews, text encoder parking, tiled VAE decode, block offloading and the
+  queue window, and they say what their automatic setting actually does — the
+  attention and convolution defaults are PER FAMILY, not one answer for every
+  style. Parking text encoders becomes a three-way choice to match the engine.
+  Each row still applies to this device's built-in engine and still needs an
+  engine restart. A test now reads the Tauri side's allowlist and requires the
+  two lists to be the SAME SET, so a control the app offers can never be one
+  the engine never receives — and an engine knob can no longer sit copied but
+  unoffered, which is exactly how the memory reserve went missing.
+
+- **A large BF16 FLUX.1 checkpoint no longer streams its blocks on a card that
+  can hold it.** The auto-offload decision was a file-size test with no
+  availability arm, so a 23.8 GB `:bf16` tier paid the documented 3-5x
+  streaming penalty on a 46 GB GPU with room for the whole thing. It now asks
+  the same two-step question its FLUX.2 sibling already asked.
+- **An XLabs-format FLUX.1 LoRA now fails loudly instead of rendering without
+  the adapter.** mold's key matcher accepts the diffusers/PEFT
+  (`lora_A`/`lora_B`), Kohya (`lora_down`/`lora_up`), OneTrainer and
+  PEFT-default conventions, and has never accepted XLabs-AI's
+  `double_blocks.N.processor.*_lora*.{down,up}.weight` layout. Such an adapter
+  used to be discarded before it reached the parser, so the render succeeded
+  with no LoRA applied at any scale; now it reaches the parser and the request
+  fails, naming the layout it saw and pointing at the exports that do load.
+  This is a behaviour change for anyone who was unknowingly rendering without
+  their adapter — use a diffusers/PEFT or Kohya export of the same LoRA.
+
+- **A FLUX.2 LoRA render is no longer refused on a card big enough to load the
+  model eagerly.** The preload gate read the engine's configured load strategy
+  while the render itself is chosen by the request — a LoRA is merged into the
+  transformer as it is built, so a LoRA request always takes the sequential
+  path whatever the strategy says. On a large card the two disagreed and a
+  `flux2-klein` + `--lora` render failed outright with "Flux.2 LoRA requests
+  require a sequential engine load plan", both on the first attempt and on the
+  retry. The gate now asks the same question the render asks and simply defers
+  the preload, so the adapter is applied by the sequential load that follows.
+  Plain FLUX.2 renders and the FLUX.1 LoRA path are unchanged.
+
+- **One model's numerical failure no longer takes the whole GPU out of
+  service.** A worker that failed three times in a row was marked degraded and
+  stopped scheduling anything for 60 seconds — the right answer for a card that
+  is wedged or faulting, and the wrong one for a checkpoint that produces a
+  NaN. Three non-finite `flux2-dev:q8` renders on a single-GPU host left
+  `/api/devices` reporting `health: "degraded"` and answered the next twelve
+  requests, for other models, with "no enabled, healthy GPU device is
+  available". Failures the engine reports as belonging to the model or the
+  request now hold that **model on that GPU** instead, with the same
+  three-strike, 60-second shape: the device stays healthy and schedulable,
+  every other model keeps rendering on it, a multi-GPU host routes the held
+  model to another card, the refusal names the model rather than the GPU, and
+  a successful render clears the strikes. Driver faults, CUDA errors and
+  out-of-memory still count against the device exactly as before, as does any
+  failure the engine has not classified.
+- **FLUX.2 renders are planned against the transformer that runs them, so a
+  FLUX.2 [dev] job no longer runs out of GPU memory two minutes into the
+  denoise** ([#1707](https://github.com/utensils/mold/issues/1707)). The memory
+  a FLUX.2 denoise needs was estimated with FLUX.1's per-pixel model, which
+  knows nothing about the transformer's width: 273 MB charged at 1024x1024 for
+  a working set three quantizations independently measure at ~3.0 GB. On a
+  46 GB L40S that let `flux2-dev:q8` be admitted at ~38 GB and die in CUDA
+  partway through the denoise, while the same shape had completed nine times
+  before. Every FLUX.2 tier is now priced from its own geometry, and a render
+  that cannot fit is refused at submit time with a reason instead of after a
+  two-minute load. The same shape with a reference image — the one that failed
+  — is now refused up front.
+- **A failed render no longer teaches the planner that its shape needs the
+  whole card.** The learned memory envelope absorbed the high-water mark of
+  attempts that ran OUT of memory, which is a measurement of the GPU, not of
+  the job. After two failures, `flux2-dev:q8` was re-planned at ~46.5 GB on a
+  ~46.1 GB card and every retry was refused with a figure that could never fit,
+  until the row aged out. Failures are still recorded, and a shape that has
+  never succeeded still learns a floor from them; a shape with completed runs
+  keeps the evidence those runs produced.
+- **Out-of-memory messages say what actually happened.** A plan that exceeds
+  the GPU's own capacity now says so and names both figures, instead of
+  reporting "memory pressure changed after scheduler admission" on a card
+  nothing else was using. A FLUX.2 job that could not stream its transformer
+  says why — GGUF tiers have no block-streaming path — rather than leaving it
+  to be guessed.
+- **The scheduler and the model loader now agree on how much VRAM is
+  available.** Admission planned against the raw driver reading while every
+  pre-load check subtracted the reserve set by `MOLD_RESERVE_VRAM_MB`, so a job
+  could be admitted and then refused at load with nothing having changed. The
+  reserve is now subtracted once, where the scheduler's capacity is computed.
+- A malformed or truncated `.safetensors` file no longer takes the server down.
+  Probing a FLUX.2 checkpoint's header trusted the length the file declared and
+  allocated it, so a placeholder or a half-finished download could abort the
+  process; an unreadable header is now handled the same way an unrecognised one
+  always was.
+- **A retained transformer no longer wedges the queue behind itself.** A FLUX.2
+  [dev] engine holds ~34 GB of weights on a card with room for them, and
+  admission was offered raw free VRAM: the IDENTICAL next request — the one
+  that would have reused those weights without loading anything — was reported
+  `queued generation is blocked on memory` once a second, forever, and so was a
+  request for any other model or family. Two things were wrong. The cache's
+  credit was clipped to the host's per-process VRAM attribution, which reads as
+  zero wherever that query cannot see mold's own pid; the engines are now asked
+  directly and their answer is a floor under that clip, never a term added to
+  it. And a generation whose plan resolver refused every device reached the
+  planner with no placement to compare, which the plan pass read as "not
+  blocked" and used to erase the block that had just been recorded — taking the
+  idle reclaim and the bounded refusal with it. And the retained weights were invisible to the server
+  entirely: every scheduler-V2 engine is built inside a wrapper that forwarded
+  `is_loaded` but defaulted the two methods this feature is made of, so
+  admission saw an empty card and the reclaim found nothing to release. Once
+  they were visible the load strategy moved under the warm engine — a card
+  whose free space IS this model's own transformer reads as roomy, so the
+  identical request planned `Eager` where the cold one planned `Sequential` —
+  and the worker destroyed the engine to satisfy it; an engine holding its
+  transformer now serves either. Measured on one L40S: 92.4 s cold, then
+  75.7 s with `Flux.2 transformer [cache hit]` and no load stage at all,
+  byte-identical prints. A different model's request releases the weights and
+  keeps the other engine's prompt cache, and anything genuinely too large is
+  refused with numbers instead of waiting.
+
+- **FLUX.2 [dev] renders again with the text-encoder park on, which is the
+  default.** Every `flux2-dev` tier — `:q8`, `:q6`, `:q4` and `:fp8` alike —
+  failed with `non-finite prediction at denoise step 0` as soon as the
+  Mistral3 prefix was held in page-locked host RAM, because the streamed
+  encoder builds the next decoder layer on a second thread and nothing made
+  its uploads complete before the forward read them. A pageable copy blocks
+  the calling thread, so every path that existed before the park could fire
+  was serialising the two threads by accident; page-locking the source turned
+  that upload into a real asynchronous transfer and the conditioning tensor
+  came back entirely NaN. The prefetch now settles its own work before the
+  layer is handed on. A parked render and an unparked one are byte-identical
+  again (verified at the same sha256 on an L40S, both `:q8` and `:fp8`), and
+  `MOLD_KEEP_TE_RAM=0` is no longer a workaround anybody needs.
+- **That park now waits until there is a second render to pay for it.**
+  Reading 34.7 GB of shards into host RAM costs about 29 s and saves about
+  6 s per encode afterwards, so it only breaks even around the sixth render of
+  one process — and a one-shot `mold run` could never collect any of it. The
+  first encode of a process now streams from the mapping as it always did, and
+  the park is taken from the second onwards, when the reuse it is buying is
+  real. `MOLD_KEEP_TE_RAM=1` overrides that and parks from the first encode —
+  an operator who set it has already answered the question the wait exists to
+  ask. Nothing about the rendered pixels changes either way.
+- **The non-finite bail no longer gives advice that cannot apply.** It used to
+  end every failure with "re-run with `MOLD_FLUX2_QMATMUL=0`", including on
+  FLUX.1 and on `flux2-dev:fp8`, which carries no quantized matmul at all. The
+  suggestion now appears only when that fast path is the arm actually running.
+
+- **A LoRA now reaches the planner on a server render, so the GPU memory plan
+  and the load strategy describe the render that actually runs.** A durable
+  job's adapter is sealed into the encrypted media set and removed from the
+  request before the job reaches the scheduler, and the execution plan is built
+  from that copy — so every `--lora` render over the server was planned as if
+  it had none: the adapter's bytes were never charged against the card, and
+  FLUX.2 and Z-Image, which merge a LoRA as the transformer is built, were
+  given an eager load plan only their sequential path can honour. The sealed
+  stack now travels with the job for planning, so those renders are planned
+  sequentially with the adapter counted. Local renders (`--local`) were never
+  affected.
+
+- **The FLUX.2 [dev] tier descriptions now name the card each one actually
+  needs.** `flux2-dev:q4` was described as the tier that "runs on a 24 GB GPU"
+  and `:q6` as fitting a 32 GB one, on the strength of the checkpoint size
+  alone. A GGUF tier has no block-streaming path, so every byte of it is
+  resident and the render also holds a ~3 GB denoise working set, the VAE and
+  the planner's safety headroom: q4 needs ~25 GB (a 32 GB-class card), q6 ~33 GB
+  (40 GB-class) and q8 ~40 GB (46/48 GB-class). `flux2-dev:fp8` is in the same
+  position for a different reason — its checkpoint is one BFL-native file with
+  nothing to stream — so it needs ~41 GB and a 46/48 GB-class card too. Only
+  `flux2-dev:bf16` block-offloads, because it is the one [dev] tier published as
+  sharded weights, and streaming it asks the HOST for the whole 65 GB. **No
+  [dev] tier fits a 24 GB card**; on 24 GB use a Klein tier. `mold list`, the
+  model page and the API all say so, and an oversized request is refused at
+  submit time naming both figures.
+
+- **A built-in LTX-2 control adapter now survives the trip to the GPU on the
+  default scheduler.** The server resolves that adapter during preparation,
+  after the request's media was sealed, so it travels beside the job and is put
+  back on the request at dispatch. The multi-GPU coordinator's job conversion
+  dropped it — and dropped it again when handing a job back for retry — so a
+  durable `--ic-lora-control` render reached the engine with no control adapter
+  at all; only the older single-worker path carried it. Both conversions now
+  carry it, and a source-level check keeps every future one honest.
+- **An out-of-memory refusal names the number it actually refused you for.**
+  Three refusals in the campaign's hardware run read `still 0.0 GB short
+  (requires 43.00 GB, 46.72 GB available)` — the available figure is larger than
+  the required one, so the message said the request fit and was refused anyway.
+  Admission compares a plan against an admission ceiling (90% of the device's
+  usable memory) that the message never printed. A refusal now names the peak,
+  the ceiling, how far over it is, and what the ceiling is a fraction of, and a
+  shortfall is never reported as `0.0 GB`.
+- **A render is no longer refused because of a measurement taken on a different
+  card.** The scheduler applies a learned memory peak from previous runs of the
+  same shape, keyed by model family rather than by device — so a figure recorded
+  on a 46 GB GPU could be applied to a job on a smaller one and refuse it
+  permanently, whatever its own plan needed. The learned figure is now bounded by
+  what the device can actually provide; it still raises an estimate that is too
+  low, which is what it is there for.
+- **Dependency preparation and the scheduler now read the same VRAM budget.**
+  Preparation planned against the raw driver reading while everything downstream
+  subtracted `MOLD_RESERVE_VRAM_MB`, so on a machine with a large reserve a plan
+  could be built that the machine had already been told not to allow — and a
+  FLUX.2 job that should have been streamed or refused was instead planned
+  resident and then blocked with no explanation.
+- **A refusal that could not stream the transformer says so.** The planner's
+  reason — for FLUX.2, that GGUF tiers have no block-streaming path — now travels
+  with the held job, instead of being dropped when the queue composes the message
+  a caller finally reads.
+- **A FLUX.2 render can no longer be admitted as "streamed" and then loaded
+  whole.** The engine's transformer loader had three paths and only one of them
+  looked at whether the plan had asked for block streaming, so a single-file
+  FLUX.2 [dev] checkpoint — the fp8 tiers — was loaded entirely onto the card
+  while admission had reserved a fraction of that. On a large GPU the render
+  simply worked and the disagreement was invisible; on a card the plan was
+  actually sized for it is an out-of-memory failure with admission's blessing.
+  That layout now refuses by name, in the engine and in the planner alike, so a
+  job is either planned for what will really happen or told why it cannot run.
+- **FLUX.2 [dev]'s prompt encoder runs on the GPU again.** The placement planner
+  priced the Mistral3 conditioner at its 36 GB file size, so an idle 46 GB card
+  looked over-subscribed and the encoder was auto-parked to the CPU, where
+  FLUX.2 selects F32 — a cache-miss prompt took 78.8 seconds with the GPU at
+  0 % utilisation for the whole phase. The encoder streams: it memory-maps its
+  shards and holds one decoder layer plus the one being prefetched, a peak near
+  3.6 GB in bf16. mold now charges that on both the device and the host side, so
+  the encoder stays on the GPU on a 24 GB card as well as a 46 GB one, and a
+  64 GB desktop is no longer refused outright for host RAM it never needed. An
+  explicit `--placement text-encoders=cpu` is still honoured.
+- **The Mistral3 encoder no longer blocks on the GPU between layers.** It
+  synchronized after the embedding lookup and after every one of its thirty
+  decoder layers, which ordered nothing the CUDA stream did not already order
+  and stopped the host from preparing the next layer. Each layer's weights are
+  now loaded one layer ahead, and the render's progress bar advances through the
+  encode instead of jumping once.
+- **Parking a text encoder in host RAM costs one copy, not two.** Parking read
+  the whole checkpoint into an anonymous buffer and then copied every tensor out
+  of it, so parking FLUX's 9.79 GB T5 briefly needed twice that — for a feature
+  whose whole purpose is fitting that encoder in host RAM. A checkpoint carrying
+  more tensors than the runtime reads no longer materializes the ones it skips.
+- **A GGUF checkpoint loads 8-10x faster.** Every quantized tensor used to be
+  copied into a fresh host buffer before being uploaded, measured at 0.96 GB/s
+  on a 33 GB FLUX.2 checkpoint against 8.3 GB/s for stable-diffusion.cpp
+  reading the same file. Reading the file through a memory mapping instead is
+  no better for a whole checkpoint: that is a page fault per 4 KiB, and on ZFS
+  — which is where `$MOLD_HOME` lives on every qualified machine — the kernel
+  serves those one page at a time out of ZFS's own cache with no readahead, so
+  a 21.76 GB Qwen-Image checkpoint took 5,312,908 major faults and 26.5 seconds
+  for bytes that were already in RAM. mold now reads the tensor payload in
+  contiguous batches across eight threads into a reused page-locked staging
+  buffer and uploads each tensor from there, with two buffers alternating so
+  one is being read while the other is still in flight to the GPU. FLUX,
+  FLUX.2, SD3, Z-Image, Qwen-Image, Wan, Hunyuan3D and the T5/UMT5/Qwen3 GGUF
+  text encoders all take it, and all now report real byte progress rather than
+  a tensor-count approximation and log each file's measured throughput.
+  Measured on 4x L40S with the file's page cache dropped: `flux1-dev-Q8_0`
+  15.5 s -> 1.6 s, `qwen-image-Q8_0` 26.5 s -> 3.3 s, and `flux2-dev-Q8_0`
+  41.7 s -> 4.3 s (0.84 -> 8.1 GB/s); already-cached repeats went 6.6 s ->
+  2.7 s on the same 35 GB file. Host memory is bounded by the buffer pair
+  rather than the checkpoint, a caller reading a FEW tensors out of a file (a
+  LoRA merge, one encoder's weights) still maps it because an untouched page is
+  never faulted at all, macOS and CPU keep the mapping, and the weights are
+  byte-identical, so renders are too.
+- **Text encoders park in host RAM when the machine can afford it, and
+  `MOLD_KEEP_TE_RAM` becomes tri-state.** The old rule was a flag plus two
+  carve-outs and asked nothing about the host. `auto` (the unset default) now
+  measures it: a park is admitted only when the encoder, the transformer that
+  loads beside it, and a `max(15 % of RAM, 8 GiB)` safety floor all fit in
+  available memory, so a 64 GB desktop keeps streaming exactly as before while
+  a 1.5 TB host parks and page-locks. `1` parks whenever the encoder alone
+  clears the floor and remains the unchanged opt-in for FLUX/SD3's T5 and Wan's
+  UMT5; `0` never parks; Metal never parks, because there the parked copy would
+  sit in the pool the encoder already runs from. FLUX.2 [dev] parks the ~35 GB
+  Mistral3 prefix it streams, filtered to the layers it actually runs — the
+  vision tower, the projector and layers 30-39 the single-file republication
+  also ships are never materialized — and the placement planner charges that
+  park, so two queued [dev] prints on a 128 GB host cannot both be admitted
+  against memory only one of them can have.
+- **Quantized Qwen3 encoders park too.** Flux.2 Klein's and Z-Image's GGUF
+  encoders used to be excluded from the host park and re-read from disk on
+  every cache-miss prompt (3.9 s on Klein). Their `QTensor` bytes now move
+  host-to-device losslessly through the same mechanism Qwen-Image's Qwen2
+  encoder has used since #1044, verified byte-identical rather than merely
+  close.
+- **A FLUX.2 LoRA trained for the wrong tier is refused at submit time, not
+  after the checkpoint loads.** The three FLUX.2 tiers are different widths —
+  3072 for [klein] 4B, 4096 for [klein] 9B, 6144 for [dev] — and nothing in an
+  adapter's file name says which it was trained for. A 9B adapter handed to
+  `flux2-klein:q8` used to report `32 layers, rank 32` and `32 patches on 16
+  tensors, 0 skipped`, read and dequantise the whole GGUF checkpoint, and then
+  fail with `shape mismatch in add, lhs: [3072, 3072], rhs: [4096, 4096]`. The
+  adapter's safetensors header is now read up front, and the refusal names the
+  adapter, its width, the tier's width, and the tier it fits — identically from
+  the CLI, the HTTP API and the durable queue. An adapter that only partly
+  matches is refused too, rather than half-merged into an image no adapter
+  produced.
+- **A FLUX.2 LoRA naming separate `to_q`/`to_k`/`to_v` projections now merges
+  into a quantized checkpoint's fused attention weight.** Such an adapter was
+  mapped onto the fused `qkv` tensor with the delta and the base the wrong way
+  round, so on a GGUF tier it logged `Flux.2 LoRA Splat: base row count !=
+  delta row count, skipping` and silently dropped three quarters of its layers
+  while still reporting them applied. Relatedly, a merge that cannot be
+  performed is now an error naming the tensor rather than a skipped patch or a
+  message about two anonymous shapes.
+- **Gallery archive-authority storage version 3 is now opt-in and reversible.**
+  The faster append-only delta log is written only when you ask for it
+  (`mold config set gallery.authority_log true`, or
+  `MOLD_GALLERY_AUTHORITY_LOG=1`); a default build leaves an existing
+  version-2 store exactly as it found it. Reading a version-3 store never
+  needs the switch. This matters for a `$MOLD_HOME` shared between binaries: a
+  mold older than 0.29 reads version 2 only and refuses to publish against a
+  version-3 store, so previously one newer process starting was enough to lock
+  the others out of the home.
+- **`mold system gallery-authority status` and `… downgrade`.** `status`
+  reports a store's on-disk version, generation, and delta-log size without
+  touching it. `downgrade` folds a version-3 store back to version 2 so an
+  older mold can publish against the home again — run it with the newer build
+  while no server is writing to that output directory. It is idempotent,
+  verifies the result by reading it back, parks the retired version-3
+  directory rather than deleting it, and refuses if a mutation is still
+  pending or the log tail is torn.
+- **`downgrade` now refuses while a server is publishing, instead of rewriting
+  the store under it.** Every mold process that can publish to a gallery holds
+  a writer lease on it (`.mold-gallery-writer.lease`, a hidden file in the
+  gallery directory) for as long as it runs, and the downgrade refuses on
+  contention, naming the process and its pid and reporting that nothing was
+  changed; `status` shows `writer lease: held / stale / none` so you can see it
+  first. The lease is shared — several servers still share one home — a clean
+  stop removes the file, and one left behind by a killed process is `stale`: it
+  blocks nothing, and `downgrade` clears it as its last step so the gallery it
+  hands to an older binary holds no mold bookkeeping at all. Previously the
+  command took only the
+  bookkeeping lock, which a server holds for the length of one publication, so
+  it waited for the gap between two prints and succeeded against a live
+  server; the server's next print then wrote version-3 bytes into the
+  version-2 directory and an older binary refused to start on that home.
+- **A commit can no longer land version-3 bytes under the version-2 name.**
+  Independently of the lease: a server whose version-3 store disappears
+  underneath it now re-establishes one beside the frozen version-2 store
+  instead of writing into it, and refuses the publication outright if it
+  cannot.
+- **Opting in writes a new store beside the old one, never over it.** The
+  version-3 store gets its own directory and the version-2 one is left intact,
+  so a rollback needs no restored backup. Note that while a version-2 writer
+  and a version-3 writer share one home they keep separate indexes that drift
+  apart — enable the switch only where every binary using the home is new
+  enough.
+- **A render's fixed server overhead is gone from the client's wall clock.** A
+  measured request timeline spent ~13 s of a 16.6 s `flux2-klein:q8` render on
+  work that had nothing to do with the picture. The RAM/RSS sampler — on the
+  1 Hz telemetry tick, on both memory watchdogs, and four times per job — built
+  a fresh `sysinfo::System` with a process table on every call, which walks all
+  of `/proc`; it now keeps one memory-only system and reads
+  `/proc/self/statm`. The ordinary generation's memory watchdog polled a flag
+  behind a one-second sleep, so finishing a render waited out the interval;
+  it stops on a channel, and its heartbeat only speaks up when RSS has actually
+  moved. NVML was re-initialized on every telemetry tick and every hot-cache
+  admission; one handle now serves the process and is replaced only when the
+  driver invalidates it.
+- **PNG encoding is fast by default.** Saving a 1024² still at zlib level 6 was
+  measured at ~1.0 s with the GPU idle. mold now encodes with fdeflate's
+  PNG-tuned ultra-fast deflate: on a 512² photograph 1.7 ms against 59.0 ms.
+  The file gets bigger — 6 % on that photograph, and 6–11 % across the campaign's
+  measured prints (a 512² SD1.5 still 316,759 → 335,155 B, a 1024² SDXL still
+  1,479,585 → 1,636,155 B). PNG is lossless under both settings, so no pixel
+  changes and the raw-pixel hash is unmoved; `MOLD_PNG_ENCODING=balanced`
+  restores the smaller files. The
+  post-generation `malloc_trim(0)` (another ~0.8 s) also moved after the print
+  is saved and the completion is sent.
+- **The CLI no longer carries a finished render back as base64.** A streaming
+  completion encoded the whole picture into the SSE frame, which the client
+  then decoded — while the identical bytes sat in the host's gallery. Where a
+  server advertises the new `gallery.persists_outputs` capability and the print
+  is being saved, `mold run` asks for `X-Mold-SSE-Payload: metadata-only` and
+  fetches the file instead. Older servers, hosts with the output directory
+  disabled, and clips, audio and meshes (whose completions carry a thumbnail or
+  poster the gallery route does not serve) keep the inline payload exactly as
+  before. The client's SSE reader also stopped rescanning its whole buffer on
+  every chunk, and stopped turning a multi-byte character split across a chunk
+  boundary into replacement characters.
+- **Publishing a print no longer costs more as the library grows.** The gallery
+  archive authority rewrote its whole index three times per commit — a
+  write-ahead copy, the checkpoint, and a backup — so saving one picture into a
+  library of ten thousand meant tens of megabytes of serialization and I/O. It
+  now appends a delta describing only what changed, and folds the log back into
+  a checkpoint every 256 mutations. Measured on a 10,000-print index, a commit
+  went from 60.5 ms to 4.4 ms. An existing store is read once and upgraded in
+  place, and a crash mid-append drops the torn record whole rather than the
+  prints before it.
+- **A control render records and merges the caller's LoRA once.** `mold run --lora`
+  on an LTX-2 model fills both the legacy `lora` field and the `loras` stack with
+  the same adapter, and the three places that prepend a built-in `--ic-lora-control`
+  adapter concatenated the two wells — so the print's provenance listed the
+  caller's adapter twice and the engine merged it twice, at double its requested
+  scale. The two fields are alternatives everywhere else (`loras` wins, `lora` is
+  the fallback), and now they are here too; where they disagreed, the stack wins
+  instead of resurrecting a singular adapter no engine would have applied.
+- **LTX-2 IC-LoRA control renders work at the tier's default resolution.** A
+  `ref0.5` control adapter (union, motion-track) conditions on a reference video at
+  half the conditioned stage's size, and that half must still land on the video
+  VAE's 32 px latent grid. `ltx-2.3-22b-distilled:fp8` defaults to 1216x704, whose
+  stage-1 grid is an odd 19x11, so `--ic-lora-control union` with no explicit
+  `--width/--height` failed inside the VAE — after paying for the full text encode —
+  with a reshape mismatch. Admission now snaps such a render down onto the grid the
+  reference can be encoded on (1216x704 becomes 1152x640) and says so, on the
+  server and under `--local` alike; the engine's own guard refuses an unsnapped
+  canvas by name instead of dying in a tensor reshape.
+- **Write more for me rewrites the prompt in place on the web.** The browser's
+  Create composer now does what the desktop app and the phone do: one rewrite
+  on the machine, installed straight into the prompt bed with an `expanded ·
+undo` chip beside it, and a live line naming the machine while it writes. The
+  prompt-expansion dialog is gone, and with it its "Enable expansion before
+  submit" checkbox, its 1/3/5 variation count (five prompts for a one-print
+  render was a server error) and its model-family override. A rewrite that
+  lands after the prompt, style, conditioning or machine changed is refused by
+  name instead of silently replacing what you typed.
+- **The web no longer asks the machine to expand at generate time.** Web was
+  the only client sending the request's `expand` flag, and the rewrite it
+  produced never appeared in the composer. A saved draft or starter that still
+  carries the old setting loads and drops it.
+- **Why reviewed prompt work went stale reads the same on every screen.** The
+  rule is shared now, so both apps say "Style changed" and "Machine selection
+  changed" in one wording.
+- **The Start-from-a-photo advisory names what the style does with the
+  picture.** A 3-D style that needs a picture used to be told it was
+  "image-to-video only" — a clip's sentence. It now says the style builds
+  from a picture and asks for a source image to give it a shape; a still
+  style says it needs a picture to work from; a clip style keeps its
+  first-frame sentence. Every one of these sentences says style, never
+  checkpoint, and the lexicon check now reads them.
+- **The 3-D exports are on the lightbox card in the browser.** Export as OBJ,
+  STL, PLY and Export turntable moved out of the overflow menu onto a visible
+  row under the print's actions, in the wide panel and the phone sheet alike.
+  The quiet row's buttons also line up: "Download" is a link, and its label used
+  to sit at the top of the row beside two centred buttons.
+- **The whole machine card opens the machine.** A connected card in the browser
+  has one tab stop and one click target across the card — click, Enter or Space
+  opens it, the way a print tile already does — while everything the card says
+  is still read out loud. Retry, Connect and the card's own menu stay to
+  themselves. A disconnected card opens nothing; Connect is still the only door.
+- **New image puts the Still picture / Short clip / 3-D object strip where it
+  belongs.** The strip and the print's name moved out of the page header onto
+  the first row of the column they govern, left-aligned above the picture.
+- **Queued and running work now sits under the prompt box on New image.** It
+  used to open the column above the picture, so pressing Generate pushed the
+  prompt box down the page. The column now reads: the kind strip, the picture,
+  the prompt box with its own alerts, the work in flight, then Recent.
+- **On New image, the Make chip explains itself when a style makes one print at
+  a time.** It used to dim, swallow the click and say why only in a hover
+  tooltip, which a touch screen never shows. It now opens like any other chip
+  and states the count it will make and the reason.
+- **New image no longer calls a 16:9 canvas "Custom".** The summary under the
+  prompt box reads the same shape resolver as the Shape chip beside it, so the
+  two can never disagree about the canvas, and both mark a nearest-match shape
+  with `≈`.
+- **The desktop app's badge counts prints that landed while you were away.**
+  The macOS Dock badge used to show this app's own pending job count, which
+  left a standing number nobody could clear while a long clip rendered and
+  said nothing at all about work another machine did. It now counts prints
+  that landed on any connected machine, made by any client, while Mold was in
+  the background, and clears the moment the window comes back. Prints that
+  land while you are watching never badge — the canvas, the toast and the
+  sidebar's new-print pill already say so. The app keeps one live event
+  connection per ready machine to hear about them; a machine whose server
+  predates that event stream contributes nothing, the count lives only for as
+  long as the app is running, so a quit and relaunch starts it at zero, and a
+  print that is trashed or deleted stops counting. It is a nudge rather than a
+  ledger. Settings ▸ Look still switches it off.
+- **Every style picker now shows the source glyph.** The Hugging Face, Civitai,
+  and local-file marks used to appear only in the desktop app's own style
+  picker. The shared style list now draws one by default for web and the
+  phone too, and the Ready to use and Browse more rows, the style details
+  panel, and the phone's style cards carry the same mark.
+- **Shape tiles no longer wrap onto a second row in a narrow rail.** Five
+  aspect-ratio tiles plus their gaps needed more width than web's 320px
+  Create rail had to give them, so a 9:16 tile fell to its own line. The
+  tiles now sit in a grid that shrinks each one to fit instead.
+- **A meter's track is visible again wherever it sits on a panel.** Its
+  track color matched a panel's own background on the machine card, the
+  machine details page, the activity strip, the cold-start guide, the downloads
+  list, and the phone's queue card, so a render's progress meter read as
+  empty space until the fill caught up. The track now uses a color that
+  contrasts on every panel and surface tone.
+- **The composer's shortcuts follow the platform.** In the browser, Write more for me and Generate are ⌘E and ⌘↵ on a Mac, iPhone, or iPad and Ctrl+E / Ctrl+↵ everywhere else, and the keycaps say which applies. Ctrl+E is end-of-line on a Mac, so it is no longer bound there.
+- **Reset says what it does.** The ↺ Reset on the Create rail puts every setting back to the style's defaults, add-on looks and the source and identity photos included; only the prompt, title, filing, and style stay, and the toast now says so in the app's own words.
+- **The retired prompt-preset field is gone.** Saved drafts, starters, phone snapshots, and prepared variations no longer carry the old composer "Style" preset, and a draft saved with one loads clean.
+- **The last print survives a reload.** The browser's Create canvas now draws a finished print from the machine that made it when the page no longer holds the bytes, instead of a broken picture.
+- **The browser's New image page follows the web design.** The composer now
+  sticks to the bottom of the column, so Generate never scrolls away on a long
+  page, and it carries the style, shape and Make controls beside the words they
+  apply to ([#1700](https://github.com/utensils/mold/issues/1700)).
+- **A finished picture stays on the canvas, with its own actions.** The
+  browser used to drop a finished print back to the empty canvas a moment
+  after it rendered; it now stays until the next one runs, and Download, Copy
+  link and Make 4 variations sit over it. Copy link yields an address that
+  opens that exact print in My images, which is something the desktop app has
+  nothing to copy ([#1700](https://github.com/utensils/mold/issues/1700)).
+- **The settings column says which machine the tab is talking to, first.** The
+  machine card leads the column with a way to change it, followed by a
+  Draft / Good / Best quality ladder built from the style's own recommended
+  passes, the two sliders, and plain-language rows for starting from a photo,
+  add-on looks, repeating a look, starters, filing and everything else
+  ([#1700](https://github.com/utensils/mold/issues/1700)).
+- **A narrow browser window is now shorter than a wide one, not longer.** Below
+  900px the settings column leaves the page and opens as one sheet instead of
+  being stacked into the composer alongside a second settings sheet
+  ([#1700](https://github.com/utensils/mold/issues/1700)).
+- The browser app speaks the same words as the desktop app. Styles has **Ready to use | Browse more** shelves, **Get it** carries the download total, and a style already here is badged **● ready**. The rail says **Stick to my words**, **Add-on looks**, **Surface detail**, **How tight to the photo** and **Repeat this look**, and the Lightbox explains a print as **Style · Size · Detail · Stick to my words · Repeat this look · Add-on look · Made on**.
+- The Styles shelf gained the three kind chips the composer already offers — **All · Still picture · Short clip · 3-D object** — shareable as a `?type=` link, and its rows now lead with the style's friendly name instead of its id.
+- A machine card in the browser says the same one sentence the desktop app says about the same box, so a four-card machine reads as `4× NVIDIA L40S · CUDA · on your network at plato` everywhere instead of naming one card.
+- The header searches your images rather than your prompts, shows the `/` shortcut that focuses it, and sets the wordmark in lowercase mono.
+- The prompt "Style" preset strip is gone from the browser and the phone, as it already was on the desktop app: the word Style belongs to the style you render with, and "Photoreal" meant two different things on one screen. A print made with a preset already carries the look in its saved words, so reusing it reapplies nothing.
+- The confirm dialog, the VRAM estimate badge, the reference-crop dialog and the "open this live work" decision are now one shared piece each across the browser and the desktop app, so they cannot drift again; a web lexicon test and a styling ratchet keep the browser's words and tokens from sliding back ([#1699](https://github.com/utensils/mold/issues/1699)).
+- **Settings you can find your way around.** Web Settings is now a search field and a
+  jump nav that opens one section at a time — `?section=` is the address of the one
+  showing — over the desktop app's lexicon sections: Look, Defaults for new images,
+  Write more for me, Machines, Styles & disk, Style licences, My images & trash, Phone
+  pairing, Speed & memory, Accounts & tokens, Cloud GPUs, Per-style defaults, Profiles,
+  Advanced, and Updates & about. Every engine key the server exposes has a plain-words
+  row — RunPod and Lambda keys live under **Cloud GPUs**, logging under **Updates &
+  about** — and a machine with per-style overrides shows one collapsed row per style
+  instead of eight rows each, so a server with 150 configuration rows is one screen
+  per section, not thirty screens of one page. Rows save as you change them; the
+  duplicate GPU list is gone. Web and desktop render the same shared schema, rows,
+  controls and theme cards ([#1698](https://github.com/utensils/mold/issues/1698)).
+- **Long Wan clips now survive a machine restart.** The multi-GPU scheduler
+  keeps ownership of active clip leases while GPU workers stop, so an
+  interrupted auto-chained video is parked for Resume instead of being marked
+  failed and swept as temporary work.
+- **`mold mesh-workflow` drives durable 3-D jobs from the terminal.** Create,
+  list, inspect, follow, resume, cancel, and delete the multi-stage workflows
+  that until now only the web and desktop 3-D Studio could author. The mode is
+  inferred from what you give it — a prompt renders a picture and reconstructs
+  it, a mesh with an appearance image paints that mesh, a mesh on its own is
+  rebuilt — and `--mode` names it outright. This is the first surface to expose
+  the whole mesh block on a workflow: `--octree`, `--threshold`,
+  `--target-faces`, `--matting` and `--delight` ride alongside texturing, and
+  `--seed` applies to every stage so one value reproduces the run. `--follow`
+  reports each stage as it changes state. A supplied mesh rides the request as
+  base64; on a machine that advertises reference uploads and is reached with an
+  API key it takes that machine's upload route instead
+  ([#1687](https://github.com/utensils/mold/issues/1687)).
+- **`mold search` finds models to pull.** Query the Hugging Face and Civitai
+  catalogs by text, family, kind, source and sort, with paging, a safety
+  filter, and `--json`. It runs on the server when one answers, so it sees the
+  credentials that machine stored, and falls back to this machine with
+  `HF_TOKEN` and `CIVITAI_TOKEN` when none does. A provider that fails is
+  reported beside the other's results rather than replacing them
+  ([#1687](https://github.com/utensils/mold/issues/1687)).
+- **`mold downloads` shows the server's download queue.** List what is
+  transferring, waiting and recently finished, queue a model, cancel one, and
+  watch the queue live with smoothed transfer rates. A catalog id is refused by
+  name and pointed at `mold pull`, which is the door that takes one
+  ([#1687](https://github.com/utensils/mold/issues/1687)).
+- **`--host` on the new remote commands.** `mold search`, `mold downloads` and
+  `mold mesh-workflow` take `--host` like every other remote verb, so
+  inspecting a second machine no longer means exporting an environment
+  variable. On the two subcommand families it is global, so it reads the same
+  before or after the verb
+  ([#1687](https://github.com/utensils/mold/issues/1687)).
+- **`mold list --json`.** The same model rows the API serves, so a script reads
+  one shape whichever it asks
+  ([#1687](https://github.com/utensils/mold/issues/1687)).
+- **`mold run --fit` fits the picture to the canvas.** Without it a `--image`
+  source decides the canvas, so `--width`/`--height` were ignored. `--fit
+crop-fill` trims the edges, `--fit pad-fit` adds black borders and `--fit
+lanczos-resize` stretches, all resampled with Lanczos3. A single-clip render
+  records the policy on the print so reusing it in Mold Studio restores the
+  same crop; a long video that auto-chains renders the same fitted pixels but
+  carries no crop provenance
+  ([#1687](https://github.com/utensils/mold/issues/1687)).
+- **Tags, collections, job ids, filenames and machines complete.** A completer
+  cannot contact a server, so `mold library list`, `mold library tag list`,
+  `mold library collection list`, `mold jobs list` and `mold queue list` now
+  record what they saw, and `--tag`, `--collection`, `<JOB-ID>`, `<FILENAME>`
+  and `--host` complete from that. Pressing Tab on a machine that has never run
+  mold still offers nothing and creates nothing
+  ([#1687](https://github.com/utensils/mold/issues/1687)).
+- **`mold runpod run --no-save` and MCP `save_to_gallery`.** Both filed every
+  render with no way to opt out. `save_to_gallery: false` on `generate_image`,
+  `generate_image_async` and `generate_mesh` does what `--no-save` does: the
+  host publishes the print and moves it straight to Trash, where it stays
+  recoverable ([#1687](https://github.com/utensils/mold/issues/1687)).
+- **One rule for which machine has a style, and web says it too.** The Create
+  style picker's availability tag now reads the same rule on every surface: it
+  is quiet when none or all of the machines you can reach hold the style, names
+  the one that does, and otherwise counts them. Web shows the tag for the first
+  time, the desktop app no longer counts a machine that is unreachable or
+  points you at nothing when only this Mac holds a style, and it says "2
+  machines" where it used to say "2 hosts"
+  ([#1686](https://github.com/utensils/mold/issues/1686)).
+- **Every phone screen now says its own name.** Make, Queue, My images, Styles
+  and Machines each carry their own large title and the single action that
+  screen offers, replacing a wordmark bar that named the app five times over.
+  Make pins where the next print lands and what kind of thing it is above the
+  scroll, so neither answer leaves the screen as the form grows
+  ([#1685](https://github.com/utensils/mold/issues/1685)).
+- **The phone's Queue shows the picture being made.** A running print's row
+  carries its live preview, a progress meter, the sentence for the stage it is
+  in, and which one of a batch it is; a waiting print stands its place in line;
+  and finished work shows three thumbnails rather than a list of titles
+  ([#1685](https://github.com/utensils/mold/issues/1685)).
+- **Styles gathers every filter into one sheet.** The shelf and the search stay
+  on screen; the machine, catalog source, model kind, family, sort and NSFW
+  controls move behind one chip that counts what it is standing in for, so the
+  results no longer jump down the page each time the shelf changes. Result rows
+  drop to the 64px grouped row the rest of the phone uses
+  ([#1685](https://github.com/utensils/mold/issues/1685)).
+- **A machine card says what the machine is.** The Machines list carries the
+  same plain hardware sentence the desktop shows, marks the machine work is
+  pinned to, and keeps its memory meter. Adding a machine moved from a
+  disclosure that sprang open on an empty fleet into a sheet you ask for
+  ([#1685](https://github.com/utensils/mold/issues/1685)).
+- **Pairing is reachable from Settings.** A card there opens the same camera
+  scanner that was previously buried inside the Machines tab
+  ([#1685](https://github.com/utensils/mold/issues/1685)).
+- **Phone controls that only answered a mouse now answer a finger.** Compute
+  device actions and licence links take a full touch target and show their
+  affordance without a hover, and queue rows give press feedback instead of a
+  hover state iOS leaves stuck on the last row tapped
+  ([#1685](https://github.com/utensils/mold/issues/1685)).
+- **Every phone sheet keeps the keyboard inside it.** The Filters and
+  Add-a-machine sheets, and the three that predate them, now take focus when
+  they open, hold Tab within the sheet, close on Escape and hand focus back to
+  whatever opened them — the promise `aria-modal` was already making over a
+  background that is not inert
+  ([#1685](https://github.com/utensils/mold/issues/1685)).
+- Add smooth focal pinch-to-zoom and panning to the full-screen image viewer on iPhone and Android.
+- **Correct local prompt expansion decoding.** Local expansion now samples its first generated token from the full prompt prefill, instead of forwarding the prompt's final token twice and sampling from the wrong next-token distribution.
+- **Swipe down to close phone sheets.** All tags, tag and collection editors, filing choices, identity photos, queue details, and model-download sheets now support downward dismissal by default. Image selection, reference crop chrome, and install-target selection gain the same gesture. Grabbers remain usable after scrolling; controls, crop manipulation, horizontal scrolling, and multi-touch do not dismiss a sheet.
+- **Reliable partial prompt batches.** Prompt batches now keep collecting when the expansion model returns fewer prompts than requested, instead of failing after three productive completions. Retries that add no new prompts remain bounded, and server logs report completion counts to help diagnose failures.
+- **`mold library source-media` recovers what a print was made from.** The
+  serving host is the only authority on the conditioning media it retained, so
+  the new verb asks it, prints one sentence per availability state, and
+  downloads a named member to a file or to stdout. A print that predates
+  retention reads as exactly that, never as damage.
+- **`mold trash delete <FILENAME>...` removes named prints permanently.**
+  The per-file counterpart of `mold trash empty`: it works on live and trashed
+  prints alike, and confirms unless `--yes`.
+- **`mold jobs amend <ID> --script edited.toml` edits a sequence's stages.**
+  Amend replaces the whole stage list, so it takes an edited `mold.chain.v1`
+  script rather than per-stage flags; `--fps`, `--seed`, `--steps`,
+  `--guidance`, `--strength`, `--motion-tail` and `--audio`/`--no-audio`
+  override the script's chain block, `--dry-run` shows what would be sent, and
+  a change to the model, size or container is refused by name. The command
+  reports how many leading stages kept their rendered clips.
+- **`mold run --no-save` keeps one render out of a server's Library.** The host
+  still publishes the print and moves it straight to trash, so `mold trash
+restore` recovers it until retention sweeps it. A local render has no Library
+  and no trash, so it refuses the flag by name instead of ignoring it.
+- **Shell completion stopped drifting.** The zsh wrapper's file-path flag list
+  is now generated from the clap tree instead of a hand-kept list that had
+  fallen thirteen file-path flags behind (`--video`, `--audio-file`,
+  `--extend`, `--first-frame`, …), missed `--output-dir` among the
+  directories, and wrongly claimed `--control-model`, which now completes
+  ControlNet adapter names. `mold library export --format` offers its
+  containers, `--profile` offers the profiles in `mold.db`, and
+  `mold skill show` offers the bundle's files.
+- **The agent skill and the docs are checked for omissions, not just errors.**
+  Every user-facing command must now appear in a tested example, which added
+  `mold run --script`, `mold chain validate`, the full `library`, `jobs`,
+  `queue` and `trash` verb sets and a positive expand/remix example to the
+  skill. Every `bash` example in `README.md` and the website is parsed against
+  the real CLI, which found `--negative` (the flag is `--negative-prompt`) and
+  a repeated `--lora-scale` that the CLI refuses.
+- **Web picks a style through the same menu as desktop.** Create's Style card
+  was a native dropdown that could say a family name and an id and nothing
+  else. It is now a chip naming the current style in plain words with its exact
+  id in mono, opening the shared menu the desktop composer already used: styles
+  grouped by family, each row carrying its size, whether it is on the GPU and
+  its own description, a type-to-filter field once the list passes eight
+  entries, ↑/↓ and Enter, a row for a restored style no machine has yet with
+  the way to get it, and **Browse more →** into Styles filtered to what you are
+  making. The 3-D Studio's two style pickers read the same menu.
+
+- **iPhone picks a style through that same menu, in a bottom sheet.** The phone's
+  native style dropdown is now a chip naming the current style in plain words
+  with its exact id in mono, opening a sheet that holds the shared list with
+  finger-sized rows: styles grouped by family, each with its size, whether it is
+  on the GPU, its description and which machines have it, a filter once the list
+  passes eight entries, a row for a style no machine has with the way to get it,
+  and **Browse more** into Styles filtered to what you are making.
+
+- **The phone's Make screen puts the canvas first.** The develop bed, the status
+  line and the finished result used to sit at the very end of the scroll, below
+  Templates, so the thing you had just asked for was the one thing off screen.
+  They are now one block directly under what you are making, and tapping
+  Generate brings it into view.
+
+- **iOS polish on the phone.** More settings is a real bottom sheet — a grabber,
+  a scrim, and a header of Reset · More settings · Done — instead of an opaque
+  full-screen overlay with a circular Done. Form row labels are plain sans
+  words rather than mono capitals, with mono kept for group headings; sheet
+  titles and Back controls follow the platform; Settings switches replace their
+  checkboxes; the My images scope row is one segmented control instead of a
+  grid that wrapped onto two lines; and the host screen's Back says **Machines**.
+- **MiniMax H3 base tags now floor steps at the reviewed schedule.** The
+  undistilled `comfy-pruned-int8` FL2VA and Ref2VA tags advertise and enforce
+  21–50 terminal-inclusive grid points instead of 2–50; below 21 the print
+  flashes once per latent frame, and 4- and 8-step renders belong to the Turbo
+  tags, which stay pinned. The web, desktop, and phone apps show the reason
+  under the Steps control
+  ([#1435](https://github.com/utensils/mold/issues/1435)).
+- **The MiniMax H3 model page links the prompting guide** and explains why a
+  one-line prompt under-performs
+  ([#1675](https://github.com/utensils/mold/issues/1675)).
+- **The prompt is optional wherever the attached media already decides the
+  render.** Wan and MiniMax H3 join LTX-2: a tier that takes a source image,
+  keyframes, a clip to continue, or a MiniMax H3 reference set now admits a
+  blank prompt on every surface — CLI, web, desktop, iPhone, Discord. Expect
+  near-static micro-motion when you leave it out. Text-to-video tiers still
+  require a prompt. MiniMax H3 Ref2VA references now count as conditioning on
+  the server too, so those renders no longer share an out-of-memory cooldown
+  with an unconditioned one. Restoring a 3-D print whose model is not installed
+  no longer demands a prompt the family never reads.
+- **A conditioned text-to-audio render now refuses a blank prompt, as its
+  recipe always advertised.** An audio-only LTX-2 render reads no pixels, so an
+  attached still is not conditioning; admission previously accepted it anyway.
+- **Preserve original export filenames.** Desktop 3-D model and animation exports now keep the original file stem when changing formats, matching web and mobile and avoiding model-only names when seed metadata loses precision.
+- **Make bigger works on completed clips.** Desktop Create now opens the durable
+  Framewise video upscaler for MP4 results, with progress and pause/resume/cancel
+  controls on the original machine. Web Create's recent-video action opens the
+  same workflow in Library. Still-image upscaling is unchanged
+  ([#1677](https://github.com/utensils/mold/pull/1677)).
+- **Face identity now renders alongside a LoRA and img2img.** Both pairings
+  were refused as "not yet qualified"; neither was ever a numerical
+  prohibition, and both are qualified on FLUX.1 and SDXL. A LoRA merges into
+  the base weights underneath the adapter, and an identity render simply
+  starts further into the schedule.
+- **Fixed `--id-start-step` on a FLUX img2img render.** The denoise loop gated
+  identity on its index into the *truncated* schedule while the value was
+  validated against the full `--steps`, so a start step meant the wrong step —
+  and at any value at or past the remaining length it silently meant nothing
+  at all, rendering an unconditioned print that still reported success.
+- **IP-Adapter image prompting on SD 1.5 and SDXL.** Attach a reference picture
+  with `--reference` and its appearance — subject, palette, setting — is
+  transferred into the render alongside the text prompt. `--reference-weight`
+  dials it from 0.0 to 2.0 (default 1.0; upstream suggests 0.6-0.8 as a
+  starting range, since 1.0 lets the picture dominate the prompt). It composes
+  with img2img, inpaint, ControlNet and a LoRA in the same pass rather than
+  replacing any of them, and a weight of exactly 0.0 renders pixel-for-pixel
+  what a request with no reference renders. Pull it with
+  `mold pull ip-adapter-sd15` or `mold pull ip-adapter-sdxl`; both bundles
+  share one OpenCLIP ViT-H/14 tower, so the second costs only its adapter
+  ([#1573](https://github.com/utensils/mold/issues/1573)).
+- **Create draws both image wells at once for an SD 1.5 or SDXL reference.**
+  IP-Adapter is the first recipe whose references ADD to the conditioning
+  instead of replacing it, so neither well parks and the request carries the
+  source image and the reference together — every earlier reference family
+  (Qwen Image Edit, FLUX.2 [dev] and [klein]) behaves exactly as it did. A drop
+  with no well under the cursor lands on the Source well, and the batch is no
+  longer coerced to one print
+  ([#1573](https://github.com/utensils/mold/issues/1573)).
+- **Reference strength control on web, desktop and phone.** It renders only
+  where the recipe declares an adapter and takes its bounds from the host, so
+  an older machine or a checkpoint without one shows nothing, and it stays off
+  the wire until you move it — a default render is unchanged
+  ([#1573](https://github.com/utensils/mold/issues/1573)).
+- **Locally quantized Hunyuan3D tiers render again on the server.** A tier made by `mold quantize` (`hunyuan3d-2.1:q4`, `hunyuan3d-turbo:q8`, …) lives only in that host's `config.toml`, and durable admission resolved its family and then validated the request without it, so every mesh request on such a tier was refused as "mesh options are only supported by 3-D families" while the built-in `:fp16` tier was admitted. New image, `mold run`, generation batches and the 3-D Studio all took that door; the Studio hit it only after the source image and matting stages had run. The door now validates with the family it resolved (#1672).
+- **A 3-D workflow stage refused at the door reads FAILED and Resume retries it.** A child refused before it was attached to a queue batch left every stage PENDING beside a failed job, and Resume re-queued the identical refusal. The current stage is now marked failed with the door's error and reset by Resume.
+- **Pulling a derived tier on another host says how to make it.** `hunyuan3d-2.1:q4` advertised by one machine is not a download anywhere; asking for it now names the source tier and the `mold quantize … --tier q4` command instead of "unknown model, run mold list".
+- **Queue-aware Auto routing.** Web, desktop, iPhone, and Android now account for
+  schedulable GPUs, active work, and the incoming batch size when choosing a
+  machine, keeping busy multi-GPU servers available for queued work.
+- **Send held jobs to another machine.** Queue details offer a destination picker
+  when another connected machine is available. The terminal Machines queue and
+  `mold queue send JOB-ID --to HOST` also support transfers. Original settings and
+  reference media are preserved, retries recover the same destination job, and
+  the held original is removed only after durable acceptance. Machine-local
+  adapters and independent workflow stages are refused rather than changed.
+- **Surface extraction no longer webs thin geometry together, so a frame or a
+  set of spokes textures in seconds instead of stalling.** mold's port of
+  ComfyUI's surface nets emitted a quad wherever four cells around a grid edge
+  happened to be active, rather than where that edge actually crosses the
+  surface. On a shape whose surfaces never fold back into the same voxel the two
+  rules agree exactly; on the thin, self-touching geometry Hunyuan3D produces
+  for a pram frame or a wheel the difference was most of the mesh. The shape
+  from [#1666](https://github.com/utensils/mold/issues/1666) came out with
+  508,838 triangles, 78% of its edges shared by more than two of them, which
+  then defeated both stages behind it: decimation stopped at 96,052 triangles
+  instead of the 40,000 it was asked for, and UV unwrapping took 1,133 s. The
+  same shape now extracts 381,080 triangles with 0.2% of edges non-manifold and
+  no open boundary at all, decimates to exactly 40,000, and unwraps in 4.1 s —
+  280x. The surplus quads were visible too: the flat ground plate under that
+  render was covered in overlapping sheets that are simply gone. A mesh you
+  upload to a texture-only workflow can still arrive non-manifold, and that case
+  is still slow to unwrap — it reports its progress, stops within seconds of a
+  cancel, and now logs a warning when decimation cannot reach the face budget it
+  was given ([#1669](https://github.com/utensils/mold/issues/1669)).
+- **A textured 3-D render decimates before it unwraps, and takes seconds instead
+  of minutes.** Tencent's own paint pipeline remeshes to 40,000 triangles before
+  UV unwrapping; mold had no face budget, so the raw surface-net mesh — 226k to
+  455k triangles in practice — went into xatlas whole and the `Unwrapping mesh`
+  stage ran for minutes to over an hour. Measured 11-14x faster end to end
+  (59.9 s to 5.4 s on a 227k-triangle mesh). An explicit `--target-faces` still
+  wins, geometry-only exports keep the full-density surface, and the budget is
+  advertised as `capabilities.mesh.target_faces_texture_default` so every client
+  shows the number it will get. Reusing the settings of a textured print made
+  before this change re-renders it at the budget, because it recorded no face
+  count of its own; set `--target-faces` explicitly to reproduce the original
+  density
+  ([#1666](https://github.com/utensils/mold/issues/1666)).
+- **UV unwrapping no longer spawns one thread per core and burns two of them in
+  a spin loop.** On a 128-core host the stage used 127 threads and 3.06 cores to
+  do one core's work; it now uses exactly one, with byte-identical output. The
+  vendored xatlas is also compiled the way its pinned oracle compiles it
+  (`-std=c++17 -O3 -DNDEBUG`), worth a further ~17%
+  ([#1666](https://github.com/utensils/mold/issues/1666)).
+- **`Unwrapping mesh` and a new `Simplifying mesh` stage report real progress
+  and can be cancelled.** The unwrap forwards xatlas's own phase and percentage,
+  which the native bridge previously received and discarded, and the chart-merge
+  phase — which reported nothing and observed no cancel at all, so a cancel
+  during it was silently ignored — is now polled
+  ([#1666](https://github.com/utensils/mold/issues/1666)).
+- **A running job whose stage has a name reports `running` rather than
+  `loading`.** Long stages that carry no step counter, including `Sampling`,
+  `Writing mesh` and the PBR bake, were mislabelled for their whole duration.
+  `/api/activity` and `/api/queue` now ask one shared predicate, so they cannot
+  disagree about the same job; weight loading and downloading still read as
+  `loading`, which is what keeps their byte counters formatted as sizes
+  ([#1666](https://github.com/utensils/mold/issues/1666)).
+- **A finish estimate that has already passed is hidden instead of rendering as
+  "Finishes in 0s".** The estimate is stamped once when a job is leased and
+  never refreshed, so an overrunning job showed `0s` indefinitely
+  ([#1666](https://github.com/utensils/mold/issues/1666)).
+- **A 3-D run is one item in My images (desktop).** A text-to-3-D workflow
+  publishes a print for every stage, so one object used to leave four unrelated
+  tiles — the source picture, its matted and delighted copies, and the mesh.
+  The mesh now carries the tile with a marker saying how many came with it;
+  **Show the N pictures** opens the run, names each step, and gives you a chip
+  to leave by. They remain ordinary prints you can reuse, export and delete,
+  and the Trash is deliberately left uncollapsed so nothing can be purged
+  without being seen. **Open the 3-D run** on such a print takes you back to
+  the 3-D Studio, on the machine that ran it, with its inputs restored. The web
+  and phone Libraries still list every stage separately.
+- **Saving and reusing a 3-D workflow is a door you can see.** The settings rail
+  gains a **Recent** tab listing every workflow that machine has run — what it
+  made, what stage it is on or how it ended, how long ago, and an accent **Use
+  these settings again** line — replacing a dropdown whose rows read
+  "Text to 3-D · completed". **New workflow** on the toolbar starts fresh
+  without forgetting the machine or the styles in use.
+- **A past 3-D run's settings come back when you ask for them.** Clicking the
+  workflow you already have open restores it rather than doing nothing, the
+  list keeps up with a run in progress instead of freezing on its first
+  status, and opening a past run no longer empties a file well it cannot
+  refill — Rebuild and Add texture say which file to choose again.
+- **The 3-D Studio looks like the rest of the app.** The description, the 3-D
+  style and Picture style chips and Generate now sit on a composer at the
+  bottom of the canvas — the same anatomy New image has — with the ⌘↩ keycap
+  the shortcut actually honours. The canvas keeps the height instead of the
+  whole surface scrolling, the settings rail's header stays put while its
+  contents scroll, and texture size and mesh orientation use the app's own
+  controls and plain words instead of raw dropdowns.
+- **The 3-D Studio's geometry fields read the same on web.** "Which way is up"
+  and "How big one unit is" keep their accessible names and sentence case in
+  the browser, where the settings rail — not a composer — is still where a
+  workflow is authored.
+- **The 3-D Studio keeps what you were making.** Leaving for the Queue, My
+  images or Settings and coming back no longer clears the description, the
+  chosen styles, the attached mesh, the stage settings or the machine the
+  workflow is pinned to. The draft also survives a restart; an attached file
+  does not, and the well says so rather than promising bytes the next launch
+  cannot read.
+- **A 3-D workflow's queue row opens the 3-D Studio.** Clicking one used to
+  land on New image under its 3-D section, which cannot resume a durable
+  workflow at all — its stages, Cancel, Resume and history live only in the
+  Studio. Prints and queue rows made by a workflow now carry which workflow
+  made them and which machine ran them, and every door routes there — a
+  workflow on another machine opens against that machine, not whichever one
+  the studio was last browsing.
+- **⌘↩ generates in the 3-D Studio.** It used to leave the view and render a
+  picture in New image while the status bar advertised the shortcut as though
+  it worked.
+- **Picture style offers only picture styles.** The text-to-3-D image stage
+  listed LTX-2, Wan and MiniMax H3 among its still-picture candidates, and also
+  the prompt-expansion LLM and the upscalers — none of which can draw a
+  picture. It now reads the same style partition the New image section strip
+  and the Styles kind filter use, plus one shared answer to "is this a style at
+  all" that the desktop and web pickers had been answering separately.
+- **Fix Hunyuan3D lighting removal.** Requests with lighting removal enabled no longer fail with `invalid type: sequence, expected a string` while preparing the source image for the delight stage.
+- **Desktop Library reuse and layout.** Video playback's context menu now offers
+  Reuse settings, inspector actions wrap within the panel, and mirrored prints
+  recover retained source media from another known copy's host before reporting
+  it unavailable.
+- **Visible video sound control.** Create and Library show a persistent Sound
+  on/off toggle, remember mute across videos and app launches, and synchronize
+  with native player controls while playback continues to loop.
+- **Stable 3-D Studio drafts.** Routine machine telemetry updates no longer
+  reload workflow capabilities or reset the selected workflow and inputs.
+- Align desktop 3-D Studio with the shared toolbar, canvas, and inspector design. Add Auto and Most capable routing that keeps every workflow stage on one eligible machine, retains the workflow owner for progress and results, and avoids reloading unchanged result media.
+- Center the web queue's failed-job dismiss icon in its touch target and vertically align it with wrapped error text.
+- Fix text-to-mesh admission rejecting its own future-image validation placeholder as invalid PNG/JPEG, while keeping that placeholder out of the durable request.
+- Reuse Generate's filtered style pickers and shared switches in 3-D Studio, make the desktop settings rail resizable with its existing saved-width controls, and bring web workflow routing and mode controls into parity.
+- Restore queued generation settings from the single-job detail endpoint across desktop, web, and mobile, including durable jobs parked after a server restart. Selecting workflow history restores its authored controls without letting polling overwrite edits.
+- **Every theme now has a light and a dark tone.** Mocha, Safelight, Blueprint, Graphite and Nebula each come in both, and **Match system** finally means _this theme, after dark_. It used to mean a different theme: Nebula in daylight repainted as Porcelain, with another typeface, another accent and other corners. Four palettes are newly drawn — Mocha's light tone is Catppuccin's own Latte, Safelight's is the darkroom with the lights on, Blueprint's dark tone is a cyanotype, and Nebula's light tone is oxblood ink on bone paper.
+- **Look is two controls now: the theme, and System · Light · Dark.** A theme is named by itself — no entry says "Mocha · dark" any more — and the tone is chosen separately, so picking a theme keeps your tone and picking a tone keeps your theme. The old **Match system appearance** switch folds into the System position.
+- **Porcelain retires as a name.** It and Graphite were one theme under two names — the same greys, the same IBM Plex, the same corners — so they merge, and Porcelain's palette lives on unchanged as Graphite's light tone. Saved choices migrate automatically on every surface.
+- **The terminal joins the same five themes.** The TUI's eleven unrelated presets are retired for the same ten palettes as the apps, derived from the shared design tokens and pinned to them by a test — its `Mocha` used to be a different Mocha from the app's. Every retired slug (`studio-dark`, `ristretto`, `gruvbox`, `tokyo`, `nord`, `dracula`, `latte`) still loads and maps to the nearest theme, and Appearance gains a Light-or-dark row.
+- **3-D Studio now routes to connected machines.** Web and desktop can bind an
+  entire durable mesh workflow to a selected authenticated host, geometry-only
+  generation remains usable when that host lacks PBR painting, and signed
+  macOS desktop builds include the complete texture, matting, and Delight
+  feature set.
+- Add bulk local saving to desktop and mobile Library selections and bulk downloads to web, with progress and partial-failure reporting. Desktop skips existing local copies and exposes save/export in the selection context menu; web also exposes removal from the current collection.
+- **Hide irrelevant pixel controls for 3-D objects.** Keep mesh generation free of image aspect-ratio, pixel-resolution, and source-fit controls on web, desktop, iOS, Android, and the terminal UI even when a model's generation profile is unavailable.
+- **Restore Hunyuan3D 2.1 prompt and PBR controls.** Accept its advertised mesh
+  roundtrip workflow without discarding the rest of the model profile, so the
+  apps keep descriptions optional and expose supported Color / PBR settings
+  ([#1651](https://github.com/utensils/mold/pull/1651)).
+- **Android theme contrast.** Restore the selected native status/navigation-bar appearance on each recreated Activity, keeping dark-theme system icons readable after changing navigation mode.
+- **Android navigation and accessibility.** Reattach overlay Back handling and system text scaling to each recreated Activity WebView, preserving keyboard-first Back dismissal after system navigation-mode changes.
+- **Android pairing.** Start scans on the current Activity and WebView after recreation, cancel obsolete camera sessions, and restore preview backgrounds only once during cleanup.
+- **Desktop delivery checks.** Keep the Linux packaging proof aligned with the shipped mesh texture, matting and delight features so the nightly validation gate accepts the current build.
+- Android identity photos now discover installed camera apps and request camera permission before launching, with clean recovery after denial or cancellation.
+- Android Back now closes the pairing scanner and releases its camera session without leaving the app.
+- Fix Android pairing scanner startup on Android 17 with the patched CameraX dependency, and composite its camera preview through TextureView beneath the scanner controls.
+- Preserve unfinished mobile prompts, settings and private source media across app restarts and upgrades, with explicit recovery when saved media is unavailable.
+- Keep the mobile destination you selected while startup restores saved drafts and host state, instead of unexpectedly returning to Machines.
+- **Keep machine connections tied to the tested details.** Closing or going Back discards late connection results, repeated Enter presses do not duplicate probes, and the saved API key is the one tested. Discovery has separate retryable errors, preserves authentication feedback, and shows Done only after a successful connection. The dialog reflows and scrolls at enlarged text sizes.
+- Keep concurrent web downloads visible, distinguish load failures from empty lists, and preserve live progress during refresh.
+- Make download errors and actions readable at enlarged text sizes, with reliable keyboard focus and a scrollable phone panel.
+- Keep unread or incomplete GPU capabilities visibly unconfirmed, and finish Styles naming and readable exact model identity in web machine details.
+- **Make machine actions accessible.** Machines now have a visible actions button and separate Open, Retry, and Connect controls. The menu supports keyboard navigation, restores focus, and stays within small or enlarged-text viewports.
+- **Keep command search useful offline.** Failed catalog searches offer Retry without closing the palette, while local commands remain available. Selection follows command identity as results change, and web labels reflow within narrow and enlarged-text viewports.
+- **Preserve unfinished settings edits.** Saving or resetting one setting keeps edits in other rows. Failed refreshes retain the existing form with Retry, profile changes cannot leave the old profile editable, and failed profile creation retains the typed name. Configuration text reflows at enlarged sizes and toggles have larger touch targets.
+- **Hunyuan3D quantized shape and portable material assets.** Added locally derived, CUDA-qualified FP8 and GGUF shape tiers (including distilled/Turbo and multiview variants), durable per-print PBR asset indexing and downloads, and ZIP export containing OBJ, MTL, base-color, metallic-roughness, and normal maps ([#1496](https://github.com/utensils/mold/issues/1496), [#1511](https://github.com/utensils/mold/issues/1511)).
+- **Android storage regression coverage.** API28 emulator checks now exercise the installed app through the real Deny/Allow dialog and verify its public Downloads output, alongside the existing native storage tests.
+- **Readable Styles at larger text sizes.** Catalog filters, cards and model details scale with browser text preferences, wrap within narrow screens, and keep actions reachable. Friendly titles retain exact model IDs for sighted and screen-reader users; unknown model modality is no longer guessed.
+- **Honest account recovery.** Settings keeps server token status unknown when its initial read fails, offers inline Retry, and prevents overlapping token writes while retaining unsaved drafts.
+- **Reliable machine details.** Failed style and download reads show Retry and preserve last-known rows instead of claiming empty lists. Machine controls and telemetry scale with larger text, and callbacks from a previous machine cannot disturb the current view.
+- **Android text preferences.** Follow system text size at launch and when it changes without restarting the app or losing the draft. Android About correctly names the GitHub APK update channel.
+- **Mobile overlay recovery.** Android Back dismisses image pickers, crop sheets, and mask editors. Dismissed image selections cannot apply late downloads. Short Android landscape screens keep readiness explanations in the scrolling form, and rotation preserves focused-editor recovery.
+- **Clearer mobile controls.** Shape and size is compact with a visible Change disclosure. Destination swipe navigation is removed while overlay and media gestures remain. Unavailable Color/PBR controls explain themselves from model capabilities, and older-server prompt validation matches capability presentation.
+- **Shareable Library views.** Filter and print links retain exact machine ownership, with keyboard-safe media actions and readable themes.
+- **Easier style discovery.** Search installed styles by friendly title or description, retry failed inventory reads, and read exact IDs beneath friendly names. Styles, Machines, Settings and pairing panels wrap at enlarged text sizes.
+- **Queue details.** Web Queue groups work into Being made, Waiting, and Needs attention, with original-machine job details, cancel, retry, and pause controls. A compact live-work summary stays available elsewhere in the app.
+- **Library navigation.** Media-type filters follow Back and Forward, including audio and 3-D links. Returning to a tab or reconnecting refreshes the listing immediately.
+- **Simpler web authoring.** Put results above the composer, switch between still
+  pictures, short clips, and 3-D objects with remembered styles, and keep shape
+  and size choices visible. More settings adapts to smaller screens, while
+  theme contrast, slider tracks, and enlarged-text reflow are clearer
+  ([#1643](https://github.com/utensils/mold/pull/1643)).
+- **A Queue workspace for the web.** Follow local and fleet work from a dedicated
+  page, open a job in New image, and cancel or retry local work without losing
+  your draft. Navigation now shares the desktop's New image, Queue, My images,
+  Styles and Machines vocabulary, with theme fonts and native browser links.
+  Keyboard actions no longer also open their surrounding queue row.
+- **Visible mobile ratios and result actions.** Keep aspect-ratio choices on the
+  main iOS/Android form while Size details remain collapsed. Give Save and share
+  and mesh statistics a readable themed surface, including light themes.
+- **Centered mobile button labels.** Vertically center segmented controls, including
+  Still picture, Short clip, and 3-D object, while preserving enlarged text and touch targets.
+- **Auto prompt tools use reachable machines.** Expand and Remix now follow Auto
+  and Most capable routing and can use an installed expander on a peer. The
+  generation destination stays separate, and retries preserve both machines.
+- **Hunyuan3D 2.1 Shape VAE mesh rebuilds.** The web and desktop 3-D Studio can
+  durably rebuild a supplied GLB or OBJ through Tencent's 2.1 Shape VAE, with
+  deterministic seeded encoding, coordinate normalization, restart-safe source
+  retention, and a fresh Library GLB ([#1511](https://github.com/utensils/mold/issues/1511),
+  [#1496](https://github.com/utensils/mold/issues/1496)).
+- **Hunyuan3D Delight preprocessing.** CUDA servers, the CLI, MCP, web, desktop, and mobile can remove baked lighting and highlights before Hunyuan3D shape or PBR paint; durable 3-D workflows checkpoint matting and delight as separate restart-safe stages ([#1496](https://github.com/utensils/mold/issues/1496), [#1511](https://github.com/utensils/mold/issues/1511)).
+- **Durable 3-D workflows.** Create, monitor, cancel, and resume text-to-mesh and supplied-mesh texturing jobs from the desktop and web 3-D Studio, with encrypted source retention and crash-safe stage recovery.
+- Keep mobile video, favorite, and image selection markers inside their badges at large accessibility text sizes.
+- Open mobile source and frame gallery actions directly on the Gallery tab.
+- Keep mobile Library selection actions readable without breaking collection labels into fragments or covering the grid at enlarged text sizes.
+- Show friendly descriptions and exact model IDs in the mobile Style picker, with Browse more opening the current output kind.
+- Fix mobile result details and export feedback contrast in light themes while preserving a dark media canvas.
+- Make iOS text follow Dynamic Type, reflow mobile controls and screen headings at larger sizes, and keep navigation and keyboard actions reachable. Show held Queue errors across the full card width with complete details and accessible status labels.
+- Keep mobile text, numeric, and organization fields visible above the keyboard, including iPhone rotation; make Done and machine-setup Next actions work consistently, keep sheet exits visible, and dismiss Android viewer and style panels in order.
+
+- Expose Color / PBR and advertised texture sizes directly in mobile 3-D creation, preserve valid mesh profiles from older hosts, and match desktop seed-control order.
+- Search the full loaded mobile library, including titles, prompts, styles, tags, and collections. Tighten Queue spacing and label prompt-free jobs clearly.
+- Apply Android system insets once so the shared mobile interface does not leave an extra status-bar-sized gap.
+- Begin the shared iOS and Android redesign with Make, Queue, Images, Styles, and Machines; simplify creation into three output kinds with remembered styles and More settings, keep Generate above the iPhone keyboard, and inspect machine-aware Queue details without replacing the draft. This is the first TestFlight milestone; further mobile refinements continue.
+- **The composer's Shape chip actually picks a shape.** The "Square · 1024"
+  chip beside the style picker was a caret with no menu behind it, and its
+  label was derived separately from the inspector's — so the rail could
+  highlight **Source** while the chip named a size, and a size the rail marked
+  approximate the chip stated flatly. Clicking it now opens the same Shape and
+  Resolution controls the Create rail has, reading and writing one resolver, so
+  the two controls stay in step whichever you reach for.
+- **Painted 3-D prints show their colours.** A Hunyuan3D print with PBR
+  materials now renders its gallery thumbnail and its turntable GIF, APNG or
+  WebP export in the baked texture's own colours instead of the bare grey
+  placeholder surface. The poster reader had been dropping the `.glb`'s
+  embedded `baseColorTexture` and vertex colours, so a painted mesh was the
+  only thing in mold that looked different in the Library than in the 3-D
+  viewer. Cached grey tiles are re-rendered automatically.
+- **The 3-D "Simplify to" field says what it does, and fits its own
+  placeholder.** The face budget now explains that it merges flat areas down
+  to a triangle count while creases and color survive, instead of only
+  claiming that fewer faces load faster. The input no longer loses its width
+  to the label beside it, so `keep every detail` reads in full. Desktop and the
+  phone use the same words.
+- **A job you pause says it was paused, not that the queue restarted.** A row
+  someone paused and a queue parked by a server restart both arrive as
+  `paused`, and every client — the apps, the queue detail panel, and
+  `mold queue list` — captioned both "Paused after restart", so pausing one
+  waiting job read as though the whole queue had stopped. `GET /api/queue` now
+  reports `explicitly_paused` on a paused row, and every surface says "Paused"
+  for a job you paused. The detail panel also stopped reporting a paused row's
+  place in a line it is not standing in. Dispatch was already correctly
+  scoped, and the three pause controls — whole queue, one machine, one job —
+  are now pinned by tests on both sides.
+- **The queue's progress bar tracks the job again.** A row the host reports
+  through `/api/activity` — every fleet row, and every row after a reconnect —
+  drew a fixed stub instead of a meter, so a Hunyuan3D print captioned
+  "Generating PBR views · 11/15" showed a bar barely off the left edge. Both
+  the sidebar rail and the Queue view now measure a row with the same counter
+  its own sentence quotes.
+- **Turntables can export without a backdrop.** The 3-D export sheet now has a
+  **Background · Transparent** checkbox, remembered for the next export, so a
+  turntable GIF, APNG or WebP can be dropped onto a slide or a README instead
+  of carrying mold's slate square with it. APNG and WebP keep the object's
+  antialiased outline; a GIF has one transparent colour, so its outline is a
+  hard cut. Also on `mold library export --transparent`, the `export_mesh` MCP
+  tool, and `POST /api/gallery/export/:filename`.
+- **Hunyuan3D background removal.** Image-to-mesh and named multiview requests can now apply a pinned pure-Rust U²-Net matte with explicit Auto, On, and Off controls across the CLI, MCP, TUI, Discord, web, desktop, and mobile surfaces ([#1496](https://github.com/utensils/mold/issues/1496)).
+- **Complete Hunyuan3D multiview authoring in terminal and Discord.** The TUI now exposes profile-gated semantic front/left/back/right inputs, and the Discord bot adds a dedicated `/mesh` command for single-view and named multiview generation ([#1496](https://github.com/utensils/mold/issues/1496)).
+- Add Hunyuan3D 2mv and 2mv Turbo shape generation from semantically named front, left, back, and right images across the server, desktop, web, mobile, CLI, and MCP surfaces.
+- **Hunyuan3D 2.1 shape.** Image-to-mesh generation with the MoE shape transformer, DINOv2-large conditioner and separate 2.1 licence gate.
+- **Hunyuan3D PBR paint.** Generate UV-unwrapped GLB meshes with embedded base-color and metallic/roughness textures from the same appearance image, with durable per-stage progress across local and remote clients.
+- **Mesh admission.** Price the selected checkpoint’s latent set and encoder size, including canvasless mini requests.
+- **Mesh geometry.** Read all static GLB scene primitives with their transforms and interleaved attributes, and reject accessors that escape their declared buffers.
+- **CUDA half-precision convolutions.** Use float32 accumulation for cuDNN Conv1D and Conv2D with float16 tensors, reducing accumulated numerical error while preserving float16 storage.
+- **Real-ESRGAN precision.** Keep RRDB residual and LeakyReLU scalars in float32 before rounding half-precision activations, matching upstream Torch arithmetic.
+- **Upscaler cancellation.** Stop RRDB inference between network blocks and reject cancellation during the final tile or output encoding before returning an image.
+- **Real-ESRGAN cuDNN dispatch.** Keep its first convolution on cuDNN when that backend is selected, avoiding an im2col rounding difference that accumulates through the residual network.
+- **A long clip survives a page reload again.** Reloading the browser while
+  the machine was rendering a long clip reported "server progress lost" while
+  the machine happily carried on stitching it. The page now picks the same
+  render back up where it left off
+  ([#1621](https://github.com/utensils/mold/issues/1621)).
+- **A clip paused by a restart now says so and stops.** When a machine parks a
+  long clip at shutdown it keeps every finished piece, ready to resume — but
+  the desktop app sat on that row forever, checking every few seconds and never
+  saying anything. It now tells you the clip is paused and points you at
+  Resume in the queue
+  ([#1622](https://github.com/utensils/mold/issues/1622)).
+- **Removed scene-by-scene clip authoring from the apps.** The desktop
+  `Simple | Scenes` strip and its timeline, the web and iPhone
+  `One shot | Sequence` output, the TUI chain composer, and the Discord
+  `/sequence` command are gone. Making a clip is now one flow: a prompt, the
+  model controls, and the length slider — including long clips, which the host
+  still renders as chained clips stitched into one video exactly as before
+  ([#1614](https://github.com/utensils/mold/issues/1614)).
+- **Sequence prints stay in your library.** Existing scene-authored clips keep
+  their thumbnails, provenance, downloads, and exports; **Use these settings
+  again** now restores a plain one-shot clip built from the first scene's
+  prompt instead of reopening a timeline.
+- **Scripted sequences are unchanged.** `mold run --script shot.toml`, repeated
+  `--prompt`, `--frames-per-clip`, `mold chain validate`, `mold jobs`, and the
+  `/api/chain-jobs` endpoints all still work for anyone driving sequences from
+  the CLI or the API.
+- **Reclaimed the space the retired composer was holding.** Removing it left
+  every saved scene draft — and the clip and opening images they referenced,
+  which can run to megabytes — stranded in browser storage with nothing left
+  that could read or free them. Both apps now clear that on launch.
+- **Website analytics popup removed.** Google Analytics now starts automatically
+  on the public documentation site, with no consent popup or preference button.
+- **Website analytics navigation.** Keep automatic scroll and link events
+  associated with the current documentation page after navigation.
+- **Optional website analytics.** The public documentation website now offers
+  consent-based Google Analytics with a persistent preference control and an
+  updated privacy disclosure. Mold apps and servers contain no new analytics.
+- **Performance-qualify Wan on Apple Metal.** Promote the backend to supported
+  after repeated real-checkpoint 1.3B BF16 and 5B Q8/FP16 video campaigns,
+  including image conditioning and sustained unified-memory pressure
+  ([#1094](https://github.com/utensils/mold/issues/1094)).
+
 ## [0.28.0] - 2026-09-06
 
 - **Restore uncached Wan 1.3B and dense 14B rendering.** Refuse residual caching
@@ -4567,7 +5817,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/utensils/mold/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/utensils/mold/compare/v0.27.1...v0.28.0
 [0.27.1]: https://github.com/utensils/mold/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/utensils/mold/compare/v0.26.0...v0.27.0

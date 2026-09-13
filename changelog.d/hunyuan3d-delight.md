@@ -1,1 +1,0 @@
-- **Hunyuan3D Delight preprocessing.** CUDA servers, the CLI, MCP, web, desktop, and mobile can remove baked lighting and highlights before Hunyuan3D shape or PBR paint; durable 3-D workflows checkpoint matting and delight as separate restart-safe stages ([#1496](https://github.com/utensils/mold/issues/1496), [#1511](https://github.com/utensils/mold/issues/1511)).

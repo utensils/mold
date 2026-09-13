@@ -14,7 +14,7 @@ description = "SQLite-backed metadata store for mold gallery items"
 name = "mold_db"
 
 [dependencies]
-mold-ai-core = { path = "../mold-core", version = "0.28.0" }
+mold-ai-core = { path = "../mold-core", version = "0.29.0" }
 anyhow = "1"
 fs2 = "0.4"
 hostname = "0.4"

@@ -1,1 +1,0 @@
-- Android identity photos now discover installed camera apps and request camera permission before launching, with clean recovery after denial or cancellation.

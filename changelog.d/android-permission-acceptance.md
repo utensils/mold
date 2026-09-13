@@ -1,1 +1,0 @@
-- **Android storage regression coverage.** API28 emulator checks now exercise the installed app through the real Deny/Allow dialog and verify its public Downloads output, alongside the existing native storage tests.

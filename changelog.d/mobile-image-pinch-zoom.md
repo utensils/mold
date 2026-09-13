@@ -1,1 +1,0 @@
-- Add smooth focal pinch-to-zoom and panning to the full-screen image viewer on iPhone and Android.

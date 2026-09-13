@@ -1,4 +1,0 @@
-- **The composer's shortcuts follow the platform.** In the browser, Write more for me and Generate are ⌘E and ⌘↵ on a Mac, iPhone, or iPad and Ctrl+E / Ctrl+↵ everywhere else, and the keycaps say which applies. Ctrl+E is end-of-line on a Mac, so it is no longer bound there.
-- **Reset says what it does.** The ↺ Reset on the Create rail puts every setting back to the style's defaults, add-on looks and the source and identity photos included; only the prompt, title, filing, and style stay, and the toast now says so in the app's own words.
-- **The retired prompt-preset field is gone.** Saved drafts, starters, phone snapshots, and prepared variations no longer carry the old composer "Style" preset, and a draft saved with one loads clean.
-- **The last print survives a reload.** The browser's Create canvas now draws a finished print from the machine that made it when the page no longer holds the bytes, instead of a broken picture.

@@ -1,1 +1,0 @@
-- Fix mobile result details and export feedback contrast in light themes while preserving a dark media canvas.

@@ -1,1 +1,0 @@
-- **Android navigation and accessibility.** Reattach overlay Back handling and system text scaling to each recreated Activity WebView, preserving keyboard-first Back dismissal after system navigation-mode changes.

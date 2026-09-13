@@ -1,1 +1,0 @@
-- **Desktop delivery checks.** Keep the Linux packaging proof aligned with the shipped mesh texture, matting and delight features so the nightly validation gate accepts the current build.
