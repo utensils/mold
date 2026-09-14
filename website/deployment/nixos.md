@@ -39,9 +39,13 @@ the exact CI-built package instead of compiling Mold locally:
 ```nix
 {
   nix.settings = {
-    extra-substituters = [ "https://mold.cachix.org" ];
+    extra-substituters = [
+      "https://mold.cachix.org"
+      "https://cache.nixos-cuda.org" # nixpkgs CUDA team cache (cuda-maintainers.cachix.org is gone)
+    ];
     extra-trusted-public-keys = [
       "mold.cachix.org-1:9HBc/bEXDdpbxMjOwpaIDpjZqBh9JYg0h5Fipm+D8m4="
+      "cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M="
     ];
   };
 }
