@@ -397,23 +397,23 @@
               # `cargo check --features cuda` must not require (#1483).
               # The device half — and with it FlashAttention — is
               # `cudaDeviceFeatureFor`, shared with the desktop recipe.
-              "${cudaDeviceFeatureFor computeCap},cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
+              "${cudaDeviceFeatureFor computeCap},cudnn,preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
             else if gpuFeature != "" then
-              "${gpuFeature},h3,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
+              "${gpuFeature},h3,preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
             else
-              "preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight";
+              "preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight";
 
           # Shell completion generation only needs CLI shape, not GPU linkage.
           # Keep this CUDA-free so Linux sandbox builds can generate completion
           # scripts without loading the host-only NVIDIA driver library.
-          completionFeatures = "preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight";
+          completionFeatures = "preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight";
 
           # Devshell defaults compile the full shipping feature set so that
-          # `mold tui`, `mold discord`, WebP/MP4 output, Prometheus metrics,
-          # and local prompt expansion are all available from the interactive
-          # `mold`, `serve`, and `generate` commands without the user having
-          # to know which features to flip. CI and `nix build` use the same
-          # list via `releaseFeatures`, so there's a single feature matrix.
+          # `mold discord`, WebP/MP4 output, Prometheus metrics, and local
+          # prompt expansion are all available from the interactive `mold`,
+          # `serve`, and `generate` commands without the user having to know
+          # which features to flip. CI and `nix build` use the same list via
+          # `releaseFeatures`, so there's a single feature matrix.
           releaseFeatures = releaseFeaturesFor cudaComputeCap;
           devFeatures = releaseFeatures;
 

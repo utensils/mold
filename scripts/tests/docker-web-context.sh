@@ -28,4 +28,16 @@ grep -Fq 'new URL("../ui", import.meta.url)' "$repo_root/web/vite.config.ts" || 
   exit 1
 }
 
+# The interactive terminal UI is retired: the Dockerfile must name neither the
+# deleted crate path nor the removed `tui` cargo feature.
+if grep -n 'crates/mold-tui' "$dockerfile"; then
+  echo "FAIL: Dockerfile still names the retired crates/mold-tui path" >&2
+  exit 1
+fi
+
+if grep -nE -- '--features[^#]*[ ,"]tui([,"[:space:]]|$)' "$dockerfile"; then
+  echo "FAIL: Dockerfile still passes the retired \`tui\` cargo feature" >&2
+  exit 1
+fi
+
 echo "PASS: Docker web-builder includes the shared workspace sources before build"

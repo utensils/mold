@@ -21,17 +21,15 @@ expect() {
   [[ "$got" == "$want" ]] || fail "$label: ${key} was '${got}', wanted '${want}'"
 }
 
-# A leaf crate pulls in only itself and its dependents.
-expect "tui-only change" scope packages "crates/mold-tui/src/app.rs"
-expect "tui-only change" names "mold-ai mold-ai-tui" "crates/mold-tui/src/app.rs"
-
-# A discord change reaches only the binary that embeds the bot.
+# A leaf crate pulls in only itself and its dependents: a discord change
+# reaches only the binary that embeds the bot.
+expect "discord-only change" scope packages "crates/mold-discord/src/lib.rs"
 expect "discord-only change" names "mold-ai mold-ai-discord" "crates/mold-discord/src/lib.rs"
 
 # The core crate fans out to every crate that depends on it (candle does not),
 # and the answer is the precise package list, not a blanket workspace.
 core_names="$(decide "crates/mold-core/src/types.rs" | sed -n 's/^names=//p')"
-for must in mold-ai mold-ai-core mold-ai-inference mold-ai-server mold-ai-tui mold-ai-discord; do
+for must in mold-ai mold-ai-core mold-ai-inference mold-ai-server mold-ai-discord; do
   grep -qw "$must" <<< "$core_names" || fail "core change does not reach $must (got: $core_names)"
 done
 
@@ -48,7 +46,7 @@ done
 
 # The feature union only names selected packages: cargo refuses `pkg/feature`
 # for a package outside the selection.
-expect "tui-only features" features "mold-ai/discord,mold-ai/expand,mold-ai/mdns,mold-ai/metrics,mold-ai/mp4,mold-ai/preview,mold-ai/pulid,mold-ai/tui,mold-ai/webp" "crates/mold-tui/src/app.rs"
+expect "discord-only features" features "mold-ai/discord,mold-ai/expand,mold-ai/mdns,mold-ai/metrics,mold-ai/mp4,mold-ai/preview,mold-ai/pulid,mold-ai/webp" "crates/mold-discord/src/lib.rs"
 candle_features="$(decide crates/mold-candle/src/lib.rs | sed -n 's/^features=//p')"
 grep -q "mold-ai-inference/pulid" <<< "$candle_features" || fail "a candle change does not reach the inference union"
 grep -q "mold-ai-core/" <<< "$candle_features" && fail "a candle change must not name core features (core does not depend on candle)"
@@ -67,7 +65,7 @@ expect "docs-only change" scope none "website/guide/prompting.md" "changelog.d/x
 expect "docs-only change" packages "" "README.md"
 
 # Mixed: a leaf crate plus docs is still just the leaf.
-expect "leaf plus docs" names "mold-ai mold-ai-tui" "crates/mold-tui/src/app.rs" "README.md"
+expect "leaf plus docs" names "mold-ai mold-ai-discord" "crates/mold-discord/src/lib.rs" "README.md"
 
 # Every cross-crate include_str! in the tree must be a listed edge.
 while IFS=: read -r file _ line; do

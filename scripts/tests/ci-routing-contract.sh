@@ -353,19 +353,19 @@ if release_change_allowed M src/production.rs; then
 fi
 
 require_text "$ci" \
-  "cargo clippy -p mold-ai --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings" \
+  "cargo clippy -p mold-ai --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,expand,webp,mp4,mdns,pulid --all-targets -- -D warnings" \
   "Metal-gated production code is not linted"
 require_text "$ci_local" \
-  "cargo clippy -p mold-ai --features h3-cuda,mesh-texture,mesh-matting,mesh-delight,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid --all-targets -- -D warnings" \
+  "cargo clippy -p mold-ai --features h3-cuda,mesh-texture,mesh-matting,mesh-delight,preview,discord,expand,webp,mp4,metrics,mdns,pulid --all-targets -- -D warnings" \
   "the local CUDA gate does not lint the shipping feature set (mesh features, discord, metrics)"
 require_text "$ci" \
   "cargo check -p mold-ai-server --features h3,mesh-texture,mesh-matting,mesh-delight,metal,expand,mdns,metrics,mp4,pulid,webp" \
   "the reviewed H3 Metal server recipe is not compiled"
 require_text "$release_workflow" \
-  "cargo build --release -p mold-ai --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid" \
+  "cargo build --release -p mold-ai --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,discord,expand,webp,mp4,metrics,mdns,pulid" \
   "the macOS release recipe omits Hunyuan3D texture baking"
 require_text "$release_workflow" \
-  "--features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid  # macOS" \
+  "--features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,discord,expand,webp,mp4,metrics,mdns,pulid  # macOS" \
   "the documented macOS source install omits Hunyuan3D texture baking"
 # `flash-attn` rides sm86 and sm100 alongside `cuda`, and sm89 gets the same
 # kernel through `h3-cuda`. FLUX's `AttentionPolicy::FastStill` math path folds
@@ -379,14 +379,14 @@ require_text "$release_workflow" \
 # Blackwell fails, so it would take the A100/H100 tile on an Ada-sized SM —
 # unmeasured, and mold owns no RTX 50-series card. See `flashAttnQualifiedCaps`
 # in flake.nix.
-cuda_release_features="cuda,flash-attn,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
+cuda_release_features="cuda,flash-attn,cudnn,preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
 [[ "$(grep -Fc -- "cargo build --release -p mold-ai --features $cuda_release_features" "$release_workflow")" -eq 2 ]] \
   || fail "the sm86/sm100 CUDA release recipes do not both ship FlashAttention and the Hunyuan3D mesh stack"
-sm120_release_features="cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
+sm120_release_features="cuda,cudnn,preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight"
 [[ "$(grep -Fc -- "cargo build --release -p mold-ai --features $sm120_release_features" "$release_workflow")" -eq 1 ]] \
   || fail "the sm120 CUDA release recipe must ship the mesh stack on math attention, without flash-attn"
 require_text "$release_workflow" \
-  "cargo build --release -p mold-ai --features h3-cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight" \
+  "cargo build --release -p mold-ai --features h3-cuda,cudnn,preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight" \
   "the sm89 CUDA release recipe omits the Hunyuan3D mesh stack"
 require_text "$desktop" \
   "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features h3-cuda,cudnn,pulid,webp,mesh-texture,mesh-matting,mesh-delight -- -D warnings" \
@@ -433,7 +433,7 @@ cuda_typecheck_features="$(grep -oE 'cargo check -p mold-ai --features [^ ]+' <<
 # only as the full reviewed `h3-cuda` set, whose flash-attn and fused-H3 nvcc
 # kernels a cold hosted runner cannot finish inside the timeout. The `h3` cfg
 # sites are compiled on the PR route by `metal-check` instead (pinned below).
-for shipped_feature in cuda preview discord expand tui webp mp4 metrics mdns pulid mesh-texture mesh-matting mesh-delight; do
+for shipped_feature in cuda preview discord expand webp mp4 metrics mdns pulid mesh-texture mesh-matting mesh-delight; do
   case ",${cuda_typecheck_features}," in
     *",${shipped_feature},"*) ;;
     *) fail "the CUDA typecheck does not compile the shipped feature '${shipped_feature}'" ;;
@@ -588,7 +588,7 @@ grep -Fq '"Cargo.lock"' "$msrv" \
   || fail "the MSRV workflow does not run when the lockfile changes"
 grep -Fq 'cargo "+$msrv_toolchain" check --workspace --all-targets --locked' "$msrv" \
   || fail "the MSRV workflow does not check the workspace on the declared toolchain"
-grep -Fq -- '--features preview,discord,expand,tui,metrics,webp,mp4,mdns,pulid' "$msrv" \
+grep -Fq -- '--features preview,discord,expand,metrics,webp,mp4,mdns,pulid' "$msrv" \
   || fail "the MSRV workflow does not check the mold CLI feature set"
 if grep -Fq 'Check declared MSRV' <<< "$rust_gate"; then
   fail "the MSRV toolchain is back on main's merge path"

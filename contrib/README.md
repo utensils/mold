@@ -46,7 +46,7 @@ journalctl --user -u mold-server -f
 To swap the binary in place after a rebuild:
 
 ```bash
-cargo build --profile dev-fast -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics
+cargo build --profile dev-fast -p mold-ai --features cuda,preview,discord,expand,webp,mp4,metrics
 systemctl --user restart mold-server
 ```
 

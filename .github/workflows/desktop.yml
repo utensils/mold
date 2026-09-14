@@ -318,7 +318,7 @@ jobs:
         working-directory: .
         run: >-
           cargo check --release -p mold-ai
-          --features preview,discord,expand,tui,webp,metrics,mdns,pulid
+          --features preview,discord,expand,webp,metrics,mdns,pulid
       - name: Import the self-signed Windows certificate
         if: github.event_name == 'push'
         id: windows-signing

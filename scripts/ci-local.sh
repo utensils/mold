@@ -242,7 +242,7 @@ if wants rust; then
       cargo "+$msrv" check --workspace --all-targets --locked
     step "rust: MSRV $msrv feature check" \
       cargo "+$msrv" check -p mold-ai --locked \
-      --features preview,discord,expand,tui,metrics,webp,mp4,mdns,pulid
+      --features preview,discord,expand,metrics,webp,mp4,mdns,pulid
   fi
   step "rust: fmt" cargo fmt --all -- --check
   step "rust: generated generation profiles" \
@@ -258,7 +258,7 @@ if wants rust; then
     step "rust: test (full main suite, cargo-nextest not installed)" cargo test --workspace
   fi
   step "rust: optional feature check" \
-    cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns,pulid
+    cargo check -p mold-ai --features preview,discord,expand,webp,mp4,mdns,pulid
   step "rust: mesh preparation tests" \
     cargo test -p mold-ai-inference --features mesh-texture,mesh-matting --lib hunyuan3d
   step "rust: mesh preparation clippy" \
@@ -366,12 +366,12 @@ if wants gpu; then
   case "$(uname -s)" in
     Darwin)
       step "gpu: Metal forced-local clippy" \
-        cargo clippy -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings
+        cargo clippy -p mold-ai --features metal,preview,expand,webp,mp4,mdns,pulid --all-targets -- -D warnings
       ;;
     *)
       if command -v nvcc >/dev/null 2>&1; then
         step "gpu: CUDA forced-local clippy" \
-          cargo clippy -p mold-ai --features h3-cuda,mesh-texture,mesh-matting,mesh-delight,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid --all-targets -- -D warnings
+          cargo clippy -p mold-ai --features h3-cuda,mesh-texture,mesh-matting,mesh-delight,preview,discord,expand,webp,mp4,metrics,mdns,pulid --all-targets -- -D warnings
         step "gpu: clippy h3_runtime_qualification_record" \
           cargo clippy -p mold-ai-inference --features dev-bins,h3-cuda \
           --bin h3_runtime_qualification_record -- -D warnings

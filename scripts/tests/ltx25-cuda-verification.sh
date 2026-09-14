@@ -145,8 +145,8 @@ chmod +x "$tmp/bin/"*
 
 build_json="$tmp/build.json"
 jq -n --arg candle_rev "$candle_rev" --arg git_sha "$head_sha" '{
-  cargo_command: "cargo build --release -p mold-ai --features h3-cuda,preview,mp4,tui",
-  features: ["h3-cuda", "preview", "mp4", "tui"],
+  cargo_command: "cargo build --release -p mold-ai --features h3-cuda,preview,mp4,metrics",
+  features: ["h3-cuda", "preview", "mp4", "metrics"],
   candle_rev: $candle_rev, git_sha: $git_sha}' >"$build_json"
 
 # A fake copy of halcyon's Metal evidence: the newest sealed Metal report

@@ -121,7 +121,6 @@ jobs:
               - 'crates/mold-core/**'
               - 'crates/mold-inference/**'
               - 'crates/mold-server/**'
-              - 'crates/mold-tui/**'
             # The `cuda` and `metal` cfg arms gate the SAME mold-cli call
             # sites into mold-server, so this is the seam `metal-check` covers
             # from the other side: the CLI, the server whose signatures it
@@ -860,7 +859,7 @@ jobs:
         # cover every GPU cfg arm that ships. `cudnn` is omitted because cudarc
         # needs the cuDNN headers at build time and mold's crates carry no
         # `cudnn` cfg arm.
-        run: cargo check -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
+        run: cargo check -p mold-ai --features cuda,preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
   metal-check:
     name: Metal forced-local typecheck
@@ -884,7 +883,7 @@ jobs:
         # out to `protoc`.
         run: brew install protobuf
       - name: Clippy Metal forced-local and server paths
-        run: cargo clippy -p mold-ai --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,expand,tui,webp,mp4,mdns,pulid --all-targets -- -D warnings
+        run: cargo clippy -p mold-ai --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,expand,webp,mp4,mdns,pulid --all-targets -- -D warnings
       - name: Check reviewed H3 Metal server recipe
         run: cargo check -p mold-ai-server --features h3,mesh-texture,mesh-matting,mesh-delight,metal,expand,mdns,metrics,mp4,pulid,webp
 

@@ -95,7 +95,6 @@ COPY crates/mold-scheduler/Cargo.toml crates/mold-scheduler/Cargo.toml
 COPY crates/mold-server/Cargo.toml crates/mold-server/Cargo.toml
 COPY crates/mold-cli/Cargo.toml crates/mold-cli/Cargo.toml
 COPY crates/mold-discord/Cargo.toml crates/mold-discord/Cargo.toml
-COPY crates/mold-tui/Cargo.toml crates/mold-tui/Cargo.toml
 # Cargo resolves explicit build-script paths before compiling the stub crates.
 # Keep these in the manifest-first layer so dependency caching remains valid.
 COPY crates/mold-core/build.rs crates/mold-core/build.rs
@@ -114,7 +113,6 @@ RUN mkdir -p crates/mold-core/src \
              crates/mold-server/src \
              crates/mold-cli/src \
              crates/mold-discord/src \
-             crates/mold-tui/src \
     && echo "// stub" > crates/mold-core/src/lib.rs \
     && echo "// stub" > crates/mold-catalog/src/lib.rs \
     && echo "// stub" > crates/mold-db/src/lib.rs \
@@ -123,11 +121,10 @@ RUN mkdir -p crates/mold-core/src \
     && echo "// stub" > crates/mold-scheduler/src/lib.rs \
     && echo "// stub" > crates/mold-server/src/lib.rs \
     && echo 'fn main() { println!("stub"); }' > crates/mold-cli/src/main.rs \
-    && echo "// stub" > crates/mold-discord/src/lib.rs \
-    && echo "// stub" > crates/mold-tui/src/lib.rs
+    && echo "// stub" > crates/mold-discord/src/lib.rs
 
 # Build dependencies only (this layer is cached until Cargo.toml/lock changes)
-RUN cargo build --release -p mold-ai --features cuda,cudnn,expand,discord,tui,webp,mp4,metrics
+RUN cargo build --release -p mold-ai --features cuda,cudnn,expand,discord,webp,mp4,metrics
 
 # Now copy the real source code
 COPY crates/ crates/
@@ -166,7 +163,7 @@ ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}
 RUN gpu_feature="cuda,flash-attn"; \
     if [ "${CUDA_COMPUTE_CAP}" = "89" ]; then gpu_feature="h3-cuda"; fi; \
     if [ "${CUDA_COMPUTE_CAP}" = "120" ]; then gpu_feature="cuda"; fi; \
-    cargo build --release -p mold-ai --features "${gpu_feature},cudnn,expand,discord,tui,webp,mp4,metrics"
+    cargo build --release -p mold-ai --features "${gpu_feature},cudnn,expand,discord,webp,mp4,metrics"
 RUN scripts/seal-cuda-ptx-manifest.py /build/target/release/mold \
     "${CUDA_COMPUTE_CAP}" /build/target/release/build
 RUN scripts/probe-cuda-embedded-ptx.py /build/target/release/mold \

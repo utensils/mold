@@ -101,7 +101,7 @@ def workspace_graph():
         rel = Path(pkg["manifest_path"]).resolve().relative_to(REPO_ROOT).parent
         dir_to_name[str(rel)] = pkg["name"]
     # Reverse edges among members from the DECLARED dependencies, so optional
-    # deps behind a feature (`mold-ai`'s `tui = ["dep:mold-tui"]`) and
+    # deps behind a feature (`mold-ai`'s `discord = ["mold-discord"]`) and
     # dev-dependencies count: the resolve graph would drop the optional ones
     # under default features and hide a real dependent.
     member_names = {pkg["name"] for pkg in by_id.values()}
@@ -172,7 +172,6 @@ FEATURE_UNION = {
         "preview",
         "discord",
         "expand",
-        "tui",
         "webp",
         "mp4",
         "mdns",

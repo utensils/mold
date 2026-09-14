@@ -52,4 +52,4 @@ jobs:
           rustup toolchain install "$msrv_toolchain" --profile minimal
           cargo "+$msrv_toolchain" check --workspace --all-targets --locked
           cargo "+$msrv_toolchain" check -p mold-ai --locked \
-            --features preview,discord,expand,tui,metrics,webp,mp4,mdns,pulid
+            --features preview,discord,expand,metrics,webp,mp4,mdns,pulid

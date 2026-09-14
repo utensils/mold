@@ -76,7 +76,7 @@ jobs:
         shell: pwsh
         run: |
           cargo build --release -p mold-ai `
-            --features preview,discord,expand,tui,webp,metrics,mdns,pulid
+            --features preview,discord,expand,webp,metrics,mdns,pulid
           ./scripts/sign-windows-binary.ps1 `
             -ConfigPath desktop/src-tauri/tauri.windows-self-signed.conf.json `
             -FilePath target/release/mold.exe

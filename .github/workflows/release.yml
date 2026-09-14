@@ -71,7 +71,7 @@ jobs:
         run: brew install protobuf
 
       - name: Build (Metal)
-        run: cargo build --release -p mold-ai --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid
+        run: cargo build --release -p mold-ai --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,discord,expand,webp,mp4,metrics,mdns,pulid
 
       - name: Ad-hoc code sign
         run: codesign -s - target/release/mold
@@ -148,7 +148,7 @@ jobs:
         shell: pwsh
         run: |
           cargo build --release -p mold-ai `
-            --features preview,discord,expand,tui,webp,metrics,mdns,pulid
+            --features preview,discord,expand,webp,metrics,mdns,pulid
           ./scripts/sign-windows-binary.ps1 `
             -ConfigPath desktop/src-tauri/tauri.windows-self-signed.conf.json `
             -FilePath target/release/mold.exe
@@ -286,7 +286,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "86"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,flash-attn,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
+        run: cargo build --release -p mold-ai --features cuda,flash-attn,cudnn,preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 86 target/release/build
@@ -393,7 +393,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "89"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features h3-cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
+        run: cargo build --release -p mold-ai --features h3-cuda,cudnn,preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 89 target/release/build
@@ -498,7 +498,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "100"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,flash-attn,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
+        run: cargo build --release -p mold-ai --features cuda,flash-attn,cudnn,preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 100 target/release/build
@@ -609,7 +609,7 @@ jobs:
         # `is_sm8x` test that consumer Blackwell fails, so sm120 would take the
         # A100/H100 tile on an Ada-sized SM. Unmeasured, not unsupported — see
         # `flashAttnQualifiedCaps` in flake.nix.
-        run: cargo build --release -p mold-ai --features cuda,cudnn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
+        run: cargo build --release -p mold-ai --features cuda,cudnn,preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-matting,mesh-delight
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 120 target/release/build
@@ -1169,8 +1169,8 @@ jobs:
             sudo apt-get install -y protobuf-compiler                    # Debian/Ubuntu
             # (Arch: pacman -S protobuf · Fedora: dnf install protobuf-compiler)
 
-            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid  # macOS
-            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features cuda,flash-attn,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid   # Linux; flash-attn is what the released CUDA artifacts compile, use the SM89 artifact for H3
+            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features h3,mesh-texture,mesh-matting,mesh-delight,metal,preview,discord,expand,webp,mp4,metrics,mdns,pulid  # macOS
+            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features cuda,flash-attn,preview,discord,expand,webp,mp4,metrics,mdns,pulid   # Linux; flash-attn is what the released CUDA artifacts compile, use the SM89 artifact for H3
 
             # Nix
             nix run github:utensils/mold/${{ github.ref_name }}

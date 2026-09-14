@@ -95,7 +95,7 @@ build() {
   [[ "${CUDA_COMPUTE_CAP}" == "120" ]] && gpu_feature="cuda"
   cargo build --release --frozen --offline \
     -p mold-ai \
-    --features "${gpu_feature},cudnn,preview,expand,tui,webp,mp4,metrics,mdns,pulid"
+    --features "${gpu_feature},cudnn,preview,expand,webp,mp4,metrics,mdns,pulid"
 }
 
 check() {
