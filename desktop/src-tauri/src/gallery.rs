@@ -1769,8 +1769,8 @@ pub(crate) fn render_offline_thumbnail_in(
         // Unlike audio, a mesh CARRIES its picture: the geometry is the
         // poster. A print this Mac mirrored from another host has no sidecar
         // — the import envelope never carried one — so render it here, cache
-        // it under both sidecar names the server and the TUI read, and keep
-        // the placeholder for a file that genuinely cannot be read. Never an
+        // it under the sidecar name the server reads, and keep the
+        // placeholder for a file that genuinely cannot be read. Never an
         // `Err`: an unreadable mesh must still lay out a tile.
         return Ok(
             match thumbs::ensure_mesh_poster(&path, thumb_dir, filename) {
@@ -2976,11 +2976,11 @@ mod tests {
     /// render in-process otherwise, and never hand back the full-size file.
     /// A mesh mirrored onto this Mac has no poster sidecar — the import
     /// envelope never carried one — but the geometry IS the picture, so the
-    /// offline tile is rendered from the stored GLB and written back to both
-    /// sidecar names the server and the TUI read. Before this, every mirrored
-    /// mesh was an `Err` here and a wireframe cube in the grid.
+    /// offline tile is rendered from the stored GLB and written back to the
+    /// sidecar name the server reads. Before this, every mirrored mesh was an
+    /// `Err` here and a wireframe cube in the grid.
     #[test]
-    fn offline_mesh_renders_its_poster_and_caches_both_sidecars() {
+    fn offline_mesh_renders_its_poster_and_caches_the_sidecar() {
         let output = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         let name = "mold-hunyuan3d-fp16-1788357387469.glb";
@@ -3008,10 +3008,9 @@ mod tests {
             render_offline_thumbnail_in(output.path(), cache.path(), name, SizeTier::S256, false)
                 .expect("a mesh must never fail to produce a tile");
         assert_eq!(&tile[..4], &[0x89, b'P', b'N', b'G']);
-        for sidecar in mold_core::media_paths::mesh_poster_thumbnail_paths(cache.path(), name) {
-            assert!(sidecar.is_file(), "{} is missing", sidecar.display());
-            assert_eq!(std::fs::read(&sidecar).unwrap(), tile);
-        }
+        let sidecar = mold_core::media_paths::mesh_poster_thumbnail_path(cache.path(), name);
+        assert!(sidecar.is_file(), "{} is missing", sidecar.display());
+        assert_eq!(std::fs::read(&sidecar).unwrap(), tile);
     }
 
     /// An unreadable mesh is a placeholder, never an error: the grid still
@@ -3029,13 +3028,12 @@ mod tests {
             crate::thumbnail_cache::sniff_content_type(&tile),
             Some("image/svg+xml")
         );
-        for sidecar in mold_core::media_paths::mesh_poster_thumbnail_paths(cache.path(), name) {
-            assert!(
-                !sidecar.exists(),
-                "a failed render must not leave {} behind",
-                sidecar.display()
-            );
-        }
+        let sidecar = mold_core::media_paths::mesh_poster_thumbnail_path(cache.path(), name);
+        assert!(
+            !sidecar.exists(),
+            "a failed render must not leave {} behind",
+            sidecar.display()
+        );
     }
 
     #[test]

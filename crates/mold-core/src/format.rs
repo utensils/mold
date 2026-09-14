@@ -1,4 +1,5 @@
-//! Human-readable byte formatting shared by every surface (CLI, TUI, MCP).
+//! Human-readable byte formatting shared by every surface (CLI, MCP, the
+//! server's own projections).
 //!
 //! Two flavors cover the real conventions in the tree:
 //! - [`human_bytes`] — spaced, e.g. `"7.0 GB"`, for verbose prose output.
@@ -39,7 +40,7 @@ pub fn human_bytes_compact(bytes: u64) -> String {
 
 /// `49152` → `49,152`. Triangle and vertex counts run to six or seven
 /// digits, where an unseparated number stops being readable at a glance.
-/// Shared by the Discord embed and the TUI caption so the two cannot drift.
+/// Shared by the Discord embed and every other caption so they cannot drift.
 pub fn group_thousands(value: u32) -> String {
     let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -53,10 +54,10 @@ pub fn group_thousands(value: u32) -> String {
 }
 
 /// Human-readable display name for a model family identifier, shared by the
-/// CLI (`mold list`, run banners) and the TUI (Models tables/details) so the
-/// two terminal surfaces can never disagree about how a family is presented
-/// (#806). `None` means the identifier is unknown here — callers keep their
-/// own fallback (the CLI shows the raw identifier, the TUI uppercases it).
+/// CLI (`mold list`, run banners) and the Discord bot so no two Rust
+/// surfaces can disagree about how a family is presented (#806). `None`
+/// means the identifier is unknown here — callers keep their own fallback
+/// (the CLI shows the raw identifier).
 ///
 /// The browser surfaces carry their own table in `studio/lib/familyLabels.ts`;
 /// the wan row is pinned across both languages by

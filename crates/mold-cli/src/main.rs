@@ -1195,13 +1195,6 @@ pub enum LibraryAction {
         #[arg(long, conflicts_with = "json")]
         preview: bool,
     },
-    /// Open the protocol-aware terminal Library grid
-    Grid {
-        #[arg(long, value_name = "URL", conflicts_with = "local", add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
-        #[arg(long, conflicts_with = "host")]
-        local: bool,
-    },
     /// Set or clear one existing print's title
     Title {
         #[arg(value_name = "FILENAME", add = ArgValueCandidates::new(completion_cache::complete_filename))]
@@ -2370,11 +2363,9 @@ Examples:
   mold library collection add Portfolio a.png b.png
   mold library collection remove Portfolio b.png
   mold library trash a.png
-  mold library grid
 
-Non-grid commands target MOLD_HOST (with MOLD_API_KEY when configured) and
-never fall back to direct filesystem access. The grid opens the existing Mold
-TUI Library; an unreachable explicit host is an error, not a local fallback.")]
+Every command targets MOLD_HOST (with MOLD_API_KEY when configured) and never
+falls back to direct filesystem access. An unreachable host is an error.")]
     Library {
         #[command(subcommand)]
         action: LibraryAction,
@@ -2949,21 +2940,6 @@ Examples:
     #[cfg(feature = "discord")]
     Discord,
 
-    /// Launch the interactive terminal UI
-    ///
-    /// Full-featured TUI for image generation with live preview,
-    /// model management, and gallery browsing.
-    #[cfg(feature = "tui")]
-    Tui {
-        /// Server URL override
-        #[arg(long, env = "MOLD_HOST", add = ArgValueCandidates::new(completion_cache::complete_host))]
-        host: Option<String>,
-
-        /// Force local inference (no server connection)
-        #[arg(long)]
-        local: bool,
-    },
-
     /// Generate shell completions (sources dynamic model-name completion)
     #[command(after_long_help = "\
 Setup instructions:
@@ -3247,17 +3223,6 @@ async fn run() -> anyhow::Result<()> {
                 matches!(log_format, LogFormat::Json),
                 &config.logging,
                 "info",
-                log_dir,
-            ))
-        }
-        #[cfg(feature = "tui")]
-        Commands::Tui { .. } => {
-            // TUI owns the terminal — file-only logging, no stderr output.
-            let config = mold_core::Config::load_or_default();
-            let log_dir = config.resolved_log_dir();
-            Some(mold_server::logging::init_tracing_file_only(
-                &config.logging,
-                "warn",
                 log_dir,
             ))
         }
@@ -4064,10 +4029,6 @@ async fn run() -> anyhow::Result<()> {
         #[cfg(feature = "discord")]
         Commands::Discord => {
             commands::discord::run().await?;
-        }
-        #[cfg(feature = "tui")]
-        Commands::Tui { host, local } => {
-            mold_tui::run_tui(host, local).await?;
         }
         Commands::Upscale {
             image,

@@ -11,7 +11,10 @@ pub enum RecordSource {
     Server,
     /// Written by the CLI's local generation path (`mold run --local` or local fallback).
     Cli,
-    /// Written by the TUI's local generation path.
+    /// A historical label, written by the retired interactive terminal
+    /// app's local generation path. Nothing mints it any more; the variant
+    /// stays so existing `source = 'tui'` rows keep reading as what made
+    /// them rather than degrading to [`RecordSource::Unknown`].
     Tui,
     /// Imported by the startup reconciliation walk from a file already on disk.
     Backfill,

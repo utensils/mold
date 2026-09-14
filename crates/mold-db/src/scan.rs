@@ -2,8 +2,7 @@
 //!
 //! One home for the "walk the output dir, filter to gallery formats,
 //! apply the size/header/solid-black validity guards" pass that
-//! reconcile, the server's filesystem gallery scan, and the TUI's
-//! fallback walk each hand-rolled. Deliberately two-level: the walker
+//! reconcile and the server's filesystem gallery scan each hand-rolled. Deliberately two-level: the walker
 //! yields file facts only — metadata parsing stays a separate leaf
 //! ([`crate::metadata_io::read_or_synthesize`]) so reconcile keeps its
 //! parse-only-new/changed-files property.

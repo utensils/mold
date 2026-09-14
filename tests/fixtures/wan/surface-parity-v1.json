@@ -1,6 +1,6 @@
 {
   "schema": "mold.wan.surface-parity.v1",
-  "comment": "Shared Wan cross-surface capability expectations (#806). Rust tests in mold-core, mold-ai (CLI), mold-ai-discord, and mold-ai-tui, plus the TS test studio/lib/wanSurfaceParity.test.ts, all read this file so a drift in any surface's Wan presentation or request semantics fails CI. Additive: new capability domains (e.g. #783 sequence rows) join as new top-level keys without touching existing ones.",
+  "comment": "Shared Wan cross-surface capability expectations (#806). Rust tests in mold-core, mold-ai (CLI), and mold-ai-discord, plus the TS test studio/lib/wanSurfaceParity.test.ts, all read this file so a drift in any surface's Wan presentation or request semantics fails CI. Additive: new capability domains (e.g. #783 sequence rows) join as new top-level keys without touching existing ones.",
   "family": "wan",
   "family_label": "Wan Video",
   "frame_grid": {

@@ -72,7 +72,7 @@ fn configure_pragmas(conn: &Connection, path: &Path) {
         tracing::warn!(error = %e, "metadata DB synchronous pragma failed");
     }
     // Wait out short lock contention instead of surfacing SQLITE_BUSY.
-    // Multiple processes share this file (TUI + `mold serve` + CLI), and
+    // Multiple processes share this file (`mold serve` + CLI + desktop), and
     // most read paths treat an error as "no value" — without a timeout a
     // reader that lands on a checkpoint or schema lock silently loses
     // settings it would have found a few milliseconds later.
@@ -282,8 +282,8 @@ impl MetadataDb {
         let conn = match open_connection(path) {
             Ok(conn) => conn,
             Err(error) if path.exists() && is_corruption_error(&error) => {
-                // Serialize recovery across the server, CLI, TUI, and Discord
-                // processes. Recheck after taking the lock: another process
+                // Serialize recovery across the server, CLI, desktop, and
+                // Discord processes. Recheck after taking the lock: another process
                 // may already have replaced the corrupt inode while we waited.
                 let _recovery_lock = acquire_recovery_lock(path)?;
                 match open_connection(path) {
@@ -441,8 +441,8 @@ impl MetadataDb {
     /// Returns EVERY row, trashed ones included — callers that only want
     /// the live library filter on [`GenerationRecord::trashed_at_ms`] or use
     /// [`Self::list_live`] / [`Self::list_trashed`]. Keeping the full view
-    /// here means the reconcile and TUI paths that predate the trash keep
-    /// observing the whole table.
+    /// here means the reconcile paths that predate the trash keep observing
+    /// the whole table.
     pub fn list(&self, output_dir: Option<&Path>) -> Result<Vec<GenerationRecord>> {
         self.list_filtered(output_dir, TrashFilter::All)
     }
@@ -852,8 +852,8 @@ pub(crate) fn upsert_with_conn_reporting_organization(
     // Seed the creation-time filing from the embedded metadata, on the
     // insert branch only. Doing it here rather than at each publication site
     // means every path — server queue, per-GPU worker, chain runner, CLI,
-    // TUI, and reconcile-from-disk for a file that lost its row — files the
-    // print identically, and none of them can forget to.
+    // and reconcile-from-disk for a file that lost its row — files the print
+    // identically, and none of them can forget to.
     let seeded = if is_insert {
         crate::organization::seed_creation_organization(
             conn,
@@ -1066,7 +1066,7 @@ mod tests {
     #[test]
     fn busy_timeout_pragma_is_set_on_open() {
         // Regression: without a busy timeout, concurrent access from a
-        // second process (TUI + `mold serve` sharing mold.db) surfaces
+        // second process (a CLI run beside `mold serve`, sharing mold.db) surfaces
         // SQLITE_BUSY instantly, and most read paths swallow the error
         // as "no value" — observed as settings silently reading back
         // empty under contention.

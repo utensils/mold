@@ -1108,7 +1108,7 @@ pub async fn run_server(
         if state.is_output_disabled(&config) {
             tracing::warn!(
                 "image output is disabled (output_dir is empty) — \
-                 generated images will not be saved and the TUI gallery will be empty"
+                 generated images will not be saved and will not appear in any gallery"
             );
         } else {
             let output_dir = config.effective_output_dir();

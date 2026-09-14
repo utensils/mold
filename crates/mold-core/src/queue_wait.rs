@@ -2,7 +2,7 @@
 //! surface.
 //!
 //! This is the Rust half of `studio/lib/queuePosition.ts`. The browser shells
-//! resolve a queued row's copy there; the CLI and TUI resolve it here, and the
+//! resolve a queued row's copy there; the CLI resolves it here, and the
 //! two must agree — the same host describing four identical queued jobs three
 //! different ways is exactly the defect that policy exists to prevent.
 //!

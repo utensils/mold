@@ -1524,9 +1524,9 @@ mod tests {
         }
     }
 
-    /// The pre-enqueue contract check. Identical table in `mold-ai` and
-    /// `mold-ai-tui`; all three must agree with the server's admission gate,
-    /// whose wording they reuse verbatim.
+    /// The pre-enqueue contract check. Identical table in `mold-ai`; both
+    /// must agree with the server's admission gate, whose wording they reuse
+    /// verbatim.
     #[test]
     fn source_image_contract_rejects_exactly_what_admission_rejects() {
         use mold_core::SourceImageCapability::{Optional, Required, Unsupported};

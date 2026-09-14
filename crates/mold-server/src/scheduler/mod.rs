@@ -1873,9 +1873,9 @@ impl Coordinator {
     ///
     /// A client used to learn its position exactly once, in the first SSE
     /// event, and the queue then drained in silence. This needs no new event
-    /// type: both terminal clients render `Queued` in place — indicatif's
-    /// `set_message` and the TUI's `current_stage` — so a repeat reads as a
-    /// live update rather than another line.
+    /// type: the CLI renders `Queued` in place through indicatif's
+    /// `set_message`, so a repeat reads as a live update rather than another
+    /// line.
     ///
     /// Only an actual change emits. Reconcile runs on every registry
     /// notification and on a 10 ms ticker, so announcing unconditionally would

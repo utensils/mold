@@ -277,7 +277,7 @@ pub struct ModelManifest {
     pub description: String,
     pub files: Vec<ModelFile>,
     pub defaults: ManifestDefaults,
-    /// Hidden models are excluded from `mold list`, TUI model selector,
+    /// Hidden models are excluded from `mold list`, every model picker,
     /// and `mold pull` tab completion in release builds. They can still be
     /// used via explicit `mold run <name>` or config.toml entries.
     pub hidden: bool,
@@ -789,7 +789,8 @@ pub fn known_manifests() -> &'static [ModelManifest] {
     &KNOWN_MANIFESTS
 }
 
-/// Visible (non-hidden) manifests for user-facing lists (CLI, TUI, tab completion).
+/// Visible (non-hidden) manifests for user-facing lists (CLI, model pickers,
+/// tab completion).
 /// Hidden models can still be used via explicit `mold run <name>` or config.toml.
 pub fn visible_manifests() -> impl Iterator<Item = &'static ModelManifest> {
     known_manifests().iter().filter(|m| !m.hidden)
@@ -6654,8 +6655,8 @@ pub const WAN_DEFAULT_NEGATIVE_PROMPT: &str = "色调艳丽，过曝，静态，
 /// request carries no `negative_prompt` at all. This is the single source for
 /// every surface that advertises, materializes, or prefills that default —
 /// `/api/models[].default_negative_prompt`, the server's request
-/// materialization, the CLI's local fallback, and TUI prefill all resolve
-/// through here so they cannot drift from the engine
+/// materialization, the CLI's local fallback, and every client's prefill all
+/// resolve through here so they cannot drift from the engine
 /// (`wan/pipeline.rs::resolve_negative_prompt`). An explicit value — the
 /// empty string included — is always authoritative and never replaced.
 pub fn default_negative_prompt_for_family(family: &str) -> Option<&'static str> {

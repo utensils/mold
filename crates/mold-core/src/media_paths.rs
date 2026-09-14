@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 /// Suffix appended to an output's filename to name its animated GIF
 /// preview sidecar. The server writes `<filename>.preview.gif` into its
-/// preview cache and the TUI reconstructs the same name — one constant
-/// so the two can't drift.
+/// preview cache and every reader reconstructs the same name — one constant
+/// so they can't drift.
 pub const PREVIEW_GIF_SUFFIX: &str = ".preview.gif";
 
 /// Preview-sidecar filename for a gallery output (e.g.
@@ -12,29 +12,20 @@ pub fn preview_gif_filename(filename: &str) -> String {
     format!("{filename}{PREVIEW_GIF_SUFFIX}")
 }
 
-/// Suffix the TUI appends when caching a thumbnail. The server's cache in the
-/// same directory uses a plain `.png` instead — see
-/// [`audio_waveform_thumbnail_paths`], which writes both so an audio print has
-/// a tile wherever it is opened.
-pub const TUI_THUMBNAIL_SUFFIX: &str = ".thumb.png";
-
-/// Both thumbnail-cache paths an audio output needs, given the shared
+/// The thumbnail-cache path an audio output needs, given the shared
 /// `<mold_dir>/cache/thumbnails` directory.
 ///
-/// Audio has no raster frame, so neither the server's on-demand thumbnailer
-/// nor the TUI's `image::open` can produce one — the waveform PNG has to be
-/// written at save time. The two consumers name their cache entries
-/// differently (`<file>.png` for the server route, `<file>.thumb.png` for the
-/// TUI), so a saver writes both rather than guessing which surface will open
-/// the print.
-pub fn audio_waveform_thumbnail_paths(
-    thumbnail_dir: &std::path::Path,
-    filename: &str,
-) -> [PathBuf; 2] {
-    [
-        thumbnail_dir.join(format!("{filename}.png")),
-        thumbnail_dir.join(format!("{filename}{TUI_THUMBNAIL_SUFFIX}")),
-    ]
+/// Audio has no raster frame, so the server's on-demand thumbnailer cannot
+/// produce one — the waveform PNG has to be written at save time, under the
+/// name the thumbnail route resolves.
+///
+/// This used to return a PAIR: the retired terminal app spelled its cache
+/// entries `<file>.thumb.png`, so a saver wrote both names rather than guess
+/// which surface would open the print first. Nothing reads the second name
+/// any more; `mold_server::thumbnails::sweep_orphans` removes the ones
+/// already on disk.
+pub fn audio_waveform_thumbnail_path(thumbnail_dir: &std::path::Path, filename: &str) -> PathBuf {
+    thumbnail_dir.join(format!("{filename}.png"))
 }
 
 /// Revision of the mesh poster renderer.
@@ -58,37 +49,22 @@ pub fn audio_waveform_thumbnail_paths(
 /// re-sized every mesh print's poster.)
 pub const MESH_POSTER_REVISION: &str = "p3";
 
-/// Both thumbnail-cache paths a mesh output needs.
+/// The thumbnail-cache path a mesh output needs.
 ///
-/// Close in shape to [`audio_waveform_thumbnail_paths`] and for a related
-/// reason: a mesh has no raster frame, so neither the server's on-demand
-/// thumbnailer nor the TUI's `image::open` can produce a tile. The poster PNG
-/// is rendered at save time and written to both names, because the two
-/// consumers spell their cache entries differently and a saver must not guess
-/// which surface will open the print first.
+/// Close in shape to [`audio_waveform_thumbnail_path`] and for a related
+/// reason: a mesh has no raster frame, so the server's on-demand thumbnailer
+/// cannot produce a tile. The poster PNG is rendered at save time.
 ///
 /// Where it PARTS from audio is [`MESH_POSTER_REVISION`], which is infixed
-/// into the server's name (`<file>.p3.png`). A waveform is a transcription of
-/// bytes that do not change; a poster is a render, so a pre-revision sidecar
-/// has to MISS rather than be served verbatim forever. Making the name carry
-/// the revision is what turns "the poster renderer changed" into an ordinary
+/// into the name (`<file>.p3.png`). A waveform is a transcription of bytes
+/// that do not change; a poster is a render, so a pre-revision sidecar has to
+/// MISS rather than be served verbatim forever. Making the name carry the
+/// revision is what turns "the poster renderer changed" into an ordinary
 /// cache miss for the route, `ensure_mesh_poster`, the desktop's offline
 /// tiles, and the save-time writers all at once — none of them needs to know
 /// a revision exists.
-///
-/// The TUI's name (`<file>.thumb.png`) deliberately does NOT carry it. The
-/// TUI resolves that name itself, from its own `thumbnail_path`, without
-/// reading this module, so revisioning it would leave every locally generated
-/// mesh print with no TUI tile at all. It self-heals instead: a re-render
-/// triggered by the server name's miss rewrites BOTH sidecars.
-pub fn mesh_poster_thumbnail_paths(
-    thumbnail_dir: &std::path::Path,
-    filename: &str,
-) -> [PathBuf; 2] {
-    [
-        thumbnail_dir.join(format!("{filename}.{MESH_POSTER_REVISION}.png")),
-        thumbnail_dir.join(format!("{filename}{TUI_THUMBNAIL_SUFFIX}")),
-    ]
+pub fn mesh_poster_thumbnail_path(thumbnail_dir: &std::path::Path, filename: &str) -> PathBuf {
+    thumbnail_dir.join(format!("{filename}.{MESH_POSTER_REVISION}.png"))
 }
 
 fn expand_home(path: &str) -> PathBuf {
@@ -163,17 +139,17 @@ pub fn configured_media_roots(paths: &[String]) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
-    /// The server's mesh sidecar carries the poster revision and the TUI's
-    /// does not, and both differ from the audio pair they used to share.
+    /// The mesh sidecar carries the poster revision and audio does not.
+    /// Each helper names exactly ONE path — the retired terminal app's
+    /// `.thumb.png` twin is not written any more.
     #[test]
     fn the_mesh_poster_sidecar_carries_the_renderer_revision() {
         let dir = std::path::Path::new("/cache");
-        let [server, tui] = mesh_poster_thumbnail_paths(dir, "chair.glb");
+        let server = mesh_poster_thumbnail_path(dir, "chair.glb");
         assert_eq!(
             server,
             dir.join(format!("chair.glb.{MESH_POSTER_REVISION}.png"))
         );
-        assert_eq!(tui, dir.join("chair.glb.thumb.png"));
 
         // A pre-revision poster is therefore at a name nothing reads any
         // more, which is exactly how "the renderer changed" becomes a miss.
@@ -181,9 +157,16 @@ mod tests {
 
         // Audio is untouched: its tile is a transcription of bytes that do
         // not change, so its sidecar has no revision to carry.
-        let [audio_server, audio_tui] = audio_waveform_thumbnail_paths(dir, "take.wav");
+        let audio_server = audio_waveform_thumbnail_path(dir, "take.wav");
         assert_eq!(audio_server, dir.join("take.wav.png"));
-        assert_eq!(audio_tui, dir.join("take.wav.thumb.png"));
+
+        // Neither helper names the retired `.thumb.png` sidecar.
+        for path in [&server, &audio_server] {
+            assert!(
+                !path.to_string_lossy().ends_with(".thumb.png"),
+                "retired sidecar name resurfaced: {path:?}"
+            );
+        }
     }
 
     #[test]
@@ -282,14 +265,10 @@ mod tests {
             "mold-ltx2-1700000000000~smurf-village.mp4.preview.gif"
         );
         let dir = std::path::Path::new("/cache/thumbnails");
-        let [server, tui] = audio_waveform_thumbnail_paths(dir, filename);
+        let server = audio_waveform_thumbnail_path(dir, filename);
         assert_eq!(
             server,
             dir.join("mold-ltx2-1700000000000~smurf-village.mp4.png")
-        );
-        assert_eq!(
-            tui,
-            dir.join("mold-ltx2-1700000000000~smurf-village.mp4.thumb.png")
         );
         // `~` is an ordinary path character: no home expansion, one component.
         assert_eq!(

@@ -431,7 +431,7 @@ pub fn migrate_config_toml_to_db(db: &MetadataDb, cfg: &Config) -> Result<bool> 
     // reader directly — the public `read_last_model()` now routes through
     // the DB hook, which would return an empty result pre-migration.
     if let Some(last) = Config::read_last_model_from_sidecar() {
-        s.set_str(keys::TUI_LAST_MODEL, &last)?;
+        s.set_str(keys::GENERATE_LAST_MODEL, &last)?;
     }
 
     s.set_bool(keys::CONFIG_MIGRATED_FROM_TOML, true)?;
@@ -476,9 +476,10 @@ fn sibling_migrated_path(p: &Path) -> std::path::PathBuf {
 }
 
 /// Scan a mold home directory for stale `.migrated` backups left by the
-/// one-shot legacy-state imports (`tui-session.json.migrated`,
-/// `prompt-history.jsonl.migrated`, `config.toml.migrated`). Returns the
-/// list of paths that still exist.
+/// one-shot legacy-state imports. `tui-session.json.migrated` is a legacy
+/// backup NAME written by an import that ran long before the terminal app
+/// was retired; a home that still has one must still get it cleaned up.
+/// Returns the list of paths that still exist.
 ///
 /// This is the *detection* half of the cleanup. Actual deletion is
 /// deferred one release per the original `.migrated` safety-net contract
@@ -567,8 +568,8 @@ pub fn hydrate_config_from_db(db: &MetadataDb, cfg: &mut Config) -> Result<()> {
 
     // Pass 2: materialize entries for DB-only rows. Required so a user
     // who set per-model generation defaults via `mold config set` (or
-    // via the TUI on a manifest-only model) finds their values applied
-    // on the next load.
+    // on a manifest-only model) finds their values applied on the next
+    // load.
     for (model_key, prefs) in ModelPrefs::list(db)? {
         if existing_canonicals.contains(&model_key) {
             continue;
@@ -629,8 +630,14 @@ pub fn install_config_post_load_hook() {
 
 fn db_read_last_model() -> Option<String> {
     let db = crate::global_db()?;
+    read_last_model_from(db)
+}
+
+/// The row `Config::read_last_model()` resolves to, split out from the global
+/// hook so it is reachable from a test with its own DB.
+fn read_last_model_from(db: &MetadataDb) -> Option<String> {
     Settings::new(db)
-        .get_str(keys::TUI_LAST_MODEL)
+        .get_str(keys::GENERATE_LAST_MODEL)
         .ok()
         .flatten()
         .filter(|s| !s.is_empty())
@@ -699,8 +706,8 @@ pub fn persist_config_key(db: &MetadataDb, config: &Config, key: &str) -> Result
 /// Persist a DB-surface `models.<name>.<field>` key after the caller
 /// mutated `config`. Resolves the model name to canonical form so
 /// `flux-dev` and `flux-dev:q4` share one `model_prefs` row, and
-/// load-merge-saves so TUI-owned fields (seed mode, batch, last prompt)
-/// survive. Assignments are unconditional so setting a field to `none`
+/// load-merge-saves so fields this key does not name (seed mode, batch,
+/// last prompt) survive. Assignments are unconditional so setting a field to `none`
 /// clears the stored value instead of leaving it to be rehydrated.
 pub fn persist_model_field(db: &MetadataDb, config: &Config, key: &str) -> Result<()> {
     let (model_name, _, _) = mold_core::config_keys::parse_model_key(key)?;
@@ -1068,6 +1075,31 @@ mod tests {
         assert_eq!(reset.queue.held_retention_days, 30);
     }
 
+    /// The last-used model moved out of the retired terminal app's
+    /// namespace in migration v38. The read hook and `record_last_model`
+    /// must agree on the new row, or `mold run` with no model named stops
+    /// resuming.
+    #[test]
+    fn the_read_hook_resolves_the_renamed_last_model_row() {
+        let db = db();
+        assert_eq!(read_last_model_from(&db), None);
+
+        Settings::new(&db).record_last_model("flux-dev:q4").unwrap();
+        assert_eq!(read_last_model_from(&db), Some("flux-dev:q4".to_string()));
+        assert_eq!(
+            Settings::new(&db)
+                .get_str("generate.last_model")
+                .unwrap()
+                .as_deref(),
+            Some("flux-dev:q4"),
+        );
+        assert_eq!(
+            Settings::new(&db).get_str("tui.last_model").unwrap(),
+            None,
+            "the retired namespace must not be written any more"
+        );
+    }
+
     #[test]
     fn migration_imports_hand_written_gallery_section_only_when_set() {
         let db = db();
@@ -1332,7 +1364,7 @@ mod tests {
 
     /// Codex P2: scheduler strings written by `mold config set` (canonical
     /// Display form, e.g. "euler-ancestral") must round-trip via
-    /// `Scheduler::FromStr` so the TUI sees the same choice.
+    /// `Scheduler::FromStr` so every surface sees the same choice.
     #[test]
     fn scheduler_display_form_round_trips_via_from_str() {
         use mold_core::Scheduler;
@@ -1670,7 +1702,7 @@ scheduler = "euler-ancestral"
         assert!(!path.with_extension("toml.migrated").exists());
     }
 
-    /// Codex P2: the pre-#265 TUI wrote `{s:?}`.to_lowercase() (e.g.
+    /// Codex P2: pre-#265 writers stored `{s:?}`.to_lowercase() (e.g.
     /// "eulerancestral") into the scheduler column. Existing DBs must
     /// still parse so a user's prior choice isn't lost on upgrade.
     #[test]

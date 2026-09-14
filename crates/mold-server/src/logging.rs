@@ -81,8 +81,8 @@ pub fn init_tracing(
 
 /// Initialize tracing with file-only output (no stderr).
 ///
-/// Used by the TUI which owns the terminal and cannot have tracing
-/// output on stderr.
+/// Used by the desktop app, which runs the engine inside a process that owns
+/// no terminal and so cannot have tracing output on stderr.
 pub fn init_tracing_file_only(
     config: &LoggingConfig,
     default_level: &str,
@@ -94,13 +94,13 @@ pub fn init_tracing_file_only(
     cleanup_old_logs(&log_dir, config.max_days);
     let appender = match tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix("mold-tui")
+        .filename_prefix("mold-desktop")
         .filename_suffix("log")
         .build(&log_dir)
     {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("warning: failed to create TUI log file appender: {e}");
+            eprintln!("warning: failed to create the log file appender: {e}");
             // Register a no-op subscriber so tracing macros are silently
             // discarded rather than leaving the global subscriber unset.
             let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
@@ -156,8 +156,13 @@ pub(crate) fn cleanup_old_logs(log_dir: &Path, max_days: u32) {
             .and_then(|f| f.to_str())
             .unwrap_or_default();
 
-        // Match both old (no .log) and new (.log suffix) patterns
-        let is_mold_log = filename.starts_with("mold-server.") || filename.starts_with("mold-tui.");
+        // Match both old (no .log) and new (.log suffix) patterns, and the
+        // legacy `mold-tui.` prefix `init_tracing_file_only` wrote before it
+        // was renamed — those files are already on disk and nothing else
+        // would ever sweep them.
+        let is_mold_log = filename.starts_with("mold-server.")
+            || filename.starts_with("mold-desktop.")
+            || filename.starts_with("mold-tui.");
         if !is_mold_log {
             continue;
         }
@@ -240,17 +245,28 @@ mod tests {
         let dir_path = dir.path();
 
         let aged = dir_path.join("mold-server.2020-01-01");
-        let aged_with_suffix = dir_path.join("mold-tui.2020-01-01.log");
+        let aged_desktop = dir_path.join("mold-desktop.2020-01-01.log");
+        // The prefix `init_tracing_file_only` wrote before the rename. Files
+        // under it are already on users' disks; nothing else sweeps them.
+        let aged_legacy = dir_path.join("mold-tui.2020-01-01.log");
         let fresh = dir_path.join("mold-server.fresh.log");
+        let fresh_desktop = dir_path.join("mold-desktop.fresh.log");
         let unrelated = dir_path.join("not-our-business.log");
 
-        for path in [&aged, &aged_with_suffix, &fresh, &unrelated] {
+        for path in [
+            &aged,
+            &aged_desktop,
+            &aged_legacy,
+            &fresh,
+            &fresh_desktop,
+            &unrelated,
+        ] {
             fs::write(path, b"x").expect("write fixture");
         }
 
-        // Backdate the two "old" files so they exceed max_days.
+        // Backdate the "old" files so they exceed max_days.
         let ancient = SystemTime::now() - Duration::from_secs(60 * 60 * 24 * 30); // 30 days ago
-        for path in [&aged, &aged_with_suffix] {
+        for path in [&aged, &aged_desktop, &aged_legacy] {
             let f = fs::File::open(path).expect("open fixture");
             f.set_modified(ancient).expect("backdate fixture");
         }
@@ -259,10 +275,18 @@ mod tests {
 
         assert!(!aged.exists(), "30-day-old mold-server log must be removed");
         assert!(
-            !aged_with_suffix.exists(),
-            "30-day-old mold-tui log must be removed",
+            !aged_desktop.exists(),
+            "30-day-old mold-desktop log must be removed",
+        );
+        assert!(
+            !aged_legacy.exists(),
+            "30-day-old legacy mold-tui log must still be swept",
         );
         assert!(fresh.exists(), "fresh mold-server log must be retained");
+        assert!(
+            fresh_desktop.exists(),
+            "fresh mold-desktop log must be retained",
+        );
         assert!(
             unrelated.exists(),
             "unrelated *.log file must be left untouched",

@@ -121,16 +121,21 @@ fn remove_cached_sidecars(name: &str) {
     let thumb_dir = crate::routes::server_thumbnail_dir();
     let _ = std::fs::remove_file(thumb_dir.join(name));
     let _ = std::fs::remove_file(thumb_dir.join(format!("{name}.png")));
-    // A mesh poster is not at `<name>.png`: its server-side name carries the
-    // poster renderer's revision, and the TUI reads a third name. Purging
-    // through the one place those names are defined is what keeps a purge
-    // from leaving a poster behind for every 3-D print ever deleted. The
-    // second of the pair is `<name>.thumb.png`, which also collects an audio
-    // print's TUI waveform — likewise dead once the print is gone. A raster
-    // has neither name, so the two removals are no-ops for one.
-    for sidecar in mold_core::media_paths::mesh_poster_thumbnail_paths(&thumb_dir, name) {
-        let _ = std::fs::remove_file(sidecar);
-    }
+    // A mesh poster is not at `<name>.png`: its name carries the poster
+    // renderer's revision. Purging through the one place that name is defined
+    // is what keeps a purge from leaving a poster behind for every 3-D print
+    // ever deleted.
+    let _ = std::fs::remove_file(mold_core::media_paths::mesh_poster_thumbnail_path(
+        &thumb_dir, name,
+    ));
+    // `<name>.thumb.png` is the retired terminal app's sidecar, for a mesh
+    // poster or an audio waveform alike. Nothing writes one any more and the
+    // orphan sweeper clears the backlog, but a purge must still take the one
+    // belonging to THIS print: after the file is gone the sweeper can still
+    // reach it, yet leaving dead bytes behind until the next pass is exactly
+    // what a permanent delete promises not to do. A raster print has neither
+    // name, so both removals are no-ops for one.
+    let _ = std::fs::remove_file(thumb_dir.join(format!("{name}.thumb.png")));
     let _ = std::fs::remove_file(
         crate::routes::server_preview_gif_dir()
             .join(mold_core::media_paths::preview_gif_filename(name)),

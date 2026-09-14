@@ -714,7 +714,7 @@ pub struct Config {
 
     /// Directory to persist generated images. Default: `~/.mold/output/`.
     /// Override with `MOLD_OUTPUT_DIR` env var. Set to empty string to disable
-    /// (TUI gallery will not function when disabled).
+    /// (no print is saved, so no gallery has anything to show).
     #[serde(default)]
     pub output_dir: Option<String>,
 
@@ -823,7 +823,7 @@ pub struct GenerateSettings {
     /// Whether a titled print is also tagged with its title slug, by the
     /// client that submits it. Default on.
     ///
-    /// This is a CLIENT-side default for the CLI and TUI — the server never
+    /// This is a CLIENT-side default for the CLI — the server never
     /// auto-tags, because it cannot tell a title the user typed from one a
     /// script generated, and a host silently adding tags to every print that
     /// crosses it would be surprising from any other machine. `mold run
@@ -1505,7 +1505,7 @@ impl Config {
             };
         }
         // 6. Config default (will auto-pull) — resolve bare names like
-        //    "flux2-klein" → "flux2-klein:q8" so the TUI/CLI show the real tag.
+        //    "flux2-klein" → "flux2-klein:q8" so every surface shows the real tag.
         DefaultModelResolution {
             model: crate::manifest::resolve_model_name(configured),
             source: DefaultModelSource::ConfigDefault,

@@ -707,9 +707,9 @@ fn resolve_wan_solver_for_model(
 ///
 /// The generation profile already pins steps to the ladder's length, guidance
 /// to 1.0, and empties the scheduler list, and admission refuses anything
-/// else — but forced-local callers and the TUI never run profile validation,
-/// and a distill quietly walked at 30 steps or CFG 6 renders garbage rather
-/// than failing. Refuse here too, naming the tier.
+/// else — but forced-local callers never run profile validation, and a
+/// distill quietly walked at 30 steps or CFG 6 renders garbage rather than
+/// failing. Refuse here too, naming the tier.
 fn enforce_dmd_ladder_request(
     model_name: &str,
     ladder: mold_core::manifest::WanDmdLadder,
@@ -4873,8 +4873,8 @@ mod tests {
     }
 
     /// The engine-side backstop behind admission: the step count, guidance,
-    /// and shift a laddered tier accepts are all fixed, and the TUI and
-    /// forced-local callers never run profile validation.
+    /// and shift a laddered tier accepts are all fixed, and forced-local
+    /// callers never run profile validation.
     #[test]
     fn wan_dmd_ladder_refuses_steps_guidance_and_shift_overrides() {
         for tier in ["wan21-t2v-1.3b:turbo", "wan22-ti2v-5b:dmd"] {

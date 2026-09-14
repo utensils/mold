@@ -453,7 +453,7 @@ pub(crate) fn save_generated_image_outputs(
 /// When `gif_preview` is non-empty, also persists
 /// `$MOLD_HOME/cache/previews/<filename>.preview.gif`. The gallery preview
 /// endpoint (`GET /api/gallery/preview/:filename`) streams from that path
-/// so remote TUI clients can animate the detail pane without re-fetching
+/// so remote clients can animate the detail pane without re-fetching
 /// the full MP4.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn save_video_to_dir(
@@ -694,11 +694,10 @@ pub(crate) fn save_mesh_poster_thumbnail(filename: &str, png_bytes: &[u8]) {
 /// Testable inner of [`save_mesh_poster_thumbnail`] with an explicit cache
 /// directory, so unit tests don't race on `MOLD_HOME`.
 fn save_mesh_poster_thumbnail_to(thumb_dir: &std::path::Path, filename: &str, png_bytes: &[u8]) {
-    // One writer for both sidecar names, shared with the on-demand render in
-    // `crate::thumbnails`, so save time and fetch time cannot disagree about
-    // where a poster lives or write a tile a reader can catch half-finished.
-    if let Err(error) =
-        crate::thumbnails::write_mesh_poster_sidecars(thumb_dir, filename, png_bytes)
+    // One writer, shared with the on-demand render in `crate::thumbnails`,
+    // so save time and fetch time cannot disagree about where a poster lives
+    // or write a tile a reader can catch half-finished.
+    if let Err(error) = crate::thumbnails::write_mesh_poster_sidecar(thumb_dir, filename, png_bytes)
     {
         tracing::warn!(
             file = %filename,
@@ -726,13 +725,12 @@ fn save_audio_waveform_thumbnail_to(thumb_dir: &std::path::Path, filename: &str,
         );
         return;
     }
-    for thumb_path in mold_core::media_paths::audio_waveform_thumbnail_paths(thumb_dir, filename) {
-        if let Err(e) = std::fs::write(&thumb_path, png_bytes) {
-            tracing::warn!(
-                "failed to write waveform thumbnail {}: {e}",
-                thumb_path.display()
-            );
-        }
+    let thumb_path = mold_core::media_paths::audio_waveform_thumbnail_path(thumb_dir, filename);
+    if let Err(e) = std::fs::write(&thumb_path, png_bytes) {
+        tracing::warn!(
+            "failed to write waveform thumbnail {}: {e}",
+            thumb_path.display()
+        );
     }
 }
 
@@ -7120,7 +7118,7 @@ mod tests {
     /// `<preview_dir>/<filename>.preview.gif` — the exact location
     /// `GET /api/gallery/preview/:filename` streams from. Without this
     /// sidecar the preview endpoint would 404 on every real generation
-    /// and the TUI detail pane would only ever see the PNG thumbnail
+    /// and a client's detail pane would only ever see the PNG thumbnail
     /// fallback.
     #[test]
     fn save_video_preview_gif_writes_to_preview_cache() {
@@ -7306,12 +7304,12 @@ mod tests {
         assert_eq!(event.audio_sample_rate, Some(24_000));
     }
 
-    /// `.wav` has no raster frame, so neither the server's on-demand
-    /// thumbnailer nor the TUI's `image::open` can build a tile. The waveform
-    /// PNG has to land in the cache at save time or the gallery shows a
+    /// `.wav` has no raster frame, so the server's on-demand thumbnailer
+    /// cannot build a tile. The waveform PNG has to land in the cache at save
+    /// time, under the one name the route resolves, or the gallery shows a
     /// placeholder forever.
     #[test]
-    fn save_audio_waveform_thumbnail_writes_both_cache_names() {
+    fn save_audio_waveform_thumbnail_writes_the_route_cache_name() {
         let td = TempDir::new().unwrap();
         let thumb_dir = td.path().join("cache").join("thumbnails");
         const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -7323,11 +7321,8 @@ mod tests {
             std::fs::read(thumb_dir.join("mold-ltx2-42.wav.png")).unwrap(),
             PNG
         );
-        // TUI cache naming.
-        assert_eq!(
-            std::fs::read(thumb_dir.join("mold-ltx2-42.wav.thumb.png")).unwrap(),
-            PNG
-        );
+        // The retired terminal app's second name is not written any more.
+        assert!(!thumb_dir.join("mold-ltx2-42.wav.thumb.png").exists());
     }
 
     #[test]

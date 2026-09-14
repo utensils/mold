@@ -423,8 +423,8 @@ mod tests {
 
     /// A GIF whose comment extension carries `mold:parameters` must
     /// import with real metadata (`metadata_synthetic == false`) — GIF
-    /// comment parsing used to live only in the TUI, so reconcile
-    /// synthesized rows for GIFs that carried full metadata.
+    /// comment parsing used to live elsewhere, so reconcile synthesized
+    /// rows for GIFs that carried full metadata.
     #[test]
     fn reconcile_recovers_embedded_gif_metadata() {
         let tmp = tempfile::tempdir().unwrap();

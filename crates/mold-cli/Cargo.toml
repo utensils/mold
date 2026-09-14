@@ -15,22 +15,21 @@ name = "mold"
 path = "src/main.rs"
 
 [features]
-mesh-texture = ["mold-inference/mesh-texture", "mold-server/mesh-texture", "mold-tui?/mesh-texture"]
-mesh-matting = ["mold-core/mesh-matting", "mold-inference/mesh-matting", "mold-server/mesh-matting", "mold-tui?/mesh-matting"]
-mesh-delight = ["mesh-matting", "mold-core/mesh-delight", "mold-inference/mesh-delight", "mold-server/mesh-delight", "mold-tui?/mesh-delight"]
+mesh-texture = ["mold-inference/mesh-texture", "mold-server/mesh-texture"]
+mesh-matting = ["mold-core/mesh-matting", "mold-inference/mesh-matting", "mold-server/mesh-matting"]
+mesh-delight = ["mesh-matting", "mold-core/mesh-delight", "mold-inference/mesh-delight", "mold-server/mesh-delight"]
 default = []
-cuda = ["mold-server/cuda", "mold-inference/cuda", "mold-tui?/cuda", "nvml"]
-cudnn = ["cuda", "mold-server/cudnn", "mold-inference/cudnn", "mold-tui?/cudnn"]
+cuda = ["mold-server/cuda", "mold-inference/cuda", "nvml"]
+cudnn = ["cuda", "mold-server/cudnn", "mold-inference/cudnn"]
 nvml = ["mold-server/nvml"]
-metal = ["mold-server/metal", "mold-inference/metal", "mold-tui?/metal"]
+metal = ["mold-server/metal", "mold-inference/metal"]
 # FlashAttention v2 path for FLUX/FLUX2. Implies `cuda` via mold-inference.
 flash-attn = ["mold-inference/flash-attn", "cuda"]
 preview = ["viuer"]
 discord = ["mold-discord"]
-expand = ["mold-inference/expand", "mold-server/expand", "mold-tui?/expand"]
-tui = ["dep:mold-tui"]
-webp = ["mold-inference/webp", "mold-server/webp", "mold-tui?/webp"]
-mp4 = ["mold-inference/mp4", "mold-server/mp4", "mold-tui?/mp4"]
+expand = ["mold-inference/expand", "mold-server/expand"]
+webp = ["mold-inference/webp", "mold-server/webp"]
+mp4 = ["mold-inference/mp4", "mold-server/mp4"]
 # Public compact MiniMax H3 execution. Device-agnostic (#1164): pair with
 # `cuda` for the shipping SM89 route or with `metal` for the Apple Silicon
 # correctness route. Model acquisition remains the two pinned upstream
@@ -84,7 +83,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 hostname = "0.4"
 viuer = { version = "0.11", optional = true }
 mold-discord = { path = "../mold-discord", package = "mold-ai-discord", version = "0.29.0", optional = true }
-mold-tui = { path = "../mold-tui", package = "mold-ai-tui", version = "0.29.0", optional = true }
 walkdir = "2.5.0"
 uuid = { version = "1", features = ["v4"] }
 

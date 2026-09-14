@@ -95,9 +95,9 @@ CREATE INDEX IF NOT EXISTS idx_gen_filename   ON generations(filename);
 CREATE INDEX IF NOT EXISTS idx_gen_output_dir ON generations(output_dir);
 "#;
 
-/// v3 → add the global KV `settings` table. Used for TUI + user-preference
-/// state that previously lived in `tui-session.json` and the user-facing
-/// portions of `config.toml`.
+/// v3 → add the global KV `settings` table. Holds user-preference state that
+/// previously lived in a JSON session sidecar and in the user-facing portions
+/// of `config.toml`.
 const V3_SETTINGS_TABLE: &str = r#"
 CREATE TABLE IF NOT EXISTS settings (
     key           TEXT PRIMARY KEY,
@@ -668,6 +668,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 37,
         kind: MigrationKind::Sql(V37_GENERATION_ASSETS),
     },
+    Migration {
+        version: 38,
+        kind: MigrationKind::Sql(V38_RETIRE_TUI_SETTINGS),
+    },
 ];
 
 /// The gallery listing is `WHERE output_dir = ? ORDER BY
@@ -907,9 +911,27 @@ ALTER TABLE generation_batch_children ADD COLUMN result_json TEXT;
 ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 "#;
 
+/// The interactive terminal app is retired, so its `tui.*` settings rows have
+/// no reader left — except one. `tui.last_model` was never a terminal-app
+/// preference: the CLI writes it after every run and reads it as tier 4 of
+/// default-model resolution, so it is renamed rather than dropped.
+///
+/// The rename runs FIRST: `DELETE ... LIKE 'tui.%'` would otherwise eat the
+/// row this migration exists to save. `UPDATE OR REPLACE` because a profile
+/// may already hold a `generate.last_model` row, and the terminal app's value
+/// is the newer of the two.
+///
+/// The delete takes `tui.host_key.<id>` rows with it, which hold remote API
+/// keys that no surviving surface can read or re-enter.
+const V38_RETIRE_TUI_SETTINGS: &str = r#"
+UPDATE OR REPLACE settings SET key = 'generate.last_model' WHERE key = 'tui.last_model';
+
+DELETE FROM settings WHERE key LIKE 'tui.%';
+"#;
+
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 37;
+pub const SCHEMA_VERSION: i64 = 38;
 
 /// Downloadable files that belong to one gallery print. The generation row
 /// remains the lifecycle authority, so permanent deletion cascades while
@@ -1300,7 +1322,7 @@ pub fn apply_pending(conn: &mut Connection) -> Result<i64> {
     }
 
     // Concurrency: multiple processes open mold.db simultaneously in the
-    // default setup (`mold tui` beside its auto-spawned `mold serve`).
+    // default setup (a `mold` client beside its auto-spawned `mold serve`).
     // Each migration therefore runs under an IMMEDIATE transaction — the
     // write lock is taken up front — and re-reads `user_version` inside
     // that lock. A connection that lost the race sees the bumped version
@@ -1430,8 +1452,8 @@ mod tests {
 
     #[test]
     fn concurrent_opens_of_a_fresh_db_all_migrate_safely() {
-        // Regression: `mold tui` + its auto-spawned `mold serve` open the
-        // same mold.db at boot. Racing connections both read the old
+        // Regression: a `mold` client and its auto-spawned `mold serve`
+        // open the same mold.db at boot. Racing connections both read the old
         // user_version and both applied the same ALTER TABLE — the loser
         // hit "duplicate column" and the file failed every later open.
         let tmp = std::env::temp_dir().join(format!(
@@ -1740,7 +1762,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 37);
+        assert_eq!(SCHEMA_VERSION, 38);
         assert!(table_exists(&conn, "device_preferences"));
         assert!(table_exists(&conn, "mesh_workflow_jobs"));
         assert!(table_exists(&conn, "mesh_workflow_stages"));
@@ -1806,7 +1828,7 @@ mod tests {
         tx.commit().unwrap();
         conn.execute(
             "INSERT INTO settings (key, value, value_type, updated_at_ms)
-             VALUES ('tui.theme', 'mocha', 'string', 123)",
+             VALUES ('expand.temperature', '0.7', 'string', 123)",
             [],
         )
         .unwrap();
@@ -1822,13 +1844,13 @@ mod tests {
 
         let (profile, value): (String, String) = conn
             .query_row(
-                "SELECT profile, value FROM settings WHERE key = 'tui.theme'",
+                "SELECT profile, value FROM settings WHERE key = 'expand.temperature'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
         assert_eq!(profile, "default");
-        assert_eq!(value, "mocha");
+        assert_eq!(value, "0.7");
     }
 
     /// v6: `model_prefs` keeps every existing row under `profile = 'default'`.
@@ -1896,7 +1918,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 37);
+        assert_eq!(SCHEMA_VERSION, 38);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -2033,7 +2055,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 37);
+        assert_eq!(SCHEMA_VERSION, 38);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -2131,19 +2153,19 @@ mod tests {
         apply_pending(&mut conn).unwrap();
         conn.execute(
             "INSERT INTO settings (profile, key, value, value_type, updated_at_ms)
-             VALUES ('default', 'tui.theme', 'mocha', 'string', 1)",
+             VALUES ('default', 'expand.temperature', '0.7', 'string', 1)",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO settings (profile, key, value, value_type, updated_at_ms)
-             VALUES ('dev', 'tui.theme', 'nord', 'string', 1)",
+             VALUES ('dev', 'expand.temperature', '0.9', 'string', 1)",
             [],
         )
         .unwrap();
         let n: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM settings WHERE key = 'tui.theme'",
+                "SELECT COUNT(*) FROM settings WHERE key = 'expand.temperature'",
                 [],
                 |r| r.get(0),
             )
@@ -2281,6 +2303,78 @@ mod tests {
         drop(tx);
         assert_eq!(current_version(&conn).unwrap(), before);
     }
+
+    /// v38: the retired terminal app's settings namespace is dropped, except
+    /// `tui.last_model`, which the CLI itself writes after every run and
+    /// reads as tier 4 of default-model resolution. It is renamed per
+    /// profile; everything else under the prefix goes, including the stored
+    /// per-host API keys no surviving surface can read.
+    #[test]
+    fn v38_renames_tui_last_model_and_drops_every_other_tui_row() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // Seed at v37 so v38 runs over rows that already exist.
+        {
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+            tx.execute_batch(V3_SETTINGS_TABLE).unwrap();
+            tx.commit().unwrap();
+        }
+        // Reach the profile-scoped settings shape first, then seed.
+        apply_pending(&mut conn).unwrap();
+        conn.execute_batch(
+            "DELETE FROM settings;
+             INSERT INTO settings (profile, key, value, value_type, updated_at_ms) VALUES
+               ('default', 'tui.last_model', 'flux-dev:q4', 'string', 1),
+               ('work', 'tui.last_model', 'sdxl', 'string', 1),
+               ('default', 'tui.theme', 'dark', 'string', 1),
+               ('default', 'tui.host_key.plato', 'k', 'string', 1);
+             PRAGMA user_version = 37;",
+        )
+        .unwrap();
+
+        apply_pending(&mut conn).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+
+        let mut rows: Vec<(String, String)> = conn
+            .prepare("SELECT profile, value FROM settings WHERE key = 'generate.last_model'")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                ("default".to_string(), "flux-dev:q4".to_string()),
+                ("work".to_string(), "sdxl".to_string()),
+            ],
+            "the last-used model must survive the rename in every profile"
+        );
+
+        let leftovers: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key LIKE 'tui.%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftovers, 0, "no tui.* row may survive v38");
+    }
+
+    /// A `mold.db` written by a NEWER build opens without error — the
+    /// accepted cost of v38 is that an older binary finds the rows gone, not
+    /// that it refuses to start.
+    #[test]
+    fn a_user_version_past_this_build_is_not_an_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pending(&mut conn).unwrap();
+        conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 5))
+            .unwrap();
+
+        apply_pending(&mut conn).expect("a newer schema must not fail the open");
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION + 5);
+    }
 }
 
 #[cfg(test)]
@@ -2295,7 +2389,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 37);
+        assert_eq!(SCHEMA_VERSION, 38);
     }
 
     #[test]
@@ -2360,8 +2454,10 @@ mod v15_tests {
     #[test]
     fn v14_runtime_migration_preserves_old_rows_with_null_runtime() {
         let mut conn = Connection::open_in_memory().unwrap();
-        // Every real v14 database carries the gallery table; v20 alters it.
+        // Every real v14 database carries the gallery table (v20 alters it)
+        // and the settings table (v3 creates it, v38 rewrites rows in it).
         conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        conn.execute_batch(V3_SETTINGS_TABLE).unwrap();
         conn.execute_batch(V10_GENERATION_METADATA_JSON).unwrap();
         conn.execute_batch(V13_SCHEDULER_ESTIMATES).unwrap();
         conn.execute_batch(V14_SCHEDULER_ESTIMATE_EVIDENCE).unwrap();
@@ -2399,8 +2495,10 @@ mod v17_tests {
     #[test]
     fn v16_av_phase_migration_preserves_legacy_vae_evidence() {
         let mut conn = Connection::open_in_memory().unwrap();
-        // Every real v16 database carries the gallery table; v20 alters it.
+        // Every real v16 database carries the gallery table (v20 alters it)
+        // and the settings table (v3 creates it, v38 rewrites rows in it).
         conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        conn.execute_batch(V3_SETTINGS_TABLE).unwrap();
         conn.execute_batch(V10_GENERATION_METADATA_JSON).unwrap();
         conn.execute_batch(V13_SCHEDULER_ESTIMATES).unwrap();
         conn.execute_batch(V14_SCHEDULER_ESTIMATE_EVIDENCE).unwrap();

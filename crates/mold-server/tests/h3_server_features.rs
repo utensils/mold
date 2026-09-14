@@ -16,9 +16,9 @@ mod h3_server_features;
 
 use h3_server_features::validate_canonical_h3_server_feature_keys as validate;
 
-/// `mold-ai`'s `h3-cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-delight`
+/// `mold-ai`'s `h3-cuda,preview,discord,expand,webp,mp4,metrics,mdns,pulid,mesh-texture,mesh-delight`
 /// as it reaches `mold-ai-server`. Features `mold-ai` does not forward to the
-/// server (`preview`, `discord`, `tui`) are deliberately absent.
+/// server (`preview`, `discord`) are deliberately absent.
 fn shipping_sm89_recipe() -> Vec<String> {
     [
         "CARGO_FEATURE_CUDA",

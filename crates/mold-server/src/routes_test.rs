@@ -12067,7 +12067,7 @@ mod tests {
         {
             let handle = db.as_ref().as_ref().unwrap();
             mold_db::Settings::for_profile(handle, "dev")
-                .set_str("tui.theme", "nord")
+                .set_str("expand.temperature", "0.9")
                 .unwrap();
         }
         let resp = app
@@ -16566,15 +16566,13 @@ mod tests {
             .unwrap();
         assert_eq!(&body[..4], &[0x89, b'P', b'N', b'G']);
 
-        // Both sidecar names now hold the poster, so the TUI and the next
-        // request are free hits rather than a second rasterization.
+        // The sidecar now holds the poster, so the next request is a free
+        // hit rather than a second rasterization.
         let thumb_dir = mold_home.path().join("cache").join("thumbnails");
-        for sidecar in
-            mold_core::media_paths::mesh_poster_thumbnail_paths(&thumb_dir, "armchair.glb")
-        {
-            assert!(sidecar.is_file(), "{} is missing", sidecar.display());
-            assert_eq!(std::fs::read(&sidecar).unwrap(), body.as_ref());
-        }
+        let sidecar =
+            mold_core::media_paths::mesh_poster_thumbnail_path(&thumb_dir, "armchair.glb");
+        assert!(sidecar.is_file(), "{} is missing", sidecar.display());
+        assert_eq!(std::fs::read(&sidecar).unwrap(), body.as_ref());
     }
 
     /// The placeholder is still the answer for a mesh nothing can read — but
@@ -16612,14 +16610,56 @@ mod tests {
             "public, max-age=300"
         );
         let thumb_dir = mold_home.path().join("cache").join("thumbnails");
-        for sidecar in mold_core::media_paths::mesh_poster_thumbnail_paths(&thumb_dir, "broken.glb")
-        {
-            assert!(
-                !sidecar.exists(),
-                "a failed render must not leave {} behind",
-                sidecar.display()
-            );
+        let sidecar = mold_core::media_paths::mesh_poster_thumbnail_path(&thumb_dir, "broken.glb");
+        assert!(
+            !sidecar.exists(),
+            "a failed render must not leave {} behind",
+            sidecar.display()
+        );
+    }
+
+    /// A permanent delete takes every cached sidecar the print had, the
+    /// retired terminal app's `<name>.thumb.png` included. Nothing writes one
+    /// any more and the orphan sweeper clears the backlog, but leaving dead
+    /// bytes behind until the next pass is exactly what a permanent delete
+    /// promises not to do.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn permanent_delete_removes_the_retired_thumbnail_sidecar() {
+        let mold_home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("MOLD_HOME", mold_home.path().as_os_str());
+        let (app, output_dir) = gallery_export_app(&[("armchair.glb", gallery_glb_fixture())]);
+
+        let thumb_dir = mold_home.path().join("cache").join("thumbnails");
+        std::fs::create_dir_all(&thumb_dir).unwrap();
+        let retired = thumb_dir.join("armchair.glb.thumb.png");
+        let poster = mold_core::media_paths::mesh_poster_thumbnail_path(&thumb_dir, "armchair.glb");
+        for path in [&retired, &poster] {
+            std::fs::write(path, b"\x89PNG\r\n\x1a\n").unwrap();
         }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/gallery/image/armchair.glb?permanent=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(!output_dir.path().join("armchair.glb").exists());
+        assert!(
+            !retired.exists(),
+            "the retired sidecar outlived its print at {}",
+            retired.display()
+        );
+        assert!(
+            !poster.exists(),
+            "the revisioned poster outlived its print at {}",
+            poster.display()
+        );
     }
 
     /// The import envelope carries bytes and metadata, never the origin's
@@ -16671,15 +16711,13 @@ mod tests {
             "material actions must be available without a gallery refetch"
         );
         let thumb_dir = mold_home.path().join("cache").join("thumbnails");
-        for sidecar in
-            mold_core::media_paths::mesh_poster_thumbnail_paths(&thumb_dir, "mirrored.glb")
-        {
-            assert!(sidecar.is_file(), "{} is missing", sidecar.display());
-            assert_eq!(
-                &std::fs::read(&sidecar).unwrap()[..4],
-                &[0x89, b'P', b'N', b'G']
-            );
-        }
+        let sidecar =
+            mold_core::media_paths::mesh_poster_thumbnail_path(&thumb_dir, "mirrored.glb");
+        assert!(sidecar.is_file(), "{} is missing", sidecar.display());
+        assert_eq!(
+            &std::fs::read(&sidecar).unwrap()[..4],
+            &[0x89, b'P', b'N', b'G']
+        );
     }
 
     fn gallery_export_app(files: &[(&str, Vec<u8>)]) -> (axum::Router, tempfile::TempDir) {
@@ -18510,8 +18548,8 @@ mod tests {
     }
 
     /// `GET /api/gallery/preview/:filename` serves the cached `.preview.gif`
-    /// the TUI's server-backed detail pane pulls when it wants to animate an
-    /// MP4 entry. Happy path: the file exists → 200 with `image/gif` + the
+    /// a client pulls when it wants to animate an MP4 entry
+    /// (`mold library show --preview` is the surviving reader). Happy path: the file exists → 200 with `image/gif` + the
     /// bytes. Missing file → 404 so the client can fall back to the full
     /// `/api/gallery/image/:filename` path.
     #[allow(clippy::await_holding_lock)]

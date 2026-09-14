@@ -11,9 +11,9 @@ pub const GIT_SHA: &str = env!("MOLD_GIT_SHA");
 
 /// Abbreviated commit SHA for display, or `"unknown"`.
 ///
-/// Chrome that right-aligns a version string shares a row with other content —
-/// the TUI tab strip is one — so the displayed width must not depend on how
-/// long the exact SHA happens to be.
+/// Chrome that right-aligns a version string shares a row with other content,
+/// so the displayed width must not depend on how long the exact SHA happens
+/// to be.
 pub const SHORT_GIT_SHA: &str = env!("MOLD_GIT_SHA_SHORT");
 
 /// Displayed abbreviation width. Keep in sync with `build.rs`.
@@ -110,10 +110,10 @@ mod tests {
 
     #[test]
     fn displayed_sha_width_is_independent_of_the_exact_sha() {
-        // The TUI tab strip right-aligns `version_string()` onto the row that
-        // holds the tab labels, so a 40-character SHA here overlaps the tabs
-        // and moves what a click lands on. The display width is pinned rather
-        // than inherited from however long GIT_SHA happens to be.
+        // A right-aligned `version_string()` shares its row with other
+        // chrome, so a 40-character SHA here would overlap it. The display
+        // width is pinned rather than inherited from however long GIT_SHA
+        // happens to be.
         if SHORT_GIT_SHA == "unknown" {
             assert_eq!(GIT_SHA, "unknown");
             return;

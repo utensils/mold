@@ -1,9 +1,7 @@
 //! `mold library` — browse and organize one serving host's live gallery.
 //!
-//! Non-grid commands always use `$MOLD_HOST` (`MOLD_API_KEY` when set) and
-//! never fall back to direct filesystem access. `grid` delegates to the
-//! existing TUI Library so terminal protocol detection and the merged gallery
-//! stay singular.
+//! Every command uses `$MOLD_HOST` (`MOLD_API_KEY` when set) and never falls
+//! back to direct filesystem access.
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
@@ -19,10 +17,7 @@ use mold_core::{
 use crate::{LibraryAction, LibraryCollectionAction, LibraryTagAction};
 
 pub async fn run(action: LibraryAction) -> Result<()> {
-    match action {
-        LibraryAction::Grid { host, local } => library_grid(host, local).await,
-        action => run_remote(action, &MoldClient::from_env()).await,
-    }
+    run_remote(action, &MoldClient::from_env()).await
 }
 
 async fn run_remote(action: LibraryAction, client: &MoldClient) -> Result<()> {
@@ -105,7 +100,6 @@ async fn run_remote(action: LibraryAction, client: &MoldClient) -> Result<()> {
             )
             .await
         }
-        LibraryAction::Grid { .. } => unreachable!("grid handled before creating a client"),
     }
 }
 
@@ -667,7 +661,7 @@ async fn library_trash(client: &MoldClient, filenames: &[String]) -> Result<()> 
 /// transcode one stored mesh (or download the stored `.glb` unchanged, or
 /// render its turntable) and write the result locally.
 ///
-/// HTTP to `$MOLD_HOST` with no local fallback, like every other non-grid
+/// HTTP to `$MOLD_HOST` with no local fallback, like every other
 /// `mold library` command: the print lives on the serving host, and reading
 /// its output directory directly would answer for the wrong machine.
 ///
@@ -1030,23 +1024,6 @@ fn confirm(prompt: &str) -> Result<bool> {
         line.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
-}
-
-#[cfg(feature = "tui")]
-async fn library_grid(host: Option<String>, local: bool) -> Result<()> {
-    mold_tui::run_tui_with_options(mold_tui::TuiLaunchOptions {
-        host,
-        local,
-        api_key: std::env::var("MOLD_API_KEY").ok(),
-        initial_workspace: mold_tui::TuiInitialWorkspace::Library,
-        strict_host: true,
-    })
-    .await
-}
-
-#[cfg(not(feature = "tui"))]
-async fn library_grid(_host: Option<String>, _local: bool) -> Result<()> {
-    bail!("Library grid requires a build with `--features tui`")
 }
 
 #[cfg(test)]

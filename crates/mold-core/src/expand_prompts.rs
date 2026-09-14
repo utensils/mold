@@ -73,7 +73,7 @@ impl IgnoredPromptAdvice {
 ///
 /// A conditioned request is the case that can differ, and it is the only
 /// case where an `Ignored` answer exists, so the rule is asked for one. The
-/// CLI, `/api/expand`, `/api/remix`, the MCP tools, the TUI, and the shared
+/// CLI, `/api/expand`, `/api/remix`, the MCP tools, and the shared
 /// expansion driver all ask this function and nothing else, so a family
 /// that ignores its prompt is never handed to a language model anywhere.
 pub fn ignored_prompt_advice(family: &str) -> Option<IgnoredPromptAdvice> {

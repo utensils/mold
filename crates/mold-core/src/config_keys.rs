@@ -918,8 +918,7 @@ impl Surface {
 /// as a conservative default (matches pre-issue-#265 behavior).
 pub fn surface_for_key(key: &str) -> Surface {
     // Prefix-based: user-preference slices that moved to DB.
-    if key.starts_with("tui.")
-        || key.starts_with("expand.")
+    if key.starts_with("expand.")
         || key.starts_with("generate.")
         || key.starts_with("scheduler.")
         || key.starts_with("gallery.")

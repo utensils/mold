@@ -59,8 +59,7 @@ pub fn read_embedded(path: &Path, format: OutputFormat) -> Option<OutputMetadata
 /// gallery cards keep the correct aspect ratio.
 ///
 /// This is the one metadata leaf every gallery consumer maps from —
-/// server scan → `GalleryImage`, reconcile → `GenerationRecord`, TUI
-/// fallback walk → its own entry type.
+/// server scan → `GalleryImage`, reconcile → `GenerationRecord`.
 pub fn read_or_synthesize(
     path: &Path,
     format: OutputFormat,
@@ -385,9 +384,8 @@ fn read_png_metadata(path: &Path) -> Option<OutputMetadata> {
 }
 
 /// Read metadata from a GIF comment extension (`0x21 0xFE` + length-
-/// prefixed sub-blocks) carrying `mold:parameters {json}`. Parser
-/// upstreamed from the TUI's gallery scanner so every consumer can
-/// recover GIF metadata.
+/// prefixed sub-blocks) carrying `mold:parameters {json}`. Lives here so
+/// every consumer can recover GIF metadata.
 fn read_gif_metadata(path: &Path) -> Option<OutputMetadata> {
     let data = std::fs::read(path).ok()?;
     let mut i = 0;
@@ -591,9 +589,9 @@ mod tests {
     }
 
     /// GIF comment-extension metadata must round-trip through
-    /// read_embedded — previously only the TUI could parse it, so
-    /// reconcile and the server gallery synthesized rows for GIFs that
-    /// actually carried full metadata.
+    /// read_embedded — before the parser moved here, reconcile and the
+    /// server gallery synthesized rows for GIFs that actually carried full
+    /// metadata.
     #[test]
     fn read_embedded_recovers_gif_comment_metadata() {
         let dir = tempfile::tempdir().unwrap();

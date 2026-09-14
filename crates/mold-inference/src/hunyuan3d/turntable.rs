@@ -1,8 +1,7 @@
 //! Turntable animation of a stored mesh: the poster set spinning.
 //!
-//! Shared by the server's `POST /api/gallery/export/:filename` route and the
-//! TUI's in-process export of a local print, so a `.glb` exports to the same
-//! bytes whichever machine renders it. Frames come from
+//! Driven by the server's `POST /api/gallery/export/:filename` route, so a
+//! `.glb` exports to the same bytes whichever machine renders it. Frames come from
 //! [`super::poster::render_sequence_frame_rgb`] over [`super::poster::turntable_cameras`]
 //! and go into the animation encoders every other mold export uses
 //! (`ltx_video::video_enc`), so a mesh GIF and a video GIF share one

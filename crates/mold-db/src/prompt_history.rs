@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::MetadataDb;
 
-/// One recorded prompt. Kept structurally identical to the legacy
-/// `HistoryEntry` in `mold-tui/src/history.rs` so imports are trivial.
+/// One recorded prompt. Structurally identical to the legacy JSON-lines
+/// history entry the one-shot import reads, so imports are trivial.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HistoryEntry {
     pub prompt: String,

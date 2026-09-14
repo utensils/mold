@@ -623,8 +623,8 @@ fn save_durable_batch_download(
     }
     std::fs::write(destination, bytes)?;
     status!("{} Saved: {}", theme::icon_done(), destination.bold());
-    // The local copy is a print like any other: record it so `mold` and the
-    // TUI Library see a `--batch N` sibling exactly as they see a singleton.
+    // The local copy is a print like any other: record it so every library
+    // surface sees a `--batch N` sibling exactly as it sees a singleton.
     if let Some(persist) = persist {
         crate::metadata_db::record_local_save(
             std::path::Path::new(destination),
@@ -3843,8 +3843,8 @@ fn save_and_preview_video(
 
 /// Save an audio-only output to disk and cache its waveform thumbnail.
 ///
-/// Audio has no raster frame, so both the TUI gallery cell and the server's
-/// on-demand thumbnailer would come up empty. The waveform PNG the engine
+/// Audio has no raster frame, so the server's on-demand thumbnailer would
+/// come up empty. The waveform PNG the engine
 /// already rendered is written into the shared thumbnail cache here, at the
 /// only moment where it exists.
 fn save_and_preview_audio(
@@ -3962,9 +3962,9 @@ fn save_and_preview_mesh(
 }
 
 /// Mirror of [`cache_audio_waveform_thumbnail`]: a locally saved `.glb` has
-/// no frame either surface can decode, so the poster has to be written to
-/// the shared cache at save time or the TUI and the desktop app both show a
-/// placeholder for a print that has a perfectly good tile.
+/// no frame a thumbnailer can decode, so the poster has to be written to the
+/// shared cache at save time or the desktop app shows a placeholder for a
+/// print that has a perfectly good tile.
 fn cache_mesh_poster_thumbnail(saved: &std::path::Path, png_bytes: &[u8]) {
     if png_bytes.is_empty() {
         return;
@@ -3979,13 +3979,12 @@ fn cache_mesh_poster_thumbnail(saved: &std::path::Path, png_bytes: &[u8]) {
     if std::fs::create_dir_all(&thumb_dir).is_err() {
         return;
     }
-    for path in mold_core::media_paths::mesh_poster_thumbnail_paths(&thumb_dir, leaf) {
-        if let Err(error) = std::fs::write(&path, png_bytes) {
-            tracing::warn!(
-                "failed to cache mesh poster thumbnail {}: {error}",
-                path.display()
-            );
-        }
+    let path = mold_core::media_paths::mesh_poster_thumbnail_path(&thumb_dir, leaf);
+    if let Err(error) = std::fs::write(&path, png_bytes) {
+        tracing::warn!(
+            "failed to cache mesh poster thumbnail {}: {error}",
+            path.display()
+        );
     }
 }
 
@@ -4003,13 +4002,12 @@ fn cache_audio_waveform_thumbnail(saved: &std::path::Path, png_bytes: &[u8]) {
     if std::fs::create_dir_all(&thumb_dir).is_err() {
         return;
     }
-    for path in mold_core::media_paths::audio_waveform_thumbnail_paths(&thumb_dir, leaf) {
-        if let Err(error) = std::fs::write(&path, png_bytes) {
-            tracing::warn!(
-                "failed to cache waveform thumbnail {}: {error}",
-                path.display()
-            );
-        }
+    let path = mold_core::media_paths::audio_waveform_thumbnail_path(&thumb_dir, leaf);
+    if let Err(error) = std::fs::write(&path, png_bytes) {
+        tracing::warn!(
+            "failed to cache waveform thumbnail {}: {error}",
+            path.display()
+        );
     }
 }
 

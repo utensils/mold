@@ -5,8 +5,8 @@
 //! the batch child state, and the only live signal a client can read is
 //! `GET /api/queue/{id}/preview`. That endpoint used to carry a denoise
 //! preview alone, so a host running with `MOLD_STEP_PREVIEW=0` reported no
-//! step counter at all and every non-browser surface — CLI `--batch N`, the
-//! TUI batch pane, MCP async jobs, RunPod — went silent for the whole render.
+//! step counter at all and every non-browser surface — CLI `--batch N`, MCP
+//! async jobs, RunPod — went silent for the whole render.
 //!
 //! [`QueueJobProgress`] is the fix, and it is one mechanism rather than a
 //! second emitter: the server FOLDS every [`SseProgressEvent`] the existing

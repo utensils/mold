@@ -6,7 +6,6 @@ members = [
     "crates/mold-server",
     "crates/mold-cli",
     "crates/mold-discord",
-    "crates/mold-tui",
     "crates/mold-catalog",
     "crates/mold-scheduler",
     "crates/mold-candle",

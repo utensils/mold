@@ -1,9 +1,9 @@
 //! Per-model preferences backed by the `model_prefs` table (v4 schema).
 //!
 //! Each row stores the last-used generation parameters for a specific
-//! model. When the user switches between models in the TUI, the outgoing
-//! model's current params get snapshotted here; the incoming model's row
-//! is loaded back onto `GenerateParams`. That is the "FLUX remembers its
+//! model. When the user switches between models, the outgoing model's
+//! current params get snapshotted here; the incoming model's row is loaded
+//! back onto the authoring form. That is the "FLUX remembers its
 //! settings, SDXL remembers its settings" behavior.
 //!
 //! All columns are `Option<T>` — a model a user has never touched simply
@@ -17,9 +17,9 @@ use serde::{Deserialize, Serialize};
 use crate::db::MetadataDb;
 use crate::settings::resolve_active_profile;
 
-/// A snapshot of all the per-model fields we persist. Mirrors the TUI's
-/// `GenerateParams` plus the last prompt/negative pair so users who type a
-/// prompt under one model see it again when they come back.
+/// A snapshot of all the per-model fields we persist: an authoring form's
+/// generation parameters plus the last prompt/negative pair, so users who
+/// type a prompt under one model see it again when they come back.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelPrefs {
     pub width: Option<u32>,
@@ -299,7 +299,7 @@ mod tests {
     }
 
     /// The marquee behavioral guarantee: switching models preserves each
-    /// model's own settings. This is what today's `TuiSession` blob does
+    /// model's own settings. This is what one shared session blob does
     /// *not* give us.
     #[test]
     fn per_model_settings_survive_model_switch() {

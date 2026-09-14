@@ -10,8 +10,8 @@
 //!
 //! This module bridges the gap **without** dragging the `mold-db` /
 //! `mold-catalog` crates into `mold-core` (where they'd transitively land
-//! in `mold-discord` and `mold-tui`, which the catalog crate explicitly
-//! forbids). The flow:
+//! in `mold-discord`, which the catalog crate explicitly forbids). The
+//! flow:
 //!
 //! 1. `looks_like_catalog_id` — pure `cv:` / `hf:` shape check.
 //! 2. `lookup_catalog_row` — hits the catalog DB (soft-fails to `Ok(None)`

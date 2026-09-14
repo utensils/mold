@@ -1229,7 +1229,7 @@ fn enable_v3_writing(root: &Path) {
 /// Resolved ONCE per process, and — this is the part that was wrong —
 /// resolved wherever the first authority open happens, not only in the server
 /// entry point. `run_server` used to be the sole writer of this flag, so a
-/// forced-local `mold run`, the TUI, and every other CLI publication path
+/// forced-local `mold run` and every other CLI publication path
 /// arrived with it false and committed VERSION 2 into a home the operator had
 /// explicitly switched to version 3. On a host that also uses the CLI that is
 /// not an edge case, it is every day: the setting was silently reverted by the
@@ -3638,7 +3638,7 @@ mod tests {
     /// just to `run_server`.
     ///
     /// It used to be written only by the server entry point, so a forced-local
-    /// `mold run` or the TUI opened a v3-enabled home with the flag false and
+    /// `mold run` opened a v3-enabled home with the flag false and
     /// committed version 2 into it — silently reverting the operator's setting
     /// on the next local render. Both sides now read one function.
     #[test]

@@ -2,8 +2,8 @@
 //!
 //! Live-only proxy to HF + Civitai with a 5-minute in-process cache;
 //! the bulk-scrape DB and walker are gone. Only `mold-cli` and
-//! `mold-server` depend on this crate. `mold-discord` and `mold-tui`
-//! MUST NOT transitively depend on it.
+//! `mold-server` depend on this crate. `mold-discord` MUST NOT
+//! transitively depend on it.
 
 #![forbid(unsafe_code)]
 

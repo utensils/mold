@@ -82,7 +82,7 @@ impl MetalMemorySnapshot {
             )
     }
 
-    /// Shared compact host-status wording for CLI, TUI and MCP projections.
+    /// Shared compact host-status wording for CLI and MCP projections.
     pub fn budget_label(&self) -> String {
         let gib = |value: Option<u64>| {
             value.map_or_else(

@@ -39,8 +39,7 @@ fn main() {
 
     // Human-readable surfaces abbreviate. `MOLD_GIT_SHA` is exact because the
     // private H3 campaign identity needs an unambiguous commit, but a 40-char
-    // SHA in a status line is 33 columns of chrome nobody reads, and the TUI
-    // tab strip right-aligns this string onto the row holding the tab labels.
+    // SHA in a status line is 33 columns of chrome nobody reads.
     let short_sha = if sha == "unknown" {
         sha.clone()
     } else {

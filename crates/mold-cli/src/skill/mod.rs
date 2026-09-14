@@ -1537,14 +1537,9 @@ mod tests {
     /// `library` verbs went untaught while every fence still parsed.
     const UNDOCUMENTED_BY_DESIGN: &[(&str, &str)] = &[
         // Interactive or long-running surfaces an agent cannot drive from a
-        // shell. `tui` and `discord` are feature-gated, so they enter the
-        // walk only in a build that carries them — CI's feature-union build
-        // does, a default `cargo test` does not.
-        (
-            "library grid",
-            "opens the interactive terminal Library grid",
-        ),
-        ("tui", "the interactive terminal app (feature `tui`)"),
+        // shell. `discord` is feature-gated, so it enters the walk only in a
+        // build that carries it — CI's feature-union build does, a default
+        // `cargo test` does not.
         ("discord", "runs the Discord bot (feature `discord`)"),
         (
             "server discover",
@@ -1672,7 +1667,24 @@ mod tests {
     /// Exemptions for commands that exist only behind a cargo feature. They
     /// are allowed to be absent from a default-feature walk; a build that
     /// carries the feature still checks them like any other.
-    const FEATURE_GATED_EXEMPTIONS: &[&str] = &["tui", "discord", "server discover"];
+    const FEATURE_GATED_EXEMPTIONS: &[&str] = &["discord", "server discover"];
+
+    /// The interactive terminal app is retired, so no command path may name
+    /// it or the Library grid that was its one other door. A clap variant
+    /// left behind would still be reachable from the shell and would still
+    /// demand a skill example.
+    #[test]
+    fn no_command_path_names_the_retired_terminal_app() {
+        let paths = invocable_command_paths();
+        for retired in ["tui", "library grid"] {
+            assert!(
+                !paths
+                    .iter()
+                    .any(|path| path == retired || path.starts_with(&format!("{retired} "))),
+                "`mold {retired}` is retired but is still an invocable command"
+            );
+        }
+    }
 
     /// Every exemption names a command that exists, so a renamed or retired
     /// command cannot leave a stale excuse behind.
@@ -1710,7 +1722,6 @@ mod tests {
     /// different build. Every entry is checked to be USED, so an example
     /// that stops appearing cannot leave a stale excuse behind.
     const FEATURE_GATED_DOC_EXAMPLES: &[(&str, &str)] = &[
-        ("mold tui", "tui"),
         ("mold discord", "discord"),
         ("mold serve --discord", "discord"),
         ("mold server discover", "mdns"),

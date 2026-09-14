@@ -455,7 +455,6 @@ pub(crate) fn validate_and_normalize_chain_family(
     // design, and that is safe because every one-shot auto-chainer sets it —
     // the CLI (`commands/chain.rs`), the web (`useGenerateStream.ts`), desktop
     // (`stores/generation.ts`), and the iPhone (via `buildAutoChainRequest`).
-    // The TUI never builds an ephemeral chain at all.
     if req.ephemeral && matches!(family.as_str(), "wan" | "ltx-video") {
         // Derived from the STAGES when there are stages: the largest stage is
         // the clip the caller actually rendered with, and it is the only form

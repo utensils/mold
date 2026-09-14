@@ -90,8 +90,8 @@ pub struct ComposedClientTags {
     pub auto_tagged: Option<String>,
 }
 
-/// Compose the tag list a CLI or TUI submits for a print, optionally adding
-/// the title's slug as a tag.
+/// Compose the tag list a client submits for a print, optionally adding the
+/// title's slug as a tag.
 ///
 /// This is a **client** policy on purpose. The server never auto-tags: it
 /// cannot tell a title a person typed from one a script generated, and a

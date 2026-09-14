@@ -508,8 +508,7 @@ pub fn identity_qualified_model_with_family(model: &str, family_hint: Option<&st
 /// The refusal a surface shows for a checkpoint that cannot take an identity
 /// reference.
 ///
-/// Extracted so admission, the TUI, and the Discord bot all speak one
-/// sentence. Clients gate on the server's advertised
+/// Extracted so admission and the Discord bot speak one sentence. Clients gate on the server's advertised
 /// `/api/models[].supports_identity` — never on this list, which is the
 /// built-in fallback and the wording authority, not a second capability.
 pub fn identity_model_gate_message(model: &str) -> String {
@@ -1561,9 +1560,9 @@ mod tests {
         }
     }
 
-    /// The three extracted helpers are what the TUI and the Discord bot call
-    /// — neither can reach [`validate_identity_conditioning`], whose build
-    /// gate is about the *server's* binary, not the client's. They must stay
+    /// The three extracted helpers are what the Discord bot calls — it
+    /// cannot reach [`validate_identity_conditioning`], whose build gate is
+    /// about the *server's* binary, not the client's. They must stay
     /// byte-identical to the sentences admission produces.
     #[test]
     fn extracted_helpers_match_the_request_validator_wording() {

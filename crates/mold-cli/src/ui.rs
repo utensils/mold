@@ -8,7 +8,7 @@ use crate::output::{is_piped, status};
 use crate::theme;
 
 /// Display label for a family identifier. The table itself lives in
-/// `mold_core::format::family_display_label` so the CLI and TUI cannot drift
+/// `mold_core::format::family_display_label` so no two surfaces can drift
 /// (#806); unknown identifiers fall back to the raw string here.
 pub(crate) fn family_label(family: &str) -> &str {
     mold_core::format::family_display_label(family).unwrap_or(family)
@@ -224,8 +224,7 @@ fn format_eta(secs: f64) -> String {
 /// The exception is the very first event. Position 0 there means there was no
 /// queue to report — the submit-time event and legacy single-GPU dispatch both
 /// announce 0 as the job starts — so the ordinary idle run says nothing rather
-/// than flashing a queue it was never in. Wording is kept in step with the
-/// TUI's `queued_stage_label`.
+/// than flashing a queue it was never in.
 fn queued_status_message(position: usize, first_event: bool) -> Option<String> {
     match position {
         0 if first_event => None,

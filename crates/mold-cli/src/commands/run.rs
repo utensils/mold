@@ -2332,9 +2332,9 @@ mod tests {
         ));
     }
 
-    /// The pre-dispatch contract check. Identical table in `mold-ai-tui` and
-    /// `mold-ai-discord`; all three must agree with the server's admission
-    /// gate, whose wording they reuse verbatim.
+    /// The pre-dispatch contract check. Identical table in
+    /// `mold-ai-discord`; both must agree with the server's admission gate,
+    /// whose wording they reuse verbatim.
     #[test]
     fn source_image_contract_rejects_exactly_what_admission_rejects() {
         use mold_core::SourceImageCapability::{Optional, Required, Unsupported};

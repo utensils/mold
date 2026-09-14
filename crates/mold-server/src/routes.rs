@@ -2362,8 +2362,7 @@ fn record_prompt_history_in_db(
     model: &str,
 ) {
     // Video requests may legitimately carry no prompt at all; there is nothing
-    // to recall later, so keep those rows out of history entirely (same rule as
-    // the TUI's `History::push_entry`).
+    // to recall later, so keep those rows out of history entirely.
     if prompt.trim().is_empty() {
         return;
     }
@@ -5557,7 +5556,7 @@ async fn pull_model_endpoint(
     }
 
     // SSE: re-emit queue events shaped like the legacy SseProgressEvent::DownloadProgress
-    // so the TUI's existing consumer continues to work unchanged.
+    // so existing consumers continue to work unchanged.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseMessage>();
     let mut events = state.downloads.subscribe();
     let model_for_cb = body.model.clone();
@@ -9271,7 +9270,7 @@ async fn import_gallery_file(
                     let thumb_dir = crate::thumbnails::server_thumbnail_dir();
                     match crate::thumbnails::render_mesh_poster(&source) {
                         Ok(poster) => {
-                            if let Err(error) = crate::thumbnails::write_mesh_poster_sidecars(
+                            if let Err(error) = crate::thumbnails::write_mesh_poster_sidecar(
                                 &thumb_dir, &name, &poster,
                             ) {
                                 tracing::warn!(
@@ -10939,11 +10938,12 @@ fn thumbnail_response(
 ///
 /// Looks up `<preview_dir>/<filename>.preview.gif` (default:
 /// `~/.mold/cache/previews/`). When present, streams the file back as
-/// `image/gif`; otherwise returns 404. This exists so the TUI's remote
-/// gallery detail pane can animate video entries the same way it animates
-/// local ones — previously it fell through to fetching the raw MP4 over
+/// `image/gif`; otherwise returns 404. This exists so a remote gallery
+/// detail pane can animate video entries the same way it animates local
+/// ones — previously it fell through to fetching the raw MP4 over
 /// `/api/gallery/image/:filename`, which `image::open` couldn't decode,
-/// leaving the panel on `Loading…` forever.
+/// leaving the panel on `Loading…` forever. `mold library show --preview`
+/// is the surviving reader.
 async fn get_gallery_preview(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
@@ -11023,10 +11023,9 @@ async fn get_gallery_preview(
         .unwrap())
 }
 
-/// Server-side GIF preview cache directory. Mirrors the layout the TUI
-/// writes to (`crates/mold-tui/src/thumbnails.rs::preview_dir`) so a
-/// single preview.gif authored on either side is reachable via this
-/// endpoint.
+/// Server-side GIF preview cache directory: `<mold_dir>/cache/previews`,
+/// where a `<filename>.preview.gif` sidecar lives. One layout, so a preview
+/// written at save time is the same file this endpoint streams.
 pub(crate) fn server_preview_gif_dir() -> std::path::PathBuf {
     mold_core::Config::mold_dir()
         .unwrap_or_else(|| std::path::PathBuf::from(".mold"))

@@ -86,7 +86,7 @@ pub fn resolution_defaults(model: &str, family: &str) -> ResolutionDefaults {
 }
 
 /// Build the user-facing model catalog from the manifest registry plus local config.
-/// Hidden manifests are excluded from the catalog (CLI list, TUI model selector).
+/// Hidden manifests are excluded from the catalog (CLI list, model pickers).
 /// Whether a family's runtime can render sequence clips at all.
 ///
 /// This is the same answer `mold-server`'s `sequence_support` gives; it lives

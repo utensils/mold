@@ -832,9 +832,9 @@ fn prompt_reason(mode: PromptRequirement) -> Option<String> {
 /// The reference-image contract for one model, and the ONE place it is
 /// decided.
 ///
-/// Every surface — admission, the profile door, the CLI, the TUI, and the
-/// browser clients through the serialized block — reads this rather than
-/// matching on the model name. Upstream references:
+/// Every surface — admission, the profile door, the CLI, and the browser
+/// clients through the serialized block — reads this rather than matching on
+/// the model name. Upstream references:
 ///
 ///   - FLUX.2: `diffusers/pipelines/flux2/pipeline_flux2_klein.py:616,765-809`
 ///     takes `image: list | PIL | None` and prepares reference ids at
@@ -4321,8 +4321,8 @@ mod tests {
                 .contains("not an available bucket")
         );
 
-        // The advisory helper (the TUI's warning source) fires exactly for the
-        // admitted off-bucket size — never for exact buckets, never for a
+        // The advisory helper (every client's warning source) fires exactly
+        // for the admitted off-bucket size — never for exact buckets, never for a
         // Reject-policy recipe, never for a refused shape.
         let recipe = wan.default_recipe().unwrap();
         assert!(off_bucket_resolution_warning(recipe, 1024, 768)
@@ -4336,7 +4336,7 @@ mod tests {
 
     #[test]
     fn resolution_advisory_downgrades_refusals_for_client_surfaces() {
-        // The TUI (like the other shells) never blocks a custom size: a
+        // No shell ever blocks a custom size: a
         // recipe refusal becomes an advisory naming the server as authority,
         // an admitted warn-policy off-bucket keeps the softer message, and an
         // exact preset stays silent.

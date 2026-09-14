@@ -173,7 +173,7 @@ impl std::str::FromStr for Scheduler {
         match s.to_lowercase().as_str() {
             "ddim" => Ok(Scheduler::Ddim),
             // `eulerancestral` is the legacy debug-lower form written by
-            // pre-#265 TUI `save_prefs_for_model`; kept as a read-only
+            // pre-#265 `save_prefs_for_model`; kept as a read-only
             // alias so existing model_prefs rows still parse after the
             // migration to canonical Display format.
             "euler-ancestral" | "euler_ancestral" | "eulerancestral" => {
@@ -2052,8 +2052,8 @@ pub struct GenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upscale_model: Option<String>,
     /// Request a GIF preview alongside the primary video output.
-    /// Used by TUI gallery and CLI `--preview` to get an animated preview without
-    /// re-encoding when the primary format is not GIF.
+    /// Used by gallery detail panes and CLI `--preview` to get an animated
+    /// preview without re-encoding when the primary format is not GIF.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub gif_preview: bool,
     /// Enable synchronized audio generation for audio-video model families such as LTX-2.
@@ -2852,7 +2852,7 @@ pub struct VideoData {
     pub int8_arm: Option<String>,
     /// First frame as PNG thumbnail for gallery grid.
     pub thumbnail: Vec<u8>,
-    /// Animated GIF preview for gallery detail view / TUI playback.
+    /// Animated GIF preview for gallery detail view playback.
     /// Always generated regardless of primary output format.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gif_preview: Vec<u8>,
@@ -2879,8 +2879,8 @@ pub struct VideoData {
 /// Audio-only output from an audio-generating pipeline (LTX-2 text-to-audio).
 ///
 /// `thumbnail` is a rendered waveform PNG produced where the samples already
-/// are, so every gallery surface — web, desktop, iPhone and the TUI — draws a
-/// legible tile from the one artifact instead of each inventing its own glyph.
+/// are, so every gallery surface — web, desktop and iPhone — draws a legible
+/// tile from the one artifact instead of each inventing its own glyph.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AudioData {
     /// Encoded audio bytes in the requested format (currently WAV).
@@ -2896,7 +2896,7 @@ pub struct AudioData {
     /// Total encoded duration in milliseconds.
     #[schema(example = 5040)]
     pub duration_ms: u64,
-    /// Rendered waveform PNG for gallery grids and the TUI cell.
+    /// Rendered waveform PNG for gallery grids.
     pub thumbnail: Vec<u8>,
     /// Raster size of `thumbnail`. Audio has no dimensions of its own, so
     /// this is what gallery rows record and what grids lay the tile out with.
@@ -3043,7 +3043,7 @@ impl MeshRequestOptions {
 /// projection; see #1496.
 ///
 /// `poster` is the mesh counterpart of [`AudioData::thumbnail`]: a rendered
-/// still that grids and the TUI cell can lay out without a 3-D renderer.
+/// still that grids can lay out without a 3-D renderer.
 /// Only the lightbox loads the geometry itself.
 #[derive(Debug, Clone)]
 pub struct MeshDerivedMedia {
@@ -3073,7 +3073,7 @@ pub struct MeshData {
     /// geometry. Distinct from "has a material": an untextured mesh still
     /// gets a default material so viewers shade it.
     pub textured: bool,
-    /// Rendered poster PNG for gallery grids and the TUI cell.
+    /// Rendered poster PNG for gallery grids.
     pub poster: Vec<u8>,
     /// Raster size of `poster`. A mesh has no dimensions of its own, so this
     /// is what gallery rows record and what grids lay the tile out with —
@@ -4077,25 +4077,6 @@ impl ModelInfoExtended {
         self.name.clone()
     }
 
-    /// Resolve a model id carried by queue/status/history records through an
-    /// inventory fetched from `/api/models`.
-    pub fn human_name_for(name: &str, models: &[Self]) -> String {
-        if let Some(model) = models.iter().find(|model| model.name == name) {
-            return model.human_name();
-        }
-        if let Some(id) = name.strip_prefix("cv:") {
-            return format!("Civitai model #{id}");
-        }
-        if let Some(repo) = name.strip_prefix("hf:") {
-            return repo
-                .rsplit('/')
-                .next()
-                .unwrap_or(repo)
-                .replace(['-', '_'], " ");
-        }
-        name.to_string()
-    }
-
     /// True if this is an upscaler model (Real-ESRGAN, etc.) not a diffusion generator.
     pub fn is_upscaler(&self) -> bool {
         crate::manifest::UPSCALER_FAMILIES.contains(&self.family.as_str())
@@ -4222,69 +4203,6 @@ mod model_defaults_frame_tests {
         assert_eq!(
             back.default_negative_prompt.as_deref(),
             Some(crate::manifest::WAN_DEFAULT_NEGATIVE_PROMPT)
-        );
-    }
-}
-
-#[cfg(test)]
-mod model_display_name_tests {
-    use super::{ModelDefaults, ModelInfo, ModelInfoExtended};
-
-    fn model(name: &str, display_name: Option<&str>, description: &str) -> ModelInfoExtended {
-        ModelInfoExtended {
-            supports_duration_prediction: None,
-            runtime_ready: None,
-            runtime_readiness_error: None,
-            runtime_available: None,
-            runtime_unavailable_reason: None,
-            info: ModelInfo {
-                name: name.to_string(),
-                family: "sdxl".to_string(),
-                size_gb: 1.0,
-                is_loaded: false,
-                last_used: None,
-                hf_repo: String::new(),
-            },
-            defaults: ModelDefaults {
-                default_steps: 20,
-                default_guidance: 7.0,
-                default_width: 1024,
-                default_height: 1024,
-                description: description.to_string(),
-                ..Default::default()
-            },
-            downloaded: true,
-            disk_usage_bytes: None,
-            remaining_download_bytes: None,
-            display_name: display_name.map(str::to_string),
-            kind: None,
-            modality: None,
-            nsfw: None,
-            supports_audio: None,
-            supports_identity: None,
-            supports_extend: None,
-            supports_sequence: None,
-            extend_default_overlap_frames: None,
-            guidance_capabilities: None,
-            source_image: None,
-            generation_profile: None,
-        }
-    }
-
-    #[test]
-    fn resolves_wire_ids_to_human_readable_inventory_names() {
-        let models = vec![model(
-            "cv:1759168",
-            Some("Juggernaut XL - Ragnarok"),
-            "legacy title",
-        )];
-        assert_eq!(
-            ModelInfoExtended::human_name_for("cv:1759168", &models),
-            "Juggernaut XL - Ragnarok"
-        );
-        assert_eq!(
-            ModelInfoExtended::human_name_for("cv:999", &models),
-            "Civitai model #999"
         );
     }
 }

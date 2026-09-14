@@ -2055,7 +2055,8 @@ async fn pull_model_with_callback_and_hf_token(
         let clean_path = mdir.join(crate::manifest::storage_path(manifest, file));
 
         if already_placed {
-            // Emit events for cached files so the TUI shows checkmarks.
+            // Emit events for cached files so a progress display shows
+            // checkmarks.
             let elapsed = batch_started_at.elapsed().as_millis() as u64;
             (callback)(DownloadProgressEvent::FileStart {
                 filename: file.hf_filename.clone(),

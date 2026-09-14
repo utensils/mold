@@ -1507,8 +1507,8 @@ pub fn has_visual_conditioning(req: &GenerateRequest) -> bool {
 
 /// The conditioning wells the prompt rule reads, decomposed.
 ///
-/// A front-end resolves the prompt BEFORE it assembles the request — the CLI,
-/// the TUI and Discord all do — so it cannot call
+/// A front-end resolves the prompt BEFORE it assembles the request — the CLI
+/// and Discord both do — so it cannot call
 /// [`has_visual_conditioning`]. Each used to rebuild the list by hand from
 /// whatever fields were in scope, and each drifted: the CLI omitted
 /// `references`, so `mold run minimax-h3-ref2va --reference a.png` was
@@ -1567,8 +1567,8 @@ pub fn prompt_conditioning_for(req: &GenerateRequest) -> bool {
 }
 
 /// Lower-level form of [`prompt_required_for`] for callers that have not yet
-/// assembled a [`GenerateRequest`] — the CLI, TUI and Discord front-ends build
-/// the request only after the prompt is resolved. `has_visual_conditioning` is
+/// assembled a [`GenerateRequest`] — the CLI and Discord front-ends build the
+/// request only after the prompt is resolved. `has_visual_conditioning` is
 /// true when the request will carry a source image, keyframes, a source video,
 /// or an extend.
 pub fn prompt_required_with_conditioning(
@@ -2570,9 +2570,9 @@ pub const MESH_EXPORT_MAX_SIZE_MM: f64 = 1000.0;
 /// The geometry defaults for one export format, or `None` for a format that
 /// takes no geometry options.
 ///
-/// THE table. The capabilities block, the server's export route, the CLI, the
-/// MCP tool and the TUI's local export all read it, so a default can never be
-/// spelled twice and drift.
+/// THE table. The capabilities block, the server's export route, the CLI and
+/// the MCP tool all read it, so a default can never be spelled twice and
+/// drift.
 ///
 /// * `obj` stays in MODEL UNITS and `y` up. Every DCC tool that reads OBJ
 ///   treats one unit as one metre, so a 100 mm scale would arrive as a 100 m

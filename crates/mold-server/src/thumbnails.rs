@@ -60,7 +60,7 @@ pub fn file_media_version(metadata: &std::fs::Metadata) -> String {
 ///
 /// The revision has to appear in two places because two different caches
 /// would otherwise miss it. The sidecar is addressed by NAME, which
-/// `mesh_poster_thumbnail_paths` handles; the desktop's `mold-thumb://` store
+/// `mesh_poster_thumbnail_path` handles; the desktop's `mold-thumb://` store
 /// and the studio's persistent cache key on the opaque `media_version`, which
 /// is this. `the_two_spellings_of_the_poster_revision_agree` pins them
 /// together, so bumping the constant in `mold-core` is the whole edit.
@@ -317,47 +317,34 @@ pub fn write_bytes_atomically(dest: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 
 /// The sidecar name the server route and the desktop's offline tiles read.
 ///
-/// The first of `mold_core::media_paths::mesh_poster_thumbnail_paths`, named
-/// here so the route and [`ensure_mesh_poster`] cannot spell it two ways.
+/// `mold_core::media_paths::mesh_poster_thumbnail_path`, named here so the
+/// route and [`ensure_mesh_poster`] cannot spell it two ways.
 pub fn mesh_poster_sidecar(thumb_dir: &Path, filename: &str) -> PathBuf {
-    let [server, _tui] = mold_core::media_paths::mesh_poster_thumbnail_paths(thumb_dir, filename);
-    server
+    mold_core::media_paths::mesh_poster_thumbnail_path(thumb_dir, filename)
 }
 
-/// Write a mesh poster to BOTH sidecar names.
+/// Write a mesh poster to its sidecar name.
 ///
-/// The server route reads `<file>.<revision>.png` ([`mesh_poster_sidecar`])
-/// and the TUI reads `<file>.thumb.png`, so a writer that guesses one leaves
-/// the other surface on the placeholder — see
-/// `mold_core::media_paths::mesh_poster_thumbnail_paths`, which is the only
-/// place either name is spelled. A failure on either name is reported; the
-/// first is kept so a caller can log one cause.
-pub fn write_mesh_poster_sidecars(
+/// The server route reads `<file>.<revision>.png` ([`mesh_poster_sidecar`]),
+/// spelled once in `mold_core::media_paths::mesh_poster_thumbnail_path`. This
+/// used to write a SECOND, unrevisioned copy for the retired terminal app;
+/// [`sweep_orphans`] removes the ones already on disk.
+pub fn write_mesh_poster_sidecar(
     thumb_dir: &Path,
     filename: &str,
     png: &[u8],
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(thumb_dir)?;
-    let mut first_error: Option<anyhow::Error> = None;
-    for dest in mold_core::media_paths::mesh_poster_thumbnail_paths(thumb_dir, filename) {
-        if let Err(error) = write_bytes_atomically(&dest, png) {
-            first_error.get_or_insert(error);
-        }
-    }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
+    let dest = mold_core::media_paths::mesh_poster_thumbnail_path(thumb_dir, filename);
+    write_bytes_atomically(&dest, png)
 }
 
 /// The poster bytes for a stored mesh: the sidecar when one is already
-/// there, otherwise a fresh render written back to both sidecar names.
+/// there, otherwise a fresh render written back to the sidecar name.
 ///
 /// The sidecar it looks for is [`mesh_poster_sidecar`], which carries the
 /// poster renderer's revision. A print whose poster was drawn by an older
-/// renderer therefore MISSES here and is re-rendered, and the write puts the
-/// fresh pixels under both names — which is how the TUI's unrevisioned copy
-/// catches up too.
+/// renderer therefore MISSES here and is re-rendered.
 ///
 /// The write is best effort. A read-only or full cache directory must still
 /// yield a tile for this request — only a mesh that cannot be READ or RENDERED
@@ -374,11 +361,11 @@ pub fn ensure_mesh_poster(
         }
     }
     let png = render_mesh_poster(source)?;
-    if let Err(error) = write_mesh_poster_sidecars(thumb_dir, filename, &png) {
+    if let Err(error) = write_mesh_poster_sidecar(thumb_dir, filename, &png) {
         tracing::warn!(
             file = %filename,
             error = %format!("{error:#}"),
-            "mesh poster rendered but its sidecars could not be written"
+            "mesh poster rendered but its sidecar could not be written"
         );
     }
     Ok(png)
@@ -386,7 +373,7 @@ pub fn ensure_mesh_poster(
 
 /// One requested rendition of a tile. The default (256 px PNG) is the shape
 /// every cache file written before `?size`/`?fmt` existed has, and it keeps
-/// its historical path and ETag so older clients, the TUI, and the desktop's
+/// its historical path and ETag so older clients and the desktop's
 /// shared-cache lookup stay byte-for-byte compatible.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThumbnailVariant {
@@ -480,7 +467,7 @@ pub fn sniff_content_type(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// Whether a cache filename is one this module minted (`<sha256>.png` or
-/// `<sha256>-<size>.<ext>`), as opposed to the TUI's `<name>.thumb.png`, an
+/// `<sha256>-<size>.<ext>`), as opposed to a retired `<name>.thumb.png`, an
 /// audio waveform `<name>.png`, or anything else sharing the directory.
 fn is_versioned_cache_name(name: &str) -> bool {
     let Some((stem, ext)) = name.rsplit_once('.') else {
@@ -493,12 +480,32 @@ fn is_versioned_cache_name(name: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// The suffix the retired terminal app spelled its thumbnail-cache entries
+/// with. Nothing writes or reads one any more, so a file still carrying it is
+/// backlog: [`sweep_orphans`] removes it under the same age guard every other
+/// candidate gets.
+const RETIRED_THUMB_SUFFIX: &str = ".thumb.png";
+
+/// Whether a cache filename is one the retired terminal app minted. Kept
+/// separate from [`is_versioned_cache_name`] because the reason differs: a
+/// versioned tile is swept when no print can address it, whereas one of these
+/// is swept because NO surface can address it at all.
+fn is_retired_thumb_name(name: &str) -> bool {
+    name.len() > RETIRED_THUMB_SUFFIX.len() && name.ends_with(RETIRED_THUMB_SUFFIX)
+}
+
 /// Delete versioned tiles that no live or trashed print can address any
-/// more. Trash purge cannot compute the versioned names after the file is
-/// gone (they hash its mtime and size), so without this every purged or
-/// re-rendered print left its tiles behind forever. Only files this module
-/// minted are candidates, and only once they are older than `min_age`, so a
-/// tile being written for a print that just landed is never swept.
+/// more, plus any sidecar left behind under the retired terminal app's name.
+/// Trash purge cannot compute the versioned names after the file is gone
+/// (they hash its mtime and size), so without this every purged or
+/// re-rendered print left its tiles behind forever. Only files mold minted
+/// are candidates, and only once they are older than `min_age`, so a tile
+/// being written for a print that just landed is never swept.
+///
+/// The retired name is swept whether or not its print is live, which is the
+/// one place this sweeper deletes a file belonging to something still on
+/// disk: the name has no reader left, so keeping it would hold dead bytes in
+/// every existing cache forever.
 pub fn sweep_orphans(
     output_dir: &Path,
     thumb_dir: &Path,
@@ -533,7 +540,9 @@ pub fn sweep_orphans(
     let mut removed = 0;
     for entry in std::fs::read_dir(thumb_dir)?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !is_versioned_cache_name(&name) || expected.contains(&name) {
+        let sweepable = is_retired_thumb_name(&name)
+            || (is_versioned_cache_name(&name) && !expected.contains(&name));
+        if !sweepable {
             continue;
         }
         let Ok(metadata) = entry.metadata() else {
@@ -764,11 +773,10 @@ mod tests {
         assert!(render_mesh_poster(&dir.path().join("absent.glb")).is_err());
     }
 
-    /// The route reads `<file>.png` and the TUI reads `<file>.thumb.png`, so
-    /// one render has to land under both names or one surface keeps the
-    /// placeholder for a print that has a perfectly good tile.
+    /// One render lands under ONE name — the revisioned sidecar the route
+    /// reads. The retired terminal app's unrevisioned twin is not written.
     #[test]
-    fn ensuring_a_poster_writes_both_sidecar_names() {
+    fn ensuring_a_poster_writes_the_revisioned_sidecar_only() {
         let output = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         let name = "mold-hunyuan3d-fp16-1788357387469.glb";
@@ -777,19 +785,17 @@ mod tests {
 
         let png = ensure_mesh_poster(&source, cache.path(), name).expect("render on demand");
         assert_eq!(sniff_content_type(&png), Some("image/png"));
-        let sidecars = mold_core::media_paths::mesh_poster_thumbnail_paths(cache.path(), name);
-        for sidecar in &sidecars {
-            assert!(sidecar.is_file(), "{} was not written", sidecar.display());
-            assert_eq!(std::fs::read(sidecar).unwrap(), png);
-        }
+        let sidecar = mold_core::media_paths::mesh_poster_thumbnail_path(cache.path(), name);
+        assert!(sidecar.is_file(), "{} was not written", sidecar.display());
+        assert_eq!(std::fs::read(&sidecar).unwrap(), png);
         assert!(
-            sidecars[0] != sidecars[1],
-            "the two consumers must not share one path"
+            !cache.path().join(format!("{name}.thumb.png")).exists(),
+            "the retired sidecar name must not be written any more"
         );
 
         // A second call is served from the sidecar rather than re-rendered:
-        // planting different bytes under the server's name is what comes back.
-        std::fs::write(&sidecars[0], b"\x89PNG\r\n\x1a\nplanted").unwrap();
+        // planting different bytes under that name is what comes back.
+        std::fs::write(&sidecar, b"\x89PNG\r\n\x1a\nplanted").unwrap();
         let second = ensure_mesh_poster(&source, cache.path(), name).expect("sidecar hit");
         assert_eq!(second, b"\x89PNG\r\n\x1a\nplanted");
     }
@@ -870,20 +876,22 @@ mod tests {
         .cache_path(cache.path(), "live.png", &version);
         let orphan = ThumbnailVariant::DEFAULT.cache_path(cache.path(), "gone.png", "1-1");
         let fresh_orphan = ThumbnailVariant::DEFAULT.cache_path(cache.path(), "new.png", "2-2");
-        let foreign = cache.path().join("live.png.thumb.png");
+        // The retired terminal app's name. Its print is LIVE, but nothing
+        // reads the name any more, so it goes with the orphan.
+        let retired = cache.path().join("live.png.thumb.png");
         let waveform = cache.path().join("clip.wav.png");
         for path in [
             &kept,
             &kept_retina,
             &orphan,
             &fresh_orphan,
-            &foreign,
+            &retired,
             &waveform,
         ] {
             std::fs::write(path, b"x").unwrap();
         }
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
-        for path in [&kept, &orphan, &foreign, &waveform] {
+        for path in [&kept, &orphan, &retired, &waveform] {
             filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
         }
         let removed = sweep_orphans(
@@ -892,8 +900,9 @@ mod tests {
             std::time::Duration::from_secs(24 * 3600),
         )
         .unwrap();
-        assert_eq!(removed, 1);
+        assert_eq!(removed, 2);
         assert!(!orphan.exists(), "an orphaned versioned tile is swept");
+        assert!(!retired.exists(), "a retired `.thumb.png` name is swept");
         assert!(
             kept.exists() && kept_retina.exists(),
             "live tiles of every variant stay"
@@ -903,8 +912,8 @@ mod tests {
             "a tile younger than the grace period stays"
         );
         assert!(
-            foreign.exists() && waveform.exists(),
-            "other layouts are never touched"
+            waveform.exists(),
+            "an audio waveform sidecar is never touched"
         );
     }
 
@@ -1018,13 +1027,10 @@ mod tests {
             "the re-render must be a real raster"
         );
 
-        // Both current names now hold the fresh render, so the TUI's
-        // unrevisioned copy caught up as well.
-        let [server, tui] =
-            mold_core::media_paths::mesh_poster_thumbnail_paths(cache.path(), "chair.glb");
+        // The revisioned name holds the fresh render.
+        let server = mold_core::media_paths::mesh_poster_thumbnail_path(cache.path(), "chair.glb");
         assert!(server.exists(), "the revisioned sidecar was not written");
         assert_eq!(std::fs::read(&server).unwrap(), poster);
-        assert_eq!(std::fs::read(&tui).unwrap(), poster);
 
         // The stale file is left where it is: the sweeper's rule is the
         // versioned-cache NAME shape, and `<file>.png` is also how an audio
@@ -1040,23 +1046,23 @@ mod tests {
         );
     }
 
-    /// The sweeper deletes only names it minted. A mesh sidecar under either
-    /// spelling is not one of those, so a live poster is never swept out from
-    /// under a print.
+    /// The sweeper deletes only names mold minted. The revisioned mesh
+    /// sidecar the route reads is not one of those, so a live poster is never
+    /// swept out from under a print — and neither is the unrevisioned
+    /// `<file>.png`, which is also how an audio waveform is spelled.
     #[test]
-    fn the_sweeper_never_touches_a_mesh_sidecar() {
+    fn the_sweeper_never_touches_a_live_mesh_sidecar() {
         let output = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         std::fs::write(output.path().join("chair.glb"), glb_fixture()).unwrap();
 
-        let [server, tui] =
-            mold_core::media_paths::mesh_poster_thumbnail_paths(cache.path(), "chair.glb");
+        let server = mold_core::media_paths::mesh_poster_thumbnail_path(cache.path(), "chair.glb");
         let pre_revision = cache.path().join("chair.glb.png");
-        for path in [&server, &tui, &pre_revision] {
+        for path in [&server, &pre_revision] {
             std::fs::write(path, b"x").unwrap();
         }
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
-        for path in [&server, &tui, &pre_revision] {
+        for path in [&server, &pre_revision] {
             filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
         }
 
@@ -1067,7 +1073,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(removed, 0, "a sidecar is not a versioned cache name");
-        assert!(server.exists() && tui.exists());
+        assert!(server.exists());
         assert!(
             pre_revision.exists(),
             "the pre-revision sidecar is left alone rather than swept: `<file>.png` \
@@ -1075,11 +1081,59 @@ mod tests {
         );
         for name in [
             server.file_name().unwrap().to_str().unwrap(),
-            tui.file_name().unwrap().to_str().unwrap(),
             "chair.glb.png",
         ] {
             assert!(!is_versioned_cache_name(name), "{name}");
         }
+    }
+
+    /// The retired terminal app's `<file>.thumb.png` has no reader left, so
+    /// the sweeper removes it even though its print is LIVE — otherwise every
+    /// existing cache holds those bytes forever, because the sweeper
+    /// otherwise deletes only names it can still mint.
+    #[test]
+    fn sweep_removes_retired_thumb_names() {
+        let output = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(output.path().join("chair.glb"), glb_fixture()).unwrap();
+        std::fs::write(output.path().join("take.wav"), b"RIFF").unwrap();
+
+        let retired = [
+            cache.path().join("chair.glb.thumb.png"),
+            cache.path().join("take.wav.thumb.png"),
+        ];
+        let live = mold_core::media_paths::mesh_poster_thumbnail_path(cache.path(), "chair.glb");
+        for path in retired.iter().chain(std::iter::once(&live)) {
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        // Fresh files are never swept, retired name or not.
+        assert_eq!(
+            sweep_orphans(
+                output.path(),
+                cache.path(),
+                std::time::Duration::from_secs(24 * 3600),
+            )
+            .unwrap(),
+            0,
+            "the age guard covers the retired name too"
+        );
+        assert!(retired.iter().all(|p| p.exists()));
+
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        for path in retired.iter().chain(std::iter::once(&live)) {
+            filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
+        }
+
+        let removed = sweep_orphans(
+            output.path(),
+            cache.path(),
+            std::time::Duration::from_secs(24 * 3600),
+        )
+        .unwrap();
+        assert_eq!(removed, retired.len(), "both retired sidecars must go");
+        assert!(retired.iter().all(|p| !p.exists()));
+        assert!(live.exists(), "the name the route reads must survive");
     }
 
     #[test]

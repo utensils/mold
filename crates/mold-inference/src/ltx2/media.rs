@@ -58,7 +58,7 @@ pub fn probe_decoded_mp4_audio_file(path: &Path) -> Result<Option<DecodedAudioPr
 
 /// Decode the exact soundtrack authority from an already-open regular file.
 ///
-/// TUI reference ingestion opens with no-follow semantics before probing. Keep
+/// Reference ingestion opens with no-follow semantics before probing. Keep
 /// that file descriptor authoritative by copying its bytes into private
 /// temporary storage instead of reopening the user-controlled pathname.
 pub fn probe_decoded_mp4_audio_open_file(mut file: fs::File) -> Result<Option<DecodedAudioProbe>> {
@@ -967,8 +967,8 @@ pub(crate) fn encode_wav_i16_interleaved(
 
 /// Peak-envelope waveform PNG for an audio-only gallery tile.
 ///
-/// Rendered here, where the samples already are, so web, desktop, iPhone and
-/// the TUI all get a legible thumbnail from the one artifact instead of each
+/// Rendered here, where the samples already are, so web, desktop and iPhone
+/// all get a legible thumbnail from the one artifact instead of each
 /// inventing a glyph. Monochrome on transparent: the gallery grid supplies the
 /// surface colour in whichever theme is active.
 pub(crate) fn render_waveform_thumbnail_png(

@@ -394,7 +394,6 @@ pub fn run_reset(key: Option<&str>, all: bool, yes: bool) -> Result<()> {
 /// a purge.
 const RESET_ALL_SENTINEL_KEYS: &[&str] = &[
     mold_db::settings::CONFIG_MIGRATED_FROM_TOML,
-    mold_db::settings::TUI_MIGRATED_FROM_JSON,
     mold_db::settings::BACKUPS_CLEANED_AT_V6,
     mold_db::settings::ACTIVE_PROFILE,
 ];
@@ -1178,8 +1177,7 @@ mod tests {
     // ── Surface classification tests ────────────────────
 
     #[test]
-    fn surface_for_tui_and_expand_and_generate_is_db() {
-        assert_eq!(surface_for_key("tui.theme"), Surface::Db);
+    fn surface_for_expand_and_generate_is_db() {
         assert_eq!(surface_for_key("expand.enabled"), Surface::Db);
         assert_eq!(surface_for_key("expand.backend"), Surface::Db);
         assert_eq!(surface_for_key("generate.default_width"), Surface::Db);
@@ -1567,8 +1565,7 @@ mod tests {
 
     /// Codex review (P2): `mold config reset --all` must NOT delete the
     /// migration bookkeeping rows (`config.migrated_from_toml`,
-    /// `tui.migrated_from_json`, `migration.backups_cleaned_at_v6`,
-    /// `profile.active`). Otherwise the next launch thinks migration
+    /// `migration.backups_cleaned_at_v6`, `profile.active`). Otherwise the next launch thinks migration
     /// hasn't run, re-imports the (already-stripped) TOML, and the
     /// rewrite clobbers the original `.migrated` backup.
     #[test]
@@ -1576,11 +1573,10 @@ mod tests {
         let db = mold_db::MetadataDb::open_in_memory().unwrap();
         let s = mold_db::Settings::for_profile(&db, "default");
         // Seed real user prefs + migration sentinels.
-        s.set_str(mold_db::settings::TUI_THEME, "mocha").unwrap();
+        s.set_str(mold_db::settings::EXPAND_MODEL, "qwen3-1.7b")
+            .unwrap();
         s.set_bool(mold_db::settings::EXPAND_ENABLED, true).unwrap();
         s.set_bool(mold_db::settings::CONFIG_MIGRATED_FROM_TOML, true)
-            .unwrap();
-        s.set_bool(mold_db::settings::TUI_MIGRATED_FROM_JSON, true)
             .unwrap();
         s.set_bool(mold_db::settings::BACKUPS_CLEANED_AT_V6, false)
             .unwrap();
@@ -1588,7 +1584,10 @@ mod tests {
         let dropped = super::reset_user_setting_rows(&db, "default").unwrap();
         // User rows gone.
         assert_eq!(dropped, 2);
-        assert!(s.get_str(mold_db::settings::TUI_THEME).unwrap().is_none());
+        assert!(s
+            .get_str(mold_db::settings::EXPAND_MODEL)
+            .unwrap()
+            .is_none());
         assert!(s
             .get_bool(mold_db::settings::EXPAND_ENABLED)
             .unwrap()
@@ -1596,11 +1595,6 @@ mod tests {
         // Sentinels preserved — next launch must not re-migrate.
         assert_eq!(
             s.get_bool(mold_db::settings::CONFIG_MIGRATED_FROM_TOML)
-                .unwrap(),
-            Some(true)
-        );
-        assert_eq!(
-            s.get_bool(mold_db::settings::TUI_MIGRATED_FROM_JSON)
                 .unwrap(),
             Some(true)
         );
@@ -1681,7 +1675,7 @@ mod tests {
 
     /// Item 6: the JSON form of `run_list` annotates each key with its
     /// surface. Structure is `{ "value": ..., "surface": "db|file|env" }`
-    /// per key, so scripts and the TUI can tell which source owns a row.
+    /// per key, so scripts can tell which source owns a row.
     #[test]
     fn surface_annotated_value_tags_env_db_and_file() {
         // env takes top priority — simulate by temporarily setting the

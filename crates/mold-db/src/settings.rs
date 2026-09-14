@@ -1,8 +1,8 @@
 //! Typed key/value settings API backed by the `settings` table (v3 schema).
 //!
-//! This is where TUI preferences (theme, last model, view mode) and the
-//! user-facing slice of `Config` (expand settings, global generation
-//! defaults) live after the move off `tui-session.json` / `config.toml`.
+//! This is where the user-facing slice of `Config` lives — expand settings,
+//! global generation defaults, the last-used model — after the move off
+//! `config.toml` and the legacy JSON session sidecar.
 //!
 //! Callers get a tiny typed surface — `get_str`, `set_bool`, `set_json<T>`,
 //! etc. — plus a set of namespaced key constants so we don't sprinkle raw
@@ -18,39 +18,6 @@ use crate::db::MetadataDb;
 // ------------------------------------------------------------------
 // Namespaced keys. Grouped by surface so grep finds related state.
 // ------------------------------------------------------------------
-
-// TUI — persisted UI state the user expects to survive restarts.
-pub const TUI_THEME: &str = "tui.theme";
-pub const TUI_LAST_MODEL: &str = "tui.last_model";
-pub const TUI_LAST_PROMPT: &str = "tui.last_prompt";
-pub const TUI_LAST_NEGATIVE: &str = "tui.last_negative";
-/// Whether an empty `tui.last_negative` was an explicit clear of the model's
-/// advertised default negative (#787) — the `""` empty-uncond opt-out —
-/// rather than an untouched field. Absent on sessions saved before the
-/// marker existed; those restore as untouched.
-pub const TUI_NEGATIVE_CLEARED: &str = "tui.negative_cleared";
-pub const TUI_NEGATIVE_COLLAPSED: &str = "tui.negative_collapsed";
-pub const TUI_VIEW_MODE: &str = "tui.view_mode";
-pub const TUI_GALLERY_COLUMNS: &str = "tui.gallery_columns";
-pub const TUI_DEFAULT_FORMAT: &str = "tui.default_format";
-pub const TUI_REDUCE_MOTION: &str = "tui.reduce_motion";
-pub const TUI_SHOW_TIMELINE: &str = "tui.show_timeline";
-pub const TUI_CONFIRM_DESTRUCTIVE: &str = "tui.confirm_destructive";
-/// Sentinel marking that the legacy `tui-session.json` + `prompt-history.jsonl`
-/// import has already run. Idempotent on subsequent launches.
-pub const TUI_MIGRATED_FROM_JSON: &str = "tui.migrated_from_json";
-/// JSON array of remembered TUI machine hosts (parity with the web's
-/// `mold.web.hosts.v1` registry shape).
-pub const TUI_HOSTS_V1: &str = "tui.hosts.v1";
-/// Prefix for per-host API keys: one row per host at
-/// `tui.host_key.<host_id>`, deleted when the host is forgotten.
-pub const TUI_HOST_KEY_PREFIX: &str = "tui.host_key.";
-/// Sticky generation target: `"auto"` | `"local"` | `"host:<host_id>"`.
-pub const TUI_GENERATE_TARGET: &str = "tui.generate_target";
-/// Whether the Create view's Advanced accordion disclosure is open.
-pub const TUI_ADVANCED_OPEN: &str = "tui.advanced_open";
-/// Slug of the one expanded Advanced section (empty/absent = none).
-pub const TUI_ADVANCED_SECTION: &str = "tui.advanced_section";
 
 // Expand — the `[expand]` section of config.toml after it moves here.
 pub const EXPAND_ENABLED: &str = "expand.enabled";
@@ -73,6 +40,11 @@ pub const GENERATE_DEFAULT_NEGATIVE_PROMPT: &str = "generate.default_negative_pr
 pub const GENERATE_EMBED_METADATA: &str = "generate.embed_metadata";
 pub const GENERATE_T5_VARIANT: &str = "generate.t5_variant";
 pub const GENERATE_QWEN3_VARIANT: &str = "generate.qwen3_variant";
+/// The model the last run used. Written after every generation and read as
+/// tier 4 of default-model resolution, so `mold run` with no model named
+/// resumes where the user left off. Migration v38 renamed it here from the
+/// retired terminal app's namespace.
+pub const GENERATE_LAST_MODEL: &str = "generate.last_model";
 
 // Scheduler — profile-scoped behavior, never machine device identity.
 pub const SCHEDULER_REPLAN_DEBOUNCE_MS: &str = "scheduler.replan_debounce_ms";
@@ -152,13 +124,13 @@ impl ValueType {
 /// `if let Some(db) = …`.
 ///
 /// Replaces the legacy `Config::write_last_model()` sidecar write after
-/// issue #265 moved `tui.last_model` into the `settings` table.
+/// issue #265 moved the last-used model into the `settings` table.
 pub fn record_last_model(model: &str) {
     let Some(db) = crate::global_db() else {
         return;
     };
     if let Err(e) = Settings::new(db).record_last_model(model) {
-        tracing::warn!("settings.tui.last_model write failed: {e:#}");
+        tracing::warn!("settings.generate.last_model write failed: {e:#}");
     }
 }
 
@@ -374,11 +346,11 @@ impl<'a> Settings<'a> {
         })
     }
 
-    /// Record the last-used model for TUI/CLI resume-on-launch. Writes
-    /// to the [`TUI_LAST_MODEL`] row — the single source of truth after
-    /// issue #265 retired the `$MOLD_HOME/last-model` sidecar.
+    /// Record the last-used model for resume-on-launch. Writes to the
+    /// [`GENERATE_LAST_MODEL`] row — the single source of truth after issue
+    /// #265 retired the `$MOLD_HOME/last-model` sidecar.
     pub fn record_last_model(&self, model: &str) -> Result<()> {
-        self.set_str(TUI_LAST_MODEL, model)
+        self.set_str(GENERATE_LAST_MODEL, model)
     }
 
     fn upsert(&self, key: &str, value: &str, ty: ValueType) -> Result<()> {
@@ -521,8 +493,8 @@ mod tests {
     fn string_roundtrip() {
         let db = db();
         let s = Settings::new(&db);
-        s.set_str(TUI_THEME, "dracula").unwrap();
-        assert_eq!(s.get_str(TUI_THEME).unwrap().as_deref(), Some("dracula"));
+        s.set_str(EXPAND_MODEL, "dracula").unwrap();
+        assert_eq!(s.get_str(EXPAND_MODEL).unwrap().as_deref(), Some("dracula"));
     }
 
     #[test]
@@ -539,10 +511,10 @@ mod tests {
     fn bool_roundtrip() {
         let db = db();
         let s = Settings::new(&db);
-        s.set_bool(TUI_NEGATIVE_COLLAPSED, true).unwrap();
-        assert_eq!(s.get_bool(TUI_NEGATIVE_COLLAPSED).unwrap(), Some(true));
-        s.set_bool(TUI_NEGATIVE_COLLAPSED, false).unwrap();
-        assert_eq!(s.get_bool(TUI_NEGATIVE_COLLAPSED).unwrap(), Some(false));
+        s.set_bool(EXPAND_THINKING, true).unwrap();
+        assert_eq!(s.get_bool(EXPAND_THINKING).unwrap(), Some(true));
+        s.set_bool(EXPAND_THINKING, false).unwrap();
+        assert_eq!(s.get_bool(EXPAND_THINKING).unwrap(), Some(false));
     }
 
     #[test]
@@ -578,63 +550,63 @@ mod tests {
     fn setter_overwrites_existing_key() {
         let db = db();
         let s = Settings::new(&db);
-        s.set_str(TUI_THEME, "mocha").unwrap();
-        s.set_str(TUI_THEME, "latte").unwrap();
-        assert_eq!(s.get_str(TUI_THEME).unwrap().as_deref(), Some("latte"));
+        s.set_str(EXPAND_MODEL, "mocha").unwrap();
+        s.set_str(EXPAND_MODEL, "latte").unwrap();
+        assert_eq!(s.get_str(EXPAND_MODEL).unwrap().as_deref(), Some("latte"));
     }
 
     #[test]
     fn delete_returns_true_when_removed_false_otherwise() {
         let db = db();
         let s = Settings::new(&db);
-        s.set_str(TUI_THEME, "nord").unwrap();
-        assert!(s.delete(TUI_THEME).unwrap());
-        assert!(!s.delete(TUI_THEME).unwrap());
-        assert!(s.get_str(TUI_THEME).unwrap().is_none());
+        s.set_str(EXPAND_MODEL, "nord").unwrap();
+        assert!(s.delete(EXPAND_MODEL).unwrap());
+        assert!(!s.delete(EXPAND_MODEL).unwrap());
+        assert!(s.get_str(EXPAND_MODEL).unwrap().is_none());
     }
 
     /// Item 3 (post-#265): `record_last_model` must land on the
-    /// `TUI_LAST_MODEL` row so the TUI's resume-on-launch logic reads
-    /// the DB-backed value, not the retired `last-model` sidecar.
+    /// `GENERATE_LAST_MODEL` row so resume-on-launch reads the DB-backed
+    /// value, not the retired `last-model` sidecar.
     #[test]
-    fn record_last_model_lands_on_tui_last_model_row() {
+    fn record_last_model_lands_on_generate_last_model_row() {
         let db = db();
         let s = Settings::new(&db);
         s.record_last_model("flux-dev:q4").unwrap();
         assert_eq!(
-            s.get_str(TUI_LAST_MODEL).unwrap().as_deref(),
+            s.get_str(GENERATE_LAST_MODEL).unwrap().as_deref(),
             Some("flux-dev:q4")
         );
         // Overwrite path mirrors the normal write flow.
         s.record_last_model("qwen-image:q6").unwrap();
         assert_eq!(
-            s.get_str(TUI_LAST_MODEL).unwrap().as_deref(),
+            s.get_str(GENERATE_LAST_MODEL).unwrap().as_deref(),
             Some("qwen-image:q6")
         );
     }
 
     /// Item 5: Settings scoped to different profiles must not see each
-    /// other's rows. `default` and `dev` can both carry `tui.theme`
+    /// other's rows. `default` and `dev` can both carry `expand.model`
     /// without clobbering.
     #[test]
     fn settings_isolate_across_profiles() {
         let db = db();
         let default = Settings::for_profile(&db, DEFAULT_PROFILE);
         let dev = Settings::for_profile(&db, "dev");
-        default.set_str(TUI_THEME, "mocha").unwrap();
-        dev.set_str(TUI_THEME, "nord").unwrap();
+        default.set_str(EXPAND_MODEL, "mocha").unwrap();
+        dev.set_str(EXPAND_MODEL, "nord").unwrap();
         assert_eq!(
-            default.get_str(TUI_THEME).unwrap().as_deref(),
+            default.get_str(EXPAND_MODEL).unwrap().as_deref(),
             Some("mocha")
         );
-        assert_eq!(dev.get_str(TUI_THEME).unwrap().as_deref(), Some("nord"));
+        assert_eq!(dev.get_str(EXPAND_MODEL).unwrap().as_deref(), Some("nord"));
         // Deleting from one profile does not affect the other.
-        assert!(dev.delete(TUI_THEME).unwrap());
+        assert!(dev.delete(EXPAND_MODEL).unwrap());
         assert_eq!(
-            default.get_str(TUI_THEME).unwrap().as_deref(),
+            default.get_str(EXPAND_MODEL).unwrap().as_deref(),
             Some("mocha")
         );
-        assert!(dev.get_str(TUI_THEME).unwrap().is_none());
+        assert!(dev.get_str(EXPAND_MODEL).unwrap().is_none());
     }
 
     /// Item 5: `list_all` only returns rows for the current profile.
@@ -642,10 +614,10 @@ mod tests {
     fn list_all_is_scoped_to_profile() {
         let db = db();
         Settings::for_profile(&db, DEFAULT_PROFILE)
-            .set_str(TUI_THEME, "mocha")
+            .set_str(EXPAND_MODEL, "mocha")
             .unwrap();
         Settings::for_profile(&db, "dev")
-            .set_str(TUI_THEME, "nord")
+            .set_str(EXPAND_MODEL, "nord")
             .unwrap();
         let default_rows = Settings::for_profile(&db, DEFAULT_PROFILE)
             .list_all()

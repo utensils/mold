@@ -53,7 +53,7 @@ const REFERENCE_UPLOAD_SESSION_HEADER: &str = "x-mold-reference-upload-session";
 ///
 /// The figure describes the HOST — its gallery can be disabled, re-enabled, or
 /// the machine replaced behind the same URL — while a `MoldClient` in the
-/// Discord bot or the TUI lives for the whole process. One capabilities GET a
+/// Discord bot lives for the whole process. One capabilities GET a
 /// minute is a negligible price for not stranding a long-lived client on a
 /// stale answer.
 const GALLERY_PERSISTS_OUTPUTS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
@@ -68,8 +68,8 @@ pub struct MoldClient {
     /// where `None` means an older server.
     ///
     /// Bounded rather than permanent: `MoldClient` outlives a single command
-    /// in the Discord bot and the TUI, and the host it points at can be
-    /// restarted, reconfigured, or replaced underneath it.
+    /// in the Discord bot, and the host it points at can be restarted,
+    /// reconfigured, or replaced underneath it.
     #[allow(clippy::type_complexity)]
     gallery_persists_outputs:
         std::sync::Arc<std::sync::Mutex<Option<(Option<bool>, std::time::Instant)>>>,
@@ -918,8 +918,8 @@ impl MoldClient {
     }
 
     /// Follow one durable chain job to settlement, forwarding its stage
-    /// progress as [`ChainProgressEvent`] so the CLI and TUI renderers see the
-    /// same shape they always have.
+    /// progress as [`ChainProgressEvent`] so the CLI renderer sees the same
+    /// shape it always has.
     ///
     /// The stream opens with a snapshot, so a caller that attaches after some
     /// stages have already run still learns the stage count and where the job
@@ -1572,27 +1572,6 @@ impl MoldClient {
         Ok(listing.licenses)
     }
 
-    /// Read-only dependency and device plan for an exact generation request.
-    /// Newer clients use the additive pending-license metadata to pause for
-    /// consent before admission starts any download.
-    pub async fn preview_generation_placement(
-        &self,
-        request: crate::types::GenerateRequest,
-        copies: u32,
-    ) -> Result<crate::types::GenerationPlacementPreview> {
-        let request = crate::prompt_text::protect_generate_request_for_wire(&request);
-        let preview = self
-            .client
-            .post(format!("{}/api/generate/placement-preview", self.base_url))
-            .json(&crate::types::GenerationPlacementPreviewRequest { request, copies })
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(preview)
-    }
-
     /// Request graceful server shutdown.
     pub async fn shutdown_server(&self) -> Result<()> {
         self.client
@@ -1603,21 +1582,9 @@ impl MoldClient {
         Ok(())
     }
 
-    /// Pull a model via SSE streaming, receiving download progress events.
-    ///
-    /// Sends `Accept: text/event-stream` to request SSE from the server.
-    /// Falls back to blocking pull if the server doesn't support SSE.
-    pub async fn pull_model_stream(
-        &self,
-        model: &str,
-        progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
-    ) -> Result<()> {
-        self.pull_model_stream_accepting(model, &[], progress_tx)
-            .await
-    }
-
-    /// [`Self::pull_model_stream`], recording license acceptances on the
-    /// server before the pull starts. See [`Self::pull_model_accepting`].
+    /// Pull a model via SSE streaming, receiving download progress events,
+    /// and record license acceptances on the server before the pull starts.
+    /// See [`Self::pull_model_accepting`].
     pub async fn pull_model_stream_accepting(
         &self,
         model: &str,
@@ -1777,7 +1744,7 @@ impl MoldClient {
     /// taking the inline payload, which every server has always sent.
     ///
     /// The answer is a property of the HOST, not of the client, and a
-    /// `MoldClient` in the Discord bot or the TUI lives for the whole process.
+    /// `MoldClient` in the Discord bot lives for the whole process.
     /// Memoizing it forever meant a host restarted with its gallery disabled
     /// kept being asked for metadata-only completions by a client that would
     /// never re-ask. The max age bounds that to one capabilities GET per
@@ -2520,23 +2487,6 @@ impl MoldClient {
         Ok(resp.bytes().await?.to_vec())
     }
 
-    /// Move one print to the host's trash (`DELETE /api/gallery/image/:name`
-    /// without `permanent`). On older servers without a trash this deletes
-    /// outright — check `capabilities.gallery.trash` first when that matters.
-    pub async fn trash_gallery_image(&self, filename: &str) -> Result<()> {
-        let resp = self
-            .client
-            .delete(format!(
-                "{}/api/gallery/image/{}",
-                self.base_url,
-                encode_path_segment(filename)
-            ))
-            .send()
-            .await?;
-        error_for_status_with_body(resp).await?;
-        Ok(())
-    }
-
     /// Permanently delete one print, bypassing the trash
     /// (`DELETE /api/gallery/image/:name?permanent=true`). Works on live and
     /// already-trashed prints alike.
@@ -2974,82 +2924,6 @@ impl MoldClient {
             _ => anyhow::bail!("unknown framewise upscale action {action:?}"),
         };
         Ok(request.send().await?.error_for_status()?.json().await?)
-    }
-
-    /// Upscale an image via SSE streaming -- progress events are sent to `progress_tx`,
-    /// returns the final `UpscaleResponse` on success.
-    pub async fn upscale_stream(
-        &self,
-        req: &crate::UpscaleRequest,
-        progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
-    ) -> Result<Option<crate::UpscaleResponse>> {
-        let mut resp = self
-            .client
-            .post(format!("{}/api/upscale/stream", self.base_url))
-            .json(req)
-            .send()
-            .await?;
-
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            let body = resp.text().await.unwrap_or_default();
-            if body.is_empty() {
-                return Ok(None); // server doesn't support SSE upscale
-            }
-            return Err(MoldError::ModelNotFound(body).into());
-        }
-
-        if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(MoldError::Validation(api_error_detail(&body)).into());
-        }
-
-        if resp.status().is_client_error() || resp.status().is_server_error() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("server error {status}: {body}");
-        }
-
-        let mut buffer = SseFrameParser::new();
-        while let Some(chunk) = resp.chunk().await? {
-            buffer.push(&chunk);
-
-            while let Some(event_text) = buffer.next_frame() {
-                let (event_type, data) = parse_sse_event(&event_text);
-                match event_type.as_str() {
-                    "progress" => {
-                        if let Ok(p) = serde_json::from_str::<SseProgressEvent>(&data) {
-                            let _ = progress_tx.send(p);
-                        }
-                    }
-                    "complete" => {
-                        let complete: crate::SseUpscaleCompleteEvent = serde_json::from_str(&data)?;
-                        let image_data =
-                            base64::engine::general_purpose::STANDARD.decode(&complete.image)?;
-                        return Ok(Some(crate::UpscaleResponse {
-                            image: crate::ImageData {
-                                data: image_data,
-                                format: complete.format,
-                                width: complete.original_width * complete.scale_factor,
-                                height: complete.original_height * complete.scale_factor,
-                                index: 0,
-                            },
-                            upscale_time_ms: complete.upscale_time_ms,
-                            model: complete.model,
-                            scale_factor: complete.scale_factor,
-                            original_width: complete.original_width,
-                            original_height: complete.original_height,
-                        }));
-                    }
-                    "error" => {
-                        let error: crate::SseErrorEvent = serde_json::from_str(&data)?;
-                        anyhow::bail!("server error: {}", error.message);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        anyhow::bail!("SSE stream ended without complete event")
     }
 }
 
@@ -6126,23 +6000,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trash_gallery_image_deletes_without_the_permanent_flag() {
-        use wiremock::matchers::{method, path, query_param_is_missing};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
-            .and(path("/api/gallery/image/cat.png"))
-            .and(query_param_is_missing("permanent"))
-            .respond_with(ResponseTemplate::new(204))
-            .mount(&server)
-            .await;
-
-        let client = MoldClient::new(&server.uri());
-        client.trash_gallery_image("cat.png").await.unwrap();
-    }
-
-    #[tokio::test]
     async fn delete_gallery_image_forever_sends_permanent_true() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -7540,7 +7397,7 @@ mod tests {
         }
     }
     /// The memo describes the HOST, and a `MoldClient` outlives any one
-    /// command — the Discord bot and the TUI hold one for the whole process.
+    /// command — the Discord bot holds one for the whole process.
     /// Memoizing forever meant a host restarted with its gallery disabled kept
     /// being asked for metadata-only completions by a client that would never
     /// re-ask, and every render then failed until the process restarted.
