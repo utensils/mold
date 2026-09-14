@@ -31,6 +31,7 @@ import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
 import { remixPrompt } from "../lib/api/remix";
 import { gpuSnapshotsFromStatus, summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
+import { formatMemoryGBPair } from "@studio/lib/formatMemory";
 import { machineSentence } from "../lib/machineSentence";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
@@ -1380,10 +1381,18 @@ useMobileBack(
   queueTransfer.close,
 );
 
+/** MiB (the legacy status unit) back to bytes for the shared memory formatter. */
+const BYTES_PER_MIB = 1024 * 1024;
+
 function hostMemLabel(id: string): string {
   const telemetry = hostTelemetry[id];
   if (!telemetry || telemetry.vramUsedMb == null || telemetry.vramTotalMb == null) return "—";
-  return `${(telemetry.vramUsedMb / 1000).toFixed(1)} / ${(telemetry.vramTotalMb / 1000).toFixed(1)} GB`;
+  // `summarizeStatusGpuMemory` answers in MiB; dividing those by 1000 and
+  // calling the result GB was a THIRD divisor in one chain of readings.
+  return formatMemoryGBPair(
+    telemetry.vramUsedMb * BYTES_PER_MIB,
+    telemetry.vramTotalMb * BYTES_PER_MIB,
+  );
 }
 
 function hostVramPercent(id: string): number {

@@ -9,10 +9,13 @@ import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import type { GpuSnapshot } from "@studio/lib/gpuFleetLabel";
 import type { ResourceSnapshot, ServerStatus } from "../../types";
 import { formatGB } from "../../util/format";
+import { formatMemoryGBPair } from "@studio/lib/formatMemory";
 
 export const DASH = "—";
 
-/** GB, one decimal, from a byte count. */
+/** Decimal GB, one decimal, from a byte count — STORAGE only. A VRAM or RAM
+ *  pair goes through `formatMemoryGBPair`, which is binary; see
+ *  `@studio/lib/formatMemory` for why the two units differ. */
 export function formatGb(bytes: number): string {
   return formatGB(bytes).replace(" GB", "");
 }
@@ -163,7 +166,7 @@ export function deriveTelemetry(
     memUsed != null && memTotal != null ? pct(memUsed, memTotal) : null;
   const memLabel =
     memUsed != null && memTotal != null
-      ? `${formatGb(memUsed)} / ${formatGb(memTotal)} GB`
+      ? formatMemoryGBPair(memUsed, memTotal)
       : DASH;
 
   const queueDepth = status?.queue_depth;
@@ -183,9 +186,7 @@ export function deriveTelemetry(
   const cpuLabel = cpuPct != null ? `${Math.round(cpuPct)}%` : DASH;
   const ram = resources?.system_ram;
   const ramPct = ram ? pct(ram.used, ram.total) : null;
-  const ramLabel = ram
-    ? `${formatGb(ram.used)} / ${formatGb(ram.total)} GB`
-    : DASH;
+  const ramLabel = ram ? formatMemoryGBPair(ram.used, ram.total) : DASH;
 
   return {
     gpuLine,

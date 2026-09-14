@@ -87,12 +87,12 @@ describe("StatusBar", () => {
     expect(wrapper.find("[data-test='status-ram']").exists()).toBe(false);
 
     useHostStatusStore().snapshot = {
-      gpus: [{ ordinal: 0, vram_used: 8_000_000_000, vram_total: 24_000_000_000 }],
-      system_ram: { used: 32_000_000_000, total: 64_000_000_000 },
+      gpus: [{ ordinal: 0, vram_used: 8_589_934_592, vram_total: 25_769_803_776 }],
+      system_ram: { used: 34_359_738_368, total: 68_719_476_736 },
     } as never;
     await flushPromises();
-    expect(wrapper.get("[data-test='status-vram']").text()).toBe("vram 8.0 GB / 24.0 GB");
-    expect(wrapper.get("[data-test='status-ram']").text()).toBe("ram 32.0 GB/64.0 GB");
+    expect(wrapper.get("[data-test='status-vram']").text()).toBe("vram 8.0 / 24.0 GB");
+    expect(wrapper.get("[data-test='status-ram']").text()).toBe("ram 32.0 / 64.0 GB");
   });
 
   /**

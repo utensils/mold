@@ -4,6 +4,7 @@ import type { DeviceInfo } from "../api/devices";
 import { metalBytes, metalLimitLabel } from "../api/metalMemory";
 import type { QueuePlan, QueueWorkItem } from "../api/queuePlan";
 import { normalizeBlockedReason } from "../lib/queuePosition";
+import { formatMemoryGB } from "../lib/formatMemory";
 import {
   queueCompletionLabel,
   queueLanePositionLabel,
@@ -105,12 +106,8 @@ const lifecycleNote = computed(() => {
   return "Live GPU controls are unavailable on this server.";
 });
 
-function gib(bytes: number | null): string {
-  return bytes === null ? "—" : `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-}
-
 function memoryLabel(device: DeviceInfo): string {
-  return `${gib(device.memory.used_bytes)} of ${gib(device.memory.total_bytes)}`;
+  return `${formatMemoryGB(device.memory.used_bytes)} of ${formatMemoryGB(device.memory.total_bytes)}`;
 }
 
 function stateLabel(device: DeviceInfo): string {

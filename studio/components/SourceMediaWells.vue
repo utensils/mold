@@ -45,6 +45,15 @@ const props = withDefaults(
     parked?: boolean;
     /** The parking sentence, from `EXCLUSIVE_WELLS_NOTE`. */
     note?: string | null;
+    /**
+     * The CALLER already heads this group with its own label (the desktop
+     * Create rail's "Start from a photo"). Suppresses only the SOLE generic
+     * "Source" legend, which under such a heading repeats it and nothing
+     * else. Any legend that tells two wells apart — First/Last frame, Target,
+     * or a layout with a second well — still carries information the
+     * caller's heading cannot, and stays.
+     */
+    titled?: boolean;
   }>(),
   {
     source: null,
@@ -56,6 +65,7 @@ const props = withDefaults(
     testIdPrefix: "",
     parked: false,
     note: null,
+    titled: false,
   },
 );
 
@@ -134,6 +144,17 @@ const showEndWell = computed(() => {
     return props.plan.requiredEndpoint !== "first" || !!props.endFrame;
   return false;
 });
+/**
+ * The head is redundant only when the caller titled the group AND the legend
+ * would read the bare "Source": one well, no second well to tell it apart,
+ * and no layout-specific name (First frame, Target) of its own. The required
+ * badge outlives it — that is a contract, not a heading — so it moves rather
+ * than disappearing with the head.
+ */
+const showSourceHead = computed(
+  () => !props.titled || showEndWell.value || sourceLabel.value !== "Source",
+);
+
 const endLabel = computed(() => (h3.value ? "Last frame" : "End frame"));
 const endAlt = computed(() => props.endFrame?.filename || endLabel.value);
 const endHint = computed(() =>
@@ -151,10 +172,18 @@ const endHint = computed(() =>
     data-test="source-media-wells"
     :data-parked="parked || undefined"
   >
-    <div class="smw__head">
+    <div v-if="showSourceHead" class="smw__head">
       <span class="smw__label">{{ sourceLabel }}</span>
       <span
         v-if="required"
+        class="smw__label smw__label--required"
+        data-test="source-required-badge"
+        >Required</span
+      >
+      <span class="smw__rule" aria-hidden="true" />
+    </div>
+    <div v-else-if="required" class="smw__head smw__head--badge-only">
+      <span
         class="smw__label smw__label--required"
         data-test="source-required-badge"
         >Required</span

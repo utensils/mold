@@ -222,12 +222,33 @@ describe("InstalledTab shelf", () => {
     // axis has to land on the header and the rows, never on `.model-table`,
     // or the cells hide while their track stays.
     expect(installedTabSource).toMatch(
-      /@container[^{]*\(max-width:[^)]*\)\s*\{[\s\S]*?\.model-table__header,\s*\.model-table :deep\(\.model-table-row\)\s*\{\s*--model-row-columns:\s*minmax\(0,\s*1fr\) 7\.5rem 12rem 8rem 10\.5rem/s,
+      /@container[^{]*\(max-width:[^)]*\)\s*\{[\s\S]*?\.model-table__header,\s*\.model-table :deep\(\.model-table-row\)\s*\{\s*--model-row-columns:\s*minmax\(0,\s*1fr\) minmax\(7\.5rem,\s*1\.2fr\) 12rem 8rem 10\.5rem/s,
     );
     expect(installedTabSource).not.toMatch(
       /@container[^{]*\{[\s\S]*?\.model-table\s*\{[^}]*--model-row-columns/s,
     );
     expect(installedTabSource).toMatch(/model-table__speed[\s\S]*display:\s*none/s);
+  });
+
+  /**
+   * "Good for" is the only free-text cell in the row, and it was the only one
+   * pinned to a fixed track while the NAME track took every spare pixel as
+   * `1fr`. On a wide window that read as a bug in the data: ~1400px of empty
+   * space beside `flux-dev:bf16`, and every description clipped to
+   * "FLUX.1 Dev BF16 …". The description shares the slack now, with its old
+   * width as a FLOOR so the narrow shelf is unchanged.
+   */
+  it("lets the description share the slack instead of pinning it while Name takes it all", () => {
+    const axis = installedTabSource.match(
+      /\.model-table\s*\{[^}]*--model-row-columns:\s*([^;]+);/s,
+    )?.[1];
+    expect(axis).toBeDefined();
+    // name · good for · size · speed · machine · actions, with the two text
+    // columns elastic and the rest fixed. The description grows, and it never
+    // starts narrower than the 7.5rem it used to be pinned at.
+    expect(axis!.trim()).toBe(
+      "minmax(0, 1fr) minmax(7.5rem, 1.2fr) 12rem 4.5rem 8rem 10.5rem",
+    );
   });
 
   it("names a family group once, in words, never a second wire slug per row", async () => {

@@ -981,15 +981,15 @@ describe("Sidebar machine card", () => {
           ordinal: 0,
           name: "L40S",
           backend: "cuda",
-          vram_total: 25_750_000_000,
-          vram_used: 15_800_000_000,
+          vram_total: 25_769_803_776,
+          vram_used: 15_784_004_813,
         },
         {
           ordinal: 1,
           name: "L40S",
           backend: "cuda",
-          vram_total: 25_750_000_000,
-          vram_used: 15_800_000_000,
+          vram_total: 25_769_803_776,
+          vram_used: 15_784_004_813,
         },
       ],
       system_ram: { total: 0, used: 0, used_by_mold: 0, used_by_other: 0 },
@@ -1018,7 +1018,7 @@ describe("Sidebar machine card", () => {
     expect(card.get("[data-test='machine-vram-percent']").attributes("title")).toBe(
       "Graphics memory in use",
     );
-    expect(card.get("[data-test='machine-memory']").text()).toBe("31.6 / 51.5 GB graphics memory");
+    expect(card.get("[data-test='machine-memory']").text()).toBe("29.4 / 48.0 GB graphics memory");
   });
 });
 

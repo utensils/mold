@@ -11,7 +11,7 @@ import { useHostStatusStore } from "../../stores/hostStatus";
 import { useQueueActivity } from "../../composables/useQueueActivity";
 import { useQueueCommands } from "../../composables/useQueueCommands";
 import { queueSentence } from "../../lib/queueRows";
-import { formatGB } from "../../lib/format";
+import { formatMemoryGBPair } from "@studio/lib/formatMemory";
 import { shortcutLabel } from "../../lib/platform";
 
 const router = useRouter();
@@ -54,7 +54,7 @@ const queueLine = computed(() =>
 
 const vramLine = computed(() =>
   hostStatus.gpus.length
-    ? `vram ${formatGB(hostStatus.vramUsed)} / ${formatGB(hostStatus.vramTotal)}`
+    ? `vram ${formatMemoryGBPair(hostStatus.vramUsed, hostStatus.vramTotal)}`
     : null,
 );
 const vramTone = computed(() => (hostStatus.vramCritical ? "text-error" : ""));
@@ -71,7 +71,7 @@ const ramTone = computed(() => {
 });
 const ramLine = computed(() => {
   const ram = hostStatus.snapshot?.system_ram;
-  return ram ? `ram ${formatGB(ram.used)}/${formatGB(ram.total)}` : null;
+  return ram ? `ram ${formatMemoryGBPair(ram.used, ram.total)}` : null;
 });
 
 const downloading = computed(() => downloads.hostedInFlight.length);

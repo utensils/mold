@@ -509,9 +509,17 @@ async function unload(m: LibraryModelEntry) {
 <style scoped>
 /* The shelf's one axis: name · good for · size · speed · machine · actions. Fixed
    tracks (not `auto`) are what make separate rows line up — each row is its
-   own grid, so only identical track sizes share an axis. */
+   own grid, so only identical track sizes share an axis.
+
+   The two TEXT columns are the elastic pair. "Good for" was pinned at 7.5rem
+   while Name took every spare pixel as `1fr`, so on a wide window the shelf
+   read as broken data: a column of short ids beside ~1400px of nothing, and
+   every description clipped to "FLUX.1 Dev BF16 …". Its old width is now its
+   FLOOR — the narrow shelf is unchanged, because 1.2fr of what is left there
+   is already under 7.5rem — and above that the description grows with the
+   window, taking the slack from the track that had no use for it. */
 .model-table {
-  --model-row-columns: minmax(0, 1fr) 7.5rem 12rem 4.5rem 8rem 10.5rem;
+  --model-row-columns: minmax(0, 1fr) minmax(7.5rem, 1.2fr) 12rem 4.5rem 8rem 10.5rem;
   container-type: inline-size;
   container-name: styles-shelf;
 }
@@ -533,7 +541,7 @@ async function unload(m: LibraryModelEntry) {
      — otherwise the cells would hide while their 4.5rem track stayed. */
   .model-table__header,
   .model-table :deep(.model-table-row) {
-    --model-row-columns: minmax(0, 1fr) 7.5rem 12rem 8rem 10.5rem;
+    --model-row-columns: minmax(0, 1fr) minmax(7.5rem, 1.2fr) 12rem 8rem 10.5rem;
   }
 
   .model-table__speed,

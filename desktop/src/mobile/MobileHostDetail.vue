@@ -49,6 +49,7 @@ import type {
   ServerStatus,
 } from "../lib/api/types";
 import { formatGB, formatUptime, percent } from "../lib/format";
+import { formatMemoryGB } from "@studio/lib/formatMemory";
 import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import { unloadModel } from "../lib/api/models";
@@ -195,7 +196,7 @@ const unifiedMemory = computed(() => unifiedMemoryHost(gpus.value));
 const hostMemoryPressure = computed(() => hostMemoryLevel(queuePlan.value?.host_memory));
 const hostMemoryLabel = computed(() => {
   const memory = queuePlan.value?.host_memory;
-  return memory ? hostMemoryScheduleLabel(memory, formatGB) : null;
+  return memory ? hostMemoryScheduleLabel(memory, formatMemoryGB) : null;
 });
 const disk = computed(() => status.value?.models_disk ?? null);
 const h3Host = computed(() => [
@@ -1203,7 +1204,7 @@ onBeforeUnmount(() => {
               >
                 <span :style="{ width: `${percent(gpu.vram_used, gpu.vram_total)}%` }" />
               </div>
-              <strong>{{ formatGB(gpu.vram_used) }}/{{ formatGB(gpu.vram_total) }}</strong>
+              <strong>{{ formatMemoryGB(gpu.vram_used) }}/{{ formatMemoryGB(gpu.vram_total) }}</strong>
             </div>
           </template>
           <div v-if="cpu" class="telemetry-meter-row">
@@ -1234,7 +1235,7 @@ onBeforeUnmount(() => {
             >
               <span :style="{ width: `${percent(ram.used, ram.total)}%` }" />
             </div>
-            <strong>{{ formatGB(ram.used) }}/{{ formatGB(ram.total) }}</strong>
+            <strong>{{ formatMemoryGB(ram.used) }}/{{ formatMemoryGB(ram.total) }}</strong>
           </div>
           <div v-if="disk" class="telemetry-meter-row">
             <span>DISK</span>

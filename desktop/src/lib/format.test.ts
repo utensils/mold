@@ -119,8 +119,10 @@ describe("formatGraphicsMemory", () => {
   // The machine card says WHAT its percent measures, in the same shape the
   // Machines list cards already use ("14.9 / 24.0 GB").
   it("names the pair and what it measures", () => {
-    expect(formatGraphicsMemory(31_600_000_000, 51_500_000_000)).toBe(
-      "31.6 / 51.5 GB graphics memory",
+    // Real hardware reports binary bytes: two 24 GiB cards are a 48 GB pool,
+    // not the 51.5 GB a decimal divisor would claim.
+    expect(formatGraphicsMemory(33_930_241_638, 51_539_607_552)).toBe(
+      "31.6 / 48.0 GB graphics memory",
     );
   });
 });

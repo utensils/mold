@@ -152,13 +152,13 @@ const SINGLE_GPU_SNAPSHOT = JSON.stringify({
       ordinal: 0,
       name: "Apple M3 Ultra",
       backend: "metal",
-      vram_total: 196_600_000_000,
-      vram_used: 32_800_000_000,
+      vram_total: 206_158_430_208,
+      vram_used: 34_359_738_368,
     },
   ],
   system_ram: {
-    total: 196_600_000_000,
-    used: 64_000_000_000,
+    total: 206_158_430_208,
+    used: 68_719_476_736,
     used_by_mold: 0,
     used_by_other: 0,
   },
@@ -347,7 +347,7 @@ describe("hostStatus host-aware display", () => {
 
     expect(store.snapshot).toBeNull();
     expect(store.gpus.map((gpu) => gpu.name)).toEqual(["Apple M3 Ultra"]);
-    expect(store.vramTotal).toBe(196_608_000_000);
+    expect(store.vramTotal).toBe(196_608 * 1024 ** 2);
   });
 
   it("reports one VRAM entry per GPU from a multi-GPU snapshot", async () => {
@@ -417,7 +417,7 @@ describe("hostStatus host-aware display", () => {
     const store = await startHostStatus();
 
     expect(store.gpus.map((gpu) => gpu.name)).toEqual(["NVIDIA GeForce RTX 4090"]);
-    expect(store.vramTotal).toBe(24_564_000_000);
+    expect(store.vramTotal).toBe(24_564 * 1024 ** 2);
   });
 });
 
@@ -536,8 +536,8 @@ describe("StatusBar", () => {
     expect(wrapper.find("[data-test='status-bar']").exists()).toBe(true);
     expect(wrapper.get("[data-test='status-machine']").text()).toBe(PLATFORM_UI.deviceLabel);
     expect(wrapper.get("[data-test='status-queue']").text()).toBe("nothing waiting");
-    expect(wrapper.get("[data-test='status-vram']").text()).toBe("vram 32.8 GB / 196.6 GB");
-    expect(wrapper.get("[data-test='status-ram']").text()).toBe("ram 64.0 GB/196.6 GB");
+    expect(wrapper.get("[data-test='status-vram']").text()).toBe("vram 32.0 / 192.0 GB");
+    expect(wrapper.get("[data-test='status-ram']").text()).toBe("ram 64.0 / 192.0 GB");
   });
 
   it("names an offline machine beside a stopped dot", async () => {

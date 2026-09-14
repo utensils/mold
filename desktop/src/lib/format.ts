@@ -1,11 +1,22 @@
-/** Decimal units, one decimal place — matches mold's shared byte formatting. */
+import { formatMemoryGBPair } from "@studio/lib/formatMemory";
+
+/**
+ * Decimal units, one decimal place — matches mold's shared byte formatting.
+ *
+ * STORAGE ONLY: downloads, checkpoint weights, gallery and disk totals, where
+ * decimal is what Hugging Face bills and what a drive vendor's label promises.
+ * A VRAM or RAM reading belongs to `formatMemoryGB` in
+ * `@studio/lib/formatMemory` — routing one through here inflates a 24 GiB card
+ * to "25.8 GB".
+ */
 export function formatGB(bytes: number): string {
   return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 }
 
-/** A used/total pair sharing one unit — `12.1 / 36.0 GB`. Meters already say
- *  what they measure, so the reading beside them repeats neither the unit nor
- *  the word (style guide: units stay tight and mono). */
+/** A used/total DISK pair sharing one unit — `12.1 / 36.0 GB`. Meters already
+ *  say what they measure, so the reading beside them repeats neither the unit
+ *  nor the word (style guide: units stay tight and mono). Memory pairs use
+ *  `formatMemoryGBPair`; see `formatGB` above for why the two differ. */
 export function formatGBPair(used: number, total: number): string {
   return `${(used / 1_000_000_000).toFixed(1)} / ${formatGB(total)}`;
 }
@@ -61,10 +72,11 @@ export function formatPercent(value: number): string {
   return `${Math.round(value)}%`;
 }
 
-/** The mono line under a VRAM meter: `31.6 / 51.5 GB graphics memory`. Says
- *  what the percent beside the meter is measuring, without decimals of its own. */
+/** The mono line under a VRAM meter: `31.6 / 48.0 GB graphics memory`. Says
+ *  what the percent beside the meter is measuring, without decimals of its own.
+ *  Binary, like every other memory reading — see `@studio/lib/formatMemory`. */
 export function formatGraphicsMemory(used: number, total: number): string {
-  return `${formatGBPair(used, total)} graphics memory`;
+  return `${formatMemoryGBPair(used, total)} graphics memory`;
 }
 
 /** Transfer rate for the download banner's mono line: 12_400_000 → "12.4 MB/s". */

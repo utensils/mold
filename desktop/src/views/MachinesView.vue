@@ -19,7 +19,8 @@ import { HOST_RECONNECTING_LABEL } from "@studio/lib/hostConnectivity";
 import { ipc, type DiscoveredHost, type SavedHost } from "../lib/ipc";
 import { gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { addressLabel, prepareHosts, versionLabel } from "../lib/discovery";
-import { formatGBPair, percent } from "../lib/format";
+import { percent } from "../lib/format";
+import { formatMemoryGBPair } from "@studio/lib/formatMemory";
 import { hostIdFromUrl } from "../lib/hosts";
 import { machineSentence } from "../lib/machineSentence";
 import { podGpuName, podProxyUrl, runPodForHostUrl, type RunPodPod } from "../lib/runpod";
@@ -298,7 +299,7 @@ function memoryLabel(host: HostView): string | null {
   if (!gpus.length) return null;
   const used = gpus.reduce((sum, gpu) => sum + gpu.vram_used, 0);
   const total = gpus.reduce((sum, gpu) => sum + gpu.vram_total, 0);
-  return formatGBPair(used, total);
+  return formatMemoryGBPair(used, total);
 }
 
 function memoryPct(host: HostView): number {

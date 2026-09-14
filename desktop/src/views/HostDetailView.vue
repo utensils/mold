@@ -26,7 +26,8 @@ import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
 import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
 import { hostMemoryLevel, hostMemoryScheduleLabel } from "@studio/lib/hostMemory";
-import { formatGB, formatGBPair, percent, vramLevel } from "../lib/format";
+import { formatGB, percent, vramLevel } from "../lib/format";
+import { formatMemoryGB, formatMemoryGBPair } from "@studio/lib/formatMemory";
 import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import { machineSentence } from "../lib/machineSentence";
@@ -551,7 +552,7 @@ const ramFill = computed(() => {
 const ramPressureLabel = computed(() => {
   const memory = queueSnapshot.value?.plan?.host_memory;
   if (!memory) return null;
-  return hostMemoryScheduleLabel(memory, formatGB);
+  return hostMemoryScheduleLabel(memory, formatMemoryGB);
 });
 
 /** `14 · 96.4 GB` summary for the models section header; null without sizes. */
@@ -806,7 +807,7 @@ async function forget() {
                 :title="gpuDetail(gpu)"
                 data-test="gpu-note"
               >
-                {{ formatGBPair(gpu.vram_used, gpu.vram_total) }}
+                {{ formatMemoryGBPair(gpu.vram_used, gpu.vram_total) }}
               </span>
             </div>
             <div v-if="cpu" class="tile ms-card-edge" data-test="cpu-card">
@@ -849,7 +850,7 @@ async function forget() {
                 />
               </span>
               <span class="font-mono text-micro text-fg-dim">
-                {{ formatGBPair(ram.used, ram.total) }}
+                {{ formatMemoryGBPair(ram.used, ram.total) }}
               </span>
             </div>
             <div

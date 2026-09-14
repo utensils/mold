@@ -207,3 +207,72 @@ describe("SourceMediaWells for an exclusive (klein) plan", () => {
     ).toBe("h3-last");
   });
 });
+
+describe("SourceMediaWells — a caller that already titled the group", () => {
+  /*
+   * The desktop Create rail heads this group with its own plain-language
+   * label ("Start from a photo"), so the well's terse "SOURCE" legend under
+   * it rendered the same heading twice:
+   *
+   *     START FROM A PHOTO
+   *     SOURCE ─────────────
+   *
+   * `titled` lets that caller say so. It suppresses ONLY the sole generic
+   * "Source" legend — the case where the legend carries no information the
+   * caller's heading does not. A legend that distinguishes one well from
+   * another (First/Last frame, Target, or any layout with a second well)
+   * is doing real work and stays regardless.
+   */
+  const soleSource = {
+    kind: "single",
+    required: false,
+    endFrame: false,
+    video: false,
+  } satisfies SourceMediaPlan;
+
+  it("drops the sole Source legend when the caller titled the group", () => {
+    const wrapper = factory(soleSource, { titled: true });
+    expect(wrapper.find("[data-test='source-media-wells']").exists()).toBe(
+      true,
+    );
+    expect(wrapper.find("[data-test='source-well']").exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("Source");
+  });
+
+  it("keeps the legend when the caller did not title the group", () => {
+    expect(factory(soleSource).text()).toContain("Source");
+  });
+
+  it("keeps a required badge the legend would otherwise have carried", () => {
+    const wrapper = factory(
+      { kind: "single", required: true, endFrame: false, video: false },
+      { titled: true },
+    );
+    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(
+      true,
+    );
+  });
+
+  it("keeps both legends when a second well makes them tell wells apart", () => {
+    const wrapper = factory(
+      { kind: "single", required: false, endFrame: true, video: true },
+      { titled: true },
+    );
+    expect(wrapper.text()).toContain("Source");
+    expect(wrapper.text()).toContain("End frame");
+  });
+
+  it("keeps a legend that names something the caller's heading cannot", () => {
+    const h3 = factory(
+      { kind: "h3-boundaries", requiredEndpoint: "first" },
+      { titled: true },
+    );
+    expect(h3.text()).toContain("First frame");
+
+    const qwen = factory(
+      { kind: "attachments", max: null, required: true, primary: "target" },
+      { titled: true },
+    );
+    expect(qwen.text()).toContain("Target");
+  });
+});

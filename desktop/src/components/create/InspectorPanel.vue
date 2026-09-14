@@ -613,7 +613,14 @@ function resetSettings() {
            mounted only for a checkpoint that advertises identity support. -->
       <div v-if="showSourceMedia" class="ms-field" data-test="inspector-source-media">
         <div class="ms-group-label uppercase">Start from a photo</div>
-        <SourceImageWell ref="sourceWell" :form="form" :selected-model="contractModel" />
+        <!-- `titled`: this label IS the group's heading, so the wells drop a
+             legend that would only read it back. -->
+        <SourceImageWell
+          ref="sourceWell"
+          :form="form"
+          :selected-model="contractModel"
+          titled
+        />
         <div v-if="maskDoorAvailable || showIdentity" class="ms-doors">
           <button
             v-if="maskDoorAvailable"

@@ -26,7 +26,7 @@ import {
   hostMemoryLevel,
   hostMemoryScheduleLabel,
 } from "@studio/lib/hostMemory";
-import { formatGB } from "../util/format";
+import { formatMemoryGB } from "@studio/lib/formatMemory";
 import {
   modelDisplayName,
   modelDisplayNameForId,
@@ -150,7 +150,7 @@ const telemetry = computed(() =>
  * cannot see it. Absent on older servers, which keeps the plain info bar. */
 const hostMemoryLabel = computed(() => {
   const memory = queuePlan.value?.host_memory;
-  return memory ? hostMemoryScheduleLabel(memory, formatGB) : null;
+  return memory ? hostMemoryScheduleLabel(memory, formatMemoryGB) : null;
 });
 const hostMemoryPressure = computed(() =>
   hostMemoryLevel(queuePlan.value?.host_memory),

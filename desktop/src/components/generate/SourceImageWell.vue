@@ -74,8 +74,15 @@ const props = withDefaults(
      * rules answer instead.
      */
     selectedModel?: ModelEntry | null;
+    /**
+     * The mount already heads this group with its own label (the Create
+     * rail's "Start from a photo"), so the wells must not repeat it. Passed
+     * straight through to `SourceMediaWells`, which decides whether its
+     * legend still carries information the heading does not.
+     */
+    titled?: boolean;
   }>(),
-  { selectedModel: null },
+  { selectedModel: null, titled: false },
 );
 const toasts = useToastStore();
 const models = useModelStore();
@@ -592,6 +599,7 @@ function setSourceFitMode(e: Event) {
     <SourceMediaWells
       v-if="plan.kind !== 'attachments' || plan.primary === 'target'"
       :plan="plan"
+      :titled="titled"
       :source="primaryWellImage"
       :end-frame="
         !targetLayout && form.endFrame
@@ -940,6 +948,7 @@ function setSourceFitMode(e: Event) {
   <div v-else-if="plan.kind === 'h3-boundaries'" data-test="source-media-controls">
     <SourceMediaWells
       :plan="plan"
+      :titled="titled"
       :source="h3Authoring.firstFrame"
       :end-frame="h3Authoring.lastFrame"
       :error="h3Error"

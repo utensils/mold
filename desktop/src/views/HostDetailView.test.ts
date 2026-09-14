@@ -227,15 +227,15 @@ async function mountView(
       {
         ordinal: 0,
         name: "NVIDIA GeForce RTX 4090",
-        vram_total_bytes: 24_000_000_000,
-        vram_used_bytes: 6_000_000_000,
+        vram_total_bytes: 25_769_803_776,
+        vram_used_bytes: 6_442_450_944,
         state: "generating",
       },
       {
         ordinal: 1,
         name: "NVIDIA B200",
-        vram_total_bytes: 80_000_000_000,
-        vram_used_bytes: 20_000_000_000,
+        vram_total_bytes: 85_899_345_920,
+        vram_used_bytes: 21_474_836_480,
         state: "idle",
       },
     ],
@@ -584,12 +584,12 @@ describe("HostDetailView telemetry", () => {
             ordinal: 0,
             name: "NVIDIA GeForce RTX 4090",
             backend: "cuda",
-            vram_total: 24_000_000_000,
-            vram_used: 18_000_000_000,
+            vram_total: 25_769_803_776,
+            vram_used: 19_327_352_832,
             gpu_utilization: 97,
           },
         ],
-        system_ram: { total: 64_000_000_000, used: 21_000_000_000 },
+        system_ram: { total: 68_719_476_736, used: 22_548_578_304 },
         cpu: { cores: 16, usage_percent: 43.2 },
       }),
     );
@@ -620,12 +620,12 @@ describe("HostDetailView telemetry", () => {
             ordinal: 0,
             name: "Apple Metal GPU",
             backend: "metal",
-            vram_total: 51_500_000_000,
-            vram_used: 46_900_000_000,
+            vram_total: 51_539_607_552,
+            vram_used: 46_922_517_709,
             gpu_utilization: null,
           },
         ],
-        system_ram: { total: 51_500_000_000, used: 46_900_000_000 },
+        system_ram: { total: 51_539_607_552, used: 46_922_517_709 },
         cpu: { cores: 16, usage_percent: 44 },
       }),
     );
@@ -634,7 +634,7 @@ describe("HostDetailView telemetry", () => {
     const gpuCard = wrapper.get("[data-test='gpu-card']");
     expect(gpuCard.text()).toContain("Memory");
     expect(gpuCard.text()).not.toContain("Graphics memory");
-    expect(gpuCard.text()).toContain("46.9 / 51.5 GB");
+    expect(gpuCard.text()).toContain("43.7 / 48.0 GB");
     // The standalone RAM row would repeat the same numbers — it stays hidden,
     // while CPU keeps its own row.
     expect(wrapper.find("[data-test='ram-card']").exists()).toBe(false);
@@ -799,12 +799,12 @@ describe("HostDetailView storage and queue", () => {
             ordinal: 0,
             name: "NVIDIA GeForce RTX 4090",
             backend: "cuda",
-            vram_total: 24_000_000_000,
-            vram_used: 18_000_000_000,
+            vram_total: 25_769_803_776,
+            vram_used: 19_327_352_832,
             gpu_utilization: 97,
           },
         ],
-        system_ram: { total: 64_000_000_000, used: 21_000_000_000 },
+        system_ram: { total: 68_719_476_736, used: 22_548_578_304 },
         cpu: { cores: 16, usage_percent: 43.2 },
       }),
     );
@@ -1020,12 +1020,12 @@ describe("HostDetailView models", () => {
             ordinal: 0,
             name: "NVIDIA GeForce RTX 4090",
             backend: "cuda",
-            vram_total: 24_000_000_000,
-            vram_used: 18_000_000_000,
+            vram_total: 25_769_803_776,
+            vram_used: 19_327_352_832,
             gpu_utilization: 97,
           },
         ],
-        system_ram: { total: 64_000_000_000, used: 21_000_000_000 },
+        system_ram: { total: 68_719_476_736, used: 22_548_578_304 },
         cpu: { cores: 16, usage_percent: 43.2 },
       }),
     );

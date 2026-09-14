@@ -1,7 +1,14 @@
 import { inferBackendFromGpuName } from "../hosts";
 import type { GpuInfo, GpuSnapshot, GpuWorkerStatus, ServerStatus } from "./types";
 
-const BYTES_PER_DECIMAL_MB = 1_000_000;
+/**
+ * `/api/status`'s legacy `vram_*_mb` fields are MEBIbytes, not decimal MB:
+ * the server fills them as `total_bytes / (1024 * 1024)`
+ * (`mold-server/src/device_registry.rs`), which is also what nvidia-smi
+ * prints and what every Rust-side fixture carries (24564 for a 4090). A
+ * decimal divisor here under-reported every legacy-status GPU by 4.86%.
+ */
+const BYTES_PER_MIB = 1024 * 1024;
 
 export function bestGpuBackend(gpus: ReadonlyArray<{ backend?: string | null }>): string | null {
   let best: string | null = null;
@@ -40,8 +47,8 @@ export function gpuSnapshotsFromWorkers(
       ordinal: 0,
       name: gpu.name,
       backend: gpu.backend ?? inferBackendFromGpuName(gpu.name),
-      vram_total: gpu.vram_total_mb * BYTES_PER_DECIMAL_MB,
-      vram_used: gpu.vram_used_mb * BYTES_PER_DECIMAL_MB,
+      vram_total: gpu.vram_total_mb * BYTES_PER_MIB,
+      vram_used: gpu.vram_used_mb * BYTES_PER_MIB,
       gpu_utilization: null,
     },
   ];
@@ -62,8 +69,8 @@ export function summarizeStatusGpuMemory(
   if (!gpus.length) return null;
   return gpus.reduce(
     (total, gpu) => ({
-      usedMb: total.usedMb + gpu.vram_used / BYTES_PER_DECIMAL_MB,
-      totalMb: total.totalMb + gpu.vram_total / BYTES_PER_DECIMAL_MB,
+      usedMb: total.usedMb + gpu.vram_used / BYTES_PER_MIB,
+      totalMb: total.totalMb + gpu.vram_total / BYTES_PER_MIB,
     }),
     { usedMb: 0, totalMb: 0 },
   );
