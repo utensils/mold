@@ -89,6 +89,7 @@ COPY crates/mold-db/Cargo.toml crates/mold-db/Cargo.toml
 COPY crates/mold-candle/Cargo.toml crates/mold-candle/Cargo.toml
 COPY crates/mold-candle/build.rs crates/mold-candle/build.rs
 COPY crates/mold-candle/src/comfy_int8/cuda/int8_linear.cu crates/mold-candle/src/comfy_int8/cuda/int8_linear.cu
+COPY crates/mold-candle/src/stable_diffusion/vae/group_norm.cu crates/mold-candle/src/stable_diffusion/vae/group_norm.cu
 COPY crates/mold-inference/Cargo.toml crates/mold-inference/Cargo.toml
 COPY crates/mold-scheduler/Cargo.toml crates/mold-scheduler/Cargo.toml
 COPY crates/mold-server/Cargo.toml crates/mold-server/Cargo.toml

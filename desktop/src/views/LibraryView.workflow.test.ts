@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { meshWorkflowRouteFor } from "@studio/lib/meshWorkflowProvenance";
 import viewSource from "./LibraryView.vue?raw";
 import lightboxSource from "../components/gallery/Lightbox.vue?raw";
-import releaseNote from "../../../changelog.d/library-3d-stacks.md?raw";
 import desktopRules from "../../../.claude/rules/desktop.md?raw";
 
 /**
@@ -73,19 +72,16 @@ describe("the Library's 3-D run doors", () => {
     expect(viewSource).toContain('`3-D object · ${count} ${count === 1 ? "picture" : "pictures"}`');
     expect(viewSource).toContain("`Show the ${membership.memberCount} pictures`");
     expect(viewSource).toContain("`One 3-D run, ${tile.model.workflowCount} pictures`");
-    // The Lightbox aside and the release note name the same set. A test that
-    // read only this view stayed green while those two said "Show all N of
-    // these" — three surfaces, two names, one of them checked.
+    // The Lightbox aside names the same set as the Library. Release fragments
+    // are deliberately deleted during promotion, so they are not test inputs.
     expect(lightboxSource).toContain("Show the {{ workflowAssetCount }} pictures");
-    expect(releaseNote).toContain("**Show the N pictures**");
-    // The agent rules are the FOURTH surface naming this set. A test that read
-    // only the three shipped ones would let the rule file drift into the word
+    // Keep the agent rules consistent too, so they cannot drift into the word
     // the design lexicon bans, which is where the next reader starts.
     expect(desktopRules).toContain("the number of pictures the run made");
     expect(desktopRules).not.toContain("the number of prints the run made");
     // Only the RUN's own wording — "N pictures" is right elsewhere (the Trash
     // confirm deletes pictures), so a blanket ban would be a false alarm.
-    for (const source of [viewSource, lightboxSource, releaseNote])
+    for (const source of [viewSource, lightboxSource])
       for (const wrong of [
         "Show all",
         "memberCount} assets",

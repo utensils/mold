@@ -123,6 +123,22 @@ require_text "Dockerfile" \
   'scripts/probe-cuda-embedded-ptx.py /build/target/release/mold'
 require_text "Dockerfile" \
   'COPY crates/mold-candle/src/comfy_int8/cuda/int8_linear.cu crates/mold-candle/src/comfy_int8/cuda/int8_linear.cu'
+# Every CUDA input read by mold-candle's build script must exist before the
+# dependency-cache build, not just after the later full source copy.
+python3 - "$repo_root" <<'PYTHON'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+prefix = (root / "Dockerfile").read_text().split("RUN cargo build", 1)[0]
+build_script = (root / "crates/mold-candle/build.rs").read_text()
+for source in set(re.findall(r'"(src/[^"\n]+\.cu)"', build_script)):
+    path = f"crates/mold-candle/{source}"
+    assert (root / path).is_file(), f"Missing CUDA source: {path}"
+    assert f"COPY {path} {path}" in prefix, f"Docker dependency build lacks {path}"
+PYTHON
+
 while IFS= read -r workspace_member; do
   require_text "Dockerfile" \
     "COPY ${workspace_member}/Cargo.toml ${workspace_member}/Cargo.toml"
