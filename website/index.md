@@ -117,7 +117,7 @@ features:
 Mold began as a single-binary command-line tool and the CLI remains its stable
 foundation. Every core workflow can be run by a person, composed in a shell
 pipeline, automated in CI, or called by an agent. `mold serve`, REST/SSE, MCP,
-and the desktop, web, and TUI surfaces all extend that same engine and contract;
+and the desktop and web surfaces all extend that same engine and contract;
 the iPhone and Android apps use the same contract as remote-only clients.
 
 ## Mold Studio for desktop

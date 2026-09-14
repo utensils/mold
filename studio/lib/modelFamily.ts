@@ -5,8 +5,8 @@
  * has to turn that into the name the family is actually known by. This lived
  * only in `web/`, so desktop and iPhone rendered the raw slug — a Wan row read
  * "wan" on desktop and "Wan Video" on web, which is exactly the cross-surface
- * drift #806 exists to close. The CLI and TUI already share their own label
- * function pinned to `tests/fixtures/wan/surface-parity-v1.json`; this is the
+ * drift #806 exists to close. The CLI and Discord already share their own
+ * label function pinned to `tests/fixtures/wan/surface-parity-v1.json`; this is the
  * Studio half of the same contract.
  *
  * Unknown slugs title-case rather than fall back to the raw string, so a family

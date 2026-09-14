@@ -860,11 +860,10 @@ export function schemaFor(key: string): KeySchema | null {
 
 /**
  * Section for an engine-config key: `models.<style>.<field>` is a per-style
- * override, curated keys go to their section, `tui.*` stays out of a
- * graphical surface, and everything else lands in Advanced.
+ * override, curated keys go to their section, and everything else lands in
+ * Advanced. Every key routes somewhere.
  */
-export function sectionForConfigKey(key: string): SectionId | null {
-  if (key.startsWith("tui.")) return null;
+export function sectionForConfigKey(key: string): SectionId {
   if (parsePerStyleKey(key)) return "styleDefaults";
   return schemaFor(key)?.section ?? "advanced";
 }

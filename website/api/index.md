@@ -1014,7 +1014,7 @@ reconcile, an import, or a re-publication never resurrects a tag someone
 removed.
 
 The server never auto-tags. mold's own clients optionally add the title's slug
-as a tag before sending (`generate.auto_tag_title` on the CLI and TUI, **Tag
+as a tag before sending (`generate.auto_tag_title` on the CLI, **Tag
 new prints with their title** in the web, desktop, and iPhone apps), which is
 why the tag is always visible in the request rather than invented downstream.
 
@@ -2490,7 +2490,7 @@ custom path:
 MOLD_OUTPUT_DIR=/srv/mold/output mold serve
 ```
 
-To disable image persistence (TUI gallery will not function):
+To disable image persistence (saved prints will not appear in any gallery):
 
 ```bash
 MOLD_OUTPUT_DIR="" mold serve

@@ -108,7 +108,7 @@ These are implementation requirements, not open questions:
 - Queue and execution-estimate state is ordinary in-memory runtime state.
   Desired device enablement and learned estimates persist.
 - Planned queue lanes, blocked reasons, ETAs, and confidence are visible on
-  every interactive client, with compact renderings allowed on iPhone and TUI.
+  every interactive client, with compact renderings allowed on iPhone.
 - Existing client-generated batches remain independent sibling requests during
   phases A–E. Raw server `batch_size > 1` is not redefined until phase F.
 - Phase F batch parents preserve ordered `base_seed + index` semantics, fail
@@ -169,7 +169,7 @@ chains, utilities, telemetry, placement, and clients.
 
 ### 3.2 Batch facts
 
-- Desktop, CLI, TUI, web/mobile flows create sibling requests and force each
+- Desktop, CLI, and web/mobile flows create sibling requests and force each
   request to `batch_size = 1`.
 - Sibling seeds use `base_seed.wrapping_add(index)`.
 - `batch_id`, one-based `batch_index`, and `batch_count` already flow through
@@ -184,7 +184,7 @@ chains, utilities, telemetry, placement, and clients.
 
 Some views already render multiple devices, but important paths still use
 `gpus[0]` or legacy `gpu_info`, including compact host cards/popovers, remote
-host capability ranking, TUI status, Discord status, and parts of mobile.
+host capability ranking, Discord status, and parts of mobile.
 Queue and status types are duplicated across `mold-core`, `studio`, `web`, and
 `desktop`; this work must migrate shared browser-safe contracts into `studio`
 instead of adding another divergent copy.
@@ -1414,7 +1414,7 @@ concurrent resume without cross-chain state corruption.
 
 ### 12.1 Phases A–E: preserve client siblings
 
-Desktop, web, iPhone, CLI, and TUI keep Batch N as N independent requests.
+Desktop, web, iPhone, and the CLI keep Batch N as N independent requests.
 Ordinary desktop/web Generate siblings reuse the visible prompt; explicitly
 prepared variations, including iPhone Batch N, retain one reviewed prompt per
 sibling. Both paths carry:
@@ -2072,19 +2072,7 @@ Prepared expansion and missing-model recovery keep their frozen host URL/key/
 instance identity. A device replan inside that host does not mutate the frozen
 host route.
 
-### 14.6 TUI
-
-Replace `gpu_info`-only summaries with a device list and selected detail. Add:
-
-- all-device utilization/VRAM;
-- queue lanes and blocked reason;
-- enable/disable action with draining feedback;
-- compact replan countdown.
-
-Keep existing key→action contracts, layout const assertions, gallery thumbnail
-protocol, and Create Advanced accordion invariants.
-
-### 14.7 CLI
+### 14.6 CLI
 
 Add:
 
@@ -2105,7 +2093,7 @@ both `devices.lifecycle` and `dispatch.v2_authoritative`; otherwise only
 Forced-local multi-item generation uses the shared scheduler adapter. A single
 local request remains simple and must not incur a material startup regression.
 
-### 14.8 Discord
+### 14.7 Discord
 
 Discord is read-only:
 
@@ -2389,7 +2377,7 @@ Deliver:
 - persistent observations/ETAs/confidence;
 - plan lanes and blocked reasons;
 - Studio type migration;
-- complete web/desktop/iPhone/TUI/CLI/Discord views;
+- complete web/desktop/iPhone/CLI/Discord views;
 - multi-host routing based on feasible devices and predicted completion.
 
 Gates:
@@ -2667,7 +2655,6 @@ Expected ownership:
 | Web                 | `web/src/components/`, Machines/Settings/queue/routing                  |
 | Desktop             | `desktop/src/components/`, stores, `HostDetailView`                     |
 | iPhone              | `desktop/src/mobile/`, native API-key boundary unchanged                |
-| TUI                 | `crates/mold-tui/src/ui/machines.rs`, chrome/app/backend                |
 | CLI/MCP             | `crates/mold-cli/src/commands/`                                         |
 | Discord             | `crates/mold-discord/src/format.rs`                                     |
 | Distribution        | release/desktop workflows, Dockerfile, `flake.nix`, installer, AUR      |

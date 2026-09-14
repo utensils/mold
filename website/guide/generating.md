@@ -444,7 +444,7 @@ mold run wan22-t2v-a14b:q5 "a cat" --no-negative
 Precedence: CLI `--negative-prompt` > per-model config > global config > the
 model family's tuned default (Wan) > empty. Wan's tuned default is advertised
 per model via `/api/models` (`default_negative_prompt`) and prefilled into
-the Negative control on web, desktop, iPhone, and the TUI; clearing that
+the Negative control on web, desktop, and iPhone; clearing that
 field is the same explicit opt-out as `--no-negative`.
 
 ## Scheduler Selection

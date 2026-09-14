@@ -11,9 +11,9 @@
  *   - `pruneRequestForFamily` — strips request fields the target family does
  *     not support, applied on model change so a leftover value never ships.
  *
- * Keep the shared LoRA-capable list in sync with
- * `mold-tui/src/model_info.rs::capabilities_for_family` and the server-side
- * gate in `mold-core/src/validation.rs`.
+ * Keep the shared LoRA-capable list in sync with the server-side authority,
+ * `mold_core::validation::LORA_CAPABLE_FAMILIES` and its
+ * `require_lora_capable_family` gate.
  */
 import {
   baseGenerationCapabilities,

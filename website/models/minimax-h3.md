@@ -406,7 +406,7 @@ cannot fit on the device, while a smaller conditioning set — an FL2VA endpoint
 is 4,032 patches — encodes proportionally faster. Measured directly on the
 FL2VA route, a repeated 4-step 768x768 render's hit saved about 30 s off a
 199 s server-reported generation time. The output is bit-identical to a
-fresh encode, and `mold run` and the TUI disclose the hit as
+fresh encode, and `mold run` discloses the hit as
 `prompt conditioning [cache hit]`.
 
 ```bash
@@ -557,7 +557,7 @@ it does not bundle or mirror the payloads in Mold releases. The project's
 documents the completed governance decision.
 
 The completed project review authorizes H3 use in every territory and across
-Mold's CLI, server/API, Discord, desktop, web, iPhone, TUI, gallery,
+Mold's CLI, server/API, Discord, desktop, web, iPhone, gallery,
 remote-client, shared-server, and hosted paths. It also covers generated-output
 distribution and model distribution or redistribution. Technical availability
 remains limited to routes Mold has implemented and qualified; authorization

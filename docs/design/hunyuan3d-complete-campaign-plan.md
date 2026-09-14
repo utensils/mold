@@ -299,7 +299,7 @@ subagents; the user subsequently requested subagent peer review before the final
 - Test all 15 nonempty subsets, reordered serialized requests, duplicate slots,
   per-view preprocessing, durable media restore and reference conditioning memory.
 - Exit: real-weight normal and Turbo multiview shapes match upstream; named input
-  wells, CLI/MCP syntax, TUI/Discord and phone request construction agree.
+  wells, CLI/MCP syntax, Discord and phone request construction agree.
 
 ### P10 — Background removal and matting (#1496.4)
 
@@ -395,7 +395,7 @@ subagents; the user subsequently requested subagent peer review before the final
   test base color and varying metallic/roughness on an independent reference mesh.
   Preserve existing camera/framing, CSP and WebGL1 fallback contracts.
 - Update Create, Library, Reuse settings, workflow progress, assets and exports in
-  web/desktop/iPhone; native bridge and TUI/CLI/Discord/MCP must build equivalent
+  web/desktop/iPhone; native bridge and CLI/Discord/MCP must build equivalent
   requests or give explicit capability refusal where an attachment cannot be supplied.
 - Exit: maps and material bundles are downloadable, correctly retained, and visible
   across clients; no client loses named inputs or workflow provenance on reuse.
@@ -430,7 +430,7 @@ subagents; the user subsequently requested subagent peer review before the final
 | Scheduling | same-device image progress during mesh CPU work; no simultaneous shape/paint residency; multi-GPU placement/cancel |
 | Durability | restart at every stage and publication window; disconnect; cancellation; interrupted explicit resume; idempotent gallery |
 | Assets/security | authorized downloads, retained sources, no paths/secrets, trash/restore, isolated permanent-delete copies, sibling independence |
-| Surfaces | CLI local/remote, server, TUI, MCP, Discord, web, desktop, iPhone request/reuse/export/progress; browser and native evidence |
+| Surfaces | CLI local/remote, server, MCP, Discord, web, desktop, iPhone request/reuse/export/progress; browser and native evidence |
 | Build coverage | CPU/feature-off, CUDA, CUDA+cuDNN, flash-attn policy, Nix sm89; other release targets compile where toolchains available |
 
 Use at least eight owned/licensed input fixtures: upholstered chair, metallic

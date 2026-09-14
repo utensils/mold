@@ -12,29 +12,29 @@ Path abbreviations used throughout: `wg/` = `website/guide/`, `wm/` = `website/m
 
 | Severity | Count |
 |---|---:|
-| wrong | 90 |
-| stale | 109 |
-| missing | 101 |
+| wrong | 83 |
+| stale | 98 |
+| missing | 92 |
 | inconsistent | 19 |
-| nit | 24 |
-| **Total** | **343** |
+| nit | 22 |
+| **Total** | **314** |
 
 ### Counts by area
 
 | Area | Findings | Confirmed | wrong | stale | missing | inconsistent | nit |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| app-docs | 59 | 57 | 8 | 25 | 22 | 1 | 3 |
+| app-docs | 58 | 56 | 7 | 25 | 21 | 1 | 3 |
 | arch-docs | 34 | 34 | 8 | 20 | 3 | 1 | 2 |
 | api | 33 | 33 | 10 | 2 | 20 | 1 | 0 |
 | skill | 30 | 29 | 7 | 9 | 11 | 2 | 1 |
 | guide-generate | 26 | 25 | 9 | 6 | 9 | 1 | 1 |
 | site-misc | 26 | 26 | 8 | 9 | 4 | 3 | 2 |
-| claude-md | 25 | 25 | 8 | 7 | 5 | 1 | 4 |
-| guide-mobile-tui | 24 | 24 | 6 | 7 | 8 | 1 | 2 |
-| guide-core | 23 | 23 | 2 | 6 | 9 | 3 | 3 |
+| claude-md | 15 | 15 | 5 | 4 | 2 | 1 | 3 |
+| guide-mobile | 8 | 8 | 3 | 1 | 2 | 1 | 1 |
+| guide-core | 22 | 22 | 2 | 5 | 9 | 3 | 3 |
 | models-image | 19 | 19 | 13 | 2 | 2 | 1 | 1 |
 | guide-ops | 17 | 17 | 6 | 3 | 3 | 1 | 4 |
-| readme-docs | 14 | 13 | 1 | 11 | 2 | 0 | 0 |
+| readme-docs | 13 | 12 | 1 | 10 | 2 | 0 | 0 |
 | models-video | 13 | 13 | 4 | 2 | 3 | 3 | 1 |
 
 ### The 5 most consequential inaccuracies
@@ -203,7 +203,7 @@ These two files document the same router and disagree with it in the same places
 - [ ] `wg/cli-reference.md:418` + `wg/configuration.md:12` — `umt5_variant` is registered but has **no** get/set arm and **no** DB slot; it is `Surface::File`, not DB-owned. Footnote #778 or drop it. **Derive from:** `config_keys.rs:108-113,489-568,643-670,903-928`.
 - [ ] `wg/cli-reference.md:88` + `wg/configuration.md:198` + `dd/feature-parity.md:34` — the `Scheduler` enum is `ddim`, `euler-ancestral`, `uni-pc`, `edm-dpm-pp-2m` (Playground only), plus wan-only `euler`/`dpm-pp`. There is no `default` variant and no `unipc` spelling. **Derive from:** `types.rs:134-165`.
 - [ ] `wg/cli-reference.md:303` + `wg/configuration.md:242` — reword `--queue-size` / `MOLD_QUEUE_SIZE` per the cross-doc fact above. **Derive from:** `main.rs:1511-1513`.
-- [ ] `wg/configuration.md:450,454` — three surfaces write gallery rows (server, CLI, **TUI**); `source` has five values (`server|cli|tui|backfill|unknown`). **Derive from:** `mold-db/src/record.rs:7-46`, `mold-tui/src/app.rs:8548`.
+- [ ] `wg/configuration.md:450,454` — two surfaces write gallery rows (server and CLI); `source` has five values (`server|cli|tui|backfill|unknown`), `tui` being historical only. **Derive from:** `mold-db/src/record.rs:7-46`.
 - [ ] `wg/cli-reference.md:424` — add the `Scheduler`, `Queue`, and `Generate` key sections. **Derive from:** `config_keys.rs:175-214,670-700`.
 - [ ] `wg/configuration.md:15` — add `default_frames`, `default_fps` to the per-model DB slice. **Derive from:** `config.rs:49-60`, `config_sync.rs:321-358`.
 - [ ] `wg/configuration.md:260` — add `MOLD_HOST_RAM_ZFS_ARC`. **Derive from:** `zfs_arc.rs:37`.
@@ -213,34 +213,15 @@ These two files document the same router and disagree with it in the same places
 - [ ] `wg/cli-reference.md:517,368` — `mold clean` is dry-run by default; `--probe` hits `/health` **and** `/api/status`.
 - [ ] `wg/configuration.md:203` ↔ `SKILL:1533` — the `MOLD_LTX2_GEMMA_VARIANT auto` rule is memory-aware on the server path and presence-only on the forced-local fallback; SKILL is the stale half. **Derive from:** `variant_dependencies.rs:1193-1215`, `ltx2/text/gemma.rs:513-520`.
 - [ ] `dd/feature-parity.md:21,68` — add the missing `GenerateRequest` fields (`title`/`tags`/`collection`, `extend_video*`, `references`, `ic_lora_control`, `id_images`/`true_cfg`/`cfg_start_step`, `source_fit`, `video_only`, `hdr_exr_*`, `sample_shift`, `distill_strength_*`) and the ~26 missing `mold run` flags. **Derive from:** `types.rs` `GenerateRequest`, `main.rs:937-1470`.
-- [ ] `dd/feature-parity.md:306,307,321` — config.toml gains `config_version`/`[scheduler]`/`[gallery]`/`[queue]`/`[generate]`; DB keys gain `queue.held_retention_days`/`generate.auto_tag_title`/`tui.*`; `mold.db` has **21** tables at `SCHEMA_VERSION 31`, not 5.
+- [ ] `dd/feature-parity.md:306,307,321` — config.toml gains `config_version`/`[scheduler]`/`[gallery]`/`[queue]`/`[generate]`; DB keys gain `queue.held_retention_days`/`generate.auto_tag_title`; `mold.db` has **21** tables at `SCHEMA_VERSION 31`, not 5.
 
 ---
 
-### Batch 6 — TUI, iPhone, Android guides (+ the two internal TUI docs)
+### Batch 6 — iPhone and Android guides
 
-Key-map facts are duplicated in `wg/tui.md`, `cr/tui.md`, and `.claude/skills/tui-uat/SKILL.md` and are wrong in the same places. Fix as one unit.
-
-**Files:** `wg/tui.md`, `wg/iphone.md`, `wg/android.md`, `wg/desktop.md` (mobile default only), `cr/tui.md`, `.claude/skills/tui-uat/SKILL.md`, `SKILL:1694`, `dd/feature-parity.md:312`
+**Files:** `wg/iphone.md`, `wg/android.md`, `wg/desktop.md` (mobile default only), `SKILL:1694`, `dd/feature-parity.md:312`
 
 **Cross-doc fact to state once:** *fresh mobile installs default to Safelight + **Dark**, with Photos auto-save and `autoTagTitle` on* — canonical in `wg/iphone.md`; `wg/desktop.md:390`, `SKILL:1694`, and `dd/feature-parity.md:312` all restate it wrongly. **Derive from:** `desktop/src/mobile/settings.ts:17-22`.
-
-**Keymap corrections** — derive every one from `crates/mold-tui/src/event.rs` (`map_machines_key`, `map_models_key`, `control_shortcut`) and `action.rs`:
-- [ ] `wg/tui.md:427` + `tui-uat/SKILL.md:167` — `d` = disconnect/reconnect (`MachinesToggleConnection`); **`f`** = forget host. Currently documented as the opposite; a UAT script following it toggles a connection instead of forgetting.
-- [ ] `wg/tui.md:573` — workspace cycling is **Alt+**Left/Right, globally; plain arrows are unbound in nav mode.
-- [ ] `wg/tui.md:298` — remove the `Ctrl+E` end-of-line row; it is bypassed to Expand.
-- [ ] `tui-uat/SKILL.md:157` — `Ctrl+R` = **randomize seed** (the same file says so at :106).
-- [ ] `wg/tui.md:399` add `r`/`/`; `:432` and `tui-uat:167` add `l`, `g`, `[`, `]`, `e`; `tui-uat:157` add `Ctrl+E`, `Ctrl+Shift+E`, `Ctrl+S`, `Ctrl+T`, `Ctrl+P`, `Ctrl+N`.
-- [ ] `wg/tui.md:400` — Enter on Models selects into Create, it does not set the persisted default.
-
-**TUI content:**
-- [ ] `wg/tui.md:285,608` — prompt history and session state live in `$MOLD_HOME/mold.db`; the legacy JSON/JSONL files are imported once and renamed `.migrated`. **Derive from:** `history.rs:7,207`, `session.rs:1-8`.
-- [ ] `wg/tui.md:507,508` — drop "(consumed by upcoming releases)" from Reduce Motion and Show Timeline; both are read today. **Derive from:** `motion.rs:53-84`, `ui/generate.rs:72`.
-- [ ] `wg/tui.md:107` + `tui-uat:161` + `cr/tui.md:11` — video models add **Duration** (and **Predict duration** where advertised); the Advanced accordion has an **Identity photo** section and a Wan `SampleShift` row; `tui-uat:161`'s landmark list also omits **File under**. **Derive from:** `ui/create_form.rs:30-55,153-294`.
-- [ ] `wg/tui.md:153` — add `References` to the Source image section.
-- [ ] `wg/tui.md:134` — Size cycles the model's authored profile presets; the 5-ratio computation is only the no-profile fallback.
-- [ ] `wg/tui.md:96,51,661` — palette also has *Connect a machine* and *Retry held prints*; add `mold-tui.YYYY-MM-DD.log`; the "All features" tab omits `webp,mp4,metrics,mdns,pulid`.
-- [ ] `tui-uat/SKILL.md:167` — `x` cancels queued **or running** work on hosts advertising `queue.cooperative_cancellation`.
 
 **Mobile:**
 - [ ] `wg/iphone.md:87` — one-shot generation no longer issues a placement preview; automatic routing ranks from cached telemetry and freezes. Placement preview is the placement planner. _(Scene authoring was retired; there is no sequence path on the phone.)_ **Derive from:** `studio/lib/generationSubmissionPolicy.ts:60-81`, `desktop/src/mobile/mobileGenerationRouting.ts:187-310`.
@@ -302,14 +283,13 @@ Key-map facts are duplicated in `wg/tui.md`, `cr/tui.md`, and `.claude/skills/tu
 
 Mostly "mark superseded / repoint symbols". Low user risk, high agent-confusion risk. Land last, but land it — several of these actively misdirect a future implementer.
 
-**Files:** `CLAUDE.md`, `cr/{inference,server-queue,studio-web,minimax-h3,desktop,tui}.md`, `da/{candle-extension,qwen-mmq-nan,pulid,pulid-face-extraction,pulid-perf,pulid-uat,wan-comfyui-parity-ledger,research-multi-model-cache-and-compute-boundaries,multi-gpu-scheduler-v2-design,minimax-h3-authorization}.md`, `dd/{architecture,feature-parity}.md`, `docs/{ltx-2.5,feasibility-recovery-plan,generate-studio-console-followups}.md`, `docs/design/README.md`, `docs/design/notes/activity-history-and-sequence-reuse.md`
+**Files:** `CLAUDE.md`, `cr/{inference,server-queue,studio-web,minimax-h3,desktop}.md`, `da/{candle-extension,qwen-mmq-nan,pulid,pulid-face-extraction,pulid-perf,pulid-uat,wan-comfyui-parity-ledger,research-multi-model-cache-and-compute-boundaries,multi-gpu-scheduler-v2-design,minimax-h3-authorization}.md`, `dd/{architecture,feature-parity}.md`, `docs/{ltx-2.5,feasibility-recovery-plan,generate-studio-console-followups}.md`, `docs/design/README.md`, `docs/design/notes/activity-history-and-sequence-reuse.md`
 
 **Rule glob fixes (these silently disable rules — do first):**
 - [ ] `cr/studio-web.md:8` — `crates/mold-server/src/generation_profile*` matches **nothing**; the file is `crates/mold-core/src/generation_profile.rs`. The rule never loads when its own cited authority is edited.
 - [ ] `cr/minimax-h3.md:7` — `crates/mold-server/src/private_*` matches nothing (all `private_*.rs` are under `crates/mold-inference/src/minimax_h3/`); `:5`'s `**/h3/**` matches no directory.
 
 **`CLAUDE.md` / rules corrections:**
-- [ ] `CLAUDE.md:53` — `mold-inference` depends on `mold-ai-catalog`, so `mold-tui` transitively does too. Only `mold-discord` is clean. Either correct the invariant or fix the dependency.
 - [ ] `CLAUDE.md:115` — config path (see Batch 5 cross-doc fact).
 - [ ] `CLAUDE.md:137` — model cache LRU is `MOLD_MAX_CACHED_MODELS` (default 3, range 1–16).
 - [ ] `CLAUDE.md:34` — `check:frontend` has no lint step.
@@ -335,13 +315,13 @@ Mostly "mark superseded / repoint symbols". Low user risk, high agent-confusion 
 - [ ] `docs/feasibility-recovery-plan.md:3` — pull-and-resume **shipped** (#1162); narrow the not-implemented list to companion-component repair.
 - [ ] `docs/generate-studio-console-followups.md:10,22,83,323` — all nine "Likely files" are gone; capability map is `studio/lib/`; Catalog → Models ▸ Discover; verification command misses the root studio gates. Mark the whole doc a closed historical backlog.
 - [ ] `docs/design/notes/activity-history-and-sequence-reuse.md:166,436,627` — `RAIL_SETTLED_KEEP` 3 → `GENERATION_HISTORY_LIMIT` 50; `routes_chain.rs` → `ChainRequest.ephemeral`; the amend route is registered.
-- [ ] `docs/design/README.md:3,18` — six surfaces (desktop is macOS/Linux/Windows; Android ships); the TUI already carries the five-workspace IA — only the restyle remains.
+- [ ] `docs/design/README.md:3,18` — six surfaces (desktop is macOS/Linux/Windows; Android ships).
 - [ ] `docs/ltx-2.5.md:79,153` — gate is `supports_duration_prediction === true && runtime_ready !== false` (absence passes); add the CUDA qualification harness scripts + schema.
 
 **`dd/architecture.md` / `dd/feature-parity.md` residue:**
 - [ ] `dd/architecture.md:3,127,143,310` — add Windows as a full target; feature set is `expand`+`mdns` always, `mp4` non-Windows, `metal`/`cuda` opt-in; LTX-2 Metal is **performance-qualified** (also `dd/feature-parity.md:103`).
 - [ ] `dd/architecture.md:190,199,236,242,280,361,449,487,109` — refresh CSP, `minWidth` 1080, the IPC command list (five named commands do not exist), the four `core:window:*` permissions, drop `@testing-library/vue`, refresh the Cargo sketch to 0.26.0, repo-relative paths, both workspace excludes.
-- [ ] `dd/feature-parity.md:84,88,110,182,188,253,263,264,291,292,310,321,354,360,72` — add `wan`/`minimax-h3` to the taxonomy and matrix; fix `/api/chain/jobs` → `/api/chain-jobs` and `/api/chain/limits` → `/api/capabilities/chain-limits`; `ModelResidency { Gpu, Parked }`; TUI views are the five workspaces; repoint the six deleted component paths; `JobLifecycle` has four states; `sourceFit*` moved to `studio/lib/`.
+- [ ] `dd/feature-parity.md:84,88,110,182,188,253,263,264,291,292,310,321,354,360,72` — add `wan`/`minimax-h3` to the taxonomy and matrix; fix `/api/chain/jobs` → `/api/chain-jobs` and `/api/chain/limits` → `/api/capabilities/chain-limits`; `ModelResidency { Gpu, Parked }`; repoint the six deleted component paths; `JobLifecycle` has four states; `sourceFit*` moved to `studio/lib/`.
 - [ ] `da/minimax-h3-authorization.md:83` — the authorized listing scope now covers three reviewed Turbo tags plus the download-only pinned tiers, not "the two compact Comfy manifests".
 - [ ] `da/wan-comfyui-parity-ledger.md:126` — drop `extend_video` from the R3 blanket refusal (per-checkpoint since #783).
 - [ ] `apps/mobile/README.md:510` *(unconfirmed — verify first)* — add the missing `mold.mobile.*` storage keys.
@@ -352,7 +332,7 @@ Mostly "mark superseded / repoint symbols". Low user risk, high agent-confusion 
 
 Abbreviations as declared above. `sev`: W=wrong, S=stale, M=missing, I=inconsistent, N=nit.
 
-### guide-core (23)
+### guide-core (22)
 
 | file:line | sev | claim → actual | fix |
 |---|---|---|---|
@@ -362,8 +342,7 @@ Abbreviations as declared above. `sev`: W=wrong, S=stale, M=missing, I=inconsist
 | wg/configuration.md:198 | S | `MOLD_SCHEDULER` 3 values → full enum | same |
 | wg/cli-reference.md:303 | S | `--queue-size` caps queued jobs → hydrated window only | reword; backlog uncapped |
 | wg/configuration.md:242 | S | `MOLD_QUEUE_SIZE` caps queue → hydrated window | same |
-| wg/configuration.md:454 | S | source `server/cli/backfill` → +`tui`,`unknown` | list 5 |
-| wg/configuration.md:450 | S | two surfaces write rows → three (TUI) | add TUI |
+| wg/configuration.md:454 | S | source `server/cli/backfill` → +`tui` (historical), `unknown` | list 5 |
 | wg/cli-reference.md:424 | M | key sections omit Scheduler/Queue/Generate | add 3 sections |
 | wg/configuration.md:15 | M | per-model DB list omits `default_frames`/`default_fps` | add both |
 | wg/cli-reference.md:48 | M | `--video-only` absent | add row |
@@ -432,26 +411,10 @@ Abbreviations as declared above. `sev`: W=wrong, S=stale, M=missing, I=inconsist
 | wg/feature-matrix.md:162 | I | unconditional CUDA on x64 Windows → published build is CPU-only | qualify |
 | wg/remote-workflows.md:39 | N | sample VERSION 0.14.0 → 0.26.0 | bump |
 
-### guide-mobile-tui (24)
+### guide-mobile (8)
 
 | file:line | sev | claim → actual | fix |
 |---|---|---|---|
-| wg/tui.md:427 | W | `d` = forget → `d` = toggle connection, `f` = forget | swap; add `f` |
-| wg/tui.md:573 | W | Left/Right cycle workspaces → Alt+Left/Right | fix |
-| wg/tui.md:298 | W | Ctrl+E end-of-line → bypassed to Expand | delete row |
-| wg/tui.md:285 | S | `~/.mold/prompt-history.jsonl` → mold.db, jsonl migrated once | fix |
-| wg/tui.md:608 | S | `~/.mold/tui-session.json` → mold.db settings/model_prefs | fix |
-| wg/tui.md:507 | S | Reduce Motion "upcoming" → consumed today | drop clause |
-| wg/tui.md:508 | S | Show Timeline "upcoming" → consumed today | drop clause |
-| wg/tui.md:399 | M | Models keys omit `r`, `/` | add |
-| wg/tui.md:400 | N | Enter = set default → select into Create | reword |
-| wg/tui.md:432 | M | Machines keys omit `l` | add |
-| wg/tui.md:107 | M | "six essentials" → +Duration/+Predict duration on video | qualify |
-| wg/tui.md:153 | M | Source image row omits `References` | add |
-| wg/tui.md:134 | S | Size cycles 5 computed ratios → model's authored presets first | reword |
-| wg/tui.md:96 | M | palette omits Connect a machine, Retry held prints | add |
-| wg/tui.md:51 | M | only `mold-server.*.log` → also `mold-tui.*.log` | add |
-| wg/tui.md:661 | S | "All features" omits webp,mp4,metrics,mdns,pulid | relabel or extend |
 | wg/iphone.md:422 | W | fresh install System appearance → Dark | fix |
 | wg/iphone.md:87 | S | asks each machine for a placement plan → telemetry-only for one-shots | reword |
 | wg/iphone.md:179 | W | canonical families omit 5:4 / 4:5 | add |
@@ -572,14 +535,13 @@ Abbreviations as declared above. `sev`: W=wrong, S=stale, M=missing, I=inconsist
 | ws/api/discord.md:30 | M | `/generate` omits `reference_1`/`reference_2` | document |
 | ws/index.md:66 | M | no Android feature card | add |
 
-### readme-docs (13)
+### readme-docs (12)
 
 | file:line | sev | claim → actual | fix |
 |---|---|---|---|
 | docs/ltx-2.5.md:79 | W | gate needs both true → `runtime_ready !== false` | reword |
 | docs/ltx-2.5.md:153 | M | CUDA qualification harness absent | add scripts + schema |
 | docs/design/README.md:3 | S | five surfaces, macOS desktop → six; +Linux/Windows | rewrite |
-| docs/design/README.md:18 | S | TUI "not yet implemented" → IA + Create form shipped | reword to restyle-only |
 | …/activity-history…md:436 | S | `routes_chain.rs` sets `chain_job_id: None` → `ChainRequest.ephemeral` | repoint |
 | …/activity-history…md:166 | S | `.slice(-3)` / `RAIL_SETTLED_KEEP` 3 → `GENERATION_HISTORY_LIMIT` 50 | fix |
 | …/activity-history…md:627 | S | amend route "in-flight" → registered | drop parenthetical |
@@ -624,7 +586,7 @@ Abbreviations as declared above. `sev`: W=wrong, S=stale, M=missing, I=inconsist
 | SKILL:1488 | M | env table omits 7 vars it cites elsewhere | add |
 | SKILL:1248 | M | no Lambda section (RunPod has one) | add |
 
-### app-docs (57)
+### app-docs (56)
 
 | file:line | sev | claim → actual | fix |
 |---|---|---|---|
@@ -647,7 +609,6 @@ Abbreviations as declared above. `sev`: W=wrong, S=stale, M=missing, I=inconsist
 | dd/feature-parity.md:253 | W | `POST /api/chain/jobs` → `/api/chain-jobs` | fix |
 | dd/feature-parity.md:264 | W | `GET /api/chain/limits` → `/api/capabilities/chain-limits` | fix |
 | dd/feature-parity.md:291 | W | `ModelResidency{Gpu,Parked,Unloaded}` → 2 variants | fix |
-| dd/feature-parity.md:360 | W | TUI views Generate/Gallery/Queue/Script → 5 workspaces | fix |
 | dd/feature-parity.md:103 | S | LTX-2 Metal correctness-only → performance-qualified | fix |
 | dd/feature-parity.md:84 | M | taxonomy omits wan, minimax-h3, ltx2-control(-camera) | add |
 | dd/feature-parity.md:88 | M | matrix omits wan, minimax-h3 rows | add |
@@ -662,7 +623,7 @@ Abbreviations as declared above. `sev`: W=wrong, S=stale, M=missing, I=inconsist
 | dd/feature-parity.md:310 | S | `PreferencesModal.vue` → `SettingsPage.vue` | fix |
 | dd/feature-parity.md:321 | S | 5 DB tables → 21 at SCHEMA_VERSION 31 | fix |
 | dd/feature-parity.md:306 | M | config.toml omits `config_version`,`[scheduler]`,`[gallery]`,`[queue]`,`[generate]` | add |
-| dd/feature-parity.md:307 | M | DB keys omit queue/generate/tui.* | add |
+| dd/feature-parity.md:307 | M | DB keys omit queue/generate | add |
 | dd/feature-parity.md:312 | I | mobile settings "only theme+family" → 4 fields | add 2 |
 | dd/feature-parity.md:354 | M | Discord commands omit `/identity`, `/sequence` | add |
 | dd/feature-parity.md:332 | M | serve/server omit `--no-mdns`, `discover` | add |
@@ -725,11 +686,10 @@ Abbreviations as declared above. `sev`: W=wrong, S=stale, M=missing, I=inconsist
 | da/multi-gpu-scheduler…md:1566 | S | `PlannedBatchPartition` / `BatchChild` do not exist | repoint |
 | da/minimax-h3-authorization.md:83 | M | scope "two compact manifests" → +3 Turbo tags +pinned-unrunnable tiers | extend |
 
-### claude-md (25)
+### claude-md (15)
 
 | file:line | sev | claim → actual | fix |
 |---|---|---|---|
-| CLAUDE.md:53 | W | mold-tui must not depend on catalog → it does, via mold-inference | fix doc or dep |
 | CLAUDE.md:115 | W | XDG `config.toml` → `$MOLD_HOME/config.toml` | fix |
 | CLAUDE.md:137 | S | LRU max 3 → default 3, range 1–16 | fix |
 | CLAUDE.md:34 | N | `check:frontend` "lint + typecheck + tests" → no lint | reword |
@@ -745,15 +705,6 @@ Abbreviations as declared above. `sev`: W=wrong, S=stale, M=missing, I=inconsist
 | cr/minimax-h3.md:7 | S | glob `mold-server/src/private_*` matches nothing | → mold-inference |
 | cr/minimax-h3.md:5 | N | `**/h3/**` matches no directory | drop |
 | cr/desktop.md:12 | W | `desktop-bun-lock` does not exist | → `frontend-bun-lock`; add `desktop-release` |
-| cr/tui.md:11 | M | accordion omits Identity photo section + Wan SampleShift | add |
-| tui-uat/SKILL.md:167 | W | `d` = forget → toggle; `f` = forget | swap |
-| tui-uat/SKILL.md:167 | S | `x` cancels queued only → also running | reword |
-| tui-uat/SKILL.md:167 | M | Machines keys omit l,g,[,],e | add |
-| tui-uat/SKILL.md:157 | W | Ctrl+R "cycle seed mode" → randomize seed (:106 correct) | fix |
-| tui-uat/SKILL.md:157 | M | omits Ctrl+E/Shift+E/S/T/P/N | add |
-| tui-uat/SKILL.md:161 | S | landmarks omit Identity photo, File under | add |
-| tui-uat/SKILL.md:161 | S | "6 essentials" → 7–8 on video models | qualify |
-| tui-uat/SKILL.md:252 | N | model_prefs column list omits profile/frames/fps/last_* | extend |
 
 ---
 

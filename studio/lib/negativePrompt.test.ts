@@ -14,7 +14,8 @@ import {
 const WAN_DEFAULT = "色调艳丽，过曝，静态，细节模糊不清";
 
 // These cases are the browser half of the cross-surface parity contract;
-// `crates/mold-tui/src/ui/create_form.rs` pins the identical set for the TUI.
+// `tests/fixtures/wan/surface-parity-v1.json` pins the identical set for the
+// Rust surfaces.
 describe("advertisedNegativeDefault", () => {
   it("normalizes the advertised row value and absence alike", () => {
     expect(

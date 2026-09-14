@@ -7,7 +7,7 @@ environment, or heavyweight runtime is required.
 The command line is the stable product foundation: core workflows accept
 predictable arguments, stdin, files, and environment variables; return useful
 stdout, stderr, exit status, and machine-readable output, and work the same for
-a person, shell script, CI job, or agent. Desktop, web, TUI, iPhone, REST/SSE,
+a person, shell script, CI job, or agent. Desktop, web, iPhone, REST/SSE,
 and MCP clients extend that engine rather than hiding it.
 
 ## How It Works
@@ -69,7 +69,7 @@ the `sh` side of the install pipe.
   and Dev, Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video (0.9.x, 2,
   2.3, and 2.5), Wan 2.1/2.2, and MiniMax H3
 - **txt2img, img2img, multimodal edit, inpainting, ControlNet**: all in one binary
-- **Image upscaling**: Real-ESRGAN super-resolution (2x/4x) via CLI, server API, or TUI
+- **Image upscaling**: Real-ESRGAN super-resolution (2x/4x) via CLI or server API
 - **Pipe-friendly**: `mold run "a cat" | viu -` just works
 - **Client-server**: run the GPU part on one machine, generate from anywhere
 - **Native apps**: a local/multi-host desktop studio plus remote-only iPhone

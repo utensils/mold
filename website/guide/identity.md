@@ -366,7 +366,7 @@ on both families:
   are gated on `GET /api/capabilities` → `identity`; see
   [Older servers](#older-servers).
 - Multiple photographs and true CFG are **CLI and API only** so far. The web,
-  desktop, iPhone, TUI, and Discord surfaces still offer a single photograph and
+  desktop, iPhone, and Discord surfaces still offer a single photograph and
   no true-CFG control, on either family.
 
 ## Removing it

@@ -35,7 +35,7 @@ describe("ModelTableRow", () => {
    * surface. Desktop rendered the raw `wan` slug because the label table lived
    * in `web/`; it is now shared through `@studio/lib/modelFamily`, where a test
    * pins it to `tests/fixtures/wan/surface-parity-v1.json` alongside the CLI
-   * and TUI readers.
+   * and Discord readers.
    */
   it("stacks the request id under a friendlier name, and hides it when they agree", () => {
     const stacked = mountRow({ name: "Photoreal — best quality", id: "flux-dev:q4" });

@@ -264,9 +264,9 @@ implied by `cuda`; drop it if you do not have them. Adding the kernels costs
 several minutes of `nvcc` on the first build.
 
 Optional features can be added to the same build, for example
-`--features cuda,flash-attn,preview,expand,discord,tui` or
-`--features metal,preview,expand,discord,tui` if you also want terminal preview,
-local prompt expansion, the Discord bot, or the interactive TUI.
+`--features cuda,flash-attn,preview,expand,discord` or
+`--features metal,preview,expand,discord` if you also want terminal preview,
+local prompt expansion, or the Discord bot.
 
 `mesh-texture` builds the pinned xatlas CPU UV unwrapper. Nix CLI and desktop
 recipes include it; source builds need a C++11 compiler. It does not by itself

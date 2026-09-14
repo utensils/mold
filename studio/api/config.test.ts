@@ -165,7 +165,6 @@ describe("canResetConfig", () => {
    * for wrongly shows a ↺ the host will refuse. */
   it("resets the DB-surface prefixes", () => {
     for (const key of [
-      "tui.theme",
       "expand.top_p",
       "generate.auto_tag_title",
       "gallery.trash_retention_days",

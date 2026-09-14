@@ -5,7 +5,7 @@
  *
  * `capabilities.reference_images` on the generation profile is the single
  * authority — `mold_core::generation_profile::reference_images_for_recipe`
- * answers it once for the server, admission, the CLI, the TUI and every GUI.
+ * answers it once for the server, admission, the CLI and every GUI.
  * Absence of the block means an OLDER SERVER, never a refusal (the
  * `supports_strength` lesson): a client falls back to the pre-profile family
  * sniff in `legacyRecipeRules.ts`.

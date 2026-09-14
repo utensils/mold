@@ -420,9 +420,8 @@ frame count above 1 keeps the video-only output contract.
 Wan checkpoints were tuned against a specific long Chinese negative prompt;
 mold applies it automatically whenever a request carries no negative at all.
 Every surface now shows it: `/api/models` advertises the tuned default per
-model (`default_negative_prompt`), the web/desktop/iPhone Negative field and
-the TUI's Advanced → Negative editor prefill it, and editing the text
-replaces it. Clearing the field (or passing `--no-negative` on the CLI, or
+model (`default_negative_prompt`), the web/desktop/iPhone Negative field
+prefills it, and editing the text replaces it. Clearing the field (or passing `--no-negative` on the CLI, or
 `negative_prompt: none` on Discord) sends an explicit empty negative, which
 the engine honors as a real empty uncond instead of re-applying the default.
 An untouched field stays absent on the wire, so older servers behave exactly

@@ -13,9 +13,6 @@ describe("tabForKey", () => {
     expect(tabForKey("models_dir")).toBe("engine");
     expect(tabForKey("server.port")).toBe("engine");
   });
-  it("skips tui keys", () => {
-    expect(tabForKey("tui.theme")).toBeNull();
-  });
   it("sends everything else to advanced", () => {
     expect(tabForKey("logging.level")).toBe("advanced");
     expect(tabForKey("runpod.api_key")).toBe("advanced");
@@ -41,19 +38,17 @@ describe("provenance", () => {
 });
 
 describe("groupConfigRows", () => {
-  it("buckets by tab, skips tui, and orders env → file → db → default then key", () => {
+  it("buckets by tab and orders env → file → db → default then key", () => {
     const rows: ConfigRow[] = [
       row("generate.steps", "db"),
       row("generate.width", "env"),
       row("expand.model", "file"),
-      row("tui.theme", "db"),
       row("models_dir", "file"),
       row("logging.level", "default"),
       row("runpod.token", "db"),
     ];
     const groups = groupConfigRows(rows);
 
-    // tui skipped entirely.
     expect(groups.generation.map((r) => r.key)).toEqual([
       "generate.width", // env first
       "expand.model", // file next

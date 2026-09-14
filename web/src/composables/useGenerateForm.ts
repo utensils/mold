@@ -1184,8 +1184,8 @@ export interface UseGenerateForm {
   isVideoFamily: (family: string) => boolean;
   supportsNegativePrompt: (family: string) => boolean;
   supportsScheduler: (family: string) => boolean;
-  /** Mirrors `mold-tui/src/model_info.rs::capabilities_for_family.supports_lora`
-   * and the server-side `require_lora_capable_family` gate. Drives the
+  /** Mirrors `mold_core::validation::LORA_CAPABLE_FAMILIES` and the
+   * server-side `require_lora_capable_family` gate. Drives the
    * conditional render of `<LoraPicker>` in the SettingsModal. */
   supportsLora: (family: string) => boolean;
 }

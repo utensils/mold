@@ -45,7 +45,7 @@
 }
 
 /* ============================================================
-   Rules the GUI must keep (they differ from the TUI)
+   Rules the GUI must keep
    ------------------------------------------------------------
    · Radius: --mold-radius-1 inner rows, --mold-radius-2 controls
      and chips, --mold-radius-3 window and dialog. Never above 6px,
@@ -58,7 +58,7 @@
    · Icons: 24×24, fill:none, stroke:currentColor, stroke-width:2,
      round caps/joins. Prefer assets/icons/*.svg; substitute from
      Lucide and say so. No filled or duotone glyphs.
-   · Unicode glyph vocabulary carries over from the TUI —
+   · Unicode glyph vocabulary shared with the CLI —
      ✓ done · ★ loaded · ⠂ working · • info · ! warning · ↓ download ·
      ▼ dropdown — used inline in mono, never redrawn as SVG.
    · Numbers are mono with tabular figures; prose is sans.

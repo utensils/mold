@@ -276,7 +276,7 @@ UI attribution, AI-generation label, provenance field, downstream contract,
 reporting path, safeguard, geolocation rule, or periodic in-product review is
 required. Existing Mold authentication, request validation, capability
 admission, safety settings, and ordinary abuse/operations controls continue to
-apply uniformly to CLI, server/API, Discord, desktop, web, iPhone, TUI, gallery,
+apply uniformly to CLI, server/API, Discord, desktop, web, iPhone, gallery,
 remote-client, shared-server, and hosted use. No surface requires a separate H3
 acceptable-use control; the README and H3 user guide are sufficient.
 

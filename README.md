@@ -10,7 +10,7 @@
 [![REST + SSE](https://img.shields.io/badge/API-REST_%2B_SSE-16a34a.svg)](https://utensils.io/mold/api/)
 
 Local AI image and video generation on your own GPU. Mold supports NVIDIA CUDA
-and Apple Silicon Metal, with a CLI, native desktop app, web studio, TUI, mobile
+and Apple Silicon Metal, with a CLI, native desktop app, web studio, mobile
 companions, Discord bot, and REST/SSE API built on the same engine.
 
 **[Documentation](https://utensils.io/mold/)** ·
@@ -153,14 +153,6 @@ mold run "a cat" --preview
   <img src="docs/terminal-preview-example.png" alt="Generating the Mold logo with an inline terminal preview" width="720" />
   <br/>
   <em>Inline image generation in Ghostty with <code>--preview</code></em>
-</p>
-
-Or open the keyboard-first terminal interface with `mold tui`:
-
-<p align="center">
-  <img src="website/public/gallery/tui-generate.png" alt="Mold TUI Create workspace with image preview" width="720" />
-  <br/>
-  <em>The TUI Create workspace with a native terminal image preview</em>
 </p>
 
 Run the engine where the GPU lives and connect from another machine:

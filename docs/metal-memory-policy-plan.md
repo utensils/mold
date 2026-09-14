@@ -163,7 +163,7 @@ force/unsafe bypass is added. Automated tests never use real /Library paths.
       authority and shared Studio contracts; render effective limit and available
       headroom in existing GPU/device details on affected clients. Older hosts omit
       the section; remote clients show host values, never local system values.
-      Keep CLI/TUI/MCP host inspection consistent where they project that authority.
+      Keep CLI/MCP host inspection consistent where they project that authority.
 - [x] M6: Update one changelog fragment, README, CLAUDE.md, CLI skill renderer,
       website CLI/performance/API docs and affected app docs. All examples parse.
 - [x] M7: Run scoped Nix tests/checks, CPU and Metal compilation, applicable local

@@ -3,7 +3,7 @@
  * capability fixture (#806).
  *
  * `tests/fixtures/wan/surface-parity-v1.json` states Wan's cross-surface
- * expectations once, and Rust tests in mold-core, the CLI, Discord, and the TUI
+ * expectations once, and Rust tests in mold-core, the CLI, and Discord
  * read it so a drift in any one surface fails CI. The fixture's own comment
  * claimed a Studio counterpart existed; it did not, which left the three
  * surfaces that share `studio/` as the only ones free to disagree with it —

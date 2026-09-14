@@ -149,7 +149,7 @@ is the install/repair surface for missing models and components.
   - If seed mode is random, template recreation is not 1:1; if static, it
     should be reproducible when all other inputs are available.
   - Decide whether templates are web-local localStorage, DB-backed and
-    profile-scoped, or shared across CLI/TUI/web.
+    profile-scoped, or shared across CLI/web.
   - Likely files: `web/src/composables/useGenerateForm.ts`, `web/src/types.ts`,
     `web/src/components/GenerateParamsPanel.vue`; DB/API files if persisted
     server-side.
@@ -338,7 +338,7 @@ is the install/repair surface for missing models and components.
   `cd web && bun run fmt:check && bun run test && bun run build`.
 - Rust tests for any API/server contract changes.
 - `cargo fmt --all -- --check`.
-- `cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4`.
+- `cargo check -p mold-ai --features preview,discord,expand,webp,mp4`.
 - `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`
   for broad/backend slices.
 - Website docs verification if API or user-facing behavior changes.

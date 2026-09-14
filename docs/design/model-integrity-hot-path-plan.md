@@ -137,7 +137,7 @@ hits. Changing just this label or making the cache more durable is insufficient.
   scheduler responsiveness. Revisit cancellation/flight code only as needed.
 - Dependency preparation: accept complete cached files regardless of digest
   cache warmth; fresh downloads still verify before becoming available.
-- Trace forced-local CLI, TUI local mode, desktop native/local execution,
+- Trace forced-local CLI, desktop native/local execution,
   remote server, batch children, authored/ephemeral chains, expansion and upscale
   utility acquisition. Shared APIs should enforce the rule; add targeted tests
   at distinct doors, not duplicate implementations per surface.

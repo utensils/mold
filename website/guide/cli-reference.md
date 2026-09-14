@@ -344,13 +344,12 @@ documents.
 ## `mold library`
 
 Browse and organize existing prints on the server selected by `MOLD_HOST`
-(`MOLD_API_KEY` is sent when configured). Non-grid commands never fall back to
+(`MOLD_API_KEY` is sent when configured). These commands never fall back to
 direct filesystem access.
 
 ```bash
 mold library list [--query TEXT] [--tag TAG] [--tag TAG]... [--collection NAME-OR-SLUG] [--favorite] [--format FORMAT] [--limit N] [--offset N] [--json]
 mold library show <FILENAME> [--json | --preview]
-mold library grid [--host URL | --local]
 mold library title <FILENAME> <TEXT>
 mold library title <FILENAME> --clear
 mold library favorite <FILENAME>...
@@ -420,10 +419,8 @@ wants its API key. `--output -` writes the bytes to stdout; with no
 
 `mold library show --preview` reuses the same inline renderer as `mold run
 --preview`; video entries prefer their animated preview and fall back to the
-thumbnail. `mold library grid [--host URL | --local]` opens the existing TUI
-directly on its protocol-aware Library grid and carries `MOLD_API_KEY` only for
-that process. An unreachable host or rejected gallery credential is an error;
-the strict grid never switches to local files.
+thumbnail. An unreachable host or rejected gallery credential is an error;
+`mold library` never switches to local files.
 
 ## `mold trash`
 
@@ -747,23 +744,11 @@ mold config edit
 
 `config.toml` owns bootstrap paths, ports, credentials, logging, and model path
 overrides. The SQLite settings DB owns user preferences and per-model
-generation defaults. The TUI's own `tui.*` preferences are DB-backed too, but
-are written by the TUI rather than listed in the static key registry.
+generation defaults.
 `umt5_variant` is registered as a key name only: it has no read/write arm and no
 DB slot ([#778](https://github.com/utensils/mold/issues/778)), and it is
 stripped whenever mold rewrites `config.toml`, so set
 the Wan UMT5 encoder variant with `MOLD_UMT5_VARIANT` instead.
-
-## `mold tui`
-
-Launch the terminal UI.
-
-```bash
-mold tui [--host URL] [--local]
-```
-
-See [Terminal UI](/guide/tui) for views, keybindings, script mode, and
-settings persistence.
 
 ## `mold discord`
 
@@ -903,15 +888,15 @@ The CLI does not need a daemon for work whose authority already exists on disk,
 in the local runtime, or in a named cloud API. Server-first commands fall back
 only when doing so preserves the target the user asked about.
 
-| Behavior without a local server    | Commands                                                                                                              | Result                                                                                                                                |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Fully standalone, local files      | `list`, `info`, `default`, `config`, `stats`, `clean`, `rm`, `chain validate`                                         | Reads or changes `MOLD_HOME` directly                                                                                                 |
-| Fully standalone, local runtime    | `gpu list`, `gpu enable`, `gpu disable`, `ps`, `unload`                                                               | Lists local devices, persists next-start device preferences, reports processes, or completes an already-empty unload                  |
-| Server-first with local execution  | `run`, `pull`, `upscale`                                                                                              | Uses the server when reachable, otherwise executes or downloads locally                                                               |
-| Standalone prompt tooling          | `expand`, `remix`                                                                                                     | Uses the configured local expansion model or external API backend                                                                     |
-| Standalone lifecycle/discovery     | `serve`, `server start`, `server status`, `server stop`, `server discover`                                            | Starts or inspects processes, or browses mDNS directly; `server status` reports on `--host`/`MOLD_HOST` when one names another server |
-| Standalone utility/network clients | `version`, `update`, `completions`, `skill`, `runpod`, `lambda`                                                       | Uses embedded data, GitHub, agent paths, or the explicitly named cloud API                                                            |
-| Requires a live Mold server        | `jobs`, `queue`, `library` (except `library grid --local`), `trash`, `mcp`, `discord`; `tui` unless `--local` is used | These operate on server-owned queue, gallery, tool, or UI state and do not substitute a different local authority                     |
+| Behavior without a local server    | Commands                                                                      | Result                                                                                                                                |
+| ---------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Fully standalone, local files      | `list`, `info`, `default`, `config`, `stats`, `clean`, `rm`, `chain validate` | Reads or changes `MOLD_HOME` directly                                                                                                 |
+| Fully standalone, local runtime    | `gpu list`, `gpu enable`, `gpu disable`, `ps`, `unload`                       | Lists local devices, persists next-start device preferences, reports processes, or completes an already-empty unload                  |
+| Server-first with local execution  | `run`, `pull`, `upscale`                                                      | Uses the server when reachable, otherwise executes or downloads locally                                                               |
+| Standalone prompt tooling          | `expand`, `remix`                                                             | Uses the configured local expansion model or external API backend                                                                     |
+| Standalone lifecycle/discovery     | `serve`, `server start`, `server status`, `server stop`, `server discover`    | Starts or inspects processes, or browses mDNS directly; `server status` reports on `--host`/`MOLD_HOST` when one names another server |
+| Standalone utility/network clients | `version`, `update`, `completions`, `skill`, `runpod`, `lambda`               | Uses embedded data, GitHub, agent paths, or the explicitly named cloud API                                                            |
+| Requires a live Mold server        | `jobs`, `queue`, `library`, `trash`, `mcp`, `discord`                         | These operate on server-owned queue, gallery, tool, or UI state and do not substitute a different local authority                     |
 
 An unreachable non-loopback `MOLD_HOST` remains an error for host-administration
 commands. In particular, `gpu`, `ps`, and `unload` do not answer with this

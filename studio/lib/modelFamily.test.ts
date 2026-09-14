@@ -2,7 +2,8 @@
  * The Studio half of #806's "present the family as **Wan Video** everywhere".
  *
  * `tests/fixtures/wan/surface-parity-v1.json` states the label once; the CLI
- * (`mold-cli/src/ui.rs`) and TUI (`mold-tui/src/ui/models.rs`) already read it.
+ * (`mold-cli/src/ui.rs`) and Discord (`mold-discord/src/commands/generate.rs`)
+ * already read it.
  * Web, desktop, and iPhone share this module, so this is the third reader —
  * and the reason the table moved out of `web/`, where desktop and iPhone could
  * not see it and rendered the raw `wan` slug instead.

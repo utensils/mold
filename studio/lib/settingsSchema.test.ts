@@ -86,10 +86,6 @@ describe("sectionForConfigKey", () => {
     );
   });
 
-  it("keeps the TUI's own preferences out of a graphical surface", () => {
-    expect(sectionForConfigKey("tui.theme")).toBeNull();
-  });
-
   it("sends a curated key to its section and an unknown one to Advanced", () => {
     expect(sectionForConfigKey("expand.enabled")).toBe("expansion");
     expect(sectionForConfigKey("runpod.api_key")).toBe("cloud");
@@ -318,10 +314,6 @@ describe("settings schema", () => {
 
   it("unknown keys fall through to advanced — a key newer than the client must surface", () => {
     expect(sectionForConfigKey("some.future.key")).toBe("advanced");
-  });
-
-  it("tui keys never surface in a desktop app", () => {
-    expect(sectionForConfigKey("tui.theme")).toBeNull();
   });
 
   it("every env knob names a real MOLD_ variable and needs a restart", () => {

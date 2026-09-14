@@ -1,5 +1,5 @@
 /*
- * Mold Studio theme contract — shared by desktop, web, the phone and the TUI.
+ * Mold Studio theme contract — shared by desktop, web and the phone.
  *
  * A theme is an IDENTITY: its typography, its corner radii, its density and its
  * accent hue. Light-vs-dark is a TONE that identity is rendered in, not a second
@@ -15,7 +15,7 @@
  * A surface persists ONE ThemeId plus a `matchSystem` flag. Pickers bind to
  * `toneChoice` / `applyToneChoice` and show a System · Light · Dark control; a
  * theme's own label never carries a tone. The Rust twin of this file is
- * desktop/src-tauri/src/settings.rs; the TUI's is crates/mold-tui/src/ui/theme.rs.
+ * desktop/src-tauri/src/settings.rs.
  */
 
 export type ThemeFamilyId =

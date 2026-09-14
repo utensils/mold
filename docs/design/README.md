@@ -2,9 +2,8 @@
 
 The canonical design source for mold's graphical surfaces: the macOS / Linux /
 Windows desktop app, the web studio, and the iPhone / Android companion. The
-terminal TUI keeps its own mockup (`mold-tui-proposed.html`) and is out of this
-package's scope. This directory is the September 2026 redesign package; the
-earlier spec (`mold-studio-spec.html` v0.14) and the archived prototype it grew
+CLI is out of this package's scope. This directory is the September 2026
+redesign package; the earlier spec (`mold-studio-spec.html` v0.14) and the archived prototype it grew
 from are gone — the reference implementations below are the source of truth,
 and the shipped shared components are authoritative where a mock differs.
 
@@ -31,7 +30,7 @@ and the shipped shared components are authoritative where a mock differs.
 
 ## 1 · Audience
 
-The TUI is for people who already live in a terminal. The GUI is for people who
+The CLI is for people who already live in a terminal. The GUI is for people who
 have never heard of a diffusion model. That single sentence decides most of the
 design: jargon is demoted to secondary mono text, never removed, and every
 progress state is written as a sentence a first-timer can act on.

@@ -2,7 +2,7 @@
 
 Mold runs the official LTX-2.5 split checkpoints natively through Candle. The
 same request and capability contract serves the CLI, HTTP API, web, desktop,
-TUI, and the shared iPhone/Android surface. Apple Metal qualification covers
+and the shared iPhone/Android surface. Apple Metal qualification covers
 the compact distilled INT8 ConvRot pack plus the Q3_K_M, Q4_K_M, and Q6 GGUF
 tiers. CUDA has a separate completed qualification campaign on NVIDIA hosts.
 

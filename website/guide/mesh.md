@@ -140,7 +140,7 @@ mold library export chair.glb --format ply --output -    # to stdout
 
 The gallery file is never renamed or replaced — an export writes a copy where
 you asked for it. The same conversions are available on every surface: the API
-(`POST /api/gallery/export/:filename`), the TUI's export picker, the
+(`POST /api/gallery/export/:filename`), `mold library export`, the
 `export_mesh` MCP tool, and the apps' **Export as…** menu. A host
 advertises what it can convert on `/api/capabilities.mesh.export_formats`.
 
@@ -303,7 +303,7 @@ artifacts it retained — settled only, so cancel or wait first.
 ## From the apps
 
 The web SPA, the desktop app, and the iPhone app all generate and view meshes
-now — not only the CLI, TUI, and Discord.
+now — not only the CLI and Discord.
 
 Web and desktop include a dedicated **3-D Studio** at `/create/3d`. **Text to
 3-D** first renders a source image with any installed image model, then removes
@@ -382,54 +382,6 @@ workflow state rather than carrying a draft or job identity across hosts.
    origin fields sit inside the swipe-up sheet under the format picker,
    never floating over the viewport.
 
-## In the TUI
-
-Pick a Hunyuan3D model in `mold tui`'s Create form and the form reshapes
-itself from the model's generation profile rather than from its name:
-
-- **Source image** is the conditioning row for ordinary single-view models.
-  A multiview recipe also shows **Named views**, edited as semantic
-  `front=/a.png; left=/b.jpg; back=/c.png; right=/d.png` slots. Any non-empty
-  subset is accepted, the TUI orders it front/left/back/right before sending,
-  and choosing one form clears the other. Strength, Mask and the
-  Negative prompt disappear because the profile advertises no strength
-  (`supports_strength` is false), a hidden mask, and no negative prompt.
-- **Advanced ▸ 3-D mesh** appears with four rows — **Octree** (`◀▶` walks
-  the advertised allowlist), **Iso threshold** (0.05 per press inside the
-  advertised range) and **Target faces** (10 000 per press; stepping below
-  the minimum turns decimation off), and **Remove background** (Auto, On, or
-  Off from the advertised profile). Auto preserves useful supplied alpha and
-  runs the pinned U²-Net pre-stage for opaque inputs. Each row reads `default` until touched,
-  showing the profile's own default, and an untouched row sends nothing so
-  the recipe's defaults apply.
-- **Format** is pinned to `glb`; `◀▶` cannot walk it onto a raster container
-  the server would only pin straight back.
-- **Generate** submits with an empty prompt, because the profile advertises
-  `prompt.mode: ignored`; the same gate still refuses an empty prompt on a
-  text model.
-
-A finished mesh saves `mold-<model>-<timestamp>.glb` beside your other
-prints, caches its poster where the Library looks for thumbnails, shows the
-poster in the Preview panel, and captions it with
-`49,152 tris · 24,576 verts · 1.00×0.80×0.60`.
-
-In the **Library**, a `.glb` tile shows its poster (fetched from the owning
-machine's thumbnail route; never the geometry through a raster decoder), and
-`x` opens an export picker offering OBJ, ZIP, STL, PLY and the turntable formats
-(GIF, APNG, and WebP on a build that encodes it) — the list the owning
-machine advertises on `capabilities.mesh.export_formats`, or the same set
-from the in-process writer for a print that lives only on this machine,
-rendered through the same code the server uses. The picker has no knobs:
-a turntable renders at the defaults (one full turn, 36 frames, 512 px,
-10 fps, looping) and OBJ/ZIP/STL/PLY export at their own per-format defaults
-(the [Print-ready exports](#print-ready-exports) table above) — its hint
-says so, pointing at `mold library export` for bounce, once, a different
-size, or a different axis and origin. A local export and the equivalent
-served one apply the identical defaults, so the bytes are the same either
-way. The converted copy is written beside your other saves
-as `<print>.<ext>` (an APNG as `.png`) and its path is shown when it lands;
-the gallery file is untouched.
-
 ## In Discord
 
 `/mesh` renders a Hunyuan3D mesh. Attach `source` for a single-view model, or
@@ -451,8 +403,8 @@ to fetch the `.glb` from the gallery.
 ## In the gallery
 
 A mesh cannot be decoded by a raster thumbnailer, so mold renders a **poster
-PNG** at save time and stores it in the shared thumbnail cache. Grids and the
-TUI cell show that poster; only the lightbox loads the geometry itself. If a
+PNG** at save time and stores it in the shared thumbnail cache. Library grids
+show that poster; only the lightbox loads the geometry itself. If a
 poster is missing, surfaces fall back to a placeholder rather than trying to
 draw glTF bytes as a picture.
 

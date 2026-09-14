@@ -219,8 +219,7 @@ complete workflows.
   every surface prefills it, and clearing the field (or `--no-negative`)
   sends an explicit empty negative instead.
 - `qwen-image-edit` is a distinct edit family, not a standard img2img mode.
-- The CLI and API support multiple ordered input images for `qwen-image-edit`;
-  the TUI keeps the edit flow to a single source image in v1.
+- The CLI and API support multiple ordered input images for `qwen-image-edit`.
 - `qwen-image-edit` can use quantized `--qwen2-variant` language weights while
   still loading the Qwen2.5-VL vision tower for image conditioning.
 - LTX-2 now wires `x2` spatial upscaling across the family, `x1.5` spatial
@@ -233,20 +232,18 @@ complete workflows.
   artifact that lands in the gallery with a rendered waveform tile.
 - LTX-2's multimodal guider exposes optional per-request overrides for STG
   scale/blocks, CFG-rescale, cross-modality scale, and the guidance skip
-  stride on the CLI and in web, desktop, iPhone, and TUI Advanced video controls. They apply to the
+  stride on the CLI and in the web, desktop, and iPhone Advanced video controls. They apply to the
   `two-stage`, `two-stage-hq`, `keyframe`, `a2-vid`, and `t2a` pipelines; unset
-  fields keep each pipeline's own constants. The TUI uses bounded keyboard
-  cycles for the numeric guidance values and validates comma-separated STG
-  blocks before closing the editor; untouched values remain absent from the
-  request. Its Video accordion also exposes the shared `enable_audio` contract
-  as a checkpoint-aware default/on/off choice, family-gated
+  fields keep each pipeline's own constants; untouched values remain absent
+  from the request. The apps' Video accordion also exposes the shared
+  `enable_audio` contract as a checkpoint-aware default/on/off choice, family-gated
   `spatial_upscale` / `temporal_upscale` native modes, and the source-free
   `one-stage`, `two-stage`, `two-stage-hq`, and `distilled` recipes while Auto
   leaves `pipeline` absent. Conditioning-file modes, the audio-only `t2a`
   pipeline, and chain-job administration remain a separate tracked gap.
 - Completed LTX-2 videos report the runtime-resolved pipeline separately from
-  the requested Auto/explicit choice. Server, CLI, and TUI saves preserve that
-  response in gallery metadata, and web, desktop, iPhone, and TUI Library
+  the requested Auto/explicit choice. Server and CLI saves preserve that
+  response in gallery metadata, and the web, desktop, and iPhone Library
   details show it when present; older and non-LTX prints simply omit the row.
 - LTX-2 is performance-qualified on CUDA and Apple Metal (19B/22B distilled
   FP8 tiers, checkpoint-backed); CPU stays correctness-only.
@@ -264,8 +261,7 @@ complete workflows.
   `collection`, seeded onto the gallery row once, as it is created. The CLI
   spells it `mold run --title/--tag/--collection` (with `--no-auto-tag` and
   the `generate.auto_tag_title` preference); web, desktop, and iPhone Create
-  render a capability-gated **File under** group, and the TUI keeps it as the
-  last Create ▸ Advanced section. A scripted sequence files the stitched print
+  render a capability-gated **File under** group. A scripted sequence files the stitched print
   only, batch and prepared siblings inherit their parent's filing, and a filing the
   host cannot apply is dropped and reported on `x-mold-request-warning`
   rather than failing the render. See

@@ -5,8 +5,9 @@
  * engine substitutes whenever a request carries no `negative_prompt`).
  *
  * Web, desktop, and iPhone derive their Negative-control behavior from these
- * helpers; `crates/mold-tui/src/ui/create_form.rs` mirrors them exactly for
- * the terminal surface. The shared tri-state (#787):
+ * helpers; the CLI's `resolve_effective_negative_prompt`
+ * (`crates/mold-cli/src/commands/run.rs`) is the terminal half of the same
+ * contract. The shared tri-state (#787):
  *
  * - **untouched** — the control shows the advertised default and the wire
  *   field stays ABSENT, so the server applies the same default and older
@@ -29,9 +30,8 @@ export type NegativeDefaultModel = {
  * Wan's tuned default negative — the engine's absence fallback
  * (`mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT`; upstream
  * `Wan2.2/wan/configs/shared_config.py`). This is the browser-side authority
- * for the family constant; the TUI parity test in
- * `crates/mold-tui/src/ui/create_form.rs` pins it byte-for-byte against the
- * Rust constant so the two can never drift.
+ * for the family constant; `tests/fixtures/wan/surface-parity-v1.json` pins
+ * it byte-for-byte against the Rust constant so the two can never drift.
  */
 export const WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT =
   "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
@@ -43,8 +43,8 @@ export const WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT =
  * absence — reconciling the same wan model against an older server that
  * omits `default_negative_prompt` would otherwise collapse the stored
  * default to `""`, at which point an explicit `""` opt-out serializes as
- * absence and silently re-enables the engine fallback. Mirrors
- * `create_form::effective_negative_default` on the TUI.
+ * absence and silently re-enables the engine fallback. Mirrors the CLI's
+ * `resolve_effective_negative_prompt`.
  */
 export function effectiveNegativeDefault(
   model: NegativeDefaultModel | null | undefined,

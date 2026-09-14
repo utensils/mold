@@ -1086,10 +1086,9 @@ export interface LoraSelection {
 export { MAX_LORA_STACK } from "@studio/lib/generationCapabilities";
 
 /// Families whose engines actually merge LoRA adapters today. Mirrors
-/// `crates/mold-tui/src/model_info.rs::capabilities_for_family` and the
-/// server-side gate in `mold-core/src/validation.rs`. Keep all three in
-/// sync — divergence shows up as a UI that lets the user pick a LoRA the
-/// server then rejects.
+/// `mold_core::validation::LORA_CAPABLE_FAMILIES` and its
+/// `require_lora_capable_family` gate. Keep both in sync — divergence shows
+/// up as a UI that lets the user pick a LoRA the server then rejects.
 export { LORA_CAPABLE_FAMILIES } from "@studio/lib/generationCapabilities";
 
 /** Advanced overrides for the LTX-2 multimodal guider, and their form-side

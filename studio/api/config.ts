@@ -141,7 +141,6 @@ const DB_FLAT_KEYS = [
 ];
 
 const DB_PREFIXES = [
-  "tui.",
   "expand.",
   "generate.",
   "scheduler.",

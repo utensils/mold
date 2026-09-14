@@ -711,7 +711,7 @@ which the scheduler's learned phase timings observe rather than predict.
 
 ## Not yet built
 
-- Multiple photographs and true CFG on the web, desktop, iPhone, TUI, and
+- Multiple photographs and true CFG on the web, desktop, iPhone, and
   Discord surfaces. #1226 shipped the contract, the runtime, and the CLI only.
   SDXL gets both for free once those surfaces gate on `supports_identity`
   rather than a hard-coded FLUX check, since neither is family-specific.

@@ -9,7 +9,7 @@ than answered from an empty prompt.
 
 **No prompt is needed anywhere.** The model's generation profile says so, and
 every surface reads it, so `mold run hunyuan3d-mini-turbo --image chair.png` is
-a complete request from the CLI, the API, the TUI, Discord and the apps alike.
+a complete request from the CLI, the API, Discord and the apps alike.
 
 **Available in the web SPA, the desktop app, and the iPhone app**, not only
 the CLI. Picking this model in Create reshapes the form from its generation
@@ -264,7 +264,7 @@ Shipping builds remove opaque image backgrounds with a pinned pure-Rust U²-Net
 pre-stage before Hunyuan3D reads the image. `--matting auto` preserves a useful
 existing alpha channel and processes an opaque input; `on` recomputes the mask;
 `off` keeps the pixels unchanged. The same choices appear in web, desktop,
-mobile, TUI, Discord, and MCP clients when the host advertises them. For a
+mobile, Discord, and MCP clients when the host advertises them. For a
 durable gallery render, mold retains the exact processed cutouts as encrypted,
 authenticated downloads alongside the original inputs; they survive restart
 and follow the print's permanent-deletion lifecycle, but cannot be selected

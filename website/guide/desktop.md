@@ -348,7 +348,7 @@ the phone keep Create / Library / Models until their own redesign.
   destination, preserves the old root, and relaunches only after the new
   location is ready. You can instead use the selected location as-is, and an
   unavailable external drive appears as a recoverable offline state. The choice
-  is stored outside the selected root, so the CLI, TUI, server, and desktop all
+  is stored outside the selected root, so the CLI, server, and desktop all
   resolve the same root (an explicit `MOLD_HOME` env override still wins).
   About credits core contributors James Brink and Jeffrey Dilley in both the
   Settings workspace and the native app menu.

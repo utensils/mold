@@ -137,8 +137,7 @@ async function loadConfig(): Promise<boolean> {
   try {
     const rows = await listConfig(originTarget.value);
     if (sequence !== configSequence) return false;
-    // `tui.*` belongs to the terminal app, not to a graphical surface.
-    configRows.value = rows.filter((row) => !row.key.startsWith("tui."));
+    configRows.value = rows;
     configError.value = "";
     configLoaded.value = true;
     return true;
