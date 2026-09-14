@@ -369,9 +369,13 @@ fi
 if grep -Fq 'build-nix-distribution:' "$repo_root/$release"; then
   fail "$release must not contain blocking Nix distribution builds"
 fi
-require_text "flake.nix" 'extra-substituters = [ "https://mold.cachix.org" ];'
+require_text "flake.nix" '"https://mold.cachix.org"'
 require_text "flake.nix" \
   '"mold.cachix.org-1:9HBc/bEXDdpbxMjOwpaIDpjZqBh9JYg0h5Fipm+D8m4="'
+# The nixpkgs CUDA team cache (cuda-maintainers.cachix.org is gone).
+require_text "flake.nix" '"https://cache.nixos-cuda.org"'
+require_text "flake.nix" \
+  '"cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M="'
 require_release_job_need "publish-aur" "release-native"
 require_release_job_text "release-latest" \
   'Include latest completed Windows artifacts'
