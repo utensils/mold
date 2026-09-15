@@ -137,6 +137,14 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: android-actions/setup-android@v3
+        with:
+          # The action's default `packages` is `tools platform-tools`, and
+          # `tools` is the obsolete SDK Tools package Google removed from the
+          # repository — `sdkmanager tools` now fails with "Failed to find
+          # package 'tools'" and takes the whole job down before anything
+          # compiles. Install nothing here; the step below installs the real
+          # toolchain, platform-tools included.
+          packages: ""
       - name: Install Android toolchain
         run: |
           sdkmanager \
