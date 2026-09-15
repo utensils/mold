@@ -615,12 +615,7 @@ function resetSettings() {
         <div class="ms-group-label uppercase">Start from a photo</div>
         <!-- `titled`: this label IS the group's heading, so the wells drop a
              legend that would only read it back. -->
-        <SourceImageWell
-          ref="sourceWell"
-          :form="form"
-          :selected-model="contractModel"
-          titled
-        />
+        <SourceImageWell ref="sourceWell" :form="form" :selected-model="contractModel" titled />
         <div v-if="maskDoorAvailable || showIdentity" class="ms-doors">
           <button
             v-if="maskDoorAvailable"

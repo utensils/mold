@@ -246,9 +246,7 @@ describe("InstalledTab shelf", () => {
     // name · good for · size · speed · machine · actions, with the two text
     // columns elastic and the rest fixed. The description grows, and it never
     // starts narrower than the 7.5rem it used to be pinned at.
-    expect(axis!.trim()).toBe(
-      "minmax(0, 1fr) minmax(7.5rem, 1.2fr) 12rem 4.5rem 8rem 10.5rem",
-    );
+    expect(axis!.trim()).toBe("minmax(0, 1fr) minmax(7.5rem, 1.2fr) 12rem 4.5rem 8rem 10.5rem");
   });
 
   it("names a family group once, in words, never a second wire slug per row", async () => {

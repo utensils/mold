@@ -1204,7 +1204,9 @@ onBeforeUnmount(() => {
               >
                 <span :style="{ width: `${percent(gpu.vram_used, gpu.vram_total)}%` }" />
               </div>
-              <strong>{{ formatMemoryGB(gpu.vram_used) }}/{{ formatMemoryGB(gpu.vram_total) }}</strong>
+              <strong
+                >{{ formatMemoryGB(gpu.vram_used) }}/{{ formatMemoryGB(gpu.vram_total) }}</strong
+              >
             </div>
           </template>
           <div v-if="cpu" class="telemetry-meter-row">
