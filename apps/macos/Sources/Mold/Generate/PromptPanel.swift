@@ -61,7 +61,10 @@ struct PromptPanel: View {
                             .lineLimit(1...3)
                     }
                 }
-                if recipe.capabilities.sourceImage?.isSupported == true {
+                if let references = recipe.capabilities.referenceImages,
+                   references.mode.isVisible {
+                    ReferenceStrip(capability: references, draft: $draft)
+                } else if recipe.capabilities.sourceImage?.isSupported == true {
                     SourceImageWell(draft: $draft)
                 }
             }

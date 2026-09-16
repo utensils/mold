@@ -205,3 +205,69 @@ private func metadata(_ json: String) -> OutputMetadata {
     #expect(draft.width == 1024)
     #expect(draft.height == 1024)
 }
+
+private func referenceRecipe(_ mode: ControlMode, relation: ReferenceSourceRelation,
+                             maxCount: Int? = 2,
+                             source: SourceImageCapability? = .optional) -> GenerationRecipe {
+    GenerationRecipe(
+        id: "r", label: "R",
+        defaults: GenerationDefaults(width: 1024, height: 1024, steps: 20, guidance: 3.5,
+                                     frames: nil, fps: nil, negativePrompt: nil),
+        resolution: ResolutionProfile(domain: .dynamic, alignment: 16, minWidth: 64,
+                                      minHeight: 64, maxPixels: nil, maxAxisPixels: nil,
+                                      offBucket: nil, aspectGroups: nil),
+        steps: wide, guidance: guidance, temporal: nil,
+        capabilities: RecipeCapabilities(
+            prompt: nil, negativePrompt: nil, output: nil,
+            referenceImages: ReferenceImagesCapability(
+                mode: mode, required: false, maxCount: maxCount, primaryIsTarget: false,
+                sourceRelation: relation, reason: nil, weight: nil),
+            supportsStrength: true, supportsLora: nil, supportsIdentity: nil,
+            supportsSequence: nil, supportsExtend: nil, supportsAudio: nil,
+            sourceImage: source))
+}
+
+@Test func referencesAreDroppedWhereTheRecipeHidesThem() {
+    var draft = RenderDraft()
+    draft.editImages = ["A", "B"]
+    let adopted = draft.adopting(referenceRecipe(.hidden, relation: .replaces),
+                                 isNewModel: false)
+    #expect(adopted.editImages.isEmpty)
+    #expect(adopted.request(model: "m").editImages == nil)
+}
+
+@Test func referencesAreTrimmedToWhatTheRecipeAccepts() {
+    var draft = RenderDraft()
+    draft.editImages = ["A", "B", "C", "D"]
+    let adopted = draft.adopting(referenceRecipe(.adjustable, relation: .replaces, maxCount: 2),
+                                 isNewModel: false)
+    #expect(adopted.editImages == ["A", "B"])
+}
+
+@Test func anExclusiveRecipeCarriesReferencesOrASourceButNotBoth() {
+    var draft = RenderDraft()
+    draft.sourceImage = "SRC"
+    draft.sourceImageName = "s.png"
+    draft.editImages = ["A"]
+    let adopted = draft.adopting(referenceRecipe(.adjustable, relation: .exclusive),
+                                 isNewModel: false)
+    // One render carries one or the other; sending both is a refusal.
+    #expect(adopted.editImages == ["A"])
+    #expect(adopted.sourceImage == nil)
+}
+
+@Test func aReplacesRecipeDropsTheSourceEntirely() {
+    var draft = RenderDraft()
+    draft.sourceImage = "SRC"
+    draft.editImages = ["A"]
+    let adopted = draft.adopting(referenceRecipe(.adjustable, relation: .replaces),
+                                 isNewModel: false)
+    #expect(adopted.sourceImage == nil)
+}
+
+@Test func anEmptyReferenceListIsOmittedRatherThanSentEmpty() {
+    let draft = RenderDraft().adopting(referenceRecipe(.adjustable, relation: .replaces),
+                                       isNewModel: true)
+    // An empty array and an absent field are different instructions.
+    #expect(draft.request(model: "m").editImages == nil)
+}

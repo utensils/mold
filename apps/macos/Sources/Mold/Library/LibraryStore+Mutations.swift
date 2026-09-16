@@ -30,6 +30,35 @@ extension LibraryStore {
         }
     }
 
+    /// Adds or removes a tag across a selection, in one replay-safe mutation.
+    func setTag(_ tag: String, adding: Bool, on entries: [LibraryEntry],
+                backend: (MoldHost.ID) -> (any MoldBackend)?) async {
+        let clean = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        let previous = perHost
+
+        mutateLocally(entries) { print in
+            var tags = print.tags ?? []
+            tags.removeAll { $0.caseInsensitiveCompare(clean) == .orderedSame }
+            if adding { tags.append(clean) }
+            print.tags = tags
+        }
+
+        for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
+            guard let client = backend(hostID) as? HTTPBackend else { continue }
+            let mutation = GalleryBulkMutation(
+                filenames: group.map(\.print.filename),
+                addTags: adding ? [clean] : [],
+                removeTags: adding ? [] : [clean])
+            do { try await client.mutate(mutation) } catch {
+                perHost = previous
+                rebuild()
+                failures[hostID] = "Couldn't change those tags."
+                return
+            }
+        }
+    }
+
     /// Trash keeps the bytes and starts a purge countdown; it is not a delete.
     func moveToTrash(_ entries: [LibraryEntry],
                      backend: (MoldHost.ID) -> (any MoldBackend)?) async {

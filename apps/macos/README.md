@@ -10,23 +10,45 @@ generation and the library. No 3-D studio.
 
 | | |
 | --- | --- |
-| **Generate** | Text-to-image. Every control comes from the model's own generation profile, so a model added to mold tomorrow gets correct controls with no change here. Durable submission, live step progress and denoise preview, the finished picture. |
-| **Library** | Every machine's prints in one day-sectioned timeline, host-badged, with search, a source filter, zoom and an inspector. Refreshes by ETag. |
-| **Queue** | Work in flight per machine, with the host's own actionable reason on each row. |
-| **Models** | Variants grouped under the model they belong to, each with the manifest's plain-English trade-off, size and install state. |
-| **Settings** | Add, edit and remove machines. Keys go to the Keychain. |
+| **Generate** | Every control comes from the model's own generation profile, so a model added to mold tomorrow gets correct controls with no change here. Stills and clips (length in seconds, snapped to the family's frame grid), source images with strength, ordered reference images, batches, negative prompts. Durable submission, live step progress and denoise preview, then the picture with Save / Copy / Show in Library. |
+| **Library** | Every machine's prints in one day-sectioned timeline, host-badged. Select with the mouse or the keyboard, open in place, play video, favourite, tag, trash, restore, save, copy, drag to the Finder, and export a clip or mesh into whatever the host will convert it to. Three shelves: all, favourites, Recently Deleted. Refreshes by ETag. |
+| **Queue** | Work in flight per machine, with the host's own actionable reason on each row, and retry / pause / resume / cancel. |
+| **Models** | Variants grouped under the model they belong to, each with the manifest's plain-English trade-off, size and install state. Install and repair with live byte progress. |
+| **Settings** | Add, edit and remove machines; keys go to the Keychain. |
+| **This Mac** | mold's own Rust engine, running in-process on Metal. It joins the machine list like any other and is reached over the same HTTP. |
 
 Shortcuts: ⌘1–⌘4 for the destinations, ⌘R to refresh, ⌘↩ to generate, ⌘, for
 Settings. Every shortcut is declared once in `MoldCommands` and only *printed*
 elsewhere — binding one twice queues the work twice.
 
+## The local engine
+
+`make engine` builds `rust/mold-macos-ffi` (a staticlib around
+`mold_server::run_server`) and rewrites `Engine.xcconfig` to link it. Without
+it the app is a remote client and needs no Rust toolchain at all, which is the
+point: UI work never costs a 40-minute build. `make engine-clean` goes back.
+
+Five C functions, and nothing about a render crosses them — the app speaks HTTP
+to loopback, exactly as it speaks to a machine on the network. Stopping is a
+`POST /api/shutdown`, the only shutdown trigger an embedder can reach.
+
+Two consequences worth knowing: the engine starts **at most once per process**
+(mold's models-dir override is a process-lifetime `OnceLock`), and once it is
+linked, `run_server` installs a process-wide SIGTERM handler — so `pkill` no
+longer quits the app.
+
+## Releasing
+
+`make signed` (needs `MOLD_SIGN_IDENTITY`), then `make dmg`, then `make
+notarize` — or `make release` for all three. Signing is depth-first and never
+`--deep`, which re-signs nested code with the outer bundle's entitlements. The
+entitlements allow JIT because candle compiles its Metal shaders at runtime.
+
 ## Not built yet
 
-Source images and img2img, video playback and length controls, tags and
-collections, trash, export, and downloading a model from inside the app. The
-larger remaining piece is running mold's own Rust engine in-process
-(`mold_server::run_server` on a thread, reached over loopback) so the app can
-render locally on Metal instead of only talking to a remote machine.
+Collections, prompt expansion, LoRAs and identity conditioning, chain jobs
+(scripted sequences are CLI and API only by design), the 3-D studio, and
+pairing-based onboarding for keyed hosts.
 
 ## Running it
 
@@ -66,7 +88,9 @@ that is a first-class state, not a degraded one.
 | --------------------- | ----------------------------------------------------------------- |
 | `Sources/Mold/`        | The app. `MoldApp.swift` is the composition root                  |
 | `Packages/MoldClient/` | Wire types and transport. **Never imports SwiftUI or AppKit**      |
-| `Packages/MoldStyle/`  | Chrome tokens and panel surfaces                                  |
+| `Packages/MoldStyle/`  | Chrome tokens, panel surfaces, layouts                            |
+| `rust/mold-macos-ffi/` | The C ABI around mold's engine. Its own cargo root                |
+| `scripts/`             | Sign, DMG, notarize                                              |
 
 ## The rules `make lint` enforces
 

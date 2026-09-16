@@ -7,7 +7,7 @@ struct DestinationDetail: View {
     var body: some View {
         switch destination {
         case .generate:
-            GeneratePane()
+            GeneratePane(destination: $destination)
         case .library:
             LibraryPane(destination: $destination)
         case .models:

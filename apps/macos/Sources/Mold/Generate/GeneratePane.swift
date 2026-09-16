@@ -7,6 +7,7 @@ import SwiftUI
 /// The picture takes the pane and the controls float over it in a material
 /// panel, so what you are making stays the largest thing on screen.
 struct GeneratePane: View {
+    @Binding var destination: Destination
     @Environment(HostStore.self) private var hosts
     @Environment(ModelStore.self) private var models
     @Environment(GenerateController.self) private var controller
@@ -42,7 +43,8 @@ struct GeneratePane: View {
                      : "Choose a model from the toolbar to start.")
             }
         } else {
-            RunCanvas(state: controller.run, host: host)
+            RunCanvas(state: controller.run, host: host,
+                      showInLibrary: { destination = .library })
         }
     }
 

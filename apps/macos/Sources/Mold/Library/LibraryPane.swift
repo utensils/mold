@@ -56,7 +56,8 @@ struct LibraryPane: View {
         .toolbar { toolbar }
         .inspector(isPresented: .constant(viewing == nil && !selected.isEmpty)) {
             LibraryInspector(entries: selected, host: selected.first.flatMap(host(of:)),
-                             scope: scope, actions: actions)
+                             scope: scope, actions: actions,
+                             filterByTag: { query = $0 })
                 .inspectorColumnWidth(min: 260, ideal: 320, max: 420)
         }
         .task { await actions.reload() }

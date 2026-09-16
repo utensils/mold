@@ -28,6 +28,10 @@ struct LibraryActions {
         Task { await library.setFavorite(makeFavorite, on: entries, backend: backend) }
     }
 
+    func setTag(_ tag: String, adding: Bool, on entries: [LibraryEntry]) {
+        Task { await library.setTag(tag, adding: adding, on: entries, backend: backend) }
+    }
+
     func moveToTrash(_ entries: [LibraryEntry]) {
         Task { await library.moveToTrash(entries, backend: backend) }
     }

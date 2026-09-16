@@ -1,4 +1,5 @@
 import MoldClient
+import MoldStyle
 import SwiftUI
 
 /// What the selection is made of, and what you can do with it.
@@ -7,6 +8,7 @@ struct LibraryInspector: View {
     let host: MoldHost?
     let scope: LibraryScope
     let actions: LibraryActions
+    let filterByTag: (String) -> Void
 
     var body: some View {
         Group {
@@ -35,6 +37,9 @@ struct LibraryInspector: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 facts(entry)
+                if !scope.isTrash {
+                    TagEditor(entries: entries, actions: actions, filterBy: filterByTag)
+                }
                 buttons
             }
             .padding(16)
@@ -49,6 +54,9 @@ struct LibraryInspector: View {
             Text("\(entries.count) prints selected").font(.headline)
             if let span = machines {
                 Text(span).font(.caption).foregroundStyle(.secondary)
+            }
+            if !scope.isTrash {
+                TagEditor(entries: entries, actions: actions, filterBy: filterByTag)
             }
             buttons
             Spacer()

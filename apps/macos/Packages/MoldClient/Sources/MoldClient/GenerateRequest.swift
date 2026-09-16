@@ -24,6 +24,10 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     public var sourceImage: String?
     public var sourceImageName: String?
     public var strength: Double?
+    /// Base64, in order. Never sent empty -- an empty array and an absent
+    /// field mean different things to the host.
+    public var editImages: [String]?
+    public var referenceWeight: Double?
 
     public init(
         prompt: String, model: String, width: Int, height: Int, steps: Int,
@@ -59,6 +63,8 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         try container.encodeIfPresent(sourceImage, forKey: .sourceImage)
         try container.encodeIfPresent(sourceImageName, forKey: .sourceImageName)
         try container.encodeIfPresent(strength, forKey: .strength)
+        try container.encodeIfPresent(editImages, forKey: .editImages)
+        try container.encodeIfPresent(referenceWeight, forKey: .referenceWeight)
     }
 }
 

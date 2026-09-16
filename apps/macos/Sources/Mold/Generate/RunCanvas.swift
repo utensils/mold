@@ -6,6 +6,7 @@ import SwiftUI
 struct RunCanvas: View {
     let state: RunState
     let host: MoldHost?
+    let showInLibrary: () -> Void
 
     @State private var preview: NSImage?
     @State private var result: NSImage?
@@ -63,11 +64,14 @@ struct RunCanvas: View {
 
     @ViewBuilder private func finishedView(_ finished: BatchResult) -> some View {
         if let result {
-            Image(nsImage: result)
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .padding(24)
+            VStack(spacing: 12) {
+                Image(nsImage: result)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                ResultBar(result: finished, host: host, showInLibrary: showInLibrary)
+            }
+            .padding(24)
         } else {
             ProgressView("Fetching your picture…")
         }
