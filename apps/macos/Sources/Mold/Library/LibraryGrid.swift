@@ -77,6 +77,7 @@ struct LibraryGrid: View {
             .id(entry.id)
             .onTapGesture(count: 2) { onOpen(entry.id) }
             .onTapGesture { click(entry) }
+            .draggable(actions.draggable(entry))
             .contextMenu {
                 LibraryMenu(targets: targets(for: entry), scope: scope, actions: actions,
                             open: { onOpen(entry.id) })

@@ -1,3 +1,4 @@
+import AVKit
 import AppKit
 import MoldClient
 import SwiftUI
@@ -17,11 +18,17 @@ struct LibraryViewer: View {
     @Environment(ThumbnailCache.self) private var cache
     @State private var full: NSImage?
     @State private var placeholder: NSImage?
+    @State private var player: AVPlayer?
+    /// The viewer must actually HOLD focus, or its escape and arrow keys never
+    /// fire -- `.focusable()` alone only makes it focus-ABLE.
+    @FocusState private var focused: Bool
 
     var body: some View {
         ZStack {
             Color.clear
-            if let image = full ?? placeholder {
+            if entry.print.isVideo {
+                video
+            } else if let image = full ?? placeholder {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(full == nil ? .low : .high)
@@ -42,6 +49,22 @@ struct LibraryViewer: View {
         .onKeyPress(.rightArrow) { onStep(1); return .handled }
         .focusable()
         .focusEffectDisabled()
+        .focused($focused)
+        .onAppear { focused = true }
+    }
+
+    /// Video plays in place rather than as a poster you have to export to see.
+    ///
+    /// `AVPlayer` builds its own requests and cannot carry `X-Api-Key`, so the
+    /// URL is minted with a media ticket on a keyed host and is the plain URL
+    /// on a keyless one.
+    @ViewBuilder private var video: some View {
+        if let player {
+            VideoPlayer(player: player)
+                .onDisappear { player.pause() }
+        } else {
+            ProgressView()
+        }
     }
 
     private var bar: some View {
@@ -71,9 +94,21 @@ struct LibraryViewer: View {
 
     private func load() async {
         full = nil
-        if let host {
-            placeholder = await cache.image(for: entry, host: host, size: 512)
+        player?.pause()
+        player = nil
+
+        if entry.print.isVideo {
+            // Streamed, not downloaded: a clip can be hundreds of megabytes
+            // and waiting for all of it before the first frame is not playback.
+            guard let url = await actions.playableURL(for: entry) else { return }
+            let player = AVPlayer(url: url)
+            player.play()
+            self.player = player
+            return
         }
+
+        guard let host else { return }
+        placeholder = await cache.image(for: entry, host: host, size: 512)
         guard let data = await actions.data(for: entry) else { return }
         full = NSImage(data: data)
     }

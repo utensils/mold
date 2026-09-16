@@ -30,6 +30,7 @@ extension HostStore {
             // per reachability check is plenty.
             if capabilities[host.id] == nil {
                 capabilities[host.id] = try? await client.capabilities()
+                exportOptions[host.id] = try? await (client as? HTTPBackend)?.exportOptions()
             }
         } catch MoldClientError.unauthorized {
             reachability[host.id] = .needsKey

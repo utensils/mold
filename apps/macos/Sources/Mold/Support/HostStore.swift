@@ -15,6 +15,8 @@ final class HostStore {
     /// absent block has a different meaning per field, so the app never
     /// probes routes to find out.
     internal(set) var capabilities: [MoldHost.ID: Capabilities] = [:]
+    /// What each machine will convert a stored print into.
+    internal(set) var exportOptions: [MoldHost.ID: ExportOptions] = [:]
 
     enum Reachability {
         case unknown

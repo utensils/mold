@@ -60,8 +60,22 @@ public struct TagCount: Codable, Hashable, Sendable, Identifiable {
 }
 
 /// What a host will convert a stored print into.
+///
+/// One flat list covering both kinds: `gif`/`apng`/`webp` are what a clip
+/// becomes, and `obj`/`stl`/`ply`/`zip` are what a mesh becomes — a mesh can
+/// also become an animated turntable, which is why the animated formats are
+/// not video-only.
 public struct ExportOptions: Codable, Hashable, Sendable {
-    public let image: [String]?
-    public let video: [String]?
-    public let mesh: [String]?
+    public let formats: [String]
+
+    private static let animated: Set<String> = ["gif", "apng", "webp"]
+    private static let geometry: Set<String> = ["obj", "stl", "ply", "zip"]
+
+    /// What a clip can be turned into.
+    public var forVideo: [String] { formats.filter(Self.animated.contains) }
+
+    /// What a mesh can be turned into: geometry files, plus a turntable.
+    public var forMesh: [String] {
+        formats.filter { Self.geometry.contains($0) || Self.animated.contains($0) }
+    }
 }

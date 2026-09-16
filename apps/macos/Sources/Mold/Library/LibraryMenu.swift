@@ -37,8 +37,24 @@ struct LibraryMenu: View {
             Button(targets.count == 1 ? "Save a Copy…" : "Save \(targets.count) Copies…") {
                 actions.save(targets)
             }
+            exportMenu
             Divider()
             Button("Move to Trash", role: .destructive) { actions.moveToTrash(targets) }
+        }
+    }
+
+    /// Only offered for prints that have another form. A PNG has nothing to
+    /// convert to that "Save a Copy" does not already give you.
+    @ViewBuilder private var exportMenu: some View {
+        if targets.count == 1, let entry = targets.first {
+            let formats = actions.exportFormats(for: entry)
+            if !formats.isEmpty {
+                Menu("Export As") {
+                    ForEach(formats, id: \.self) { format in
+                        Button(format.uppercased()) { actions.export(entry, as: format) }
+                    }
+                }
+            }
         }
     }
 
