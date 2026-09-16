@@ -11,6 +11,7 @@ import SwiftUI
 struct ModelsPane: View {
     @Environment(HostStore.self) private var hosts
     @Environment(ModelStore.self) private var models
+    @Environment(DownloadStore.self) private var downloads
 
     @State private var hostID: MoldHost.ID?
     @State private var query = ""
@@ -24,11 +25,15 @@ struct ModelsPane: View {
                 List {
                     ForEach(groups, id: \.title) { group in
                         if group.isSolo {
-                            ModelSoloRow(model: group.variants[0], title: group.title)
+                            ModelSoloRow(model: group.variants[0], title: group.title,
+                                         install: install,
+                                         progress: progress(group.variants[0]))
                         } else {
                             Section {
                                 ForEach(group.variants) { variant in
-                                    ModelVariantRow(model: variant, groupTitle: group.title)
+                                    ModelVariantRow(model: variant, groupTitle: group.title,
+                                                    install: install,
+                                                    progress: progress(variant))
                                 }
                             } header: {
                                 ModelGroupHeader(title: group.title, repo: group.repo)
@@ -116,6 +121,18 @@ struct ModelsPane: View {
                 Label("Installed only", systemImage: "internaldrive")
             }
             .help(installedOnly ? "Showing installed models" : "Showing everything on offer")
+        }
+    }
+
+    private func progress(_ model: Model) -> DownloadStore.Progress? {
+        guard let host else { return nil }
+        return downloads.progress(for: model.name, on: host.id)
+    }
+
+    private func install(_ model: Model) {
+        guard let host else { return }
+        Task {
+            await downloads.install(model, on: host, backend: hosts.backend(for: host))
         }
     }
 

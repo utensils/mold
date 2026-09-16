@@ -30,6 +30,9 @@ public struct ServerStatus: Hashable, Codable, Sendable {
     public let queueDepth: Int?
     public let memoryStatus: String?
     public let gpus: [GPU]?
+    /// Identifies this run of the server. A retry must name it, so work is
+    /// never aimed at a host that has restarted since.
+    public let instanceId: String?
 
     public struct GPU: Hashable, Codable, Sendable {
         public let ordinal: Int

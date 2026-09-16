@@ -1,69 +1,76 @@
 import MoldClient
 import SwiftUI
 
-/// Work in flight, on every machine.
+/// Work in flight, on every machine, with the controls to act on it.
 struct QueuePane: View {
     @Environment(HostStore.self) private var hosts
-    @State private var byHost: [MoldHost.ID: [QueueEntry]] = [:]
-    @State private var isLoading = false
+    @Environment(QueueStore.self) private var queue
 
     var body: some View {
         Group {
-            if rows.isEmpty {
+            if queue.all.isEmpty {
                 ContentUnavailableView(
-                    isLoading ? "Checking each machine…" : "Nothing queued",
+                    queue.isLoading ? "Checking each machine…" : "Nothing queued",
                     systemImage: "list.bullet.indent",
-                    description: Text(isLoading ? "" : "Renders you start appear here.")
+                    description: Text(queue.isLoading ? "" : "Renders you start appear here.")
                 )
             } else {
                 List {
                     ForEach(hosts.hosts) { host in
-                        let entries = byHost[host.id] ?? []
+                        let entries = queue.entries(on: host.id)
                         if !entries.isEmpty {
                             Section(host.name) {
-                                ForEach(entries) { QueueRow(entry: $0) }
+                                ForEach(entries) { entry in
+                                    QueueRow(entry: entry, act: { act($0, on: entry, host: host) })
+                                }
                             }
                         }
                     }
                 }
                 .listStyle(.inset)
+                .alert("That didn't work", isPresented: .constant(queue.failure != nil)) {
+                    Button("OK") { }
+                } message: {
+                    Text(queue.failure ?? "")
+                }
             }
         }
         .navigationTitle("Queue")
         .navigationSubtitle(subtitle)
-        .toolbar {
-            ToolbarItem {
-                Button { Task { await load() } } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(isLoading)
-            }
-        }
+        .toolbar { toolbar }
         .task { await load() }
         .focusedSceneValue(\.refreshAction) { Task { await load() } }
     }
 
-    private var rows: [QueueEntry] { byHost.values.flatMap(\.self) }
-
     private var subtitle: String {
-        let live = rows.filter(\.state.isLive).count
+        let live = queue.all.filter(\.state.isLive).count
         return live == 0 ? "Idle" : "\(live) waiting or running"
     }
 
-    private func load() async {
-        isLoading = true
-        defer { isLoading = false }
-        await hosts.refreshAll()
-        await withTaskGroup(of: (MoldHost.ID, [QueueEntry]).self) { group in
-            for host in hosts.hosts {
-                let client = hosts.backend(for: host)
-                group.addTask {
-                    // Merged by id: a live-only row and a durable row for the
-                    // same job are one job.
-                    (host.id, (try? await client.queue())?.merged ?? [])
-                }
+    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        ToolbarItem {
+            Button { Task { await load() } } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
             }
-            for await (id, entries) in group { byHost[id] = entries }
+            .disabled(queue.isLoading)
         }
+    }
+
+    private func act(_ action: QueueRow.Action, on entry: QueueEntry, host: MoldHost) {
+        let backend = hosts.backend(for: host)
+        Task {
+            switch action {
+            case .cancel: await queue.cancel(entry, on: host.id, backend: backend)
+            case .pause: await queue.pause(entry, on: host.id, backend: backend)
+            case .resume: await queue.resume(entry, on: host.id, backend: backend)
+            case .retry: await queue.retry(entry, on: host.id, backend: backend)
+            }
+            await load()
+        }
+    }
+
+    private func load() async {
+        await hosts.refreshAll()
+        await queue.refresh(hosts: hosts.hosts) { hosts.backend(for: $0) }
     }
 }

@@ -15,6 +15,8 @@ struct MoldApp: App {
     @State private var thumbnails = ThumbnailCache()
     @State private var models = ModelStore()
     @State private var generate = GenerateController()
+    @State private var queue = QueueStore()
+    @State private var downloads = DownloadStore()
     @State private var destination = Destination.launch
 
     var body: some Scene {
@@ -26,6 +28,8 @@ struct MoldApp: App {
                 .environment(thumbnails)
                 .environment(models)
                 .environment(generate)
+                .environment(queue)
+                .environment(downloads)
                 // Below this the split view stops being a split view and
                 // starts being two cramped columns.
                 .frame(minWidth: 880, minHeight: 560)
