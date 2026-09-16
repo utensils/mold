@@ -30,12 +30,10 @@ private struct HostRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "circle.fill")
-                .font(.system(size: 7))
-                .foregroundStyle(tint)
+            HostStatusDot(reachability: reachability)
             VStack(alignment: .leading, spacing: 1) {
                 Text(host.name)
-                if let detail {
+                if let detail = reachability.summary {
                     Text(detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -43,29 +41,6 @@ private struct HostRow: View {
                 }
             }
         }
-        .help(host.baseURL.absoluteString)
-    }
-
-    /// `.green`/`.red` here are status semantics, not brand color -- the same
-    /// meaning the system uses in its own connection indicators.
-    private var tint: Color {
-        switch reachability {
-        case .unknown, .checking: .secondary
-        case .up: .green
-        // Amber, not red: the machine is fine, the credential is missing.
-        case .needsKey: .orange
-        case .down: .red
-        }
-    }
-
-    private var detail: String? {
-        switch reachability {
-        case .unknown: nil
-        case .checking: "Checking…"
-        case let .up(status):
-            status.busy ? "Busy · \(status.version)" : "Ready · \(status.version)"
-        case .needsKey: "Needs an API key"
-        case let .down(reason): reason
-        }
+        .help(HostAddress.displayString(for: host.baseURL))
     }
 }

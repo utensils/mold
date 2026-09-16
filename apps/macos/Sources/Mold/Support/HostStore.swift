@@ -51,7 +51,10 @@ extension HostStore {
         let seed = ProcessInfo.processInfo.environment["MOLD_NATIVE_HOSTS"] ?? ""
         for entry in seed.split(separator: ",") {
             let parts = entry.split(separator: "=", maxSplits: 1)
-            guard parts.count == 2, let url = URL(string: String(parts[1])) else { continue }
+            // Through the same normalizer the editor uses, so a devshell can
+            // seed `plato=100.105.134.43` without spelling out the port.
+            guard parts.count == 2, let url = HostAddress.normalize(String(parts[1]))
+            else { continue }
             hosts.append(MoldHost(name: String(parts[0]), baseURL: url))
         }
         return hosts

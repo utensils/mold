@@ -14,7 +14,7 @@ generation and the library. No 3-D studio.
 | **Library** | Every machine's prints in one day-sectioned timeline, host-badged. Select with the mouse or the keyboard, open in place, play video, favourite, tag, trash, restore, save, copy, drag to the Finder, and export a clip or mesh into whatever the host will convert it to. Three shelves: all, favourites, Recently Deleted. Refreshes by ETag. |
 | **Queue** | Work in flight per machine, with the host's own actionable reason on each row, and retry / pause / resume / cancel. |
 | **Models** | Variants grouped under the model they belong to, each with the manifest's plain-English trade-off, size and install state. Install and repair with live byte progress. |
-| **Settings** | Add, edit and remove machines; keys go to the Keychain. |
+| **Settings** | Add, edit and remove machines. An address is normalized the way the other apps normalize it, checked live while you type, and refused when another machine already answers at it; keys go to the Keychain. |
 | **This Mac** | mold's own Rust engine, running in-process on Metal. It joins the machine list like any other and is reached over the same HTTP. |
 
 Shortcuts: ⌘1–⌘4 for the destinations, ⌘R to refresh, ⌘↩ to generate, ⌘, for
@@ -70,17 +70,29 @@ and re-run `make gen`.
 
 ## Pointing it at a server
 
-The app ships with one host, `http://localhost:7680`. To add machines for a dev
-run without putting their addresses in the repo, set `MOLD_NATIVE_HOSTS` to
-comma-separated `name=url` pairs:
+The app ships with no machines. Add one in Settings: a name or an IP is enough,
+because `HostAddress` fills in `http://` and port 7680 the way the Tauri app and
+the browser build do — `plato`, `10.0.0.5:7680`, `https://box.ts.net` and a
+pasted `http://box:7680/api/status` all resolve to the same one origin. The
+sheet checks the address while you type and names the machine after the hostname
+the server reports, so a box reached by IP still lists under its own name. A
+keyless host needs no API key — that is a first-class state, not a degraded one.
+
+To seed machines for a dev run without putting their addresses in the repo, set
+`MOLD_NATIVE_HOSTS` to comma-separated `name=address` pairs, in the same
+shorthand the sheet accepts:
 
 ```bash
-MOLD_NATIVE_HOSTS='plato=http://10.0.0.5:7680,hal9000=http://10.0.0.6:7680' macos-dev
+MOLD_NATIVE_HOSTS='plato=plato,hal9000=10.0.0.6' macos-dev
 ```
 
 `macos-dev` execs the binary rather than `open`ing it, so the variable reaches
-the app and its stdout stays on your terminal. A keyless host needs no API key —
-that is a first-class state, not a degraded one.
+the app and its stdout stays on your terminal.
+
+`MOLD_NATIVE_DESTINATION` forces where the window opens: a destination name,
+`settings`, or `add-machine` / `edit-machine` to open the host sheet empty or on
+the first machine. The sheet ones exist so a UAT run can photograph it without
+a script driving the mouse across the desktop.
 
 ## Layout
 

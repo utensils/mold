@@ -30,14 +30,16 @@ struct RootView: View {
 }
 
 extension RootView {
-    /// `MOLD_NATIVE_DESTINATION=settings` opens the Settings window on launch.
+    /// `MOLD_NATIVE_DESTINATION=settings` opens the Settings window on launch,
+    /// and `=add-machine` opens it with the host sheet already up.
     ///
     /// Settings is a scene, not a destination, so it cannot be reached by
     /// selecting a sidebar row -- this is what lets a UAT run photograph it
     /// without driving the menu bar.
     func openSettingsIfRequested() {
-        guard ProcessInfo.processInfo.environment["MOLD_NATIVE_DESTINATION"] == "settings"
-        else { return }
+        let requested = ProcessInfo.processInfo.environment["MOLD_NATIVE_DESTINATION"]
+        let sheets = [MachinesSettings.addOnLaunch, MachinesSettings.editOnLaunch]
+        guard requested == "settings" || sheets.contains(requested ?? "") else { return }
         openSettings()
     }
 }

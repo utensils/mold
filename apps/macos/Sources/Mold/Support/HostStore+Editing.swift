@@ -7,18 +7,55 @@ import MoldClient
 extension HostStore {
 
 
-    func add(name: String, url: URL, apiKey: String?) {
-        hosts.append(MoldHost(name: name, baseURL: url, apiKey: apiKey))
+    /// Adds a machine and starts checking it.
+    ///
+    /// The address is normalized here as well as in the editor, because this
+    /// is the door every caller comes through -- the seeded `MOLD_NATIVE_HOSTS`
+    /// list included -- and two spellings of one box would otherwise become
+    /// two rows whose prints never merge.
+    @discardableResult
+    func add(name: String, url: URL, apiKey: String?) -> MoldHost {
+        let address = HostAddress.normalize(url.absoluteString) ?? url
+        let host = MoldHost(
+            name: resolvedName(name, for: address),
+            baseURL: address,
+            apiKey: apiKey
+        )
+        hosts.append(host)
         persist()
+        Task { await refresh(host) }
+        return host
     }
 
     func update(_ host: MoldHost) {
         guard let index = hosts.firstIndex(where: { $0.id == host.id }) else { return }
-        hosts[index] = host
+        var updated = host
+        updated.baseURL = HostAddress.normalize(host.baseURL.absoluteString) ?? host.baseURL
+        updated.name = resolvedName(host.name, for: updated.baseURL)
+        hosts[index] = updated
         persist()
         // The key or address may have changed, so what we knew is stale.
-        reachability[host.id] = .unknown
-        capabilities[host.id] = nil
+        reachability[updated.id] = .unknown
+        capabilities[updated.id] = nil
+        exportOptions[updated.id] = nil
+        Task { await refresh(updated) }
+    }
+
+    /// A machine already in the list at this address, if there is one.
+    ///
+    /// `excluding` is the row being edited: saving a host without touching its
+    /// address must not report the host as a duplicate of itself.
+    func host(at url: URL, excluding id: MoldHost.ID? = nil) -> MoldHost? {
+        hosts.first { $0.id != id && HostAddress.sameOrigin($0.baseURL, url) }
+    }
+
+    /// Nothing in the list is allowed to be nameless, because the sidebar,
+    /// the host badges and the Generate picker all print this.
+    private func resolvedName(_ name: String, for url: URL) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        let suggested = HostAddress.suggestedName(for: url)
+        return suggested.isEmpty ? HostAddress.displayString(for: url) : suggested
     }
 
     func remove(_ host: MoldHost) {

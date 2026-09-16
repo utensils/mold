@@ -22,23 +22,35 @@ extension HostStore {
 
     func refresh(_ host: MoldHost) async {
         reachability[host.id] = .checking
+        let state = await check(host)
+        reachability[host.id] = state
+        // Capabilities change only when the host is rebuilt, so one fetch per
+        // reachability check is plenty.
+        guard case .up = state, capabilities[host.id] == nil else { return }
+        let client = backend(for: host)
+        capabilities[host.id] = try? await client.capabilities()
+        exportOptions[host.id] = try? await (client as? HTTPBackend)?.exportOptions()
+    }
+
+    /// Asks one machine what it is, and answers rather than recording.
+    ///
+    /// Separated from `refresh` so the host editor can try an address the
+    /// person is still typing without that attempt landing in the machine
+    /// list -- a half-typed hostname must not turn a working row red.
+    func check(_ host: MoldHost) async -> Reachability {
         do {
-            let client = backend(for: host)
-            let status = try await client.status()
-            reachability[host.id] = .up(status)
-            // Capabilities change only when the host is rebuilt, so one fetch
-            // per reachability check is plenty.
-            if capabilities[host.id] == nil {
-                capabilities[host.id] = try? await client.capabilities()
-                exportOptions[host.id] = try? await (client as? HTTPBackend)?.exportOptions()
-            }
+            return .up(try await backend(for: host).status())
         } catch MoldClientError.unauthorized {
-            reachability[host.id] = .needsKey
+            return .needsKey
         } catch {
-            let reason = (error as? LocalizedError)?.errorDescription
-                ?? error.localizedDescription
-            reachability[host.id] = .down(reason)
+            return .down((error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription)
         }
+    }
+
+    /// Tries an address nobody has committed to yet.
+    func probe(url: URL, apiKey: String?) async -> Reachability {
+        await check(MoldHost(name: "", baseURL: url, apiKey: apiKey))
     }
 
     func reachability(of host: MoldHost) -> Reachability {
