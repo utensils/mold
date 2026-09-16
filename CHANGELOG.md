@@ -11,6 +11,51 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-16
+
+- **Restore CUDA container releases.** Include the complete Hunyuan3D mesh pipeline in every Docker target so the SM89 server build passes its required feature checks.
+- **Finish source-backed long videos reliably.** Automatic long videos and scripted sequences now retain their source media on the exact published take instead of failing after rendering. Retrying finalization can reuse an already-published video without rerendering its clips.
+- **Keep Library selection visible.** The desktop Library now leaves space above the first row so selected outlines and raised hover tiles are not clipped by the scroll area.
+- **Keep the desktop open when a trashed print is imported again.** Retire stale
+  gallery archive records before re-importing, reject conflicting imports before
+  publication, and recover interrupted imports of the same media without losing
+  their original provenance or retained source files
+  ([#1723](https://github.com/utensils/mold/pull/1723)).
+- **Saving prints locally preserves their Library order.** Manual and automatic
+  remote saves retain the original Library date, including on filesystems that
+  require copying instead of hard links, so bulk saving no longer reorders prints.
+- **Accept model licenses on the destination machine.** Installing a style from Ready to use onto another machine now opens the shared license review dialog when that machine requires consent. Machine-detail repairs, missing-component repairs, and command-palette installs use the same host-specific acceptance flow; cancelling queues nothing.
+- **Memory readings agree with the card in your machine.** VRAM and RAM were
+  formatted with three different divisors across the apps — a 24 GiB RTX 4090
+  read `25.8 GB` on the Machines meter, `24.0 GB` on the compute-plan card
+  directly below it, and `23.4 GB` on the phone's host card, all spelled "GB".
+  Every memory figure now comes from one authority and reads the number the
+  hardware is sold as; storage and downloads keep the decimal units Hugging
+  Face and drive vendors use. The legacy `/api/status` `vram_*_mb` fields are
+  also read as the mebibytes the server actually sends, which had been
+  under-reporting every older host by 4.86%.
+- **Styles no longer clips every description.** "Good for" was pinned to a
+  fixed width while the Name column absorbed all the spare space, so on a wide
+  window every row read `FLUX.1 Dev BF16 …` beside a column of empty space. The
+  description now grows with the window, and never starts narrower than before.
+- **The Create rail stops printing its heading twice.** The source group read
+  `START FROM A PHOTO` over `SOURCE`; the well's legend now stands down when
+  the group is already titled and it would only repeat it, while a legend that
+  tells two wells apart (First frame, Last frame, Target) still renders.
+- **Removed the interactive terminal UI.** `mold tui`, the `tui` build feature
+  and `mold library grid` are gone. A source build that passes `--features tui`
+  now fails with an unknown-feature error — drop `tui` from the list and the
+  build is otherwise unchanged. Every other `mold` command behaves exactly as
+  before, and the desktop, web and phone apps are the graphical surfaces
+  ([#1717](https://github.com/utensils/mold/issues/1717)).
+- **The CLI's last-used model moved to `generate.last_model`.** The row is
+  copied from `tui.last_model` on first launch, so `mold run` with no model
+  still resolves the model you used last. Terminal-app-only settings, including
+  remembered machines and their stored API keys, are removed from `mold.db`;
+  downgrading to 0.29 or earlier will not find them. Existing
+  `<file>.thumb.png` thumbnail twins are swept from the cache
+  ([#1717](https://github.com/utensils/mold/issues/1717)).
+
 ## [0.29.0] - 2026-09-12
 
 - **FLUX.1 and FLUX.2 are fast by default on CUDA.** Both families now render
@@ -5817,7 +5862,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/utensils/mold/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/utensils/mold/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/utensils/mold/compare/v0.27.1...v0.28.0
 [0.27.1]: https://github.com/utensils/mold/compare/v0.27.0...v0.27.1

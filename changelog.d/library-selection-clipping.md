@@ -1,1 +1,0 @@
-- **Keep Library selection visible.** The desktop Library now leaves space above the first row so selected outlines and raised hover tiles are not clipped by the scroll area.
