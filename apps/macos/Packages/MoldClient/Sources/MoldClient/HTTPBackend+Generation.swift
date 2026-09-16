@@ -55,7 +55,7 @@ public extension HTTPBackend {
                         throw streamFailure(response)
                     }
                     var parser = SSEParser()
-                    for try await line in bytes.lines {
+                    for try await line in bytes.moldLines() {
                         guard let event = parser.consume(line: line),
                               event.name == "generation_batch",
                               let data = event.data.data(using: .utf8),

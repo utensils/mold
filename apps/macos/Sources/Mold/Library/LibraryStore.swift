@@ -37,6 +37,10 @@ final class LibraryStore {
     /// The machines whose chain a task is already walking.
     var draining: Set<MoldHost.ID> = []
 
+    /// The registration with `HostStore`'s event fan-out. See
+    /// `LibraryStore+Live`.
+    var listening: UUID?
+
     /// Prints from every host, newest first.
     func refresh(hosts: [MoldHost], using backend: (MoldHost) -> any MoldBackend) async {
         isLoading = true

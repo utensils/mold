@@ -46,6 +46,12 @@ extension GenerateController {
             // The stream ended without a settled frame; READ the status once
             // rather than leaving the pane spinning. Re-submitting to find out
             // what happened would be asking for a second render.
+            //
+            // This used to be the ONLY way a render finished, because
+            // `AsyncBytes.lines` drops the blank line that terminates an SSE
+            // frame and `batchEvents` therefore yielded nothing at all. The
+            // picture appeared when the server closed the stream rather than
+            // when the batch settled. See `LineAccumulator`.
             settle(try await backend.batchStatus(id: initial.id), host: host)
         } catch {
             // A dropped stream does NOT mean the work stopped: on a durable

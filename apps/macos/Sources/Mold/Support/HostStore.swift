@@ -18,7 +18,20 @@ final class HostStore {
     /// What each machine will convert a stored print into.
     internal(set) var exportOptions: [MoldHost.ID: ExportOptions] = [:]
 
-    enum Reachability {
+    /// One live `/api/events` connection per machine. See `HostStore+Events`.
+    var watchers: [MoldHost.ID: Task<Void, Never>] = [:]
+    var listeners: [UUID: (MoldHost.ID, MoldEvent) -> Void] = [:]
+    /// The fleet identity each machine last announced. The same address
+    /// answering with a different one is a different library, not a
+    /// reconnection.
+    var instanceIDs: [MoldHost.ID: String] = [:]
+
+    /// `Equatable` so a view can watch it. Without the conformance
+    /// `.onChange(of: hosts.reachability)` has no valid overload, and rather
+    /// than saying so the type checker searches until it gives up on the whole
+    /// body -- "unable to type-check this expression in reasonable time",
+    /// pointing at a line with nothing wrong on it.
+    enum Reachability: Equatable {
         case unknown
         case checking
         case up(ServerStatus)
