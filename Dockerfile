@@ -140,7 +140,8 @@ RUN find crates/ -name "*.rs" -exec touch {} +
 # digest-addressed runtime image before publishing release manifests.
 ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}
 
-# Build the real binary.
+# Build the real binary. Mesh features belong to every shipping CUDA target;
+# the SM89 server build fence also requires this complete Hunyuan3D pipeline.
 # SM89 names `h3-cuda`, not `cuda,h3`: since #1164 the bare `h3` feature no
 # longer implies CUDA or the SM89 attention kernel, so `cuda,h3` would build a
 # CUDA H3 binary without its kernel. `h3-cuda` implies `cuda`, which is why it
@@ -163,7 +164,7 @@ ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}
 RUN gpu_feature="cuda,flash-attn"; \
     if [ "${CUDA_COMPUTE_CAP}" = "89" ]; then gpu_feature="h3-cuda"; fi; \
     if [ "${CUDA_COMPUTE_CAP}" = "120" ]; then gpu_feature="cuda"; fi; \
-    cargo build --release -p mold-ai --features "${gpu_feature},cudnn,expand,discord,webp,mp4,metrics"
+    cargo build --release -p mold-ai --features "${gpu_feature},cudnn,expand,discord,webp,mp4,metrics,mesh-texture,mesh-matting,mesh-delight"
 RUN scripts/seal-cuda-ptx-manifest.py /build/target/release/mold \
     "${CUDA_COMPUTE_CAP}" /build/target/release/build
 RUN scripts/probe-cuda-embedded-ptx.py /build/target/release/mold \

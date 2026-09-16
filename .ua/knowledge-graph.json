@@ -134445,9 +134445,9 @@
       "filePath": "Dockerfile",
       "lineRange": [
         39,
-        161
+        180
       ],
-      "summary": "Build stage or service named builder in Dockerfile.",
+      "summary": "CUDA binary build stage: caches dependencies with stub crates, then builds each GPU target with mesh-texture, mesh-matting and mesh-delight. SM89 selects h3-cuda, SM120 selects cuda, other targets select cuda plus flash-attn. Seals and validates embedded PTX and H3 release provenance.",
       "tags": [
         "infrastructure",
         "containerization",

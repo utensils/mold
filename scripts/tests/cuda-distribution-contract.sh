@@ -139,6 +139,30 @@ for source in set(re.findall(r'"(src/[^"\n]+\.cu)"', build_script)):
     assert f"COPY {path} {path}" in prefix, f"Docker dependency build lacks {path}"
 PYTHON
 
+# Evaluate the actual Docker build command for each target without invoking
+# CUDA. This catches a recipe that passes text checks but omits mesh workers
+# required by the reviewed SM89 server feature set.
+python3 - "$repo_root" <<'PYTHON'
+import pathlib
+import subprocess
+import sys
+
+root = pathlib.Path(sys.argv[1])
+dockerfile = (root / "Dockerfile").read_text().replace("\\\n", " ")
+recipe = next(line[4:] for line in dockerfile.splitlines()
+              if line.startswith('RUN gpu_feature='))
+for cap in ("80", "86", "89", "90", "100", "120"):
+    result = subprocess.run(
+        ["sh", "-c", 'cargo() { printf "%s\\n" "$@"; }; ' + recipe],
+        env={"CUDA_COMPUTE_CAP": cap}, capture_output=True, text=True, check=True,
+    )
+    args = result.stdout.splitlines()
+    features = set(args[args.index("--features") + 1].split(","))
+    required = {"mesh-texture", "mesh-matting", "mesh-delight"}
+    assert required <= features, f"Docker SM{cap} lacks {required - features}"
+    assert ("h3-cuda" in features) == (cap == "89"), f"Wrong H3 target: SM{cap}"
+PYTHON
+
 while IFS= read -r workspace_member; do
   require_text "Dockerfile" \
     "COPY ${workspace_member}/Cargo.toml ${workspace_member}/Cargo.toml"
