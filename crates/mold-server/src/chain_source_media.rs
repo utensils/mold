@@ -205,7 +205,7 @@ pub(crate) fn handoff_current_to_gallery(
     db: &mold_db::MetadataDb,
     jobs_root: &Path,
     job_dir: &Path,
-    job_id: &str,
+    gallery_identity: &crate::batch_transaction::ArchivedChildIdentity,
     output_dir: &Path,
     request: &ChainRequest,
     gate: &crate::batch_transaction::GalleryPublicationGate,
@@ -218,12 +218,13 @@ pub(crate) fn handoff_current_to_gallery(
         return Ok(());
     };
     let store = open_store(jobs_root)?;
-    let bindings = gate.bind_retained_media_for_job(output_dir, job_id, media_set, |pin_id| {
-        store
-            .pin_for_gallery_item(media_set, pin_id)
-            .map(|_| ())
-            .map_err(Into::into)
-    })?;
+    let bindings =
+        gate.bind_retained_media_for_output(output_dir, gallery_identity, media_set, |pin_id| {
+            store
+                .pin_for_gallery_item(media_set, pin_id)
+                .map(|_| ())
+                .map_err(Into::into)
+        })?;
     let canonical = std::fs::canonicalize(output_dir).unwrap_or_else(|_| output_dir.into());
     for (filename, _) in bindings {
         let retained = gate

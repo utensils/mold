@@ -2471,7 +2471,7 @@ fn finalize_job(
             let gallery_filename =
                 chain_gallery_filename(&job.id, take, metadata.title.as_deref(), gallery_format);
             published_gallery_filename = Some(gallery_filename.clone());
-            save_video_to_dir_named(
+            let published_gallery_identity = save_video_to_dir_named(
                 output_dir,
                 &gallery_filename,
                 &gallery_bytes,
@@ -2484,22 +2484,25 @@ fn finalize_job(
             )?;
             #[cfg(test)]
             deps.executor.after_gallery_publication(&job.id)?;
+            let jobs_root = job
+                .job_dir
+                .parent()
+                .context("chain job directory has no jobs root")?;
+            // Retention is part of durable settlement. On failure, preserve the
+            // chain for retry (within the GC grace period for ephemeral jobs)
+            // rather than completing it without a source-media pin. Keep the
+            // gallery writer guard through handoff so in-process deletion cannot
+            // interleave. Publication and handoff are both replayable.
+            crate::chain_source_media::handoff_current_to_gallery(
+                db,
+                jobs_root,
+                &job.job_dir,
+                &published_gallery_identity,
+                output_dir,
+                &effective,
+                &deps.gallery_publication_gate,
+            )?;
         }
-    }
-    if let Some(output_dir) = deps.output_dir.as_ref() {
-        let jobs_root = job
-            .job_dir
-            .parent()
-            .context("chain job directory has no jobs root")?;
-        crate::chain_source_media::handoff_current_to_gallery(
-            db,
-            jobs_root,
-            &job.job_dir,
-            &job.id,
-            output_dir,
-            &effective,
-            &deps.gallery_publication_gate,
-        )?;
     }
 
     let now = now_ms_u64();
@@ -5523,6 +5526,92 @@ mod tests {
     }
 
     #[test]
+    fn source_backed_chains_retain_media_on_their_committed_print() {
+        for ephemeral in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = db();
+            let jobs_root = dir.path().join("jobs");
+            let job_dir = jobs_root.join("source-backed");
+            std::fs::create_dir_all(&job_dir).unwrap();
+            let mut req = request(vec![TransitionMode::Smooth, TransitionMode::Smooth]);
+            req.ephemeral = ephemeral;
+            req.stages[0].source_image = Some(b"retained source bytes".to_vec());
+            let row = create_job_with_params(
+                &db,
+                &jobs_root,
+                CreateJobParams {
+                    id: "source-backed".into(),
+                    ephemeral,
+                    request: req,
+                    frozen_model: None,
+                },
+            )
+            .unwrap();
+            let executor = Arc::new(FakeExecutor {
+                calls: AtomicUsize::new(0),
+                cancel_on_progress: AtomicBool::new(false),
+            });
+            let output_dir = dir.path().join("gallery");
+            let mut deps = deps(
+                db,
+                jobs_root,
+                executor,
+                Arc::new(FakeProbe(AtomicUsize::new(0))),
+            );
+            deps.output_dir = Some(output_dir.clone());
+
+            execute_job(&deps, &row, 0).unwrap();
+
+            let db = deps.db.as_ref().as_ref().unwrap();
+            assert_eq!(
+                chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+                ChainJobState::Completed
+            );
+            let rows = db.list(Some(&output_dir)).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].metadata.job_id, None);
+            assert_eq!(
+                rows[0].metadata.chain_job_id.as_deref(),
+                (!ephemeral).then_some(row.id.as_str())
+            );
+            let retained = deps
+                .gallery_publication_gate
+                .retained_media_for_item(&output_dir, &rows[0].filename)
+                .unwrap()
+                .unwrap()
+                .1;
+            assert_eq!(
+                retained.len(),
+                1,
+                "the committed print must own its source media"
+            );
+            crate::chain_source_media::release_all(&deps.jobs_root, &job_dir).unwrap();
+            let store = crate::queue_media_store::QueueMediaStore::open(dir.path())
+                .unwrap()
+                .store;
+            let pin = crate::queue_media_store::GalleryMediaPinRef::new(
+                retained[0].media_set.clone(),
+                retained[0].pin_id.clone(),
+            )
+            .unwrap();
+            let decrypted = store
+                .decrypt_to_private_staging_from_gallery_pin(&pin)
+                .unwrap();
+            assert_eq!(
+                std::fs::read(&decrypted.files[0].path).unwrap(),
+                b"retained source bytes"
+            );
+            assert_eq!(
+                ChainJobManifest::read_from_dir(&job_dir)
+                    .unwrap()
+                    .finalizes
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn durable_execute_job_records_exactly_one_runner_gallery_row() {
         let dir = tempfile::tempdir().unwrap();
         let db = db();
@@ -6928,9 +7017,11 @@ mod tests {
         let db = db();
         let mut req = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
         req.stages[0].source_image = Some(vec![1, 2, 3]);
+        let jobs_root = dir.path().join("jobs");
+        let output_dir = dir.path().join("gallery");
         let row = create_job_with_params(
             &db,
-            dir.path(),
+            &jobs_root,
             CreateJobParams {
                 id: "01JBR55SOURCEPREFIX".into(),
                 ephemeral: false,
@@ -6944,22 +7035,36 @@ mod tests {
             calls: AtomicUsize::new(0),
             cancel_on_progress: AtomicBool::new(false),
         });
-        let deps = deps(
+        let mut deps = deps(
             db,
-            dir.path().join("output"),
+            jobs_root.clone(),
             executor,
             Arc::new(FakeProbe(AtomicUsize::new(0))),
         );
+        deps.output_dir = Some(output_dir.clone());
         execute_job(&deps, &row, 0).unwrap();
         let db = deps.db.as_ref().as_ref().unwrap();
         let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let first_filename = manifest.finalizes[0]
+            .gallery_filename
+            .as_ref()
+            .unwrap()
+            .clone();
+        let first_binding = deps
+            .gallery_publication_gate
+            .retained_media_for_item(&output_dir, &first_filename)
+            .unwrap()
+            .unwrap()
+            .1;
+        assert_eq!(first_binding.len(), 1);
         let mut stages = effective_request_with_media(&manifest, &job_dir)
             .unwrap()
             .stages;
         stages[1].prompt = "edited later stage".into();
 
-        let (_, preserved) =
-            apply_amend(db, dir.path(), &row.id, &amend_with_stages(stages)).unwrap();
+        stages[1].source_image = Some(vec![4, 5, 6]);
+        let (updated, preserved) =
+            apply_amend(db, &jobs_root, &row.id, &amend_with_stages(stages)).unwrap();
 
         assert_eq!(preserved, 1);
         assert_eq!(
@@ -6968,6 +7073,26 @@ mod tests {
                 .stage_status[0]
                 .state,
             StageState::Completed
+        );
+        execute_job(&deps, &updated, updated.current_stage).unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(manifest.finalizes.len(), 2);
+        let second_filename = manifest.finalizes[1].gallery_filename.as_ref().unwrap();
+        let second_binding = deps
+            .gallery_publication_gate
+            .retained_media_for_item(&output_dir, second_filename)
+            .unwrap()
+            .unwrap()
+            .1;
+        assert_eq!(second_binding.len(), 1);
+        assert_ne!(first_binding[0].media_set, second_binding[0].media_set);
+        assert_eq!(
+            deps.gallery_publication_gate
+                .retained_media_for_item(&output_dir, &first_filename)
+                .unwrap()
+                .unwrap()
+                .1,
+            first_binding
         );
     }
 
@@ -7892,8 +8017,18 @@ mod tests {
     fn gallery_publication_crash_replay_keeps_one_file_row_and_finalize_record() {
         let dir = tempfile::tempdir().unwrap();
         let db = db();
-        let req = request(vec![TransitionMode::Smooth]);
-        let job_dir = dir.path().join("job");
+        let mut req = request(vec![TransitionMode::Smooth]);
+        req.stages[0].source_image = Some(b"replay source".to_vec());
+        let jobs_root = dir.path().join("jobs");
+        let job_dir = jobs_root.join("job");
+        std::fs::create_dir_all(&job_dir).unwrap();
+        let req = crate::chain_source_media::persist_scrubbed(
+            &jobs_root,
+            &job_dir,
+            "01JBR55GALLERYREPLAY",
+            req,
+        )
+        .unwrap();
         let output_dir = dir.path().join("gallery");
         let row = persist_job(
             &db,
@@ -7908,7 +8043,7 @@ mod tests {
         });
         let deps = RunnerDeps {
             db: Arc::new(Some(db)),
-            jobs_root: dir.path().join("jobs"),
+            jobs_root,
             executor: executor.clone(),
             queue_probe: Arc::new(FakeProbe(AtomicUsize::new(0))),
             events: Arc::new(JobEventBus::new()),
@@ -7997,6 +8132,29 @@ mod tests {
                 .unwrap()
                 .needs_finalize,
             Some(false)
+        );
+        let rows = db.list(Some(&output_dir)).unwrap();
+        let bindings = deps
+            .gallery_publication_gate
+            .retained_media_for_item(&output_dir, &rows[0].filename)
+            .unwrap()
+            .unwrap()
+            .1;
+        assert_eq!(bindings.len(), 1);
+        let store = crate::queue_media_store::QueueMediaStore::open(dir.path())
+            .unwrap()
+            .store;
+        let pin = crate::queue_media_store::GalleryMediaPinRef::new(
+            bindings[0].media_set.clone(),
+            bindings[0].pin_id.clone(),
+        )
+        .unwrap();
+        let source = store
+            .decrypt_to_private_staging_from_gallery_pin(&pin)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&source.files[0].path).unwrap(),
+            b"replay source"
         );
     }
 

@@ -121,6 +121,11 @@ fn classify_existing_authority_error(error: anyhow::Error) -> CompletedOutputArc
     }
 }
 
+enum RetainedMediaTarget<'a> {
+    Job(&'a str),
+    Output(&'a ArchivedChildIdentity),
+}
+
 impl CachedCommittedArchiveIndex {
     fn new(generation: u64, index: CommittedArchiveIndex) -> Self {
         let mut filenames_by_job_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -575,26 +580,72 @@ impl GalleryPublicationGate {
         output_dir: &Path,
         job_id: &str,
         media_set: &crate::queue_media_store::MediaSetRef,
+        pin: impl FnMut(&str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Vec<(String, GalleryMediaPin)>> {
+        self.bind_retained_media(output_dir, RetainedMediaTarget::Job(job_id), media_set, pin)
+    }
+
+    /// Bind only the published take. Chain prints need not carry a queue job
+    /// id, and different takes of one chain may have different source media.
+    pub(crate) fn bind_retained_media_for_output(
+        &self,
+        output_dir: &Path,
+        identity: &ArchivedChildIdentity,
+        media_set: &crate::queue_media_store::MediaSetRef,
+        pin: impl FnMut(&str) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Vec<(String, GalleryMediaPin)>> {
+        self.bind_retained_media(
+            output_dir,
+            RetainedMediaTarget::Output(identity),
+            media_set,
+            pin,
+        )
+    }
+
+    fn bind_retained_media(
+        &self,
+        output_dir: &Path,
+        target: RetainedMediaTarget<'_>,
+        media_set: &crate::queue_media_store::MediaSetRef,
         mut pin: impl FnMut(&str) -> anyhow::Result<()>,
     ) -> anyhow::Result<Vec<(String, GalleryMediaPin)>> {
         let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
         let canonical_output_dir = bookkeeping.canonical_root();
         let mut index =
             self.committed_archive_index_while_locked(canonical_output_dir, &bookkeeping)?;
-        let mut targets = index
-            .entries
-            .iter()
-            .filter(|(filename, entry)| {
-                !index.quarantined_names.contains(*filename)
-                    && entry.record.metadata.job_id.as_deref() == Some(job_id)
-            })
-            .map(|(filename, entry)| (filename.clone(), entry.identity.clone()))
-            .collect::<Vec<_>>();
+        let mut targets = match target {
+            RetainedMediaTarget::Job(job_id) => index
+                .entries
+                .iter()
+                .filter(|(filename, entry)| {
+                    !index.quarantined_names.contains(*filename)
+                        && entry.record.metadata.job_id.as_deref() == Some(job_id)
+                })
+                .map(|(filename, entry)| (filename.clone(), entry.identity.clone()))
+                .collect::<Vec<_>>(),
+            RetainedMediaTarget::Output(identity) => index
+                .entries
+                .get(&identity.final_name)
+                .filter(|entry| {
+                    !index.quarantined_names.contains(&identity.final_name)
+                        && entry.identity == *identity
+                })
+                .map(|entry| (identity.final_name.clone(), entry.identity.clone()))
+                .into_iter()
+                .collect(),
+        };
         targets.sort_by(|left, right| left.0.cmp(&right.0));
-        ensure!(
-            !targets.is_empty(),
-            "no committed gallery outputs belong to queue job {job_id}"
-        );
+        if targets.is_empty() {
+            match target {
+                RetainedMediaTarget::Job(job_id) => {
+                    bail!("no committed gallery outputs belong to queue job {job_id}")
+                }
+                RetainedMediaTarget::Output(identity) => bail!(
+                    "no matching committed gallery identity available for source-media handoff: {}",
+                    identity.final_name
+                ),
+            }
+        }
         let mut bindings = Vec::with_capacity(targets.len());
         for (filename, identity) in &targets {
             let entry = index
@@ -5056,11 +5107,30 @@ pub(crate) fn find_completed_output_in_committed_archive(
 pub(crate) fn archive_ordinary_gallery_record(
     output_dir: &Path,
     final_path: &Path,
-    mut record: GenerationRecord,
+    record: GenerationRecord,
     precomputed_sha256: Option<String>,
     gate: &GalleryPublicationGate,
     bookkeeping: &GalleryBookkeepingGuard,
 ) -> anyhow::Result<GenerationRecord> {
+    archive_ordinary_gallery_record_with_identity(
+        output_dir,
+        final_path,
+        record,
+        precomputed_sha256,
+        gate,
+        bookkeeping,
+    )
+    .map(|(record, _)| record)
+}
+
+pub(crate) fn archive_ordinary_gallery_record_with_identity(
+    output_dir: &Path,
+    final_path: &Path,
+    mut record: GenerationRecord,
+    precomputed_sha256: Option<String>,
+    gate: &GalleryPublicationGate,
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<(GenerationRecord, ArchivedChildIdentity)> {
     bookkeeping.ensure_root(output_dir)?;
     let canonical_output_dir = bookkeeping.canonical_root();
     validate_component(&record.filename, "ordinary gallery filename")?;
@@ -5100,8 +5170,9 @@ pub(crate) fn archive_ordinary_gallery_record(
     // write path already synced this directory — three of the four callers
     // reach here by a link or a rename of their own.
     sync_dir(canonical_output_dir)?;
+    let identity = archived_child_identity(&manifest, &manifest.children[0])?;
     gate.record_committed_manifest(canonical_output_dir, &manifest, bookkeeping)?;
-    Ok(record)
+    Ok((record, identity))
 }
 
 /// Durably retire the exact committed archive child currently claiming
@@ -8682,6 +8753,71 @@ mod tests {
                 vec![binding]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn retained_media_output_binding_selects_only_the_exact_live_take() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = GalleryPublicationGate::default();
+        for name in ["take-1.png", "take-2.png"] {
+            publish_import(dir.path(), name, name, 0, name.as_bytes()).await;
+        }
+        let media_set = crate::queue_media_store::MediaSetRef {
+            owner_id: "chain-jobs".into(),
+            job_id: "source-revision".into(),
+            set_id: "source-set".into(),
+        };
+        let identity = gate
+            .retained_media_for_item(dir.path(), "take-2.png")
+            .unwrap()
+            .unwrap()
+            .0;
+        let bindings = gate
+            .bind_retained_media_for_output(dir.path(), &identity, &media_set, |_| Ok(()))
+            .unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].0, "take-2.png");
+        let restarted = GalleryPublicationGate::default();
+        assert!(restarted
+            .retained_media_for_item(dir.path(), "take-1.png")
+            .unwrap()
+            .unwrap()
+            .1
+            .is_empty());
+        assert_eq!(
+            restarted
+                .retained_media_for_item(dir.path(), "take-2.png")
+                .unwrap()
+                .unwrap()
+                .1,
+            vec![bindings[0].1.clone()]
+        );
+        // Replaying the handoff is idempotent, without requiring queue metadata.
+        assert_eq!(
+            gate.bind_retained_media_for_output(dir.path(), &identity, &media_set, |_| Ok(()))
+                .unwrap(),
+            bindings
+        );
+        let mut missing = identity.clone();
+        missing.final_name = "missing.png".into();
+        assert!(gate
+            .bind_retained_media_for_output(dir.path(), &missing, &media_set, |_| panic!(
+                "missing output must never pin"
+            ))
+            .is_err());
+        let mut foreign = identity.clone();
+        foreign.parent_id = "different-publication".into();
+        assert!(gate
+            .bind_retained_media_for_output(dir.path(), &foreign, &media_set, |_| panic!(
+                "foreign identity must never pin"
+            ))
+            .is_err());
+        fs::write(dir.path().join("take-2.png"), b"replacement").unwrap();
+        assert!(gate
+            .bind_retained_media_for_output(dir.path(), &identity, &media_set, |_| panic!(
+                "replaced output must never pin"
+            ))
+            .is_err());
     }
 
     #[tokio::test]

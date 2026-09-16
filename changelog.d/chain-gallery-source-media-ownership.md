@@ -1,0 +1,1 @@
+- **Finish source-backed long videos reliably.** Automatic long videos and scripted sequences now retain their source media on the exact published take instead of failing after rendering. Retrying finalization can reuse an already-published video without rerendering its clips.

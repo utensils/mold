@@ -750,7 +750,7 @@ pub(crate) fn save_video_to_dir_named(
     db: Option<&MetadataDb>,
     events: Option<&crate::events::EventBroadcaster>,
     gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<crate::batch_transaction::ArchivedChildIdentity> {
     let filename_path = std::path::Path::new(filename);
     if filename_path.components().count() != 1
         || !matches!(
@@ -797,7 +797,7 @@ pub(crate) fn save_video_to_dir_named(
         backend: Some(mold_inference::compiled_backend_label()),
     };
     let index = gallery_gate.committed_archive_index_while_locked(dir, &authority)?;
-    let record = if let Some(existing) = index.get(filename) {
+    let (record, identity) = if let Some(existing) = index.get(filename) {
         anyhow::ensure!(
             existing.record().format == format
                 && existing.record().metadata == *metadata
@@ -805,10 +805,10 @@ pub(crate) fn save_video_to_dir_named(
             "gallery replay target '{}' exists with different archived metadata",
             path.display()
         );
-        existing.record().clone()
+        (existing.record().clone(), existing.identity.clone())
     } else {
         let record = mold_db::persist::build_saved_output_record(dir, filename, &path, &params);
-        match crate::batch_transaction::archive_ordinary_gallery_record(
+        match crate::batch_transaction::archive_ordinary_gallery_record_with_identity(
             dir,
             &path,
             record,
@@ -855,7 +855,7 @@ pub(crate) fn save_video_to_dir_named(
             announce_seeded_filing(events, filename, announced);
         }
     }
-    Ok(filename.to_string())
+    Ok(identity)
 }
 
 /// Publish an already-encoded video without materializing the whole file in
@@ -7008,7 +7008,8 @@ mod tests {
                     None,
                     &gallery_gate,
                 )
-                .unwrap(),
+                .unwrap()
+                .final_name,
                 filename
             );
         }
