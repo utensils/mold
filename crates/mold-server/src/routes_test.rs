@@ -22928,6 +22928,66 @@ mod tests {
             .is_empty());
     }
 
+    /// Historical trash moved the bytes and DB row while leaving archive
+    /// authority live. Re-import must retire that authority before publishing
+    /// even when the new descriptor differs from the original.
+    #[tokio::test]
+    async fn gallery_import_over_historical_archived_trash_republishes_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        let gate = state.gallery_publication_gate.clone();
+        let app = app_with_state(state);
+        for title in ["First", "Second"] {
+            let mut metadata = output_metadata("historical trash");
+            metadata.title = Some(title.into());
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::put("/api/gallery/import/historical.png")
+                        .header("content-type", "application/vnd.mold.gallery-import")
+                        .body(Body::from(gallery_import_body(
+                            Some(&metadata),
+                            &minimal_png(),
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            if title == "First" {
+                let trash = mold_db::trash_dir(dir.path());
+                std::fs::create_dir_all(&trash).unwrap();
+                std::fs::rename(
+                    dir.path().join("historical.png"),
+                    trash.join("historical.png"),
+                )
+                .unwrap();
+                db.as_ref()
+                    .as_ref()
+                    .unwrap()
+                    .mark_trashed(dir.path(), "historical.png", 1)
+                    .unwrap();
+            }
+        }
+        crate::batch_transaction::recover_transactions(dir.path(), &gate, db.clone())
+            .await
+            .unwrap();
+        let row = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .get(dir.path(), "historical.png")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.metadata.title.as_deref(), Some("Second"));
+        assert!(row.trashed_at_ms.is_none());
+        assert!(dir.path().join("historical.png").is_file());
+        assert!(!mold_db::trash_dir(dir.path())
+            .join("historical.png")
+            .exists());
+        assert_eq!(gallery_rows(&app, "/api/gallery").await.len(), 1);
+    }
+
     // ── Durable-admission readiness ───────────────────────────────────────────
     //
     // Appended as one block on purpose. A semantic conflict in a Rust test file

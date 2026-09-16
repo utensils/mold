@@ -403,6 +403,12 @@ pub(crate) fn purge_trashed_print_blocking(
     gate: &GalleryPublicationGate,
     media_lifecycle: Option<&crate::queue_media_lifecycle::QueueMediaLifecycle>,
 ) -> Result<(), ApiError> {
+    batch_transaction::retire_trashed_archive_filename(dir, name, gate).map_err(|e| {
+        internal(
+            "failed to retire trashed gallery authority",
+            format!("{e:#}"),
+        )
+    })?;
     let trash_dir = batch_transaction::gallery_trash_dir(dir);
     let trash_path = trash_dir.join(name);
     match std::fs::remove_file(&trash_path) {

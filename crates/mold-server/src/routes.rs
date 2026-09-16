@@ -9252,6 +9252,9 @@ async fn import_gallery_file(
                     drop(error);
                     unreachable!("unresolved commit aborts the process");
                 }
+                drop(error);
+                let _ =
+                    tokio::task::spawn_blocking(move || transaction.rollback_unpublished()).await;
                 return Err(ApiError::internal(format!(
                     "atomic gallery import commit failed before publication: {message}"
                 )));

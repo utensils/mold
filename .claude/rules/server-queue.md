@@ -46,3 +46,14 @@ Gallery writes happen in the server (`queue.rs` upserts after disk write; backgr
 - **Cancellation capability.** Current servers advertise `queue.cooperative_cancellation`: queued work and running singleton generations cancel through `DELETE /api/queue/:id`, with the worker stopping at the next model safe point. iPhone Host detail keeps its 44pt two-step action and exact Keychain-authenticated route for both states; older hosts keep running rows read-only. This supersedes the older queued-only mobile sentence above.
 
 - **Installed model preparation never hashes weight bodies.** Warm format facts off the coordinator, but use saved observed digests or tagged process-local installation identity for equivalence. Missing receipts are not pending downloads. Metadata replacement invalidates frozen plans without a hash fallback. Receipts appearing during a lease cannot change the chosen identity representation.
+
+**Historical trash and re-import share archive authority.** Before purging a
+trashed print, `retire_trashed_archive_filename` verifies its trash bytes and
+retires any historical live archive left by older trash paths; a live replacement
+or mismatched trash is preserved. Imports preflight archive conflicts under the
+namespace lock before entering `Committing`, where errors abort the process.
+Recovery can reuse existing authority only for an import with matching sealed
+bytes, format and generation metadata (allowing an absent elapsed generation
+time to become known). It retains the original archive identity and source-media
+pins. This recovers interrupted historical re-imports without treating a filename
+match as permission to replace another print's provenance.

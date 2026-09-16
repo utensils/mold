@@ -399,8 +399,24 @@ impl GalleryPublicationGate {
         let mut index = self.committed_archive_index_while_locked(output_dir, bookkeeping)?;
         for child in &manifest.children {
             let identity = archived_child_identity(manifest, child)?;
-            match index.entries.get(&identity.final_name) {
+            match index.entries.get_mut(&identity.final_name) {
                 Some(existing) if existing.identity == identity => continue,
+                Some(existing) if compatible_gallery_reimport(manifest, child, existing) => {
+                    // Older trash paths could leave live archive authority behind.
+                    // A checksum-verified re-import of the same descriptor is
+                    // idempotent, including when recovering a committing attempt.
+                    // Keep the original identity and its retained-media bindings.
+                    existing.facts = Some(ArchiveFileFacts::from_path(
+                        &output_dir.join(&child.final_name),
+                    )?);
+                    existing.record.metadata.generation_time_ms = existing
+                        .record
+                        .metadata
+                        .generation_time_ms
+                        .or(child.record.metadata.generation_time_ms);
+                    index.quarantined_names.remove(&identity.final_name);
+                    continue;
+                }
                 Some(_) => anyhow::bail!(
                     "multiple live committed archives claim gallery filename {}",
                     identity.final_name
@@ -1631,6 +1647,36 @@ impl GalleryImportTransaction {
             Ok(bookkeeping) => Some(bookkeeping),
             Err(error) => return Err(UnresolvedBatchCommit::pre_commit(error)),
         };
+        // Refuse conflicting authority before entering the process-fatal commit
+        // region. The namespace lock remains held through publication.
+        if self.manifest.state == BatchManifestState::Prepared {
+            let validation = (|| -> anyhow::Result<()> {
+                let namespace = bookkeeping.as_ref().expect("bookkeeping lock is held");
+                let index =
+                    if crate::gallery_authority::read_generation(&self.output_dir, namespace)?
+                        .is_some()
+                    {
+                        gate.committed_archive_index_while_locked(&self.output_dir, namespace)?
+                    } else {
+                        // Do not initialize a new authority store ahead of the
+                        // archive evidence whose checkpoint lifetime it tracks.
+                        load_committed_archive_index_legacy(&self.output_dir)?
+                    };
+                let child = sole_child(&self.manifest);
+                if let Some(existing) = index.entries.get(&child.final_name) {
+                    ensure!(
+                        existing.identity == archived_child_identity(&self.manifest, child)?
+                            || compatible_gallery_reimport(&self.manifest, child, existing),
+                        "gallery import conflicts with committed archive authority for {}",
+                        child.final_name
+                    );
+                }
+                Ok(())
+            })();
+            if let Err(error) = validation {
+                return Err(UnresolvedBatchCommit::pre_commit(error));
+            }
+        }
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.commit_while_locked(gate, &db, &mut bookkeeping)
         }));
@@ -5112,6 +5158,79 @@ pub(crate) enum ArchiveDeleteDisposition {
     NoArchive,
     SafeToUnlink,
     PreservedReplacement,
+}
+
+/// Purging historical trash must retire its archive even when an older trash
+/// operation moved only the bytes/DB row. Verify the trash identity before
+/// deleting that evidence, and never retire a name occupied by a live file.
+pub(crate) fn retire_trashed_archive_filename(
+    output_dir: &Path,
+    filename: &str,
+    gate: &GalleryPublicationGate,
+) -> anyhow::Result<()> {
+    validate_component(filename, "gallery purge filename")?;
+    let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+    let output_dir = bookkeeping.canonical_root();
+    let mut index = gate.committed_archive_index_while_locked(output_dir, &bookkeeping)?;
+    let Some(entry) = index.entries.get(filename).cloned() else {
+        return Ok(());
+    };
+    ensure!(
+        matches!(fs::symlink_metadata(output_dir.join(filename)), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+        "cannot purge stale trash authority while a live path exists for {filename}"
+    );
+    ensure!(
+        crate::gallery_authority::file_matches_entry_at(
+            &gallery_trash_dir(output_dir).join(filename),
+            &entry,
+        )?,
+        "trashed bytes do not match committed archive authority for {filename}"
+    );
+    let generation = crate::gallery_authority::read_generation(output_dir, &bookkeeping)?
+        .context("gallery authority generation is missing")?;
+    index.entries.remove(filename);
+    index.quarantined_names.remove(filename);
+    index.retired_names.insert(filename.to_owned());
+    index.retired_entries.insert(filename.to_owned(), entry);
+    index
+        .retirement_epochs
+        .insert(filename.to_owned(), generation.saturating_add(1));
+    index.retirement_projection_epochs.remove(filename);
+    let generation = crate::gallery_authority::commit_snapshot(
+        output_dir,
+        &bookkeeping,
+        generation,
+        &mut index,
+        "retire_historical_trash",
+        vec![filename.to_owned()],
+    )?;
+    gate.install_committed_archive_index(output_dir, generation, index);
+    Ok(())
+}
+
+// A newer mirror can enrich a historical descriptor with elapsed generation
+// time. It does not describe how pixels were made; accept only missing-to-known
+// enrichment, never conflicting known durations or changed generation inputs.
+fn compatible_gallery_reimport(
+    manifest: &BatchAttemptManifest,
+    child: &BatchManifestChild,
+    existing: &CommittedArchiveEntry,
+) -> bool {
+    let mut archived_metadata = existing.record.metadata.clone();
+    archived_metadata.generation_time_ms = archived_metadata
+        .generation_time_ms
+        .or(child.record.metadata.generation_time_ms);
+    manifest
+        .normalized_request
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        == Some("gallery_import")
+        && child.checksum_sha256.as_deref() == Some(existing.identity.checksum_sha256.as_str())
+        && child.size_bytes == Some(existing.identity.size_bytes)
+        && child.final_name == existing.identity.final_name
+        && child.record.format == existing.record.format
+        && child.record.metadata == archived_metadata
+        && child.record.metadata_synthetic == existing.record.metadata_synthetic
 }
 
 pub(crate) fn tombstone_committed_archive_filename(
@@ -8950,6 +9069,152 @@ mod tests {
             serde_json::from_slice(&fs::read(reservation_path(dir.path(), "same.png")).unwrap())
                 .unwrap();
         assert_eq!(owner, retry.reservation_owner());
+    }
+
+    #[tokio::test]
+    async fn historical_trash_retirement_preserves_unverified_files() {
+        for live_replacement in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let gate = GalleryPublicationGate::default();
+            publish_import(dir.path(), "original", "one.png", 0, b"one").await;
+            let trash = gallery_trash_dir(dir.path());
+            fs::create_dir_all(&trash).unwrap();
+            fs::rename(dir.path().join("one.png"), trash.join("one.png")).unwrap();
+            if live_replacement {
+                fs::write(dir.path().join("one.png"), b"replacement").unwrap();
+            } else {
+                fs::write(trash.join("one.png"), b"modified trash").unwrap();
+            }
+            assert!(retire_trashed_archive_filename(dir.path(), "one.png", &gate).is_err());
+            assert!(trash.join("one.png").is_file());
+            if live_replacement {
+                assert_eq!(
+                    fs::read(dir.path().join("one.png")).unwrap(),
+                    b"replacement"
+                );
+            }
+            assert!(gate
+                .committed_archive_index(dir.path())
+                .unwrap()
+                .retired_entries
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn historical_reimport_recovery_preserves_identical_archive_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = GalleryPublicationGate::default();
+        let mut saved = record("one.png", 0);
+        saved.metadata.job_id = Some("recovery-job".into());
+        let mut original_import = GalleryImportTransaction::begin(
+            dir.path(),
+            "original",
+            0,
+            serde_json::json!({"kind": "gallery_import"}),
+            saved.clone(),
+        )
+        .unwrap();
+        original_import.stage_bytes(b"one").unwrap();
+        original_import.mark_prepared().unwrap();
+        original_import.commit(&gate, Arc::new(None)).await.unwrap();
+        gate.bind_retained_media_for_job(
+            dir.path(),
+            "recovery-job",
+            &crate::queue_media_store::MediaSetRef {
+                owner_id: "owner".into(),
+                job_id: "recovery-job".into(),
+                set_id: "source".into(),
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        let original = gate.committed_archive_index(dir.path()).unwrap().entries["one.png"].clone();
+        // The historical trash purge removed the bytes but left this live
+        // archive. Recreate the crash after final publication/staging cleanup.
+        fs::remove_file(dir.path().join("one.png")).unwrap();
+        saved.metadata.generation_time_ms = Some(224886);
+        let mut transaction = GalleryImportTransaction::begin(
+            dir.path(),
+            "reimport",
+            0,
+            serde_json::json!({"kind": "gallery_import"}),
+            saved,
+        )
+        .unwrap();
+        transaction.stage_bytes(b"one").unwrap();
+        transaction.mark_prepared().unwrap();
+        transaction.manifest.state = BatchManifestState::Committing;
+        transaction.persist_manifest().unwrap();
+        fs::hard_link(transaction.staging_path(), transaction.final_path()).unwrap();
+        transaction
+            .append_journal(BatchJournalEvent::FinalPublished { child_index: 0 })
+            .unwrap();
+        transaction.cleanup_private_primary_staging().unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let report = recover_transactions(dir.path(), &gate, db.clone())
+            .await
+            .unwrap();
+        assert_eq!(report.rolled_forward, 1);
+        let index = gate.committed_archive_index(dir.path()).unwrap();
+        assert_eq!(index.entries["one.png"].identity, original.identity);
+        assert_eq!(
+            index.entries["one.png"].retained_media,
+            original.retained_media
+        );
+        assert!(!index.entries["one.png"].retained_media.is_empty());
+        assert_eq!(
+            index.entries["one.png"].record.metadata.generation_time_ms,
+            Some(224886)
+        );
+        assert!(!index.quarantined_names.contains("one.png"));
+        assert_eq!(fs::read(dir.path().join("one.png")).unwrap(), b"one");
+        assert_eq!(db.as_ref().as_ref().unwrap().count().unwrap(), 1);
+        assert_eq!(
+            recover_transactions(dir.path(), &GalleryPublicationGate::default(), db)
+                .await
+                .unwrap(),
+            RecoveryReport::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_reimport_is_refused_before_committing() {
+        for (bytes, seed, synthetic) in [
+            (b"two".as_slice(), 0, false),
+            (b"one".as_slice(), 1, false),
+            (b"one".as_slice(), 0, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let gate = GalleryPublicationGate::default();
+            publish_import(dir.path(), "original", "one.png", 0, b"one").await;
+            fs::remove_file(dir.path().join("one.png")).unwrap();
+            let mut incoming = record("one.png", seed);
+            incoming.metadata_synthetic = synthetic;
+            let mut transaction = GalleryImportTransaction::begin(
+                dir.path(),
+                "reimport",
+                0,
+                serde_json::json!({"kind": "gallery_import"}),
+                incoming,
+            )
+            .unwrap();
+            transaction.stage_bytes(bytes).unwrap();
+            transaction.mark_prepared().unwrap();
+            let error = transaction.commit(&gate, Arc::new(None)).await.unwrap_err();
+            assert!(!error.entered_committing());
+            drop(error); // A pre-commit refusal must not abort the process.
+            assert_eq!(transaction.manifest.state, BatchManifestState::Prepared);
+            assert!(!dir.path().join("one.png").exists());
+            transaction.rollback_unpublished().unwrap();
+            assert_eq!(
+                gate.committed_archive_index(dir.path()).unwrap().entries["one.png"]
+                    .identity
+                    .parent_id,
+                "original"
+            );
+        }
     }
 
     #[tokio::test]
