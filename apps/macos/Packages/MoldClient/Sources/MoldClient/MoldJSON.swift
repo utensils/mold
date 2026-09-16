@@ -17,6 +17,19 @@ public enum MoldJSON {
         encoder.keyEncodingStrategy = .convertToSnakeCase
         return encoder
     }()
+
+    /// For the app's OWN files, where both ends are this binary.
+    ///
+    /// Deliberately strategy-free, because the two above are NOT inverses:
+    /// `convertToSnakeCase` knows `baseURL` is an acronym and writes
+    /// `base_url`, while `convertFromSnakeCase` reads `base_url` back as
+    /// `baseUrl`. That is harmless on the wire -- mold sends snake_case and
+    /// nothing round-trips through both -- and silent data loss anywhere the
+    /// app writes something and reads it again, which is how the machine list
+    /// came back empty after every launch. Local types spell their keys out.
+    public static let localDecoder = JSONDecoder()
+
+    public static let localEncoder = JSONEncoder()
 }
 
 /// A `RawRepresentable` enum that tolerates values this build has never heard

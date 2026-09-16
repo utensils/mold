@@ -10,6 +10,15 @@ struct LocalEngineSettings: View {
         Form {
             Section {
                 LabeledContent("Status") { status }
+                // The one question a local engine gets asked: which library is
+                // this, and is it the same one `mold` uses in a terminal.
+                LabeledContent("Home") {
+                    Text(verbatim: home.url.path(percentEncoded: false))
+                        .truncationMode(.head)
+                        .lineLimit(1)
+                        .textSelection(.enabled)
+                        .help(homeExplanation)
+                }
                 if case let .running(port) = engine.state {
                     LabeledContent("Address") {
                         // `Text` interpolation of an integer goes through
@@ -35,6 +44,16 @@ struct LocalEngineSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private var home: MoldHome { MoldHome.resolve() }
+
+    private var homeExplanation: String {
+        switch home.source {
+        case .environment: "From MOLD_HOME in this app's environment."
+        case .saved: "The home chosen in Mold Desktop, shared with every mold on this Mac."
+        case .fallback: "The default home, shared with every mold on this Mac."
+        }
     }
 
     @ViewBuilder private var status: some View {

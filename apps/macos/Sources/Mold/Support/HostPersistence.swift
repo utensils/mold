@@ -9,26 +9,17 @@ import MoldClient
 enum HostPersistence {
     private static let key = "hosts"
 
-    struct Stored: Codable {
-        let id: UUID
-        var name: String
-        var baseURL: URL
-    }
-
     static func load(from defaults: UserDefaults = AppStorageSuite.defaults) -> [MoldHost]? {
         guard let data = defaults.data(forKey: key),
-              let stored = try? MoldJSON.decoder.decode([Stored].self, from: data),
+              let stored = try? MoldJSON.localDecoder.decode([StoredHost].self, from: data),
               !stored.isEmpty
         else { return nil }
-        return stored.map {
-            MoldHost(id: $0.id, name: $0.name, baseURL: $0.baseURL,
-                     apiKey: Keychain.apiKey(for: $0.id))
-        }
+        return stored.map { $0.host(apiKey: Keychain.apiKey(for: $0.id)) }
     }
 
     static func save(_ hosts: [MoldHost], to defaults: UserDefaults = AppStorageSuite.defaults) {
-        let stored = hosts.map { Stored(id: $0.id, name: $0.name, baseURL: $0.baseURL) }
-        defaults.set(try? MoldJSON.encoder.encode(stored), forKey: key)
+        let stored = hosts.map(StoredHost.init)
+        defaults.set(try? MoldJSON.localEncoder.encode(stored), forKey: key)
         for host in hosts {
             Keychain.setAPIKey(host.apiKey, for: host.id)
         }

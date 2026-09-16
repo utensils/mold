@@ -1880,7 +1880,7 @@
               {
                 category = "macos";
                 name = "macos-dev";
-                help = "build and run the native macOS app with logs on the terminal";
+                help = "build and run the native macOS app against your real settings and mold home";
                 command = ''
                   set -euo pipefail
                   cd apps/macos
@@ -1892,6 +1892,17 @@
                   # with a fresh environment, which would drop MOLD_NATIVE_HOSTS
                   # and send stdout somewhere you cannot watch.
                   exec ./build/Debug/Mold.app/Contents/MacOS/Mold "$@"
+                '';
+              }
+              {
+                category = "macos";
+                name = "macos-uat";
+                help = "run the native macOS app against a throwaway prefs domain and mold home";
+                command = ''
+                  set -euo pipefail
+                  cd apps/macos
+                  pkill -x Mold 2>/dev/null || true
+                  exec make uat
                 '';
               }
               {

@@ -38,7 +38,8 @@ extension HostStore {
     ///
     /// `MOLD_NATIVE_HOSTS` seeds extra machines as `name=url` pairs so a dev
     /// run can point at real hardware without those addresses living in the
-    /// source. The devshell's `macos-dev` sets it.
+    /// source. Pass it to `macos-dev` or `macos-uat`, which exec the binary
+    /// rather than `open`ing it so the variable actually arrives.
     static func seededHosts() -> [MoldHost] {
         // A saved list wins. Seeding over it would resurrect machines the
         // person removed on every launch.

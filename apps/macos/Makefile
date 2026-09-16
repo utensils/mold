@@ -13,7 +13,7 @@ APP      := $(BUILD)/$(CONFIG)/Mold.app
 XCB      := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) \
             -derivedDataPath $(BUILD)/DerivedData CONFIGURATION_BUILD_DIR=$(BUILD)/$(CONFIG)
 
-.PHONY: help gen build run run-fresh test lint lint-layers lint-color lint-size clean \
+.PHONY: help gen build run uat test lint lint-layers lint-color lint-size clean \
         engine engine-clean engine-config signed dmg notarize release
 
 help: ## Show this help
@@ -65,11 +65,20 @@ build: gen ## Build the app
 run: build ## Build and launch the app
 	@open $(APP)
 
-run-fresh: build ## Launch with a throwaway preferences domain
-	@# A first-launch run without touching the real settings: the app reads
-	@# MOLD_NATIVE_FRESH and swaps in a scratch defaults suite.
+# TMPDIR carries its trailing slash on macOS; `or` covers a shell that has none.
+UAT_HOME ?= $(or $(TMPDIR),/tmp/)mold-native-uat
+
+uat: build ## Launch against a throwaway prefs domain and a throwaway mold home
+	@# Everything this run touches is disposable, so a UAT can exercise
+	@# onboarding, a first launch and an empty library without costing anyone
+	@# their machine list, their models or their prints. `make run` is the
+	@# opposite by design: it uses the real settings and the real home.
 	@defaults delete io.utensils.mold.native.fresh 2>/dev/null || true
-	@MOLD_NATIVE_FRESH=1 ./build/$(CONFIG)/Mold.app/Contents/MacOS/Mold
+	@rm -rf "$(UAT_HOME)" && mkdir -p "$(UAT_HOME)"
+	@echo "  prefs: io.utensils.mold.native.fresh (emptied)"
+	@echo "  home:  $(UAT_HOME) (emptied -- the engine starts here with no models)"
+	@MOLD_NATIVE_FRESH=1 MOLD_HOME="$(UAT_HOME)" \
+	  ./build/$(CONFIG)/Mold.app/Contents/MacOS/Mold
 
 test: ## Run package tests
 	@cd Packages/MoldClient && swift test

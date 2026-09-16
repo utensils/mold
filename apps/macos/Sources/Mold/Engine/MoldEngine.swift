@@ -48,7 +48,16 @@ final class MoldEngine {
         guard case .stopped = state else { return }
         state = .starting
 
-        let home = MoldEngine.moldHome
+        // Resolved the way every other mold on this Mac resolves it. An app
+        // launched from Finder is handed no environment at all, so reading
+        // MOLD_HOME alone meant the engine ran against `~/.mold` while the CLI
+        // and the Tauri app used the home someone had actually chosen.
+        let resolved = MoldHome.resolve()
+        if let reason = resolved.unavailableReason {
+            state = .failed(reason)
+            return
+        }
+        let home = resolved.url.path(percentEncoded: false)
         let logs = MoldEngine.logDirectory
         Task.detached(priority: .userInitiated) {
             // The engine starts at most ONCE per process: the models-dir
@@ -93,11 +102,6 @@ final class MoldEngine {
         _ = mold_engine_join(8_000)
         state = .stopped
         #endif
-    }
-
-    private static var moldHome: String {
-        ProcessInfo.processInfo.environment["MOLD_HOME"]
-            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: ".mold").path
     }
 
     private static var logDirectory: String {

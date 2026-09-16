@@ -55,7 +55,8 @@ pairing-based onboarding for keyed hosts.
 From inside `nix develop`:
 
 ```bash
-macos-dev      # build and run, logs on the terminal
+macos-dev      # build and run against your real settings, logs on the terminal
+macos-uat      # the same build against a throwaway prefs domain and mold home
 macos-test     # package tests
 macos-lint     # architecture lints
 macos-build    # release build
@@ -63,6 +64,25 @@ macos-gen      # regenerate Mold.xcodeproj, then open it in Xcode
 ```
 
 Or directly: `make help` in this directory.
+
+`macos-dev` is your setup: the machines you saved, and the mold home every other
+mold on this Mac uses. `macos-uat` is disposable — it empties the
+`io.utensils.mold.native.fresh` preferences domain and points `MOLD_HOME` at a
+scratch directory under `$TMPDIR`, so a run can exercise onboarding, a first
+launch and an empty library without costing you your machine list, your models
+or your prints. Override the scratch home with `make uat UAT_HOME=/some/path`.
+The engine started there has no models installed — that is the point.
+
+## Which mold home it uses
+
+The in-process engine resolves its home exactly the way `crates/mold-core`'s
+`Config::mold_dir` does, and has to: it IS that engine, so if the two disagree
+one Mac has two libraries. `MOLD_HOME` wins; otherwise the bootstrap pointer at
+`~/Library/Application Support/mold/home` — the file Mold Desktop writes when
+someone moves their home to another drive — and finally `~/.mold`. Settings ▸
+This Mac prints the answer. A home named by that pointer but not currently
+mounted is reported rather than recreated, because a fresh empty home in its
+place is indistinguishable from having lost everything.
 
 `Mold.xcodeproj` is **generated** from `project.yml` and is gitignored. Editing
 it by hand creates a second source of truth that drifts; change `project.yml`
@@ -86,8 +106,8 @@ shorthand the sheet accepts:
 MOLD_NATIVE_HOSTS='plato=plato,hal9000=10.0.0.6' macos-dev
 ```
 
-`macos-dev` execs the binary rather than `open`ing it, so the variable reaches
-the app and its stdout stays on your terminal.
+`macos-dev` and `macos-uat` exec the binary rather than `open`ing it, so the
+variable reaches the app and its stdout stays on your terminal.
 
 `MOLD_NATIVE_DESTINATION` forces where the window opens: a destination name,
 `settings`, or `add-machine` / `edit-machine` to open the host sheet empty or on
