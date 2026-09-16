@@ -765,7 +765,11 @@ describe("CommandPalette model search", () => {
       .mockRejectedValueOnce(refusal)
       .mockRejectedValueOnce(refusal)
       .mockResolvedValue("palette-job");
-    const fetch = vi.fn().mockResolvedValue(Response.json({ licenses: [] }));
+    const fetch = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/models")) return Response.json([]);
+      if (url.endsWith("/api/licenses/accept")) return Response.json({ licenses: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
     vi.stubGlobal("fetch", fetch);
     const downloads = useDownloadsStore();
     const subscribe = vi.spyOn(downloads, "subscribe").mockResolvedValue();
