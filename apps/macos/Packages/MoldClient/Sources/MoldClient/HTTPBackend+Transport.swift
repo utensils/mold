@@ -85,4 +85,38 @@ extension HTTPBackend {
             )
         }
     }
+
+    /// A `text/event-stream` route as parsed frames. The status is checked
+    /// before the first byte -- a 401 is `.unauthorized` like every other
+    /// route, not a stream that opens and then goes silent.
+    func stream(_ path: String, timeout: TimeInterval) -> AsyncThrowingStream<ServerSentEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var request = self.request(path)
+                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    request.timeoutInterval = timeout
+
+                    let (bytes, response) = try await session.bytes(for: request)
+                    guard let http = response as? HTTPURLResponse,
+                          (200..<300).contains(http.statusCode)
+                    else { throw streamFailure(response) }
+
+                    for try await frame in bytes.moldLines().serverSentEvents() {
+                        continuation.yield(frame)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func streamFailure(_ response: URLResponse) -> MoldClientError {
+        guard let http = response as? HTTPURLResponse else { return .malformedResponse }
+        if http.statusCode == 401 { return .unauthorized }
+        return .http(status: http.statusCode, code: nil, message: nil)
+    }
 }

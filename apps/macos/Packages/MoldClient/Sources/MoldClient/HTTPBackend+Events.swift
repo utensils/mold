@@ -15,20 +15,9 @@ extension HTTPBackend {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    var request = self.request("/api/events")
-                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     // An idle machine says nothing for hours, and that is the
                     // stream working rather than the stream stuck.
-                    request.timeoutInterval = 86_400
-
-                    let (bytes, response) = try await session.bytes(for: request)
-                    guard let http = response as? HTTPURLResponse,
-                          (200..<300).contains(http.statusCode)
-                    else { throw eventStreamFailure(response) }
-
-                    var parser = SSEParser()
-                    for try await line in bytes.moldLines() {
-                        guard let frame = parser.consume(line: line) else { continue }
+                    for try await frame in stream("/api/events", timeout: 86_400) {
                         if let event = MoldEvent(name: frame.name, data: frame.data) {
                             continuation.yield(event)
                         }
@@ -40,11 +29,5 @@ extension HTTPBackend {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
-    }
-
-    private func eventStreamFailure(_ response: URLResponse) -> MoldClientError {
-        guard let http = response as? HTTPURLResponse else { return .malformedResponse }
-        if http.statusCode == 401 { return .unauthorized }
-        return .http(status: http.statusCode, code: nil, message: nil)
     }
 }

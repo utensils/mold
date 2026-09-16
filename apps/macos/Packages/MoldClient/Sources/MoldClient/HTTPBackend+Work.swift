@@ -73,14 +73,8 @@ public extension HTTPBackend {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    var request = self.request("/api/downloads/stream")
-                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-                    request.timeoutInterval = 3_600
-                    let (bytes, _) = try await session.bytes(for: request)
-                    var parser = SSEParser()
-                    for try await line in bytes.lines {
-                        guard let event = parser.consume(line: line),
-                              let data = event.data.data(using: .utf8),
+                    for try await frame in stream("/api/downloads/stream", timeout: 3_600) {
+                        guard let data = frame.data.data(using: .utf8),
                               let decoded = try? MoldJSON.decoder.decode(
                                   DownloadEvent.self, from: data)
                         else { continue }

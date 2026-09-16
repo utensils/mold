@@ -99,6 +99,10 @@ lint-layers: ## MoldClient stays UI-free; only the root may build a backend
 	@! grep -rn 'JSONDecoder()' Sources Packages/*/Sources Packages/*/Tests --include='*.swift' \
 	  | grep -v 'MoldJSON.swift' \
 	  || { echo "DECODER VIOLATION: use MoldJSON.decoder"; exit 1; }
+	@# URLSession's `.lines` drops empty lines, and an empty line is what ends an
+	@# SSE frame. `moldLines()` is the accumulator that keeps them.
+	@! grep -rn 'bytes\.lines' Packages/MoldClient/Sources --include='*.swift' \
+	  || { echo "SSE VIOLATION: use bytes.moldLines()"; exit 1; }
 	@echo "  layers ok"
 
 lint-color: ## No literal colors -- the system owns the palette
