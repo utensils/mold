@@ -52,6 +52,8 @@ private struct HostRow: View {
         switch reachability {
         case .unknown, .checking: .secondary
         case .up: .green
+        // Amber, not red: the machine is fine, the credential is missing.
+        case .needsKey: .orange
         case .down: .red
         }
     }
@@ -62,6 +64,7 @@ private struct HostRow: View {
         case .checking: "Checking…"
         case let .up(status):
             status.busy ? "Busy · \(status.version)" : "Ready · \(status.version)"
+        case .needsKey: "Needs an API key"
         case let .down(reason): reason
         }
     }

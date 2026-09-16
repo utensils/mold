@@ -16,11 +16,40 @@ final class HostStore {
         case unknown
         case checking
         case up(ServerStatus)
+        /// Answering, but refusing us. That is a different problem from being
+        /// off: the machine is there and the fix is a key, not a reboot.
+        case needsKey
         case down(String)
     }
 
     init(hosts: [MoldHost]) {
         self.hosts = hosts
+    }
+
+    // MARK: - Editing
+
+    func add(name: String, url: URL, apiKey: String?) {
+        hosts.append(MoldHost(name: name, baseURL: url, apiKey: apiKey))
+        persist()
+    }
+
+    func update(_ host: MoldHost) {
+        guard let index = hosts.firstIndex(where: { $0.id == host.id }) else { return }
+        hosts[index] = host
+        persist()
+        // The key or address may have changed, so what we knew is stale.
+        reachability[host.id] = .unknown
+    }
+
+    func remove(_ host: MoldHost) {
+        hosts.removeAll { $0.id == host.id }
+        reachability[host.id] = nil
+        HostPersistence.forget(host)
+        persist()
+    }
+
+    private func persist() {
+        HostPersistence.save(hosts)
     }
 
     func backend(for host: MoldHost) -> any MoldBackend {
@@ -40,6 +69,8 @@ final class HostStore {
         do {
             let status = try await backend(for: host).status()
             reachability[host.id] = .up(status)
+        } catch MoldClientError.unauthorized {
+            reachability[host.id] = .needsKey
         } catch {
             let reason = (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
@@ -73,6 +104,10 @@ extension HostStore {
     /// run can point at real hardware without those addresses living in the
     /// source. The devshell's `macos-dev` sets it.
     static func seededHosts() -> [MoldHost] {
+        // A saved list wins. Seeding over it would resurrect machines the
+        // person removed on every launch.
+        if let saved = HostPersistence.load() { return saved }
+
         var hosts = [
             MoldHost(name: "This Mac", baseURL: URL(string: "http://localhost:7680")!)
         ]

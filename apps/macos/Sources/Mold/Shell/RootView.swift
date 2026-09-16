@@ -7,6 +7,7 @@ import SwiftUI
 /// second copy of it arguing with the first.
 struct RootView: View {
     @Environment(HostStore.self) private var hosts
+    @Environment(\.openSettings) private var openSettings
     /// Reopening where you left off is what every Mac app does. The env
     /// override exists so a UAT run can land on a named destination without
     /// driving the mouse.
@@ -22,7 +23,21 @@ struct RootView: View {
         }
         .navigationTitle("Mold")
         .task { await hosts.refreshAll() }
+        .task { openSettingsIfRequested() }
         .onChange(of: destination) { _, new in stored = new.rawValue }
+    }
+}
+
+extension RootView {
+    /// `MOLD_NATIVE_DESTINATION=settings` opens the Settings window on launch.
+    ///
+    /// Settings is a scene, not a destination, so it cannot be reached by
+    /// selecting a sidebar row -- this is what lets a UAT run photograph it
+    /// without driving the menu bar.
+    func openSettingsIfRequested() {
+        guard ProcessInfo.processInfo.environment["MOLD_NATIVE_DESTINATION"] == "settings"
+        else { return }
+        openSettings()
     }
 }
 

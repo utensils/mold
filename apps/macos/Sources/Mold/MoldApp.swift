@@ -30,5 +30,10 @@ struct MoldApp: App {
         }
         .defaultSize(width: 1_280, height: 860)
         .windowToolbarStyle(.unified)
+
+        Settings {
+            SettingsView()
+                .environment(hosts)
+        }
     }
 }
