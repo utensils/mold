@@ -7,6 +7,9 @@ struct RunCanvas: View {
     let state: RunState
     let host: MoldHost?
     let showInLibrary: () -> Void
+    /// Clicking the picture -- and only the picture, never the empty canvas or
+    /// the buttons under it -- tucks the prompt away and brings it back.
+    let togglePrompt: () -> Void
 
     @State private var preview: NSImage?
     @State private var result: NSImage?
@@ -49,6 +52,7 @@ struct RunCanvas: View {
                     .interpolation(.medium)
                     .aspectRatio(contentMode: .fit)
                     .padding(40)
+                    .onTapGesture(perform: togglePrompt)
             } else {
                 VStack(spacing: 10) {
                     ProgressView()
@@ -69,6 +73,9 @@ struct RunCanvas: View {
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
+                    .onTapGesture(perform: togglePrompt)
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint("Hides the prompt so the picture fills the pane")
                 ResultBar(result: finished, host: host, showInLibrary: showInLibrary)
             }
             .padding(24)

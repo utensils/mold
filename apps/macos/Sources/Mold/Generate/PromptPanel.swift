@@ -4,6 +4,10 @@ import SwiftUI
 
 /// The floating panel: what to make, how to make it, and the button.
 struct PromptPanel: View {
+    /// The capsule's ceiling. `PromptLip` matches it so the lip sits flush
+    /// under the capsule it came from.
+    static let maxWidth: CGFloat = 760
+
     let recipe: GenerationRecipe?
     @Binding var draft: RenderDraft
     let model: Model?
@@ -34,7 +38,7 @@ struct PromptPanel: View {
         }
         .padding(16)
         .panel(.floating)
-        .frame(maxWidth: 760)
+        .frame(maxWidth: Self.maxWidth)
     }
 
     @ViewBuilder private func prompt(_ recipe: GenerationRecipe) -> some View {

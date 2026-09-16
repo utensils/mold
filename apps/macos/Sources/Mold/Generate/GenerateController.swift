@@ -14,6 +14,11 @@ final class GenerateController {
     private(set) var placementError: String?
     private var placementTask: Task<Void, Never>?
 
+    /// Whether the prompt capsule has slid off the bottom edge so the
+    /// picture can be looked at. Visual only -- nothing about the draft or
+    /// the run changes with it.
+    var promptTucked = false
+
     var run: RunState = .idle
     var runTask: Task<Void, Never>?
     var activeBatch: (id: String, host: MoldHost.ID)?

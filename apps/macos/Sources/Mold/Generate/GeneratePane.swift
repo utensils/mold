@@ -18,14 +18,19 @@ struct GeneratePane: View {
         ZStack(alignment: .bottom) {
             canvas
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            PromptPanel(recipe: recipe, draft: $controller.draft, model: selectedModel,
-                        submit: startRun, cancel: cancelRun, maxBatch: maxBatch)
-                .padding(20)
+            PromptTuck(tucked: $controller.promptTucked, steps: controller.run.steps) {
+                PromptPanel(recipe: recipe, draft: $controller.draft, model: selectedModel,
+                            submit: startRun, cancel: cancelRun, maxBatch: maxBatch)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("Generate")
         .navigationSubtitle(subtitle)
         .toolbar { toolbar }
+        // Escape brings the capsule back, the way it dismisses any other
+        // temporary state -- a tucked prompt with no keyboard way out is a
+        // corner someone can get stuck in.
+        .onExitCommand { controller.promptTucked = false }
         .task { await loadModels() }
         .onChange(of: controller.draft) { _, _ in refreshPlacement() }
         .onChange(of: controller.modelName) { _, _ in refreshPlacement() }
@@ -44,7 +49,8 @@ struct GeneratePane: View {
             }
         } else {
             RunCanvas(state: controller.run, host: host,
-                      showInLibrary: { destination = .library })
+                      showInLibrary: { destination = .library },
+                      togglePrompt: { controller.promptTucked.toggle() })
         }
     }
 
