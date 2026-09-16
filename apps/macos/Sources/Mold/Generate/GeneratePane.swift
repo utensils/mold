@@ -31,6 +31,9 @@ struct GeneratePane: View {
         // temporary state -- a tucked prompt with no keyboard way out is a
         // corner someone can get stuck in.
         .onExitCommand { controller.promptTucked = false }
+        .focusedSceneValue(\.promptTuck, PromptTuckAction(isTucked: controller.promptTucked) {
+            controller.promptTucked.toggle()
+        })
         .task { await loadModels() }
         .onChange(of: controller.draft) { _, _ in refreshPlacement() }
         .onChange(of: controller.modelName) { _, _ in refreshPlacement() }
