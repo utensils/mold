@@ -10,11 +10,17 @@ import UniformTypeIdentifiers
 /// pulling one down on mouse-down would stall every drag that was never
 /// dropped anywhere.
 struct DraggablePrint: Transferable, Sendable {
+    let id: PrintID
     let filename: String
     let format: String
     let fetch: @Sendable () async -> Data?
 
     static var transferRepresentation: some TransferRepresentation {
+        // Two representations, and the order is the offer: another app takes
+        // the file, and Mold itself takes the identity -- which is what makes
+        // dropping a print on a collection cost nothing, while dropping the
+        // same print on the Finder still costs a download.
+        ProxyRepresentation(exporting: \.id)
         FileRepresentation(exportedContentType: .data) { print in
             guard let data = await print.fetch() else {
                 throw CocoaError(.fileNoSuchFile)
@@ -35,6 +41,7 @@ struct DraggablePrint: Transferable, Sendable {
 extension LibraryActions {
     func draggable(_ entry: LibraryEntry) -> DraggablePrint {
         DraggablePrint(
+            id: entry.id,
             filename: entry.print.filename,
             format: entry.print.format ?? "png",
             fetch: { [self] in await data(for: entry) }

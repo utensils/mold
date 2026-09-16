@@ -23,6 +23,20 @@ public struct CollectionShelf: Identifiable, Hashable, Sendable {
 
     public var id: String { slug }
 
+    /// How many of these prints are actually in front of you.
+    ///
+    /// NOT `count`, which is the host's own number: that includes trashed
+    /// members, which keep their membership until they are purged, and it can
+    /// outlive the prints entirely. A sidebar badge is a promise about what
+    /// opening the row shows, so it is counted from the index the grid draws
+    /// -- and a print counts only under the id ITS OWN machine gave the shelf.
+    public func count(in entries: [LibraryEntry]) -> Int {
+        entries.count { entry in
+            guard let id = hosts[entry.hostID] else { return false }
+            return entry.print.collectionList.contains(id)
+        }
+    }
+
     /// Folds every machine's collections into one list of shelves.
     public static func merge(_ perHost: [MoldHost.ID: [Collection]]) -> [CollectionShelf] {
         var bySlug: [String: [(host: MoldHost.ID, collection: Collection)]] = [:]

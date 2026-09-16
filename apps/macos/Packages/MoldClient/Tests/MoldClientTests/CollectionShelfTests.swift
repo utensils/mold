@@ -151,3 +151,41 @@ func aTagGoesIntoAPathAsItself(tag: String) {
     #expect(!escaped.contains(" "))
     #expect(escaped.removingPercentEncoding == tag)
 }
+
+// A shelf's number is a PROMISE ABOUT WHAT OPENING IT SHOWS. The host's own
+// `count` is not that promise: it includes trashed members, which keep their
+// membership until they are purged, and it can outlive the prints themselves
+// -- plato reports 6 for a shelf no row on plato carries any more. A sidebar
+// reading 19 over a grid of 12 looks broken whoever is technically right.
+
+private func libraryEntry(_ name: String, host: UUID, collections: [String]) -> LibraryEntry {
+    PrintFixtures.entry(name, host: host, collections: collections)
+}
+
+@Test func aShelfCountsWhatOpeningItWouldActuallyShow() {
+    let shelf = CollectionShelf.merge([
+        plato: [collection("Tyler", slug: "tyler", count: 6, id: "p")],
+        hal: [collection("Tyler", slug: "tyler", count: 13, id: "h")],
+    ])[0]
+    #expect(shelf.count == 19)
+
+    // What the library actually holds: nothing on plato, twelve on hal9000.
+    let live = (0..<12).map { libraryEntry("h\($0).png", host: hal, collections: ["h"]) }
+        + [libraryEntry("other.png", host: hal, collections: ["h-other"])]
+    #expect(shelf.count(in: live) == 12)
+}
+
+/// A print counts only where its OWN machine's id says it belongs. Counting
+/// any listed id would let two machines' unrelated shelves inflate each other.
+@Test func countingUsesTheIdForEachPrintsOwnMachine() {
+    let shelf = CollectionShelf.merge([
+        plato: [collection("Hangar", slug: "hangar", count: 0, id: "same-id")],
+        hal: [collection("Hangar", slug: "hangar", count: 0, id: "other-id")],
+    ])[0]
+    let live = [
+        libraryEntry("a.png", host: plato, collections: ["same-id"]),
+        // On hal9000 that id means nothing, so this one does not count.
+        libraryEntry("b.png", host: hal, collections: ["same-id"]),
+    ]
+    #expect(shelf.count(in: live) == 1)
+}

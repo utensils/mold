@@ -53,6 +53,9 @@ struct LibraryActions {
     func reload() async {
         await library.refresh(hosts: hosts.hosts) { hosts.backend(for: $0) }
         await library.refreshTrash(hosts: hosts.hosts) { hosts.backend(for: $0) }
+        // Shelves and tags travel with the index: reloading one without the
+        // other leaves a renamed collection still reading its old name.
+        await library.refreshOrganization(hosts: hosts.hosts) { hosts.backend(for: $0) }
     }
 
     /// Puts the picture on the pasteboard, so ⌘V works anywhere.

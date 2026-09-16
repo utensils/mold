@@ -39,6 +39,21 @@
 	     for local network permission on first connection. -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Mold connects to mold servers on your local network.</string>
+	<!-- A print dragged inside Mold travels as its identity, so a drop onto a
+	     collection accepts prints and not every JSON file on the disk. -->
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>io.utensils.mold.print</string>
+			<key>UTTypeDescription</key>
+			<string>Mold Print</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
 	<!-- The engine drains on quit; sudden termination would cut a publish. -->
 	<key>NSSupportsSuddenTermination</key>
 	<false/>

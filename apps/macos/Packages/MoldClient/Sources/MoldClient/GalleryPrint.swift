@@ -111,7 +111,10 @@ public struct LibraryEntry: Identifiable, Hashable, Sendable {
     public var createdAt: Date { print.createdAt }
 
     /// Case-, diacritic- and width-insensitive, so "cafe" finds "Café".
-    static func fold(_ text: String) -> String {
+    ///
+    /// Public because anything OFFERING a filter has to fold the same way the
+    /// filter itself does, or a suggestion appears that then matches nothing.
+    public static func fold(_ text: String) -> String {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
                      locale: .current)
     }

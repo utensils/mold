@@ -29,6 +29,23 @@ public enum LibraryToken: Hashable, Sendable, Identifiable {
         }
     }
 
+    /// The chip's icon. A chip is small and a person scanning a row of them
+    /// reads the shapes before the words.
+    public var symbol: String {
+        switch self {
+        case .tag: "tag"
+        case .machine: "server.rack"
+        case .favorite: "star"
+        case let .kind(kind):
+            switch kind {
+            case .picture: "photo"
+            case .clip: "film"
+            case .mesh: "cube"
+            }
+        case .collection: "rectangle.stack"
+        }
+    }
+
     /// What the chip reads as.
     public var label: String {
         switch self {

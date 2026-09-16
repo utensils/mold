@@ -12,6 +12,7 @@ import SwiftUI
 struct MoldApp: App {
     @State private var hosts = HostStore(hosts: HostStore.seededHosts())
     @State private var library = LibraryStore()
+    @State private var libraryNavigation = LibraryNavigation()
     @State private var thumbnails = ThumbnailCache()
     @State private var models = ModelStore()
     @State private var generate = GenerateController()
@@ -26,6 +27,7 @@ struct MoldApp: App {
                 .task { ClickModifiers.startObserving() }
                 .environment(hosts)
                 .environment(library)
+                .environment(libraryNavigation)
                 .environment(thumbnails)
                 .environment(models)
                 .environment(generate)

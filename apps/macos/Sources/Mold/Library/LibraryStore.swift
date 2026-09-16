@@ -21,6 +21,12 @@ final class LibraryStore {
     var etags: [MoldHost.ID: String] = [:]
     var trashEtags: [MoldHost.ID: String] = [:]
 
+    /// Collections and tags as each MACHINE holds them. A collection's id is
+    /// that machine's, so these are never merged in storage -- only when they
+    /// are read, by `CollectionShelf.merge`.
+    var collectionsPerHost: [MoldHost.ID: [Collection]] = [:]
+    var tagsPerHost: [MoldHost.ID: [TagCount]] = [:]
+
     /// Prints from every host, newest first.
     func refresh(hosts: [MoldHost], using backend: (MoldHost) -> any MoldBackend) async {
         isLoading = true

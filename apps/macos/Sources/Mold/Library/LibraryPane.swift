@@ -2,38 +2,29 @@ import MoldClient
 import SwiftUI
 
 /// The merged library.
+///
+/// Which shelf is showing comes from the sidebar, so this pane is only ever
+/// asked "draw what the query selects" -- the filtering itself is
+/// `LibraryQuery`, which is pure and tested away from any view.
 struct LibraryPane: View {
     @Environment(HostStore.self) var hosts
     @Environment(LibraryStore.self) var library
+    @Environment(LibraryNavigation.self) var navigation
     @Environment(GenerateController.self) var generate
     @Environment(ModelStore.self) var models
     @Binding var destination: Destination
 
-    @State var scope: LibraryScope = .all
-    @State var sourceHost: MoldHost.ID?
-    @State var query = ""
-    @State var edge: CGFloat = 132
     @State var selection = LibraryCursor.Selection.empty
     @State var viewing: PrintID?
+    @State var showsInspector = true
 
-    private var actions: LibraryActions {
+    var actions: LibraryActions {
         LibraryActions(hosts: hosts, library: library, reuse: reuse)
     }
 
-    /// Seeds the Generate pane from a finished print and goes there.
-    ///
-    /// The model is adopted from the machine that MADE the print, because a
-    /// model installed on one host is not available on another.
-    private func reuse(_ entry: LibraryEntry) {
-        generate.draft = RenderDraft(reusing: entry.print.metadata)
-        if let name = entry.print.metadata.model,
-           let model = models.model(named: name, on: entry.hostID) {
-            generate.adopt(model: model, on: entry.hostID, keepingDraft: true)
-        }
-        destination = .generate
-    }
-
     var body: some View {
+        @Bindable var navigation = navigation
+
         Group {
             if let viewing, let entry = entry(viewing) {
                 LibraryViewer(entry: entry, host: host(of: entry), actions: actions,
@@ -43,46 +34,61 @@ struct LibraryPane: View {
                 empty
             } else {
                 LibraryGrid(
-                    sections: sections, hosts: hosts.hosts, edge: edge,
-                    showsHostBadges: sourceHost == nil && hosts.hosts.count > 1,
-                    scope: scope, actions: actions, entries: visible,
+                    sections: sections, hosts: hosts.hosts, edge: navigation.edge,
+                    showsHostBadges: showsHostBadges,
+                    scope: navigation.scope, actions: actions, entries: visible,
                     selection: $selection, onOpen: { viewing = $0 }
                 )
             }
         }
-        .navigationTitle("Library")
+        .navigationTitle(navigation.scope.title(in: library.shelves))
         .navigationSubtitle(subtitle)
-        .searchable(text: $query, prompt: "Search prompts and models")
+        .searchable(text: $navigation.query.text, tokens: $navigation.query.tokens,
+                    suggestedTokens: .constant(suggestedTokens),
+                    prompt: "Search prompts, models and tags") { token in
+            Label(token.label, systemImage: token.symbol)
+        }
         .toolbar { toolbar }
-        .inspector(isPresented: .constant(viewing == nil && !selected.isEmpty)) {
+        .inspector(isPresented: $showsInspector) {
             LibraryInspector(entries: selected, host: selected.first.flatMap(host(of:)),
-                             scope: scope, actions: actions,
-                             filterByTag: { query = $0 })
+                             scope: navigation.scope, actions: actions,
+                             filterByTag: { navigation.query.tokens.append(.tag($0)) })
                 .inspectorColumnWidth(min: 260, ideal: 320, max: 420)
         }
         .task { await actions.reload() }
         .focusedSceneValue(\.refreshAction) { Task { await actions.reload() } }
-        .onChange(of: scope) { _, _ in selection = .empty; viewing = nil }
+        .focusedSceneValue(\.inspectorToggle, InspectorToggle(isShowing: showsInspector) {
+            showsInspector.toggle()
+        })
+        .onChange(of: navigation.scope) { _, _ in selection = .empty; viewing = nil }
+        .onChange(of: library.shelves) { _, shelves in navigation.reconcile(with: shelves) }
     }
 
     // MARK: - Content
 
-    private var pool: [LibraryEntry] {
-        scope.isTrash ? library.trashed : library.items
+    /// The query the grid is actually drawing: what was typed, plus the
+    /// narrowing the chosen shelf adds.
+    private var resolved: LibraryQuery {
+        var query = navigation.query
+        query.hiddenCollectionIDs = library.hiddenCollectionIDs
+        if let token = navigation.scope.token(in: library.shelves) {
+            query.tokens.append(token)
+        }
+        return query
     }
 
-    private var visible: [LibraryEntry] {
-        pool.filter { entry in
-            if scope == .favorites, !entry.print.isFavorite { return false }
-            guard sourceHost == nil || entry.hostID == sourceHost else { return false }
-            return query.isEmpty || entry.matches(query)
-        }
-    }
+    var visible: [LibraryEntry] { resolved.apply(to: pool) }
 
     private var sections: [LibrarySection] { LibraryGrouping.byDay(visible) }
 
-    private var selected: [LibraryEntry] {
+    var selected: [LibraryEntry] {
         visible.filter { selection.items.contains($0.id) }
+    }
+
+    /// Only worth the ink when the grid can actually be showing two machines.
+    private var showsHostBadges: Bool {
+        guard hosts.hosts.count > 1 else { return false }
+        return !navigation.query.tokens.contains { if case .machine = $0 { true } else { false } }
     }
 
     private func entry(_ id: PrintID) -> LibraryEntry? { visible.first { $0.id == id } }
@@ -99,34 +105,16 @@ struct LibraryPane: View {
         self.viewing = visible[next].id
     }
 
-    private var subtitle: String {
-        let shown = visible.count
-        let total = pool.count
-        let noun = scope.isTrash ? "in the trash" : "prints"
-        return shown == total
-            ? "\(total.formatted()) \(noun)"
-            : "\(shown.formatted()) of \(total.formatted()) \(noun)"
-    }
-
-    @ViewBuilder private var empty: some View {
-        if library.isLoading {
-            ProgressView("Loading prints…")
-        } else if let failure = library.failures.values.compactMap(\.self).first {
-            ContentUnavailableView("Can't load the library", systemImage: "exclamationmark.triangle",
-                                   description: Text(failure))
-        } else if !query.isEmpty {
-            ContentUnavailableView.search(text: query)
-        } else {
-            ContentUnavailableView(scope.title, systemImage: scope.symbol,
-                                   description: Text(emptyMessage))
+    /// Seeds the Generate pane from a finished print and goes there.
+    ///
+    /// The model is adopted from the machine that MADE the print, because a
+    /// model installed on one host is not available on another.
+    private func reuse(_ entry: LibraryEntry) {
+        generate.draft = RenderDraft(reusing: entry.print.metadata)
+        if let name = entry.print.metadata.model,
+           let model = models.model(named: name, on: entry.hostID) {
+            generate.adopt(model: model, on: entry.hostID, keepingDraft: true)
         }
-    }
-
-    private var emptyMessage: String {
-        switch scope {
-        case .all: "Prints from every machine appear here."
-        case .favorites: "Stars you add show up here."
-        case .trash: "Deleted prints wait here until their machine purges them."
-        }
+        destination = .generate
     }
 }

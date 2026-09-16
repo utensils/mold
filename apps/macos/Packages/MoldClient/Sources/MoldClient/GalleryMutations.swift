@@ -97,6 +97,11 @@ public struct TagCount: Codable, Hashable, Sendable, Identifiable {
     public let name: String
     public let count: Int
     public var id: String { name }
+
+    public init(name: String, count: Int) {
+        self.name = name
+        self.count = count
+    }
 }
 
 /// What a host will convert a stored print into.

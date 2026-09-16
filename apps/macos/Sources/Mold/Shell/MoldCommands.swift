@@ -9,6 +9,7 @@ struct MoldCommands: Commands {
     @Binding var destination: Destination
     @FocusedValue(\.refreshAction) private var refresh
     @FocusedValue(\.promptTuck) private var promptTuck
+    @FocusedValue(\.inspectorToggle) private var inspector
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -29,6 +30,11 @@ struct MoldCommands: Commands {
             }
             .keyboardShortcut("p", modifiers: [.command, .option])
             .disabled(promptTuck == nil)
+            Button(inspector?.isShowing == true ? "Hide Inspector" : "Show Inspector") {
+                inspector?.toggle()
+            }
+            .keyboardShortcut("i", modifiers: [.command, .option])
+            .disabled(inspector == nil)
             Button("Refresh") { refresh?() }
                 .keyboardShortcut("r")
                 .disabled(refresh == nil)
@@ -56,6 +62,19 @@ struct PromptTuckKey: FocusedValueKey {
     typealias Value = PromptTuckAction
 }
 
+/// Whether the showing pane has an inspector open, and how to change that.
+/// Equatable on the state alone, for the same reason `PromptTuckAction` is.
+struct InspectorToggle: Equatable {
+    let isShowing: Bool
+    let toggle: () -> Void
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.isShowing == rhs.isShowing }
+}
+
+struct InspectorToggleKey: FocusedValueKey {
+    typealias Value = InspectorToggle
+}
+
 extension FocusedValues {
     var refreshAction: RefreshActionKey.Value? {
         get { self[RefreshActionKey.self] }
@@ -65,5 +84,10 @@ extension FocusedValues {
     var promptTuck: PromptTuckAction? {
         get { self[PromptTuckKey.self] }
         set { self[PromptTuckKey.self] = newValue }
+    }
+
+    var inspectorToggle: InspectorToggle? {
+        get { self[InspectorToggleKey.self] }
+        set { self[InspectorToggleKey.self] = newValue }
     }
 }
