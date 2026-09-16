@@ -10,8 +10,8 @@ import MoldClient
 @MainActor
 extension LibraryStore {
 
-    /// Applies a planned edit locally, registers its inverse, then tells the
-    /// machines.
+    /// Applies a planned edit locally, registers its inverse, then queues it
+    /// for the machines.
     ///
     /// **Synchronous on purpose, and this is load-bearing.** `UndoManager`
     /// only routes a registration to the REDO stack while it is inside
@@ -23,53 +23,20 @@ extension LibraryStore {
     /// here, and only the network call is deferred.
     ///
     /// Local first for its own reason: a star that waits for a round trip
-    /// feels broken on a remote machine. A failure puts the whole snapshot
-    /// back rather than leaving the screen and the host quietly disagreeing.
+    /// feels broken on a remote machine. What happens when the machine never
+    /// agrees is the outbox's problem, not this function's -- see
+    /// `LibraryStore+Outbox`.
     func apply(_ edit: PrintEdit, backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
         guard !edit.isEmpty else { return }
-        let previous = perHost
         mutate(edit)
         undo.register(edit) { [weak self] inverse in
             self?.apply(inverse, backend: backend)
         }
-        Task { await push(edit, previous: previous, backend: backend) }
-    }
-
-    /// The half that talks to the machines.
-    private func push(_ edit: PrintEdit, previous: [MoldHost.ID: [LibraryEntry]],
-                      backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
-        for (hostID, filenames) in edit.targets {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
-            do { try await client.mutate(mutation(edit.change, filenames)) } catch {
-                perHost = previous
-                rebuild()
-                failures[hostID] = edit.change.failureSentence
-                // The stack now describes changes that never happened.
-                undo.forget()
-                return
-            }
-        }
-        if case .collection = edit.change { await reloadCollections(backend) }
-    }
-
-    /// The wire form of a change, over one machine's filenames.
-    private func mutation(_ change: PrintChange, _ filenames: [String]) -> GalleryBulkMutation {
-        switch change {
-        case let .favorite(on):
-            GalleryBulkMutation(filenames: filenames, favorite: on)
-        case let .tag(name, adding):
-            GalleryBulkMutation(filenames: filenames,
-                                addTags: adding ? [name] : [],
-                                removeTags: adding ? [] : [name])
-        case let .collection(name, slug, filing):
-            GalleryBulkMutation(filenames: filenames,
-                                addToCollection: filing ? .named(name) : nil,
-                                removeFromCollectionSlug: filing ? nil : slug)
-        }
+        send(edit, backend: backend)
     }
 
     /// The same change, applied to the rows on screen.
-    private func mutate(_ edit: PrintEdit) {
+    func mutate(_ edit: PrintEdit) {
         for (hostID, filenames) in edit.targets {
             let names = Set(filenames)
             perHost[hostID] = (perHost[hostID] ?? []).map { entry in

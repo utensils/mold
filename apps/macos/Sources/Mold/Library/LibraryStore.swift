@@ -31,6 +31,12 @@ final class LibraryStore {
     /// the window's, handed over by the pane -- see `MoldUndo`.
     let undo = MoldUndo()
 
+    /// Organization edits on their way to the machines. See
+    /// `LibraryStore+Outbox`.
+    var outbox = MutationOutbox()
+    /// The machines whose chain a task is already walking.
+    var draining: Set<MoldHost.ID> = []
+
     /// Prints from every host, newest first.
     func refresh(hosts: [MoldHost], using backend: (MoldHost) -> any MoldBackend) async {
         isLoading = true
