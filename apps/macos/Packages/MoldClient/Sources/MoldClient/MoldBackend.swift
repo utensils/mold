@@ -14,6 +14,10 @@ import Foundation
 public protocol MoldBackend: Sendable {
     var host: MoldHost { get }
     func status() async throws -> ServerStatus
+    func capabilities() async throws -> Capabilities
+    func models() async throws -> [Model]
+    /// Pass the previous `etag` to let the host answer `.notModified`.
+    func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]>
 }
 
 public enum MoldClientError: Error, Sendable, LocalizedError {

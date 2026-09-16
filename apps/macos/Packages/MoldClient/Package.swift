@@ -18,6 +18,9 @@ let package = Package(
         .testTarget(
             name: "MoldClientTests",
             dependencies: ["MoldClient"],
+            // Read by path off #filePath, not from a bundle, so SwiftPM should
+            // leave them alone rather than treat them as unhandled resources.
+            exclude: ["Fixtures"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         )
     ]

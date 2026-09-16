@@ -20,7 +20,7 @@ private let hal9000Status = """
 """.data(using: .utf8)!
 
 @Test func decodesAServerStatusAndIgnoresFieldsItDoesNotModel() throws {
-    let status = try JSONDecoder().decode(ServerStatus.self, from: hal9000Status)
+    let status = try MoldJSON.decoder.decode(ServerStatus.self, from: hal9000Status)
 
     #expect(status.version == "0.28.0")
     #expect(status.hostname == "hal9000")

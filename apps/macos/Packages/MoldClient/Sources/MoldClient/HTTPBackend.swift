@@ -17,12 +17,39 @@ public struct HTTPBackend: MoldBackend {
         try await get("/api/status")
     }
 
+    public func capabilities() async throws -> Capabilities {
+        try await get("/api/capabilities")
+    }
+
+    public func models() async throws -> [Model] {
+        try await get("/api/models")
+    }
+
+    public func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]> {
+        var request = self.request("/api/gallery")
+        // The index is large and mostly unchanged between refreshes, so ask
+        // the host whether it changed at all before it serializes 1.2 MB.
+        if let etag { request.setValue(etag, forHTTPHeaderField: "If-None-Match") }
+        // Listing a full gallery takes longer than a status probe.
+        request.timeoutInterval = 60
+
+        let (data, http) = try await send(request)
+        if http.statusCode == 304 { return .notModified }
+        try check(http, data)
+        do {
+            let prints = try MoldJSON.decoder.decode([GalleryPrint].self, from: data)
+            return .fresh(prints, etag: http.value(forHTTPHeaderField: "ETag"))
+        } catch {
+            throw MoldClientError.malformedResponse
+        }
+    }
+
     // MARK: - Transport
 
     private func get<T: Decodable>(_ path: String) async throws -> T {
         let data = try await bytes(for: request(path))
         do {
-            return try JSONDecoder().decode(T.self, from: data)
+            return try MoldJSON.decoder.decode(T.self, from: data)
         } catch {
             throw MoldClientError.malformedResponse
         }
@@ -40,27 +67,33 @@ public struct HTTPBackend: MoldBackend {
     }
 
     private func bytes(for request: URLRequest) async throws -> Data {
-        let data: Data
-        let response: URLResponse
+        let (data, http) = try await send(request)
+        try check(http, data)
+        return data
+    }
+
+    private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         do {
-            (data, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw MoldClientError.malformedResponse
+            }
+            return (data, http)
         } catch let error as URLError {
             throw MoldClientError.unreachable(error.localizedDescription)
         }
+    }
 
-        guard let http = response as? HTTPURLResponse else {
-            throw MoldClientError.malformedResponse
-        }
+    private func check(_ http: HTTPURLResponse, _ data: Data) throws {
         guard (200..<300).contains(http.statusCode) else {
             if http.statusCode == 401 { throw MoldClientError.unauthorized }
-            let api = try? JSONDecoder().decode(APIError.self, from: data)
+            let api = try? MoldJSON.decoder.decode(APIError.self, from: data)
             throw MoldClientError.http(
                 status: http.statusCode,
                 code: api?.code,
                 message: api?.error
             )
         }
-        return data
     }
 }
 

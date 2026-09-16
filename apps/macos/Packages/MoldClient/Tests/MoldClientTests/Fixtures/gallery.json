@@ -1,0 +1,103 @@
+[
+ {
+  "filename": "mold-qwen-image-q8-1789529980561.png",
+  "metadata": {
+   "prompt": "A twin engine aircraft",
+   "generation_time_ms": 343399,
+   "output_mode": "one-shot",
+   "job_id": "0eb5b6a9-039b-4901-bcb2-8c22ce5258d4",
+   "model": "qwen-image:q8",
+   "family": "qwen-image",
+   "seed": 1789529636781972965,
+   "steps": 50,
+   "guidance": 4.0,
+   "width": 1328,
+   "height": 1328,
+   "generation_width": 1328,
+   "generation_height": 1328,
+   "output_format": "png",
+   "pipeline_requested": false,
+   "mesh_workflow": {
+    "job_id": "96cd794f-5287-4d3c-855b-a4a2bea84cdc",
+    "mode": "text_to_mesh",
+    "role": "generated_image",
+    "stage_index": 0
+   },
+   "version": "0.28.0 (b2dbb45 2026-09-12)"
+  },
+  "timestamp": 1789529980,
+  "format": "png",
+  "size_bytes": 1602467,
+  "media_version": "1789529980560:1602467"
+ },
+ {
+  "filename": "mold-ltx-2.5-22b-distilled-q8-1789532686738.mp4",
+  "metadata": {
+   "prompt": "A 360 view of this twin engine aircract in a hanger - the camera rotates fully around the airplane in a single clip",
+   "generation_time_ms": 238374,
+   "output_mode": "one-shot",
+   "job_id": "c5cbcccd-05fa-443a-a72a-8b08ecdee759",
+   "model": "ltx-2.5-22b-distilled:q8",
+   "family": "ltx2",
+   "seed": 903433285,
+   "steps": 8,
+   "guidance": 1.0,
+   "width": 768,
+   "height": 768,
+   "generation_width": 768,
+   "generation_height": 768,
+   "strength": 0.75,
+   "source_image_name": "mold-qwen-image-q8-1789531868557.png",
+   "source_image_sha256": "6a0f0ffb08d234944f7125512a3a714a0a5649e3dd6466574a3394198675dc1b",
+   "source_fit": {
+    "mode": "crop-fill"
+   },
+   "output_format": "mp4",
+   "enable_audio": true,
+   "pipeline": "distilled",
+   "pipeline_requested": false,
+   "duration_prediction_requested": true,
+   "source_preprocessing": {
+    "profile": {
+     "generation": "v2_5",
+     "image_crf": 18
+    },
+    "codec": "openh264-cqp18",
+    "fit_policy": "fill-center-crop"
+   },
+   "attention_path": "ltx2-bf16-flash",
+   "frames": 145,
+   "fps": 24,
+   "version": "0.28.0 (b2dbb45 2026-09-12)"
+  },
+  "timestamp": 1789532686,
+  "format": "mp4",
+  "size_bytes": 6947151,
+  "media_version": "1789532686816:6947151"
+ },
+ {
+  "filename": "mold-ultrareal-v4-q8-1788589534143.png",
+  "metadata": {
+   "prompt": "terrifying beautiful woman with void eyes, dark eldritch horror, decaying reality, blood-stained fractals, skeletal beauty, cursed hallucination, nightmare deity, ultra nightmarish, hyper detailed terror, photorealistic",
+   "generation_time_ms": 59737,
+   "output_mode": "one-shot",
+   "job_id": "7fe45426-a285-445e-a3d1-6ee82b31a95b",
+   "model": "ultrareal-v4:q8",
+   "seed": 88001,
+   "steps": 33,
+   "guidance": 5.1,
+   "width": 1024,
+   "height": 1024,
+   "generation_width": 1024,
+   "generation_height": 1024,
+   "output_format": "png",
+   "pipeline_requested": false,
+   "version": "0.27.0 (10ebd23 2026-09-05)"
+  },
+  "timestamp": 1788589534,
+  "format": "png",
+  "size_bytes": 1470726,
+  "media_version": "1788589534242:1470726",
+  "favorite": true
+ }
+]

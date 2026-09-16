@@ -1,0 +1,491 @@
+[
+ {
+  "name": "flux-schnell:bf16",
+  "family": "flux",
+  "size_gb": 22.149185,
+  "is_loaded": false,
+  "last_used": null,
+  "hf_repo": "black-forest-labs/FLUX.1-schnell",
+  "default_steps": 4,
+  "default_guidance": 0.0,
+  "default_width": 1024,
+  "default_height": 1024,
+  "description": "FLUX.1 Schnell BF16 \u2014 fast 4-step, full precision (23.8GB transformer)",
+  "max_pixels": 1800000,
+  "recommended_dimensions": [
+   {
+    "width": 768,
+    "height": 768
+   },
+   {
+    "width": 1024,
+    "height": 1024
+   },
+   {
+    "width": 1024,
+    "height": 768
+   },
+   {
+    "width": 768,
+    "height": 1024
+   },
+   {
+    "width": 1024,
+    "height": 576
+   },
+   {
+    "width": 576,
+    "height": 1024
+   }
+  ],
+  "dimension_alignment": 16,
+  "downloaded": false,
+  "remaining_download_bytes": 23782506688,
+  "supports_identity": true,
+  "supports_extend": false,
+  "extend_default_overlap_frames": 17,
+  "supports_sequence": false,
+  "guidance_capabilities": {
+   "adjustable": true,
+   "supports_negative_prompt": false
+  },
+  "generation_profile": {
+   "schema_version": 1,
+   "profile_id": "flux.flux-schnell",
+   "profile_hash": "2d943203fd2a1425efb0bee042af7757582e55c4bfa6f9164f48818fe5c7d0e3",
+   "default_recipe_id": "default",
+   "recipes": [
+    {
+     "id": "default",
+     "label": "Default",
+     "request_selector": {},
+     "defaults": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 4,
+      "guidance": 0.0
+     },
+     "resolution": {
+      "domain": "dynamic",
+      "alignment": 16,
+      "min_width": 64,
+      "min_height": 64,
+      "max_pixels": 1800000,
+      "aspect_groups": [
+       {
+        "id": "1:1",
+        "label": "1:1",
+        "presets": [
+         {
+          "id": "768x768",
+          "width": 768,
+          "height": 768,
+          "tier": "recommended"
+         },
+         {
+          "id": "1024x1024",
+          "width": 1024,
+          "height": 1024,
+          "tier": "recommended"
+         }
+        ]
+       },
+       {
+        "id": "4:3",
+        "label": "4:3",
+        "presets": [
+         {
+          "id": "1024x768",
+          "width": 1024,
+          "height": 768,
+          "tier": "recommended"
+         }
+        ]
+       },
+       {
+        "id": "3:4",
+        "label": "3:4",
+        "presets": [
+         {
+          "id": "768x1024",
+          "width": 768,
+          "height": 1024,
+          "tier": "recommended"
+         }
+        ]
+       },
+       {
+        "id": "16:9",
+        "label": "16:9",
+        "presets": [
+         {
+          "id": "1024x576",
+          "width": 1024,
+          "height": 576,
+          "tier": "recommended"
+         }
+        ]
+       },
+       {
+        "id": "9:16",
+        "label": "9:16",
+        "presets": [
+         {
+          "id": "576x1024",
+          "width": 576,
+          "height": 1024,
+          "tier": "recommended"
+         }
+        ]
+       }
+      ]
+     },
+     "steps": {
+      "default": 4,
+      "min": 1,
+      "max": 100,
+      "step": 1,
+      "recommended": [
+       2,
+       4,
+       6
+      ],
+      "mode": "adjustable"
+     },
+     "guidance": {
+      "default": 0.0,
+      "min": 0.0,
+      "max": 100.0,
+      "step": 0.1,
+      "mode": "adjustable"
+     },
+     "capabilities": {
+      "guidance": {
+       "adjustable": true,
+       "supports_negative_prompt": false
+      },
+      "negative_prompt": {
+       "mode": "hidden",
+       "required": false,
+       "reason": "This recipe does not encode a negative prompt."
+      },
+      "supports_lora": true,
+      "supports_controlnet": false,
+      "supports_identity": true,
+      "supports_sequence": false,
+      "supports_extend": false,
+      "supports_audio": false,
+      "source_video": {
+       "mode": "hidden",
+       "required": false,
+       "reason": "This recipe does not accept a source video."
+      },
+      "mask": {
+       "mode": "adjustable",
+       "required": false
+      },
+      "keyframes": {
+       "mode": "hidden",
+       "required": false,
+       "reason": "This model does not accept keyframes."
+      },
+      "audio": {
+       "mode": "hidden",
+       "required": false,
+       "reason": "This recipe does not accept source audio."
+      },
+      "lora": {
+       "mode": "adjustable",
+       "max_count": 4
+      },
+      "controlnet": {
+       "mode": "hidden",
+       "max_count": 0,
+       "reason": "ControlNet generation is available for SD1.5 models."
+      },
+      "output": {
+       "default_format": "png",
+       "formats": [
+        "png",
+        "jpeg",
+        "webp"
+       ],
+       "audio_requires_mp4": false
+      },
+      "wan_recipe": {
+       "mode": "hidden",
+       "supports_distill_strength": false,
+       "supports_first_last_frame": false,
+       "reason": "Wan sampler controls apply only to Wan models."
+      },
+      "prompt": {
+       "mode": "required"
+      },
+      "supports_strength": true,
+      "reference_images": {
+       "mode": "hidden",
+       "required": false,
+       "max_count": 0,
+       "primary_is_target": false,
+       "source_relation": "replaces",
+       "reason": "This model does not accept reference images (edit_images)."
+      }
+     },
+     "provenance": [
+      {
+       "kind": "mold-policy",
+       "source": "mold-qualified compatibility profile",
+       "qualified": true,
+       "evidence": "mold.generation-profile.v1"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "flux-dev:q4",
+  "family": "flux",
+  "size_gb": 7.01361,
+  "is_loaded": false,
+  "last_used": null,
+  "hf_repo": "city96/FLUX.1-dev-gguf",
+  "default_steps": 25,
+  "default_guidance": 3.5,
+  "default_width": 1024,
+  "default_height": 1024,
+  "description": "FLUX.1 Dev Q4 \u2014 smaller/faster, good quality",
+  "max_pixels": 1800000,
+  "recommended_dimensions": [
+   {
+    "width": 768,
+    "height": 768
+   },
+   {
+    "width": 1024,
+    "height": 1024
+   },
+   {
+    "width": 1024,
+    "height": 768
+   },
+   {
+    "width": 768,
+    "height": 1024
+   },
+   {
+    "width": 1024,
+    "height": 576
+   },
+   {
+    "width": 576,
+    "height": 1024
+   }
+  ],
+  "dimension_alignment": 16,
+  "downloaded": true,
+  "disk_usage_bytes": 17904744256,
+  "remaining_download_bytes": 0,
+  "supports_identity": true,
+  "supports_extend": false,
+  "extend_default_overlap_frames": 17,
+  "supports_sequence": false,
+  "guidance_capabilities": {
+   "adjustable": true,
+   "supports_negative_prompt": false
+  },
+  "generation_profile": {
+   "schema_version": 1,
+   "profile_id": "flux.flux-dev",
+   "profile_hash": "f5be25db62d10ccf66095b6619f3eeb4648e79a498773215c52333d7eb5afb52",
+   "default_recipe_id": "default",
+   "recipes": [
+    {
+     "id": "default",
+     "label": "Default",
+     "request_selector": {},
+     "defaults": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 25,
+      "guidance": 3.5
+     },
+     "resolution": {
+      "domain": "dynamic",
+      "alignment": 16,
+      "min_width": 64,
+      "min_height": 64,
+      "max_pixels": 1800000,
+      "aspect_groups": [
+       {
+        "id": "1:1",
+        "label": "1:1",
+        "presets": [
+         {
+          "id": "768x768",
+          "width": 768,
+          "height": 768,
+          "tier": "recommended"
+         },
+         {
+          "id": "1024x1024",
+          "width": 1024,
+          "height": 1024,
+          "tier": "recommended"
+         }
+        ]
+       },
+       {
+        "id": "4:3",
+        "label": "4:3",
+        "presets": [
+         {
+          "id": "1024x768",
+          "width": 1024,
+          "height": 768,
+          "tier": "recommended"
+         }
+        ]
+       },
+       {
+        "id": "3:4",
+        "label": "3:4",
+        "presets": [
+         {
+          "id": "768x1024",
+          "width": 768,
+          "height": 1024,
+          "tier": "recommended"
+         }
+        ]
+       },
+       {
+        "id": "16:9",
+        "label": "16:9",
+        "presets": [
+         {
+          "id": "1024x576",
+          "width": 1024,
+          "height": 576,
+          "tier": "recommended"
+         }
+        ]
+       },
+       {
+        "id": "9:16",
+        "label": "9:16",
+        "presets": [
+         {
+          "id": "576x1024",
+          "width": 576,
+          "height": 1024,
+          "tier": "recommended"
+         }
+        ]
+       }
+      ]
+     },
+     "steps": {
+      "default": 25,
+      "min": 1,
+      "max": 100,
+      "step": 1,
+      "recommended": [
+       13,
+       25,
+       38
+      ],
+      "mode": "adjustable"
+     },
+     "guidance": {
+      "default": 3.5,
+      "min": 0.0,
+      "max": 100.0,
+      "step": 0.1,
+      "mode": "adjustable"
+     },
+     "capabilities": {
+      "guidance": {
+       "adjustable": true,
+       "supports_negative_prompt": false
+      },
+      "negative_prompt": {
+       "mode": "hidden",
+       "required": false,
+       "reason": "This recipe does not encode a negative prompt."
+      },
+      "supports_lora": true,
+      "supports_controlnet": false,
+      "supports_identity": true,
+      "supports_sequence": false,
+      "supports_extend": false,
+      "supports_audio": false,
+      "source_video": {
+       "mode": "hidden",
+       "required": false,
+       "reason": "This recipe does not accept a source video."
+      },
+      "mask": {
+       "mode": "adjustable",
+       "required": false
+      },
+      "keyframes": {
+       "mode": "hidden",
+       "required": false,
+       "reason": "This model does not accept keyframes."
+      },
+      "audio": {
+       "mode": "hidden",
+       "required": false,
+       "reason": "This recipe does not accept source audio."
+      },
+      "lora": {
+       "mode": "adjustable",
+       "max_count": 4
+      },
+      "controlnet": {
+       "mode": "hidden",
+       "max_count": 0,
+       "reason": "ControlNet generation is available for SD1.5 models."
+      },
+      "output": {
+       "default_format": "png",
+       "formats": [
+        "png",
+        "jpeg",
+        "webp"
+       ],
+       "audio_requires_mp4": false
+      },
+      "wan_recipe": {
+       "mode": "hidden",
+       "supports_distill_strength": false,
+       "supports_first_last_frame": false,
+       "reason": "Wan sampler controls apply only to Wan models."
+      },
+      "prompt": {
+       "mode": "required"
+      },
+      "supports_strength": true,
+      "reference_images": {
+       "mode": "hidden",
+       "required": false,
+       "max_count": 0,
+       "primary_is_target": false,
+       "source_relation": "replaces",
+       "reason": "This model does not accept reference images (edit_images)."
+      }
+     },
+     "provenance": [
+      {
+       "kind": "mold-policy",
+       "source": "mold-qualified compatibility profile",
+       "qualified": true,
+       "evidence": "mold.generation-profile.v1"
+      }
+     ]
+    }
+   ]
+  }
+ }
+]

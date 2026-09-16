@@ -38,16 +38,6 @@ public struct ServerStatus: Hashable, Codable, Sendable {
         public let vramUsedBytes: UInt64?
         public let state: String?
 
-        private enum CodingKeys: String, CodingKey {
-            case ordinal, name, state
-            case vramTotalBytes = "vram_total_bytes"
-            case vramUsedBytes = "vram_used_bytes"
-        }
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case version, hostname, busy, gpus
-        case queueDepth = "queue_depth"
-        case memoryStatus = "memory_status"
-    }
 }

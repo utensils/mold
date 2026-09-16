@@ -46,6 +46,11 @@ lint-layers: ## MoldClient stays UI-free; only the root may build a backend
 	  || { echo "LAYER VIOLATION: MoldClient imports a UI framework"; exit 1; }
 	@! grep -rln 'HTTPBackend(' Sources --include='*.swift' | grep -v 'HostStore.swift' \
 	  || { echo "LAYER VIOLATION: a backend is constructed outside the composition root"; exit 1; }
+	@# One decoder configures snake_case conversion. A bare JSONDecoder()
+	@# silently decodes every multi-word field as nil rather than failing.
+	@! grep -rn 'JSONDecoder()' Sources Packages/*/Sources Packages/*/Tests --include='*.swift' \
+	  | grep -v 'MoldJSON.swift' \
+	  || { echo "DECODER VIOLATION: use MoldJSON.decoder"; exit 1; }
 	@echo "  layers ok"
 
 lint-color: ## No literal colors -- the system owns the palette
