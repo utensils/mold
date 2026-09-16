@@ -27,6 +27,10 @@ final class LibraryStore {
     var collectionsPerHost: [MoldHost.ID: [Collection]] = [:]
     var tagsPerHost: [MoldHost.ID: [TagCount]] = [:]
 
+    /// The Edit menu's Undo, for the edits this store makes. Its manager is
+    /// the window's, handed over by the pane -- see `MoldUndo`.
+    let undo = MoldUndo()
+
     /// Prints from every host, newest first.
     func refresh(hosts: [MoldHost], using backend: (MoldHost) -> any MoldBackend) async {
         isLoading = true

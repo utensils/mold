@@ -10,6 +10,11 @@ public extension GalleryPrint {
         public var favorite: Bool?
         public var tags: [String]?
         public var title: String?
+        /// This machine's own ids for the shelves the print sits on. Filing is
+        /// a local change like any other -- the grid draws a collection scope
+        /// from these, so a print filed optimistically has to leave the shelf
+        /// it was dragged off immediately.
+        public var collections: [String]?
         private let base: GalleryPrint
 
         public init(_ print: GalleryPrint) {
@@ -17,13 +22,14 @@ public extension GalleryPrint {
             self.favorite = print.favorite
             self.tags = print.tags
             self.title = print.title
+            self.collections = print.collections
         }
 
         public func build() -> GalleryPrint {
             GalleryPrint(
                 filename: base.filename, metadata: base.metadata, timestamp: base.timestamp,
                 format: base.format, sizeBytes: base.sizeBytes, mediaVersion: base.mediaVersion,
-                title: title, tags: tags, favorite: favorite, collections: base.collections,
+                title: title, tags: tags, favorite: favorite, collections: collections,
                 trashedAt: base.trashedAt, purgeAt: base.purgeAt)
         }
     }

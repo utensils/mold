@@ -40,7 +40,10 @@ struct MoldApp: App {
         }
         .defaultSize(width: 1_280, height: 860)
         .windowToolbarStyle(.unified)
-        .commands { MoldCommands(destination: $destination) }
+        .commands {
+            MoldCommands(destination: $destination)
+            LibraryCommands()
+        }
 
         Settings {
             SettingsView()

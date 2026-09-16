@@ -65,32 +65,25 @@ extension LibraryStore {
     /// print on another machine must land in that machine's own copy of the
     /// shelf. The host resolves the name by slug and creates it if it has
     /// never seen it, which is what keeps one shelf one shelf.
-    func file(_ entries: [LibraryEntry], into name: String,
-              backend: (MoldHost.ID) -> (any MoldBackend)?) async {
-        for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
-            let mutation = GalleryBulkMutation(
-                filenames: group.map(\.print.filename),
-                addToCollection: .named(name))
-            do { try await client.mutate(mutation) } catch {
-                failures[hostID] = "Couldn't file those into \(name)."
-            }
-        }
-        await reloadOrganization(backend)
+    func file(_ entries: [LibraryEntry], into shelf: CollectionShelf,
+              backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
+        apply(filing(entries, shelf, true), backend: backend)
     }
 
-    /// Takes prints off a shelf. By slug, for the same reason filing is by
-    /// name -- it is the identity the app and every machine agree on.
-    func unfile(_ entries: [LibraryEntry], from slug: String,
-                backend: (MoldHost.ID) -> (any MoldBackend)?) async {
-        for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
-            let mutation = GalleryBulkMutation(
-                filenames: group.map(\.print.filename),
-                removeFromCollectionSlug: slug)
-            try? await client.mutate(mutation)
-        }
-        await reloadOrganization(backend)
+    /// Takes prints off a shelf.
+    func unfile(_ entries: [LibraryEntry], from shelf: CollectionShelf,
+                backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
+        apply(filing(entries, shelf, false), backend: backend)
+    }
+
+    private func filing(_ entries: [LibraryEntry], _ shelf: CollectionShelf,
+                        _ filing: Bool) -> PrintEdit {
+        PrintEdit.plan(
+            .collection(name: shelf.name, slug: shelf.slug, filing: filing),
+            over: entries,
+            // Each machine's OWN id for the shelf, which is what a print's
+            // `collections` are spelled in.
+            collectionIDs: shelf.hosts)
     }
 
     // MARK: - Shelf lifecycle
@@ -98,51 +91,41 @@ extension LibraryStore {
     /// A shelf is made on the machine you are looking at; the others get their
     /// copy the first time something is filed into it there.
     func createShelf(named name: String, on hostID: MoldHost.ID,
-                     backend: (MoldHost.ID) -> (any MoldBackend)?) async {
+                     backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         guard let client = backend(hostID) as? HTTPBackend else { return }
         _ = try? await client.createCollection(name: name)
-        await reloadOrganization(backend)
+        await reloadCollections(backend)
     }
 
     /// Renames every machine's copy, so the shelf does not split in two.
     func renameShelf(_ shelf: CollectionShelf, to name: String,
-                     backend: (MoldHost.ID) -> (any MoldBackend)?) async {
+                     backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         for (hostID, id) in shelf.hosts {
             guard let client = backend(hostID) as? HTTPBackend else { continue }
             _ = try? await client.updateCollection(id: id, change: CollectionChange(name: name))
         }
-        await reloadOrganization(backend)
+        await reloadCollections(backend)
     }
 
     /// Removes the shelf from every machine. The prints stay -- only the
     /// membership goes.
     func deleteShelf(_ shelf: CollectionShelf,
-                     backend: (MoldHost.ID) -> (any MoldBackend)?) async {
+                     backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         for (hostID, id) in shelf.hosts {
             guard let client = backend(hostID) as? HTTPBackend else { continue }
             try? await client.deleteCollection(id: id)
         }
-        await reloadOrganization(backend)
+        await reloadCollections(backend)
     }
 
     func setShelfHidden(_ shelf: CollectionShelf, hidden: Bool,
-                        backend: (MoldHost.ID) -> (any MoldBackend)?) async {
+                        backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         for (hostID, id) in shelf.hosts {
             guard let client = backend(hostID) as? HTTPBackend else { continue }
             _ = try? await client.updateCollection(id: id,
                                                    change: CollectionChange(hidden: hidden))
         }
-        await reloadOrganization(backend)
+        await reloadCollections(backend)
     }
 
-    private func reloadOrganization(_ backend: (MoldHost.ID) -> (any MoldBackend)?) async {
-        // Membership changed, so every machine's index is stale.
-        etags.removeAll()
-        for hostID in collectionsPerHost.keys {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
-            if let collections = try? await client.collections() {
-                collectionsPerHost[hostID] = collections
-            }
-        }
-    }
 }

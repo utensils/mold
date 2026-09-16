@@ -8,7 +8,12 @@ extension LibraryPane {
     var subtitle: String {
         if selected.count > 1 { return "\(selected.count.formatted()) selected" }
         let shown = visible.count
-        let noun = navigation.scope.isTrash ? "in the trash" : "prints"
+        // "1 prints" is the tell of a string built by concatenation. The noun
+        // agrees with the LAST number in the sentence, which is the pool's
+        // when the query has narrowed one count out of another; the trash
+        // reads "in the trash" either way, being a phrase and not a count.
+        let counted = navigation.query.isNarrowed ? pool.count : shown
+        let noun = navigation.scope.isTrash ? "in the trash" : (counted == 1 ? "print" : "prints")
         guard navigation.query.isNarrowed else { return "\(shown.formatted()) \(noun)" }
         return "\(shown.formatted()) of \(pool.count.formatted()) \(noun)"
     }

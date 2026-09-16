@@ -12,6 +12,10 @@ struct LibraryPane: View {
     @Environment(LibraryNavigation.self) var navigation
     @Environment(GenerateController.self) var generate
     @Environment(ModelStore.self) var models
+    /// The WINDOW's undo manager. The store registers against it so Edit ▸
+    /// Undo, which SwiftUI wires to the responder chain, finds our edits --
+    /// and so a focused text field still keeps ⌘Z for itself.
+    @Environment(\.undoManager) private var undoManager
     @Binding var destination: Destination
 
     @State var selection = LibraryCursor.Selection.empty
@@ -58,10 +62,13 @@ struct LibraryPane: View {
                 .inspectorColumnWidth(min: 260, ideal: 320, max: 420)
         }
         .task { await actions.reload() }
+        .onAppear { library.undo.manager = undoManager }
+        .onChange(of: undoManager) { _, manager in library.undo.manager = manager }
         .focusedSceneValue(\.refreshAction) { Task { await actions.reload() } }
         .focusedSceneValue(\.inspectorToggle, InspectorToggle(isShowing: showsInspector) {
             showsInspector.toggle()
         })
+        .focusedSceneValue(\.librarySelection, menuSelection)
         .onChange(of: navigation.scope) { _, _ in selection = .empty; viewing = nil }
         .onChange(of: library.shelves) { _, shelves in navigation.reconcile(with: shelves) }
         // A plain confirm with a danger button. Never a typed phrase: making

@@ -1,67 +1,32 @@
 import Foundation
 import MoldClient
 
-// Changing what is in the library. Split from the fetching half purely
-// for size.
+// What the UI asks for. Each of these narrows a request to the prints it would
+// actually change and hands it to `apply`, which is the one place that mutates,
+// registers the undo and talks to the machines.
 @MainActor
 extension LibraryStore {
 
-
-    /// Applies a change locally first, then tells the host.
-    ///
-    /// A star that waits for a round trip feels broken on a remote machine, so
-    /// the tile turns immediately and a failure puts it back -- rather than the
-    /// UI and the host quietly disagreeing.
     func setFavorite(_ favorite: Bool, on entries: [LibraryEntry],
-                     backend: (MoldHost.ID) -> (any MoldBackend)?) async {
-        let previous = perHost
-        mutateLocally(entries) { $0.favorite = favorite }
-
-        for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
-            let mutation = GalleryBulkMutation(
-                filenames: group.map(\.print.filename), favorite: favorite)
-            do { try await client.mutate(mutation) } catch {
-                perHost = previous
-                rebuild()
-                failures[hostID] = "Couldn't update those prints."
-                return
-            }
-        }
+                     backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
+        apply(PrintEdit.plan(.favorite(favorite), over: entries), backend: backend)
     }
 
-    /// Adds or removes a tag across a selection, in one replay-safe mutation.
     func setTag(_ tag: String, adding: Bool, on entries: [LibraryEntry],
-                backend: (MoldHost.ID) -> (any MoldBackend)?) async {
+                backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
         let clean = tag.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-        let previous = perHost
-
-        mutateLocally(entries) { print in
-            var tags = print.tags ?? []
-            tags.removeAll { $0.caseInsensitiveCompare(clean) == .orderedSame }
-            if adding { tags.append(clean) }
-            print.tags = tags
-        }
-
-        for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
-            let mutation = GalleryBulkMutation(
-                filenames: group.map(\.print.filename),
-                addTags: adding ? [clean] : [],
-                removeTags: adding ? [] : [clean])
-            do { try await client.mutate(mutation) } catch {
-                perHost = previous
-                rebuild()
-                failures[hostID] = "Couldn't change those tags."
-                return
-            }
-        }
+        apply(PrintEdit.plan(.tag(clean, adding: adding), over: entries), backend: backend)
     }
 
     /// Trash keeps the bytes and starts a purge countdown; it is not a delete.
+    ///
+    /// Deliberately NOT on the undo stack. It already has a better answer --
+    /// the print sits in Recently Deleted with its own countdown and its own
+    /// Put Back, which survives quitting the app in a way an undo stack does
+    /// not.
     func moveToTrash(_ entries: [LibraryEntry],
-                     backend: (MoldHost.ID) -> (any MoldBackend)?) async {
+                     backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         let previous = perHost
         let ids = Set(entries.map(\.id))
         for (hostID, list) in perHost {
@@ -82,7 +47,7 @@ extension LibraryStore {
     }
 
     func restore(_ entries: [LibraryEntry],
-                 backend: (MoldHost.ID) -> (any MoldBackend)?) async {
+                 backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
             guard let client = backend(hostID) as? HTTPBackend else { continue }
             try? await client.restoreFromTrash(group.map(\.print.filename))
@@ -91,28 +56,14 @@ extension LibraryStore {
         trashEtags.removeAll()
     }
 
-    /// Permanent on the host. Nothing here can undo it.
+    /// Permanent on the host. Nothing here can undo it, which is why the panes
+    /// ask first.
     func deleteForever(_ entries: [LibraryEntry],
-                       backend: (MoldHost.ID) -> (any MoldBackend)?) async {
+                       backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
             guard let client = backend(hostID) as? HTTPBackend else { continue }
             try? await client.deleteForever(group.map(\.print.filename))
         }
         trashEtags.removeAll()
-    }
-
-    private func mutateLocally(_ entries: [LibraryEntry],
-                               _ change: (inout GalleryPrint.Mutable) -> Void) {
-        let ids = Set(entries.map(\.id))
-        for (hostID, list) in perHost {
-            perHost[hostID] = list.map { entry in
-                guard ids.contains(entry.id) else { return entry }
-                var mutable = GalleryPrint.Mutable(entry.print)
-                change(&mutable)
-                return LibraryEntry(hostID: entry.hostID, hostName: entry.hostName,
-                                    print: mutable.build())
-            }
-        }
-        rebuild()
     }
 }

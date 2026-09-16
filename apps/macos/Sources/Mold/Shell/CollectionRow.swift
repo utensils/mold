@@ -63,7 +63,7 @@ struct CollectionRow: View {
     private func file(_ ids: [PrintID]) {
         let entries = library.items.filter { ids.contains($0.id) }
         guard !entries.isEmpty else { return }
-        Task { await library.file(entries, into: shelf.name, backend: backend) }
+        library.file(entries, into: shelf, backend: backend)
     }
 
     private func backend(_ id: MoldHost.ID) -> (any MoldBackend)? {

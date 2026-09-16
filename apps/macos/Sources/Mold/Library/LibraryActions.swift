@@ -41,11 +41,11 @@ struct LibraryActions {
         // If any is not a favourite, the action makes them all favourites --
         // the same rule the Finder uses for mixed selections.
         let makeFavorite = entries.contains { !$0.print.isFavorite }
-        Task { await library.setFavorite(makeFavorite, on: entries, backend: backend) }
+        library.setFavorite(makeFavorite, on: entries, backend: backend)
     }
 
     func setTag(_ tag: String, adding: Bool, on entries: [LibraryEntry]) {
-        Task { await library.setTag(tag, adding: adding, on: entries, backend: backend) }
+        library.setTag(tag, adding: adding, on: entries, backend: backend)
     }
 
     func moveToTrash(_ entries: [LibraryEntry]) {

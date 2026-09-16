@@ -11,15 +11,20 @@ generation and the library. No 3-D studio.
 | | |
 | --- | --- |
 | **Generate** | Every control comes from the model's own generation profile, so a model added to mold tomorrow gets correct controls with no change here. Stills and clips (length in seconds, snapped to the family's frame grid), source images with strength, ordered reference images, batches, negative prompts. Durable submission, live step progress and denoise preview, then the picture with Save / Copy / Show in Library. Clicking the picture tucks the controls off the bottom edge, leaving a lip that still carries the step marks; clicking it again or pressing Escape brings them back. |
-| **Library** | Every machine's prints in one day-sectioned timeline, host-badged. Select with the mouse or the keyboard, open in place, play video, favourite, tag, trash, restore, save, copy, drag to the Finder, and export a clip or mesh into whatever the host will convert it to. Three shelves: all, favourites, Recently Deleted. Refreshes by ETag. |
+| **Library** | Every machine's prints in one day-sectioned timeline, host-badged. Select with the mouse or the keyboard, open in place, play video, favourite, tag, trash, restore, save, copy, drag to the Finder, and export a clip or mesh into whatever the host will convert it to. Collections are sidebar rows, merged across the fleet by slug, and you file prints by dragging onto one. Search with real tokens (`tag:`, a machine, `is:video`), sort, and set the tile size. Recently Deleted carries each print's own countdown, Put Back and Delete Immediately. Favourite, tag and filing are **undoable** from the Edit menu. Refreshes by ETag. |
 | **Queue** | Work in flight per machine, with the host's own actionable reason on each row, and retry / pause / resume / cancel. |
 | **Models** | Variants grouped under the model they belong to, each with the manifest's plain-English trade-off, size and install state. Install and repair with live byte progress. |
 | **Settings** | Add, edit and remove machines. An address is normalized the way the other apps normalize it, checked live while you type, and refused when another machine already answers at it; keys go to the Keychain. |
 | **This Mac** | mold's own Rust engine, running in-process on Metal. It joins the machine list like any other and is reached over the same HTTP. |
 
 Shortcuts: ⌘1–⌘4 for the destinations, ⌘R to refresh, ⌘↩ to generate, ⌘, for
-Settings. Every shortcut is declared once in `MoldCommands` and only *printed*
-elsewhere — binding one twice queues the work twice.
+Settings, ⌥⌘I for the inspector, ⌥⌘F to favourite, ⌘⌫ to trash, ⌘Z to undo.
+Every shortcut is declared once in `MoldCommands` or `LibraryCommands` and only
+*printed* elsewhere — binding one twice queues the work twice.
+
+What a selection can do is in the **Library menu**, never in a bar that floats
+over the grid: the menu bar is what macOS searches from Help, what the keyboard
+reaches, and what VoiceOver reads.
 
 ## The local engine
 
@@ -46,9 +51,9 @@ entitlements allow JIT because candle compiles its Metal shaders at runtime.
 
 ## Not built yet
 
-Collections, prompt expansion, LoRAs and identity conditioning, chain jobs
-(scripted sequences are CLI and API only by design), the 3-D studio, and
-pairing-based onboarding for keyed hosts.
+Prompt expansion, LoRAs and identity conditioning, inpainting, the model
+catalog, per-machine GPU panels, chain jobs (scripted sequences are CLI and API
+only by design), the 3-D studio, and pairing-based onboarding for keyed hosts.
 
 ## Running it
 
