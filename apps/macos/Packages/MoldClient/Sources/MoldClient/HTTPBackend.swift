@@ -30,7 +30,12 @@ public struct HTTPBackend: MoldBackend {
     }
 
     public func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]> {
-        var request = self.request("/api/gallery")
+        try await galleryListing(view: nil, etag: etag)
+    }
+
+    /// `view` is `trash` for the deleted shelf, absent for the live library.
+    func galleryListing(view: String?, etag: String?) async throws -> Fetched<[GalleryPrint]> {
+        var request = self.request(view.map { "/api/gallery?view=\($0)" } ?? "/api/gallery")
         // The index is large and mostly unchanged between refreshes, so ask
         // the host whether it changed at all before it serializes 1.2 MB.
         if let etag { request.setValue(etag, forHTTPHeaderField: "If-None-Match") }

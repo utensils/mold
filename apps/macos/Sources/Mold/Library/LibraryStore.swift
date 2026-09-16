@@ -12,10 +12,14 @@ import MoldClient
 final class LibraryStore {
     private(set) var items: [LibraryEntry] = []
     private(set) var isLoading = false
-    private(set) var failures: [MoldHost.ID: String] = [:]
+    var failures: [MoldHost.ID: String] = [:]
 
-    private var perHost: [MoldHost.ID: [LibraryEntry]] = [:]
-    private var etags: [MoldHost.ID: String] = [:]
+    private(set) var trashed: [LibraryEntry] = []
+
+    var perHost: [MoldHost.ID: [LibraryEntry]] = [:]
+    var trashPerHost: [MoldHost.ID: [LibraryEntry]] = [:]
+    var etags: [MoldHost.ID: String] = [:]
+    var trashEtags: [MoldHost.ID: String] = [:]
 
     /// Prints from every host, newest first.
     func refresh(hosts: [MoldHost], using backend: (MoldHost) -> any MoldBackend) async {
@@ -67,11 +71,37 @@ final class LibraryStore {
         rebuild()
     }
 
-    private func rebuild() {
+    func rebuild() {
         items = perHost.values.flatMap(\.self)
             .filter { $0.print.trashedAt == nil }
             .sorted { $0.print.timestamp > $1.print.timestamp }
     }
 
     func count(for host: MoldHost.ID) -> Int { perHost[host]?.count ?? 0 }
+
+    // MARK: - Trash
+
+    func refreshTrash(hosts: [MoldHost], using backend: (MoldHost) -> any MoldBackend) async {
+        await withTaskGroup(of: (MoldHost, [LibraryEntry]?, String?).self) { group in
+            for host in hosts {
+                let client = backend(host)
+                let etag = trashEtags[host.id]
+                group.addTask {
+                    guard let client = client as? HTTPBackend,
+                          let fetched = try? await client.trashedPrints(etag: etag)
+                    else { return (host, nil, nil) }
+                    guard let prints = fetched.value else { return (host, nil, nil) }
+                    return (host, prints.map {
+                        LibraryEntry(hostID: host.id, hostName: host.name, print: $0)
+                    }, fetched.etag)
+                }
+            }
+            for await (host, entries, etag) in group {
+                if let entries { trashPerHost[host.id] = entries }
+                if let etag { trashEtags[host.id] = etag }
+            }
+        }
+        trashed = trashPerHost.values.flatMap(\.self)
+            .sorted { ($0.print.trashedAt ?? 0) > ($1.print.trashedAt ?? 0) }
+    }
 }

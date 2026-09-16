@@ -2,59 +2,128 @@ import MoldClient
 import MoldStyle
 import SwiftUI
 
-/// The day-sectioned grid of prints.
+/// The day-sectioned grid, with selection and the keyboard.
 struct LibraryGrid: View {
     let sections: [LibrarySection]
     let hosts: [MoldHost]
     let edge: CGFloat
     let showsHostBadges: Bool
-    @Binding var selection: PrintID?
+    let scope: LibraryScope
+    let actions: LibraryActions
+    let entries: [LibraryEntry]
+    @Binding var selection: LibraryCursor.Selection
+    let onOpen: (PrintID) -> Void
+
+    @State private var columns = 1
 
     var body: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
-                ForEach(sections) { section in
-                    Section {
-                        ForEach(section.items) { item in
-                            cell(item)
+        ScrollViewReader { scroller in
+            ScrollView {
+                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 16) {
+                    ForEach(sections) { section in
+                        Section {
+                            ForEach(section.items) { cell($0) }
+                        } header: {
+                            header(section)
                         }
-                    } header: {
-                        header(section)
                     }
                 }
+                .padding(16)
             }
-            .padding(16)
+            .onChange(of: selection.lead) { _, lead in
+                guard let lead else { return }
+                withAnimation(.snappy) { scroller.scrollTo(lead, anchor: .center) }
+            }
         }
-        .scrollContentBackground(.hidden)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+            // The cursor needs the real column count for arrow keys to land
+            // where the eye expects.
+            columns = max(Int((width - 32 + 12) / (edge + 12)), 1)
+        }
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(.leftArrow) { move(.left) }
+        .onKeyPress(.rightArrow) { move(.right) }
+        .onKeyPress(.upArrow) { move(.up) }
+        .onKeyPress(.downArrow) { move(.down) }
+        .onKeyPress(.return) { openLead() }
+        .onKeyPress(.space) { openLead() }
+        .onKeyPress(.delete) { trashSelection() }
+        .onKeyPress(keys: ["a"]) { press in
+            guard press.modifiers.contains(.command) else { return .ignored }
+            selection = LibraryCursor.Selection(
+                items: Set(entries.map(\.id)), anchor: entries.first?.id,
+                lead: selection.lead ?? entries.first?.id)
+            return .handled
+        }
     }
 
-    private var columns: [GridItem] {
+    private var gridColumns: [GridItem] {
         [GridItem(.adaptive(minimum: edge, maximum: .infinity), spacing: 12)]
     }
 
-    @ViewBuilder private func cell(_ item: LibraryEntry) -> some View {
-        if let host = hosts.first(where: { $0.id == item.hostID }) {
+    private var cursor: LibraryCursor {
+        LibraryCursor(sections: sections, columns: columns)
+    }
+
+    @ViewBuilder private func cell(_ entry: LibraryEntry) -> some View {
+        if let host = hosts.first(where: { $0.id == entry.hostID }) {
             LibraryCell(
-                item: item, host: host, edge: edge,
-                isSelected: selection == item.id,
+                entry: entry, host: host, edge: edge,
+                isSelected: selection.items.contains(entry.id),
+                isLead: selection.lead == entry.id,
                 showsHostBadge: showsHostBadges
             )
-            .onTapGesture { selection = item.id }
+            .id(entry.id)
+            .onTapGesture(count: 2) { onOpen(entry.id) }
+            .onTapGesture { click(entry) }
+            .contextMenu {
+                LibraryMenu(targets: targets(for: entry), scope: scope, actions: actions,
+                            open: { onOpen(entry.id) })
+            }
         }
     }
 
     private func header(_ section: LibrarySection) -> some View {
         HStack {
-            Text(LibraryGrouping.title(for: section.day))
-                .font(.headline)
+            Text(LibraryGrouping.title(for: section.day)).font(.headline)
             Text(section.items.count.formatted())
-                .font(.subheadline)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
+                .font(.subheadline).monospacedDigit().foregroundStyle(.secondary)
             Spacer()
         }
         .padding(.top, 8)
-        // A material keeps the heading readable while tiles scroll under it.
         .background(.bar)
+    }
+
+    // MARK: - Selection
+
+    /// Acts on the whole selection when the clicked print is in it.
+    private func targets(for entry: LibraryEntry) -> [LibraryEntry] {
+        selection.items.contains(entry.id)
+            ? entries.filter { selection.items.contains($0.id) }
+            : [entry]
+    }
+
+    private func click(_ entry: LibraryEntry) {
+        selection = cursor.clicking(entry.id, ClickModifiers.current, from: selection)
+    }
+
+    private func move(_ move: LibraryCursor.Move) -> KeyPress.Result {
+        selection = cursor.moving(move, ClickModifiers.current, from: selection)
+        return .handled
+    }
+
+    private func openLead() -> KeyPress.Result {
+        guard let lead = selection.lead else { return .ignored }
+        onOpen(lead)
+        return .handled
+    }
+
+    private func trashSelection() -> KeyPress.Result {
+        let targets = entries.filter { selection.items.contains($0.id) }
+        guard !targets.isEmpty else { return .ignored }
+        if scope.isTrash { actions.deleteForever(targets) } else { actions.moveToTrash(targets) }
+        selection = .empty
+        return .handled
     }
 }

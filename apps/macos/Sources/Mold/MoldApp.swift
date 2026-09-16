@@ -20,6 +20,7 @@ struct MoldApp: App {
     var body: some Scene {
         Window("Mold", id: "main") {
             RootView(destination: $destination)
+                .task { ClickModifiers.startObserving() }
                 .environment(hosts)
                 .environment(library)
                 .environment(thumbnails)

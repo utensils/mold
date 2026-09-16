@@ -1,52 +1,107 @@
 import MoldClient
 import SwiftUI
 
-/// What a selected print is made of.
+/// What the selection is made of, and what you can do with it.
 struct LibraryInspector: View {
-    let item: LibraryEntry?
+    let entries: [LibraryEntry]
     let host: MoldHost?
+    let scope: LibraryScope
+    let actions: LibraryActions
 
     var body: some View {
         Group {
-            if let item, let host {
-                details(item, host)
-            } else {
+            if entries.isEmpty {
                 ContentUnavailableView("Nothing selected", systemImage: "sidebar.right")
+            } else if entries.count == 1, let entry = entries.first {
+                single(entry)
+            } else {
+                many
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func details(_ item: LibraryEntry, _ host: MoldHost) -> some View {
+    private func single(_ entry: LibraryEntry) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                LibraryThumbnail(item: item, host: host, edge: 320)
-                    .frame(maxWidth: .infinity)
-
-                if let prompt = item.print.metadata.prompt, !prompt.isEmpty {
+                if let host {
+                    LibraryThumbnail(entry: entry, host: host, edge: 320)
+                        .frame(maxWidth: .infinity)
+                }
+                if let prompt = entry.print.metadata.prompt, !prompt.isEmpty {
                     Text(prompt)
                         .font(.callout)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-
-                facts(item)
+                facts(entry)
+                buttons
             }
             .padding(16)
         }
     }
 
-    private func facts(_ item: LibraryEntry) -> some View {
-        let meta = item.print.metadata
+    private var many: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "square.stack")
+                .font(.largeTitle)
+                .foregroundStyle(.tertiary)
+            Text("\(entries.count) prints selected").font(.headline)
+            if let span = machines {
+                Text(span).font(.caption).foregroundStyle(.secondary)
+            }
+            buttons
+            Spacer()
+        }
+        .padding(16)
+    }
+
+    /// Says when a selection spans machines, because the actions below will
+    /// then touch more than one.
+    private var machines: String? {
+        let names = Set(entries.map(\.hostName)).sorted()
+        return names.count > 1 ? "On \(names.joined(separator: ", "))" : names.first
+    }
+
+    @ViewBuilder private var buttons: some View {
+        if scope.isTrash {
+            HStack {
+                Button("Put Back") { actions.restore(entries) }
+                Button("Delete", role: .destructive) { actions.deleteForever(entries) }
+            }
+        } else {
+            HStack {
+                Button { actions.toggleFavorite(entries) } label: {
+                    Label("Favorite", systemImage: allFavorite ? "star.fill" : "star")
+                }
+                Button { actions.save(entries) } label: {
+                    Label("Save", systemImage: "square.and.arrow.down")
+                }
+                Button { actions.copy(entries) } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+                Button(role: .destructive) { actions.moveToTrash(entries) } label: {
+                    Label("Trash", systemImage: "trash")
+                }
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private var allFavorite: Bool { entries.allSatisfy(\.print.isFavorite) }
+
+    private func facts(_ entry: LibraryEntry) -> some View {
+        let meta = entry.print.metadata
         return Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 6) {
-            row("Machine", item.hostName)
+            row("Machine", entry.hostName)
             row("Model", meta.model)
             row("Seed", meta.seed.map(String.init))
             row("Steps", meta.steps.map(String.init))
             row("Guidance", meta.guidance.map { $0.formatted(.number.precision(.fractionLength(1))) })
             row("Size", size(meta))
-            row("Made", item.createdAt.formatted(date: .abbreviated, time: .shortened))
-            row("File", item.print.filename)
+            row("Made", entry.createdAt.formatted(date: .abbreviated, time: .shortened))
+            row("File", entry.print.filename)
         }
         .font(.caption)
     }
@@ -60,14 +115,8 @@ struct LibraryInspector: View {
     @ViewBuilder private func row(_ label: String, _ value: String?) -> some View {
         if let value {
             GridRow {
-                Text(label)
-                    .foregroundStyle(.secondary)
-                    .gridColumnAlignment(.trailing)
-                Text(value)
-                    .textSelection(.enabled)
-                    // Numbers and identifiers should not reflow as they change.
-                    .monospacedDigit()
-                    .lineLimit(3)
+                Text(label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                Text(value).textSelection(.enabled).monospacedDigit().lineLimit(3)
             }
         }
     }
