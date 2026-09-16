@@ -12,7 +12,8 @@ struct RootView: View {
     /// override exists so a UAT run can land on a named destination without
     /// driving the mouse.
     @AppStorage("destination") private var stored = Destination.generate.rawValue
-    @State private var destination = Destination.launch
+    /// Owned by the scene so a menu command can change it.
+    @Binding var destination: Destination
 
     var body: some View {
         NavigationSplitView {

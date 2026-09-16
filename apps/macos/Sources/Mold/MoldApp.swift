@@ -15,10 +15,11 @@ struct MoldApp: App {
     @State private var thumbnails = ThumbnailCache()
     @State private var models = ModelStore()
     @State private var generate = GenerateController()
+    @State private var destination = Destination.launch
 
     var body: some Scene {
         Window("Mold", id: "main") {
-            RootView()
+            RootView(destination: $destination)
                 .environment(hosts)
                 .environment(library)
                 .environment(thumbnails)
@@ -30,6 +31,7 @@ struct MoldApp: App {
         }
         .defaultSize(width: 1_280, height: 860)
         .windowToolbarStyle(.unified)
+        .commands { MoldCommands(destination: $destination) }
 
         Settings {
             SettingsView()

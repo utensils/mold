@@ -35,6 +35,7 @@ struct LibraryPane: View {
                 .inspectorColumnWidth(min: 260, ideal: 320, max: 420)
         }
         .task { await reload() }
+        .focusedSceneValue(\.refreshAction) { Task { await reload() } }
     }
 
     // MARK: - Content

@@ -6,6 +6,28 @@ An experimental native Swift app for mold, on the long-running
 It is a candidate replacement for the Tauri `desktop/` app on macOS, scoped to
 generation and the library. No 3-D studio.
 
+## What works today
+
+| | |
+| --- | --- |
+| **Generate** | Text-to-image. Every control comes from the model's own generation profile, so a model added to mold tomorrow gets correct controls with no change here. Durable submission, live step progress and denoise preview, the finished picture. |
+| **Library** | Every machine's prints in one day-sectioned timeline, host-badged, with search, a source filter, zoom and an inspector. Refreshes by ETag. |
+| **Queue** | Work in flight per machine, with the host's own actionable reason on each row. |
+| **Models** | Variants grouped under the model they belong to, each with the manifest's plain-English trade-off, size and install state. |
+| **Settings** | Add, edit and remove machines. Keys go to the Keychain. |
+
+Shortcuts: ⌘1–⌘4 for the destinations, ⌘R to refresh, ⌘↩ to generate, ⌘, for
+Settings. Every shortcut is declared once in `MoldCommands` and only *printed*
+elsewhere — binding one twice queues the work twice.
+
+## Not built yet
+
+Source images and img2img, video playback and length controls, tags and
+collections, trash, export, and downloading a model from inside the app. The
+larger remaining piece is running mold's own Rust engine in-process
+(`mold_server::run_server` on a thread, reached over loopback) so the app can
+render locally on Metal instead of only talking to a remote machine.
+
 ## Running it
 
 From inside `nix develop`:

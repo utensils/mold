@@ -40,6 +40,7 @@ struct QueuePane: View {
             }
         }
         .task { await load() }
+        .focusedSceneValue(\.refreshAction) { Task { await load() } }
     }
 
     private var rows: [QueueEntry] { byHost.values.flatMap(\.self) }
