@@ -1,0 +1,128 @@
+{
+  "generation_profile_v1": true,
+  "gallery": {
+    "can_delete": true,
+    "trash": {
+      "enabled": true,
+      "retention_days": 30
+    },
+    "organize": true,
+    "bulk_mutations": true,
+    "media_version": true,
+    "conditional_get": true,
+    "row_events": true,
+    "persists_outputs": true
+  },
+  "catalog": {
+    "available": true,
+    "families": [
+      "flux",
+      "flux2",
+      "sd15",
+      "sdxl",
+      "sd3",
+      "z-image",
+      "ltx-video",
+      "ltx2",
+      "wan",
+      "minimax-h3",
+      "qwen-image",
+      "qwen-image-edit",
+      "wuerstchen",
+      "hunyuan3d"
+    ],
+    "sort": [
+      "downloads",
+      "recent",
+      "rating"
+    ]
+  },
+  "model_access": {
+    "restrictions": []
+  },
+  "discovery": {
+    "can_browse": true
+  },
+  "events": {
+    "available": true
+  },
+  "queue": {
+    "can_pause": true,
+    "can_pause_job": true,
+    "can_cancel_all": true,
+    "can_reorder": true,
+    "stable_device_pins": true,
+    "cooperative_cancellation": true,
+    "durable_queue": true,
+    "heterogeneous_batch_max_outputs": 64
+  },
+  "video_upscale": {
+    "available": true,
+    "gallery_image": true,
+    "contract_version": 1,
+    "source_library": true,
+    "source_upload": false,
+    "input_containers": [
+      "mp4",
+      "mov",
+      "webm"
+    ],
+    "output_container": "mp4",
+    "preserves_primary_audio_when_compatible": true,
+    "supports_vfr": false,
+    "supports_hdr": false,
+    "disclosure": "Framewise upscale processes each frame independently; temporal flicker may remain."
+  },
+  "durable_media": {
+    "protocol_version": 2,
+    "encrypted_at_rest": true,
+    "generate_request_media": true,
+    "identity": true,
+    "private_h3": true
+  },
+  "reference_uploads": {
+    "available": false,
+    "protocol_version": 2,
+    "requires_api_key": true,
+    "session_path": "/api/generate/reference-upload-sessions",
+    "upload_path": "/api/generate/reference-upload",
+    "session_handle_header": "x-mold-reference-upload-session",
+    "upload_handle_header": "x-mold-reference-upload",
+    "max_file_bytes": 268435456,
+    "max_session_bytes": 1073741824,
+    "max_active_sessions": 4,
+    "session_ttl_ms": 1800000
+  },
+  "devices": {
+    "available": true,
+    "lifecycle": true,
+    "restart_enable": false,
+    "stable_pins": true,
+    "planned_lanes": true,
+    "learned_eta": true
+  },
+  "dispatch": {
+    "modes": [
+      "legacy",
+      "observe",
+      "v2"
+    ],
+    "active_mode": "v2",
+    "v2_authoritative": true,
+    "observes_v2_decisions": false,
+    "request_placement_preview": true
+  },
+  "expand": {
+    "configured": true,
+    "model_present": true,
+    "backend": "local",
+    "remix": true,
+    "model": "qwen3-expand:q8"
+  },
+  "identity": {
+    "multi_photo": true,
+    "max_photos": 4,
+    "true_cfg": true
+  },
+  "licenses": true
+}

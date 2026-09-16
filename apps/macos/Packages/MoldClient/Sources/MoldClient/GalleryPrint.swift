@@ -56,6 +56,16 @@ public struct GalleryPrint: Codable, Hashable, Sendable {
     /// mold stores video as mp4 and meshes as glb; everything else is a still.
     public var isVideo: Bool { ["mp4", "webm", "mov"].contains(format ?? "") }
     public var isMesh: Bool { format == "glb" }
+
+    /// What a person would call this.
+    public var kind: PrintKind {
+        if isVideo { return .clip }
+        if isMesh { return .mesh }
+        return .picture
+    }
+
+    /// The collections this print is in, as ids ON ITS OWN MACHINE.
+    public var collectionList: [String] { collections ?? [] }
 }
 
 /// A print's identity in a library merged across machines.
@@ -111,34 +121,5 @@ public struct LibraryEntry: Identifiable, Hashable, Sendable {
         let tokens = Self.fold(query).split(separator: " ")
         guard !tokens.isEmpty else { return true }
         return tokens.allSatisfy { searchKey.contains($0) }
-    }
-}
-
-public extension GalleryPrint {
-    /// A print with the few fields a client may change locally.
-    ///
-    /// `GalleryPrint` is a wire type and stays immutable; this exists so an
-    /// optimistic update can turn a star on without inventing a second model
-    /// of what a print is.
-    struct Mutable {
-        public var favorite: Bool?
-        public var tags: [String]?
-        public var title: String?
-        private let base: GalleryPrint
-
-        public init(_ print: GalleryPrint) {
-            self.base = print
-            self.favorite = print.favorite
-            self.tags = print.tags
-            self.title = print.title
-        }
-
-        public func build() -> GalleryPrint {
-            GalleryPrint(
-                filename: base.filename, metadata: base.metadata, timestamp: base.timestamp,
-                format: base.format, sizeBytes: base.sizeBytes, mediaVersion: base.mediaVersion,
-                title: title, tags: tags, favorite: favorite, collections: base.collections,
-                trashedAt: base.trashedAt, purgeAt: base.purgeAt)
-        }
     }
 }

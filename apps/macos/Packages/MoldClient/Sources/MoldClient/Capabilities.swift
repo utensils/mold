@@ -4,31 +4,25 @@ import Foundation
 ///
 /// This is the authority the app reads instead of probing routes for 404s or
 /// matching on model names. Absence has a DIFFERENT meaning per field and is
-/// never flattened to "no" -- each optional below says which it is.
+/// never flattened to "no" -- `Capabilities+Reading` is where each one says
+/// which, and that file is the only thing the app should ask.
 public struct Capabilities: Codable, Hashable, Sendable {
     public let generationProfileV1: Bool?
     public let gallery: GalleryCapabilities?
     public let queue: QueueCapabilities?
     public let events: EventsCapabilities?
     public let licenses: Bool?
-
-    /// Absence means an older host that predates the field, so the app falls
-    /// back to unconditional listing rather than assuming it is unsupported.
-    public var supportsConditionalGallery: Bool { gallery?.conditionalGet ?? false }
-
-    /// Row-level gallery events let the app update one tile instead of
-    /// re-listing 1,500.
-    public var supportsGalleryRowEvents: Bool { gallery?.rowEvents ?? false }
-
-    /// The presence of this number is how a client knows the host generates at
-    /// all -- not a separate boolean.
-    public var generates: Bool { queue?.heterogeneousBatchMaxOutputs != nil }
-
-    public var maxBatchOutputs: Int { queue?.heterogeneousBatchMaxOutputs ?? 1 }
-
-    /// Durable work survives a dropped connection. Where this is true, a job
-    /// whose stream died is still running and must NOT be dead-lettered.
-    public var hasDurableQueue: Bool { queue?.durableQueue ?? false }
+    public let catalog: CatalogCapabilities?
+    public let discovery: DiscoveryCapabilities?
+    public let devices: DeviceCapabilities?
+    public let dispatch: DispatchCapabilities?
+    public let expand: ExpandCapabilities?
+    /// Advertised ONLY when the identity runtime is available, which is what
+    /// makes its absence a definitive no rather than an older host.
+    public let identity: IdentityCapabilities?
+    public let videoUpscale: VideoUpscaleCapabilities?
+    public let durableMedia: DurableMediaCapabilities?
+    public let referenceUploads: ReferenceUploadCapabilities?
 }
 
 public struct GalleryCapabilities: Codable, Hashable, Sendable {
@@ -44,14 +38,18 @@ public struct GalleryCapabilities: Codable, Hashable, Sendable {
 
 public struct TrashCapabilities: Codable, Hashable, Sendable {
     public let enabled: Bool
-    /// 0 means keep forever.
+    /// 0 means keep forever, which is NOT the same as "purged in 0 days".
+    /// Read it through `Capabilities.trashRetentionDays`, which returns nil.
     public let retentionDays: Int?
 }
 
 public struct QueueCapabilities: Codable, Hashable, Sendable {
     public let canPause: Bool?
+    public let canPauseJob: Bool?
     public let canCancelAll: Bool?
     public let canReorder: Bool?
+    public let stableDevicePins: Bool?
+    public let cooperativeCancellation: Bool?
     public let durableQueue: Bool?
     public let heterogeneousBatchMaxOutputs: Int?
 }
