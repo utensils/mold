@@ -12,8 +12,20 @@ import SwiftUI
 /// Every item here is the same call the contextual menu makes.
 struct LibraryCommands: Commands {
     @FocusedValue(\.librarySelection) private var library
+    @FocusedValue(\.libraryImport) private var importer
 
     var body: some Commands {
+        // Importing is a File thing, not a Library thing: it is where the
+        // Mac puts "bring something in from outside".
+        CommandGroup(after: .newItem) {
+            Menu("Import to") {
+                ForEach(importer?.machines ?? []) { machine in
+                    Button(machine.name) { importer?.run(machine) }
+                }
+            }
+            .disabled(importer?.machines.isEmpty ?? true)
+        }
+
         CommandMenu("Library") {
             if library?.scope.isTrash == true {
                 trash
@@ -105,6 +117,18 @@ struct LibrarySelection: Equatable {
     }
 }
 
+/// Which machines a file could be imported into, and how.
+struct LibraryImport: Equatable {
+    let machines: [MoldHost]
+    let run: (MoldHost) -> Void
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.machines == rhs.machines }
+}
+
+struct LibraryImportKey: FocusedValueKey {
+    typealias Value = LibraryImport
+}
+
 struct LibrarySelectionKey: FocusedValueKey {
     typealias Value = LibrarySelection
 }
@@ -113,5 +137,10 @@ extension FocusedValues {
     var librarySelection: LibrarySelection? {
         get { self[LibrarySelectionKey.self] }
         set { self[LibrarySelectionKey.self] = newValue }
+    }
+
+    var libraryImport: LibraryImport? {
+        get { self[LibraryImportKey.self] }
+        set { self[LibraryImportKey.self] = newValue }
     }
 }

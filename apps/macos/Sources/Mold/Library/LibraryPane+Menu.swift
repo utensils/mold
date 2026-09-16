@@ -29,6 +29,14 @@ extension LibraryPane {
         )
     }
 
+    /// The machines a file could be imported into, and the door to do it.
+    var menuImport: LibraryImport {
+        let actions = self.actions
+        return LibraryImport(machines: hosts.hosts.filter(hosts.isUp)) { machine in
+            actions.importFiles(into: machine)
+        }
+    }
+
     /// The shelf the grid is currently showing, if it is showing one.
     private var enclosingShelf: CollectionShelf? {
         guard case let .collection(slug) = navigation.scope else { return nil }

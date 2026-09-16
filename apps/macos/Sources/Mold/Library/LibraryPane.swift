@@ -39,6 +39,7 @@ struct LibraryPane: View {
                 showsInspector.toggle()
             })
             .focusedSceneValue(\.librarySelection, menuSelection)
+            .focusedSceneValue(\.libraryImport, menuImport)
             // A plain confirm with a danger button. Never a typed phrase:
             // making somebody retype a word does not make them read the
             // sentence.
