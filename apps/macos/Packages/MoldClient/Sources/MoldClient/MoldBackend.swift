@@ -20,6 +20,7 @@ public protocol MoldBackend: Sendable {
     func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]>
     /// Read-only: reserves nothing, queues nothing.
     func placementPreview(_ request: GenerateRequest, copies: Int) async throws -> PlacementPreview
+    func queue() async throws -> QueueListing
 }
 
 public enum MoldClientError: Error, Sendable, LocalizedError {

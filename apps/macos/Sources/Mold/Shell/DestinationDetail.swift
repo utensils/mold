@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// Routes the sidebar's selection to its pane. Destinations not yet built say
-/// so plainly rather than showing an empty screen.
+/// Routes the sidebar's selection to its pane.
 struct DestinationDetail: View {
     let destination: Destination
 
@@ -14,12 +13,7 @@ struct DestinationDetail: View {
         case .models:
             ModelsPane()
         case .queue:
-            ContentUnavailableView {
-                Label(destination.title, systemImage: destination.symbol)
-            } description: {
-                Text("Not built yet.")
-            }
-            .navigationTitle(destination.title)
+            QueuePane()
         }
     }
 }

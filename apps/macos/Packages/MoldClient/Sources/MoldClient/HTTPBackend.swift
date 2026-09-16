@@ -25,6 +25,10 @@ public struct HTTPBackend: MoldBackend {
         try await get("/api/models")
     }
 
+    public func queue() async throws -> QueueListing {
+        try await get("/api/queue")
+    }
+
     public func placementPreview(
         _ request: GenerateRequest, copies: Int = 1
     ) async throws -> PlacementPreview {

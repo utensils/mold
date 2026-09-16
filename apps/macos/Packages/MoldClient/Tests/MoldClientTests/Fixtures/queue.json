@@ -1,0 +1,56 @@
+{
+ "entries": [
+  {
+   "id": "02acd592-4605-4f45-9d4a-1c5869ad1244",
+   "model": "flux-dev:q8",
+   "state": "held",
+   "started_at_unix_ms": 1789148571337,
+   "position": 0,
+   "seed_pinned": true,
+   "durable": true,
+   "replayed": false,
+   "dispatch_attempts": 0,
+   "held_reason": "deferred generation preparation failed: LoRA adapter is no longer readable at /tmp/uat-flux-baseline-assets/flux1-realism-lora.safetensors; restore the file and retry this job",
+   "error": "deferred generation preparation failed: LoRA adapter is no longer readable at /tmp/uat-flux-baseline-assets/flux1-realism-lora.safetensors; restore the file and retry this job",
+   "retryable": true,
+   "batch_id": "ad89d645-214f-41e0-a3a2-52e86ee194b8",
+   "client_batch_id": "ddd2cf1b-ad8b-4a6c-b2af-1c2bd72a8797",
+   "batch_index": 1
+  },
+  {
+   "id": "ffbeda09-8de6-4183-8b45-c1179b0de062",
+   "model": "flux-dev:q8",
+   "state": "held",
+   "started_at_unix_ms": 1789148571886,
+   "position": 0,
+   "seed_pinned": true,
+   "durable": true,
+   "replayed": false,
+   "dispatch_attempts": 0,
+   "held_reason": "deferred generation preparation failed: LoRA adapter is no longer readable at /tmp/uat-flux-baseline-assets/flux1-realism-lora.safetensors; restore the file and retry this job",
+   "error": "deferred generation preparation failed: LoRA adapter is no longer readable at /tmp/uat-flux-baseline-assets/flux1-realism-lora.safetensors; restore the file and retry this job",
+   "retryable": true,
+   "batch_id": "9e15ac86-e0e9-47ac-a575-f09069338949",
+   "client_batch_id": "e6353336-7b10-4511-9615-1acf12be50ea",
+   "batch_index": 1
+  },
+  {
+   "id": "74e8e606-8b69-4c3d-9cc4-3933f6cfa95f",
+   "model": "flux2-dev:q8",
+   "state": "held",
+   "started_at_unix_ms": 1789149884253,
+   "position": 0,
+   "seed_pinned": true,
+   "durable": true,
+   "replayed": false,
+   "dispatch_attempts": 1,
+   "held_reason": "GPU ran out of memory loading or running 'flux2-dev:q8'. Requested size: 1024x1024. The checkpoint size is only the weights; peak VRAM also includes activations, VAE decode workspace, CUDA workspaces, and resident cache. Try: lower --width/--height, keep --batch 1, use a smaller/quantized variant if this model provides one, run mold unload, or close other GPU apps. The next attempt at this shape will plan against a smaller memory grant (~28.6 GB). model 'flux2-dev:q8' at 1024x1024:f1:b1:src0 is temporarily unschedulable after CUDA OOM on this GPU; retry in 59s with a smaller shape or a quantized variant.",
+   "error": "GPU ran out of memory loading or running 'flux2-dev:q8'. Requested size: 1024x1024. The checkpoint size is only the weights; peak VRAM also includes activations, VAE decode workspace, CUDA workspaces, and resident cache. Try: lower --width/--height, keep --batch 1, use a smaller/quantized variant if this model provides one, run mold unload, or close other GPU apps. The next attempt at this shape will plan against a smaller memory grant (~28.6 GB). model 'flux2-dev:q8' at 1024x1024:f1:b1:src0 is temporarily unschedulable after CUDA OOM on this GPU; retry in 59s with a smaller shape or a quantized variant.",
+   "retryable": true,
+   "batch_id": "96224561-b0e0-4693-8733-527fa43670a8",
+   "client_batch_id": "5334666f-b62b-4026-ac36-8ae6bf06d752",
+   "batch_index": 1
+  }
+ ],
+ "live_only_entries": []
+}
