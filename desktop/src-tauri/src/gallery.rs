@@ -842,6 +842,7 @@ fn save_output_bytes_offline(
     filename: String,
     bytes: Vec<u8>,
     metadata: Option<Box<mold_core::OutputMetadata>>,
+    timestamp: Option<u64>,
 ) -> Result<String, String> {
     let dir = output_dir().ok_or_else(|| "Local output is disabled.".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -859,6 +860,8 @@ fn save_output_bytes_offline(
         path
     };
 
+    mold_db::metadata_io::preserve_gallery_timestamp(&path, timestamp)
+        .map_err(|error| error.to_string())?;
     let saved_name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -903,6 +906,7 @@ fn save_output_bytes_offline(
 
 #[derive(Serialize)]
 struct GalleryImportDescriptor<'a> {
+    timestamp: Option<u64>,
     metadata: &'a mold_core::OutputMetadata,
     metadata_synthetic: bool,
 }
@@ -957,12 +961,14 @@ async fn save_output_bytes_server(
     filename: String,
     bytes: Vec<u8>,
     metadata: Option<Box<mold_core::OutputMetadata>>,
+    timestamp: Option<u64>,
 ) -> Result<String, String> {
     let (metadata, metadata_synthetic) =
         gallery_import_metadata(filename.clone(), &bytes, metadata);
     let descriptor = serde_json::to_vec(&GalleryImportDescriptor {
         metadata: &metadata,
         metadata_synthetic,
+        timestamp,
     })
     .map_err(|error| format!("Couldn't encode gallery metadata: {error}"))?;
     let descriptor_len = u32::try_from(descriptor.len())
@@ -1003,6 +1009,7 @@ pub async fn save_output_bytes(
     filename: String,
     data_b64: String,
     metadata: Option<Box<mold_core::OutputMetadata>>,
+    timestamp: Option<u64>,
 ) -> Result<String, String> {
     if !valid_filename(&filename) {
         return Err("Invalid filename.".into());
@@ -1013,10 +1020,10 @@ pub async fn save_output_bytes(
         .map_err(|e| format!("Invalid image data: {e}"))?;
     match local_gallery_authority(&state).await {
         LocalGalleryAuthority::Server(info) => {
-            save_output_bytes_server(info, filename, bytes, metadata).await
+            save_output_bytes_server(info, filename, bytes, metadata, timestamp).await
         }
         LocalGalleryAuthority::Offline(_guard) => {
-            save_output_bytes_offline(filename, bytes, metadata)
+            save_output_bytes_offline(filename, bytes, metadata, timestamp)
         }
     }
 }

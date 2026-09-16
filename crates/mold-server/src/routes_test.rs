@@ -1282,9 +1282,19 @@ mod tests {
         metadata_synthetic: bool,
         bytes: &[u8],
     ) -> Vec<u8> {
+        gallery_import_body_with_timestamp(metadata, metadata_synthetic, bytes, None)
+    }
+
+    fn gallery_import_body_with_timestamp(
+        metadata: &mold_core::OutputMetadata,
+        metadata_synthetic: bool,
+        bytes: &[u8],
+        timestamp: Option<u64>,
+    ) -> Vec<u8> {
         let descriptor = serde_json::to_vec(&serde_json::json!({
             "metadata": metadata,
             "metadata_synthetic": metadata_synthetic,
+            "timestamp": timestamp,
         }))
         .unwrap();
         let mut body = Vec::with_capacity(12 + descriptor.len() + bytes.len());
@@ -17918,7 +17928,12 @@ mod tests {
             .oneshot(
                 Request::put("/api/gallery/import/print.png")
                     .header("content-type", "application/vnd.mold.gallery-import")
-                    .body(Body::from(gallery_import_body(Some(&metadata), &bytes)))
+                    .body(Body::from(gallery_import_body_with_timestamp(
+                        &metadata,
+                        false,
+                        &bytes,
+                        Some(1_700_000_000),
+                    )))
                     .unwrap(),
             )
             .await
@@ -17956,6 +17971,40 @@ mod tests {
         assert_eq!(repeated.status(), StatusCode::OK);
         assert_eq!(json_body(repeated).await["filename"], "print.png");
         assert!(!dir.path().join("print-2.png").exists());
+        // Saving now (and replaying without a date) must not move an older
+        // print to the top. DB listing, filesystem fallback and reconcile
+        // all read this same preserved mtime.
+        assert_eq!(
+            std::fs::metadata(dir.path().join("print.png"))
+                .unwrap()
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            1_700_000_000,
+        );
+        assert_eq!(
+            db.as_ref()
+                .as_ref()
+                .unwrap()
+                .get(dir.path(), "print.png")
+                .unwrap()
+                .unwrap()
+                .to_gallery_image()
+                .timestamp,
+            1_700_000_000,
+        );
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::get("/api/gallery?filename=print.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(listed).await[0]["timestamp"], 1_700_000_000u64);
         let replay_event = events.try_recv();
         assert!(
             matches!(

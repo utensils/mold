@@ -1183,6 +1183,7 @@ describe("submitBatch connection cap", () => {
       "finished.png",
       expect.any(String),
       originMetadata,
+      1,
     );
     expect(submitted.jobs[0]!.result?.metadata).toEqual(originMetadata);
     // The badge counts the print on the machine that MADE it, and the mirror

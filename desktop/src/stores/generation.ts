@@ -25,7 +25,6 @@ import type {
   CompleteEvent,
   GenerateRequest,
   PromptTransformProvenance,
-  OutputMetadata,
   GalleryImage,
 } from "../lib/api/types";
 import {
@@ -333,17 +332,14 @@ const ownPreviews = new OwnPrintPreviewWatchers();
  * is not there (yet) or the host cannot answer — the mirror still saves the
  * bytes, with the metadata the desktop synthesizes from the filename.
  */
-async function originGalleryMetadata(
-  target: ApiTarget,
-  filename: string,
-): Promise<OutputMetadata | null> {
+async function originGalleryRow(target: ApiTarget, filename: string): Promise<GalleryImage | null> {
   try {
     const rows = await apiJsonTo<GalleryImage[]>(
       target,
       `/api/gallery?filename=${encodeURIComponent(filename)}`,
     );
     const row = Array.isArray(rows) ? rows.find((entry) => entry.filename === filename) : null;
-    return row?.metadata ?? null;
+    return row ?? null;
   } catch {
     return null;
   }
@@ -1156,14 +1152,20 @@ export const useGenerationStore = defineStore("generation", {
               // Mirror the print WITH that metadata so This device's copy is
               // a real print (reuse, cross-host collapse) rather than a file
               // whose metadata was synthesized from its name.
-              const metadata = await originGalleryMetadata(target, filename);
+              const origin = await originGalleryRow(target, filename);
+              const metadata = origin?.metadata ?? null;
               if (metadata && result.filename === filename) result.metadata = metadata;
               const bytes = await fetchGalleryMediaBytes(
                 galleryMediaPath(filename, "host"),
                 target,
               );
               const buffer = Uint8Array.from(bytes).buffer;
-              await ipc.saveOutputBytes(filename, await blobToBase64(new Blob([buffer])), metadata);
+              await ipc.saveOutputBytes(
+                filename,
+                await blobToBase64(new Blob([buffer])),
+                metadata,
+                origin?.timestamp,
+              );
               void useGalleryStore().refreshHost("local");
             } catch (error) {
               console.warn("local save of remote durable output failed:", error);
@@ -2040,10 +2042,16 @@ export const useGenerationStore = defineStore("generation", {
         return;
       }
       try {
-        const metadata = await originGalleryMetadata(target, filename);
+        const origin = await originGalleryRow(target, filename);
+        const metadata = origin?.metadata ?? null;
         const bytes = await fetchGalleryMediaBytes(galleryMediaPath(filename, "host"), target);
         const buffer = Uint8Array.from(bytes).buffer;
-        await ipc.saveOutputBytes(filename, await blobToBase64(new Blob([buffer])), metadata);
+        await ipc.saveOutputBytes(
+          filename,
+          await blobToBase64(new Blob([buffer])),
+          metadata,
+          origin?.timestamp,
+        );
         void useGalleryStore().refreshHost("local");
       } catch (error) {
         console.warn("local save of remote sequence output failed:", error);

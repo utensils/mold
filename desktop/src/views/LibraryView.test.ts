@@ -1456,6 +1456,7 @@ describe("Library bulk local saving", () => {
       "second.mp4",
     ]);
     expect(nativeSave.save.mock.calls[0]![2]).toEqual(remote.metadata);
+    expect(nativeSave.save.mock.calls[0]![3]).toBe(remote.timestamp);
     expect(refresh).toHaveBeenCalledWith("local");
     expect(wrapper.get("[data-test='bulk-save-locally']").attributes("disabled")).toBeUndefined();
     wrapper.unmount();

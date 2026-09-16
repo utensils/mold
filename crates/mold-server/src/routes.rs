@@ -8676,6 +8676,8 @@ pub(crate) fn validate_gallery_filename(filename: &str) -> Result<(), ApiError> 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GalleryImportDescriptor {
+    #[serde(default)]
+    timestamp: Option<u64>,
     metadata: mold_core::OutputMetadata,
     metadata_synthetic: bool,
 }
@@ -9000,9 +9002,13 @@ async fn import_gallery_file(
         ));
     }
     transaction = tokio::task::spawn_blocking(move || {
-        if let Err(error) = transaction
-            .seal_staged_file()
-            .and_then(|()| transaction.mark_prepared())
+        if let Err(error) = mold_db::metadata_io::preserve_gallery_timestamp(
+            &transaction.staging_path(),
+            descriptor.timestamp,
+        )
+        .map_err(anyhow::Error::from)
+        .and_then(|()| transaction.seal_staged_file())
+        .and_then(|()| transaction.mark_prepared())
         {
             let cleanup = transaction.rollback_unpublished();
             return Err(error.context(format!(

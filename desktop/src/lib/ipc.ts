@@ -423,9 +423,15 @@ export const ipc = {
     filename: string,
     dataB64: string,
     metadata?: OutputMetadata | null,
+    timestamp?: number | null,
   ): Promise<string> {
     if (!inTauri()) return Promise.reject(new Error("Local saves require the desktop app."));
-    return invoke<string>("save_output_bytes", { filename, dataB64, metadata: metadata ?? null });
+    return invoke<string>("save_output_bytes", {
+      filename,
+      dataB64,
+      metadata: metadata ?? null,
+      timestamp: timestamp ?? null,
+    });
   },
   /** Save rendered bytes to the configured media folder. */
   saveMediaBytes(filename: string, dataB64: string): Promise<SavedMedia> {

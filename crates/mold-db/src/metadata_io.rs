@@ -9,6 +9,28 @@
 use mold_core::{OutputFormat, OutputMetadata};
 use std::path::Path;
 
+/// Preserve the origin Library's ordering key when copying a print. The bytes
+/// and embedded provenance stay unchanged; reconciliation observes the same
+/// timestamp as the immediate import publication.
+pub fn preserve_gallery_timestamp(path: &Path, timestamp: Option<u64>) -> std::io::Result<()> {
+    if let Some(timestamp) = timestamp {
+        let modified = std::time::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(timestamp))
+            .filter(|_| timestamp <= i64::MAX as u64 / 1000)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid gallery timestamp",
+                )
+            })?;
+        std::fs::File::options()
+            .write(true)
+            .open(path)?
+            .set_modified(modified)?;
+    }
+    Ok(())
+}
+
 /// Format inferred from a file extension. `None` for anything we don't
 /// store in the gallery (everything outside the [`OutputFormat`] set).
 pub fn format_from_path(path: &Path) -> Option<OutputFormat> {
@@ -783,5 +805,42 @@ mod tests {
             OutputFormat::Png,
             20 * 1024,
         ));
+    }
+}
+
+#[cfg(test)]
+mod copied_timestamp_tests {
+    use super::*;
+
+    #[test]
+    fn copies_saved_newest_first_keep_origin_order_and_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, timestamp) in [("new.png", 1_700_000_100), ("old.png", 1_700_000_000)] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"unchanged output").unwrap();
+            preserve_gallery_timestamp(&path, Some(timestamp)).unwrap();
+            preserve_gallery_timestamp(&path, None).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"unchanged output");
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .unwrap()
+                    .modified()
+                    .unwrap()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                timestamp
+            );
+        }
+        assert!(
+            std::fs::metadata(dir.path().join("new.png"))
+                .unwrap()
+                .modified()
+                .unwrap()
+                > std::fs::metadata(dir.path().join("old.png"))
+                    .unwrap()
+                    .modified()
+                    .unwrap()
+        );
     }
 }

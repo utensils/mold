@@ -315,6 +315,7 @@ async function saveSelectedLocally(selection: MergedPrint[]) {
           entry.item.filename,
           await fetchItemBase64(entry),
           entry.item.metadata,
+          entry.item.timestamp,
         );
         saved++;
       } catch (error) {
