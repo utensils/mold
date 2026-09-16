@@ -845,7 +845,25 @@ fn save_output_bytes_offline(
     timestamp: Option<u64>,
 ) -> Result<String, String> {
     let dir = output_dir().ok_or_else(|| "Local output is disabled.".to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    save_output_bytes_in_dir(
+        &dir,
+        mold_db::global_db(),
+        filename,
+        bytes,
+        metadata,
+        timestamp,
+    )
+}
+
+fn save_output_bytes_in_dir(
+    dir: &std::path::Path,
+    db: Option<&mold_db::MetadataDb>,
+    filename: String,
+    bytes: Vec<u8>,
+    metadata: Option<Box<mold_core::OutputMetadata>>,
+    timestamp: Option<u64>,
+) -> Result<String, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let existing = dir.join(&filename);
     // Idempotence requires byte-identical content, not just a matching
     // name and length — a different print under the same name must not
@@ -853,7 +871,7 @@ fn save_output_bytes_offline(
     let path = if file_matches_bytes(&existing, &bytes) {
         existing
     } else {
-        let path = unique_output_path(&dir, &filename);
+        let path = unique_output_path(dir, &filename);
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
@@ -872,10 +890,7 @@ fn save_output_bytes_offline(
     // Embedded metadata wins (it is the file's own record); the caller's
     // wire metadata covers formats that embed nothing; filename
     // synthesis remains the last resort.
-    if let (Some(db), Some(format)) = (
-        mold_db::global_db(),
-        mold_db::metadata_io::format_from_path(&path),
-    ) {
+    if let (Some(db), Some(format)) = (db, mold_db::metadata_io::format_from_path(&path)) {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -889,7 +904,7 @@ fn save_output_bytes_offline(
         };
         let _ = mold_db::persist::record_saved_output(
             db,
-            &dir,
+            dir,
             &saved_name,
             &path,
             &mold_db::persist::OutputRecordParams {
@@ -3339,4 +3354,49 @@ mod tests {
             .unwrap()
             .contains("authenticated HTTP API"));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn offline_copy_preserves_origin_date_in_file_and_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = mold_db::MetadataDb::open_in_memory().unwrap();
+    let saved = save_output_bytes_in_dir(
+        dir.path(),
+        Some(&db),
+        "remote.mp4".into(),
+        b"video bytes".to_vec(),
+        None,
+        Some(1_700_000_000),
+    )
+    .unwrap();
+    assert_eq!(saved, "remote.mp4");
+    assert_eq!(
+        db.get(dir.path(), &saved)
+            .unwrap()
+            .unwrap()
+            .to_gallery_image()
+            .timestamp,
+        1_700_000_000
+    );
+    // A replay without an origin date must not replace an existing date.
+    save_output_bytes_in_dir(
+        dir.path(),
+        Some(&db),
+        saved.clone(),
+        b"video bytes".to_vec(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::metadata(dir.path().join(&saved))
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        1_700_000_000
+    );
 }

@@ -5898,37 +5898,61 @@ fn publish_no_replace(staged: &Path, final_path: &Path) -> anyhow::Result<()> {
             // publication gate keeps API observers out while this
             // create-new copy is written, and create_new preserves the
             // no-overwrite contract.
-            let mut source = File::open(staged)?;
-            let mut destination = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(final_path)
-                .with_context(|| {
-                    format!(
-                        "publishing {} without replacement after hard-link failure: {hard_link_error}",
-                        final_path.display()
-                    )
-                })?;
-            if let Err(error) =
-                std::io::copy(&mut source, &mut destination).and_then(|_| destination.sync_all())
-            {
-                drop(destination);
-                let cleanup = fs::remove_file(final_path);
-                if let Err(cleanup_error) = cleanup {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "publishing {} failed and partial final cleanup also failed: {cleanup_error}",
-                            final_path.display()
-                        )
-                    });
-                }
-                return Err(error).with_context(|| {
-                    format!("publishing {} by no-replace copy", final_path.display())
-                });
-            }
+            publish_copy_no_replace(staged, final_path).with_context(|| {
+                format!("publishing after hard-link failure: {hard_link_error}")
+            })?;
         }
     }
     Ok(())
+}
+
+// The fallback must preserve the same mtime as hard-link publication: this
+// is the origin Library timestamp for imported prints, not the copy time.
+fn publish_copy_no_replace(staged: &Path, final_path: &Path) -> anyhow::Result<()> {
+    let mut source = File::open(staged)?;
+    let modified = source.metadata()?.modified()?;
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(final_path)
+        .with_context(|| format!("publishing {} without replacement", final_path.display()))?;
+    if let Err(error) = std::io::copy(&mut source, &mut destination)
+        .and_then(|_| destination.set_modified(modified))
+        .and_then(|_| destination.sync_all())
+    {
+        drop(destination);
+        let cleanup = fs::remove_file(final_path);
+        if let Err(cleanup_error) = cleanup {
+            return Err(error).with_context(|| {
+                format!(
+                    "publishing {} failed and partial final cleanup also failed: {cleanup_error}",
+                    final_path.display()
+                )
+            });
+        }
+        return Err(error)
+            .with_context(|| format!("publishing {} by no-replace copy", final_path.display()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn publication_copy_preserves_timestamp_and_refuses_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let staged = dir.path().join("staged.png");
+    let published = dir.path().join("published.png");
+    fs::write(&staged, b"original bytes").unwrap();
+    mold_db::metadata_io::preserve_gallery_timestamp(&staged, Some(1_700_000_000)).unwrap();
+    publish_copy_no_replace(&staged, &published).unwrap();
+    assert_eq!(fs::read(&published).unwrap(), b"original bytes");
+    assert_eq!(
+        fs::metadata(&published).unwrap().modified().unwrap(),
+        fs::metadata(&staged).unwrap().modified().unwrap()
+    );
+    fs::write(&staged, b"different bytes").unwrap();
+    assert!(publish_copy_no_replace(&staged, &published).is_err());
+    assert_eq!(fs::read(&published).unwrap(), b"original bytes");
 }
 
 fn atomic_write_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
