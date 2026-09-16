@@ -256,6 +256,7 @@ async function remove(m: LibraryModelEntry) {
 const drawerRepairing = ref(false);
 
 function requestDownload(m: LibraryModelEntry) {
+  if (drawerRepairing.value) return;
   const candidates = installPlan(m).targets;
   if (candidates.length === 0) {
     toasts.push("No online machine is available for this style.", "error");
@@ -271,6 +272,7 @@ function requestDownload(m: LibraryModelEntry) {
 async function downloadOnHost(m: LibraryModelEntry, host: HostView | null) {
   pendingRepair.value = null;
   drawerRepairing.value = true;
+  busy.value = m.name;
   const owns = (m.hostIds ?? ["local"]).includes(host?.id ?? "local");
   try {
     const target = targetForHost(host) ?? currentTarget();
@@ -293,6 +295,7 @@ async function downloadOnHost(m: LibraryModelEntry, host: HostView | null) {
     );
   } finally {
     drawerRepairing.value = false;
+    busy.value = null;
   }
 }
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import type { CatalogEntry } from "../../lib/api/types";
 
@@ -10,6 +10,9 @@ vi.mock("../../lib/api/catalog", () => ({ fetchCatalogDetail, startCatalogDownlo
 const { fetchModelComponents } = vi.hoisted(() => ({ fetchModelComponents: vi.fn() }));
 vi.mock("../../lib/api/models", () => ({ fetchModelComponents }));
 
+import { createPinia, setActivePinia } from "pinia";
+import { ApiError } from "@studio/api/client";
+import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
 import CatalogDetailDrawer from "./CatalogDetailDrawer.vue";
 
 function summary(part: Partial<CatalogEntry> = {}): CatalogEntry {
@@ -75,12 +78,75 @@ async function mountDrawer(
 }
 
 beforeEach(() => {
+  setActivePinia(createPinia());
   vi.clearAllMocks();
   fetchCatalogDetail.mockResolvedValue(detail());
   fetchModelComponents.mockRejectedValue(new Error("not installed here"));
 });
 
 describe("CatalogDetailDrawer", () => {
+  it.each([true, false])(
+    "reviews a component dependency on its captured host (accept=%s)",
+    async (accept) => {
+      const target = { baseUrl: "http://studio:7680", apiKey: "remote-key" };
+      const terms = {
+        id: "dependency-terms",
+        name: "Dependency terms",
+        url: "https://example.test/pinned",
+        canonical: "https://example.test/license",
+        sha256: "a".repeat(64),
+        summary: "Review these terms.",
+      };
+      const refusal = new ApiError("Review required", 403, { license: terms });
+      startCatalogDownload
+        .mockRejectedValueOnce(refusal)
+        .mockRejectedValueOnce(refusal)
+        .mockResolvedValue("component-job");
+      fetchModelComponents.mockResolvedValue({
+        model: "parent:q8",
+        components: [
+          {
+            name: "encoder",
+            kind: "text-encoder",
+            present: false,
+            repair_model: "dependency:fp16",
+          },
+        ],
+      });
+      const fetch = vi.fn().mockResolvedValue(Response.json({ licenses: [] }));
+      vi.stubGlobal("fetch", fetch);
+      const wrapper = await mountDrawer(summary({ installed: true }), {
+        target,
+        hostLabel: "Studio GPU",
+        forwardCredentials: true,
+      });
+      await wrapper.get("[data-test='component-repair']").trigger("click");
+      await flushPromises();
+      const prompt = useLicenseAcceptance();
+      expect(prompt.pending.value).toMatchObject({
+        target,
+        hostLabel: "Studio GPU",
+        requirements: [{ installModel: "dependency:fp16" }],
+      });
+      await wrapper.setProps({
+        target: { baseUrl: "http://changed:7680", apiKey: "wrong-key" },
+        forwardCredentials: false,
+      });
+      if (accept) await prompt.accept();
+      else prompt.cancel();
+      await flushPromises();
+      expect(startCatalogDownload).toHaveBeenCalledTimes(accept ? 3 : 2);
+      for (const args of startCatalogDownload.mock.calls)
+        expect(args).toEqual(["dependency:fp16", target, true]);
+      if (accept) {
+        expect(fetch.mock.calls[0]![0]).toBe(`${target.baseUrl}/api/licenses/accept`);
+        expect(fetch.mock.calls[0]![1].headers.get("X-Api-Key")).toBe(target.apiKey);
+      } else expect(fetch).not.toHaveBeenCalled();
+      expect(prompt.pending.value).toBeNull();
+      wrapper.unmount();
+    },
+  );
+
   // Civitai publishes several previews per model version, and the detail
   // endpoint does not have to pick the one the search listing picked. The
   // card the user clicked has to stay the hero, or the drawer looks like a
@@ -394,4 +460,9 @@ describe("CatalogDetailDrawer", () => {
     await wrapper.get("[data-test='drawer-pull']").trigger("click");
     expect(wrapper.emitted("pull")?.[1]?.[0]).toMatchObject({ id: "flux-dev:q8" });
   });
+});
+
+afterEach(() => {
+  useLicenseAcceptance().cancel();
+  vi.unstubAllGlobals();
 });

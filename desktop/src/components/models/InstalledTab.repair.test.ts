@@ -141,6 +141,7 @@ describe("InstalledTab model info drawer", () => {
       await flushPromises();
       expect(dialog.text()).toContain("Studio GPU");
       expect(dialog.text()).toContain("Future weights terms");
+      expect(wrapper.get("[data-test=install-elsewhere]").attributes("disabled")).toBeDefined();
       expect(useToastStore().items).toHaveLength(0);
       // Switching the primary during review must not redirect either POST.
       connection.info = {

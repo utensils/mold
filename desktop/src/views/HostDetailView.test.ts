@@ -76,6 +76,13 @@ vi.mock("../lib/api/models", async (importOriginal) => ({
   unloadModel: (...a: unknown[]) => unloadModel(...a),
 }));
 
+const startCatalogDownload = vi.hoisted(() => vi.fn());
+vi.mock("../lib/api/catalog", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/api/catalog")>()),
+  startCatalogDownload,
+}));
+import { ApiError as SharedApiError } from "@studio/api/client";
+import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
 import HostDetailView from "./HostDetailView.vue";
 import { authenticatedMiniMaxH3Capabilities } from "@studio/lib/minimaxH3Inventory.testFixtures";
 import { useComposerStore } from "../stores/composer";
@@ -291,6 +298,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  useLicenseAcceptance().cancel();
+  vi.unstubAllGlobals();
   for (const wrapper of mountedViews) wrapper.unmount();
   mountedViews.length = 0;
 });
@@ -910,6 +919,49 @@ describe("HostDetailView models", () => {
     );
   });
 
+  it.each([true, false])(
+    "reviews repair terms on the machine being inspected (accept=%s)",
+    async (accept) => {
+      const terms = {
+        id: "future-terms",
+        name: "Future terms",
+        url: "https://example.test/pinned",
+        canonical: "https://example.test/license",
+        sha256: "a".repeat(64),
+        summary: "Review these terms.",
+      };
+      const refusal = new SharedApiError("Review required", 403, { license: terms });
+      startCatalogDownload
+        .mockRejectedValueOnce(refusal)
+        .mockRejectedValueOnce(refusal)
+        .mockResolvedValue("repair-job");
+      const fetch = vi.fn().mockResolvedValue(Response.json({ licenses: [] }));
+      vi.stubGlobal("fetch", fetch);
+      const wrapper = await mountView();
+      await wrapper.get("[data-test='model-row'] [data-test='row-title']").trigger("click");
+      await flushPromises();
+      await wrapper.get("[data-test='drawer-repair']").trigger("click");
+      await flushPromises();
+      const prompt = useLicenseAcceptance();
+      expect(prompt.pending.value).toMatchObject({
+        hostLabel: "hal9000",
+        target: { baseUrl: "http://hal9000:7680", apiKey: "sekrit" },
+      });
+      if (accept) await prompt.accept();
+      else prompt.cancel();
+      await flushPromises();
+      expect(startCatalogDownload).toHaveBeenCalledTimes(accept ? 3 : 2);
+      for (const args of startCatalogDownload.mock.calls)
+        expect(args).toEqual([
+          "flux-dev:q8",
+          { baseUrl: "http://hal9000:7680", apiKey: "sekrit" },
+          true,
+        ]);
+      if (accept) expect(fetch.mock.calls[0]![0]).toBe("http://hal9000:7680/api/licenses/accept");
+      else expect(fetch).not.toHaveBeenCalled();
+      expect(prompt.pending.value).toBeNull();
+    },
+  );
   it("opens the shared model detail drawer from a model row", async () => {
     const wrapper = await mountView();
     await wrapper.get("[data-test='model-row'] [data-test='row-title']").trigger("click");

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 
@@ -21,6 +21,8 @@ vi.mock("../../lib/api/catalog", () => ({
   startCatalogDownload: startCatalogDownloadMock,
 }));
 
+import { ApiError } from "@studio/api/client";
+import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
 import CommandPalette from "./CommandPalette.vue";
 import { overlayDepth, resetOverlayStackForTests } from "@ui/lib/overlayStack";
 import { useGalleryStore } from "../../stores/gallery";
@@ -729,6 +731,86 @@ describe("CommandPalette model search", () => {
     wrapper.unmount();
   });
 
+  it.each([true, false])("takes palette install consent (accept=%s)", async (accept) => {
+    vi.useFakeTimers();
+    seedFleet();
+    // Both machines' inventories are known and neither holds the model.
+    useModelStore().all = [model("flux-dev:q4", "flux")];
+    useHostModelsStore().byHost["bender-7680"] = { entries: [], fetchedAt: 1, error: null };
+    searchCatalogMock.mockResolvedValue({
+      entries: [
+        {
+          id: "hf:org/qwen",
+          name: "Qwen Image",
+          family: "qwen-image",
+          source: "hf",
+          installed: false,
+          supported: true,
+        },
+      ],
+      page: 1,
+      page_size: 12,
+      total: 1,
+    });
+    const terms = {
+      id: "future-terms",
+      name: "Future terms",
+      url: "https://example.test/pinned",
+      canonical: "https://example.test/license",
+      sha256: "a".repeat(64),
+      summary: "Review these terms.",
+    };
+    const refusal = new ApiError("Review required", 403, { license: terms });
+    startCatalogDownloadMock
+      .mockRejectedValueOnce(refusal)
+      .mockRejectedValueOnce(refusal)
+      .mockResolvedValue("palette-job");
+    const fetch = vi.fn().mockResolvedValue(Response.json({ licenses: [] }));
+    vi.stubGlobal("fetch", fetch);
+    const downloads = useDownloadsStore();
+    const subscribe = vi.spyOn(downloads, "subscribe").mockResolvedValue();
+
+    const wrapper = await openPalette();
+    await wrapper.get("input").setValue("qwen");
+    await vi.advanceTimersByTimeAsync(300);
+
+    const row = wrapper.findAll("[role='option']").find((o) => o.text().includes("Get Qwen Image"));
+    expect(row).toBeDefined();
+    expect(row!.text()).toContain("not on this machine · hf");
+
+    await row!.trigger("click");
+    await vi.advanceTimersByTimeAsync(0);
+
+    const prompt = useLicenseAcceptance();
+    expect(prompt.pending.value).toMatchObject({
+      target: { baseUrl: "http://127.0.0.1:7680", apiKey: null },
+    });
+    if (accept) await prompt.accept();
+    else prompt.cancel();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(startCatalogDownloadMock).toHaveBeenCalledTimes(accept ? 3 : 2);
+    const accepts = fetch.mock.calls.filter(([url]) =>
+      String(url).endsWith("/api/licenses/accept"),
+    );
+    if (accept) expect(accepts[0]![0]).toBe("http://127.0.0.1:7680/api/licenses/accept");
+    else {
+      expect(accepts).toHaveLength(0);
+      expect(useToastStore().items.some((t) => t.message.includes("Pulling"))).toBe(false);
+    }
+    expect(prompt.pending.value).toBeNull();
+    // Stream attached before the POST so a cached pull still shows a terminal event.
+    expect(subscribe).toHaveBeenCalled();
+    // This Mac is the plan's first install target, addressed explicitly (same
+    // shape the Models workspace sends) with no credential forwarding.
+    expect(startCatalogDownloadMock).toHaveBeenCalledWith(
+      "hf:org/qwen",
+      { baseUrl: "http://127.0.0.1:7680", apiKey: null },
+      false,
+    );
+    vi.useRealTimers();
+    wrapper.unmount();
+  });
+
   it("never offers to install a model the fleet already has", async () => {
     vi.useFakeTimers();
     seedFleet();
@@ -857,4 +939,10 @@ describe("CommandPalette — Generate respects the route it is on", () => {
     expect(routerPush).toHaveBeenCalledWith("/create");
     wrapper.unmount();
   });
+});
+
+afterEach(() => {
+  useLicenseAcceptance().cancel();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
 });

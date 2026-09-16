@@ -462,7 +462,11 @@ async function handleInstallElsewhere() {
 async function handleComponentRepair(component: ModelComponentStatus) {
   if (!component.repair_model) return;
   try {
-    await cat.startDownload(component.repair_model);
+    const started = await installTargets.startDownloadOn(
+      null,
+      component.repair_model,
+    );
+    if (started.declined) return;
     toast("success", `repairing ${component.name}`);
   } catch (e: unknown) {
     toast("error", e instanceof Error ? e.message : "repair failed");

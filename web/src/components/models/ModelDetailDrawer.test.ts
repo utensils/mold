@@ -1,6 +1,8 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
+import { ApiError } from "@studio/api/client";
+import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
 import ModelDetailDrawer from "./ModelDetailDrawer.vue";
 import type { CatalogEntryWire, ModelInfoExtended } from "../../types";
 import type { ModelDetail, ModelVariant } from "../../composables/useCatalog";
@@ -887,6 +889,67 @@ describe("ModelDetailDrawer", () => {
       expect(w.find("[data-test=component-missing]").exists()).toBe(false);
     });
 
+    it.each([true, false])(
+      "reviews component repair terms on the origin (accept=%s)",
+      async (accept) => {
+        mockDetail.value = {
+          kind: "installed",
+          model: makeModel(),
+          components: [
+            {
+              kind: "text-encoder",
+              name: "encoder",
+              present: false,
+              repair_model: "dependency:fp16",
+            },
+          ],
+        };
+        const terms = {
+          id: "dependency-terms",
+          name: "Dependency terms",
+          url: "https://example.test/pinned",
+          canonical: "https://example.test/license",
+          sha256: "a".repeat(64),
+          summary: "Review these terms.",
+        };
+        const refusal = new ApiError("Review required", 403, {
+          license: terms,
+        });
+        mockStartDownload
+          .mockRejectedValueOnce(refusal)
+          .mockRejectedValueOnce(refusal)
+          .mockResolvedValue("component-job");
+        const fetch = vi
+          .fn()
+          .mockResolvedValue(Response.json({ licenses: [] }));
+        vi.stubGlobal("fetch", fetch);
+        const w = mount(ModelDetailDrawer);
+        await w.get("[data-test=component-repair]").trigger("click");
+        await flushPromises();
+        const prompt = useLicenseAcceptance();
+        expect(prompt.pending.value).toMatchObject({
+          target: { baseUrl: "", apiKey: null },
+          requirements: [{ installModel: "dependency:fp16" }],
+        });
+        if (accept) await prompt.accept();
+        else prompt.cancel();
+        await flushPromises();
+        expect(mockStartDownload).toHaveBeenCalledTimes(accept ? 3 : 2);
+        expect(mockHostCatalogDownload).not.toHaveBeenCalled();
+        if (accept) {
+          expect(fetch.mock.calls[0]![0]).toBe("/api/licenses/accept");
+          expect(mockToast).toHaveBeenCalledWith(
+            "success",
+            "repairing encoder",
+          );
+        } else {
+          expect(fetch).not.toHaveBeenCalled();
+          expect(mockToast).not.toHaveBeenCalled();
+        }
+        expect(prompt.pending.value).toBeNull();
+        w.unmount();
+      },
+    );
     it("labels missing components and repairs the exact advertised target", async () => {
       mockDetail.value = {
         kind: "installed",
@@ -1049,4 +1112,9 @@ describe("viewport anchoring", () => {
     const w = mount(ModelDetailDrawer);
     expect(w.find("[data-test='detail-drawer-host']").exists()).toBe(false);
   });
+});
+
+afterEach(() => {
+  useLicenseAcceptance().cancel();
+  vi.unstubAllGlobals();
 });

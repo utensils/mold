@@ -165,7 +165,7 @@ async function repairComponent(c: ModelComponentStatus): Promise<void> {
     const model = c.repair_model;
     const forward = props.forwardCredentials ?? false;
     const outcome = await runWithLicenseConsent({
-      hostLabel: props.hostLabel ?? target.baseUrl,
+      hostLabel: props.hostLabel ?? (props.target ? target.baseUrl : "This device"),
       target,
       installModel: model,
       start: () => startCatalogDownload(model, target, forward),
