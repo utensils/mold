@@ -21,6 +21,19 @@ public protocol MoldBackend: Sendable {
     /// Read-only: reserves nothing, queues nothing.
     func placementPreview(_ request: GenerateRequest, copies: Int) async throws -> PlacementPreview
     func queue() async throws -> QueueListing
+
+    /// Admits a batch. Idempotent on `clientBatchId`: re-sending the same one
+    /// returns the work already held rather than starting it twice.
+    func submit(_ admission: BatchAdmission) async throws -> BatchStatus
+    /// Whole-snapshot frames; safe to reconnect at any point.
+    func batchEvents(id: String) -> AsyncThrowingStream<BatchStatus, Error>
+    func batchStatus(id: String) async throws -> BatchStatus
+    /// Recovers a batch whose admission response was lost, by the id this
+    /// client minted for it.
+    func batchStatus(clientBatchId: String) async throws -> BatchStatus
+    /// Step progress and the denoise preview for one running job.
+    func jobPreview(jobId: String) async throws -> JobProgress?
+    func cancelBatch(id: String) async throws
 }
 
 public enum MoldClientError: Error, Sendable, LocalizedError {

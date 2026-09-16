@@ -17,7 +17,8 @@ struct GeneratePane: View {
         ZStack(alignment: .bottom) {
             canvas
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            PromptPanel(recipe: recipe, draft: $controller.draft, model: selectedModel)
+            PromptPanel(recipe: recipe, draft: $controller.draft, model: selectedModel,
+                        submit: startRun, cancel: cancelRun)
                 .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -41,11 +42,7 @@ struct GeneratePane: View {
                      : "Choose a model from the toolbar to start.")
             }
         } else {
-            ContentUnavailableView {
-                Label("Nothing rendered yet", systemImage: "wand.and.sparkles")
-            } description: {
-                Text("Your picture appears here.")
-            }
+            RunCanvas(state: controller.run, host: host)
         }
     }
 
@@ -92,6 +89,16 @@ struct GeneratePane: View {
            let first = models.ready(on: host.id).first {
             controller.select(model: first, on: host.id)
         }
+    }
+
+    private func startRun() {
+        guard let host else { return }
+        controller.submit(on: host, backend: hosts.backend(for: host))
+    }
+
+    private func cancelRun() {
+        guard let host else { return }
+        controller.cancel(backend: hosts.backend(for: host))
     }
 
     private func refreshPlacement() {

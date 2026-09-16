@@ -6,7 +6,7 @@ import Foundation
 /// engine will use -- see `MoldBackend`.
 public struct HTTPBackend: MoldBackend {
     public let host: MoldHost
-    private let session: URLSession
+    let session: URLSession
 
     public init(host: MoldHost, session: URLSession = .shared) {
         self.host = host
@@ -29,13 +29,6 @@ public struct HTTPBackend: MoldBackend {
         try await get("/api/queue")
     }
 
-    public func placementPreview(
-        _ request: GenerateRequest, copies: Int = 1
-    ) async throws -> PlacementPreview {
-        try await post("/api/generate/placement-preview",
-                       body: PlacementRequest(request: request, copies: copies))
-    }
-
     public func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]> {
         var request = self.request("/api/gallery")
         // The index is large and mostly unchanged between refreshes, so ask
@@ -56,8 +49,11 @@ public struct HTTPBackend: MoldBackend {
     }
 
     // MARK: - Transport
+    //
+    // `internal` rather than `private`: the generation half of this client
+    // lives in HTTPBackend+Generation.swift and shares these.
 
-    private func get<T: Decodable>(_ path: String) async throws -> T {
+    func get<T: Decodable>(_ path: String) async throws -> T {
         let data = try await bytes(for: request(path))
         do {
             return try MoldJSON.decoder.decode(T.self, from: data)
@@ -66,7 +62,7 @@ public struct HTTPBackend: MoldBackend {
         }
     }
 
-    private func post<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
+    func post<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
         var request = self.request(path)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -79,7 +75,7 @@ public struct HTTPBackend: MoldBackend {
         }
     }
 
-    private func request(_ path: String) -> URLRequest {
+    func request(_ path: String) -> URLRequest {
         var request = URLRequest(url: host.baseURL.appending(path: path))
         // A keyless host is open by policy. Sending no key is the correct
         // request there, not a degraded one.
@@ -90,13 +86,13 @@ public struct HTTPBackend: MoldBackend {
         return request
     }
 
-    private func bytes(for request: URLRequest) async throws -> Data {
+    func bytes(for request: URLRequest) async throws -> Data {
         let (data, http) = try await send(request)
         try check(http, data)
         return data
     }
 
-    private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
@@ -108,7 +104,7 @@ public struct HTTPBackend: MoldBackend {
         }
     }
 
-    private func check(_ http: HTTPURLResponse, _ data: Data) throws {
+    func check(_ http: HTTPURLResponse, _ data: Data) throws {
         guard (200..<300).contains(http.statusCode) else {
             if http.statusCode == 401 { throw MoldClientError.unauthorized }
             let api = try? MoldJSON.decoder.decode(APIError.self, from: data)

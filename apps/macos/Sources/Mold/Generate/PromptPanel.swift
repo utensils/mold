@@ -7,12 +7,17 @@ struct PromptPanel: View {
     let recipe: GenerationRecipe?
     @Binding var draft: RenderDraft
     let model: Model?
+    let submit: () -> Void
+    let cancel: () -> Void
 
     @Environment(GenerateController.self) private var controller
     @FocusState private var promptFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if let steps = controller.run.steps {
+                StepSegments(done: steps.done, total: steps.total)
+            }
             if let recipe {
                 prompt(recipe)
                 Divider()
@@ -53,19 +58,22 @@ struct PromptPanel: View {
                 placement: controller.placement,
                 error: controller.placementError
             )
-            Button {
-                // Submission lands in the next milestone; the request is
-                // already built and validated against the host.
-            } label: {
-                HStack(spacing: 6) {
-                    Text("Generate")
-                    Text("⌘↩").foregroundStyle(.secondary)
+            if controller.run.isBusy {
+                Button("Stop", role: .destructive, action: cancel)
+                    .controlSize(.large)
+            } else {
+                Button(action: submit) {
+                    HStack(spacing: 6) {
+                        Text("Generate")
+                        Text("⌘↩").foregroundStyle(.secondary)
+                    }
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(draft.refusal(for: recipe) != nil)
+                .help(draft.refusal(for: recipe) ?? "Render this")
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(draft.refusal(for: recipe) != nil)
-            .help(draft.refusal(for: recipe) ?? "Render this")
         }
         .fixedSize()
     }
