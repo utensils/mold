@@ -15,7 +15,7 @@ enum HostPersistence {
         var baseURL: URL
     }
 
-    static func load(from defaults: UserDefaults = .standard) -> [MoldHost]? {
+    static func load(from defaults: UserDefaults = AppStorageSuite.defaults) -> [MoldHost]? {
         guard let data = defaults.data(forKey: key),
               let stored = try? MoldJSON.decoder.decode([Stored].self, from: data),
               !stored.isEmpty
@@ -26,7 +26,7 @@ enum HostPersistence {
         }
     }
 
-    static func save(_ hosts: [MoldHost], to defaults: UserDefaults = .standard) {
+    static func save(_ hosts: [MoldHost], to defaults: UserDefaults = AppStorageSuite.defaults) {
         let stored = hosts.map { Stored(id: $0.id, name: $0.name, baseURL: $0.baseURL) }
         defaults.set(try? MoldJSON.encoder.encode(stored), forKey: key)
         for host in hosts {

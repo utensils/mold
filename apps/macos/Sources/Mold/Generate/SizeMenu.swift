@@ -21,7 +21,9 @@ struct SizeMenu: View {
                 }
             }
         } label: {
-            Text("\(draft.width) × \(draft.height)").monospacedDigit()
+            // Verbatim: pixel dimensions take no thousands separator, and
+            // `Text` interpolation would render 1024 as "1,024".
+            Text(verbatim: "\(draft.width) × \(draft.height)").monospacedDigit()
         }
         .menuStyle(.button)
         .buttonStyle(.accessoryBar)

@@ -115,3 +115,5 @@ apps/macos/build/
 apps/macos/**/build/
 .swiftpm/
 .build/
+Engine.xcconfig
+apps/macos/dist/

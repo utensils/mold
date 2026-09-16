@@ -1,0 +1,46 @@
+[package]
+name = "mold-macos-ffi"
+version = "0.29.0"
+description = "C ABI for embedding the mold engine in the native macOS app"
+edition = "2021"
+rust-version = "1.93"
+license = "MIT"
+publish = false
+
+# Its own cargo root, for the same reason desktop/src-tauri is: this graph
+# must not enter the CUDA workspace, its lockfile, or the `--workspace` CI
+# gates. The empty table stops cargo walking up to the outer workspace.
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+mold-core = { path = "../../../../crates/mold-core", package = "mold-ai-core", version = "0.29.0" }
+mold-db = { path = "../../../../crates/mold-db", package = "mold-ai-db", version = "0.29.0" }
+mold-server = { path = "../../../../crates/mold-server", package = "mold-ai-server", version = "0.29.0", features = [
+  "expand",
+  "mdns",
+  "mp4",
+] }
+
+[features]
+default = []
+metal = ["mold-server/metal"]
+
+# Mirrors the root workspace's same-name compatibility patch, because this
+# standalone root owns an independent dependency graph. Every candle crate must
+# resolve to ONE fork revision or `candle_core::Tensor` becomes two nominal
+# types and nothing that hands a tensor across the seam compiles.
+[patch.crates-io]
+candle-core = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "bf2cd29a791dbc053df826b4377d092c3809d17f" }
+candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "bf2cd29a791dbc053df826b4377d092c3809d17f" }
+candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "bf2cd29a791dbc053df826b4377d092c3809d17f" }
+cudarc = { git = "https://github.com/utensils/cudarc", rev = "9b3b1bc276bc27c3e99343ee82db7f99705b9ed5" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 16

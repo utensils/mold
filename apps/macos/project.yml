@@ -38,6 +38,10 @@ packages:
   MoldStyle:
     path: Packages/MoldStyle
 
+configFiles:
+  Debug: Engine.xcconfig
+  Release: Engine.xcconfig
+
 targets:
   Mold:
     type: application
@@ -57,3 +61,4 @@ targets:
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         ENABLE_PREVIEWS: "YES"
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Mold/Engine/MoldEngineBridge.h
