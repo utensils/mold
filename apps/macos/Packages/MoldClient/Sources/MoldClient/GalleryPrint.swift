@@ -71,17 +71,41 @@ public struct PrintID: Hashable, Codable, Sendable {
 
 /// A print paired with the machine that owns it -- what the merged Library
 /// actually holds.
-public struct LibraryItem: Identifiable, Hashable, Sendable {
+public struct LibraryEntry: Identifiable, Hashable, Sendable {
     public let hostID: MoldHost.ID
     public let hostName: String
     public let print: GalleryPrint
+    /// Everything searchable, folded once at construction.
+    ///
+    /// A library holds thousands of prints and the search field filters on
+    /// every keystroke; folding each row's text again per keystroke is work
+    /// proportional to the library, repeated for every character typed.
+    public let searchKey: String
 
     public init(hostID: MoldHost.ID, hostName: String, print: GalleryPrint) {
         self.hostID = hostID
         self.hostName = hostName
         self.print = print
+        self.searchKey = Self.fold([
+            print.metadata.prompt, print.metadata.model, print.metadata.family,
+            print.title, print.filename, hostName,
+            print.metadata.seed.map(String.init),
+        ].compactMap(\.self).joined(separator: " ") + " " + print.tagList.joined(separator: " "))
     }
 
     public var id: PrintID { PrintID(host: hostID, filename: print.filename) }
     public var createdAt: Date { print.createdAt }
+
+    /// Case-, diacritic- and width-insensitive, so "cafe" finds "Café".
+    static func fold(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+                     locale: .current)
+    }
+
+    /// Every whitespace-separated token must appear, so more words narrow.
+    public func matches(_ query: String) -> Bool {
+        let tokens = Self.fold(query).split(separator: " ")
+        guard !tokens.isEmpty else { return true }
+        return tokens.allSatisfy { searchKey.contains($0) }
+    }
 }

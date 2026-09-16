@@ -1,0 +1,77 @@
+import Foundation
+import MoldClient
+
+/// Every machine's prints, in one timeline.
+///
+/// `GET /api/gallery` has no pagination: a host answers with its entire index
+/// in one array. So the app holds each host's index whole, merges them, and
+/// filters locally -- and refreshes by ETag, which a live host answers with a
+/// 304 and zero bytes instead of re-serializing 1.2 MB.
+@MainActor
+@Observable
+final class LibraryStore {
+    private(set) var items: [LibraryEntry] = []
+    private(set) var isLoading = false
+    private(set) var failures: [MoldHost.ID: String] = [:]
+
+    private var perHost: [MoldHost.ID: [LibraryEntry]] = [:]
+    private var etags: [MoldHost.ID: String] = [:]
+
+    /// Prints from every host, newest first.
+    func refresh(hosts: [MoldHost], using backend: (MoldHost) -> any MoldBackend) async {
+        isLoading = true
+        defer { isLoading = false }
+
+        await withTaskGroup(of: (MoldHost, Result<Fetched<[GalleryPrint]>, Error>).self) { group in
+            for host in hosts {
+                let client = backend(host)
+                let etag = etags[host.id]
+                group.addTask {
+                    do { return (host, .success(try await client.gallery(etag: etag))) }
+                    catch { return (host, .failure(error)) }
+                }
+            }
+            for await (host, result) in group {
+                apply(result, for: host)
+            }
+        }
+        rebuild()
+    }
+
+    private func apply(_ result: Result<Fetched<[GalleryPrint]>, Error>, for host: MoldHost) {
+        switch result {
+        case let .success(.fresh(prints, etag)):
+            failures[host.id] = nil
+            if let etag { etags[host.id] = etag }
+            perHost[host.id] = prints.map {
+                LibraryEntry(hostID: host.id, hostName: host.name, print: $0)
+            }
+        case .success(.notModified):
+            // Nothing changed. Keeping the cached rows is the whole point of
+            // having asked conditionally.
+            failures[host.id] = nil
+        case let .failure(error):
+            failures[host.id] = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            // A host going down must not erase what it already showed us --
+            // the other machines' prints stay, and so do this one's.
+        }
+    }
+
+    /// Drops hosts the user has removed, so their prints don't linger.
+    func prune(to hosts: [MoldHost]) {
+        let live = Set(hosts.map(\.id))
+        perHost = perHost.filter { live.contains($0.key) }
+        etags = etags.filter { live.contains($0.key) }
+        failures = failures.filter { live.contains($0.key) }
+        rebuild()
+    }
+
+    private func rebuild() {
+        items = perHost.values.flatMap(\.self)
+            .filter { $0.print.trashedAt == nil }
+            .sorted { $0.print.timestamp > $1.print.timestamp }
+    }
+
+    func count(for host: MoldHost.ID) -> Int { perHost[host]?.count ?? 0 }
+}

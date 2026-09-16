@@ -11,11 +11,15 @@ import SwiftUI
 @main
 struct MoldApp: App {
     @State private var hosts = HostStore(hosts: HostStore.seededHosts())
+    @State private var library = LibraryStore()
+    @State private var thumbnails = ThumbnailCache()
 
     var body: some Scene {
         Window("Mold", id: "main") {
             RootView()
                 .environment(hosts)
+                .environment(library)
+                .environment(thumbnails)
                 // Below this the split view stops being a split view and
                 // starts being two cramped columns.
                 .frame(minWidth: 880, minHeight: 560)

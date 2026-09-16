@@ -53,3 +53,27 @@ private func loadPrints() throws -> [GalleryPrint] {
     #expect(urls.media("a.png", trashed: true).absoluteString
         == "http://host:7680/api/gallery/image/a.png?view=trash")
 }
+
+@Test func searchIsFoldedAndEveryTokenMustMatch() throws {
+    let raw = try #require(loadPrints().first)
+    let item = LibraryEntry(hostID: UUID(), hostName: "hal9000", print: raw)
+    let prompt = try #require(item.print.metadata.prompt)
+    let word = try #require(prompt.split(separator: " ").first.map(String.init))
+
+    #expect(item.matches(word.uppercased()))
+    #expect(item.matches(""))
+    // More words narrow rather than widen.
+    #expect(!item.matches("\(word) definitelynotpresentxyz"))
+}
+
+@Test func searchCoversTheModelAndTheHostNotJustThePrompt() throws {
+    let item = try #require(loadPrints().first { $0.metadata.model != nil })
+    let library = LibraryEntry(hostID: UUID(), hostName: "plato", print: item)
+    #expect(library.matches("plato"))
+    #expect(library.matches(try #require(item.metadata.model)))
+}
+
+@Test func searchIgnoresDiacritics() {
+    let folded = LibraryEntry.fold("Café Übung")
+    #expect(folded == "cafe ubung")
+}
