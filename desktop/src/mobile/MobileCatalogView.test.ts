@@ -69,6 +69,8 @@ vi.mock("../lib/api/models", () => ({
 
 vi.mock("../lib/api/sse", () => ({ sseStream }));
 
+import { ApiError } from "@studio/api/client";
+import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
 import MobileCatalogView from "./MobileCatalogView.vue";
 
 const studio: MobileHost = {
@@ -283,6 +285,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  useLicenseAcceptance().cancel();
+  vi.unstubAllGlobals();
   wrapper?.unmount();
   wrapper = null;
   document.body.innerHTML = "";
@@ -291,6 +295,66 @@ afterEach(() => {
 });
 
 describe("MobileCatalogView", () => {
+  it.each([true, false])(
+    "takes consent for a model installed on another machine (accept=%s)",
+    async (accept) => {
+      apiFetchTo.mockImplementation((target: ApiTarget, path: string) => {
+        if (path === "/api/models")
+          return Promise.resolve(
+            jsonResponse(
+              target.baseUrl === renderBox.baseUrl ? [model("installed:q8", "flux", true)] : [],
+            ),
+          );
+        return Promise.resolve(new Response(null, { status: 204 }));
+      });
+      searchCatalog.mockResolvedValue(searchResponse([]));
+      const terms = {
+        id: "future-terms",
+        name: "Future terms",
+        url: "https://example.test/pinned",
+        canonical: "https://example.test/license",
+        sha256: "a".repeat(64),
+        summary: "Review these terms.",
+      };
+      const refusal = new ApiError("Review required", 403, { license: terms });
+      startCatalogDownload
+        .mockRejectedValueOnce(refusal)
+        .mockRejectedValueOnce(refusal)
+        .mockResolvedValue("remote-job");
+      const fetch = vi.fn().mockResolvedValue(Response.json({ licenses: [] }));
+      vi.stubGlobal("fetch", fetch);
+      wrapper = mountCatalog();
+      await flushPromises();
+      const card = wrapper
+        .findAll("[data-test='mobile-catalog-card']")
+        .find((row) => row.text().includes("installed:q8"))!;
+      await card.get(".mobile-catalog-pull").trigger("click");
+      await flushPromises();
+      document
+        .querySelector<HTMLButtonElement>(
+          "[data-test='mobile-catalog-target-option'][data-action='install']",
+        )!
+        .click();
+      await flushPromises();
+      const prompt = useLicenseAcceptance();
+      expect(prompt.pending.value).toMatchObject({ hostLabel: "Studio", target: targets.studio });
+      if (accept) await prompt.accept();
+      else prompt.cancel();
+      await flushPromises();
+      expect(startCatalogDownload).toHaveBeenCalledTimes(accept ? 3 : 2);
+      for (const args of startCatalogDownload.mock.calls)
+        expect(args).toEqual(["installed:q8", targets.studio, false]);
+      if (accept) {
+        expect(fetch.mock.calls[0]![0]).toBe(`${targets.studio.baseUrl}/api/licenses/accept`);
+        expect(fetch.mock.calls[0]![1].headers.get("X-Api-Key")).toBe(targets.studio.apiKey);
+        expect(wrapper.text()).toContain("Pulling");
+      } else {
+        expect(fetch).not.toHaveBeenCalled();
+        expect(wrapper.text()).not.toContain("Could not");
+      }
+    },
+  );
+
   it("does not render the fleet-wide H3 runtime panel — it lives in host detail", async () => {
     apiFetchTo.mockImplementation((target: ApiTarget, path: string) => {
       if (path === "/api/models") return Promise.resolve(jsonResponse([]));

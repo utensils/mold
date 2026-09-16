@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import type { ModelComponentStatus, ModelEntry } from "../../lib/api/types";
@@ -23,6 +23,9 @@ const { startCatalogDownload, fetchCatalogDetail } = vi.hoisted(() => ({
 vi.mock("../../lib/api/catalog", () => ({ startCatalogDownload, fetchCatalogDetail }));
 vi.mock("../../lib/openExternal", () => ({ openExternal: vi.fn() }));
 
+import { ApiError } from "@studio/api/client";
+import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
+import LicenseAcceptanceDialog from "@studio/components/LicenseAcceptanceDialog.vue";
 import InstalledTab from "./InstalledTab.vue";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -60,6 +63,11 @@ function component(part: Partial<ModelComponentStatus> = {}): ModelComponentStat
 
 async function mountWithComponents(components: ModelComponentStatus[]) {
   setActivePinia(createPinia());
+  useConnectionStore().info = {
+    mode: "local",
+    baseUrl: "http://127.0.0.1:7680",
+    apiKey: "local-key",
+  };
   useModelStore().all = [model()];
   fetchModelComponents.mockResolvedValue({ model: "sdxl-base:fp16", components });
   const wrapper = mount(InstalledTab, { props: {} });
@@ -76,7 +84,102 @@ beforeEach(() => {
   fetchCatalogDetail.mockRejectedValue(new Error("no detail in tests"));
 });
 
+afterEach(() => {
+  useLicenseAcceptance().cancel();
+  vi.unstubAllGlobals();
+});
+
+const licenseTerms = {
+  id: "future-weights",
+  name: "Future weights terms",
+  url: "https://example.test/pinned",
+  canonical: "https://example.test/license",
+  sha256: "a".repeat(64),
+  summary: "Review before downloading.",
+};
+
 describe("InstalledTab model info drawer", () => {
+  it.each([true, false])(
+    "takes remote installed-shelf consent (accept=%s) on the destination only",
+    async (accept) => {
+      setActivePinia(createPinia());
+      const connection = useConnectionStore();
+      connection.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" };
+      connection.status = "ready";
+      useHostsStore().extras.push({
+        id: "studio",
+        label: "Studio GPU",
+        url: "http://studio:7680",
+        apiKey: "studio-key",
+        status: "ready",
+        error: null,
+        instanceId: null,
+      });
+      for (const id of ["local", "studio"])
+        useHostModelsStore().byHost[id] = { entries: [], fetchedAt: Date.now(), error: null };
+      const refusal = new ApiError("Review required", 403, {
+        code: "LICENSE_NOT_ACCEPTED",
+        license: licenseTerms,
+      });
+      startCatalogDownload
+        .mockRejectedValueOnce(refusal)
+        .mockRejectedValueOnce(refusal)
+        .mockResolvedValue("remote-job");
+      const fetch = vi.fn().mockResolvedValue(Response.json({ licenses: [] }));
+      vi.stubGlobal("fetch", fetch);
+      const wrapper = mount(InstalledTab, {
+        attachTo: document.body,
+        props: { entries: [{ ...model(), hostIds: ["local"] }] },
+      });
+      const dialog = mount(LicenseAcceptanceDialog, { attachTo: document.body });
+      await flushPromises();
+      await wrapper.get("[data-test='install-elsewhere']").trigger("click");
+      await flushPromises();
+      document.body
+        .querySelector<HTMLButtonElement>("[data-test='download-target-studio']")!
+        .click();
+      await flushPromises();
+      expect(dialog.text()).toContain("Studio GPU");
+      expect(dialog.text()).toContain("Future weights terms");
+      expect(useToastStore().items).toHaveLength(0);
+      // Switching the primary during review must not redirect either POST.
+      connection.info = {
+        mode: "local",
+        baseUrl: "http://different:7680",
+        apiKey: "different-key",
+      };
+      await dialog.get(accept ? ".license-primary" : ".license-secondary").trigger("click");
+      await flushPromises();
+      expect(startCatalogDownload).toHaveBeenCalledTimes(accept ? 3 : 2);
+      for (const args of startCatalogDownload.mock.calls)
+        expect(args).toEqual([
+          "sdxl-base:fp16",
+          { baseUrl: "http://studio:7680", apiKey: "studio-key" },
+          true,
+        ]);
+      if (accept) {
+        expect(fetch).toHaveBeenCalledTimes(1);
+        const [url, init] = fetch.mock.calls[0]!;
+        expect(url).toBe("http://studio:7680/api/licenses/accept");
+        expect(init.headers.get("X-Api-Key")).toBe("studio-key");
+        expect(JSON.parse(init.body).accept_licenses).toEqual([
+          { id: licenseTerms.id, url: licenseTerms.url, sha256: licenseTerms.sha256 },
+        ]);
+        expect(
+          useToastStore().items.some(
+            (t) => t.message.includes("Getting") && t.message.includes("Studio GPU"),
+          ),
+        ).toBe(true);
+      } else {
+        expect(fetch).not.toHaveBeenCalled();
+        expect(useToastStore().items).toHaveLength(0);
+      }
+      expect(useLicenseAcceptance().pending.value).toBeNull();
+      wrapper.unmount();
+      dialog.unmount();
+    },
+  );
+
   it("labels installed rows with model kind and explicit mature classification", () => {
     setActivePinia(createPinia());
     const wrapper = mount(InstalledTab, {
@@ -134,7 +237,11 @@ describe("InstalledTab model info drawer", () => {
     // The download is keyed on the server-provided repair_model and goes to
     // the same API target the component listing came from (the owning host —
     // the local primary here, so no explicit target or forwarding).
-    expect(startCatalogDownload).toHaveBeenCalledWith("sdxl-base:fp16", undefined, false);
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "sdxl-base:fp16",
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+      false,
+    );
     expect(useToastStore().items.some((t) => /repair/i.test(t.message))).toBe(true);
   });
 
@@ -237,7 +344,11 @@ describe("InstalledTab model info drawer", () => {
     dialog.querySelector<HTMLButtonElement>("[data-test='download-target-local']")!.click();
     await flushPromises();
 
-    expect(startCatalogDownload).toHaveBeenCalledWith("sdxl-base:fp16", undefined, false);
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "sdxl-base:fp16",
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+      false,
+    );
     wrapper.unmount();
   });
 

@@ -394,17 +394,19 @@ function installable(entry: CatalogEntry & { hostIds?: string[] }): boolean {
  * own credentials), else the first ready host — with credentials forwarded
  * for remote hosts — so browsing survives a dead built-in engine.
  */
-function catalogTarget(): { target: ApiTarget | undefined; forward: boolean } {
+function catalogTarget(): { target: ApiTarget | undefined; forward: boolean; label: string } {
   const primary = hosts.all.find((host) => host.id === "local");
-  if (primary?.status === "ready") return { target: undefined, forward: false };
+  if (primary?.status === "ready")
+    return { target: undefined, forward: false, label: primary?.label ?? "This device" };
   const fallback = readyHosts.value[0];
   if (fallback?.baseUrl) {
     return {
       target: { baseUrl: fallback.baseUrl, apiKey: fallback.apiKey },
       forward: fallback.kind === "remote",
+      label: fallback.label,
     };
   }
-  return { target: undefined, forward: false };
+  return { target: undefined, forward: false, label: primary?.label ?? "This device" };
 }
 
 /** Invalidates in-flight page loops when a newer search supersedes them. */
@@ -967,6 +969,7 @@ onUnmounted(() => {
       :entry="detailEntry"
       :pulling="pulling.has(detailEntry.id)"
       :target="detailTarget.target"
+      :host-label="detailTarget.label"
       :forward-credentials="detailTarget.forward"
       :variants="detailVariants"
       :mode="detailMode"

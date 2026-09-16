@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 import { computed, nextTick, onBeforeUnmount, ref, toRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { MESH_WORKFLOW_ROUTE } from "@studio/lib/meshWorkflowProvenance";
@@ -23,6 +24,7 @@ import { altShortcutLabel, shiftShortcutLabel, shortcutLabel } from "../../lib/p
 import { matchCommands, type Matchable } from "../../lib/palette";
 import { fetchHistory, type HistoryEntry } from "../../lib/api/history";
 import { loadModel, unloadModel } from "../../lib/api/models";
+import { currentTarget } from "../../lib/api/client";
 import { searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
 import { useInventoryKnown } from "../../lib/modelInventory";
 import { planModelInstall } from "@studio/lib/modelInstallTargets";
@@ -242,11 +244,17 @@ async function installModel(modelId: string, displayName: string) {
   const host = planModelInstall(readyHosts, [], { inventoryKnown }).targets[0]?.host ?? null;
   close();
   try {
-    const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : undefined;
+    const target = host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : currentTarget();
     // Attach the snapshot-first stream before enqueueing so a cached,
     // near-instant pull still produces a visible terminal event.
     await downloads.subscribe(host ?? undefined);
-    await startCatalogDownload(modelId, target, host ? host.kind === "remote" : false);
+    const outcome = await runWithLicenseConsent({
+      hostLabel: host?.label ?? "This device",
+      target,
+      installModel: modelId,
+      start: () => startCatalogDownload(modelId, target, host ? host.kind === "remote" : false),
+    });
+    if (outcome.kind === "declined") return;
     toasts.push(`Pulling ${displayName}${host && hosts.all.length > 1 ? ` on ${host.label}` : ""}`);
   } catch (err) {
     toasts.push(`Couldn't queue ${displayName}: ${String(err)}`, "error");

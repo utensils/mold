@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 import { computed, ref, watch } from "vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
@@ -20,7 +21,7 @@ import { catalogThumbnailUrl } from "../../lib/catalogThumbnails";
 import { formatCount, formatGB } from "../../lib/format";
 import { openExternal } from "../../lib/openExternal";
 import { useToastStore } from "../../stores/toasts";
-import { ApiError, type ApiTarget } from "../../lib/api/client";
+import { ApiError, currentTarget, type ApiTarget } from "../../lib/api/client";
 import type { ModelSource } from "@studio/lib/modelSource";
 import type { ModelRuntimeNotice } from "@studio/lib/modelRuntimeAvailability";
 import type { CatalogEntry, ModelComponentStatus } from "../../lib/api/types";
@@ -48,6 +49,7 @@ const props = defineProps<{
   pulling: boolean;
   /** Host the catalog view is browsing; undefined = current primary. */
   target?: ApiTarget | undefined;
+  hostLabel?: string | undefined;
   forwardCredentials?: boolean | undefined;
   /** Selectable pull variants; the chosen chip is the exact pull target. */
   variants?: DrawerVariant[] | undefined;
@@ -159,7 +161,16 @@ async function repairComponent(c: ModelComponentStatus): Promise<void> {
   const toasts = useToastStore();
   repairing.value.add(c.name);
   try {
-    await startCatalogDownload(c.repair_model, props.target, props.forwardCredentials ?? false);
+    const target = props.target ?? currentTarget();
+    const model = c.repair_model;
+    const forward = props.forwardCredentials ?? false;
+    const outcome = await runWithLicenseConsent({
+      hostLabel: props.hostLabel ?? target.baseUrl,
+      target,
+      installModel: model,
+      start: () => startCatalogDownload(model, target, forward),
+    });
+    if (outcome.kind === "declined") return;
     toasts.push(`Repairing ${merged.value.name} — re-fetching ${c.name}`);
     await loadComponents();
   } catch (err) {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { runWithLicenseConsent } from "@studio/composables/useLicenseAcceptance";
 import { computed, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import Tooltip from "@ui/components/Tooltip.vue";
@@ -19,7 +20,7 @@ import RenameDialog from "../components/shell/RenameDialog.vue";
 import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { unloadModel } from "../lib/api/models";
-import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { ApiError, apiJsonTo, currentTarget, type ApiTarget } from "../lib/api/client";
 import { fetchHostConfigKey, setHostConfigKey } from "../lib/api/hostConfig";
 import { gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { installedModelToEntry } from "../lib/catalogDetail";
@@ -575,7 +576,14 @@ async function repairFromDrawer() {
   if (!m || !h) return;
   drawerRepairing.value = true;
   try {
-    await startCatalogDownload(m.name, hostTarget() ?? undefined, h.kind === "remote");
+    const target = hostTarget() ?? currentTarget();
+    const outcome = await runWithLicenseConsent({
+      hostLabel: h.label,
+      target,
+      installModel: m.name,
+      start: () => startCatalogDownload(m.name, target, h.kind === "remote"),
+    });
+    if (outcome.kind === "declined") return;
     toasts.push(`Repairing ${modelDisplayName(m)} on ${h.label}`);
   } catch (err) {
     toasts.push(
@@ -1124,6 +1132,7 @@ async function forget() {
         :entry="installedModelToEntry(detailModel)"
         :pulling="drawerRepairing"
         :target="hostTarget() ?? undefined"
+        :host-label="host.label"
         :forward-credentials="host.kind === 'remote'"
         @close="detailModel = null"
         @pull="repairFromDrawer"

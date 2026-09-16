@@ -1,5 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
+import { flushPromises } from "@vue/test-utils";
+import { ApiError } from "@studio/api/client";
+import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
 import type { RoutableHost } from "../lib/hostRouting";
 import type { InstallTarget } from "./useModelInstallTargets";
 
@@ -184,6 +187,63 @@ describe("chooseInstallTarget", () => {
 });
 
 describe("startDownloadOn", () => {
+  it.each([true, false])(
+    "reviews installed-elsewhere terms on the selected host (accept=%s)",
+    async (accept) => {
+      const entry = addHost({
+        url: "http://studio.local:7680",
+        name: "Studio",
+        apiKey: "remote-key",
+      });
+      mockHosts.value = [
+        host(ORIGIN_HOST_ID),
+        host(entry.id, { label: "Studio" }),
+      ];
+      mockOwners.value = { "future-model:q8": [ORIGIN_HOST_ID] };
+      const terms = {
+        id: "future-terms",
+        name: "Future terms",
+        url: "https://example.test/pinned",
+        canonical: "https://example.test/license",
+        sha256: "a".repeat(64),
+        summary: "Review these terms.",
+      };
+      const refusal = new ApiError("Review required", 403, { license: terms });
+      mockHostModelDownload
+        .mockRejectedValueOnce(refusal)
+        .mockRejectedValueOnce(refusal)
+        .mockResolvedValue({ primary_job_id: "remote-job" });
+      const fetch = vi.fn().mockResolvedValue(Response.json({ licenses: [] }));
+      vi.stubGlobal("fetch", fetch);
+      const targets = useModelInstallTargets();
+      const planned = targets.planFor("future-model:q8", true).targets[0]!;
+      expect(planned.action).toBe("install");
+      const promise = targets.startDownloadOn(planned, "future-model:q8");
+      await flushPromises();
+      const prompt = useLicenseAcceptance();
+      expect(prompt.pending.value).toMatchObject({
+        hostLabel: "Studio",
+        target: { baseUrl: entry.url, apiKey: "remote-key" },
+      });
+      if (accept) await prompt.accept();
+      else prompt.cancel();
+      expect(await promise).toEqual({
+        declined: !accept,
+        jobId: accept ? "remote-job" : null,
+      });
+      expect(mockStartDownload).not.toHaveBeenCalled();
+      expect(mockHostModelDownload).toHaveBeenCalledTimes(accept ? 3 : 2);
+      if (accept) {
+        expect(fetch.mock.calls[0]![0]).toBe(
+          `${entry.url}/api/licenses/accept`,
+        );
+        expect(fetch.mock.calls[0]![1].headers.get("X-Api-Key")).toBe(
+          "remote-key",
+        );
+      } else expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
   it("keeps the origin on the catalog composable so downloads repaint", async () => {
     const targets = useModelInstallTargets();
     await targets.startDownloadOn(
@@ -259,4 +319,9 @@ describe("queuedMessage", () => {
       targets.queuedMessage({ host: mockHosts.value[0], action: "repair" }),
     ).toBe("Repair queued on this server");
   });
+});
+
+afterEach(() => {
+  useLicenseAcceptance().cancel();
+  vi.unstubAllGlobals();
 });
