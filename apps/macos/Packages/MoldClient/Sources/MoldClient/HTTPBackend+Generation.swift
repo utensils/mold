@@ -28,7 +28,7 @@ public extension HTTPBackend {
     }
 
     func placementPreview(
-        _ request: GenerateRequest, copies: Int = 1
+        _ request: GenerateRequest, copies: Int
     ) async throws -> PlacementPreview {
         try await post("/api/generate/placement-preview",
                        body: PlacementRequest(request: request, copies: copies))

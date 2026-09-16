@@ -32,7 +32,7 @@ extension LibraryStore {
             var touchedCollections = false
             while let entry = outbox.head(for: host) {
                 if case .collection = entry.change { touchedCollections = true }
-                guard let client = backend(host) as? HTTPBackend else {
+                guard let client = backend(host) else {
                     // The machine was removed. Its rows went with it.
                     outbox.failed(entry.id)
                     continue
@@ -63,7 +63,7 @@ extension LibraryStore {
     /// a single print, and so it carries no operation id and no fence. That is
     /// safe precisely because it is idempotent -- setting a title twice is
     /// setting a title -- where adding a tag twice would not be.
-    private func send(_ entry: MutationOutbox.Entry, to client: HTTPBackend) async throws {
+    private func send(_ entry: MutationOutbox.Entry, to client: any MoldBackend) async throws {
         if case let .title(_, to) = entry.change {
             for filename in entry.filenames {
                 try await client.patch(filename, with: GalleryPatch(title: to))
@@ -107,7 +107,7 @@ extension LibraryStore {
     /// repair at all.
     private func repair(_ filenames: [String], on host: MoldHost.ID,
                         _ backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
-        guard !filenames.isEmpty, let client = backend(host) as? HTTPBackend else { return }
+        guard !filenames.isEmpty, let client = backend(host) else { return }
         guard let name = hostName(host) else { return }
         etags[host] = nil
         guard case let .fresh(prints, etag) = try? await client.gallery(etag: nil) else { return }

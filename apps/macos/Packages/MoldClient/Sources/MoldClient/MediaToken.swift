@@ -16,7 +16,8 @@ public struct MediaToken: Codable, Hashable, Sendable {
 }
 
 public extension HTTPBackend {
-    func mediaToken(forPath path: String) async throws -> MediaToken {
+    /// Internal: a ticket exists for `playableURL`, its only caller.
+    internal func mediaToken(forPath path: String) async throws -> MediaToken {
         struct Request: Encodable { let path: String }
         return try await post("/api/gallery/media-token", body: Request(path: path))
     }

@@ -38,21 +38,21 @@ final class QueueStore {
     func cancel(_ entry: QueueEntry, on host: MoldHost.ID,
                 backend: (any MoldBackend)?) async {
         await act(entry, on: host) {
-            try await ($0 as? HTTPBackend)?.cancelJob(id: entry.id)
+            try await $0.cancelJob(id: entry.id)
         } using: { backend }
     }
 
     func pause(_ entry: QueueEntry, on host: MoldHost.ID,
                backend: (any MoldBackend)?) async {
         await act(entry, on: host) {
-            try await ($0 as? HTTPBackend)?.pauseJob(id: entry.id)
+            try await $0.pauseJob(id: entry.id)
         } using: { backend }
     }
 
     func resume(_ entry: QueueEntry, on host: MoldHost.ID,
                 backend: (any MoldBackend)?) async {
         await act(entry, on: host) {
-            try await ($0 as? HTTPBackend)?.resumeJob(id: entry.id)
+            try await $0.resumeJob(id: entry.id)
         } using: { backend }
     }
 
@@ -65,7 +65,7 @@ final class QueueStore {
             return
         }
         await act(entry, on: host) {
-            try await ($0 as? HTTPBackend)?.retryJob(entry, instanceId: instance)
+            try await $0.retryJob(entry, instanceId: instance)
         } using: { backend }
     }
 

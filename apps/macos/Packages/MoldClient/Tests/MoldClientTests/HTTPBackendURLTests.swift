@@ -57,3 +57,42 @@ private let backend = HTTPBackend(
     #expect(request.value(forHTTPHeaderField: "X-Api-Key") == "secret")
     #expect(request.url?.absoluteString.contains("secret") == false)
 }
+
+/// The app holds `any MoldBackend`, never the concrete type. Every route it
+/// calls has to be reachable through the protocol -- a downcast to
+/// `HTTPBackend` at the call site is how a failed cast turns into silence
+/// instead of an error.
+///
+/// Nothing here is sent: the closure is built and never invoked, so what is
+/// under test is whether it COMPILES.
+@Test func aBackendHeldAsTheProtocolReachesEveryRouteTheAppUses() {
+    let backend: any MoldBackend = HTTPBackend(
+        host: MoldHost(name: "plato", baseURL: URL(string: "http://plato:7680")!)
+    )
+    let _: () async throws -> Void = {
+        _ = backend.events()
+        _ = backend.batchEvents(id: "b")
+        _ = backend.downloadEvents()
+        try await backend.emptyTrash()
+        _ = try await backend.renameTag("a", to: "b")
+        try await backend.cancelJob(id: "j")
+        _ = try await backend.media("a.png", trashed: true)
+        _ = await backend.playableURL(for: "a.png")
+        _ = try await backend.startDownload(DownloadRequest(model: "m"))
+        _ = try await backend.trashedPrints(etag: nil)
+    }
+    #expect(backend.host.name == "plato")
+}
+
+/// A print in the trash lives behind `?view=trash`, exactly as the listing
+/// does. Fetching it from the live view answers 404 on a print that is right
+/// there.
+@Test func aTrashedPrintIsFetchedFromTheTrashView() {
+    let live = backend.mediaRequest("a b.png", trashed: false).url
+    #expect(live?.path() == "/api/gallery/image/a%20b.png")
+    #expect(live?.query() == nil)
+
+    let trashed = backend.mediaRequest("a b.png", trashed: true).url
+    #expect(trashed?.path() == "/api/gallery/image/a%20b.png")
+    #expect(trashed?.query() == "view=trash")
+}

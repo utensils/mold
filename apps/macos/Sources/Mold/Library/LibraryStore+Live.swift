@@ -87,7 +87,7 @@ extension LibraryStore {
     /// answers 304 and the repair repairs nothing.
     private func reread(_ host: MoldHost.ID,
                         _ backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
-        guard let client = backend(host) as? HTTPBackend,
+        guard let client = backend(host),
               let name = perHost[host]?.first?.hostName else { return }
         etags[host] = nil
         guard case let .fresh(prints, etag) = try? await client.gallery(etag: nil) else { return }

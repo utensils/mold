@@ -37,8 +37,7 @@ extension LibraryActions {
         ) {
             Task {
                 for host in hosts.hosts {
-                    guard let client = hosts.backend(for: host) as? HTTPBackend else { continue }
-                    try? await client.emptyTrash()
+                    try? await hosts.backend(for: host).emptyTrash()
                 }
                 await library.refreshTrash(hosts: hosts.hosts) { hosts.backend(for: $0) }
             }

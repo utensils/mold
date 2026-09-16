@@ -27,7 +27,7 @@ extension LibraryActions {
     }
 
     private func send(_ urls: [URL], to host: MoldHost) async {
-        guard let client = backend(host.id) as? HTTPBackend else { return }
+        guard let client = backend(host.id) else { return }
         for url in urls {
             guard let data = try? Data(contentsOf: url) else { continue }
             // The file's own date, so an old picture lands where it belongs in

@@ -12,7 +12,7 @@ public extension HTTPBackend {
 
     /// Makes a collection and hands back the machine's own row, so the caller
     /// learns the id and the slug it resolved to rather than guessing either.
-    func createCollection(name: String, description: String? = nil) async throws -> Collection {
+    func createCollection(name: String, description: String?) async throws -> Collection {
         try await send("/api/gallery/collections", method: "POST",
                        body: CollectionCreate(name: name, description: description))
     }
@@ -26,15 +26,6 @@ public extension HTTPBackend {
     /// goes away.
     func deleteCollection(id: String) async throws {
         try await delete("/api/gallery/collections/\(id)")
-    }
-
-    /// One call adds and removes, which is what makes dragging between two
-    /// shelves a single request rather than a pair that can half-fail.
-    @discardableResult
-    func changeCollectionItems(id: String, add: [String] = [],
-                               remove: [String] = []) async throws -> Collection {
-        try await send("/api/gallery/collections/\(id)/items", method: "PUT",
-                       body: CollectionItems(add: add, remove: remove))
     }
 
     // MARK: - Tags
@@ -58,12 +49,6 @@ public extension HTTPBackend {
     func emptyTrash() async throws {
         try await delete("/api/gallery/trash")
     }
-
-    /// Purges only what is already past its retention — what the host would
-    /// have done on its own schedule anyway.
-    func sweepTrash() async throws {
-        _ = try await postRaw("/api/gallery/trash/sweep", body: Empty())
-    }
 }
 
 /// Bodies. Each is its own type rather than a dictionary so that an optional
@@ -86,13 +71,6 @@ public struct CollectionChange: Encodable, Sendable {
     }
 }
 
-struct CollectionItems: Encodable, Sendable {
-    let add: [String]
-    let remove: [String]
-}
-
 struct TagRename: Encodable, Sendable {
     let name: String
 }
-
-struct Empty: Encodable, Sendable {}

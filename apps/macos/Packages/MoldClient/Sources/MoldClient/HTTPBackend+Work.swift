@@ -32,14 +32,6 @@ public extension HTTPBackend {
             clientBatchId: entry.clientBatchId, jobId: entry.id))
     }
 
-    func pauseQueue() async throws {
-        _ = try await postRaw("/api/queue/pause", body: EmptyBody())
-    }
-
-    func resumeQueue() async throws {
-        _ = try await postRaw("/api/queue/resume", body: EmptyBody())
-    }
-
     // MARK: - Downloads
 
     /// Queues a model fetch.

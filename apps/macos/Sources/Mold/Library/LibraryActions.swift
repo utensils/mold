@@ -118,21 +118,14 @@ struct LibraryActions {
 
     /// A URL a player can open directly, ticketed if the machine needs it.
     func playableURL(for entry: LibraryEntry) async -> URL? {
-        guard let host = host(entry),
-              let client = backend(host.id) as? HTTPBackend
-        else { return nil }
+        guard let host = host(entry), let client = backend(host.id) else { return nil }
         return await client.playableURL(for: entry.print.filename)
     }
 
     /// The stored bytes for a print, fetched from the machine that holds it.
     func data(for entry: LibraryEntry) async -> Data? {
         guard let host = host(entry) else { return nil }
-        var request = URLRequest(
-            url: MediaURL(baseURL: host.baseURL).media(entry.print.filename,
-                                                       trashed: entry.print.trashedAt != nil))
-        if let key = host.apiKey, !key.isEmpty {
-            request.setValue(key, forHTTPHeaderField: "X-Api-Key")
-        }
-        return try? await URLSession.shared.data(for: request).0
+        return try? await backend(host.id)?.media(entry.print.filename,
+                                                  trashed: entry.print.trashedAt != nil)
     }
 }

@@ -27,7 +27,7 @@ extension LibraryStore {
 
         Task {
             for hostID in tagsPerHost.keys {
-                guard let client = backend(hostID) as? HTTPBackend else { continue }
+                guard let client = backend(hostID) else { continue }
                 do { _ = try await client.renameTag(name, to: clean) } catch {
                     // A machine that has never seen the tag answers 404, which
                     // is not a failure of the rename -- it is a machine with
@@ -54,7 +54,7 @@ extension LibraryStore {
 
         Task {
             for hostID in tagsPerHost.keys {
-                guard let client = backend(hostID) as? HTTPBackend else { continue }
+                guard let client = backend(hostID) else { continue }
                 try? await client.deleteTag(name)
             }
             await reloadTags(backend)
@@ -86,7 +86,7 @@ extension LibraryStore {
     private func reloadTags(_ backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         etags.removeAll()
         for hostID in tagsPerHost.keys {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
+            guard let client = backend(hostID) else { continue }
             if let tags = try? await client.tags() { tagsPerHost[hostID] = tags }
         }
     }

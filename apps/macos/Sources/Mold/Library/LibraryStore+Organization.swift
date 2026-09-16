@@ -41,7 +41,6 @@ extension LibraryStore {
             for host in hosts {
                 let client = backend(host)
                 group.addTask {
-                    guard let client = client as? HTTPBackend else { return (host.id, nil, nil) }
                     // Two independent asks: a host with no organization tables
                     // answers neither, and one of them failing must not blank
                     // the other.
@@ -92,8 +91,8 @@ extension LibraryStore {
     /// copy the first time something is filed into it there.
     func createShelf(named name: String, on hostID: MoldHost.ID,
                      backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
-        guard let client = backend(hostID) as? HTTPBackend else { return }
-        _ = try? await client.createCollection(name: name)
+        guard let client = backend(hostID) else { return }
+        _ = try? await client.createCollection(name: name, description: nil)
         await reloadCollections(backend)
     }
 
@@ -101,7 +100,7 @@ extension LibraryStore {
     func renameShelf(_ shelf: CollectionShelf, to name: String,
                      backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         for (hostID, id) in shelf.hosts {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
+            guard let client = backend(hostID) else { continue }
             _ = try? await client.updateCollection(id: id, change: CollectionChange(name: name))
         }
         await reloadCollections(backend)
@@ -112,7 +111,7 @@ extension LibraryStore {
     func deleteShelf(_ shelf: CollectionShelf,
                      backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         for (hostID, id) in shelf.hosts {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
+            guard let client = backend(hostID) else { continue }
             try? await client.deleteCollection(id: id)
         }
         await reloadCollections(backend)
@@ -121,7 +120,7 @@ extension LibraryStore {
     func setShelfHidden(_ shelf: CollectionShelf, hidden: Bool,
                         backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         for (hostID, id) in shelf.hosts {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
+            guard let client = backend(hostID) else { continue }
             _ = try? await client.updateCollection(id: id,
                                                    change: CollectionChange(hidden: hidden))
         }

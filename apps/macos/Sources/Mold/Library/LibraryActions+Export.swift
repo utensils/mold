@@ -20,7 +20,7 @@ extension LibraryActions {
     /// Converts a print and saves the result.
     func export(_ entry: LibraryEntry, as format: String) {
         Task {
-            guard let client = backend(entry.hostID) as? HTTPBackend else { return }
+            guard let client = backend(entry.hostID) else { return }
             guard let data = try? await client.export(entry.print.filename, format: format)
             else { return }
 

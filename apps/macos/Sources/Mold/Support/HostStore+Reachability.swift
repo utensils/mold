@@ -29,7 +29,7 @@ extension HostStore {
         guard case .up = state, capabilities[host.id] == nil else { return }
         let client = backend(for: host)
         capabilities[host.id] = try? await client.capabilities()
-        exportOptions[host.id] = try? await (client as? HTTPBackend)?.exportOptions()
+        exportOptions[host.id] = try? await client.exportOptions()
     }
 
     /// Asks one machine what it is, and answers rather than recording.

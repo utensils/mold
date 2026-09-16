@@ -59,7 +59,7 @@ extension LibraryStore {
     func reloadCollections(_ backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         etags.removeAll()
         for hostID in collectionsPerHost.keys {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
+            guard let client = backend(hostID) else { continue }
             if let collections = try? await client.collections() {
                 collectionsPerHost[hostID] = collections
             }

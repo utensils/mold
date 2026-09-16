@@ -40,7 +40,7 @@ extension HostStore {
             // comes back in seconds; one that is off should not be hammered.
             var attempt = 0
             while !Task.isCancelled {
-                guard let client = self?.backend(for: host) as? HTTPBackend else { return }
+                guard let client = self?.backend(for: host) else { return }
                 do {
                     for try await event in client.events() {
                         attempt = 0

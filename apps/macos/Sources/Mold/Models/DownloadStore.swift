@@ -32,26 +32,24 @@ final class DownloadStore {
     /// A 409 means it is already queued there, which is the outcome the click
     /// wanted -- the client treats it as success and starts watching.
     func install(_ model: Model, on host: MoldHost, backend: any MoldBackend) async {
-        guard let client = backend as? HTTPBackend else { return }
         do {
-            let ticket = try await client.startDownload(DownloadRequest(model: model.name))
+            let ticket = try await backend.startDownload(DownloadRequest(model: model.name))
             var forHost = active[host.id] ?? [:]
             forHost[ticket.id] = Progress(model: model.name)
             active[host.id] = forHost
-            watch(host: host, backend: client)
+            watch(host: host, backend: backend)
         } catch {
             failure = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
 
     func cancel(jobID: String, on host: MoldHost, backend: any MoldBackend) async {
-        guard let client = backend as? HTTPBackend else { return }
-        try? await client.cancelDownload(id: jobID)
+        try? await backend.cancelDownload(id: jobID)
         active[host.id]?.removeValue(forKey: jobID)
     }
 
     /// One stream per machine, however many models are being fetched on it.
-    private func watch(host: MoldHost, backend: HTTPBackend) {
+    private func watch(host: MoldHost, backend: any MoldBackend) {
         guard streams[host.id] == nil else { return }
         streams[host.id] = Task { [weak self] in
             defer { self?.streams[host.id] = nil }

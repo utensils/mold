@@ -44,7 +44,7 @@ extension LibraryStore {
         rebuild()
 
         for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
+            guard let client = backend(hostID) else { continue }
             do { try await client.trash(group.map(\.print.filename)) } catch {
                 perHost = previous
                 rebuild()
@@ -58,7 +58,7 @@ extension LibraryStore {
     func restore(_ entries: [LibraryEntry],
                  backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
+            guard let client = backend(hostID) else { continue }
             try? await client.restoreFromTrash(group.map(\.print.filename))
         }
         etags.removeAll()
@@ -70,7 +70,7 @@ extension LibraryStore {
     func deleteForever(_ entries: [LibraryEntry],
                        backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
         for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
-            guard let client = backend(hostID) as? HTTPBackend else { continue }
+            guard let client = backend(hostID) else { continue }
             try? await client.deleteForever(group.map(\.print.filename))
         }
         trashEtags.removeAll()

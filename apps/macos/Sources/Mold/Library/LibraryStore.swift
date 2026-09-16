@@ -121,8 +121,7 @@ final class LibraryStore {
                 let client = backend(host)
                 let etag = trashEtags[host.id]
                 group.addTask {
-                    guard let client = client as? HTTPBackend,
-                          let fetched = try? await client.trashedPrints(etag: etag)
+                    guard let fetched = try? await client.trashedPrints(etag: etag)
                     else { return (host, nil, nil) }
                     guard let prints = fetched.value else { return (host, nil, nil) }
                     return (host, prints.map {

@@ -61,8 +61,20 @@ public extension HTTPBackend {
     }
 
     /// The original bytes as stored.
-    func media(_ filename: String) async throws -> Data {
-        try await bytes(for: request("/api/gallery/image/\(escaped(filename))"))
+    func media(_ filename: String, trashed: Bool) async throws -> Data {
+        try await bytes(for: mediaRequest(filename, trashed: trashed))
+    }
+
+    /// A trashed print is behind the trash view, exactly as the listing is --
+    /// asking the live route for one answers 404 on a print that is right
+    /// there.
+    internal func mediaRequest(_ filename: String, trashed: Bool) -> URLRequest {
+        let path = "/api/gallery/image/\(escaped(filename))"
+        var request = request(trashed ? path + "?view=trash" : path)
+        // A clip is tens of megabytes; the 10 s idle timeout every other route
+        // gets is for a JSON answer. Same allowance as `export`.
+        request.timeoutInterval = 300
+        return request
     }
 
     internal func postRaw<Body: Encodable>(_ path: String, body: Body) async throws -> Data {
