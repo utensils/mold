@@ -1935,6 +1935,9 @@ const virtualizer = useVirtualizer(
     count: rows.value.length,
     getScrollElement: () => scrollEl.value,
     estimateSize: (i: number) => (rows.value[i]?.height ?? rowHeight.value) + GAP,
+    // Match the horizontal gutter so first-row rings and hover lift are not
+    // clipped by the scroll container's paint containment.
+    paddingStart: PAD,
     overscan: 2,
   })),
 );
