@@ -18,6 +18,8 @@ public protocol MoldBackend: Sendable {
     func models() async throws -> [Model]
     /// Pass the previous `etag` to let the host answer `.notModified`.
     func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]>
+    /// Read-only: reserves nothing, queues nothing.
+    func placementPreview(_ request: GenerateRequest, copies: Int) async throws -> PlacementPreview
 }
 
 public enum MoldClientError: Error, Sendable, LocalizedError {

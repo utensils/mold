@@ -25,6 +25,13 @@ public struct HTTPBackend: MoldBackend {
         try await get("/api/models")
     }
 
+    public func placementPreview(
+        _ request: GenerateRequest, copies: Int = 1
+    ) async throws -> PlacementPreview {
+        try await post("/api/generate/placement-preview",
+                       body: PlacementRequest(request: request, copies: copies))
+    }
+
     public func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]> {
         var request = self.request("/api/gallery")
         // The index is large and mostly unchanged between refreshes, so ask
@@ -48,6 +55,19 @@ public struct HTTPBackend: MoldBackend {
 
     private func get<T: Decodable>(_ path: String) async throws -> T {
         let data = try await bytes(for: request(path))
+        do {
+            return try MoldJSON.decoder.decode(T.self, from: data)
+        } catch {
+            throw MoldClientError.malformedResponse
+        }
+    }
+
+    private func post<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
+        var request = self.request(path)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try MoldJSON.encoder.encode(body)
+        let data = try await bytes(for: request)
         do {
             return try MoldJSON.decoder.decode(T.self, from: data)
         } catch {

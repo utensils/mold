@@ -50,6 +50,20 @@ final class HostStore {
     func reachability(of host: MoldHost) -> Reachability {
         reachability[host.id] ?? .unknown
     }
+
+    func isUp(_ host: MoldHost) -> Bool {
+        if case .up = reachability(of: host) { return true }
+        return false
+    }
+
+    /// The machine to work on by default.
+    ///
+    /// Deliberately not "the first one configured": the list starts with this
+    /// Mac, which on most setups is not running a server at all. Landing there
+    /// shows an empty model picker and reads as the app being broken.
+    var preferredHost: MoldHost? {
+        hosts.first(where: isUp) ?? hosts.first
+    }
 }
 
 extension HostStore {

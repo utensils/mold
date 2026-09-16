@@ -7,9 +7,11 @@ struct DestinationDetail: View {
 
     var body: some View {
         switch destination {
+        case .generate:
+            GeneratePane()
         case .library:
             LibraryPane()
-        case .generate, .queue, .models:
+        case .queue, .models:
             ContentUnavailableView {
                 Label(destination.title, systemImage: destination.symbol)
             } description: {
