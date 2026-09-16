@@ -15,7 +15,6 @@ final class LibraryStore {
 
     private(set) var items: [LibraryEntry] = []
     private(set) var isLoading = false
-    var failures: [MoldHost.ID: String] = [:]
 
     /// Set from here and from `+Mutations`'s `refreshTrash()`; `private(set)`
     /// does not cross that file boundary.
@@ -86,18 +85,20 @@ final class LibraryStore {
     private func apply(_ result: Result<Fetched<[GalleryPrint]>, Error>, for host: MoldHost) {
         switch result {
         case let .success(.fresh(prints, etag)):
-            failures[host.id] = nil
             if let etag { etags[host.id] = etag }
             perHost[host.id] = prints.map { LibraryEntry(host: host, print: $0) }
+            // Scoped: `refresh` is also `reload`'s own passive listing, run
+            // right after other actions, and must not clear what one of
+            // THOSE just reported.
+            hosts.succeeded(on: host.id, doing: "list its prints")
         case .success(.notModified):
             // Nothing changed. Keeping the cached rows is the whole point of
             // having asked conditionally.
-            failures[host.id] = nil
+            hosts.succeeded(on: host.id, doing: "list its prints")
         case let .failure(error):
-            failures[host.id] = (error as? LocalizedError)?.errorDescription
-                ?? error.localizedDescription
             // A host going down must not erase what it already showed us --
             // the other machines' prints stay, and so do this one's.
+            hosts.report(error, on: host.id, doing: "list its prints")
         }
     }
 
@@ -113,7 +114,6 @@ final class LibraryStore {
         trashPerHost = trashPerHost.filter { live.contains($0.key) }
         etags = etags.filter { live.contains($0.key) }
         trashEtags = trashEtags.filter { live.contains($0.key) }
-        failures = failures.filter { live.contains($0.key) }
         collectionsPerHost = collectionsPerHost.filter { live.contains($0.key) }
         tagsPerHost = tagsPerHost.filter { live.contains($0.key) }
         rebuild()

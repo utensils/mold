@@ -51,8 +51,7 @@ extension HostStore {
         } catch MoldClientError.unauthorized {
             return .needsKey
         } catch {
-            return .down((error as? LocalizedError)?.errorDescription
-                ?? error.localizedDescription)
+            return .down(error.sentence)
         }
     }
 

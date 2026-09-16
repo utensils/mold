@@ -24,8 +24,7 @@ extension GenerateController {
                 self?.activeBatch = (accepted.id, host.id)
                 await self?.follow(accepted, backend: backend, host: host.id)
             } catch {
-                self?.run = .failed((error as? LocalizedError)?.errorDescription
-                    ?? error.localizedDescription)
+                self?.run = .failed(error.sentence)
                 PendingBatch.forget(admission.clientBatchId)
             }
         }
@@ -98,7 +97,10 @@ extension GenerateController {
     func cancel(backend: any MoldBackend) {
         guard let active = activeBatch else { return }
         runTask?.cancel()
-        Task { try? await backend.cancelBatch(id: active.id) }
+        Task { [weak self] in
+            do { try await backend.cancelBatch(id: active.id) }
+            catch { self?.hosts.report(error, on: active.host, doing: "cancel that render") }
+        }
         run = .idle
     }
 

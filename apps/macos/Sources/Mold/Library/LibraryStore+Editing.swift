@@ -55,51 +55,18 @@ extension LibraryStore {
         return collectionsPerHost[hostID]?.first { $0.slug == slug }?.id
     }
 
+    /// This machine's own collections, or a report if it refused to say.
     func reloadCollections() async {
         etags.removeAll()
         for host in hosts.hosts {
-            if let collections = try? await hosts.backend(for: host).collections() {
-                collectionsPerHost[host.id] = collections
+            do {
+                collectionsPerHost[host.id] = try await hosts.backend(for: host).collections()
+                // Scoped: a passive refresh after every shelf edit must not
+                // clear a failure that edit itself just reported.
+                hosts.succeeded(on: host.id, doing: "read its collections")
+            } catch {
+                hosts.report(error, on: host.id, doing: "read its collections")
             }
-        }
-    }
-}
-
-extension PrintChange {
-    /// What the machine could not do, in the terms the person used.
-    var failureSentence: String {
-        switch self {
-        case .favorite: "Couldn't update those prints."
-        case .tag: "Couldn't change those tags."
-        case let .collection(name, _, filing):
-            filing ? "Couldn't file those into \(name)." : "Couldn't take those out of \(name)."
-        case .title: "Couldn't rename that print."
-        }
-    }
-
-    /// The change, applied to one print on screen.
-    ///
-    /// `collectionID` is that machine's id for the shelf. Filing onto a
-    /// machine that has never seen it leaves the row's membership alone --
-    /// the host mints the id, and guessing one here would put a stranger in
-    /// the list until the next refresh corrected it.
-    func applied(to print: inout GalleryPrint.Mutable, collectionID: String?) {
-        switch self {
-        case let .favorite(on):
-            print.favorite = on
-        case let .tag(name, adding):
-            var tags = print.tags ?? []
-            tags.removeAll { $0.caseInsensitiveCompare(name) == .orderedSame }
-            if adding { tags.append(name) }
-            print.tags = tags
-        case let .collection(_, _, filing):
-            guard let collectionID else { return }
-            var members = print.collections ?? []
-            members.removeAll { $0 == collectionID }
-            if filing { members.append(collectionID) }
-            print.collections = members
-        case let .title(_, to):
-            print.title = to.isEmpty ? nil : to
         }
     }
 }

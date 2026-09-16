@@ -17,4 +17,12 @@ enum FakeFixtures {
         let json = #"{"id": "\#(id)", "state": "\#(state)"}"#
         return try! MoldJSON.decoder.decode(QueueEntry.self, from: Data(json.utf8))
     }
+
+    /// A listing with no `liveOnlyEntries` -- `QueueListing`'s own init is not
+    /// public, so a planted answer is decoded the way the wire produces one.
+    static func queueListing(_ ids: [String]) -> QueueListing {
+        let entries = ids.map { #"{"id": "\#($0)", "state": "accepted"}"# }.joined(separator: ",")
+        let json = #"{"entries": [\#(entries)], "liveOnlyEntries": null}"#
+        return try! MoldJSON.decoder.decode(QueueListing.self, from: Data(json.utf8))
+    }
 }

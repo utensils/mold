@@ -10,20 +10,28 @@ extension LibraryStore {
     // MARK: - Trash
 
     func refreshTrash() async {
-        await withTaskGroup(of: (MoldHost, [LibraryEntry]?, String?).self) { group in
+        await withTaskGroup(of: (MoldHost, Result<Fetched<[GalleryPrint]>, Error>).self) { group in
             for host in hosts.hosts {
                 let client = hosts.backend(for: host)
                 let etag = trashEtags[host.id]
                 group.addTask {
-                    guard let fetched = try? await client.trashedPrints(etag: etag)
-                    else { return (host, nil, nil) }
-                    guard let prints = fetched.value else { return (host, nil, nil) }
-                    return (host, prints.map { LibraryEntry(host: host, print: $0) }, fetched.etag)
+                    do { return (host, .success(try await client.trashedPrints(etag: etag))) }
+                    catch { return (host, .failure(error)) }
                 }
             }
-            for await (host, entries, etag) in group {
-                if let entries { trashPerHost[host.id] = entries }
-                if let etag { trashEtags[host.id] = etag }
+            for await (host, result) in group {
+                switch result {
+                case let .success(.fresh(prints, etag)):
+                    trashPerHost[host.id] = prints.map { LibraryEntry(host: host, print: $0) }
+                    if let etag { trashEtags[host.id] = etag }
+                    // Scoped: this passive listing runs right after
+                    // `emptyTrash` too, and must not clear what THAT reported.
+                    hosts.succeeded(on: host.id, doing: "list its trash")
+                case .success(.notModified):
+                    hosts.succeeded(on: host.id, doing: "list its trash")
+                case let .failure(error):
+                    hosts.report(error, on: host.id, doing: "list its trash")
+                }
             }
         }
         trashed = trashPerHost.values.flatMap(\.self)
@@ -56,20 +64,21 @@ extension LibraryStore {
     /// Put Back, which survives quitting the app in a way an undo stack does
     /// not.
     func moveToTrash(_ entries: [LibraryEntry]) async {
-        let previous = perHost
         let ids = Set(entries.map(\.id))
-        for (hostID, list) in perHost {
-            perHost[hostID] = list.filter { !ids.contains($0.id) }
-        }
-        rebuild()
-
         for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
+            let before = perHost[hostID]
+            perHost[hostID] = (perHost[hostID] ?? []).filter { !ids.contains($0.id) }
+            rebuild()
             guard let client = hosts.backend(for: hostID) else { continue }
-            do { try await client.trash(group.map(\.print.filename)) } catch {
-                perHost = previous
+            do {
+                try await client.trash(group.map(\.print.filename))
+                hosts.succeeded(on: hostID)
+            } catch {
+                // Only THIS machine's rows come back -- a refusal here says
+                // nothing about the machines that already succeeded.
+                perHost[hostID] = before
                 rebuild()
-                failures[hostID] = "Couldn't move those to the trash."
-                return
+                hosts.report(error, on: hostID, doing: "move those to the trash")
             }
         }
         trashEtags.removeAll()
@@ -78,7 +87,12 @@ extension LibraryStore {
     func restore(_ entries: [LibraryEntry]) async {
         for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
             guard let client = hosts.backend(for: hostID) else { continue }
-            try? await client.restoreFromTrash(group.map(\.print.filename))
+            do {
+                try await client.restoreFromTrash(group.map(\.print.filename))
+                hosts.succeeded(on: hostID)
+            } catch {
+                hosts.report(error, on: hostID, doing: "put those back")
+            }
         }
         etags.removeAll()
         trashEtags.removeAll()
@@ -89,7 +103,12 @@ extension LibraryStore {
     func deleteForever(_ entries: [LibraryEntry]) async {
         for (hostID, group) in Dictionary(grouping: entries, by: \.hostID) {
             guard let client = hosts.backend(for: hostID) else { continue }
-            try? await client.deleteForever(group.map(\.print.filename))
+            do {
+                try await client.deleteForever(group.map(\.print.filename))
+                hosts.succeeded(on: hostID)
+            } catch {
+                hosts.report(error, on: hostID, doing: "delete those permanently")
+            }
         }
         trashEtags.removeAll()
     }
@@ -98,7 +117,12 @@ extension LibraryStore {
     /// `LibraryActions+Destructive`; this is what runs once someone agrees.
     func emptyTrash() async {
         for host in hosts.hosts {
-            try? await hosts.backend(for: host).emptyTrash()
+            do {
+                try await hosts.backend(for: host).emptyTrash()
+                hosts.succeeded(on: host.id)
+            } catch {
+                hosts.report(error, on: host.id, doing: "empty the trash")
+            }
         }
         await refreshTrash()
     }

@@ -44,6 +44,7 @@ struct ModelsPane: View {
                 .listStyle(.inset)
             }
         }
+        .failureBanner(hosts)
         .navigationTitle("Models")
         .navigationSubtitle(subtitle)
         .searchable(text: $query, prompt: "Search models")

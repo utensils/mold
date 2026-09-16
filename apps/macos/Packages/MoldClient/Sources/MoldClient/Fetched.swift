@@ -9,14 +9,4 @@ import Foundation
 public enum Fetched<Value: Sendable>: Sendable {
     case fresh(Value, etag: String?)
     case notModified
-
-    public var value: Value? {
-        if case let .fresh(value, _) = self { return value }
-        return nil
-    }
-
-    public var etag: String? {
-        if case let .fresh(_, etag) = self { return etag }
-        return nil
-    }
 }

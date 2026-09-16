@@ -174,4 +174,16 @@ import Testing
         // Clearing is not renaming, and the Edit menu should say which.
         #expect(PrintChange.title(from: "Old", to: "").actionName == "Clear Title")
     }
+
+    /// `HostStore.report` wraps this into "Couldn't ⟨verb⟩ on ⟨machine⟩.
+    /// ⟨reason⟩" -- so it reads as a phrase, not a restatement of the noun.
+    @Test func everyChangeNamesWhatItWasDoing() {
+        #expect(PrintChange.favorite(true).verb == "update those prints")
+        #expect(PrintChange.tag("owls", adding: true).verb == "change those tags")
+        #expect(PrintChange.collection(name: "Hangar", slug: "hangar", filing: true).verb
+            == "file those into Hangar")
+        #expect(PrintChange.collection(name: "Hangar", slug: "hangar", filing: false).verb
+            == "take those out of Hangar")
+        #expect(PrintChange.title(from: "Old", to: "New").verb == "rename that print")
+    }
 }

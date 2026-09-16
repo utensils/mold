@@ -17,7 +17,6 @@ final class DownloadStore {
     private let hosts: HostStore
     /// Keyed by host then by the host's job id.
     private(set) var active: [MoldHost.ID: [String: Progress]] = [:]
-    private(set) var failure: String?
     private var streams: [MoldHost.ID: Task<Void, Never>] = [:]
 
     init(hosts: HostStore) {
@@ -43,14 +42,20 @@ final class DownloadStore {
             var forHost = active[host.id] ?? [:]
             forHost[ticket.id] = Progress(model: model.name)
             active[host.id] = forHost
+            hosts.succeeded(on: host.id)
             watch(host: host)
         } catch {
-            failure = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            hosts.report(error, on: host.id, doing: "start that download")
         }
     }
 
     func cancel(jobID: String, on host: MoldHost) async {
-        try? await hosts.backend(for: host).cancelDownload(id: jobID)
+        do {
+            try await hosts.backend(for: host).cancelDownload(id: jobID)
+            hosts.succeeded(on: host.id)
+        } catch {
+            hosts.report(error, on: host.id, doing: "cancel that download")
+        }
         active[host.id]?.removeValue(forKey: jobID)
     }
 

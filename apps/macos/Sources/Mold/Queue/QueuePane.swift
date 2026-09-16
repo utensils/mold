@@ -28,13 +28,9 @@ struct QueuePane: View {
                     }
                 }
                 .listStyle(.inset)
-                .alert("That didn't work", isPresented: .constant(queue.failure != nil)) {
-                    Button("OK") { }
-                } message: {
-                    Text(queue.failure ?? "")
-                }
             }
         }
+        .failureBanner(hosts)
         .navigationTitle("Queue")
         .navigationSubtitle(subtitle)
         .toolbar { toolbar }

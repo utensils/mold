@@ -40,9 +40,9 @@ extension LibraryActions {
                                      width: size.width, height: size.height, madeAt: made)
             do {
                 _ = try await client.importPrint(item, as: url.lastPathComponent)
+                hosts.succeeded(on: host.id)
             } catch {
-                library.failures[host.id] =
-                    "Couldn't import \(url.lastPathComponent). \(reason(error))"
+                hosts.report(error, on: host.id, doing: "import “\(url.lastPathComponent)”")
                 return
             }
         }
@@ -66,9 +66,5 @@ extension LibraryActions {
     private func version(of host: MoldHost) -> String {
         if case let .up(status) = hosts.reachability(of: host) { return status.version }
         return "0"
-    }
-
-    private func reason(_ error: Error) -> String {
-        (error as? MoldClientError)?.errorDescription ?? "The machine refused it."
     }
 }

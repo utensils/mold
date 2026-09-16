@@ -109,3 +109,17 @@ public struct PrintEdit: Hashable, Sendable {
         }
     }
 }
+
+public extension PrintChange {
+    /// What was being attempted, for `HostStore.report` to wrap into the one
+    /// sentence a person sees.
+    var verb: String {
+        switch self {
+        case .favorite: "update those prints"
+        case .tag: "change those tags"
+        case let .collection(name, _, filing):
+            filing ? "file those into \(name)" : "take those out of \(name)"
+        case .title: "rename that print"
+        }
+    }
+}

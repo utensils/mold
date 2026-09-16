@@ -20,6 +20,9 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var trashedRows: [GalleryPrint] = []
     nonisolated(unsafe) var tagRows: [TagCount] = []
     nonisolated(unsafe) var collectionRows: [Collection] = []
+    /// `nil` means nothing was planted, so `queue()` behaves like every other
+    /// unplanted route and throws rather than answering with an empty list.
+    nonisolated(unsafe) var queueListing: QueueListing?
 
     init(host: MoldHost) { self.host = host }
 
@@ -55,7 +58,11 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     // MARK: - Queue
 
-    func queue() async throws -> QueueListing { try record("queue"); throw notPlanted() }
+    func queue() async throws -> QueueListing {
+        try record("queue")
+        guard let queueListing else { throw notPlanted() }
+        return queueListing
+    }
     func cancelJob(id: String) async throws { try record("cancelJob") }
     func pauseJob(id: String) async throws { try record("pauseJob") }
     func resumeJob(id: String) async throws { try record("resumeJob") }

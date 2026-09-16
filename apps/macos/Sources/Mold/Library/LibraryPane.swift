@@ -91,6 +91,7 @@ struct LibraryPane: View {
         @Bindable var navigation = navigation
 
         return content
+            .failureBanner(hosts)
             .navigationTitle(navigation.scope.title(in: library.shelves))
             .navigationSubtitle(fullSubtitle)
             .searchable(text: $navigation.query.text, tokens: $navigation.query.tokens,

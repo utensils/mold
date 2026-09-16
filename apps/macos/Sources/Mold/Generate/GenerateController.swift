@@ -6,7 +6,9 @@ import MoldClient
 @MainActor
 @Observable
 final class GenerateController {
-    private let hosts: HostStore
+    /// Not `private`: `GenerateController+Run` reports a machine's cancel
+    /// failure through it.
+    let hosts: HostStore
     var draft = RenderDraft()
     var hostID: MoldHost.ID?
     var modelName: String?
@@ -68,8 +70,7 @@ final class GenerateController {
                 placementError = nil
             } catch {
                 placement = nil
-                placementError = (error as? LocalizedError)?.errorDescription
-                    ?? error.localizedDescription
+                placementError = error.sentence
             }
         }
     }

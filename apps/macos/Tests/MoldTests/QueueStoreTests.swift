@@ -22,6 +22,26 @@ struct QueueStoreTests {
         await queue.cancel(entry, on: machine.id)
 
         #expect(fake.calls.contains("cancelJob"))
-        #expect(queue.failure != nil)
+        #expect(hosts.failures.contains { $0.host == machine.id })
+    }
+
+    /// **Fails today**: `refresh`'s `?? []` writes an empty array for a
+    /// machine whose fetch failed, so a transient hiccup blanks rows that
+    /// were showing a second ago.
+    @Test func aMachineThatCannotListItsQueueKeepsTheRowsItLastShowed() async {
+        let machine = MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        let fake = FakeBackend(host: machine)
+        let hosts = HostStore(hosts: [machine]) { _ in fake }
+        let queue = QueueStore(hosts: hosts)
+
+        fake.queueListing = FakeFixtures.queueListing(["job-1"])
+        await queue.refresh()
+        #expect(queue.entries(on: machine.id).map(\.id) == ["job-1"])
+
+        fake.refuses = ["queue"]
+        await queue.refresh()
+
+        #expect(queue.entries(on: machine.id).map(\.id) == ["job-1"])
+        #expect(hosts.failures.contains { $0.host == machine.id && $0.verb == "list its queue" })
     }
 }

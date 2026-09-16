@@ -20,13 +20,22 @@ final class ModelStore {
     func refresh() async {
         isLoading = true
         defer { isLoading = false }
-        await withTaskGroup(of: (MoldHost.ID, [Model]?).self) { group in
+        await withTaskGroup(of: (MoldHost.ID, Result<[Model], Error>).self) { group in
             for host in hosts.hosts {
                 let client = hosts.backend(for: host)
-                group.addTask { (host.id, try? await client.models()) }
+                group.addTask {
+                    do { return (host.id, .success(try await client.models())) }
+                    catch { return (host.id, .failure(error)) }
+                }
             }
-            for await (id, models) in group where models != nil {
-                byHost[id] = models
+            for await (id, result) in group {
+                switch result {
+                case let .success(models):
+                    byHost[id] = models
+                    hosts.succeeded(on: id, doing: "list its models")
+                case let .failure(error):
+                    hosts.report(error, on: id, doing: "list its models")
+                }
             }
         }
     }

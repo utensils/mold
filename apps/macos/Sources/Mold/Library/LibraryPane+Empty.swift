@@ -25,10 +25,6 @@ extension LibraryPane {
     @ViewBuilder var empty: some View {
         if library.isLoading, library.items.isEmpty {
             ProgressView("Loading prints…")
-        } else if let failure = library.failures.values.compactMap(\.self).first {
-            ContentUnavailableView("Can't load the library",
-                                   systemImage: "exclamationmark.triangle",
-                                   description: Text(failure))
         } else if navigation.query.isNarrowed {
             // A narrowed library that shows nothing is a search result, not an
             // empty shelf -- and the way out is to widen, not to make a print.

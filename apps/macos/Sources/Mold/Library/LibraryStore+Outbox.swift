@@ -40,14 +40,14 @@ extension LibraryStore {
                 do {
                     try await send(entry, to: client)
                     outbox.succeeded(entry.id)
-                    failures[host] = nil
+                    hosts.succeeded(on: host)
                 } catch {
                     let transient = (error as? MoldClientError)?.isTransient ?? false
                     if transient, entry.attempts < Self.maxAttempts {
                         outbox.retry(entry.id)
                         try? await Task.sleep(for: .seconds(pow(2.0, Double(entry.attempts - 1))))
                     } else {
-                        failures[host] = entry.change.failureSentence
+                        hosts.report(error, on: host, doing: entry.change.verb)
                         outbox.failed(entry.id)
                         await relist(host)
                     }

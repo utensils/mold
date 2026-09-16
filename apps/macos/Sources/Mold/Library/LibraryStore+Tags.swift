@@ -31,13 +31,16 @@ extension LibraryStore {
 
         Task {
             for host in hosts.hosts {
-                do { _ = try await hosts.backend(for: host).renameTag(name, to: clean) } catch {
+                do {
+                    _ = try await hosts.backend(for: host).renameTag(name, to: clean)
+                    hosts.succeeded(on: host.id)
+                } catch {
                     // A machine that has never seen the tag answers 404, which
                     // is not a failure of the rename -- it is a machine with
                     // nothing to rename.
                     if let mold = error as? MoldClientError,
                        case let .http(status, _, _) = mold, status == 404 { continue }
-                    failures[host.id] = "Couldn't rename \(name)."
+                    hosts.report(error, on: host.id, doing: "rename the tag “\(name)”")
                 }
             }
             await reloadTags()
@@ -57,7 +60,12 @@ extension LibraryStore {
 
         Task {
             for host in hosts.hosts {
-                try? await hosts.backend(for: host).deleteTag(name)
+                do {
+                    try await hosts.backend(for: host).deleteTag(name)
+                    hosts.succeeded(on: host.id)
+                } catch {
+                    hosts.report(error, on: host.id, doing: "delete the tag “\(name)”")
+                }
             }
             await reloadTags()
         }
@@ -87,7 +95,15 @@ extension LibraryStore {
     private func reloadTags() async {
         etags.removeAll()
         for host in hosts.hosts {
-            if let tags = try? await hosts.backend(for: host).tags() { tagsPerHost[host.id] = tags }
+            do {
+                tagsPerHost[host.id] = try await hosts.backend(for: host).tags()
+                // Scoped to its own verb: this is a passive refresh that runs
+                // after every rename and delete, and must not silently clear
+                // a failure THAT action just reported.
+                hosts.succeeded(on: host.id, doing: "read its tags")
+            } catch {
+                hosts.report(error, on: host.id, doing: "read its tags")
+            }
         }
     }
 }

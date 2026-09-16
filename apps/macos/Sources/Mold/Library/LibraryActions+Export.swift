@@ -21,8 +21,14 @@ extension LibraryActions {
     func export(_ entry: LibraryEntry, as format: String) {
         Task {
             guard let client = hosts.backend(for: entry.hostID) else { return }
-            guard let data = try? await client.export(entry.print.filename, format: format)
-            else { return }
+            let data: Data
+            do {
+                data = try await client.export(entry.print.filename, format: format)
+                hosts.succeeded(on: entry.hostID)
+            } catch {
+                hosts.report(error, on: entry.hostID, doing: "export that print")
+                return
+            }
 
             let panel = NSSavePanel()
             let stem = (entry.print.filename as NSString).deletingPathExtension

@@ -17,6 +17,9 @@ final class HostStore {
     internal(set) var capabilities: [MoldHost.ID: Capabilities] = [:]
     /// What each machine will convert a stored print into.
     internal(set) var exportOptions: [MoldHost.ID: ExportOptions] = [:]
+    /// What every store's failures funnel into. Newest first. See
+    /// `HostStore+Failures`.
+    internal(set) var failures: [HostFailure] = []
 
     /// One live `/api/events` connection per machine. See `HostStore+Events`.
     var watchers: [MoldHost.ID: Task<Void, Never>] = [:]
