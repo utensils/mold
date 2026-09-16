@@ -14,6 +14,10 @@ public enum PrintChange: Hashable, Sendable {
     /// creates it, while removal names the `slug` every machine agrees on.
     /// An inverse needs whichever one it is about to use.
     case collection(name: String, slug: String, filing: Bool)
+    /// Renaming one print. Carries BOTH ends, because a title's inverse cannot
+    /// be worked out from the new value -- only the caller ever knew the old
+    /// one, and by the time undo runs the screen no longer does.
+    case title(from: String, to: String)
 
     /// What the Edit menu says after "Undo". Sentence-cased for a menu item,
     /// and never containing the count -- macOS undo names the action, not the
@@ -24,6 +28,8 @@ public enum PrintChange: Hashable, Sendable {
         case let .tag(_, adding): adding ? "Tag" : "Remove Tag"
         case let .collection(name, _, filing):
             filing ? "Move to \(name)" : "Remove from \(name)"
+        case let .title(_, to):
+            to.isEmpty ? "Clear Title" : "Rename"
         }
     }
 
@@ -33,6 +39,8 @@ public enum PrintChange: Hashable, Sendable {
         case let .tag(name, adding): .tag(name, adding: !adding)
         case let .collection(name, slug, filing):
             .collection(name: name, slug: slug, filing: !filing)
+        case let .title(from, to):
+            .title(from: to, to: from)
         }
     }
 }
@@ -94,6 +102,10 @@ public struct PrintEdit: Hashable, Sendable {
         case let .collection(_, _, filing):
             guard let collectionID else { return filing }
             return (print.collections ?? []).contains(collectionID) != filing
+        case let .title(_, to):
+            // An untitled print has no title, not an empty one, so clearing
+            // what was never set is not a change.
+            return (print.title ?? "") != to
         }
     }
 }

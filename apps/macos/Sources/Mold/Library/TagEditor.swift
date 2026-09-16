@@ -6,12 +6,25 @@ import SwiftUI
 ///
 /// Shows the tags EVERY selected print has. A tag on only some of them would
 /// be a lie in a control whose remove button acts on all of them.
+/// A tag a sheet is about.
+///
+/// A wrapper rather than a retroactive `Identifiable` on `String`: conforming
+/// a stdlib type in an app target is a conflict waiting for whichever library
+/// does it next, and it would make every string in the app look presentable in
+/// a `sheet(item:)`.
+struct TagName: Identifiable, Hashable {
+    let name: String
+    var id: String { name }
+    init(_ name: String) { self.name = name }
+}
+
 struct TagEditor: View {
     let entries: [LibraryEntry]
     let actions: LibraryActions
     let filterBy: (String) -> Void
 
     @State private var adding = ""
+    @State private var renaming: TagName?
     @FocusState private var typing: Bool
 
     var body: some View {
@@ -31,6 +44,9 @@ struct TagEditor: View {
                     actions.setTag(adding, adding: true, on: entries)
                     adding = ""
                 }
+        }
+        .sheet(item: $renaming) { subject in
+            TagNameSheet(tag: subject.name) { actions.renameTag(subject.name, to: $0) }
         }
     }
 
@@ -58,5 +74,14 @@ struct TagEditor: View {
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
         .background(Chrome.wellFill, in: Capsule())
+        // Renaming and deleting reach EVERY print on EVERY machine, which is a
+        // different act from taking the tag off this one -- so it lives on the
+        // contextual menu and says so, rather than sitting next to the x.
+        .contextMenu {
+            Button("Show Everything Tagged \u{201C}\(tag)\u{201D}") { filterBy(tag) }
+            Divider()
+            Button("Rename Tag Everywhere…") { renaming = TagName(tag) }
+            Button("Delete Tag Everywhere…", role: .destructive) { actions.deleteTag(tag) }
+        }
     }
 }

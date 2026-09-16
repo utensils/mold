@@ -75,6 +75,7 @@ extension PrintChange {
         case .tag: "Couldn't change those tags."
         case let .collection(name, _, filing):
             filing ? "Couldn't file those into \(name)." : "Couldn't take those out of \(name)."
+        case .title: "Couldn't rename that print."
         }
     }
 
@@ -99,6 +100,8 @@ extension PrintChange {
             members.removeAll { $0 == collectionID }
             if filing { members.append(collectionID) }
             print.collections = members
+        case let .title(_, to):
+            print.title = to.isEmpty ? nil : to
         }
     }
 }

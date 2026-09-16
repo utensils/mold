@@ -19,6 +19,15 @@ extension LibraryStore {
         apply(PrintEdit.plan(.tag(clean, adding: adding), over: entries), backend: backend)
     }
 
+    /// Names one print. The old name travels with the change so undo can put
+    /// it back -- see `PrintChange.title`.
+    func setTitle(_ title: String, on entry: LibraryEntry,
+                  backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        apply(PrintEdit.plan(.title(from: entry.print.title ?? "", to: clean), over: [entry]),
+              backend: backend)
+    }
+
     /// Trash keeps the bytes and starts a purge countdown; it is not a delete.
     ///
     /// Deliberately NOT on the undo stack. It already has a better answer --

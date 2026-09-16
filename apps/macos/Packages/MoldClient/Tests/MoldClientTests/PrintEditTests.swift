@@ -96,6 +96,36 @@ import Testing
         #expect(edit.isEmpty)
     }
 
+    // MARK: - Titles
+
+    /// A title is the one change whose inverse cannot be derived from the
+    /// change alone -- "call it Helmet" reverses to "call it what it was", and
+    /// only the caller knows that. So the change carries both ends.
+    @Test func aTitleChangeCarriesWhatItWasSoItCanBePutBack() {
+        let entries = [PrintFixtures.entry("a.png", host: plato, title: "Old")]
+        let edit = PrintEdit.plan(.title(from: "Old", to: "New"), over: entries)
+        #expect(edit.targets[plato] == ["a.png"])
+        #expect(edit.inverse.change == .title(from: "New", to: "Old"))
+    }
+
+    @Test func renamingAPrintToWhatItIsCalledIsNoEdit() {
+        let entries = [PrintFixtures.entry("a.png", host: plato, title: "Helmet")]
+        #expect(PrintEdit.plan(.title(from: "Helmet", to: "Helmet"), over: entries).isEmpty)
+    }
+
+    /// An untitled print has no title, not an empty one -- so clearing a title
+    /// that was never set changes nothing.
+    @Test func clearingATitleThatWasNeverSetIsNoEdit() {
+        let entries = [PrintFixtures.entry("a.png", host: plato)]
+        #expect(PrintEdit.plan(.title(from: "", to: ""), over: entries).isEmpty)
+    }
+
+    @Test func clearingARealTitleIsAnEdit() {
+        let entries = [PrintFixtures.entry("a.png", host: plato, title: "Helmet")]
+        #expect(PrintEdit.plan(.title(from: "Helmet", to: ""), over: entries).targets[plato]
+            == ["a.png"])
+    }
+
     // MARK: - Fleets
 
     @Test func targetsAreGroupedByMachine() {
@@ -140,5 +170,8 @@ import Testing
             .actionName == "Move to Hangar")
         #expect(PrintChange.collection(name: "Hangar", slug: "hangar", filing: false)
             .actionName == "Remove from Hangar")
+        #expect(PrintChange.title(from: "Old", to: "New").actionName == "Rename")
+        // Clearing is not renaming, and the Edit menu should say which.
+        #expect(PrintChange.title(from: "Old", to: "").actionName == "Clear Title")
     }
 }

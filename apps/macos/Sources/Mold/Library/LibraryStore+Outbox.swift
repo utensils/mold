@@ -38,7 +38,7 @@ extension LibraryStore {
                     continue
                 }
                 do {
-                    try await client.mutate(mutation(for: entry))
+                    try await send(entry, to: client)
                     outbox.succeeded(entry.id)
                     failures[host] = nil
                 } catch {
@@ -55,6 +55,22 @@ extension LibraryStore {
             // Membership moved, so every machine's collection counts are stale.
             if touchedCollections { await reloadCollections(backend) }
         }
+    }
+
+    /// Sends one queued entry.
+    ///
+    /// A title is the one change that is not a bulk mutation: it is a PATCH on
+    /// a single print, and so it carries no operation id and no fence. That is
+    /// safe precisely because it is idempotent -- setting a title twice is
+    /// setting a title -- where adding a tag twice would not be.
+    private func send(_ entry: MutationOutbox.Entry, to client: HTTPBackend) async throws {
+        if case let .title(_, to) = entry.change {
+            for filename in entry.filenames {
+                try await client.patch(filename, with: GalleryPatch(title: to))
+            }
+            return
+        }
+        try await client.mutate(mutation(for: entry))
     }
 
     /// The wire form of one queued entry.
@@ -75,6 +91,9 @@ extension LibraryStore {
                                 addToCollection: filing ? .named(name) : nil,
                                 removeFromCollectionSlug: filing ? nil : slug,
                                 operationId: entry.id)
+        case .title:
+            // Unreachable: `send` takes titles down the PATCH route above.
+            GalleryBulkMutation(filenames: entry.filenames, operationId: entry.id)
         }
     }
 

@@ -3,6 +3,12 @@ import MoldStyle
 import SwiftUI
 
 /// What the selection is made of, and what you can do with it.
+///
+/// Ordered by how often it is touched, not by how the wire format is shaped:
+/// the name and the filing at the top because those are what people change,
+/// provenance below in a disclosure because it is what people read, and the
+/// actions last. A print's own numbers are all selectable, because the point
+/// of showing a seed is that somebody copies it.
 struct LibraryInspector: View {
     let entries: [LibraryEntry]
     let host: MoldHost?
@@ -10,60 +16,70 @@ struct LibraryInspector: View {
     let actions: LibraryActions
     let filterByTag: (String) -> Void
 
+    @AppStorage("inspectorShowsProvenance", store: AppStorageSuite.defaults)
+    private var showsProvenance = true
+
     var body: some View {
         Group {
             if entries.isEmpty {
                 ContentUnavailableView("Nothing selected", systemImage: "sidebar.right")
-            } else if entries.count == 1, let entry = entries.first {
-                single(entry)
             } else {
-                many
+                ScrollView { content.padding(16) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func single(_ entry: LibraryEntry) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                if let host {
-                    LibraryThumbnail(entry: entry, host: host, edge: 320)
-                        .frame(maxWidth: .infinity)
-                }
-                if let prompt = entry.print.metadata.prompt, !prompt.isEmpty {
-                    Text(prompt)
-                        .font(.callout)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                facts(entry)
-                if !scope.isTrash {
-                    TagEditor(entries: entries, actions: actions, filterBy: filterByTag)
-                }
-                buttons
+    @ViewBuilder private var content: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+            if scope.isTrash {
+                TrashCountdownBlock(entries: entries)
+            } else {
+                organize
             }
-            .padding(16)
+            if entries.count == 1, let entry = entries.first {
+                DisclosureGroup("Provenance", isExpanded: $showsProvenance) {
+                    ProvenanceGrid(entry: entry)
+                        .padding(.top, 6)
+                }
+                .font(.callout)
+            }
+            InspectorActions(entries: entries, scope: scope, actions: actions)
         }
     }
 
-    private var many: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "square.stack")
-                .font(.largeTitle)
-                .foregroundStyle(.tertiary)
-            Text("\(entries.count) prints selected").font(.headline)
-            if let span = machines {
-                Text(span).font(.caption).foregroundStyle(.secondary)
+    /// The picture, then what it is called.
+    @ViewBuilder private var header: some View {
+        if entries.count == 1, let entry = entries.first {
+            if let host {
+                LibraryThumbnail(entry: entry, host: host, edge: 320)
+                    .frame(maxWidth: .infinity)
             }
-            if scope.isTrash {
-                countdown
-            } else {
-                TagEditor(entries: entries, actions: actions, filterBy: filterByTag)
+            if !scope.isTrash {
+                TitleField(entry: entry, actions: actions)
             }
-            buttons
-            Spacer()
+        } else {
+            VStack(spacing: 6) {
+                Image(systemName: "square.stack")
+                    .font(.largeTitle)
+                    .foregroundStyle(.tertiary)
+                Text("\(entries.count) prints selected").font(.headline)
+                if let span = machines {
+                    Text(span).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity)
         }
-        .padding(16)
+    }
+
+    @ViewBuilder private var organize: some View {
+        LabeledSection("Tags") {
+            TagEditor(entries: entries, actions: actions, filterBy: filterByTag)
+        }
+        LabeledSection("Collections") {
+            CollectionsField(entries: entries, actions: actions)
+        }
     }
 
     /// Says when a selection spans machines, because the actions below will
@@ -72,79 +88,26 @@ struct LibraryInspector: View {
         let names = Set(entries.map(\.hostName)).sorted()
         return names.count > 1 ? "On \(names.joined(separator: ", "))" : names.first
     }
+}
 
-    /// Each trashed print carries its OWN countdown, and the trash is never
-    /// collapsed or grouped -- hiding one behind another would let retention
-    /// purge something nobody was ever shown.
-    @ViewBuilder private var countdown: some View {
-        let remaining = entries.compactMap { TrashRetention.remaining(for: $0.print) }
-        if let first = remaining.first {
-            Label(Set(remaining).count == 1 ? first : "Deleting on their own schedules",
-                  systemImage: "clock")
+/// A heading and the thing it names. Small enough to be a shape rather than a
+/// component, but every section wants the same one.
+struct LabeledSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            content
         }
-    }
-
-    @ViewBuilder private var buttons: some View {
-        if scope.isTrash {
-            HStack {
-                // The Finder's own words. "Restore" and "Delete" describe the
-                // mechanism; these describe what happens to your picture.
-                Button("Put Back") { actions.restore(entries) }
-                Button("Delete Immediately…", role: .destructive) {
-                    actions.deleteForever(entries)
-                }
-            }
-        } else {
-            HStack {
-                Button { actions.toggleFavorite(entries) } label: {
-                    Label("Favorite", systemImage: allFavorite ? "star.fill" : "star")
-                }
-                Button { actions.save(entries) } label: {
-                    Label("Save", systemImage: "square.and.arrow.down")
-                }
-                Button { actions.copy(entries) } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
-                }
-                Button(role: .destructive) { actions.moveToTrash(entries) } label: {
-                    Label("Trash", systemImage: "trash")
-                }
-            }
-            .labelStyle(.iconOnly)
-            .buttonStyle(.bordered)
-        }
-    }
-
-    private var allFavorite: Bool { entries.allSatisfy(\.print.isFavorite) }
-
-    private func facts(_ entry: LibraryEntry) -> some View {
-        let meta = entry.print.metadata
-        return Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 6) {
-            row("Machine", entry.hostName)
-            row("Model", meta.model)
-            row("Seed", meta.seed.map(String.init))
-            row("Steps", meta.steps.map(String.init))
-            row("Guidance", meta.guidance.map { $0.formatted(.number.precision(.fractionLength(1))) })
-            row("Size", size(meta))
-            row("Made", entry.createdAt.formatted(date: .abbreviated, time: .shortened))
-            row("File", entry.print.filename)
-        }
-        .font(.caption)
-    }
-
-    private func size(_ meta: OutputMetadata) -> String? {
-        guard let width = meta.width, let height = meta.height else { return nil }
-        guard let frames = meta.frames else { return "\(width) × \(height)" }
-        return "\(width) × \(height) · \(frames) frames"
-    }
-
-    @ViewBuilder private func row(_ label: String, _ value: String?) -> some View {
-        if let value {
-            GridRow {
-                Text(label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                Text(value).textSelection(.enabled).monospacedDigit().lineLimit(3)
-            }
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

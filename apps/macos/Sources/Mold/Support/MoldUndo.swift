@@ -28,20 +28,31 @@ final class MoldUndo {
     /// is what makes redo free: undoing calls it with the inverse, which
     /// registers the inverse's inverse -- the original change again.
     func register(_ edit: PrintEdit, apply: @escaping (PrintEdit) -> Void) {
-        guard !edit.isEmpty, let manager else { return }
+        guard !edit.isEmpty else { return }
         let inverse = edit.inverse
+        register(edit.actionName) { apply(inverse) }
+    }
+
+    /// Registers an inverse for a change that is not about a set of prints --
+    /// renaming a tag across the whole library, say.
+    ///
+    /// `inverse` must go through the same path the original change took. That
+    /// is what makes redo free: undoing calls it, and it registers its own
+    /// inverse in turn, which is the original change again.
+    func register(_ actionName: String, inverse: @escaping () -> Void) {
+        guard let manager else { return }
         manager.registerUndo(withTarget: self) { _ in
             // `UndoManager` calls back on whichever thread invoked undo, and
             // for a menu item that is the main one. The store it is about to
             // touch is `@MainActor`, so state the fact rather than hopping --
             // a hop would let a second undo start before the first finished.
-            MainActor.assumeIsolated { apply(inverse) }
+            MainActor.assumeIsolated { inverse() }
         }
         // While undoing, the registration above IS the redo entry, and naming
         // it after the inverse would put "Redo Unfavorite" in the menu of
         // someone who asked to undo a favourite.
         if !manager.isUndoing {
-            manager.setActionName(edit.actionName)
+            manager.setActionName(actionName)
         }
     }
 
