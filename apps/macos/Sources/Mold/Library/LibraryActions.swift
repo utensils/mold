@@ -12,8 +12,24 @@ struct LibraryActions {
     /// Set by the pane so a print can seed a new render. Absent in contexts
     /// that have no Generate pane to send it to.
     var reuse: ((LibraryEntry) -> Void)?
+    /// Set by the pane, which owns the dialog. Destroying somebody's pictures
+    /// must ask first, and there are three doors into it -- the Delete key,
+    /// the context menu and the inspector -- so the question belongs here
+    /// rather than at each of them.
+    var confirmDestruction: ((Destruction) -> Void)?
 
-    private func backend(_ id: MoldHost.ID) -> (any MoldBackend)? {
+    /// Something permanent, waiting on an answer.
+    struct Destruction: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
+        let verb: String
+        let perform: () -> Void
+    }
+
+    // Internal, not private: `LibraryActions+Destructive` needs it, and the
+    // 150-line lint is what put that half in its own file.
+    func backend(_ id: MoldHost.ID) -> (any MoldBackend)? {
         hosts.hosts.first { $0.id == id }.map { hosts.backend(for: $0) }
     }
 
@@ -40,13 +56,6 @@ struct LibraryActions {
         Task {
             await library.restore(entries, backend: backend)
             await reload()
-        }
-    }
-
-    func deleteForever(_ entries: [LibraryEntry]) {
-        Task {
-            await library.deleteForever(entries, backend: backend)
-            await library.refreshTrash(hosts: hosts.hosts) { hosts.backend(for: $0) }
         }
     }
 
@@ -95,32 +104,6 @@ struct LibraryActions {
                     try? data.write(to: folder.appending(path: entry.print.filename))
                 }
             }
-        }
-    }
-
-    /// What this print can be converted into on the machine that holds it.
-    ///
-    /// The conversion happens THERE, so the app never needs a decoder for
-    /// every container mold can write.
-    func exportFormats(for entry: LibraryEntry) -> [String] {
-        guard let options = hosts.exportOptions[entry.hostID] else { return [] }
-        if entry.print.isMesh { return options.forMesh }
-        if entry.print.isVideo { return options.forVideo }
-        return []
-    }
-
-    /// Converts a print and saves the result.
-    func export(_ entry: LibraryEntry, as format: String) {
-        Task {
-            guard let client = backend(entry.hostID) as? HTTPBackend else { return }
-            guard let data = try? await client.export(entry.print.filename, format: format)
-            else { return }
-
-            let panel = NSSavePanel()
-            let stem = (entry.print.filename as NSString).deletingPathExtension
-            panel.nameFieldStringValue = "\(stem).\(format)"
-            guard await panel.begin() == .OK, let url = panel.url else { return }
-            try? data.write(to: url)
         }
     }
 

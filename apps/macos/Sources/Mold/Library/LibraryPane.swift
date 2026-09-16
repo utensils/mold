@@ -17,9 +17,11 @@ struct LibraryPane: View {
     @State var selection = LibraryCursor.Selection.empty
     @State var viewing: PrintID?
     @State var showsInspector = true
+    @State private var pendingDestruction: LibraryActions.Destruction?
 
     var actions: LibraryActions {
-        LibraryActions(hosts: hosts, library: library, reuse: reuse)
+        LibraryActions(hosts: hosts, library: library, reuse: reuse,
+                       confirmDestruction: { pendingDestruction = $0 })
     }
 
     var body: some View {
@@ -42,7 +44,7 @@ struct LibraryPane: View {
             }
         }
         .navigationTitle(navigation.scope.title(in: library.shelves))
-        .navigationSubtitle(subtitle)
+        .navigationSubtitle(retentionSentence.map { "\(subtitle) · \($0)" } ?? subtitle)
         .searchable(text: $navigation.query.text, tokens: $navigation.query.tokens,
                     suggestedTokens: .constant(suggestedTokens),
                     prompt: "Search prompts, models and tags") { token in
@@ -62,6 +64,19 @@ struct LibraryPane: View {
         })
         .onChange(of: navigation.scope) { _, _ in selection = .empty; viewing = nil }
         .onChange(of: library.shelves) { _, shelves in navigation.reconcile(with: shelves) }
+        // A plain confirm with a danger button. Never a typed phrase: making
+        // somebody retype a word does not make them read the sentence.
+        .confirmationDialog(
+            pendingDestruction?.title ?? "",
+            isPresented: Binding(get: { pendingDestruction != nil },
+                                 set: { if !$0 { pendingDestruction = nil } }),
+            presenting: pendingDestruction
+        ) { destruction in
+            Button(destruction.verb, role: .destructive, action: destruction.perform)
+            Button("Cancel", role: .cancel) {}
+        } message: { destruction in
+            Text(destruction.message)
+        }
     }
 
     // MARK: - Content

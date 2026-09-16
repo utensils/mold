@@ -3,7 +3,7 @@ import Foundation
 // Changing what is in a gallery, and getting things out of it.
 public extension HTTPBackend {
     func patch(_ filename: String, with patch: GalleryPatch) async throws {
-        var request = self.request("/api/gallery/image/\(filename)")
+        var request = self.request("/api/gallery/image/\(escaped(filename))")
         request.httpMethod = "PATCH"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try MoldJSON.encoder.encode(patch)
@@ -52,7 +52,7 @@ public extension HTTPBackend {
     /// The conversion happens on the machine that holds the print, so the app
     /// never needs a decoder for every container mold can write.
     func export(_ filename: String, format: String) async throws -> Data {
-        var request = self.request("/api/gallery/export/\(filename)")
+        var request = self.request("/api/gallery/export/\(escaped(filename))")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["format": format])
@@ -62,7 +62,7 @@ public extension HTTPBackend {
 
     /// The original bytes as stored.
     func media(_ filename: String) async throws -> Data {
-        try await bytes(for: request("/api/gallery/image/\(filename)"))
+        try await bytes(for: request("/api/gallery/image/\(escaped(filename))"))
     }
 
     internal func postRaw<Body: Encodable>(_ path: String, body: Body) async throws -> Data {

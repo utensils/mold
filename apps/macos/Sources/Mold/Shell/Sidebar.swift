@@ -15,6 +15,11 @@ struct Sidebar: View {
 
     @State private var renaming: CollectionShelf?
     @State private var isCreating = false
+    @State private var pendingDestruction: LibraryActions.Destruction?
+
+    private func confirmDestruction(_ destruction: LibraryActions.Destruction) {
+        pendingDestruction = destruction
+    }
 
     var body: some View {
         List(selection: selection) {
@@ -32,6 +37,13 @@ struct Sidebar: View {
                         .tag(Row.shelf(.collection(slug: shelf.slug)))
                 }
                 shelfRow(.trash)
+                    .contextMenu {
+                        Button("Empty Trash…", role: .destructive) {
+                            LibraryActions(hosts: hosts, library: library,
+                                           confirmDestruction: confirmDestruction).emptyTrash()
+                        }
+                        .disabled(library.trashed.isEmpty)
+                    }
                 Button("New Collection…", systemImage: "plus") { isCreating = true }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
@@ -47,6 +59,17 @@ struct Sidebar: View {
         .refreshable { await hosts.refreshAll() }
         .sheet(isPresented: $isCreating) { ShelfNameSheet(shelf: nil) }
         .sheet(item: $renaming) { ShelfNameSheet(shelf: $0) }
+        .confirmationDialog(
+            pendingDestruction?.title ?? "",
+            isPresented: Binding(get: { pendingDestruction != nil },
+                                 set: { if !$0 { pendingDestruction = nil } }),
+            presenting: pendingDestruction
+        ) { destruction in
+            Button(destruction.verb, role: .destructive, action: destruction.perform)
+            Button("Cancel", role: .cancel) {}
+        } message: { destruction in
+            Text(destruction.message)
+        }
     }
 
     private func shelfRow(_ scope: LibraryScope) -> some View {

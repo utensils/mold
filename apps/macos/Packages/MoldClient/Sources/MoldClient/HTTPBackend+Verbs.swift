@@ -37,9 +37,15 @@ extension HTTPBackend {
         _ = try await bytes(for: request(path, method: "DELETE"))
     }
 
-    /// A path component that may contain anything a person typed -- a tag can
-    /// hold a slash, a space or a `#`.
+    /// One path component, whatever a person put in it.
+    ///
+    /// A tag can hold a slash, a space or a `#`, and a print's filename folds
+    /// in a title slug. `/` is subtracted from the allowed set BECAUSE it is
+    /// allowed in a path: left alone it would silently split one component
+    /// into two and address a different route.
     func escaped(_ component: String) -> String {
-        component.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? component
+        component.addingPercentEncoding(
+            withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))
+        ) ?? component
     }
 }

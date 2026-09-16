@@ -43,4 +43,10 @@ extension LibraryPane {
                                    description: Text(navigation.scope.emptyMessage))
         }
     }
+
+    /// What the trash promises, in the machines' own terms.
+    var retentionSentence: String? {
+        guard navigation.scope.isTrash else { return nil }
+        return TrashRetention.sentence(for: hosts.hosts, capabilities: hosts.capabilities)
+    }
 }

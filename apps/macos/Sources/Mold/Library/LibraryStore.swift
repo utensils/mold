@@ -31,6 +31,9 @@ final class LibraryStore {
     func refresh(hosts: [MoldHost], using backend: (MoldHost) -> any MoldBackend) async {
         isLoading = true
         defer { isLoading = false }
+        // A machine that was removed must not keep contributing prints to a
+        // merged timeline nobody can attribute them from.
+        prune(to: hosts)
 
         await withTaskGroup(of: (MoldHost, Result<Fetched<[GalleryPrint]>, Error>).self) { group in
             for host in hosts {
@@ -68,13 +71,24 @@ final class LibraryStore {
         }
     }
 
-    /// Drops hosts the user has removed, so their prints don't linger.
+    /// Drops machines that are no longer in the list, so their prints don't
+    /// linger. Called from `refresh`, because removing a machine is exactly
+    /// when nobody thinks to reload the library.
     func prune(to hosts: [MoldHost]) {
         let live = Set(hosts.map(\.id))
+        guard perHost.keys.contains(where: { !live.contains($0) })
+            || trashPerHost.keys.contains(where: { !live.contains($0) })
+        else { return }
         perHost = perHost.filter { live.contains($0.key) }
+        trashPerHost = trashPerHost.filter { live.contains($0.key) }
         etags = etags.filter { live.contains($0.key) }
+        trashEtags = trashEtags.filter { live.contains($0.key) }
         failures = failures.filter { live.contains($0.key) }
+        collectionsPerHost = collectionsPerHost.filter { live.contains($0.key) }
+        tagsPerHost = tagsPerHost.filter { live.contains($0.key) }
         rebuild()
+        trashed = trashPerHost.values.flatMap(\.self)
+            .sorted { ($0.print.trashedAt ?? 0) > ($1.print.trashedAt ?? 0) }
     }
 
     func rebuild() {

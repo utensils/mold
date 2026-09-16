@@ -55,7 +55,9 @@ struct LibraryInspector: View {
             if let span = machines {
                 Text(span).font(.caption).foregroundStyle(.secondary)
             }
-            if !scope.isTrash {
+            if scope.isTrash {
+                countdown
+            } else {
                 TagEditor(entries: entries, actions: actions, filterBy: filterByTag)
             }
             buttons
@@ -71,11 +73,28 @@ struct LibraryInspector: View {
         return names.count > 1 ? "On \(names.joined(separator: ", "))" : names.first
     }
 
+    /// Each trashed print carries its OWN countdown, and the trash is never
+    /// collapsed or grouped -- hiding one behind another would let retention
+    /// purge something nobody was ever shown.
+    @ViewBuilder private var countdown: some View {
+        let remaining = entries.compactMap { TrashRetention.remaining(for: $0.print) }
+        if let first = remaining.first {
+            Label(Set(remaining).count == 1 ? first : "Deleting on their own schedules",
+                  systemImage: "clock")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     @ViewBuilder private var buttons: some View {
         if scope.isTrash {
             HStack {
+                // The Finder's own words. "Restore" and "Delete" describe the
+                // mechanism; these describe what happens to your picture.
                 Button("Put Back") { actions.restore(entries) }
-                Button("Delete", role: .destructive) { actions.deleteForever(entries) }
+                Button("Delete Immediately…", role: .destructive) {
+                    actions.deleteForever(entries)
+                }
             }
         } else {
             HStack {
