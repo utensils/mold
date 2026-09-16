@@ -8,9 +8,17 @@ extension HostStore {
     /// one is constructed anywhere else, which keeps "what is this app
     /// talking to" a decision in one file -- and is what makes swapping in
     /// the in-process engine a change here rather than everywhere.
-    func backend(for host: MoldHost) -> any MoldBackend {
-        HTTPBackend(host: host)
-    }
+    static let http: @MainActor (MoldHost) -> any MoldBackend = { HTTPBackend(host: $0) }
+
+    func backend(for host: MoldHost) -> any MoldBackend { makeBackend(host) }
+
+    /// The backend for a machine still in the list. `nil` means it was
+    /// removed -- the caller's request has nowhere left to go.
+    func backend(for id: MoldHost.ID) -> (any MoldBackend)? { host(id).map(backend(for:)) }
+
+    func host(_ id: MoldHost.ID) -> MoldHost? { hosts.first { $0.id == id } }
+
+    func name(of id: MoldHost.ID) -> String? { host(id)?.name }
 
     func refreshAll() async {
         await withTaskGroup(of: Void.self) { group in

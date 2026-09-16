@@ -132,13 +132,13 @@ struct ModelsPane: View {
     private func install(_ model: Model) {
         guard let host else { return }
         Task {
-            await downloads.install(model, on: host, backend: hosts.backend(for: host))
+            await downloads.install(model, on: host)
         }
     }
 
     private func load() async {
         await hosts.refreshAll()
-        await models.refresh(hosts: hosts.hosts) { hosts.backend(for: $0) }
+        await models.refresh()
         if hostID == nil { hostID = hosts.preferredHost?.id }
     }
 }

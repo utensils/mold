@@ -6,6 +6,7 @@ import MoldClient
 @MainActor
 @Observable
 final class GenerateController {
+    private let hosts: HostStore
     var draft = RenderDraft()
     var hostID: MoldHost.ID?
     var modelName: String?
@@ -22,6 +23,10 @@ final class GenerateController {
     var run: RunState = .idle
     var runTask: Task<Void, Never>?
     var activeBatch: (id: String, host: MoldHost.ID)?
+
+    init(hosts: HostStore) {
+        self.hosts = hosts
+    }
 
     /// Adopts a model while KEEPING the draft that was just restored.
     ///
@@ -50,13 +55,14 @@ final class GenerateController {
     ///
     /// Read-only -- it reserves nothing. Debounced, because it fires on every
     /// control change and a slider produces a great many of those.
-    func refreshPlacement(using backend: @escaping () -> (any MoldBackend)?) {
+    func refreshPlacement(on host: MoldHost) {
         placementTask?.cancel()
         guard let modelName else { return }
         let request = draft.request(model: modelName)
+        let client = hosts.backend(for: host)
         placementTask = Task {
             try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled, let client = backend() else { return }
+            guard !Task.isCancelled else { return }
             do {
                 placement = try await client.placementPreview(request, copies: 1)
                 placementError = nil

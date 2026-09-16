@@ -10,7 +10,8 @@ private func entry(_ n: Int, day: Int) -> LibraryEntry {
     // means older, so the grid order is n ascending.
     let base = UInt64(Date.now.timeIntervalSince1970) - UInt64(day * 86_400)
     let meta = try! MoldJSON.decoder.decode(OutputMetadata.self, from: Data("{}".utf8))
-    return LibraryEntry(hostID: host, hostName: "h", print: GalleryPrint(
+    return LibraryEntry(host: MoldHost(id: host, name: "h", baseURL: URL(string: "http://h")!),
+                       print: GalleryPrint(
         filename: "d\(day)-\(n).png", metadata: meta, timestamp: base - UInt64(n),
         format: "png", sizeBytes: 1, mediaVersion: "v", title: nil, tags: nil,
         favorite: nil, collections: nil, trashedAt: nil, purgeAt: nil))

@@ -12,6 +12,7 @@ struct ResultBar: View {
     let host: MoldHost?
     let showInLibrary: () -> Void
 
+    @Environment(HostStore.self) private var hosts
     @State private var saving = false
 
     var body: some View {
@@ -45,11 +46,7 @@ struct ResultBar: View {
 
     private func bytes() async -> Data? {
         guard let host, let filename = result.filename else { return nil }
-        var request = URLRequest(url: MediaURL(baseURL: host.baseURL).media(filename))
-        if let key = host.apiKey, !key.isEmpty {
-            request.setValue(key, forHTTPHeaderField: "X-Api-Key")
-        }
-        return try? await URLSession.shared.data(for: request).0
+        return try? await hosts.backend(for: host).media(filename, trashed: false)
     }
 
     private func save() async {

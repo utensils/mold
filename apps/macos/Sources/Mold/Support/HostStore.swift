@@ -26,6 +26,13 @@ final class HostStore {
     /// reconnection.
     var instanceIDs: [MoldHost.ID: String] = [:]
 
+    /// How a machine's requests actually get made. A stored property, because
+    /// it cannot live in an extension -- and this file may not construct a
+    /// concrete backend itself, so the default reaches into `+Reachability`
+    /// for one. Not `private`: `backend(for:)` reads it from that other file,
+    /// and `private` does not cross a file boundary even within one type.
+    let makeBackend: @MainActor (MoldHost) -> any MoldBackend
+
     /// `Equatable` so a view can watch it. Without the conformance
     /// `.onChange(of: hosts.reachability)` has no valid overload, and rather
     /// than saying so the type checker searches until it gives up on the whole
@@ -41,8 +48,10 @@ final class HostStore {
         case down(String)
     }
 
-    init(hosts: [MoldHost]) {
+    init(hosts: [MoldHost],
+         makeBackend: @escaping @MainActor (MoldHost) -> any MoldBackend = HostStore.http) {
         self.hosts = hosts
+        self.makeBackend = makeBackend
     }
 }
 

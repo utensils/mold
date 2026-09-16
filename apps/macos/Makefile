@@ -80,8 +80,9 @@ uat: build ## Launch against a throwaway prefs domain and a throwaway mold home
 	@MOLD_NATIVE_FRESH=1 MOLD_HOME="$(UAT_HOME)" \
 	  ./build/$(CONFIG)/Mold.app/Contents/MacOS/Mold
 
-test: ## Run package tests
+test: gen ## Run every test bundle: the package, then the app's own store tests
 	@cd Packages/MoldClient && swift test
+	@$(XCB) -destination 'platform=macOS,arch=arm64' test | grep -Ev '^\s*$$' | tail -5
 
 lint: lint-layers lint-color lint-size ## Run every architecture lint
 

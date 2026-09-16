@@ -34,7 +34,7 @@ enum PrintFixtures {
                       favorite: Bool? = nil, title: String? = nil, collections: [String]? = nil,
                       prompt: String? = nil, bytes: Int? = 100) -> LibraryEntry {
         LibraryEntry(
-            hostID: host, hostName: hostName,
+            host: MoldHost(id: host, name: hostName, baseURL: URL(string: "http://h")!),
             print: print(filename, timestamp: timestamp, format: format, tags: tags,
                          favorite: favorite, title: title, collections: collections,
                          prompt: prompt, bytes: bytes)

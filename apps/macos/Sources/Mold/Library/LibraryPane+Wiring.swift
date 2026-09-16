@@ -21,7 +21,7 @@ extension LibraryPane {
     func entry(_ id: PrintID) -> LibraryEntry? { visible.first { $0.id == id } }
 
     func host(of entry: LibraryEntry) -> MoldHost? {
-        hosts.hosts.first { $0.id == entry.hostID }
+        hosts.host(entry.hostID)
     }
 
     /// Walks the viewer through the list the grid is showing.

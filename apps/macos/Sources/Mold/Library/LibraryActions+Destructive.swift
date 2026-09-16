@@ -18,8 +18,8 @@ extension LibraryActions {
             verb: "Delete Immediately"
         ) {
             Task {
-                await library.deleteForever(entries, backend: backend)
-                await library.refreshTrash(hosts: hosts.hosts) { hosts.backend(for: $0) }
+                await library.deleteForever(entries)
+                await library.refreshTrash()
             }
         })
     }
@@ -35,12 +35,7 @@ extension LibraryActions {
                 + " will be deleted from every machine. This cannot be undone.",
             verb: "Empty Trash"
         ) {
-            Task {
-                for host in hosts.hosts {
-                    try? await hosts.backend(for: host).emptyTrash()
-                }
-                await library.refreshTrash(hosts: hosts.hosts) { hosts.backend(for: $0) }
-            }
+            Task { await library.emptyTrash() }
         })
     }
 }

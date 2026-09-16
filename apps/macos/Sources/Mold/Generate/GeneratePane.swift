@@ -100,7 +100,7 @@ struct GeneratePane: View {
         // Reachability decides which machine we land on, so make sure it is
         // known before choosing one.
         await hosts.refreshAll()
-        await models.refresh(hosts: hosts.hosts) { hosts.backend(for: $0) }
+        await models.refresh()
         // Nothing chosen yet: start on something the machine can actually run.
         if controller.modelName == nil, let host,
            let first = models.ready(on: host.id).first {
@@ -119,9 +119,7 @@ struct GeneratePane: View {
     }
 
     private func refreshPlacement() {
-        controller.refreshPlacement {
-            guard let host else { return nil }
-            return hosts.backend(for: host)
-        }
+        guard let host else { return }
+        controller.refreshPlacement(on: host)
     }
 }

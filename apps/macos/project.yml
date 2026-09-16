@@ -62,3 +62,27 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         ENABLE_PREVIEWS: "YES"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Mold/Engine/MoldEngineBridge.h
+    scheme:
+      testTargets:
+        - MoldTests
+      # A host-app test bundle LAUNCHES the app, so the scheme needs the same
+      # throwaway prefs domain and scratch home `make uat` uses -- otherwise a
+      # test run reads and writes the real machine list. The target-level
+      # `scheme:` shorthand has no separate test/run split, which is fine here:
+      # nothing else uses this scheme's launch action.
+      environmentVariables:
+        MOLD_NATIVE_FRESH: "1"
+        MOLD_HOME: "$(TEMP_DIR)/mold-native-tests"
+
+  MoldTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/MoldTests
+    dependencies:
+      - target: Mold
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Mold.app/Contents/MacOS/Mold"
+        BUNDLE_LOADER: "$(TEST_HOST)"

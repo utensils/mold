@@ -10,18 +10,31 @@ import SwiftUI
 /// later is a change to this file rather than to the app.
 @main
 struct MoldApp: App {
-    @State private var hosts = HostStore(hosts: HostStore.seededHosts())
-    @State private var library = LibraryStore()
+    @State private var hosts: HostStore
+    @State private var library: LibraryStore
     @State private var libraryNavigation = LibraryNavigation()
     @State private var thumbnails = ThumbnailCache()
     @State private var materializer = PrintMaterializer()
-    @State private var models = ModelStore()
-    @State private var generate = GenerateController()
-    @State private var queue = QueueStore()
-    @State private var downloads = DownloadStore()
+    @State private var models: ModelStore
+    @State private var generate: GenerateController
+    @State private var queue: QueueStore
+    @State private var downloads: DownloadStore
     @State private var engine = MoldEngine()
     @State private var destination = Destination.launch
     @NSApplicationDelegateAdaptor(MoldAppDelegate.self) private var delegate
+
+    /// `@State` initializers cannot reference each other, so composition
+    /// happens explicitly here: `HostStore` first, since every other store
+    /// is built by asking it which machines exist.
+    init() {
+        let hosts = HostStore(hosts: HostStore.seededHosts())
+        _hosts = State(initialValue: hosts)
+        _library = State(initialValue: LibraryStore(hosts: hosts))
+        _models = State(initialValue: ModelStore(hosts: hosts))
+        _queue = State(initialValue: QueueStore(hosts: hosts))
+        _downloads = State(initialValue: DownloadStore(hosts: hosts))
+        _generate = State(initialValue: GenerateController(hosts: hosts))
+    }
 
     var body: some Scene {
         Window("Mold", id: "main") {

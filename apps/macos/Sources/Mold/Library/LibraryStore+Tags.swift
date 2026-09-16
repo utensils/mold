@@ -13,8 +13,12 @@ extension LibraryStore {
     ///
     /// Undoable, because it is exactly reversible: the inverse of a rename is
     /// the rename back, and nothing is lost on the way.
-    func renameTag(_ name: String, to newName: String,
-                   backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
+    ///
+    /// Reaches every machine `HostStore` knows about, not just the ones that
+    /// have reported a tag already: a machine whose `tags()` call never landed
+    /// (or simply hasn't been asked yet) still carries the tag on its prints,
+    /// and skipping it left a rename half-done with no sign anything was wrong.
+    func renameTag(_ name: String, to newName: String) {
         let clean = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty, clean.caseInsensitiveCompare(name) != .orderedSame else { return }
 
@@ -22,22 +26,21 @@ extension LibraryStore {
         // as you press Return rather than a round trip later.
         retag(name, to: clean)
         undo.register("Rename Tag") { [weak self] in
-            self?.renameTag(clean, to: name, backend: backend)
+            self?.renameTag(clean, to: name)
         }
 
         Task {
-            for hostID in tagsPerHost.keys {
-                guard let client = backend(hostID) else { continue }
-                do { _ = try await client.renameTag(name, to: clean) } catch {
+            for host in hosts.hosts {
+                do { _ = try await hosts.backend(for: host).renameTag(name, to: clean) } catch {
                     // A machine that has never seen the tag answers 404, which
                     // is not a failure of the rename -- it is a machine with
                     // nothing to rename.
                     if let mold = error as? MoldClientError,
                        case let .http(status, _, _) = mold, status == 404 { continue }
-                    failures[hostID] = "Couldn't rename \(name)."
+                    failures[host.id] = "Couldn't rename \(name)."
                 }
             }
-            await reloadTags(backend)
+            await reloadTags()
         }
     }
 
@@ -46,18 +49,17 @@ extension LibraryStore {
     /// NOT undoable, and the caller asks first. Putting it back would mean
     /// knowing which prints carried it, and by the time the answer came back
     /// the machines had already forgotten.
-    func deleteTag(_ name: String, backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
+    func deleteTag(_ name: String) {
         retag(name, to: nil)
         // A tag that no longer exists cannot be renamed back to, and an undo
         // stack that offers it is offering a lie.
         undo.forget()
 
         Task {
-            for hostID in tagsPerHost.keys {
-                guard let client = backend(hostID) else { continue }
-                try? await client.deleteTag(name)
+            for host in hosts.hosts {
+                try? await hosts.backend(for: host).deleteTag(name)
             }
-            await reloadTags(backend)
+            await reloadTags()
         }
     }
 
@@ -76,18 +78,16 @@ extension LibraryStore {
                     tags.append(replacement)
                 }
                 mutable.tags = tags
-                return LibraryEntry(hostID: entry.hostID, hostName: entry.hostName,
-                                    print: mutable.build())
+                return entry.replacingPrint(mutable.build())
             }
         }
         rebuild()
     }
 
-    private func reloadTags(_ backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
+    private func reloadTags() async {
         etags.removeAll()
-        for hostID in tagsPerHost.keys {
-            guard let client = backend(hostID) else { continue }
-            if let tags = try? await client.tags() { tagsPerHost[hostID] = tags }
+        for host in hosts.hosts {
+            if let tags = try? await hosts.backend(for: host).tags() { tagsPerHost[host.id] = tags }
         }
     }
 }

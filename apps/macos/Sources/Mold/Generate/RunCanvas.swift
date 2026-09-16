@@ -11,6 +11,7 @@ struct RunCanvas: View {
     /// the buttons under it -- tucks the prompt away and brings it back.
     let togglePrompt: () -> Void
 
+    @Environment(HostStore.self) private var hosts
     @State private var preview: NSImage?
     @State private var result: NSImage?
 
@@ -91,11 +92,8 @@ struct RunCanvas: View {
 
     private func loadResult() async {
         guard let filename = resultFilename, let host else { result = nil; return }
-        var request = URLRequest(url: MediaURL(baseURL: host.baseURL).media(filename))
-        if let key = host.apiKey, !key.isEmpty {
-            request.setValue(key, forHTTPHeaderField: "X-Api-Key")
-        }
-        guard let (data, _) = try? await URLSession.shared.data(for: request) else { return }
+        guard let data = try? await hosts.backend(for: host).media(filename, trashed: false)
+        else { return }
         result = NSImage(data: data)
     }
 }

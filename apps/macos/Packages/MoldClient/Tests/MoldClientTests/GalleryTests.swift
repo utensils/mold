@@ -56,7 +56,8 @@ private func loadPrints() throws -> [GalleryPrint] {
 
 @Test func searchIsFoldedAndEveryTokenMustMatch() throws {
     let raw = try #require(loadPrints().first)
-    let item = LibraryEntry(hostID: UUID(), hostName: "hal9000", print: raw)
+    let item = LibraryEntry(host: MoldHost(id: UUID(), name: "hal9000", baseURL: URL(string: "http://h")!),
+                            print: raw)
     let prompt = try #require(item.print.metadata.prompt)
     let word = try #require(prompt.split(separator: " ").first.map(String.init))
 
@@ -68,7 +69,8 @@ private func loadPrints() throws -> [GalleryPrint] {
 
 @Test func searchCoversTheModelAndTheHostNotJustThePrompt() throws {
     let item = try #require(loadPrints().first { $0.metadata.model != nil })
-    let library = LibraryEntry(hostID: UUID(), hostName: "plato", print: item)
+    let library = LibraryEntry(host: MoldHost(id: UUID(), name: "plato", baseURL: URL(string: "http://h")!),
+                               print: item)
     #expect(library.matches("plato"))
     #expect(library.matches(try #require(item.metadata.model)))
 }
@@ -76,4 +78,17 @@ private func loadPrints() throws -> [GalleryPrint] {
 @Test func searchIgnoresDiacritics() {
     let folded = LibraryEntry.fold("Café Übung")
     #expect(folded == "cafe ubung")
+}
+
+@Test func aRowRebuiltFromANewPrintRefoldsItsSearchKey() {
+    let host = MoldHost(id: UUID(), name: "plato", baseURL: URL(string: "http://h")!)
+    let entry = PrintFixtures.entry("a.png", host: host.id, hostName: host.name, prompt: "owls")
+    let rebuilt = entry.replacingPrint(PrintFixtures.print("a.png", prompt: "a brass helmet"))
+
+    // The machine identity carries over untouched...
+    #expect(rebuilt.hostID == entry.hostID)
+    #expect(rebuilt.hostName == entry.hostName)
+    // ...but the search key is folded again from the NEW print, not the old one.
+    #expect(rebuilt.matches("helmet"))
+    #expect(!rebuilt.matches("owls"))
 }

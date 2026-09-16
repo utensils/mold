@@ -14,7 +14,7 @@ private func item(_ secondsAgo: Int, host: UUID = UUID()) -> LibraryEntry {
     let stamp = noon - UInt64(secondsAgo)
     let meta = try! MoldJSON.decoder.decode(OutputMetadata.self, from: Data("{}".utf8))
     return LibraryEntry(
-        hostID: host, hostName: "h",
+        host: MoldHost(id: host, name: "h", baseURL: URL(string: "http://h")!),
         print: GalleryPrint(
             filename: "f-\(secondsAgo)-\(host).png", metadata: meta, timestamp: stamp,
             format: "png", sizeBytes: 1, mediaVersion: "v", title: nil, tags: nil,

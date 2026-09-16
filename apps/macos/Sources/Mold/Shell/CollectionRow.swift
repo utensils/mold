@@ -10,7 +10,6 @@ struct CollectionRow: View {
     let shelf: CollectionShelf
     @Binding var renaming: CollectionShelf?
 
-    @Environment(HostStore.self) private var hosts
     @Environment(LibraryStore.self) private var library
     @State private var isTargeted = false
     @State private var isConfirmingDelete = false
@@ -35,15 +34,14 @@ struct CollectionRow: View {
         .contextMenu {
             Button("Rename…") { renaming = shelf }
             Button(shelf.hidden ? "Show in All Prints" : "Hide from All Prints") {
-                Task { await library.setShelfHidden(shelf, hidden: !shelf.hidden,
-                                                    backend: backend) }
+                Task { await library.setShelfHidden(shelf, hidden: !shelf.hidden) }
             }
             Divider()
             Button("Delete Collection…", role: .destructive) { isConfirmingDelete = true }
         }
         .confirmationDialog("Delete “\(shelf.name)”?", isPresented: $isConfirmingDelete) {
             Button("Delete Collection", role: .destructive) {
-                Task { await library.deleteShelf(shelf, backend: backend) }
+                Task { await library.deleteShelf(shelf) }
             }
         } message: {
             // Worth saying plainly: people hesitate over this exact question.
@@ -63,11 +61,7 @@ struct CollectionRow: View {
     private func file(_ ids: [PrintID]) {
         let entries = library.items.filter { ids.contains($0.id) }
         guard !entries.isEmpty else { return }
-        library.file(entries, into: shelf, backend: backend)
-    }
-
-    private func backend(_ id: MoldHost.ID) -> (any MoldBackend)? {
-        hosts.hosts.first { $0.id == id }.map { hosts.backend(for: $0) }
+        library.file(entries, into: shelf)
     }
 }
 
@@ -106,17 +100,13 @@ struct ShelfNameSheet: View {
         let named = trimmed
         Task {
             if let shelf {
-                await library.renameShelf(shelf, to: named, backend: backend)
+                await library.renameShelf(shelf, to: named)
             } else if let first = hosts.hosts.first {
                 // Made on one machine; the others get their copy the first
                 // time something of theirs is filed into it.
-                await library.createShelf(named: named, on: first.id, backend: backend)
+                await library.createShelf(named: named, on: first.id)
             }
         }
         dismiss()
-    }
-
-    private func backend(_ id: MoldHost.ID) -> (any MoldBackend)? {
-        hosts.hosts.first { $0.id == id }.map { hosts.backend(for: $0) }
     }
 }

@@ -57,13 +57,12 @@ struct QueuePane: View {
     }
 
     private func act(_ action: QueueRow.Action, on entry: QueueEntry, host: MoldHost) {
-        let backend = hosts.backend(for: host)
         Task {
             switch action {
-            case .cancel: await queue.cancel(entry, on: host.id, backend: backend)
-            case .pause: await queue.pause(entry, on: host.id, backend: backend)
-            case .resume: await queue.resume(entry, on: host.id, backend: backend)
-            case .retry: await queue.retry(entry, on: host.id, backend: backend)
+            case .cancel: await queue.cancel(entry, on: host.id)
+            case .pause: await queue.pause(entry, on: host.id)
+            case .resume: await queue.resume(entry, on: host.id)
+            case .retry: await queue.retry(entry, on: host.id)
             }
             await load()
         }
@@ -71,6 +70,6 @@ struct QueuePane: View {
 
     private func load() async {
         await hosts.refreshAll()
-        await queue.refresh(hosts: hosts.hosts) { hosts.backend(for: $0) }
+        await queue.refresh()
     }
 }

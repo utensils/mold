@@ -17,12 +17,12 @@ extension LibraryStore {
     /// than watching an edit hang indefinitely on a machine they turned off.
     private static let maxAttempts = 4
 
-    func send(_ edit: PrintEdit, backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
+    func send(_ edit: PrintEdit) {
         outbox.enqueue(edit)
-        for host in outbox.waiting { drain(host, backend) }
+        for host in outbox.waiting { drain(host) }
     }
 
-    private func drain(_ host: MoldHost.ID, _ backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
+    private func drain(_ host: MoldHost.ID) {
         // One task per machine, so its chain stays a chain. A second edit
         // arriving mid-drain joins the queue the running task is already
         // walking.
@@ -32,7 +32,7 @@ extension LibraryStore {
             var touchedCollections = false
             while let entry = outbox.head(for: host) {
                 if case .collection = entry.change { touchedCollections = true }
-                guard let client = backend(host) else {
+                guard let client = hosts.backend(for: host) else {
                     // The machine was removed. Its rows went with it.
                     outbox.failed(entry.id)
                     continue
@@ -48,12 +48,13 @@ extension LibraryStore {
                         try? await Task.sleep(for: .seconds(pow(2.0, Double(entry.attempts - 1))))
                     } else {
                         failures[host] = entry.change.failureSentence
-                        await repair(outbox.failed(entry.id), on: host, backend)
+                        outbox.failed(entry.id)
+                        await relist(host)
                     }
                 }
             }
             // Membership moved, so every machine's collection counts are stale.
-            if touchedCollections { await reloadCollections(backend) }
+            if touchedCollections { await reloadCollections() }
         }
     }
 
@@ -97,34 +98,13 @@ extension LibraryStore {
         }
     }
 
-    /// Puts the named rows back to what the machine says they are.
-    ///
-    /// Re-lists the machine rather than patching the rows by hand, because the
-    /// server is the authority and this app has just proved it does not know
-    /// what happened. Everything still queued for that machine is then applied
-    /// again on top, so a row with a newer edit in flight keeps showing that
-    /// newer intent -- which is the same rule `failed` uses to decide what to
-    /// repair at all.
-    private func repair(_ filenames: [String], on host: MoldHost.ID,
-                        _ backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
-        guard !filenames.isEmpty, let client = backend(host) else { return }
-        guard let name = hostName(host) else { return }
-        etags[host] = nil
-        guard case let .fresh(prints, etag) = try? await client.gallery(etag: nil) else { return }
-        if let etag { etags[host] = etag }
-        perHost[host] = prints.map { LibraryEntry(hostID: host, hostName: name, print: $0) }
-        replayPending(on: host)
-        rebuild()
-    }
-
-    /// Re-applies every edit still queued for a machine, in order.
-    private func replayPending(on host: MoldHost.ID) {
+    /// Re-applies every edit still queued for a machine, in order, onto rows
+    /// just read from it. Applied locally with `mutate`, never `apply`: these
+    /// edits are already on their way to the machine, and re-enqueuing them
+    /// would send them twice.
+    func replayPending(on host: MoldHost.ID) {
         for pending in outbox.chain(for: host) {
             mutate(PrintEdit(change: pending.change, targets: [host: pending.filenames]))
         }
-    }
-
-    private func hostName(_ host: MoldHost.ID) -> String? {
-        perHost[host]?.first?.hostName ?? trashPerHost[host]?.first?.hostName
     }
 }

@@ -53,7 +53,7 @@ import Testing
         let now = Date(timeIntervalSince1970: 1_000_000)
         let print = PrintFixtures.print("a.png", prompt: "owls", trashedAt: 999_000,
                                         purgeAt: 1_000_000 + 86_400 * 3)
-        let entry = LibraryEntry(hostID: plato, hostName: "plato", print: print)
+        let entry = LibraryEntry(host: MoldHost(id: plato, name: "plato", baseURL: URL(string: "http://h")!), print: print)
         #expect(entry.spokenDescription(showsHost: false, now: now)
             == "owls, picture, deleted, 3 days left")
     }
@@ -62,7 +62,7 @@ import Testing
         let now = Date(timeIntervalSince1970: 1_000_000)
         let print = PrintFixtures.print("a.png", prompt: "owls", trashedAt: 999_000,
                                         purgeAt: 1_000_100)
-        let entry = LibraryEntry(hostID: plato, hostName: "plato", print: print)
+        let entry = LibraryEntry(host: MoldHost(id: plato, name: "plato", baseURL: URL(string: "http://h")!), print: print)
         #expect(entry.spokenDescription(showsHost: false, now: now).hasSuffix("deleted, today"))
     }
 }

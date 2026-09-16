@@ -74,9 +74,8 @@ struct LibraryPane: View {
     /// In that order because the events are DELTAS: a client that has never
     /// read the listings has nothing to apply them to.
     private func start() async {
-        let actions = self.actions
         await actions.reload()
-        library.listen(to: hosts, backend: actions.backend)
+        library.listen()
         hosts.reconcileEventStreams()
     }
 

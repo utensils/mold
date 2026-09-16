@@ -35,11 +35,10 @@ extension LibraryStore {
 
     func shelf(slug: String) -> CollectionShelf? { shelves.first { $0.slug == slug } }
 
-    func refreshOrganization(hosts: [MoldHost],
-                             using backend: (MoldHost) -> any MoldBackend) async {
+    func refreshOrganization() async {
         await withTaskGroup(of: (MoldHost.ID, [Collection]?, [TagCount]?).self) { group in
-            for host in hosts {
-                let client = backend(host)
+            for host in hosts.hosts {
+                let client = hosts.backend(for: host)
                 group.addTask {
                     // Two independent asks: a host with no organization tables
                     // answers neither, and one of them failing must not blank
@@ -64,15 +63,13 @@ extension LibraryStore {
     /// print on another machine must land in that machine's own copy of the
     /// shelf. The host resolves the name by slug and creates it if it has
     /// never seen it, which is what keeps one shelf one shelf.
-    func file(_ entries: [LibraryEntry], into shelf: CollectionShelf,
-              backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
-        apply(filing(entries, shelf, true), backend: backend)
+    func file(_ entries: [LibraryEntry], into shelf: CollectionShelf) {
+        apply(filing(entries, shelf, true))
     }
 
     /// Takes prints off a shelf.
-    func unfile(_ entries: [LibraryEntry], from shelf: CollectionShelf,
-                backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
-        apply(filing(entries, shelf, false), backend: backend)
+    func unfile(_ entries: [LibraryEntry], from shelf: CollectionShelf) {
+        apply(filing(entries, shelf, false))
     }
 
     private func filing(_ entries: [LibraryEntry], _ shelf: CollectionShelf,
@@ -89,42 +86,37 @@ extension LibraryStore {
 
     /// A shelf is made on the machine you are looking at; the others get their
     /// copy the first time something is filed into it there.
-    func createShelf(named name: String, on hostID: MoldHost.ID,
-                     backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
-        guard let client = backend(hostID) else { return }
+    func createShelf(named name: String, on hostID: MoldHost.ID) async {
+        guard let client = hosts.backend(for: hostID) else { return }
         _ = try? await client.createCollection(name: name, description: nil)
-        await reloadCollections(backend)
+        await reloadCollections()
     }
 
     /// Renames every machine's copy, so the shelf does not split in two.
-    func renameShelf(_ shelf: CollectionShelf, to name: String,
-                     backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
+    func renameShelf(_ shelf: CollectionShelf, to name: String) async {
         for (hostID, id) in shelf.hosts {
-            guard let client = backend(hostID) else { continue }
+            guard let client = hosts.backend(for: hostID) else { continue }
             _ = try? await client.updateCollection(id: id, change: CollectionChange(name: name))
         }
-        await reloadCollections(backend)
+        await reloadCollections()
     }
 
     /// Removes the shelf from every machine. The prints stay -- only the
     /// membership goes.
-    func deleteShelf(_ shelf: CollectionShelf,
-                     backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
+    func deleteShelf(_ shelf: CollectionShelf) async {
         for (hostID, id) in shelf.hosts {
-            guard let client = backend(hostID) else { continue }
+            guard let client = hosts.backend(for: hostID) else { continue }
             try? await client.deleteCollection(id: id)
         }
-        await reloadCollections(backend)
+        await reloadCollections()
     }
 
-    func setShelfHidden(_ shelf: CollectionShelf, hidden: Bool,
-                        backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
+    func setShelfHidden(_ shelf: CollectionShelf, hidden: Bool) async {
         for (hostID, id) in shelf.hosts {
-            guard let client = backend(hostID) else { continue }
-            _ = try? await client.updateCollection(id: id,
-                                                   change: CollectionChange(hidden: hidden))
+            guard let client = hosts.backend(for: hostID) else { continue }
+            _ = try? await client.updateCollection(id: id, change: CollectionChange(hidden: hidden))
         }
-        await reloadCollections(backend)
+        await reloadCollections()
     }
 
 }

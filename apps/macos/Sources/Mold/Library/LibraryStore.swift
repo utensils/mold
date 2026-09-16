@@ -10,11 +10,16 @@ import MoldClient
 @MainActor
 @Observable
 final class LibraryStore {
+    /// The one object that knows which machines exist and how to reach them.
+    let hosts: HostStore
+
     private(set) var items: [LibraryEntry] = []
     private(set) var isLoading = false
     var failures: [MoldHost.ID: String] = [:]
 
-    private(set) var trashed: [LibraryEntry] = []
+    /// Set from here and from `+Mutations`'s `refreshTrash()`; `private(set)`
+    /// does not cross that file boundary.
+    internal(set) var trashed: [LibraryEntry] = []
 
     var perHost: [MoldHost.ID: [LibraryEntry]] = [:]
     var trashPerHost: [MoldHost.ID: [LibraryEntry]] = [:]
@@ -41,17 +46,21 @@ final class LibraryStore {
     /// `LibraryStore+Live`.
     var listening: UUID?
 
+    init(hosts: HostStore) {
+        self.hosts = hosts
+    }
+
     /// Prints from every host, newest first.
-    func refresh(hosts: [MoldHost], using backend: (MoldHost) -> any MoldBackend) async {
+    func refresh() async {
         isLoading = true
         defer { isLoading = false }
         // A machine that was removed must not keep contributing prints to a
         // merged timeline nobody can attribute them from.
-        prune(to: hosts)
+        prune(to: hosts.hosts)
 
         await withTaskGroup(of: (MoldHost, Result<Fetched<[GalleryPrint]>, Error>).self) { group in
-            for host in hosts {
-                let client = backend(host)
+            for host in hosts.hosts {
+                let client = hosts.backend(for: host)
                 let etag = etags[host.id]
                 group.addTask {
                     do { return (host, .success(try await client.gallery(etag: etag))) }
@@ -65,14 +74,21 @@ final class LibraryStore {
         rebuild()
     }
 
+    /// Lists, then re-lists the trash and the shelves. Shelves and tags travel
+    /// with the index: reloading one without the other leaves a renamed
+    /// collection still reading its old name.
+    func reload() async {
+        await refresh()
+        await refreshTrash()
+        await refreshOrganization()
+    }
+
     private func apply(_ result: Result<Fetched<[GalleryPrint]>, Error>, for host: MoldHost) {
         switch result {
         case let .success(.fresh(prints, etag)):
             failures[host.id] = nil
             if let etag { etags[host.id] = etag }
-            perHost[host.id] = prints.map {
-                LibraryEntry(hostID: host.id, hostName: host.name, print: $0)
-            }
+            perHost[host.id] = prints.map { LibraryEntry(host: host, print: $0) }
         case .success(.notModified):
             // Nothing changed. Keeping the cached rows is the whole point of
             // having asked conditionally.
@@ -88,10 +104,10 @@ final class LibraryStore {
     /// Drops machines that are no longer in the list, so their prints don't
     /// linger. Called from `refresh`, because removing a machine is exactly
     /// when nobody thinks to reload the library.
-    func prune(to hosts: [MoldHost]) {
-        let live = Set(hosts.map(\.id))
-        guard perHost.keys.contains(where: { !live.contains($0) })
-            || trashPerHost.keys.contains(where: { !live.contains($0) })
+    func prune(to hostList: [MoldHost]) {
+        let live = Set(hostList.map(\.id))
+        guard perHost.contains(where: { !live.contains($0.key) })
+            || trashPerHost.contains(where: { !live.contains($0.key) })
         else { return }
         perHost = perHost.filter { live.contains($0.key) }
         trashPerHost = trashPerHost.filter { live.contains($0.key) }
@@ -112,29 +128,4 @@ final class LibraryStore {
     }
 
     func count(for host: MoldHost.ID) -> Int { perHost[host]?.count ?? 0 }
-
-    // MARK: - Trash
-
-    func refreshTrash(hosts: [MoldHost], using backend: (MoldHost) -> any MoldBackend) async {
-        await withTaskGroup(of: (MoldHost, [LibraryEntry]?, String?).self) { group in
-            for host in hosts {
-                let client = backend(host)
-                let etag = trashEtags[host.id]
-                group.addTask {
-                    guard let fetched = try? await client.trashedPrints(etag: etag)
-                    else { return (host, nil, nil) }
-                    guard let prints = fetched.value else { return (host, nil, nil) }
-                    return (host, prints.map {
-                        LibraryEntry(hostID: host.id, hostName: host.name, print: $0)
-                    }, fetched.etag)
-                }
-            }
-            for await (host, entries, etag) in group {
-                if let entries { trashPerHost[host.id] = entries }
-                if let etag { trashEtags[host.id] = etag }
-            }
-        }
-        trashed = trashPerHost.values.flatMap(\.self)
-            .sorted { ($0.print.trashedAt ?? 0) > ($1.print.trashedAt ?? 0) }
-    }
 }

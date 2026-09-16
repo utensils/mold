@@ -14,10 +14,15 @@ final class DownloadStore {
         var failed: String?
     }
 
+    private let hosts: HostStore
     /// Keyed by host then by the host's job id.
     private(set) var active: [MoldHost.ID: [String: Progress]] = [:]
     private(set) var failure: String?
     private var streams: [MoldHost.ID: Task<Void, Never>] = [:]
+
+    init(hosts: HostStore) {
+        self.hosts = hosts
+    }
 
     func progress(for model: String, on host: MoldHost.ID) -> Progress? {
         active[host]?.values.first { $0.model == model }
@@ -31,30 +36,32 @@ final class DownloadStore {
     ///
     /// A 409 means it is already queued there, which is the outcome the click
     /// wanted -- the client treats it as success and starts watching.
-    func install(_ model: Model, on host: MoldHost, backend: any MoldBackend) async {
+    func install(_ model: Model, on host: MoldHost) async {
+        let client = hosts.backend(for: host)
         do {
-            let ticket = try await backend.startDownload(DownloadRequest(model: model.name))
+            let ticket = try await client.startDownload(DownloadRequest(model: model.name))
             var forHost = active[host.id] ?? [:]
             forHost[ticket.id] = Progress(model: model.name)
             active[host.id] = forHost
-            watch(host: host, backend: backend)
+            watch(host: host)
         } catch {
             failure = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
 
-    func cancel(jobID: String, on host: MoldHost, backend: any MoldBackend) async {
-        try? await backend.cancelDownload(id: jobID)
+    func cancel(jobID: String, on host: MoldHost) async {
+        try? await hosts.backend(for: host).cancelDownload(id: jobID)
         active[host.id]?.removeValue(forKey: jobID)
     }
 
     /// One stream per machine, however many models are being fetched on it.
-    private func watch(host: MoldHost, backend: any MoldBackend) {
+    private func watch(host: MoldHost) {
         guard streams[host.id] == nil else { return }
         streams[host.id] = Task { [weak self] in
             defer { self?.streams[host.id] = nil }
             // A dropped stream just stops the live figures; the download
             // itself belongs to the host and carries on.
+            guard let backend = self?.hosts.backend(for: host) else { return }
             do {
                 for try await event in backend.downloadEvents() {
                     self?.apply(event, on: host.id)

@@ -30,44 +30,30 @@ struct LibraryActions {
         let perform: () -> Void
     }
 
-    // Internal, not private: `LibraryActions+Destructive` needs it, and the
-    // 150-line lint is what put that half in its own file.
-    func backend(_ id: MoldHost.ID) -> (any MoldBackend)? {
-        hosts.hosts.first { $0.id == id }.map { hosts.backend(for: $0) }
-    }
-
-    private func host(_ entry: LibraryEntry) -> MoldHost? {
-        hosts.hosts.first { $0.id == entry.hostID }
-    }
-
     func toggleFavorite(_ entries: [LibraryEntry]) {
         // If any is not a favourite, the action makes them all favourites --
         // the same rule the Finder uses for mixed selections.
         let makeFavorite = entries.contains { !$0.print.isFavorite }
-        library.setFavorite(makeFavorite, on: entries, backend: backend)
+        library.setFavorite(makeFavorite, on: entries)
     }
 
     func setTag(_ tag: String, adding: Bool, on entries: [LibraryEntry]) {
-        library.setTag(tag, adding: adding, on: entries, backend: backend)
+        library.setTag(tag, adding: adding, on: entries)
     }
 
     func moveToTrash(_ entries: [LibraryEntry]) {
-        Task { await library.moveToTrash(entries, backend: backend) }
+        Task { await library.moveToTrash(entries) }
     }
 
     func restore(_ entries: [LibraryEntry]) {
         Task {
-            await library.restore(entries, backend: backend)
+            await library.restore(entries)
             await reload()
         }
     }
 
     func reload() async {
-        await library.refresh(hosts: hosts.hosts) { hosts.backend(for: $0) }
-        await library.refreshTrash(hosts: hosts.hosts) { hosts.backend(for: $0) }
-        // Shelves and tags travel with the index: reloading one without the
-        // other leaves a renamed collection still reading its old name.
-        await library.refreshOrganization(hosts: hosts.hosts) { hosts.backend(for: $0) }
+        await library.reload()
     }
 
     /// Puts the picture on the pasteboard, so ⌘V works anywhere.
@@ -118,14 +104,12 @@ struct LibraryActions {
 
     /// A URL a player can open directly, ticketed if the machine needs it.
     func playableURL(for entry: LibraryEntry) async -> URL? {
-        guard let host = host(entry), let client = backend(host.id) else { return nil }
-        return await client.playableURL(for: entry.print.filename)
+        await hosts.backend(for: entry.hostID)?.playableURL(for: entry.print.filename)
     }
 
     /// The stored bytes for a print, fetched from the machine that holds it.
     func data(for entry: LibraryEntry) async -> Data? {
-        guard let host = host(entry) else { return nil }
-        return try? await backend(host.id)?.media(entry.print.filename,
-                                                  trashed: entry.print.trashedAt != nil)
+        try? await hosts.backend(for: entry.hostID)?.media(entry.print.filename,
+                                                            trashed: entry.print.trashedAt != nil)
     }
 }

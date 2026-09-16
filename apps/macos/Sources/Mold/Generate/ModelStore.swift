@@ -9,15 +9,20 @@ import MoldClient
 @MainActor
 @Observable
 final class ModelStore {
+    private let hosts: HostStore
     private(set) var byHost: [MoldHost.ID: [Model]] = [:]
     private(set) var isLoading = false
 
-    func refresh(hosts: [MoldHost], using backend: (MoldHost) -> any MoldBackend) async {
+    init(hosts: HostStore) {
+        self.hosts = hosts
+    }
+
+    func refresh() async {
         isLoading = true
         defer { isLoading = false }
         await withTaskGroup(of: (MoldHost.ID, [Model]?).self) { group in
-            for host in hosts {
-                let client = backend(host)
+            for host in hosts.hosts {
+                let client = hosts.backend(for: host)
                 group.addTask { (host.id, try? await client.models()) }
             }
             for await (id, models) in group where models != nil {

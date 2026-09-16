@@ -26,13 +26,13 @@ extension LibraryStore {
     /// feels broken on a remote machine. What happens when the machine never
     /// agrees is the outbox's problem, not this function's -- see
     /// `LibraryStore+Outbox`.
-    func apply(_ edit: PrintEdit, backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) {
+    func apply(_ edit: PrintEdit) {
         guard !edit.isEmpty else { return }
         mutate(edit)
         undo.register(edit) { [weak self] inverse in
-            self?.apply(inverse, backend: backend)
+            self?.apply(inverse)
         }
-        send(edit, backend: backend)
+        send(edit)
     }
 
     /// The same change, applied to the rows on screen.
@@ -43,8 +43,7 @@ extension LibraryStore {
                 guard names.contains(entry.print.filename) else { return entry }
                 var mutable = GalleryPrint.Mutable(entry.print)
                 edit.change.applied(to: &mutable, collectionID: collectionID(edit.change, hostID))
-                return LibraryEntry(hostID: entry.hostID, hostName: entry.hostName,
-                                    print: mutable.build())
+                return entry.replacingPrint(mutable.build())
             }
         }
         rebuild()
@@ -56,12 +55,11 @@ extension LibraryStore {
         return collectionsPerHost[hostID]?.first { $0.slug == slug }?.id
     }
 
-    func reloadCollections(_ backend: @escaping (MoldHost.ID) -> (any MoldBackend)?) async {
+    func reloadCollections() async {
         etags.removeAll()
-        for hostID in collectionsPerHost.keys {
-            guard let client = backend(hostID) else { continue }
-            if let collections = try? await client.collections() {
-                collectionsPerHost[hostID] = collections
+        for host in hosts.hosts {
+            if let collections = try? await hosts.backend(for: host).collections() {
+                collectionsPerHost[host.id] = collections
             }
         }
     }

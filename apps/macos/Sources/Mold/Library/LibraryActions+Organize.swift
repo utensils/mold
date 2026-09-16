@@ -8,19 +8,19 @@ import MoldClient
 extension LibraryActions {
 
     func setTitle(_ title: String, on entry: LibraryEntry) {
-        library.setTitle(title, on: entry, backend: backend)
+        library.setTitle(title, on: entry)
     }
 
     func file(_ entries: [LibraryEntry], into shelf: CollectionShelf) {
-        library.file(entries, into: shelf, backend: backend)
+        library.file(entries, into: shelf)
     }
 
     func unfile(_ entries: [LibraryEntry], from shelf: CollectionShelf) {
-        library.unfile(entries, from: shelf, backend: backend)
+        library.unfile(entries, from: shelf)
     }
 
     func renameTag(_ name: String, to newName: String) {
-        library.renameTag(name, to: newName, backend: backend)
+        library.renameTag(name, to: newName)
     }
 
     func deleteTag(_ name: String) {
@@ -28,7 +28,7 @@ extension LibraryActions {
             title: "Delete the tag \u{201C}\(name)\u{201D}?",
             message: "It comes off every print on every machine. The prints are kept.",
             verb: "Delete Tag",
-            perform: { library.deleteTag(name, backend: backend) }
+            perform: { library.deleteTag(name) }
         ))
     }
 }
