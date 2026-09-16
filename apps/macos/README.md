@@ -96,10 +96,11 @@ that is a first-class state, not a degraded one.
 
 - `MoldClient` must not import a UI framework — it has to stay usable from
   tests and from anything that isn't this app.
-- A concrete backend is built **only** in the composition root, so what the app
-  is talking to is a decision in one file. That is what makes running mold's
-  Rust engine in-process later a change to `MoldApp.swift` rather than a
-  rewrite.
+- A concrete backend is built **only** in `HostStore+Reachability.swift`, so
+  what the app is talking to is a decision in one file. That is what made
+  running mold's engine in-process a new host in the list rather than a
+  rewrite — the lint caught two attempts to construct one elsewhere while that
+  was being built.
 - No literal colors. The app is system light/dark only: semantic colors,
   materials, and the user's own accent. There is no palette to maintain.
 - Files over 150 lines are flagged. The Tauri app's `GenerateView.vue` reached
