@@ -120,6 +120,15 @@ import Testing
         #expect(edit.targets.count == 1)
     }
 
+    // MARK: - Display
+
+    @Test func aPrintIsCalledItsTitleIfItHasOneAndItsFilenameOtherwise() {
+        #expect(PrintFixtures.print("a.png", title: "Owl at dusk").displayName == "Owl at dusk")
+        #expect(PrintFixtures.print("a.png").displayName == "a.png")
+        // A cleared field is not a name.
+        #expect(PrintFixtures.print("a.png", title: "   ").displayName == "a.png")
+    }
+
     // MARK: - Names
 
     @Test func everyChangeNamesItselfForTheEditMenu() {

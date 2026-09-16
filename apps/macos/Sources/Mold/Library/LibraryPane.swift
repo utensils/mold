@@ -12,6 +12,7 @@ struct LibraryPane: View {
     @Environment(LibraryNavigation.self) var navigation
     @Environment(GenerateController.self) var generate
     @Environment(ModelStore.self) var models
+    @Environment(PrintMaterializer.self) var materializer
     /// The WINDOW's undo manager. The store registers against it so Edit ▸
     /// Undo, which SwiftUI wires to the responder chain, finds our edits --
     /// and so a focused text field still keeps ⌘Z for itself.
@@ -25,7 +26,8 @@ struct LibraryPane: View {
 
     var actions: LibraryActions {
         LibraryActions(hosts: hosts, library: library, reuse: reuse,
-                       confirmDestruction: { pendingDestruction = $0 })
+                       confirmDestruction: { pendingDestruction = $0 },
+                       materializer: materializer)
     }
 
     var body: some View {

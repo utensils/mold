@@ -17,6 +17,8 @@ extension LibraryPane {
             scope: navigation.scope,
             shelves: library.shelves,
             enclosingShelf: enclosingShelf,
+            share: navigation.scope.isTrash ? [] : entries.map(actions.draggable),
+            quickLook: { actions.quickLook(entries) },
             favorite: { _ in actions.toggleFavorite(entries) },
             file: { shelf in library.file(entries, into: shelf, backend: actions.backend) },
             unfile: { shelf in library.unfile(entries, from: shelf, backend: actions.backend) },

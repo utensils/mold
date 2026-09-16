@@ -14,17 +14,27 @@ generation and the library. No 3-D studio.
 | **Library** | Every machine's prints in one day-sectioned timeline, host-badged. Select with the mouse or the keyboard, open in place, play video, favourite, tag, trash, restore, save, copy, drag to the Finder, and export a clip or mesh into whatever the host will convert it to. Collections are sidebar rows, merged across the fleet by slug, and you file prints by dragging onto one. Search with real tokens (`tag:`, a machine, `is:video`), sort, and set the tile size. Recently Deleted carries each print's own countdown, Put Back and Delete Immediately. Favourite, tag and filing are **undoable** from the Edit menu. Refreshes by ETag. |
 | **Queue** | Work in flight per machine, with the host's own actionable reason on each row, and retry / pause / resume / cancel. |
 | **Models** | Variants grouped under the model they belong to, each with the manifest's plain-English trade-off, size and install state. Install and repair with live byte progress. |
-| **Settings** | Add, edit and remove machines. An address is normalized the way the other apps normalize it, checked live while you type, and refused when another machine already answers at it; keys go to the Keychain. |
+| **Settings** | Add, edit and remove machines. An address is normalized the way the other apps normalize it, checked live while you type, and refused when another machine already answers at it; keys go to the Keychain. Storage sets how much disk the media cache may use. |
 | **This Mac** | mold's own Rust engine, running in-process on Metal. It joins the machine list like any other and is reached over the same HTTP. |
 
 Shortcuts: ⌘1–⌘4 for the destinations, ⌘R to refresh, ⌘↩ to generate, ⌘, for
-Settings, ⌥⌘I for the inspector, ⌥⌘F to favourite, ⌘⌫ to trash, ⌘Z to undo.
+Settings, ⌥⌘I for the inspector, ⌥⌘F to favourite, ⌘⌫ to trash, ⌘Z to undo,
+Space for Quick Look.
 Every shortcut is declared once in `MoldCommands` or `LibraryCommands` and only
 *printed* elsewhere — binding one twice queues the work twice.
 
 What a selection can do is in the **Library menu**, never in a bar that floats
 over the grid: the menu bar is what macOS searches from Help, what the keyboard
 reaches, and what VoiceOver reads.
+
+## Where the bytes go
+
+A print lives on the machine that made it, and Quick Look, sharing, saving and
+dragging one to the Finder all need a real file here. They share one cache,
+keyed on `(machine, filename, media_version)` — the same `media_version` the
+server builds its ETag from, so a re-rendered poster invalidates cleanly. It
+is capped (Settings ▸ Storage) and **emptied when Mold quits**: it exists so a
+second look at a clip is free, not to be a copy of the library.
 
 ## The local engine
 

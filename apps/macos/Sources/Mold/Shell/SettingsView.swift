@@ -7,6 +7,8 @@ struct SettingsView: View {
         TabView {
             MachinesSettings()
                 .tabItem { Label("Machines", systemImage: "server.rack") }
+            StorageSettings()
+                .tabItem { Label("Storage", systemImage: "internaldrive") }
             LocalEngineSettings()
                 .tabItem { Label("This Mac", systemImage: "cpu") }
         }

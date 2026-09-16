@@ -64,6 +64,15 @@ public struct GalleryPrint: Codable, Hashable, Sendable {
         return .picture
     }
 
+    /// What to put under the tile, in Quick Look's title bar, and on the
+    /// file a share hands over: the person's own title when they gave one,
+    /// and otherwise the name the machine chose. An empty title is not a
+    /// title -- it is a field someone cleared.
+    public var displayName: String {
+        if let title, !title.trimmingCharacters(in: .whitespaces).isEmpty { return title }
+        return filename
+    }
+
     /// The collections this print is in, as ids ON ITS OWN MACHINE.
     public var collectionList: [String] { collections ?? [] }
 }

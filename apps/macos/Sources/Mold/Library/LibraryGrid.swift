@@ -47,7 +47,10 @@ struct LibraryGrid: View {
         .onKeyPress(.upArrow) { move(.up) }
         .onKeyPress(.downArrow) { move(.down) }
         .onKeyPress(.return) { openLead() }
-        .onKeyPress(.space) { openLead() }
+        // Space is Quick Look everywhere else on the Mac. Return opens in
+        // place, which is the app's own viewer and the only one that plays a
+        // clip with the machine's media ticket.
+        .onKeyPress(.space) { quickLookSelection() }
         .onKeyPress(.delete) { trashSelection() }
         .onKeyPress(keys: ["a"]) { press in
             guard press.modifiers.contains(.command) else { return .ignored }
@@ -117,6 +120,13 @@ struct LibraryGrid: View {
     private func openLead() -> KeyPress.Result {
         guard let lead = selection.lead else { return .ignored }
         onOpen(lead)
+        return .handled
+    }
+
+    private func quickLookSelection() -> KeyPress.Result {
+        let targets = entries.filter { selection.items.contains($0.id) }
+        guard !targets.isEmpty else { return .ignored }
+        actions.quickLook(targets)
         return .handled
     }
 

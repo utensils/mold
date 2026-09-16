@@ -14,21 +14,31 @@ struct MoldApp: App {
     @State private var library = LibraryStore()
     @State private var libraryNavigation = LibraryNavigation()
     @State private var thumbnails = ThumbnailCache()
+    @State private var materializer = PrintMaterializer()
     @State private var models = ModelStore()
     @State private var generate = GenerateController()
     @State private var queue = QueueStore()
     @State private var downloads = DownloadStore()
     @State private var engine = MoldEngine()
     @State private var destination = Destination.launch
+    @NSApplicationDelegateAdaptor(MoldAppDelegate.self) private var delegate
 
     var body: some Scene {
         Window("Mold", id: "main") {
             RootView(destination: $destination)
                 .task { ClickModifiers.startObserving() }
+                // The delegate owns quitting, and quitting has to reach the
+                // engine and the cache. It is made by SwiftUI, so this is
+                // where the two meet.
+                .task {
+                    delegate.engine = engine
+                    delegate.materializer = materializer
+                }
                 .environment(hosts)
                 .environment(library)
                 .environment(libraryNavigation)
                 .environment(thumbnails)
+                .environment(materializer)
                 .environment(models)
                 .environment(generate)
                 .environment(queue)
@@ -49,6 +59,7 @@ struct MoldApp: App {
             SettingsView()
                 .environment(hosts)
                 .environment(engine)
+                .environment(materializer)
         }
     }
 }

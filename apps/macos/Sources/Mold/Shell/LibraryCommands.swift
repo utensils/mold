@@ -24,6 +24,14 @@ struct LibraryCommands: Commands {
     }
 
     @ViewBuilder private var prints: some View {
+        Button("Quick Look") { library?.quickLook() }
+            .keyboardShortcut(.space, modifiers: [])
+            .disabled(library?.isEmpty ?? true)
+        if let share = library?.share, !share.isEmpty {
+            ShareLink(items: share) { SharePreview($0.filename) }
+        }
+        Divider()
+
         Button(library?.allFavorite == true ? "Unfavorite" : "Favorite") {
             library?.favorite(!(library?.allFavorite ?? false))
         }
@@ -75,6 +83,11 @@ struct LibrarySelection: Equatable {
     /// only ever honest about the shelf you are standing in.
     let enclosingShelf: CollectionShelf?
 
+    /// Not compared: a `DraggablePrint` is a closure in a trench coat, and the
+    /// count above already changes whenever this list does.
+    let share: [DraggablePrint]
+
+    let quickLook: () -> Void
     let favorite: (Bool) -> Void
     let file: (CollectionShelf) -> Void
     let unfile: (CollectionShelf) -> Void

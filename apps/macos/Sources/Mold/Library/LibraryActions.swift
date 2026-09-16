@@ -17,6 +17,9 @@ struct LibraryActions {
     /// the context menu and the inspector -- so the question belongs here
     /// rather than at each of them.
     var confirmDestruction: ((Destruction) -> Void)?
+    /// Turns prints into files on this disk. Absent in contexts that only
+    /// read -- nothing here fetches bytes without it.
+    var materializer: PrintMaterializer?
 
     /// Something permanent, waiting on an answer.
     struct Destruction: Identifiable {
@@ -84,6 +87,9 @@ struct LibraryActions {
 
     /// Saves the original bytes. One print gets a save panel; several get a
     /// folder, because ten save panels in a row is not a feature.
+    ///
+    /// Goes through the materializer like everything else, so saving a clip
+    /// you just previewed is a local copy rather than a second download.
     func save(_ entries: [LibraryEntry]) {
         Task {
             guard let first = entries.first else { return }
@@ -91,8 +97,9 @@ struct LibraryActions {
                 let panel = NSSavePanel()
                 panel.nameFieldStringValue = first.print.filename
                 guard await panel.begin() == .OK, let url = panel.url,
-                      let data = await data(for: first) else { return }
-                try? data.write(to: url)
+                      let source = await files(for: [first]).first else { return }
+                try? FileManager.default.removeItem(at: url)
+                try? FileManager.default.copyItem(at: source.url, to: url)
             } else {
                 let panel = NSOpenPanel()
                 panel.canChooseDirectories = true
@@ -100,8 +107,10 @@ struct LibraryActions {
                 panel.prompt = "Save Here"
                 guard await panel.begin() == .OK, let folder = panel.url else { return }
                 for entry in entries {
-                    guard let data = await data(for: entry) else { continue }
-                    try? data.write(to: folder.appending(path: entry.print.filename))
+                    guard let source = await files(for: [entry]).first else { continue }
+                    let destination = folder.appending(path: entry.print.filename)
+                    try? FileManager.default.removeItem(at: destination)
+                    try? FileManager.default.copyItem(at: source.url, to: destination)
                 }
             }
         }

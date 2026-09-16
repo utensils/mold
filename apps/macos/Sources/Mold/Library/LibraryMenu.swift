@@ -15,8 +15,11 @@ struct LibraryMenu: View {
     var body: some View {
         if let open, targets.count == 1 {
             Button("Open", action: open)
-            Divider()
         }
+        if !scope.isTrash {
+            Button(quickLookTitle) { actions.quickLook(targets) }
+        }
+        if open != nil || !scope.isTrash { Divider() }
 
         if let reuse = actions.reuse, targets.count == 1, let entry = targets.first,
            !scope.isTrash {
@@ -34,6 +37,12 @@ struct LibraryMenu: View {
             Button(favoriteTitle) { actions.toggleFavorite(targets) }
             Divider()
             Button("Copy") { actions.copy(targets) }
+            // A real ShareLink: AirDrop, Messages, Mail, Photos and Save to
+            // Files, all free and all better than a bespoke export menu. The
+            // file is fetched when the share sheet asks for it, not now.
+            ShareLink(items: targets.map(actions.draggable)) { print in
+                SharePreview(print.filename)
+            }
             Button(targets.count == 1 ? "Save a Copy…" : "Save \(targets.count) Copies…") {
                 actions.save(targets)
             }
@@ -56,6 +65,13 @@ struct LibraryMenu: View {
                 }
             }
         }
+    }
+
+    /// Quick Look names what it is about, the way the Finder does.
+    private var quickLookTitle: String {
+        targets.count == 1
+            ? "Quick Look \u{201C}\(targets[0].print.displayName)\u{201D}"
+            : "Quick Look \(targets.count) Prints"
     }
 
     private var favoriteTitle: String {
