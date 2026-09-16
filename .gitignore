@@ -105,3 +105,13 @@ crates/mold-cli/ltx2-control-union-19b/
 # Python bytecode from the contract scripts under scripts/
 __pycache__/
 *.pyc
+
+# Native macOS app (apps/macos). The Xcode project is generated from
+# project.yml by `make gen`; checking it in would create a second source of
+# truth that silently drifts.
+*.xcodeproj
+DerivedData/
+apps/macos/build/
+apps/macos/**/build/
+.swiftpm/
+.build/
