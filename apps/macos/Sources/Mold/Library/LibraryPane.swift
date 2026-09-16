@@ -3,17 +3,35 @@ import SwiftUI
 
 /// The merged library.
 struct LibraryPane: View {
-    @Environment(HostStore.self) private var hosts
-    @Environment(LibraryStore.self) private var library
+    @Environment(HostStore.self) var hosts
+    @Environment(LibraryStore.self) var library
+    @Environment(GenerateController.self) var generate
+    @Environment(ModelStore.self) var models
+    @Binding var destination: Destination
 
-    @State private var scope: LibraryScope = .all
-    @State private var sourceHost: MoldHost.ID?
-    @State private var query = ""
-    @State private var edge: CGFloat = 132
-    @State private var selection = LibraryCursor.Selection.empty
-    @State private var viewing: PrintID?
+    @State var scope: LibraryScope = .all
+    @State var sourceHost: MoldHost.ID?
+    @State var query = ""
+    @State var edge: CGFloat = 132
+    @State var selection = LibraryCursor.Selection.empty
+    @State var viewing: PrintID?
 
-    private var actions: LibraryActions { LibraryActions(hosts: hosts, library: library) }
+    private var actions: LibraryActions {
+        LibraryActions(hosts: hosts, library: library, reuse: reuse)
+    }
+
+    /// Seeds the Generate pane from a finished print and goes there.
+    ///
+    /// The model is adopted from the machine that MADE the print, because a
+    /// model installed on one host is not available on another.
+    private func reuse(_ entry: LibraryEntry) {
+        generate.draft = RenderDraft(reusing: entry.print.metadata)
+        if let name = entry.print.metadata.model,
+           let model = models.model(named: name, on: entry.hostID) {
+            generate.adopt(model: model, on: entry.hostID, keepingDraft: true)
+        }
+        destination = .generate
+    }
 
     var body: some View {
         Group {
@@ -108,35 +126,6 @@ struct LibraryPane: View {
         case .all: "Prints from every machine appear here."
         case .favorites: "Stars you add show up here."
         case .trash: "Deleted prints wait here until their machine purges them."
-        }
-    }
-
-    // MARK: - Toolbar
-
-    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem {
-            Picker("Shelf", selection: $scope) {
-                ForEach(LibraryScope.allCases) { shelf in
-                    Label(shelf.title, systemImage: shelf.symbol).tag(shelf)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelStyle(.iconOnly)
-            .help("All prints, favorites, or the trash")
-        }
-        ToolbarItem {
-            Picker("Source", selection: $sourceHost) {
-                Text("All machines").tag(MoldHost.ID?.none)
-                ForEach(hosts.hosts) { host in
-                    Text("\(host.name) (\(library.count(for: host.id)))")
-                        .tag(MoldHost.ID?.some(host.id))
-                }
-            }
-        }
-        ToolbarItem {
-            Slider(value: $edge, in: 88...260) { Text("Thumbnail size") }
-                .frame(width: 110)
-                .help("Thumbnail size")
         }
     }
 }

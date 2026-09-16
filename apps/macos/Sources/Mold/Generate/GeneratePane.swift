@@ -18,7 +18,7 @@ struct GeneratePane: View {
             canvas
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             PromptPanel(recipe: recipe, draft: $controller.draft, model: selectedModel,
-                        submit: startRun, cancel: cancelRun)
+                        submit: startRun, cancel: cancelRun, maxBatch: maxBatch)
                 .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -58,6 +58,12 @@ struct GeneratePane: View {
     }
 
     private var recipe: GenerationRecipe? { selectedModel?.defaultRecipe }
+
+    /// What this machine will admit in one batch. Absent means an older host,
+    /// which is one at a time.
+    private var maxBatch: Int {
+        host.flatMap { hosts.capabilities(of: $0)?.maxBatchOutputs } ?? 1
+    }
 
     private var subtitle: String {
         guard let host else { return "No machine" }

@@ -20,7 +20,7 @@ struct RootView: View {
             Sidebar(destination: $destination)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
         } detail: {
-            DestinationDetail(destination: destination)
+            DestinationDetail(destination: $destination)
         }
         .navigationTitle("Mold")
         .task { await hosts.refreshAll() }

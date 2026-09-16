@@ -18,6 +18,12 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// Absent means the host picks one and reports it back.
     public var seed: UInt64?
     public var saveToGallery: Bool?
+    public var frames: Int?
+    public var fps: Int?
+    /// Base64, as mold encodes every byte field on the wire.
+    public var sourceImage: String?
+    public var sourceImageName: String?
+    public var strength: Double?
 
     public init(
         prompt: String, model: String, width: Int, height: Int, steps: Int,
@@ -48,6 +54,11 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         try container.encodeIfPresent(negativePrompt, forKey: .negativePrompt)
         try container.encodeIfPresent(seed, forKey: .seed)
         try container.encodeIfPresent(saveToGallery, forKey: .saveToGallery)
+        try container.encodeIfPresent(frames, forKey: .frames)
+        try container.encodeIfPresent(fps, forKey: .fps)
+        try container.encodeIfPresent(sourceImage, forKey: .sourceImage)
+        try container.encodeIfPresent(sourceImageName, forKey: .sourceImageName)
+        try container.encodeIfPresent(strength, forKey: .strength)
     }
 }
 

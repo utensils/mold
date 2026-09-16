@@ -9,6 +9,7 @@ struct PromptPanel: View {
     let model: Model?
     let submit: () -> Void
     let cancel: () -> Void
+    let maxBatch: Int
 
     @Environment(GenerateController.self) private var controller
     @FocusState private var promptFocused: Bool
@@ -22,7 +23,8 @@ struct PromptPanel: View {
                 prompt(recipe)
                 Divider()
                 HStack(alignment: .bottom, spacing: 12) {
-                    ControlsRow(recipe: recipe, draft: $draft)
+                    ControlsRow(recipe: recipe, maxBatch: maxBatch, draft: $draft)
+                    Spacer(minLength: 12)
                     actions(recipe)
                 }
             } else {
@@ -44,12 +46,32 @@ struct PromptPanel: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
         default:
-            TextField("Describe a picture…", text: $draft.prompt, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.body)
-                .lineLimit(2...6)
-                .focused($promptFocused)
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    TextField(placeholder(recipe), text: $draft.prompt, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .font(.body)
+                        .lineLimit(2...6)
+                        .focused($promptFocused)
+                    if recipe.capabilities.negativePrompt?.isAvailable == true {
+                        TextField("Avoid…", text: $draft.negativePrompt, axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1...3)
+                    }
+                }
+                if recipe.capabilities.sourceImage?.isSupported == true {
+                    SourceImageWell(draft: $draft)
+                }
+            }
         }
+    }
+
+    /// A clip model is not making "a picture", and saying so is the cheapest
+    /// way to tell someone what they are about to get.
+    private func placeholder(_ recipe: GenerationRecipe) -> String {
+        recipe.temporal == nil ? "Describe a picture…" : "Describe a clip…"
     }
 
     private func actions(_ recipe: GenerationRecipe) -> some View {

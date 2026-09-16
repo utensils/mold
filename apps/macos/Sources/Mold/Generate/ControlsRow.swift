@@ -9,12 +9,16 @@ import SwiftUI
 /// model added to mold tomorrow gets correct controls with no change here.
 struct ControlsRow: View {
     let recipe: GenerationRecipe
+    let maxBatch: Int
     @Binding var draft: RenderDraft
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 18) {
+        WrappingHStack(horizontalSpacing: 18, verticalSpacing: 10) {
             if recipe.resolution.hasCanvas {
                 ControlLabel("Size") { SizeMenu(resolution: recipe.resolution, draft: $draft) }
+            }
+            if let temporal = recipe.temporal {
+                ControlLabel("Length") { LengthControl(temporal: temporal, draft: $draft) }
             }
             if recipe.steps.hasSomethingToShow {
                 ControlLabel("Steps") { steps }
@@ -22,28 +26,21 @@ struct ControlsRow: View {
             if recipe.guidance.hasSomethingToShow {
                 ControlLabel("Guidance") { guidance }
             }
+            if draft.sourceImage != nil, recipe.capabilities.supportsStrength == true {
+                ControlLabel("Strength") {
+                    SliderControl(value: $draft.strength, range: 0...1, step: 0.05) {
+                        Text(draft.strength, format: .number.precision(.fractionLength(2)))
+                    }
+                }
+            }
             ControlLabel("Seed") { SeedControl(draft: $draft) }
-            Spacer(minLength: 0)
+            ControlLabel("Batch") { BatchControl(maximum: maxBatch, draft: $draft) }
         }
     }
 
     @ViewBuilder private var steps: some View {
         if recipe.steps.mode.isAdjustable {
-            HStack(spacing: 6) {
-                Slider(
-                    value: Binding(
-                        get: { Double(draft.steps) },
-                        set: { draft.steps = Int($0.rounded()) }
-                    ),
-                    in: Double(recipe.steps.min)...Double(recipe.steps.max),
-                    step: Double(recipe.steps.step)
-                )
-                .controlSize(.small)
-                .frame(minWidth: 80, maxWidth: 130)
-                Text(draft.steps.formatted())
-                    .monospacedDigit()
-                    .frame(minWidth: 22, alignment: .trailing)
-            }
+            StepsControl(control: recipe.steps, draft: $draft)
         } else if let note = recipe.steps.note {
             // A pinned control still has something to say. The note is the
             // server's own words and is shown as written.
@@ -53,16 +50,7 @@ struct ControlsRow: View {
 
     @ViewBuilder private var guidance: some View {
         if recipe.guidance.mode.isAdjustable {
-            HStack(spacing: 6) {
-                Slider(value: $draft.guidance,
-                       in: recipe.guidance.min...recipe.guidance.max,
-                       step: recipe.guidance.step)
-                    .controlSize(.small)
-                    .frame(minWidth: 80, maxWidth: 130)
-                Text(draft.guidance, format: .number.precision(.fractionLength(1)))
-                    .monospacedDigit()
-                    .frame(minWidth: 28, alignment: .trailing)
-            }
+            GuidanceControl(control: recipe.guidance, draft: $draft)
         } else if let note = recipe.guidance.note {
             Text(note).font(.caption).foregroundStyle(.secondary)
         }

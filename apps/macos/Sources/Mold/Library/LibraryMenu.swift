@@ -18,6 +18,12 @@ struct LibraryMenu: View {
             Divider()
         }
 
+        if let reuse = actions.reuse, targets.count == 1, let entry = targets.first,
+           !scope.isTrash {
+            Button("Use These Settings") { reuse(entry) }
+            Divider()
+        }
+
         if scope.isTrash {
             Button("Put Back") { actions.restore(targets) }
             Divider()

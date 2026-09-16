@@ -3,8 +3,15 @@ import Testing
 
 @testable import MoldClient
 
+/// Midday on a fixed date.
+///
+/// Deliberately NOT relative to `now`: a test that builds "30 hours ago" from
+/// the wall clock groups into two days or three depending on the time of day it
+/// runs, and duly failed the first time it ran after midnight.
+private let noon = UInt64(1_789_560_000)
+
 private func item(_ secondsAgo: Int, host: UUID = UUID()) -> LibraryEntry {
-    let stamp = UInt64(Date.now.timeIntervalSince1970) - UInt64(secondsAgo)
+    let stamp = noon - UInt64(secondsAgo)
     let meta = try! MoldJSON.decoder.decode(OutputMetadata.self, from: Data("{}".utf8))
     return LibraryEntry(
         hostID: host, hostName: "h",
@@ -17,6 +24,7 @@ private func item(_ secondsAgo: Int, host: UUID = UUID()) -> LibraryEntry {
 }
 
 @Test func groupsPrintsIntoDaysNewestFirst() {
+    // From midday, 30 hours back is the previous day whatever the clock says.
     let sections = LibraryGrouping.byDay([item(0), item(60 * 60 * 30), item(120)])
 
     #expect(sections.count == 2)
@@ -32,8 +40,11 @@ private func item(_ secondsAgo: Int, host: UUID = UUID()) -> LibraryEntry {
 }
 
 @Test func todayAndYesterdayAreNamedRatherThanDated() {
-    #expect(LibraryGrouping.title(for: .now) == "Today")
-    #expect(LibraryGrouping.title(for: .now.addingTimeInterval(-86_400)) == "Yesterday")
+    // Anchored to the start of today so the assertion cannot straddle
+    // midnight the way a bare `.now` minus 24h can.
+    let today = Calendar.current.startOfDay(for: .now)
+    #expect(LibraryGrouping.title(for: today) == "Today")
+    #expect(LibraryGrouping.title(for: today.addingTimeInterval(-86_400)) == "Yesterday")
 }
 
 @Test func anOlderDayGetsADateAndAPreviousYearSaysWhichYear() {

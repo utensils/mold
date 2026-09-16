@@ -11,6 +11,10 @@ import MoldClient
 final class HostStore {
     private(set) var hosts: [MoldHost]
     private(set) var reachability: [MoldHost.ID: Reachability] = [:]
+    /// What each machine says it can do. Read rather than guessed -- an
+    /// absent block has a different meaning per field, so the app never
+    /// probes routes to find out.
+    private(set) var capabilities: [MoldHost.ID: Capabilities] = [:]
 
     enum Reachability {
         case unknown
@@ -39,11 +43,13 @@ final class HostStore {
         persist()
         // The key or address may have changed, so what we knew is stale.
         reachability[host.id] = .unknown
+        capabilities[host.id] = nil
     }
 
     func remove(_ host: MoldHost) {
         hosts.removeAll { $0.id == host.id }
         reachability[host.id] = nil
+        capabilities[host.id] = nil
         HostPersistence.forget(host)
         persist()
     }
@@ -67,8 +73,14 @@ final class HostStore {
     func refresh(_ host: MoldHost) async {
         reachability[host.id] = .checking
         do {
-            let status = try await backend(for: host).status()
+            let client = backend(for: host)
+            let status = try await client.status()
             reachability[host.id] = .up(status)
+            // Capabilities change only when the host is rebuilt, so one fetch
+            // per reachability check is plenty.
+            if capabilities[host.id] == nil {
+                capabilities[host.id] = try? await client.capabilities()
+            }
         } catch MoldClientError.unauthorized {
             reachability[host.id] = .needsKey
         } catch {
@@ -81,6 +93,8 @@ final class HostStore {
     func reachability(of host: MoldHost) -> Reachability {
         reachability[host.id] ?? .unknown
     }
+
+    func capabilities(of host: MoldHost) -> Capabilities? { capabilities[host.id] }
 
     func isUp(_ host: MoldHost) -> Bool {
         if case .up = reachability(of: host) { return true }

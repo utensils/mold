@@ -16,6 +16,10 @@ public struct OutputMetadata: Codable, Hashable, Sendable {
     public let guidance: Double?
     public let width: Int?
     public let height: Int?
+    /// What was actually rendered, when it differs from the delivered size --
+    /// an upscaled print's `width` is the final one, not the one to reuse.
+    public let generationWidth: Int?
+    public let generationHeight: Int?
     public let frames: Int?
     public let fps: Double?
     public let generationTimeMs: Int?

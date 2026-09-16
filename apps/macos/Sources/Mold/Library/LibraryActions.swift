@@ -9,6 +9,9 @@ import UniformTypeIdentifiers
 struct LibraryActions {
     let hosts: HostStore
     let library: LibraryStore
+    /// Set by the pane so a print can seed a new render. Absent in contexts
+    /// that have no Generate pane to send it to.
+    var reuse: ((LibraryEntry) -> Void)?
 
     private func backend(_ id: MoldHost.ID) -> (any MoldBackend)? {
         hosts.hosts.first { $0.id == id }.map { hosts.backend(for: $0) }

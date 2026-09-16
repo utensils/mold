@@ -74,6 +74,8 @@ public struct RecipeCapabilities: Codable, Hashable, Sendable {
     public let supportsSequence: Bool?
     public let supportsExtend: Bool?
     public let supportsAudio: Bool?
+    /// Absent means the recipe has no source path at all.
+    public let sourceImage: SourceImageCapability?
 
     public var promptRequirement: PromptRequirement {
         (prompt ?? .assumedRequired).mode
@@ -89,6 +91,8 @@ public struct GenerationRecipe: Codable, Hashable, Sendable, Identifiable {
     public let resolution: ResolutionProfile
     public let steps: IntegerControl
     public let guidance: FloatControl
+    /// Present only for the families that make a clip.
+    public let temporal: TemporalProfile?
     public let capabilities: RecipeCapabilities
 }
 

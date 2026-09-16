@@ -13,6 +13,11 @@ let package = Package(
         .target(
             name: "MoldStyle",
             swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "MoldStyleTests",
+            dependencies: ["MoldStyle"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
         )
     ]
 )
