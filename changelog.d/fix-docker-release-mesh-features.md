@@ -1,3 +1,1 @@
-### Fixed
-
-- Restore CUDA container releases by including the complete Hunyuan3D mesh pipeline in every Docker target.
+- **Restore CUDA container releases.** Include the complete Hunyuan3D mesh pipeline in every Docker target so the SM89 server build passes its required feature checks.
