@@ -11,7 +11,9 @@ struct DestinationDetail: View {
             GeneratePane()
         case .library:
             LibraryPane()
-        case .queue, .models:
+        case .models:
+            ModelsPane()
+        case .queue:
             ContentUnavailableView {
                 Label(destination.title, systemImage: destination.symbol)
             } description: {

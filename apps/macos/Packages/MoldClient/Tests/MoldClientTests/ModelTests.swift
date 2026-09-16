@@ -56,3 +56,57 @@ private func loadModels() throws -> [Model] {
     #expect(!model(family: "controlnet").isGenerator)
     #expect(!model(family: "hunyuan3d-paint").isGenerator)
 }
+
+@Test func splitsANameIntoItsBaseAndTag() {
+    func model(_ name: String, _ description: String = "X — y") -> Model {
+        Model(name: name, family: "flux", description: description, sizeGb: nil,
+              isLoaded: nil, downloaded: nil, hfRepo: nil, displayName: nil,
+              remainingDownloadBytes: nil, generationProfile: nil)
+    }
+    #expect(model("flux-dev:q4").baseName == "flux-dev")
+    #expect(model("flux-dev:q4").tag == "q4")
+    #expect(model("wuerstchen").tag == nil)
+    #expect(model("wuerstchen").baseName == "wuerstchen")
+}
+
+@Test func aGroupHeadingDropsTheQuantizationButKeepsRealWords() throws {
+    let models = try loadModels()
+    let dev = try #require(models.first { $0.name == "flux-dev:q4" })
+    let schnell = try #require(models.first { $0.name == "flux-schnell:bf16" })
+
+    // "FLUX.1 Dev Q4" -> "FLUX.1 Dev";  "FLUX.1 Schnell BF16" -> "FLUX.1 Schnell"
+    #expect(dev.baseTitle == "FLUX.1 Dev")
+    #expect(schnell.baseTitle == "FLUX.1 Schnell")
+    // "Dev" is a real word, not a quantization, so it must survive.
+    #expect(dev.baseTitle.hasSuffix("Dev"))
+}
+
+@Test func aCatalogIdIsANamespaceNotAVariantTag() {
+    func model(_ name: String) -> Model {
+        Model(name: name, family: "sdxl", description: "D — t", sizeGb: nil, isLoaded: nil,
+              downloaded: nil, hfRepo: nil, displayName: nil,
+              remainingDownloadBytes: nil, generationProfile: nil)
+    }
+    // Two unrelated Civitai checkpoints must not share a base name, or they
+    // group together as variants of each other.
+    #expect(model("cv:252914").baseName == "cv:252914")
+    #expect(model("cv:1759168").baseName == "cv:1759168")
+    #expect(model("cv:252914").baseName != model("cv:1759168").baseName)
+    #expect(model("cv:252914").tag == nil)
+    #expect(model("hf:owner/repo").baseName == "hf:owner/repo")
+    // A real variant tag still splits.
+    #expect(model("flux-dev:q4").baseName == "flux-dev")
+}
+
+@Test func moreThanOneTrailingVariantWordComesOff() {
+    func titled(_ description: String) -> String {
+        Model(name: "n:q4", family: "flux2", description: description, sizeGb: nil,
+              isLoaded: nil, downloaded: nil, hfRepo: nil, displayName: nil,
+              remainingDownloadBytes: nil, generationProfile: nil).baseTitle
+    }
+    #expect(titled("FLUX.2 [dev] Q4 GGUF — smallest dev tier") == "FLUX.2 [dev]")
+    #expect(titled("Flux.2 Klein-4B Base Q4 GGUF — undistilled") == "Flux.2 Klein-4B Base")
+    #expect(titled("FLUX.1 Dev Q4 — good quality") == "FLUX.1 Dev")
+    // A model whose whole name looks like a variant keeps at least one word.
+    #expect(titled("Q4 — x") == "Q4")
+}
