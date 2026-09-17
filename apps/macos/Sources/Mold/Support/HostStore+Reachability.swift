@@ -35,6 +35,12 @@ extension HostStore {
         reachability[host.id] = .checking
         let state = await check(host)
         reachability[host.id] = state
+        // It answered, so whatever "can't be reached" line it was carrying
+        // is no longer true -- a real refusal, if this same check also
+        // surfaces one below, reports its own line separately.
+        if case .up = state {
+            succeeded(on: host.id, doing: HostFailure.reachVerb)
+        }
         // Capabilities change only when the host is rebuilt, so one fetch per
         // reachability check is plenty. Reconciling comes AFTER them, because
         // whether a machine wants watching is something its capabilities say.

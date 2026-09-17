@@ -25,7 +25,9 @@ func settle(until condition: () -> Bool) async {
 final class FakeBackend: MoldBackend, @unchecked Sendable {
     let host: MoldHost
     nonisolated(unsafe) private(set) var calls: [String] = []
-    /// Route names that answer with `.unreachable` however they are planted.
+    /// Route names that answer with a refusal (a 409) however they are
+    /// planted -- a REFUSAL, not an unreachable machine, so a store test can
+    /// still pin the verb its report was keyed on.
     nonisolated(unsafe) var refuses: Set<String> = []
     nonisolated(unsafe) var prints: [GalleryPrint] = []
     nonisolated(unsafe) var trashedRows: [GalleryPrint] = []
@@ -77,7 +79,9 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     private func record(_ route: String) throws {
         calls.append(route)
-        if refuses.contains(route) { throw MoldClientError.unreachable("planted") }
+        if refuses.contains(route) {
+            throw MoldClientError.http(status: 409, code: nil, message: "Refused by the fake.")
+        }
     }
 
     private func notPlanted() -> Error { MoldClientError.unreachable("not planted") }
