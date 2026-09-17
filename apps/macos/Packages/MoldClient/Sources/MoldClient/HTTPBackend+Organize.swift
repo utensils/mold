@@ -19,13 +19,13 @@ public extension HTTPBackend {
 
     /// Absent fields are untouched, so renaming does not clear a cover.
     func updateCollection(id: String, change: CollectionChange) async throws -> Collection {
-        try await send("/api/gallery/collections/\(id)", method: "PATCH", body: change)
+        try await send("/api/gallery/collections/\(escaped(id))", method: "PATCH", body: change)
     }
 
     /// Removes the shelf, never its prints — membership is the only thing that
     /// goes away.
     func deleteCollection(id: String) async throws {
-        try await delete("/api/gallery/collections/\(id)")
+        try await delete("/api/gallery/collections/\(escaped(id))")
     }
 
     // MARK: - Tags

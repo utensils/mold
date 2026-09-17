@@ -102,7 +102,10 @@ private func repairModels() throws -> [Model] {
 @Test func aSearchQueryEscapesItsTextAndOmitsWhatWasNotAsked() {
     let query = CatalogQuery(text: "a b/c#d", family: "sd15", pageSize: 3)
     let qs = query.queryString
-    #expect(qs.contains("q=a%20b%2Fc%23d"))
+    // A `/` is legal and unambiguous in a query VALUE, so the query escaper
+    // leaves it readable -- unlike the path escaper, which must protect it
+    // (`HTTPBackend.escapedQueryValue`).
+    #expect(qs.contains("q=a%20b/c%23d"))
     #expect(qs.contains("family=sd15"))
     #expect(qs.contains("page_size=3"))
     // Nothing asked for -- kind, source, sort, page, includeNSFW -- appears.

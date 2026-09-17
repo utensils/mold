@@ -1,28 +1,35 @@
 import Foundation
 
 // Acting on queued work, and fetching models.
+//
+// Every id below is server- or client-minted and is a UUID today, so nothing
+// here is reachable -- but `URLComponents.percentEncodedPath` RAISES on an
+// invalid character rather than answering nil, so the failure mode if an id
+// shape ever changes is a crash, not a bad request. Every comparable route
+// (`queueJob`, `modelPath`, `transferExportPath`, `revokePairedClient`)
+// already escapes; these were the exceptions.
 public extension HTTPBackend {
     // MARK: - Queue
 
     func cancelJob(id: String) async throws {
-        var request = self.request("/api/queue/\(id)")
+        var request = self.request("/api/queue/\(escaped(id))")
         request.httpMethod = "DELETE"
         _ = try await bytes(for: request)
     }
 
     func pauseJob(id: String) async throws {
-        _ = try await postRaw("/api/queue/\(id)/pause", body: EmptyBody())
+        _ = try await postRaw("/api/queue/\(escaped(id))/pause", body: EmptyBody())
     }
 
     func resumeJob(id: String) async throws {
-        _ = try await postRaw("/api/queue/\(id)/resume", body: EmptyBody())
+        _ = try await postRaw("/api/queue/\(escaped(id))/resume", body: EmptyBody())
     }
 
     /// The one route that moves a job BACKWARD, from held to queued. It needs
     /// the full fenced identity so a retry cannot be aimed at the wrong job
     /// (`routes.rs:7617-7650`).
     func retryJob(_ authority: QueueAuthority) async throws {
-        _ = try await postRaw("/api/queue/\(authority.jobId)/retry", body: authority)
+        _ = try await postRaw("/api/queue/\(escaped(authority.jobId))/retry", body: authority)
     }
 
     // MARK: - Downloads
@@ -48,7 +55,7 @@ public extension HTTPBackend {
     }
 
     func cancelDownload(id: String) async throws {
-        var request = self.request("/api/downloads/\(id)")
+        var request = self.request("/api/downloads/\(escaped(id))")
         request.httpMethod = "DELETE"
         _ = try await bytes(for: request)
     }

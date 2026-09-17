@@ -28,16 +28,18 @@ public struct CatalogQuery: Hashable, Sendable {
 
     /// `GET /api/catalog/search`'s query string, omitting anything not
     /// asked for -- an absent field is "no filter" on the server, which is
-    /// not the same request as an explicit default. `text` is the only
-    /// value that needs escaping in practice; the rest are server-defined
-    /// tokens, escaped the same way on principle.
+    /// not the same request as an explicit default. `text` is free user
+    /// input; the rest are server-defined tokens, escaped by the same rule
+    /// because the rule is about the encoder, not about who supplies the
+    /// value. `escapedQueryValue`, never `escaped` -- see its doc comment.
     public var queryString: String {
         var parts: [String] = []
-        if let text, !text.isEmpty { parts.append("q=\(HTTPBackend.escaped(text))") }
-        if let family { parts.append("family=\(HTTPBackend.escaped(family))") }
-        if let kind { parts.append("kind=\(HTTPBackend.escaped(kind))") }
-        if let source { parts.append("source=\(HTTPBackend.escaped(source))") }
-        if let sort { parts.append("sort=\(HTTPBackend.escaped(sort))") }
+        let escape = HTTPBackend.escapedQueryValue
+        if let text, !text.isEmpty { parts.append("q=\(escape(text))") }
+        if let family { parts.append("family=\(escape(family))") }
+        if let kind { parts.append("kind=\(escape(kind))") }
+        if let source { parts.append("source=\(escape(source))") }
+        if let sort { parts.append("sort=\(escape(sort))") }
         if let page { parts.append("page=\(page)") }
         if let pageSize { parts.append("page_size=\(pageSize)") }
         if let includeNSFW { parts.append("include_nsfw=\(includeNSFW)") }

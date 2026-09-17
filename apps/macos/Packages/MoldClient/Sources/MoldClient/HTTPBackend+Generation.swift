@@ -2,27 +2,33 @@ import Foundation
 
 // Asking a host to make something, and following it while it does.
 // Split from the core transport purely for size.
+//
+// The ids are UUIDs today, so `escaped(_:)` changes nothing on the wire --
+// it is here because `URLComponents.percentEncodedPath` RAISES rather than
+// answering nil, so an id shape that ever grows a `?` or a space would crash
+// instead of failing the request (`HTTPBackend+Work.swift` carries the same
+// note).
 public extension HTTPBackend {
     func submit(_ admission: BatchAdmission) async throws -> BatchStatus {
         try await post("/api/generation-batches", body: admission)
     }
 
     func batchStatus(id: String) async throws -> BatchStatus {
-        try await get("/api/generation-batches/\(id)")
+        try await get("/api/generation-batches/\(escaped(id))")
     }
 
     func batchStatus(clientBatchId: String) async throws -> BatchStatus {
-        try await get("/api/generation-batches/by-client/\(clientBatchId)")
+        try await get("/api/generation-batches/by-client/\(escaped(clientBatchId))")
     }
 
     func jobPreview(jobId: String) async throws -> JobProgress? {
         // The route answers `null` while there is nothing to show yet, which
         // is an ordinary state and not an error.
-        try await get("/api/queue/\(jobId)/preview")
+        try await get("/api/queue/\(escaped(jobId))/preview")
     }
 
     func cancelBatch(id: String) async throws {
-        var request = self.request("/api/generation-batches/\(id)")
+        var request = self.request("/api/generation-batches/\(escaped(id))")
         request.httpMethod = "DELETE"
         _ = try await bytes(for: request)
     }
@@ -45,7 +51,7 @@ public extension HTTPBackend {
                     // A stream has no business timing out while it sits idle
                     // between denoise steps.
                     for try await frame in stream(
-                        "/api/generation-batches/\(id)/events", timeout: 3_600
+                        "/api/generation-batches/\(escaped(id))/events", timeout: 3_600
                     ) {
                         guard frame.name == "generation_batch",
                               let data = frame.data.data(using: .utf8),
