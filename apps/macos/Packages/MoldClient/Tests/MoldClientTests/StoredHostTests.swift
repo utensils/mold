@@ -37,7 +37,7 @@ import Testing
     #expect(text.contains("\"base_url\""))
 }
 
-/// The key is a credential and goes to the Keychain. Preferences are copied
+/// The key is a credential and goes to `SecretStore`. Preferences are copied
 /// into backups and into any sync that takes the domain.
 @Test func aSavedMachineNeverCarriesItsKey() throws {
     let host = MoldHost(name: "plato", baseURL: URL(string: "http://plato:7680")!,

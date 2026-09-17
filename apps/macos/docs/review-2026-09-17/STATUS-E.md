@@ -62,6 +62,7 @@ list names; it is untouched here.
   Nobody's lane list names this file; it is Accounts' own row. (`05ed1032`)
 - `Packages/MoldClient/Sources/MoldClient/StoredHost.swift` — two doc-comment sentences that said
   the key travels through the Keychain. Lane A owns the file; this is comment text only. (`f11a4779`)
+  Its test file's own such sentence, the same way, in this lane's last commit.
 
 ## Requests for Lane F (do not act on these here)
 
