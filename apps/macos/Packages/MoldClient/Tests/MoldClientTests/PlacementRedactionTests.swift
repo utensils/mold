@@ -47,8 +47,10 @@ private func fullDraft() -> RenderDraft {
     #expect(request.editImages == ["", ""])
     #expect(request.keyframes?.map(\.image) == [""])
 
-    // Filing is DELETED, not blanked: both fields are additive, absent is
-    // their normal shape, and a preview files nothing.
+    // Filing is DELETED, not blanked: all three are additive, absent is their
+    // normal shape, and a preview files nothing. The TITLE is filing too --
+    // it is exactly the "Client X, unannounced" the rule is written about.
+    #expect(request.title == nil)
     #expect(request.tags == nil)
     #expect(request.collection == nil)
 }
@@ -96,6 +98,7 @@ private func fullDraft() -> RenderDraft {
     #expect(request.sourceImage == "SOURCEBYTES")
     #expect(request.editImages == ["REF1", "REF2"])
     #expect(request.idImage == "FACEBYTES")
+    #expect(request.title == "Client X, unannounced")
     #expect(request.tags?.isEmpty == false)
     #expect(request.collection != nil)
 }

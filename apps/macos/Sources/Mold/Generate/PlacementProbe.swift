@@ -40,7 +40,12 @@ final class PlacementProbe {
             do {
                 // Four one-output children preview as four copies of one
                 // output, not as one four-output child.
-                self?.placement = try await client.placementPreview(request, copies: copies)
+                let answer = try await client.placementPreview(request, copies: copies)
+                // Re-checked AFTER the await: URLSession can complete a
+                // buffered response for a cancelled request, and writing it
+                // here would revert the hint to a superseded answer.
+                guard !Task.isCancelled else { return }
+                self?.placement = answer
                 self?.error = nil
             } catch is CancellationError {
                 // Superseded by a later control change, not a failed request.

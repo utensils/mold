@@ -43,6 +43,10 @@ public extension GenerateRequest {
         redacted.keyframes = keyframes?.map {
             KeyframeCondition(frame: $0.frame, image: "", name: $0.name)
         }
+        // Filing is DELETED. The title is the SAME class of user-authored
+        // filing text as the tags it composes into ("Client X, unannounced"),
+        // and studio's builder simply never had one to strip.
+        redacted.title = nil
         redacted.tags = nil
         redacted.collection = nil
         return redacted
