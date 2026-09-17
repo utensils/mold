@@ -75,5 +75,5 @@ import Testing
         destinationLabel: "hal9000", sourceLabel: "plato")
     #expect(result == .outcome(.refused(
         "hal9000 wouldn't take it: the job's media is larger than a machine will accept in one "
-            + "request (about 48 MB). The original is still here.")))
+            + "request (\(RequestBodyLimit.sentence)). The original is still here.")))
 }
