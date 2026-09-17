@@ -42,7 +42,7 @@ extension HostStore.Reachability {
         case .unknown: nil
         case .checking: "Checking…"
         case let .up(status):
-            [status.hostname.isEmpty ? nil : status.hostname,
+            [status.hostname,
              "mold \(status.version)",
              status.hardware]
                 .compactMap(\.self).joined(separator: " · ")

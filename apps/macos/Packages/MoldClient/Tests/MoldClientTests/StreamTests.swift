@@ -73,6 +73,18 @@ struct StreamTests {
         }
     }
 
+    @Test func theResourceStreamTakesSnapshotFramesAndDropsPings() async throws {
+        let snapshot = #"{"hostname":"h","timestamp":1,"gpus":[],"system_ram":{"total":1,"used":1,"used_by_mold":0}}"#
+        let body = ": ping\r\n\r\n" + "event: snapshot\r\ndata: \(snapshot)\r\n\r\n"
+        StubURLProtocol.responses["/api/resources/stream"] = (200, Data(body.utf8))
+        let backend = stubbedBackend()
+
+        var received: [ResourceSnapshot] = []
+        for try await sample in backend.resourceStream() { received.append(sample) }
+        #expect(received.count == 1)
+        #expect(received.first?.hostname == "h")
+    }
+
     @Test func aBatchStreamStopsAtTheFirstSettledFrame() async throws {
         let complete = #"{"id":"b1","client_batch_id":"c1","instance_id":"i","durable":true,"children":[{"index":0,"job_id":"j1","state":"complete","revision":1}]}"#
         let running = #"{"id":"b1","client_batch_id":"c1","instance_id":"i","durable":true,"children":[{"index":0,"job_id":"j1","state":"running","revision":2}]}"#

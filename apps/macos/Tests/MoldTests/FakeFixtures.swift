@@ -33,7 +33,7 @@ enum FakeFixtures {
 extension FakeFixtures {
     static func serverStatus(instanceId: String? = nil) -> ServerStatus {
         let json = """
-        {"version": "0.29.0", "hostname": "fake", "busy": false,
+        {"version": "0.29.0", "hostname": "fake", "busy": false, "uptime_secs": 0,
          "instance_id": \(instanceId.map { "\"\($0)\"" } ?? "null")}
         """
         return try! MoldJSON.decoder.decode(ServerStatus.self, from: Data(json.utf8))

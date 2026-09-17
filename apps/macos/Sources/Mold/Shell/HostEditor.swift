@@ -121,10 +121,10 @@ struct HostEditor: View {
         probe = outcome
         // The machine's own hostname beats whatever we guessed from the
         // address -- it is the same answer however you reached the box.
-        if case let .up(status) = outcome, !status.hostname.isEmpty,
+        if case let .up(status) = outcome, let hostname = status.hostname,
            name.isEmpty || name == autoName {
-            name = status.hostname
-            autoName = status.hostname
+            name = hostname
+            autoName = hostname
         }
     }
 

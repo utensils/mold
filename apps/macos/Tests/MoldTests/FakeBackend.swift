@@ -38,6 +38,19 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var capabilityBlock: Capabilities?
     nonisolated(unsafe) var exportBlock: ExportOptions?
     nonisolated(unsafe) var downloadTicket: DownloadTicket?
+
+    // MARK: - Machines
+
+    nonisolated(unsafe) var deviceState: DeviceState?
+    nonisolated(unsafe) var resourceSnapshot: ResourceSnapshot?
+    nonisolated(unsafe) var peerRows: [DiscoveryPeer] = []
+    /// Held open like `eventStream`, so a test can push a sample without
+    /// the store's watcher going round its reconnect loop. Named apart from
+    /// the `resourceStream()` witness below it answers -- a stored property
+    /// and a method cannot share one name in Swift.
+    nonisolated(unsafe) var resourceStreamContinuation: AsyncThrowingStream<ResourceSnapshot, Error>.Continuation?
+    /// What `setDevice` was asked, in call order.
+    nonisolated(unsafe) var patchedDevices: [(String, Bool)] = []
     /// The live `/api/events` stream, so a test can hand the store a frame
     /// and watch what it does with it. Held open: a stream that finishes
     /// sends the watcher round its reconnect loop, which is a second
@@ -60,6 +73,20 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     }
 
     private func notPlanted() -> Error { MoldClientError.unreachable("not planted") }
+
+    /// `DeviceInfo` has no public memberwise init -- like `GalleryPrint` and
+    /// `QueueEntry` above, it is built the way the wire builds one, by
+    /// round-tripping through JSON with the two fields a live toggle changes.
+    private static func mutated(_ device: DeviceInfo, enabled: Bool) throws -> DeviceInfo {
+        let data = try MoldJSON.encoder.encode(device)
+        guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return device
+        }
+        object["desired_enabled"] = enabled
+        object["admin_state"] = enabled ? "enabled" : "disabled"
+        let mutated = try JSONSerialization.data(withJSONObject: object)
+        return try MoldJSON.decoder.decode(DeviceInfo.self, from: mutated)
+    }
 
     // MARK: - Status
 
@@ -112,6 +139,31 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         return downloadTicket
     }
     func cancelDownload(id: String) async throws { try record("cancelDownload") }
+
+    // MARK: - Machines
+
+    func devices() async throws -> DeviceState {
+        try record("devices")
+        guard let deviceState else { throw notPlanted() }
+        return deviceState
+    }
+    @discardableResult
+    func setDevice(_ id: String, enabled: Bool) async throws -> DeviceInfo {
+        try record("setDevice")
+        patchedDevices.append((id, enabled))
+        guard let row = deviceState?.devices.first(where: { $0.id == id }) else { throw notPlanted() }
+        return try Self.mutated(row, enabled: enabled)
+    }
+    func resources() async throws -> ResourceSnapshot {
+        try record("resources")
+        guard let resourceSnapshot else { throw notPlanted() }
+        return resourceSnapshot
+    }
+    func resourceStream() -> AsyncThrowingStream<ResourceSnapshot, Error> {
+        calls.append("resourceStream")
+        return AsyncThrowingStream { self.resourceStreamContinuation = $0 }
+    }
+    func peers() async throws -> [DiscoveryPeer] { try record("peers"); return peerRows }
 
     // MARK: - Gallery
 

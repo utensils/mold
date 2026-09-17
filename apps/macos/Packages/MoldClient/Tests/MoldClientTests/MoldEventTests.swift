@@ -67,6 +67,14 @@ import Testing
         #expect(MoldEvent(name: nil, data: "") == nil)
     }
 
+    /// Carries nothing: the frame names three of `DeviceInfo`'s fourteen
+    /// fields and the pane draws eight, so this is an invalidation, not a
+    /// patch -- go and read `/api/devices`.
+    @Test func aDeviceStateChangedFrameIsAnInvalidation() {
+        let data = #"{"type":"device_state_changed","device_id":"cuda:9ffc81c539446490bfd9f68366f98226","desired_enabled":false,"admin_state":"draining"}"#
+        #expect(MoldEvent(name: "event", data: data) == .deviceStateChanged)
+    }
+
     /// The keep-alive comments mold sends every 15 seconds are not events.
     @Test func aKeepAliveIsNotAnEvent() {
         var parser = SSEParser()

@@ -16,6 +16,12 @@ public enum MoldEvent: Hashable, Sendable {
     /// the listings; do not carry on.
     case resyncRequired
     case gallery(Gallery)
+    /// A device's lifecycle preference or runtime state changed on this
+    /// machine. Carries NOTHING: the frame names three of `DeviceInfo`'s
+    /// fourteen fields and the pane draws eight, so a partial patch would show
+    /// a switch that flipped beside an activity that did not. It is an
+    /// invalidation -- go and read `/api/devices`.
+    case deviceStateChanged
 
     public enum Gallery: Hashable, Sendable {
         /// `row` present means insert without asking again; absent means the
@@ -53,6 +59,7 @@ public enum MoldEvent: Hashable, Sendable {
         case "gallery_removed": self = .gallery(.removed(filename: frame.name))
         case "gallery_trashed": self = .gallery(.trashed(filename: frame.name))
         case "gallery_collections_changed": self = .gallery(.collectionsChanged)
+        case "device_state_changed": self = .deviceStateChanged
         default: return nil
         }
     }

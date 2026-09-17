@@ -111,6 +111,12 @@ public extension Capabilities {
     /// where a live change is not authoritative.
     var canEnableDeviceAtRestart: Bool { devices?.restartEnable ?? false }
 
+    /// Whether scheduler V2 owns dispatch on this host. Absent means a host
+    /// with no V2 scheduler at all, so no -- and a live device change needs
+    /// THIS as well as `devices.lifecycle`: one says the route exists, the
+    /// other says the runtime will honour what it does.
+    var dispatchIsAuthoritative: Bool { dispatch?.v2Authoritative ?? false }
+
     var canBrowsePeers: Bool { discovery?.canBrowse ?? false }
 
     var canBrowseCatalog: Bool { catalog?.available ?? false }

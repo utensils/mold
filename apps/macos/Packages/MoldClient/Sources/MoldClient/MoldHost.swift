@@ -25,7 +25,11 @@ public struct MoldHost: Identifiable, Hashable, Codable, Sendable {
 /// What a host reports about itself. Mirrors `GET /api/status`.
 public struct ServerStatus: Hashable, Codable, Sendable {
     public let version: String
-    public let hostname: String
+    /// `nil` when the host cannot resolve its own hostname. `#[serde(skip_serializing_if)]`
+    /// on the server omits the key entirely rather than sending an empty
+    /// string, and a non-optional `String` here threw on that host and made
+    /// `check(_:)` report it as DOWN.
+    public let hostname: String?
     public let busy: Bool
     public let queueDepth: Int?
     public let memoryStatus: String?
@@ -33,6 +37,7 @@ public struct ServerStatus: Hashable, Codable, Sendable {
     /// Identifies this run of the server. A retry must name it, so work is
     /// never aimed at a host that has restarted since.
     public let instanceId: String?
+    public let uptimeSecs: UInt64
 
     public struct GPU: Hashable, Codable, Sendable {
         public let ordinal: Int

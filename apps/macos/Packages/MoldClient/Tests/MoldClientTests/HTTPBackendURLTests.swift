@@ -84,6 +84,15 @@ private let backend = HTTPBackend(
     #expect(backend.host.name == "plato")
 }
 
+/// A device id is OPAQUE (`cuda:<32 hex>`) and must ride as ONE path
+/// component -- splitting it on `:` addresses a route no mold has.
+@Test func aDeviceIdIsSentAsOnePathComponent() {
+    let path = backend.deviceMutationPath("cuda:9ffc81c539446490bfd9f68366f98226")
+    #expect(path == "/api/devices/cuda:9ffc81c539446490bfd9f68366f98226")
+    let url = backend.request(path, method: "PATCH").url
+    #expect(url?.path() == "/api/devices/cuda:9ffc81c539446490bfd9f68366f98226")
+}
+
 /// A print in the trash lives behind `?view=trash`, exactly as the listing
 /// does. Fetching it from the live view answers 404 on a print that is right
 /// there.

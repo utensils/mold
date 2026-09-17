@@ -29,6 +29,22 @@ private let hal9000Status = """
     #expect(status.gpus?.count == 1)
     #expect(status.gpus?.first?.name == "NVIDIA GeForce RTX 4090")
     #expect(status.gpus?.first?.vramTotalBytes == 25_757_220_864)
+    #expect(status.uptimeSecs == 232_723)
+}
+
+// A host that cannot resolve its own hostname omits the key entirely
+// (`#[serde(skip_serializing_if = "Option::is_none")]` on the server). A
+// non-optional `String` here threw on the whole decode and made `check(_:)`
+// report the machine as DOWN.
+private let statusWithNoHostname = """
+{"version":"0.29.0","models_loaded":[],"busy":false,"gpu_info":null,
+ "uptime_secs":69838,"instance_id":"ff00bea2-a8fc-4ffa-80c6-f5f80cfa5580"}
+""".data(using: .utf8)!
+
+@Test func aStatusWithNoHostnameStillDecodes() throws {
+    let status = try MoldJSON.decoder.decode(ServerStatus.self, from: statusWithNoHostname)
+    #expect(status.hostname == nil)
+    #expect(status.uptimeSecs == 69_838)
 }
 
 @Test func aKeylessHostCarriesNoKey() {

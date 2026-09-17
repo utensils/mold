@@ -12,6 +12,10 @@ extension LibraryStore {
         switch event {
         case .authority:
             break
+        // A device's lifecycle or runtime state is not a gallery concern --
+        // `MachineStore` is what reads `/api/devices` again.
+        case .deviceStateChanged:
+            break
         case .resyncRequired:
             // The stream admitted it dropped deltas, so nothing on screen for
             // this machine can be trusted. Reading the listing again is the

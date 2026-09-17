@@ -118,6 +118,17 @@ private let ancient = try! MoldJSON.decoder.decode(Capabilities.self, from: Data
     #expect(ancient.canSeeDevices == false)
 }
 
+/// A live device change needs BOTH `devices.lifecycle` (the route exists) and
+/// `dispatch.v2Authoritative` (the runtime will honour it) -- one without the
+/// other is a persisted change nothing will ever enforce.
+@Test func dispatchIsAuthoritativeOnlyUnderSchedulerV2() throws {
+    let caps = try live()
+    #expect(caps.dispatch?.activeMode == "v2")
+    #expect(caps.dispatchIsAuthoritative)
+    #expect(ancient.dispatch == nil)
+    #expect(ancient.dispatchIsAuthoritative == false)
+}
+
 /// Reference uploads exist on this host but are unavailable, because the
 /// protocol needs API-key auth and plato is keyless. Advertised-but-off is not
 /// the same as absent, and neither is a reason to fail a small reference.
