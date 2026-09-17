@@ -21,14 +21,51 @@ Branch `worktree-agent-ac7de2eea3506f1ea`, cut from `feat/macos-native-app` at `
 | Quick Look on a mesh shows its poster | done | 2bdc1cde | UAT below (needs a real host) |
 | Menus: `RowAction` on the view, the tile and the menu bar | done | 2bdc1cde + follow-up | `MeshViewMenuSuite`, `LibraryMenuPlanTests` |
 
+## Review round (adversarial review 2026-09-17, `REVIEW-F1.md`)
+
+| finding | status | commit | test |
+| --- | --- | --- | --- |
+| 1 CRITICAL — `Int` overflow trap in the accessor span | fixed | bb2c2477 | `refusesASpanThatCannotFitInMemoryRatherThanTrapping`, `refusesEitherOperandOfTheSpanOnItsOwn`, `refusesNegativeAndFractionalIntegerFields` |
+| 2 HIGH — every video export 422'd | fixed | b4396931 | `aClipExportNeverTakesTheMeshDoor` |
+| 3 HIGH — "as stored" wrote a 100 mm model | fixed | b4396931 | `asStoredIsOfferedOnlyWhereTheHostsDefaultIsAlreadyUnscaled` |
+| 4 HIGH — turntable defaults over the frame budget | fixed | 6eea08d5 | `clampsEveryTurntableValueIntoTheServersBoundsAndItsBudget`, `countsTheFramesTheBudgetBuysAtEverySizeItOffers`, `everySizeTheSheetOffersIsExportableAtItsOwnDefault` |
+| 5 MED — zero-length index buffer reached Metal | fixed | bb2c2477 | `refusesAMeshWithNoTriangles` |
+| 6 MED — stepping mesh→mesh killed auto-rotate | fixed | 89ae443f | — (teardown ordering; see below) |
+| 7 MED — `modelView`'s rotation order had no oracle | fixed | 89ae443f | `composesTheRotationsInTheReferencesOwnOrder` |
+| 8 MED — texture bomb (axis capped, product not) | fixed | bb2c2477 + 89ae443f | — (`edgeIndices` reserve and the pixel cap; see below) |
+| 9 LOW — a third file over 150 lines | fixed | 89ae443f | `make lint-size` names none of this lane's files |
+| 10 LOW — arrow RELEASE untested, claim polled | fixed | 89ae443f | `givesTheArrowsBackWhenNothingClaimsThem`, `announcesTakingAndGivingUpFirstResponder` |
+| 11 LOW — three tests that cannot fail, one silent `try?` | fixed | 6eea08d5 + 89ae443f | `carriesTheServersOwnBounds`, `noGestureMovesTheCentreTheCameraOrbits`, `handsBackAFreshValueSoAViewerCannotMutateTheHomeView` |
+| 12 LOW — `edges`/`edgeCount` read outside the lock | fixed | 89ae443f | — (`MeshFrame` carries them out of the same snapshot) |
+
+Three of those have no test of their own and that is a judgement, not an oversight:
+
+- **6** is an ordering inside `dismantleNSView`, which only SwiftUI calls; a test would
+  have to drive a view's removal from a hosting controller. The fix is two lines
+  swapped plus `wantsTour = true` in `load`, and UAT item 5 below is what sees it.
+- **8**'s pixel cap is a decode-time refusal of a PNG a test would have to synthesize at
+  16384 square; the `edgeIndices` half is a `reserveCapacity` hint, which is by
+  definition invisible to behaviour.
+- **12** is a race that is benign today, so a test asserting the current output proves
+  nothing. What it needed was the structure: the mutable fields leave the lock inside
+  `MeshFrame`, and there is no longer a reference from which to read them.
+
+**The CRITICAL was reproduced before it was fixed.** `swift test --filter
+refusesASpanThatCannotFitInMemoryRatherThanTrapping` killed the whole test process with
+signal 5 on the hostile fixture; after the fix the same file gets the reference's own
+sentence. The span is computed with reported-overflow arithmetic that SATURATES at
+`Int.max` rather than refusing separately, so a file that cannot fit in 64 bits falls
+into the same refusal, in the same words, as one that merely does not fit its bufferView
+— which is what keeps every ported message from `glb.test.ts` intact.
+
 ## Gates
 
-- `make lint` — green. `lint-size` (advisory) still names `LibraryViewer.swift` (159)
-  and `PrintMaterializer.swift` (151); both were already 147/150 before this lane and
-  each grew by the smallest change that could be made (an arrow-claim watcher; a
-  `named:` parameter).
-- `cd Packages/MoldClient && swift test` — 750 tests, 34 suites, green.
-- app-bundle `xcodebuild test` under the shared lock — 566 tests, 85 suites, green.
+- `make lint` — green, and `lint-size` names NO file from this lane: the four it took
+  over 150 (`LibraryViewer`, `PrintMaterializer`, `GLBAccessor`, `GLB`, plus
+  `MoldCommands+FocusedValues`) are split. It is a rule, not an advisory; calling it
+  advisory in the first round was wrong.
+- `cd Packages/MoldClient && swift test` — 758 tests, 34 suites, green.
+- app-bundle `xcodebuild test` under the shared lock — 572 tests, 86 suites, green.
 - `cargo test -p mold-ai-inference --lib the_viewer_mirrors` — green (the one cargo run
   the brief allowed), plus the two parser tests in the same warm binary.
 
@@ -108,20 +145,31 @@ I cannot drive the UI. On a host with a mesh print (plato holds several):
 7. **A textured mesh.** One with a baked texture must show it, right way up — a
    flipped V would show the texture upside down.
 8. **Quick Look.** Space on a mesh tile must show its poster, not a generic icon.
+8b. **A CLIP export still works.** Right-click an MP4 ▸ Export ▸ GIF: it must convert
+    straight away, with no turntable sheet — that combination 422'd for the whole first
+    round of this lane.
+8c. **"As stored" is offered only for OBJ.** Export ▸ STL must show no "Resize for
+    printing" toggle (its default IS 100 mm and the wire cannot ask for unscaled);
+    Export ▸ OBJ must show one.
 9. **An STL export at 100 mm, Z-up, floor.** Export ▸ STL, keep the defaults, then
    open it in a slicer: the longest side must measure 100 mm, it must stand upright
    rather than lie on its side, and its base must sit on the plate.
-10. **A turntable.** Export ▸ Turntable…, 36 frames at 10 fps: a 3.6 s spin whose
-    first frame is the same picture as the tile.
+10. **A turntable.** Export ▸ Turntable…, 36 views at 10 fps: a 3.6 s spin whose first
+    frame is the same picture as the tile. Then set the size to 2048 px and tick
+    Transparent: the views stepper must drop to at most 16 and say why in a line, and
+    the export must still succeed.
 11. **Failure lands on the poster.** Disconnect the host mid-open: the poster must
     stay with one sentence under it, never a black rectangle or a spinner.
 
-## Deferred
+## Not applicable, and one stated limit
 
-- Fullscreen. The reference gates it behind a prop and only the Create result areas
-  pass it; on this Mac the viewer already fills the pane and the window has its own
-  full-screen button, so I did not add a second one. Say if you want it.
-- A mesh's bounding box does not reach the export sheet's size sentence from the TILE
-  menu (it does not know one yet), so it reads "longest side 100 mm" there and names
-  all three extents only where a viewer has reported a box. The wire request is
-  identical either way.
+Nothing on this branch is deferred.
+
+- **Fullscreen is NOT APPLICABLE.** `MeshViewer.vue` prop-gates it and only the Create
+  result areas pass it, because a browser page has no window chrome of its own. A macOS
+  window carries the system full-screen button and the viewer already fills the pane, so
+  a second control would be a duplicate affordance. Nothing is missing for parity.
+- **Stated limit:** a mesh's bounding box does not reach the export sheet from the TILE
+  menu, which has not opened a viewer and so knows no box. The size sentence there reads
+  "longest side 100 mm" instead of naming all three extents. The wire request is
+  identical either way, and the sentence names all three from the viewer.
