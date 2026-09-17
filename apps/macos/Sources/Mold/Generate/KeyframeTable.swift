@@ -15,12 +15,20 @@ struct KeyframeTable: View {
     let temporal: TemporalProfile?
     @Binding var draft: RenderDraft
 
+    /// What a file the engine cannot read said, beside the control that
+    /// collected it rather than nowhere at all -- the same caption its two
+    /// sibling wells draw (finding 02#7).
+    @State private var importFailure: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(draft.media.keyframes.enumerated()), id: \.offset) { index, keyframe in
                 row(index: index, keyframe: keyframe)
             }
             addButton
+            if let importFailure {
+                Text(importFailure).font(.caption2).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -71,10 +79,16 @@ struct KeyframeTable: View {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task {
-            guard let picked = try? await PictureImport.load(
-                url, accepting: PictureImport.engineReadable) else { return }
-            draft.media.addingKeyframe(KeyframeCondition(
-                frame: nextFrame(temporal: temporal), image: picked.encoded, name: picked.name))
+            do {
+                let picked = try await PictureImport.load(
+                    url, accepting: PictureImport.engineReadable)
+                draft.media.addingKeyframe(KeyframeCondition(
+                    frame: nextFrame(temporal: temporal), image: picked.encoded,
+                    name: picked.name))
+                importFailure = nil
+            } catch {
+                importFailure = error.reasonSentence
+            }
         }
     }
 
