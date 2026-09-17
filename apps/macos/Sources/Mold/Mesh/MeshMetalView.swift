@@ -54,7 +54,23 @@ final class MeshMetalView: MTKView {
 
     override var acceptsFirstResponder: Bool { true }
 
-    override func becomeFirstResponder() -> Bool { true }
+    /// Both edges are ANNOUNCED. `ArrowKeyClaim` can only be asked, and
+    /// `NSWindow.didUpdateNotification` -- which the Library viewer polled --
+    /// is not a first-responder signal at all: a window that needs no update
+    /// does not post it, so the arrows kept stepping prints for a moment
+    /// after clicking into the mesh, and kept doing nothing for a moment
+    /// after clicking back out.
+    static let claimChanged = Notification.Name("io.utensils.mold.arrowClaimChanged")
+
+    override func becomeFirstResponder() -> Bool {
+        NotificationCenter.default.post(name: Self.claimChanged, object: self)
+        return true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        NotificationCenter.default.post(name: Self.claimChanged, object: self)
+        return true
+    }
 
     /// A click focuses the view, so the arrows reach it rather than the
     /// Library's previous/next.

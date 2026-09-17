@@ -68,8 +68,13 @@ struct MeshView: NSViewRepresentable {
     /// away: a lightbox opens and closes all session, and a Mac that keeps
     /// every mesh it has ever shown is one that eventually cannot show one.
     static func dismantleNSView(_ view: MeshMetalView, coordinator: Coordinator) {
-        view.stopTour()
+        // The callback goes FIRST. `stopTour` fires it whenever the tour was
+        // running, and it reports an INTERACTION -- so stepping from one mesh
+        // to the next used to retire the tour for every mesh after it, with
+        // nobody having touched anything, and wrote SwiftUI state during
+        // teardown while it was at it.
         view.onAutoRotateChange = nil
+        view.stopTour()
         view.delegate = nil
         view.renderer.release()
     }

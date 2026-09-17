@@ -24,6 +24,10 @@ struct MeshPayload: Sendable {
     let mesh: ParsedMesh
     let texture: MeshTextureImage?
 
+    /// Four times the largest texture mold bakes, on each axis and in total.
+    nonisolated static let maximumTextureEdge = 4096
+    nonisolated static let maximumTexturePixels = 4096 * 4096
+
     /// Parses the GLB and decodes its embedded baseColor image, if any.
     ///
     /// A texture that will not decode is DROPPED rather than failing the
@@ -45,7 +49,16 @@ struct MeshPayload: Sendable {
         else { return nil }
         let width = image.width
         let height = image.height
-        guard width > 0, height > 0, width <= 16384, height <= 16384 else { return nil }
+        // The PIXEL COUNT, not each axis: a solid-colour 16384x16384 PNG is a
+        // couple of kilobytes and expands to a 1 GiB array, with the `Data`
+        // copy below making the peak 2 GiB -- from a few KB embedded in the
+        // `.glb`. mold's own bakes are 2048 square at most (`hy3dpaint`), so
+        // 4096 square is four times the largest texture this app will ever be
+        // handed and a 64 MiB ceiling on what an untrusted one can ask for.
+        guard width > 0, height > 0,
+              width <= Self.maximumTextureEdge, height <= Self.maximumTextureEdge,
+              width * height <= Self.maximumTexturePixels
+        else { return nil }
 
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()

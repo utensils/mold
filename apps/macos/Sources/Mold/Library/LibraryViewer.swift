@@ -28,9 +28,11 @@ struct LibraryViewer: View {
     @Environment(\.isSearching) private var isSearching
     @FocusedValue(\.editingText) private var editingText: Bool?
     /// And so does a focused 3-D view, which ORBITS with the arrows and which
-    /// only AppKit can answer for (`ArrowKeyClaim`). Re-read as the key window
-    /// updates, and written only when it CHANGES, so the viewer's body is not
-    /// churned on every window notification.
+    /// only AppKit can answer for (`ArrowKeyClaim`). Re-read when a mesh view
+    /// TAKES or GIVES UP first responder -- the two moments the answer can
+    /// change -- and written only when it differs, so the viewer's body is not
+    /// churned. The window notification stays as a backstop for the responder
+    /// changes no mesh view announces (clicking into the grid, or a sheet).
     @State private var responderClaimsArrows = false
 
     var body: some View {
@@ -56,9 +58,11 @@ struct LibraryViewer: View {
         .background(.background)
         .overlay(alignment: .top) { bar }
         .task(id: entry.id) { await load() }
+        .onReceive(NotificationCenter.default.publisher(for: MeshMetalView.claimChanged)) { _ in
+            readArrowClaim()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didUpdateNotification)) { _ in
-            let claimed = ArrowKeyClaim.isClaimedNow
-            if claimed != responderClaimsArrows { responderClaimsArrows = claimed }
+            readArrowClaim()
         }
     }
 
@@ -76,59 +80,27 @@ struct LibraryViewer: View {
         }
     }
 
-    private var bar: some View {
-        HStack(spacing: 12) {
-            // A grid, not a third chevron: the icon says WHERE back goes, and
-            // the bar no longer reads as three arrows in a row.
-            Button { onClose() } label: { Label("Library", systemImage: "square.grid.2x2") }
-                // Every key this viewer answers is bound to the control that
-                // performs it, never to a focus the viewer holds: SwiftUI
-                // hands the grid's focus to the search field the moment the
-                // viewer replaces it, so `.onKeyPress` here reached nothing.
-                // A key equivalent is window-scoped and needs no focus, and
-                // these controls exist only while a print is showing.
-                .keyboardShortcut(isEditing ? nil : KeyboardShortcut.cancelAction)
-                .help("Back to the library (esc)")
-            Divider().frame(height: 14)
-            Button { onStep(-1) } label: { Label("Previous", systemImage: "chevron.left") }
-                .keyboardShortcut(stepping(.leftArrow))
-                .help("Previous print (←)")
-            Button { onStep(1) } label: { Label("Next", systemImage: "chevron.right") }
-                .keyboardShortcut(stepping(.rightArrow))
-                .help("Next print (→)")
-            Spacer()
-            Text(entry.print.metadata.prompt ?? entry.print.filename)
-                .lineLimit(1)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Button { actions.toggleFavorite([entry]) } label: {
-                Label("Favourite",
-                      systemImage: entry.print.isFavorite ? "star.fill" : "star")
-            }
-            .help(entry.print.isFavorite ? "Remove from Favourites" : "Add to Favourites")
-            Button { actions.save([entry]) } label: {
-                Label("Save", systemImage: "square.and.arrow.down")
-            }
-            .help("Save a copy")
-        }
-        .buttonStyle(.accessoryBar)
-        .labelStyle(.iconOnly)
-        .padding(10)
-        .background(.bar)
-    }
-
     /// Written once, because Escape and the two arrows all answer to it: a
     /// caret has the better claim on an unmodified key, so every shortcut here
     /// stands down and the field answers instead. How long that lasts is the
     /// FIELD's to decide -- the search field releases focus on its own Escape,
     /// so the next one leaves the viewer; a title field reverts and keeps
     /// typing, so you leave it before Escape means "back" again.
-    private var isEditing: Bool { isSearching || editingText == true }
+    /// Not `private`: the bar lives in `+Bar` for size, and `private` does
+    /// not cross files for the same type.
+    var isEditing: Bool { isSearching || editingText == true }
+
+    /// The answer is AppKit's, asked at the moments it can change. Written
+    /// only when it differs: both publishers fire often.
+    private func readArrowClaim() {
+        let claimed = ArrowKeyClaim.isClaimedNow
+        if claimed != responderClaimsArrows { responderClaimsArrows = claimed }
+    }
 
     /// Escape still means "back" while a 3-D view has focus -- it is the arrows
     /// the mesh claims, and a viewer you cannot leave would be worse than one
     /// whose arrows do two things.
-    private func stepping(_ key: KeyEquivalent) -> KeyboardShortcut? {
+    func stepping(_ key: KeyEquivalent) -> KeyboardShortcut? {
         isEditing || responderClaimsArrows ? nil : KeyboardShortcut(key, modifiers: [])
     }
 

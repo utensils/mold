@@ -105,6 +105,44 @@ import Testing
         #expect(!ArrowKeyClaim.claims(NSButton()))
     }
 
+    /// **Fails today**: only the CLAIM was tested. Giving the arrows BACK --
+    /// closing the mesh, stepping to a picture, clicking into the grid -- is
+    /// the half that decides whether the Library still works afterwards, and
+    /// nothing said a thing about it.
+    @Test func givesTheArrowsBackWhenNothingClaimsThem() throws {
+        let view = MeshMetalView(renderer: try renderer())
+        #expect(ArrowKeyClaim.claims(view))
+        // Every responder the viewer falls back to once the mesh is gone.
+        #expect(!ArrowKeyClaim.claims(nil))
+        #expect(!ArrowKeyClaim.claims(NSView()))
+        #expect(!ArrowKeyClaim.claims(NSImageView()))
+        // And the responders that claimed them BEFORE this lane still do.
+        #expect(ArrowKeyClaim.claims(NSSlider()))
+        #expect(ArrowKeyClaim.claims(NSTextField()))
+    }
+
+    /// Both edges are announced, so the viewer is told rather than polling a
+    /// notification that is not about first responders.
+    @Test func announcesTakingAndGivingUpFirstResponder() throws {
+        let view = MeshMetalView(renderer: try renderer())
+        let counter = Counter()
+        let token = NotificationCenter.default.addObserver(
+            forName: MeshMetalView.claimChanged, object: view, queue: nil
+        ) { _ in counter.bump() }
+        defer { NotificationCenter.default.removeObserver(token) }
+        _ = view.becomeFirstResponder()
+        _ = view.resignFirstResponder()
+        #expect(counter.count == 2)
+    }
+
+    /// A tiny box, because a notification block is not `@MainActor`.
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func bump() { lock.withLock { value += 1 } }
+        var count: Int { lock.withLock { value } }
+    }
+
     private func key(_ characters: String, shift: Bool = false) -> MeshInteraction.Key? {
         let event = NSEvent.keyEvent(
             with: .keyDown, location: .zero,

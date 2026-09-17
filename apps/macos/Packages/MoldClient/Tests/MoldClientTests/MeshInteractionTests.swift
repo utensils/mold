@@ -108,13 +108,32 @@ import Testing
         #expect(MeshInteraction.key(forCharacters: "") == nil)
     }
 
-    /// There is NO pan: nothing here moves the centre the camera orbits, so
-    /// the framing stays the poster's at every angle.
-    @Test func nothingMovesTheCentreTheCameraOrbits() {
-        let moved = MeshInteraction.apply(
-            .orbitLeft, to: MeshInteraction.zoom(home, by: 2), shift: true)
-        // A `ViewerCamera` carries only yaw, pitch and zoom -- there is no
-        // field a pan could write, which is the structural half of the rule.
-        #expect(moved.zoom == MeshInteraction.zoom(home, by: 2).zoom)
+    /// There is NO pan, and the rule is STRUCTURAL: a `ViewerCamera` carries
+    /// only yaw, pitch and zoom, so there is no field a pan could write and
+    /// the framing stays the poster's at every angle. Every gesture is
+    /// checked, because a pan would have to arrive through one of them.
+    @Test func noGestureMovesTheCentreTheCameraOrbits() {
+        let start = MeshInteraction.zoom(home, by: 2)
+        var reached: [ViewerCamera] = [
+            MeshInteraction.orbit(start, dx: 3, dy: -1),
+            MeshInteraction.zoom(start, by: 1.15),
+        ]
+        for key in [MeshInteraction.Key.orbitLeft, .orbitRight, .orbitUp, .orbitDown,
+                    .zoomIn, .zoomOut, .home] {
+            reached.append(MeshInteraction.apply(key, to: start, shift: true))
+        }
+        // Every reachable camera is still describable by the three fields the
+        // home camera has: nothing has introduced a fourth to pan with.
+        for camera in reached {
+            #expect(camera == ViewerCamera(yaw: camera.yaw, pitch: camera.pitch,
+                                           zoom: camera.zoom))
+        }
+        // An orbit moves the angles and NOT the zoom; a zoom the reverse.
+        let orbited = MeshInteraction.orbit(start, dx: 3, dy: -1)
+        #expect(orbited.zoom == start.zoom)
+        #expect(orbited.yaw != start.yaw)
+        let zoomed = MeshInteraction.zoom(start, by: 1.15)
+        #expect(zoomed.yaw == start.yaw)
+        #expect(zoomed.pitch == start.pitch)
     }
 }

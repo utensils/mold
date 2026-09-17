@@ -93,6 +93,9 @@ struct MeshCanvas: View {
         scene = nil
         note = nil
         wireframe = false
+        // The tour is per MESH, not per mount: stepping to the next print
+        // starts a fresh one, and only an interaction with THAT one ends it.
+        wantsTour = true
         do {
             let bytes = try await fetch()
             let payload = try await Task.detached(priority: .userInitiated) {

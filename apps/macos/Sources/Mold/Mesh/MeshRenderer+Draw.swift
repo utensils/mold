@@ -6,8 +6,11 @@ import simd
 // The draw itself, composed exactly as `MeshViewer.vue:277-345` composes it.
 extension MeshRenderer {
 
-    func draw(_ scene: MeshScene, camera: ViewerCamera, wireframe: Bool, extent: Double,
-              size: CGSize, into encoder: any MTLRenderCommandEncoder) {
+    func draw(_ frame: MeshFrame, size: CGSize,
+              into encoder: any MTLRenderCommandEncoder) {
+        let scene = frame.scene
+        let camera = frame.camera
+        let extent = frame.extent
         // Backing-store pixels, not points: the scale factor cancels between
         // the fit and the half-extents, so a retina view frames the mesh
         // exactly as the server's poster does.
@@ -50,7 +53,8 @@ extension MeshRenderer {
         encoder.setCullMode(.none)
         encoder.setFrontFacing(.counterClockwise)
 
-        let overlay = wireframe && scene.edgeCount > 0
+        // Decided under the lock, with the buffer it names.
+        let overlay = frame.edges != nil
         if overlay {
             // Pushing the filled triangles away from the eye keeps the edges
             // from z-fighting the very surface they outline -- the reference's
@@ -64,13 +68,13 @@ extension MeshRenderer {
             type: .triangle, indexCount: scene.indexCount, indexType: .uint32,
             indexBuffer: scene.indices, indexBufferOffset: 0)
 
-        guard overlay, let edges = scene.edges else { return }
+        guard let edges = frame.edges else { return }
         encoder.setDepthBias(0, slopeScale: 0, clamp: 0)
         uniforms.wireframe = 1
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<MeshUniforms>.stride, index: 4)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<MeshUniforms>.stride, index: 0)
         encoder.drawIndexedPrimitives(
-            type: .line, indexCount: scene.edgeCount, indexType: .uint32,
+            type: .line, indexCount: frame.edgeCount, indexType: .uint32,
             indexBuffer: edges, indexBufferOffset: 0)
     }
 

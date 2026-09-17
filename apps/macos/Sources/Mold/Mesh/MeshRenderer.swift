@@ -14,6 +14,19 @@ struct MeshUniforms {
     var wireframe: Float
 }
 
+/// One draw's worth of state, read out under the renderer's lock in one go.
+///
+/// The edge buffer is part of it BECAUSE it is the one mutable thing a
+/// `MeshScene` carries: copying the pointer out under the lock is what makes
+/// `MeshScene`'s own "every reader goes through the lock" true.
+struct MeshFrame {
+    let scene: MeshScene
+    let camera: ViewerCamera
+    let extent: Double
+    let edges: (any MTLBuffer)?
+    let edgeCount: Int
+}
+
 /// The mesh view's Metal state and its camera.
 ///
 /// **Deliberately not `@MainActor`.** `MTKViewDelegate`'s callbacks arrive off
@@ -95,7 +108,13 @@ final class MeshRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
-        let snapshot = state.withLock { state -> (MeshScene, ViewerCamera, Bool, Double)? in
+        // EVERYTHING the draw reads is taken under the lock, the edge buffer
+        // included. It used to hand the `MeshScene` reference out and read
+        // `edges`/`edgeCount` unsynchronised while `toggleWireframe` could
+        // write them from the main actor -- benign only by an invariant
+        // nobody had written down, and a race on a GPU resource pointer the
+        // moment any of it changed.
+        let frame = state.withLock { state -> MeshFrame? in
             guard let scene = state.scene else { return nil }
             if state.camera.pitch != state.framedPitch {
                 state.framedPitch = state.camera.pitch
@@ -106,28 +125,23 @@ final class MeshRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     MeshViewerCamera.sweepExtentOfProfile(
                         scene.profile, elevationRad: state.camera.pitch))
             }
-            return (scene, state.camera, state.wireframe, state.framedExtent)
+            let overlay = state.wireframe && scene.edgeCount > 0
+            return MeshFrame(scene: scene, camera: state.camera,
+                             extent: state.framedExtent,
+                             edges: overlay ? scene.edges : nil,
+                             edgeCount: overlay ? scene.edgeCount : 0)
         }
-        guard let snapshot,
+        guard let frame,
               let descriptor = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
               let buffer = queue.makeCommandBuffer(),
               let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor)
         else { return }
-        encode(into: encoder, view: view, scene: snapshot.0, camera: snapshot.1,
-               wireframe: snapshot.2, extent: snapshot.3)
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setDepthStencilState(depthState)
+        draw(frame, size: view.drawableSize, into: encoder)
         encoder.endEncoding()
         buffer.present(drawable)
         buffer.commit()
-    }
-
-    /// Split out so `MeshRenderer+Draw` owns the composition.
-    private func encode(into encoder: any MTLRenderCommandEncoder, view: MTKView,
-                        scene: MeshScene, camera: ViewerCamera, wireframe: Bool,
-                        extent: Double) {
-        encoder.setRenderPipelineState(pipeline)
-        encoder.setDepthStencilState(depthState)
-        draw(scene, camera: camera, wireframe: wireframe, extent: extent,
-             size: view.drawableSize, into: encoder)
     }
 }

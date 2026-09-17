@@ -64,9 +64,9 @@ final class PrintMaterializer {
 
     /// A file for this print, downloading it if the cache has not got one.
     ///
-    /// `named` overrides the file's NAME inside the per-print folder, which is
-    /// what a mesh's Quick Look needs: its bytes are the host's poster, and a
-    /// `.png` written under a `.glb` name is a file macOS will not preview.
+    /// `named` overrides the file's NAME inside the per-print folder: a
+    /// mesh's Quick Look holds the host's poster, and a `.png` written under
+    /// a `.glb` name is a file macOS will not preview.
     func url(for entry: LibraryEntry, named name: String? = nil,
              fetch: @escaping () async -> Data?) async -> URL? {
         let key = Self.key(for: entry)
@@ -120,27 +120,6 @@ final class PrintMaterializer {
         if let url { noteIfTooLarge(url, named: entry.print.displayName) }
         enforceBudget(keeping: key)
         return url
-    }
-
-    /// The identity of a print's bytes, as a directory name.
-    ///
-    /// The filename stays OUT of the key and inside the directory, so what
-    /// Quick Look titles and what the Finder receives is the print's own name
-    /// rather than a hash. `media_version` is absent on older servers; the
-    /// timestamp stands in, which at worst re-downloads once.
-    private static func key(for entry: LibraryEntry) -> String {
-        let version = entry.print.mediaVersion ?? String(entry.print.timestamp)
-        // `media_version` is the machine's string too, and this is the only
-        // place the app makes a DIRECTORY out of one -- so it is folded rather
-        // than refused (a print with an odd version is still a print) by the
-        // same rule the filename is judged against. mold's own versions carry
-        // a colon, which is legal in a POSIX component and invisible here but
-        // which the Finder renders as "/", so it goes either way.
-        // Room for the machine's UUID and the dash: the whole thing is ONE
-        // component, and one byte over is a directory that cannot be created.
-        let safe = SafeFilename.folded(version, fallback: String(entry.print.timestamp),
-                                       limit: SafeFilename.maxBytes - 37)
-        return "\(entry.hostID.uuidString)-\(safe)"
     }
 
     /// Empties the whole cache. Called when Mold quits.
