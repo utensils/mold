@@ -25,6 +25,9 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
         // Before the bundle guard below: the appearance is a plain AppKit
         // call and must land outside a real `.app` too (the test host).
         Appearance.stored(in: AppStorageSuite.defaults).apply()
+        #if DEBUG
+        UATScript.runIfRequested()
+        #endif
         guard MoldNotifications.isInsideBundle() else { return }
         UNUserNotificationCenter.current().delegate = self
     }
