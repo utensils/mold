@@ -355,8 +355,9 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var chainJobAnswer: CreateChainJobResponse?
     /// Every body created, in call order -- WHAT an auto-chain submitted.
     nonisolated(unsafe) var chainJobRequests: [AutoChainRequest] = []
-    /// Every `x-mold-operation-id` sent, so a test can pin the fence.
-    nonisolated(unsafe) var chainOperationIds: [String] = []
+    /// Every create recorded, so `releaseSubmit` knows a chain gate is the
+    /// one being released.
+    nonisolated(unsafe) private var recordedChainCreates: [String] = []
     nonisolated(unsafe) var cancelledChainJobIds: [String] = []
     nonisolated(unsafe) var chainJobDetails: [String: ChainJobDetail] = [:]
     /// Ids whose event stream is held OPEN, pushed with `emitChainEvent`.
@@ -366,7 +367,42 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     /// Set before a submit to hold `createChainJob` in the air until
     /// `releaseSubmit()` -- the window where Stop has no job id to cancel yet.
+    /// Its OWN queue of continuations, not `holdsSubmit`'s single slot: two
+    /// creates can be outstanding at once, and one shared slot would drop the
+    /// first and hang the test.
     nonisolated(unsafe) var holdsChainCreate = false
+    nonisolated(unsafe) private var chainGates: [@Sendable () -> Void] = []
+    nonisolated(unsafe) private var chainReleases = 0
+
+    /// Lets the OLDEST held-open `createChainJob` answer, whether or not it
+    /// has suspended yet. Its own verb, not `releaseSubmit`'s: two creates can
+    /// be outstanding at once and a batch may be in the air beside them.
+    func releaseChainCreate() {
+        submitLock.lock()
+        if chainGates.isEmpty {
+            chainReleases += 1
+            submitLock.unlock()
+            return
+        }
+        let gate = chainGates.removeFirst()
+        submitLock.unlock()
+        gate()
+    }
+
+    /// Suspends until a `releaseChainCreate()` is available for this create.
+    private func chainGate() async {
+        await withCheckedContinuation { continuation in
+            submitLock.lock()
+            if chainReleases > 0 {
+                chainReleases -= 1
+                submitLock.unlock()
+                continuation.resume()
+            } else {
+                chainGates.append { continuation.resume() }
+                submitLock.unlock()
+            }
+        }
+    }
 
     func createChainJob(
         _ request: AutoChainRequest, operationId: String
@@ -374,24 +410,12 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         try record("createChainJob")
         let holding = submitLock.withLock { () -> Bool in
             chainJobRequests.append(request)
-            chainOperationIds.append(operationId)
+            recordedChainCreates.append(operationId)
             let held = holdsChainCreate
             holdsChainCreate = false
             return held
         }
-        if holding {
-            await withCheckedContinuation { continuation in
-                submitLock.lock()
-                if submitReleased {
-                    submitReleased = false
-                    submitLock.unlock()
-                    continuation.resume()
-                } else {
-                    submitGate = { continuation.resume() }
-                    submitLock.unlock()
-                }
-            }
-        }
+        if holding { await chainGate() }
         guard let chainJobAnswer else { throw notPlanted() }
         return chainJobAnswer
     }

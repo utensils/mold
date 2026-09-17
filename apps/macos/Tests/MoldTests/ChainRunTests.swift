@@ -139,13 +139,47 @@ struct ChainRunTests {
 
         controller.stop()
         #expect(controller.run.isBusy == false)
-        backend.releaseSubmit()
+        backend.releaseChainCreate()
 
         await settle { backend.cancelledChainJobIds == ["chain-4"] }
         // Never followed, and never recoverable -- the user withdrew it.
         #expect(backend.calls.contains("chainJobEvents") == false)
         #expect(PendingChain.all()["chain-4"] == nil)
         #expect(controller.run.isBusy == false)
+    }
+
+    /// Generate, Stop, Generate. **Fails today**: `creating` and `withdrawn`
+    /// are instance state shared by every start, so the FIRST task's landing
+    /// clears the SECOND's flags -- and the second Stop then found nothing to
+    /// stop, fell through to the batch path, and the chain the user had just
+    /// withdrawn rendered to completion.
+    @Test func aStaleStartNeverClobbersTheOneAfterIt() async {
+        let plato = machine()
+        let backend = FakeBackend(host: plato)
+        let controller = makeController(backend, host: plato)
+        backend.chainJobAnswer = try! MoldJSON.decoder.decode(
+            CreateChainJobResponse.self, from: Data(#"{"job_id": "chain-5"}"#.utf8))
+        backend.holdsChainCreate = true
+
+        controller.submit(on: plato, backend: backend, routing: routing)
+        await settle { backend.calls.contains("createChainJob") }
+        controller.stop()
+
+        // A second press while the FIRST create is still in the air.
+        backend.holdsChainCreate = true
+        controller.submit(on: plato, backend: backend, routing: routing)
+        await settle { backend.calls.filter { $0 == "createChainJob" }.count == 2 }
+        // The first create lands now, and must touch nothing of the second's.
+        backend.releaseChainCreate()
+        await settle { backend.cancelledChainJobIds.count == 1 }
+
+        // Stop, aimed at the SECOND chain, which is still unanswered.
+        #expect(controller.run.isBusy)
+        controller.stop()
+        #expect(controller.run.isBusy == false)
+        backend.releaseChainCreate()
+        await settle { backend.cancelledChainJobIds.count == 2 }
+        #expect(backend.calls.contains("chainJobEvents") == false)
     }
 
     /// A refusal is the SERVER's sentence and nothing is submitted at all.

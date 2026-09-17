@@ -20,6 +20,12 @@ final class ChainRun {
     private(set) var active: ChainProgress?
     private var task: Task<Void, Never>?
     private var host: MoldHost.ID?
+    /// Which start owns this type's state. `creating`, `withdrawn`, `active`,
+    /// `host` and `task` are all instance state shared by every `start()`, so
+    /// without a token an OLDER task's landing clears the flags of the one
+    /// after it -- and the Stop aimed at the newer chain then found nothing to
+    /// stop and let it render to completion.
+    private var generation = 0
     /// A create is in the air. Set SYNCHRONOUSLY by `start`, so a Stop
     /// pressed in the same turn is answered even though there is no job id
     /// to cancel yet.
@@ -52,6 +58,8 @@ final class ChainRun {
         on host: MoldHost.ID, backend: any MoldBackend, report: Reporter
     ) {
         task?.cancel()
+        generation += 1
+        let mine = generation
         self.host = host
         creating = true
         withdrawn = false
@@ -61,7 +69,7 @@ final class ChainRun {
             do {
                 created = try await backend.createChainJob(request, operationId: operationId)
             } catch {
-                guard let self else { return }
+                guard let self, self.generation == mine else { return }
                 self.creating = false
                 // A withdrawn create that then failed needs no sentence: the
                 // user already asked for it to stop.
@@ -70,19 +78,16 @@ final class ChainRun {
                 report.failed(error.sentence)
                 return
             }
-            guard let self else {
-                // Admitted but abandoned: the job is real on the host and
-                // nobody is going to watch it, so withdraw it rather than
-                // leaving a GPU rendering for no one.
+            // Gone, superseded, or withdrawn: the job is REAL on the host and
+            // nobody is going to watch it, so cancel the id it just named
+            // rather than leaving a GPU rendering for no one. This is the
+            // whole reason Stop does not cancel the task above.
+            guard let self, self.generation == mine else {
                 try? await backend.cancelChainJob(id: created.jobId)
                 return
             }
             self.creating = false
             guard !self.withdrawn, !Task.isCancelled else {
-                // Admitted and then withdrawn: the job is REAL on the host
-                // and nobody is going to watch it, so cancel the id it just
-                // named rather than leaving a GPU rendering for no one. This
-                // is the whole reason Stop does not cancel the task above.
                 self.withdrawn = false
                 try? await backend.cancelChainJob(id: created.jobId)
                 return
@@ -103,7 +108,10 @@ final class ChainRun {
         backend: any MoldBackend, report: Reporter
     ) {
         task?.cancel()
+        generation += 1
         self.host = host
+        creating = false
+        withdrawn = false
         active = ChainProgress(jobId: jobId, stageCount: stageCount)
         task = Task { [weak self] in
             await self?.follow(jobId, on: host, backend: backend, report: report)
