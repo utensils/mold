@@ -53,8 +53,28 @@ public struct GalleryPrint: Codable, Hashable, Sendable {
     public var isFavorite: Bool { favorite ?? false }
     public var tagList: [String] { tags ?? [] }
 
-    /// mold stores video as mp4 and meshes as glb; everything else is a still.
-    public var isVideo: Bool { ["mp4", "webm", "mov"].contains(format ?? "") }
+    /// Containers mold only ever writes for something that MOVES. `format` is
+    /// the serialized `OutputFormat` (`types.rs:3667-3689`), not a file
+    /// extension, so `apng` arrives spelled out even though the file on disk
+    /// is a `.png`. `webm` and `mov` used to be in this set and are formats
+    /// mold has never produced (`metadata_io.rs:36-56` is the closed set).
+    private static let animatedFormats: Set<String> = ["mp4", "gif", "apng"]
+
+    /// Whether this print moves.
+    ///
+    /// The container answers for every format but one. `webp` is offered for a
+    /// still recipe AND for a temporal one (`generation_profile.rs:2140-2157`),
+    /// so a WebP alone says nothing and the print's own frame count decides.
+    /// Picking GIF or WebP for an LTX-2 or Wan render is a one-click choice
+    /// the inspector offers from `capabilities.output.formats`, so this is an
+    /// ordinary print, not a corner case.
+    public var isVideo: Bool {
+        guard let format else { return false }
+        if Self.animatedFormats.contains(format) { return true }
+        return format == "webp" && (metadata.frames ?? 1) > 1
+    }
+
+    /// mold stores every 3-D artifact as one GLB.
     public var isMesh: Bool { format == "glb" }
 
     /// What a person would call this.
