@@ -9,7 +9,7 @@ import Foundation
 /// model's default width and height BEFORE any source watcher runs, so the
 /// comparison always failed and the canvas stopped following the source on
 /// the first model switch (`sourceResolution.ts:50-59`).
-public enum CanvasIntent: String, Hashable, Sendable {
+public enum CanvasIntent: String, Codable, Hashable, Sendable {
     /// Follow the attached source, on the model's own preset ladder.
     case source
     /// Follow the source at its own aligned, capped size.

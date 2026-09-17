@@ -23,6 +23,9 @@ struct GeneratePane: View {
     /// destination.
     @AppStorage("generateShowsInspector", store: AppStorageSuite.defaults)
     var showsInspector = true
+    /// The draft this pane was holding when the app last quit. Not
+    /// `private`: `GeneratePane+Models` asks it which model to adopt.
+    @State var drafts = DraftPersistence()
 
     var body: some View {
         @Bindable var controller = controller
@@ -42,6 +45,7 @@ struct GeneratePane: View {
             GenerateInspector(recipe: recipe, model: selectedModel, host: host,
                               draft: $controller.draft, destination: $destination)
         }
+        .persistingDraft(controller, in: drafts)
         .navigationTitle("Generate")
         .navigationSubtitle(subtitle)
         .toolbar { toolbar }
