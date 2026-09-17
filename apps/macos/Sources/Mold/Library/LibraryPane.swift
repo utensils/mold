@@ -21,6 +21,9 @@ struct LibraryPane: View {
 
     @State var selection = LibraryCursor.Selection.empty
     @State var viewing: PrintID?
+    /// Backs Edit ▸ Find (design S6): `.searchFocused($isSearchFocused)`
+    /// below, set from `body`'s own `findAction` focused value.
+    @FocusState private var isSearchFocused: Bool
     /// Persisted, and deliberately not `private`: the toolbar button that
     /// flips it lives in an extension in another file.
     @AppStorage("libraryShowsInspector", store: AppStorageSuite.defaults)
@@ -45,6 +48,12 @@ struct LibraryPane: View {
             })
             .focusedSceneValue(\.librarySelection, menuSelection(showing))
             .focusedSceneValue(\.libraryImport, menuImport)
+            .focusedSceneValue(\.libraryFile, menuFile(showing))
+            .focusedSceneValue(\.findAction) { isSearchFocused = true }
+            .focusedSceneValue(\.thumbnailScale, ThumbnailScaleAction(edge: navigation.edge) { delta in
+                navigation.edge = ThumbnailStep.apply(navigation.edge, delta: delta)
+                navigation.rememberEdge()
+            })
             .destructionDialog($pendingDestruction)
     }
 
@@ -94,6 +103,7 @@ struct LibraryPane: View {
                         prompt: "Search prompts, models and tags") { token in
                 Label(token.label, systemImage: token.symbol)
             }
+            .searchFocused($isSearchFocused)
             .toolbar { toolbar }
     }
 

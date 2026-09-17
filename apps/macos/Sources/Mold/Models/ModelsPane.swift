@@ -24,6 +24,10 @@ struct ModelsPane: View {
     @AppStorage("modelsScope", store: AppStorageSuite.defaults) var scopeRaw = ModelScope.installed.rawValue
     @State var query = ""
     @State var selection: Model.ID?
+    /// Backs Edit ▸ Find. The pane answers no ⌘A (design S6): `selection`
+    /// below is a single `Model.ID?`, so there is no multi-row selection
+    /// for Select All to make.
+    @FocusState private var isSearchFocused: Bool
     // Not `private`: `ModelsPane+Actions` reads and writes these too, same
     // file-boundary reason as the doc comment above.
     @State var pendingDestruction: Destruction?
@@ -81,6 +85,7 @@ struct ModelsPane: View {
         .navigationTitle("Models")
         .navigationSubtitle(subtitle)
         .searchable(text: $query, prompt: "Search models")
+        .searchFocused($isSearchFocused)
         .toolbar { toolbar }
         .sheet(item: $downloads.pendingLicense) { pending in
             LicenseSheet(pending: pending)
@@ -93,6 +98,7 @@ struct ModelsPane: View {
         }
         .destructionDialog($pendingDestruction)
         .focusedSceneValue(\.modelSelection, modelSelection)
+        .focusedSceneValue(\.findAction) { isSearchFocused = true }
         .task { await load() }
         .onChange(of: hosts.reachability) { _, _ in adoptPreferredHost() }
     }
@@ -127,20 +133,5 @@ struct ModelsPane: View {
     private func load() async {
         await models.refresh()
         adoptPreferredHost()
-    }
-
-    /// Land on a machine once one has answered.
-    ///
-    /// `preferredHost` falls back to the first row configured, which before
-    /// any answer is in may well be a machine that is off -- so this waits for
-    /// an `up`. Until then `host` falls back the same way for display, so the
-    /// pane still shows something; what it does not do is PIN the picker to a
-    /// machine nobody chose. "Nobody chose" is asked directly against the
-    /// stored id -- `machine(selected:)` itself already falls back to
-    /// `preferredHost`, so asking IT would never see "nothing yet".
-    private func adoptPreferredHost() {
-        let chosen = UUID(uuidString: selectedMachine).flatMap(hosts.host)
-        guard chosen == nil, hosts.hosts.contains(where: hosts.isUp) else { return }
-        selectedMachine = hosts.preferredHost?.id.uuidString ?? ""
     }
 }

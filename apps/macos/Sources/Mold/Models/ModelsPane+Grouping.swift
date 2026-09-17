@@ -69,4 +69,19 @@ extension ModelsPane {
     var sections: [(family: String, rows: [Model])] {
         ModelSort.grouped(candidates, by: sort.wrappedValue)
     }
+
+    /// Land on a machine once one has answered.
+    ///
+    /// `preferredHost` falls back to the first row configured, which before
+    /// any answer is in may well be a machine that is off -- so this waits for
+    /// an `up`. Until then `host` falls back the same way for display, so the
+    /// pane still shows something; what it does not do is PIN the picker to a
+    /// machine nobody chose. "Nobody chose" is asked directly against the
+    /// stored id -- `machine(selected:)` itself already falls back to
+    /// `preferredHost`, so asking IT would never see "nothing yet".
+    func adoptPreferredHost() {
+        let chosen = UUID(uuidString: selectedMachine).flatMap(hosts.host)
+        guard chosen == nil, hosts.hosts.contains(where: hosts.isUp) else { return }
+        selectedMachine = hosts.preferredHost?.id.uuidString ?? ""
+    }
 }

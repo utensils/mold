@@ -54,6 +54,7 @@ struct MachinesPane: View {
         }
         .onDisappear { machines.stopWatchingResources() }
         .focusedSceneValue(\.refreshAction) { refresh() }
+        .focusedSceneValue(\.machineSelection, machineSelection)
     }
 
     @ViewBuilder private func machine(_ host: MoldHost) -> some View {
@@ -95,6 +96,15 @@ struct MachinesPane: View {
         ToolbarItem {
             Button { refresh() } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            .disabled(selected == nil)
+        }
+        // Overflow rather than a fixed slot: a choice made far more rarely
+        // than Refresh, through the same `HostStore.setDefault(_:)` the
+        // Machine menu's own item calls (`MachineCommands.swift`) -- one door.
+        ToolbarItem(placement: .secondaryAction) {
+            Button { selected.map(hosts.setDefault) } label: {
+                Label("Set as Default", systemImage: "star")
             }
             .disabled(selected == nil)
         }

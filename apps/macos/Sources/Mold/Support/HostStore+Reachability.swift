@@ -87,11 +87,15 @@ extension HostStore {
 
     /// The machine to work on by default.
     ///
-    /// Deliberately not "the first one configured": the list starts with this
-    /// Mac, which on most setups is not running a server at all. Landing there
-    /// shows an empty model picker and reads as the app being broken.
+    /// An explicit choice (`HostStore+Default.swift`) outranks the heuristic
+    /// below, even when that machine is down -- the pane says "can't be
+    /// reached" rather than looking broken. A default that has been REMOVED
+    /// (`remove(_:)`) falls through to it: deliberately not "the first one
+    /// configured", since the list starts with this Mac, which on most setups
+    /// is not running a server at all, and landing there shows an empty model
+    /// picker and reads as the app being broken.
     var preferredHost: MoldHost? {
-        hosts.first(where: isUp) ?? hosts.first
+        defaultMachine.flatMap(host) ?? hosts.first(where: isUp) ?? hosts.first
     }
 
     /// The machine a remembered `uuidString` names, or somewhere real.

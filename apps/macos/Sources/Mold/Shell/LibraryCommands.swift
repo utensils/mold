@@ -39,9 +39,9 @@ struct LibraryCommands: Commands {
         Button("Quick Look") { library?.quickLook() }
             .keyboardShortcut(.space, modifiers: [])
             .disabled(library?.isEmpty ?? true)
-        if let share = library?.share, !share.isEmpty {
-            ShareLink(items: share) { SharePreview($0.filename) }
-        }
+        // Share moved to File ▸ Share, off the same `librarySelection.share`
+        // (design decision 24, `MoldCommands.swift`) -- a Mac's Share belongs
+        // in File, not in a feature menu.
         Divider()
 
         Button(library?.allFavorite == true ? "Unfavorite" : "Favorite") {

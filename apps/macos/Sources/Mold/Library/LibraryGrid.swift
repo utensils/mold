@@ -46,6 +46,16 @@ struct LibraryGrid: View {
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
+        // ⌘A here, not in `MoldCommands`: Edit already carries the system's
+        // Select All, which SwiftUI never routes to a focusable grid
+        // (`onCommand` read back disabled, M7 S6), and a second item would
+        // be a duplicate -- so the grid answers the key. Proven by PID.
+        .onKeyPress(keys: ["a"]) { press in
+            guard press.modifiers.contains(.command) else { return .ignored }
+            let ids = entries.map(\.id)
+            selection = LibraryCursor.Selection(items: Set(ids), anchor: ids.first, lead: selection.lead ?? ids.first)
+            return .handled
+        }
         // Claimed after a yield rather than in `onAppear`: a `@FocusState`
         // written in the pass that inserts the view is dropped.
         .task { await Task.yield(); focused = true }
@@ -59,13 +69,6 @@ struct LibraryGrid: View {
         // clip with the machine's media ticket.
         .onKeyPress(.space) { quickLookSelection() }
         .onKeyPress(.delete) { trashSelection() }
-        .onKeyPress(keys: ["a"]) { press in
-            guard press.modifiers.contains(.command) else { return .ignored }
-            selection = LibraryCursor.Selection(
-                items: Set(entries.map(\.id)), anchor: entries.first?.id,
-                lead: selection.lead ?? entries.first?.id)
-            return .handled
-        }
     }
 
     private var gridColumns: [GridItem] {

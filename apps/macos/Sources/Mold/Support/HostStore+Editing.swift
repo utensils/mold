@@ -78,6 +78,11 @@ extension HostStore {
     func remove(_ host: MoldHost) {
         hosts.removeAll { $0.id == host.id }
         forget(host.id)
+        // A removed default cannot outlive its machine in the preferences.
+        // Not inside `forget(_:)` itself: `update(_:)` also calls that, to
+        // invalidate what the OLD address answered, and an edit must not
+        // silently un-default the machine being edited.
+        if defaultMachine == host.id { defaultMachine = nil }
         reconcileEventStreams()
         HostPersistence.forget(host)
         persist()

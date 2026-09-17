@@ -1,0 +1,44 @@
+import Foundation
+import MoldClient
+import Testing
+
+@testable import Mold
+
+/// The two pure resolvers behind the Machine menu and View ▸ Larger/Smaller
+/// Thumbnails (design M7 S6) -- pinned with no view rendered, the same way
+/// `QueueSelection.offeredTitles` is.
+@MainActor
+struct MenuBarTests {
+    private func machine(_ name: String) -> MoldHost {
+        MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
+    }
+
+    @Test func everyMachineAppearsInTheMachineMenuWithTheDefaultTicked() {
+        let plato = machine("plato")
+        let hal9000 = machine("hal9000")
+        let selection = MachineSelection(
+            machines: [plato, hal9000], selected: plato.id, defaultID: hal9000.id,
+            check: {}, choose: { _ in }, setDefault: {})
+
+        #expect(selection.rows == [
+            .init(name: "plato", isDefault: false),
+            .init(name: "hal9000", isDefault: true),
+        ])
+    }
+
+    @Test func noMachineIsTickedWhenNothingHasBeenChosenYet() {
+        let plato = machine("plato")
+        let selection = MachineSelection(
+            machines: [plato], selected: plato.id, defaultID: nil,
+            check: {}, choose: { _ in }, setDefault: {})
+
+        #expect(selection.rows == [.init(name: "plato", isDefault: false)])
+    }
+
+    @Test func theThumbnailStepsStopAtTheSlidersOwnEnds() {
+        #expect(ThumbnailStep.apply(88, delta: -24) == 88)
+        #expect(ThumbnailStep.apply(260, delta: 24) == 260)
+        #expect(ThumbnailStep.apply(132, delta: 24) == 156)
+        #expect(ThumbnailStep.apply(132, delta: -24) == 108)
+    }
+}

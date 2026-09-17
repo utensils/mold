@@ -37,6 +37,23 @@ extension LibraryPane {
         }
     }
 
+    /// What File ▸ Export… and File ▸ Save a Copy… offer -- the same calls
+    /// `LibraryMenu.swift`'s own "Save a Copy…" and "Export As" make, off the
+    /// same selection (design S6).
+    func menuFile(_ showing: LibraryShowing) -> LibraryFile {
+        let entries = showing.selected
+        let actions = self.actions
+        return LibraryFile(
+            count: entries.count,
+            exportFormats: entries.count == 1 ? actions.exportFormats(for: entries[0]) : [],
+            save: { actions.save(entries) },
+            export: { format in
+                guard entries.count == 1, let entry = entries.first else { return }
+                actions.export(entry, as: format)
+            }
+        )
+    }
+
     /// The shelf the grid is currently showing, if it is showing one.
     private var enclosingShelf: CollectionShelf? {
         guard case let .collection(slug) = navigation.scope else { return nil }
