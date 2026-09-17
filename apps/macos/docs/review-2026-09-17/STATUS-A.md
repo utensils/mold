@@ -62,6 +62,37 @@ evicts the oldest). `stream(_:timeout:)` was a SECOND buffer stacked under each 
 a lazy `SSEStream` like the two parsers under it, so a route's declared capacity is the only one
 there is — pinned by naming the four files allowed to construct a buffer.
 
+## Adversarial review, round 3
+
+| id | status | commit | test |
+| --- | --- | --- | --- |
+| R9 one `.resyncRequired` per DROPPED FRAME | fixed | `lane-a-r3` | `EventDeliveryTests` (8) |
+
+**R9.** `yieldOrResync` was stateless, and under `.bufferingNewest` EVERY yield reports `.dropped`
+once the buffer is full — so a sustained burst produced a marker per frame: each took a slot and
+evicted another real frame (measured: 5 markers and only 3 state frames left in an 8-slot buffer),
+and each made every consumer fire its own re-read. The repair path amplified the overload.
+
+`EventOverflow` bounds markers per overflow EPISODE. First drop → one marker, `overflowing` set;
+further drops → nothing, just `droppedSinceMarker`. The episode ENDS on a yield reporting
+`remaining >= max(1, capacity / 2)` — hysteresis, because a buffer that is exactly full enqueues
+with `remaining == 0` and drops on the very next yield, so ending on the first successful enqueue
+would flap once per frame and reproduce the storm; half the buffer is the consumer demonstrably
+DRAINING rather than briefly keeping up, and it is never zero, so the closing marker always has
+somewhere to land. At most two markers an episode, and the state read after the closing one is
+current.
+
+Two holes the red tests exposed, both fixed here: the OPENING marker is best-effort — a burst that
+keeps going evicts it like anything else — so the closing one is the guarantee; and a stream that
+ENDS mid-burst gets no episode end at all, which is a server closing the connection under load and
+is NOT repaired by the reconnect (the instance id is unchanged). `hasUnannouncedLoss` is what
+`events()` checks before either `finish`, yielding one last marker where it is newest and certain
+to survive.
+
+Thread safety: `EventOverflow` is a `struct` declared inside `events()`' own producing `Task`, so
+that task is its only owner and there is nothing to lock. It constructs no stream, so the
+`everyStreamStatesItsBufferingPolicy` file allowlist is unchanged.
+
 **R2, the public surface for the integrator to route to Lane C:**
 
 ```swift
