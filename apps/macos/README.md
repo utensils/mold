@@ -14,10 +14,11 @@ generation and the library. No 3-D studio.
 | **Library** | Every machine's prints in one day-sectioned timeline, host-badged. Select with the mouse or the keyboard, open in place, play video, favourite, tag, trash, restore, save, copy, drag to the Finder, and export a clip or mesh into whatever the host will convert it to. Collections are sidebar rows, merged across the fleet by slug, and you file prints by dragging onto one. Search with real tokens (`tag:`, a machine, `is:video`), sort, and set the tile size. Recently Deleted carries each print's own countdown, Put Back and Delete Immediately. Name a print, tag it, file it, and rename or delete a tag across every machine at once. Favourite, tag, filing and renaming are all **undoable** from the Edit menu. Space is Quick Look, and every print can be shared, saved or dragged out. File ▸ Import to adds a picture, clip or mesh from this Mac to a machine. Refreshes by ETag, and follows each machine's live event stream — a print favourited, tagged or trashed somewhere else appears here without a refresh. |
 | **Queue** | Work in flight per machine, with the host's own actionable reason on each row, and retry / pause / resume / cancel. |
 | **Models** | Variants grouped under the model they belong to, each with the manifest's plain-English trade-off, size and install state. Install and repair with live byte progress. |
+| **Machines** | Every machine's page: its GPUs with what each is holding and how much memory is gone, a switch per card where the machine's scheduler will honour one, live memory and CPU, what is queued and installed there, and its address. Machines on the local network that this one can see are offered to add. The machine picked here is the one the Models pane shows. |
 | **Settings** | Add, edit and remove machines. An address is normalized the way the other apps normalize it, checked live while you type, and refused when another machine already answers at it; keys go to the Keychain. Storage sets how much disk the media cache may use. |
 | **This Mac** | mold's own Rust engine, running in-process on Metal. It joins the machine list like any other and is reached over the same HTTP. |
 
-Shortcuts: ⌘1–⌘4 for the destinations, ⌘R to refresh, ⌘↩ to generate, ⌘, for
+Shortcuts: ⌘1–⌘5 for the destinations, ⌘R to refresh, ⌘↩ to generate, ⌘, for
 Settings, ⌥⌘I for the inspector, ⌃⌘S to hide or show the sidebar, ⌥⌘F to
 favourite, ⌘⌫ to trash, ⌘Z to undo, Space for Quick Look, Escape to leave the
 viewer.
@@ -63,12 +64,13 @@ entitlements allow JIT because candle compiles its Metal shaders at runtime.
 ## Not built yet
 
 Prompt expansion, LoRAs and identity conditioning, inpainting, the model
-catalog, per-machine GPU panels, chain jobs (scripted sequences are CLI and API
-only by design), the 3-D studio, and pairing-based onboarding for keyed hosts.
+catalog, chain jobs (scripted sequences are CLI and API only by design), the
+3-D studio, and pairing-based onboarding for keyed hosts.
 
-## Two things about the wire that the docs do not say
+## Three things about the wire that the docs do not say
 
-Both were found by reading frames off a live host, and both fail silently.
+The first two were found by reading frames off a live host, and both fail
+silently; the third is a rule with two halves.
 
 `GET /api/events` opens with `event: authority` and then sends **everything
 else** as the literal `event: event`, with the real tag in the payload's
@@ -80,6 +82,13 @@ the blank line is the frame terminator. A parser fed by `.lines` sees `event:`
 and `data:` arrive and is never told the frame ended: connected, receiving,
 silent, no error anywhere. `LineAccumulator` in `MoldClient` is the answer, and
 every SSE reader here goes through it.
+
+A GPU's on/off switch is live only when **two** capability flags agree:
+`devices.lifecycle` says `PATCH /api/devices/:id` exists, and
+`dispatch.v2_authoritative` says the runtime answering it is the one that owns
+dispatch. A legacy, observe or maintenance runtime can carry the first without
+the second, and persisting a change it cannot enforce is a lie -- so the card
+reads as read-only there. `DeviceControl.resolve` is that rule, tested.
 
 ## Running it
 
@@ -141,8 +150,8 @@ MOLD_NATIVE_HOSTS='plato=plato,hal9000=10.0.0.6' macos-dev
 variable reaches the app and its stdout stays on your terminal.
 
 `MOLD_NATIVE_DESTINATION` forces where the window opens: a destination name,
-`settings`, or `add-machine` / `edit-machine` to open the host sheet empty or on
-the first machine. The sheet ones exist so a UAT run can photograph it without
+`settings`, `machines` to open on the machine page, or `add-machine` /
+`edit-machine` to open the host sheet empty or on the first machine. The sheet ones exist so a UAT run can photograph it without
 a script driving the mouse across the desktop.
 
 ## Layout
