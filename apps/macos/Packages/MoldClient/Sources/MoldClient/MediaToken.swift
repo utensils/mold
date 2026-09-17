@@ -27,7 +27,9 @@ public extension HTTPBackend {
     /// On a keyless host this is just the plain URL; on a keyed one it carries
     /// the ticket. Either way the caller does not have to know which -- but
     /// on a keyed host a ticket that fails to mint is a `throw`, not a plain
-    /// URL the player would send with no credential and get a 401 from.
+    /// URL the player would send with no credential and get a 401 from. The
+    /// keyless answer is the HOST's (`auth_required`), never this Mac's own
+    /// configuration.
     func playableURL(for filename: String) async throws -> URL {
         let urls = MediaURL(baseURL: host.baseURL)
         let plain = urls.media(filename)
@@ -38,9 +40,20 @@ public extension HTTPBackend {
         // the server compares against the request's (encoded) path, so the
         // ticket never matched.
         let ticket = try await mediaToken(forPath: urls.mediaPath(filename))
-        guard ticket.authRequired, let token = ticket.token,
+        // A host that answers `auth_required: false` is keyless and the
+        // direct URL IS the right request there. That is the case this Mac
+        // lands in holding a key the host no longer wants, and the server
+        // answers it deliberately (`routes.rs:9800-9803`).
+        guard ticket.authRequired else { return plain }
+
+        // Past here the machine has said a ticket is required. Handing
+        // `AVPlayer` the plain URL would send a request with no credential --
+        // it builds its own requests and cannot set `X-Api-Key` -- and a 401
+        // it has no way to report becomes a silent playback failure. So this
+        // fails as the auth failure it is.
+        guard let token = ticket.token,
               var components = URLComponents(url: plain, resolvingAgainstBaseURL: false)
-        else { return plain }
+        else { throw MoldClientError.unauthorized }
 
         var query = components.queryItems ?? []
         query.append(URLQueryItem(name: "media_token", value: token))
@@ -48,6 +61,7 @@ public extension HTTPBackend {
             query.append(URLQueryItem(name: "expires", value: String(expires)))
         }
         components.queryItems = query
-        return components.url ?? plain
+        guard let url = components.url else { throw MoldClientError.unauthorized }
+        return url
     }
 }
