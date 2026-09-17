@@ -4,8 +4,8 @@ import SwiftUI
 
 /// Authoring a render.
 ///
-/// The picture takes the pane and the controls float over it in a material
-/// panel, so what you are making stays the largest thing on screen.
+/// The picture takes the pane and the controls float over it, so what you are
+/// making stays the largest thing on screen.
 struct GeneratePane: View {
     @Binding var destination: Destination
     @Environment(HostStore.self) private var hosts
@@ -77,7 +77,8 @@ struct GeneratePane: View {
         } else {
             RunCanvas(state: controller.run, host: host,
                       showInLibrary: { destination = .library },
-                      togglePrompt: { controller.promptTucked.toggle() })
+                      togglePrompt: { controller.promptTucked.toggle() },
+                      onResultShown: controller.handoff.acknowledge)
         }
     }
 
@@ -144,7 +145,6 @@ struct GeneratePane: View {
     private func cancelRun() { controller.stop() }
 
     private func refreshPlacement() {
-        guard let host else { return }
-        controller.refreshPlacement(on: host)
+        host.map(controller.refreshPlacement(on:))
     }
 }

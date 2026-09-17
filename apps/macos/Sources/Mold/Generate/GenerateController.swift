@@ -51,6 +51,10 @@ final class GenerateController {
     var run: RunState = .idle
     var runTask: Task<Void, Never>?
     var activeBatch: ActiveBatch?
+    /// Stop, and a second press, while an admission is still unanswered.
+    let submissions = SubmissionFence()
+    /// The beat between a batch settling and the next one taking the canvas.
+    let handoff: ResultHandoff
     /// Batches this pane admitted while another was still on screen, in
     /// admission order. The canvas follows `activeBatch`; when it settles or
     /// is stopped, the head of this list is followed next (M8 decision 8).
@@ -60,9 +64,10 @@ final class GenerateController {
     /// files -- the same reason `HostStore.failures` is `internal(set)`.
     internal(set) var queued: [ActiveBatch] = []
 
-    init(hosts: HostStore, defaults: ConfigStore) {
+    init(hosts: HostStore, defaults: ConfigStore, handoff: ResultHandoff = ResultHandoff()) {
         self.hosts = hosts
         self.defaults = defaults
+        self.handoff = handoff
     }
 
     /// Adopts a model while KEEPING the draft that was just restored.

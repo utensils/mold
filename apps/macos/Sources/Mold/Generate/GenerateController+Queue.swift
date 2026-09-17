@@ -33,10 +33,13 @@ extension GenerateController {
                 run = .finished(outcome, host: host)
             }
             PendingBatch.forget(status.clientBatchId)
-            // M8 decision 8: the `.finished`/`.failed` write above lands
-            // first, so it is observed for at least one beat before
-            // `followNext` replaces it with the next batch's `.running`.
-            followNext()
+            // Settled, so it is no longer the batch Stop would cancel.
+            activeBatch = nil
+            // M8 decision 8, with the beat made REAL: the next batch takes
+            // the canvas once this outcome has actually been drawn on it (or
+            // the handoff's grace runs out), never merely in a later turn of
+            // the same render pass -- see `ResultHandoff` (finding 02#9).
+            handoff.hold { [weak self] in self?.followNext() }
         } else if case let .running(_, progress) = run {
             run = .running(status, progress)
         } else {
@@ -72,12 +75,28 @@ extension GenerateController {
     /// Stops the batch on screen -- exactly what `cancel(backend:)` used to
     /// do -- then moves on to whatever is next in `queued`.
     func stop() {
-        guard let active = activeBatch else { return }
+        handoff.cancel()
+        // Stop pressed while an admission is still in the air. `runTask` is
+        // deliberately NOT cancelled: the POST has very likely already reached
+        // the host, and killing the task here would leave that batch rendering
+        // with nobody holding its id and no recovery record to find it by.
+        // The submit task cancels the id the host returns (finding 02#2).
+        if submissions.requestStop() {
+            run = .idle
+            return
+        }
+        guard let active = activeBatch else {
+            // A first-ever render that has not been admitted yet: there is
+            // nothing to cancel, but Stop must still leave the button alone.
+            run = .idle
+            return
+        }
         runTask?.cancel()
         runTask = nil
         // Cancelled by the user, not lost: nothing to recover on relaunch.
         PendingBatch.forget(active.clientBatchId)
         cancelOnItsMachine(active)
+        activeBatch = nil
         run = .idle
         followNext()
     }
@@ -93,7 +112,9 @@ extension GenerateController {
         stop()
     }
 
-    private func cancelOnItsMachine(_ batch: ActiveBatch) {
+    /// Not `private`: `GenerateController+Run` cancels the batch a Stop
+    /// pressed during `.submitting` was aimed at, once the host has named it.
+    func cancelOnItsMachine(_ batch: ActiveBatch) {
         guard let backend = hosts.backend(for: batch.host) else { return }
         Task { [weak self] in
             do { try await backend.cancelBatch(id: batch.id) }

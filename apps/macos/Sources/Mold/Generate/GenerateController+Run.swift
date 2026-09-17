@@ -33,6 +33,7 @@ extension GenerateController {
         if followingNow {
             run = .submitting
             runTask?.cancel()
+            submissions.begin(admission.clientBatchId)
         }
         let task = Task { [weak self] in
             do {
@@ -41,21 +42,36 @@ extension GenerateController {
                 let active = ActiveBatch(
                     id: accepted.id, clientBatchId: admission.clientBatchId,
                     host: host.id, admitted: accepted)
-                if followingNow {
+                guard followingNow else { self.queued.append(active); return }
+                // Stop, or a second press, may have happened while this was in
+                // the air. Only now is there an id the host would recognise.
+                switch self.submissions.land(admission.clientBatchId) {
+                case .cancel:
+                    PendingBatch.forget(admission.clientBatchId)
+                    self.cancelOnItsMachine(active)
+                    self.followNext()
+                case .queue:
+                    self.queued.append(active)
+                case .follow:
                     self.activeBatch = active
                     await self.follow(accepted, backend: backend, host: host.id)
-                } else {
-                    self.queued.append(active)
                 }
             } catch {
                 PendingBatch.forget(admission.clientBatchId)
                 guard let self else { return }
-                if followingNow {
-                    self.run = .failed(error.sentence)
-                } else {
+                guard followingNow else {
                     // The render on screen is unaffected by a second one
                     // failing to be admitted -- report it, don't replace `run`.
                     self.hosts.report(error, on: host.id, doing: "queue that render")
+                    return
+                }
+                switch self.submissions.land(admission.clientBatchId) {
+                case .follow: self.run = .failed(error.sentence)
+                // Stop already answered for this one; the queue still moves.
+                case .cancel: self.followNext()
+                // Superseded: a failure here must not replace what took the
+                // canvas from it.
+                case .queue: break
                 }
             }
         }

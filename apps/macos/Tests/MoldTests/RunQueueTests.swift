@@ -79,6 +79,10 @@ struct RunQueueTests {
         backend.emitBatchEvent(settled, for: "batch-1")
         backend.finishBatchEvents(for: "batch-1")
 
+        // What the canvas does once the outcome is really on screen; without
+        // it the queue waits out `ResultHandoff`'s grace instead (02#9).
+        await settle { controller.handoff.isHolding }
+        controller.handoff.acknowledge()
         await settle { controller.queuedCount == 0 }
 
         #expect(controller.activeBatch?.id == "batch-2")

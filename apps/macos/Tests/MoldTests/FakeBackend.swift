@@ -106,6 +106,12 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// same one. Empty falls back to `submitAnswer`, so every existing test
     /// is unaffected.
     nonisolated(unsafe) var submitAnswers: [BatchStatus] = []
+    /// Every batch id `cancelBatch` was asked to stop, in call order -- WHICH
+    /// batch a Stop reached, not merely that one did.
+    nonisolated(unsafe) var cancelledBatchIds: [String] = []
+    /// Set before a `submit` to hold it in the air until `releaseSubmit()`.
+    nonisolated(unsafe) var holdsSubmit = false
+    nonisolated(unsafe) private var submitGate: (() -> Void)?
     /// Planted per `id`, since a test drives `submit` then reads the same
     /// batch back through `batchStatus(id:)` once its events stream ends.
     nonisolated(unsafe) var batchStatusAnswers: [String: BatchStatus] = [:]
@@ -229,6 +235,14 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     func submit(_ admission: BatchAdmission) async throws -> BatchStatus {
         try record("submit")
         submittedAdmissions.append(admission)
+        // Held open so a test can press Stop while an admission is GENUINELY
+        // in the air -- the window finding 02#2 is about.
+        if holdsSubmit {
+            holdsSubmit = false
+            await withCheckedContinuation { continuation in
+                submitGate = { continuation.resume() }
+            }
+        }
         if !submitAnswers.isEmpty { return submitAnswers.removeFirst() }
         guard let submitAnswer else { throw notPlanted() }
         return submitAnswer
@@ -254,7 +268,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         jobPreviewCalls.append(jobId)
         return nil
     }
-    func cancelBatch(id: String) async throws { try record("cancelBatch") }
+    func cancelBatch(id: String) async throws {
+        try record("cancelBatch")
+        cancelledBatchIds.append(id)
+    }
 
     // MARK: - Create
 
@@ -564,6 +581,13 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
             self.batchEventsContinuations[id] = continuation
         }
     }
+    /// Lets a held-open `submit` answer.
+    func releaseSubmit() {
+        let gate = submitGate
+        submitGate = nil
+        gate?()
+    }
+
     /// Pushes one frame into an id's held-open `batchEvents` stream.
     func emitBatchEvent(_ status: BatchStatus, for id: String) {
         batchEventsContinuations[id]?.yield(status)

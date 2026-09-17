@@ -10,6 +10,9 @@ struct RunCanvas: View {
     /// Clicking the picture -- and only the picture, never the empty canvas or
     /// the buttons under it -- tucks the prompt away and brings it back.
     let togglePrompt: () -> Void
+    /// Called once the settled outcome is really on screen, which is what
+    /// releases the next queued batch onto the canvas (`ResultHandoff`).
+    let onResultShown: () -> Void
 
     /// Not `private`: `RunCanvas+Result` reads all three from its own
     /// extension methods, and `private` does not cross files for the same
@@ -28,6 +31,10 @@ struct RunCanvas: View {
                 running
             case let .finished(outcome, _):
                 finishedView(outcome)
+                    // Not `onAppear`: SwiftUI reuses this view for the NEXT
+                    // settled batch, and a second outcome must release the
+                    // queue as surely as the first.
+                    .task(id: outcome) { onResultShown() }
             case let .failed(message):
                 ContentUnavailableView("That didn't finish", systemImage: "exclamationmark.triangle",
                                        description: Text(message))
