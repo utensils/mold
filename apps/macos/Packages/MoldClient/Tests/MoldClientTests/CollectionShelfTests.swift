@@ -46,21 +46,34 @@ private func collection(_ name: String, slug: String, count: Int,
     #expect(tied[0].name == "Aardvark")
 }
 
-/// Hidden means omitted from the default grid. One machine still showing it
-/// means those prints belong in All Prints, so the shelf is only hidden when
-/// every machine that has it hides it.
-@Test func aShelfIsHiddenOnlyWhenEveryMachineHidesIt() {
+/// **Fails today**: this app used `allSatisfy` where
+/// `mergeCollectionsAcrossHosts` (`studio/lib/libraryOrganization.ts:167,
+/// 205`) sets `hidden` when ANY host copy is hidden. Both rules are
+/// defensible read alone; two different ones for the same shelf across a
+/// fleet are not, and a person who hid "Drafts" on one machine was told by
+/// one app that it was hidden and by another that it was not.
+///
+/// Studio's is the one to keep: the mutation FANS OUT to every copy, so a
+/// mixed state is an edit that half-landed, and answering "hidden" is
+/// answering with the intent rather than with the failure.
+@Test func aShelfIsHiddenWhenAnyMachineHidesIt() {
     let partly = CollectionShelf.merge([
         plato: [collection("Drafts", slug: "drafts", count: 3, hidden: true)],
         hal: [collection("Drafts", slug: "drafts", count: 1, hidden: false)],
     ])
-    #expect(partly[0].hidden == false)
+    #expect(partly[0].hidden)
 
     let fully = CollectionShelf.merge([
         plato: [collection("Drafts", slug: "drafts", count: 3, hidden: true)],
         hal: [collection("Drafts", slug: "drafts", count: 1, hidden: true)],
     ])
     #expect(fully[0].hidden)
+
+    let neither = CollectionShelf.merge([
+        plato: [collection("Drafts", slug: "drafts", count: 3, hidden: false)],
+        hal: [collection("Drafts", slug: "drafts", count: 1, hidden: false)],
+    ])
+    #expect(!neither[0].hidden)
 }
 
 @Test func aShelfOnOneMachineIsStillAShelf() {
