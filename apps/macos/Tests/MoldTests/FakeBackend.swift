@@ -24,7 +24,13 @@ func settle(until condition: () -> Bool) async {
 
 final class FakeBackend: MoldBackend, @unchecked Sendable {
     let host: MoldHost
-    nonisolated(unsafe) private(set) var calls: [String] = []
+    /// Every route asked, in order. Read and written under `callsLock`: a
+    /// store's unstructured task appends while a test reads `callCount`, and
+    /// an unguarded array filtered mid-append is an index trap -- one took
+    /// the whole app bundle down after five tests on 2026-09-16.
+    var calls: [String] { callsLock.withLock { recorded } }
+    nonisolated(unsafe) private var recorded: [String] = []
+    private let callsLock = NSLock()
     /// Route names that answer with a refusal (a 409) however they are
     /// planted -- a REFUSAL, not an unreachable machine, so a store test can
     /// still pin the verb its report was keyed on.
@@ -89,12 +95,12 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// Hands the open event stream one frame.
     func emit(_ event: MoldEvent) { eventStream?.yield(event) }
 
-    func callCount(_ route: String) -> Int { calls.filter { $0 == route }.count }
+    func callCount(_ route: String) -> Int { callsLock.withLock { recorded.filter { $0 == route }.count } }
 
     init(host: MoldHost) { self.host = host }
 
     private func record(_ route: String) throws {
-        calls.append(route)
+        callsLock.withLock { recorded.append(route) }
         if let planted = plantedErrors[route] { throw planted }
         if refuses.contains(route) {
             throw MoldClientError.http(status: 409, code: nil, message: "Refused by the fake.")
@@ -257,7 +263,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         return resourceSnapshot
     }
     func resourceStream() -> AsyncThrowingStream<ResourceSnapshot, Error> {
-        calls.append("resourceStream")
+        callsLock.withLock { recorded.append("resourceStream") }
         return AsyncThrowingStream { continuation in
             self.resourceStreamContinuation = continuation
             continuation.onTermination = { _ in self.resourceStreamEnded = true }
@@ -325,15 +331,15 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     // MARK: - Streams
 
     func events() -> AsyncThrowingStream<MoldEvent, Error> {
-        calls.append("events")
+        callsLock.withLock { recorded.append("events") }
         return AsyncThrowingStream { self.eventStream = $0 }
     }
     func batchEvents(id: String) -> AsyncThrowingStream<BatchStatus, Error> {
-        calls.append("batchEvents")
+        callsLock.withLock { recorded.append("batchEvents") }
         return AsyncThrowingStream { $0.finish() }
     }
     func downloadEvents() -> AsyncThrowingStream<DownloadEvent, Error> {
-        calls.append("downloadEvents")
+        callsLock.withLock { recorded.append("downloadEvents") }
         return AsyncThrowingStream {
             $0.onTermination = { _ in self.downloadStreamEnded = true }
             self.downloadStream = $0
