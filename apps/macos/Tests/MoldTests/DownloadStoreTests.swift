@@ -134,4 +134,80 @@ struct DownloadStoreTests {
         downloads.clearFinished(on: plato.id)
         #expect(downloads.finished[plato.id] == nil)
     }
+
+    /// **Fails today**: `catalog_ready` has a non-nil `id` and is not
+    /// terminal, so it falls into the progress branch and inserts a row keyed
+    /// by the CATALOG id -- nameless, stuck on "Starting…", with a Cancel
+    /// that would `DELETE /api/downloads/hf%3Aowner%2Frepo` and 404. Nothing
+    /// ever removes it, so the toolbar reads "downloading" and the SSE
+    /// connection is held open for the rest of the launch.
+    @Test func aCatalogReadyFrameLeavesNoRowBehind() async {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        fake.catalogInstallAnswer = FakeFixtures.catalogInstall(primary: "job-1")
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
+        await downloads.install("hf:black-forest-labs/FLUX.1-dev", on: plato)
+        await settle { fake.callCount("downloadEvents") == 1 }
+
+        // What the server sends once every job in the group has settled
+        // (`downloads.rs:521-523`); its `id` is the CATALOG entry's, and
+        // there is no job by that name. The `progress` behind it is a
+        // barrier: one stream, delivered in order, so seeing its effect
+        // means the frame before it is fully applied.
+        fake.downloadStream?.yield(FakeFixtures.downloadEvent(
+            type: "catalog_ready", id: "hf:black-forest-labs/FLUX.1-dev"))
+        fake.downloadStream?.yield(FakeFixtures.downloadEvent(
+            type: "progress", id: "job-1", bytesDone: 7, bytesTotal: 10))
+        await settle { downloads.active[plato.id]?["job-1"]?.bytesDone == 7 }
+
+        #expect(Set((downloads.active[plato.id] ?? [:]).keys) == ["job-1"])
+
+        // And with the real job settled there is nothing left to stream --
+        // the phantom row is what used to hold this connection open for the
+        // rest of the launch.
+        fake.downloadStream?.yield(FakeFixtures.downloadEvent(
+            type: "job_done", id: "job-1", model: "hf:black-forest-labs/FLUX.1-dev"))
+        await settle { downloads.active[plato.id] == nil }
+        #expect(downloads.streams[plato.id] == nil)
+    }
+
+    /// A delta about a job this client has never seen is not a new job:
+    /// `downloads.ts:96-97` returns the state untouched rather than
+    /// synthesising a row out of a partial frame.
+    @Test func aProgressFrameForAnUnknownJobCreatesNothing() async {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        fake.downloadTicket = FakeFixtures.downloadTicket("job-1")
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
+        await downloads.install("flux-dev:q4", on: plato)
+        await settle { fake.callCount("downloadEvents") == 1 }
+
+        fake.downloadStream?.yield(FakeFixtures.downloadEvent(
+            type: "progress", id: "job-somebody-elses", bytesDone: 5, bytesTotal: 10))
+        fake.downloadStream?.yield(FakeFixtures.downloadEvent(
+            type: "progress", id: "job-1", bytesDone: 7, bytesTotal: 10))
+        await settle { downloads.active[plato.id]?["job-1"]?.bytesDone == 7 }
+
+        #expect(Set((downloads.active[plato.id] ?? [:]).keys) == ["job-1"])
+    }
+
+    /// `enqueued` still MAY create one -- that is how a `mold pull` at a
+    /// terminal appears here between two snapshots.
+    @Test func anEnqueuedFrameStillIntroducesAJobThisAppNeverStarted() async {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        fake.downloadTicket = FakeFixtures.downloadTicket("job-1")
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
+        await downloads.install("flux-dev:q4", on: plato)
+        await settle { fake.callCount("downloadEvents") == 1 }
+
+        fake.downloadStream?.yield(FakeFixtures.downloadEvent(
+            type: "enqueued", id: "job-cli", model: "sd15:fp16"))
+        await settle { downloads.active[plato.id]?.count == 2 }
+
+        #expect(downloads.active[plato.id]?["job-cli"]?.model == "sd15:fp16")
+    }
 }
