@@ -60,14 +60,22 @@ struct KeyframeTable: View {
         }
     }
 
+    /// Through `PictureImport` like every other still: read and encoded off
+    /// the main actor, and conformed to something the engine decodes rather
+    /// than uploaded and refused (findings 02#7 and 02#10). The frame is
+    /// chosen when the bytes arrive, so two picks in a row cannot land on
+    /// the same one.
     private func addKeyframe(temporal: TemporalProfile) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg]
         panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) else { return }
-        let frame = nextFrame(temporal: temporal)
-        let keyframe = KeyframeCondition(frame: frame, image: data.base64EncodedString(), name: url.lastPathComponent)
-        draft.media.addingKeyframe(keyframe)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            guard let picked = try? await PictureImport.load(
+                url, accepting: PictureImport.engineReadable) else { return }
+            draft.media.addingKeyframe(KeyframeCondition(
+                frame: nextFrame(temporal: temporal), image: picked.encoded, name: picked.name))
+        }
     }
 
     private func nextFrame(temporal: TemporalProfile) -> Int {

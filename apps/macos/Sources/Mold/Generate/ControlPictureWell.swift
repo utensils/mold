@@ -17,8 +17,26 @@ struct ControlPictureWell: View {
 
     @State private var targeted = false
     @State private var preview: NSImage?
+    /// What a file the engine cannot read said, beside the control that
+    /// collected it rather than in a 422 after the upload (finding 02#7).
+    @State private var importFailure: String?
+    /// The one import in flight, cancelled by the next pick so an older,
+    /// slower file can never overwrite a newer one.
+    @State private var importTask: Task<Void, Never>?
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            well
+            if let importFailure {
+                Text(importFailure)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 140, alignment: .leading)
+            }
+        }
+    }
+
+    private var well: some View {
         ZStack {
             RoundedRectangle(cornerRadius: Chrome.wellRadius, style: .continuous)
                 .fill(targeted ? Chrome.wellFillTargeted : Chrome.wellFill)
@@ -69,12 +87,28 @@ struct ControlPictureWell: View {
         load(url)
     }
 
+    /// Through the one door: read, conform and encode OFF the main actor --
+    /// the panel offers HEIC, the format every iPhone photograph arrives in,
+    /// and nothing behind mold reads it, so it is transcoded here rather
+    /// than uploaded whole and refused (findings 02#7 and 02#10).
     private func load(_ url: URL) {
-        guard let data = try? Data(contentsOf: url) else { return }
-        var control = draft.media.control ?? ControlConditioning()
-        control.image = data.base64EncodedString()
-        control.name = url.lastPathComponent
-        draft.media.control = control
-        preview = NSImage(data: data)
+        importTask?.cancel()
+        importTask = Task {
+            do {
+                let picked = try await PictureImport.load(
+                    url, accepting: PictureImport.engineReadable)
+                guard !Task.isCancelled else { return }
+                var control = draft.media.control ?? ControlConditioning()
+                control.image = picked.encoded
+                control.name = picked.name
+                draft.media.control = control
+                preview = NSImage(data: picked.data)
+                importFailure = nil
+            } catch is CancellationError {
+                return
+            } catch {
+                importFailure = error.reasonSentence
+            }
+        }
     }
 }

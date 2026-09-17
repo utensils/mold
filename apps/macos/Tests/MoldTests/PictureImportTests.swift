@@ -83,4 +83,36 @@ struct PictureImportTests {
         let sentence = PictureImportError.undecodable(name: "notes.txt").errorDescription
         #expect(sentence?.contains("notes.txt") == true)
     }
+
+    /// **Fails today**: three wells that were added after this type still
+    /// hand-roll `Data(contentsOf:)` + `base64EncodedString()` in a `View`
+    /// method on the main actor -- the exact stall 02#10 was about -- and
+    /// `ControlPictureWell` offers `.heic` in its open panel and never
+    /// transcodes it, so an iPhone photograph uploads whole and then 422s.
+    ///
+    /// A source scan, because the defect is the ABSENCE of a call: a unit
+    /// test can only pin what a well does once it goes through the one door,
+    /// and nothing stops the next well from opening its own.
+    @Test func noWellReadsAFileItself() throws {
+        let generate = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "Sources/Mold/Generate")
+        let files = FileManager.default.enumerator(at: generate, includingPropertiesForKeys: nil)
+        var offences: [String] = []
+        for case let file as URL in files?.allObjects ?? [] where file.pathExtension == "swift" {
+            // The two readers themselves, and the UAT seed, which reads a
+            // path from the environment rather than a person's pick.
+            guard !["PictureImport.swift", "MediaImport.swift", "GeneratePane+UAT.swift"]
+                .contains(file.lastPathComponent)
+            else { continue }
+            let text = try String(contentsOf: file, encoding: .utf8)
+            for (number, line) in text.components(separatedBy: "\n").enumerated() {
+                let code = line.trimmingCharacters(in: .whitespaces)
+                guard code.contains("Data(contentsOf:"), !code.hasPrefix("//") else { continue }
+                offences.append("\(file.lastPathComponent):\(number + 1)")
+            }
+        }
+        #expect(offences == [], "a well reading a file on the main actor")
+    }
 }

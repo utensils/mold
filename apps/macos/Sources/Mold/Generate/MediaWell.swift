@@ -27,8 +27,23 @@ struct MediaWell: View {
     @Binding var attachment: Attachment?
 
     @State private var targeted = false
+    /// What a file this Mac could not read said, beside the well that
+    /// collected it.
+    @State private var importFailure: String?
+    /// The one import in flight, cancelled by the next pick so an older,
+    /// slower file can never overwrite a newer one.
+    @State private var importTask: Task<Void, Never>?
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            well
+            if let importFailure {
+                Text(importFailure).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var well: some View {
         HStack(spacing: 6) {
             Image(systemName: systemImage)
                 .foregroundStyle(.secondary)
@@ -73,10 +88,25 @@ struct MediaWell: View {
         load(url)
     }
 
+    /// mold takes every byte field as base64 on the wire, so the encode
+    /// happens here rather than at request time -- but OFF the main actor
+    /// (`MediaImport`): a continuation clip is hundreds of megabytes, and
+    /// reading and encoding one in a `View` method froze the window. A file
+    /// this Mac cannot read says so beside the well instead of leaving the
+    /// pick looking like it did nothing.
     private func load(_ url: URL) {
-        guard let data = try? Data(contentsOf: url) else { return }
-        // mold takes every byte field as base64 on the wire, so the encode
-        // happens here rather than at request time.
-        attachment = Attachment(base64: data.base64EncodedString(), name: url.lastPathComponent)
+        importTask?.cancel()
+        importTask = Task {
+            do {
+                let file = try await MediaImport.load(url)
+                guard !Task.isCancelled else { return }
+                attachment = Attachment(base64: file.base64, name: file.name)
+                importFailure = nil
+            } catch is CancellationError {
+                return
+            } catch {
+                importFailure = error.reasonSentence
+            }
+        }
     }
 }
