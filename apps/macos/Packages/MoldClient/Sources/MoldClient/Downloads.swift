@@ -11,16 +11,6 @@ public struct DownloadRequest: Codable, Sendable {
     }
 }
 
-public struct LicenseAcceptance: Codable, Hashable, Sendable {
-    public let id: String
-    public let accepted: Bool
-
-    public init(id: String, accepted: Bool = true) {
-        self.id = id
-        self.accepted = accepted
-    }
-}
-
 /// What the host says when a download is queued.
 ///
 /// A 409 here is NOT a failure: it means this model is already queued or
@@ -52,12 +42,4 @@ public struct DownloadEvent: Codable, Sendable {
     public var isTerminal: Bool {
         ["job_done", "job_failed", "job_cancelled"].contains(type)
     }
-}
-
-/// A licence a host requires before it will fetch a model.
-public struct LicenseRefusal: Codable, Hashable, Sendable {
-    public let id: String?
-    public let name: String?
-    public let url: String?
-    public let summary: String?
 }

@@ -78,6 +78,13 @@ public protocol MoldBackend: Sendable {
     func startDownload(_ request: DownloadRequest) async throws -> DownloadTicket
     func cancelDownload(id: String) async throws
 
+    // MARK: - Licences
+
+    /// Every gated licence and whether THIS machine has accepted it.
+    func licenses() async throws -> [ThirdPartyLicense]
+    /// Records consent on this machine and answers with the refreshed state.
+    @discardableResult func acceptLicenses(_ accept: [LicenseAcceptance]) async throws -> [ThirdPartyLicense]
+
     // MARK: - Machines
 
     func devices() async throws -> DeviceState

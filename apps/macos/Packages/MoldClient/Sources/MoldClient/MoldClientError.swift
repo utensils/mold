@@ -5,6 +5,16 @@ public enum MoldClientError: Error, Sendable, LocalizedError {
     case unauthorized
     case http(status: Int, code: String?, message: String?)
     case malformedResponse
+    /// This machine will not fetch those bytes until somebody accepts the
+    /// terms.
+    ///
+    /// Its own case rather than an `.http` with a code, because it is the one
+    /// refusal the app can RESOLVE: the payload carries everything
+    /// `POST /api/licenses/accept` needs, so the UI can show the terms and
+    /// retry the identical request. `mismatch` is the 409 -- the licence is
+    /// known and the two sides disagree about its revision -- which reads
+    /// differently and resolves the same way.
+    case licenseRequired(LicenseRefusal, mismatch: Bool)
 
     /// Whether sending the same request again could plausibly work.
     ///
@@ -20,6 +30,7 @@ public enum MoldClientError: Error, Sendable, LocalizedError {
         case .unauthorized: false
         case let .http(status, _, _): status >= 500 || status == 429
         case .malformedResponse: false
+        case .licenseRequired: false
         }
     }
 
@@ -33,6 +44,10 @@ public enum MoldClientError: Error, Sendable, LocalizedError {
             message ?? "The machine answered with an error (\(status))."
         case .malformedResponse:
             "The machine sent something this version of Mold can't read."
+        case let .licenseRequired(refusal, mismatch):
+            mismatch
+                ? "This machine pins different terms for \(refusal.name)."
+                : "\(refusal.name) has to be accepted on this machine first."
         }
     }
 }

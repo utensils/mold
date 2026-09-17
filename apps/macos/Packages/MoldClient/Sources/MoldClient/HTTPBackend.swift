@@ -54,10 +54,29 @@ public struct HTTPBackend: MoldBackend {
     }
 }
 
-/// mold's error envelope. Every failing route answers with this shape, and the
-/// `code` is the part to branch on -- the `error` prose is for humans and is
-/// not stable.
+/// mold's error envelope. `code` is the part to branch on.
+///
+/// Every field is optional because half the routes this app calls do not send
+/// all of them: `create_download`'s 400 is `{"error": …}` with no code
+/// (`routes.rs:11563-11569`), and the catalog routes answer plain text
+/// (`catalog_api.rs:586-590`). Requiring both threw the machine's own
+/// sentence away and left "the machine answered with an error (400)".
 struct APIError: Decodable, Sendable {
-    let error: String
-    let code: String
+    let error: String?
+    let code: String?
+    /// Present only on a licence refusal (`routes.rs:38-49`).
+    let license: LicenseRefusal?
+}
+
+extension HTTPBackend {
+    /// A body that is not mold's JSON envelope, when it is short enough to be
+    /// a sentence rather than a proxy's HTML page.
+    static func plainMessage(_ data: Data) -> String? {
+        guard !data.isEmpty, data.count <= 400,
+              let text = String(data: data, encoding: .utf8)?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty, !text.hasPrefix("<")
+        else { return nil }
+        return text
+    }
 }

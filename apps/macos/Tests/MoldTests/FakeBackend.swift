@@ -261,6 +261,34 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     }
     func cancelDownload(id: String) async throws { try record("cancelDownload") }
 
+    // MARK: - Licences
+
+    /// `nil` throws as unplanted, same rule as every other listing here.
+    nonisolated(unsafe) var licenseRows: [ThirdPartyLicense]?
+    /// Every `acceptLicenses` call, in order -- what a retry actually sent.
+    nonisolated(unsafe) var acceptedLicenses: [[LicenseAcceptance]] = []
+
+    func licenses() async throws -> [ThirdPartyLicense] {
+        try record("licenses")
+        guard let licenseRows else { throw notPlanted() }
+        return licenseRows
+    }
+    @discardableResult
+    func acceptLicenses(_ acceptances: [LicenseAcceptance]) async throws -> [ThirdPartyLicense] {
+        try record("acceptLicenses")
+        acceptedLicenses.append(acceptances)
+        let accepted = Set(acceptances.map(\.id))
+        licenseRows = (licenseRows ?? []).map { row in
+            accepted.contains(row.id)
+                ? ThirdPartyLicense(
+                    id: row.id, name: row.name, url: row.url, canonical: row.canonical,
+                    sha256: row.sha256, summary: row.summary, accepted: true,
+                    requiredBy: row.requiredBy, requiredByStyles: row.requiredByStyles)
+                : row
+        }
+        return licenseRows ?? []
+    }
+
     // MARK: - Machines
 
     func devices() async throws -> DeviceState {

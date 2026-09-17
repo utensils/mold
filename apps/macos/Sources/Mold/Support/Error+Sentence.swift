@@ -30,6 +30,10 @@ extension Error {
             return message.map(lowercasingFirstLetter(of:)) ?? "it answered with an error (\(status))."
         case .malformedResponse:
             return "it answered something this version of Mold can't read."
+        case let .licenseRequired(refusal, mismatch):
+            return mismatch
+                ? lowercasingFirstLetter(of: "\(refusal.name) pins different terms on this machine.")
+                : lowercasingFirstLetter(of: "\(refusal.name) has to be accepted on this machine first.")
         }
     }
 }

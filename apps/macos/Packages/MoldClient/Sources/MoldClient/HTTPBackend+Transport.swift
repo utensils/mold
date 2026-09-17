@@ -92,10 +92,14 @@ extension HTTPBackend {
         guard (200..<300).contains(http.statusCode) else {
             if http.statusCode == 401 { throw MoldClientError.unauthorized }
             let api = try? MoldJSON.decoder.decode(APIError.self, from: data)
+            if let refusal = api?.license,
+               api?.code == LicenseCode.notAccepted || api?.code == LicenseCode.termsMismatch {
+                throw MoldClientError.licenseRequired(refusal, mismatch: api?.code == LicenseCode.termsMismatch)
+            }
             throw MoldClientError.http(
                 status: http.statusCode,
                 code: api?.code,
-                message: api?.error
+                message: api?.error ?? Self.plainMessage(data)
             )
         }
     }

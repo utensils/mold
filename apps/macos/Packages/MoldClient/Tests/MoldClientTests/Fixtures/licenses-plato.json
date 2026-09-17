@@ -1,0 +1,103 @@
+{
+    "licenses": [
+        {
+            "id": "insightface-antelopev2",
+            "name": "InsightFace pretrained models (antelopev2)",
+            "url": "https://raw.githubusercontent.com/deepinsight/insightface/7fadd420c2351d0ffa8cac403421c1a3ed733365/README.md",
+            "canonical": "https://github.com/deepinsight/insightface#license",
+            "sha256": "84606d9ab37a38606b12c10d96172c6343768d2ef72c802a16482e476f8baf22",
+            "summary": "InsightFace pretrained models (antelopev2: scrfd_10g_bnkps, glintr100) are licensed for non-commercial research purposes only.",
+            "accepted": true,
+            "required_by": [
+                "pulid-flux",
+                "pulid-sdxl"
+            ],
+            "required_by_styles": [
+                {
+                    "name": "pulid-flux",
+                    "description": "PuLID-FLUX v0.9.1 identity conditioning \u2014 adapter, EVA02-CLIP vision tower, and InsightFace antelopev2 face models"
+                },
+                {
+                    "name": "pulid-sdxl",
+                    "description": "PuLID v1.1 identity conditioning for SDXL \u2014 adapter, EVA02-CLIP vision tower, and InsightFace antelopev2 face models"
+                }
+            ]
+        },
+        {
+            "id": "tencent-hunyuan3d-2.0",
+            "name": "Tencent Hunyuan 3D 2.0 Community License",
+            "url": "https://raw.githubusercontent.com/Tencent-Hunyuan/Hunyuan3D-2/f8db63096c8282cb27354314d896feba5ba6ff8a/LICENSE",
+            "canonical": "https://github.com/Tencent-Hunyuan/Hunyuan3D-2/blob/main/LICENSE",
+            "sha256": "94259df223918a5733677965c1bfe1774a2dba25042d9c3b47a3418ea6c1f324",
+            "summary": "Tencent Hunyuan 3D 2.0 weights: the licence does NOT apply in the European Union, the United Kingdom or South Korea, and a separate Tencent licence is required above 1 million monthly active users. Tencent claims no rights in the meshes you generate.",
+            "accepted": true,
+            "required_by": [
+                "hunyuan3d-mini-turbo:fp16",
+                "hunyuan3d-turbo:fp16",
+                "hunyuan3d:fp16",
+                "hunyuan3d-2mv:fp16",
+                "hunyuan3d-2mv-turbo:fp16",
+                "hunyuan3d-matting:on",
+                "hunyuan3d-matting",
+                "hunyuan3d-delight:fp16"
+            ],
+            "required_by_styles": [
+                {
+                    "name": "hunyuan3d-mini-turbo:fp16",
+                    "description": "Hunyuan3D 2.0 mini Turbo \u2014 image-to-3D mesh, step-distilled"
+                },
+                {
+                    "name": "hunyuan3d-turbo:fp16",
+                    "description": "Hunyuan3D 2.0 Turbo \u2014 image-to-3D mesh, step-distilled"
+                },
+                {
+                    "name": "hunyuan3d:fp16",
+                    "description": "Hunyuan3D 2.0 \u2014 image-to-3D mesh, highest shape fidelity"
+                },
+                {
+                    "name": "hunyuan3d-2mv:fp16",
+                    "description": "Hunyuan3D 2mv \u2014 shape generation from one to four named views"
+                },
+                {
+                    "name": "hunyuan3d-2mv-turbo:fp16",
+                    "description": "Hunyuan3D 2mv Turbo \u2014 five-step shape generation from named views"
+                },
+                {
+                    "name": "hunyuan3d-matting:on",
+                    "description": "U\u00b2-Net forced background matting for Hunyuan3D inputs"
+                },
+                {
+                    "name": "hunyuan3d-matting",
+                    "description": "U\u00b2-Net background matting for Hunyuan3D inputs"
+                },
+                {
+                    "name": "hunyuan3d-delight:fp16",
+                    "description": "Hunyuan3D lighting and highlight removal"
+                }
+            ]
+        },
+        {
+            "id": "tencent-hunyuan3d-2.1",
+            "name": "Tencent Hunyuan 3D 2.1 Community License",
+            "url": "https://raw.githubusercontent.com/Tencent-Hunyuan/Hunyuan3D-2.1/82920d643c0dc2f7bfd7255f45f62d386edfe60c/LICENSE",
+            "canonical": "https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1/blob/main/LICENSE",
+            "sha256": "b79ac5e11ce063b6c6570dbe9686a45a03ba08bd248aa6aa82fb342a23a81c0c",
+            "summary": "Tencent Hunyuan 3D 2.1 weights: the licence does NOT apply in the European Union, the United Kingdom or South Korea, and a separate Tencent licence is required above 1 million monthly active users. Tencent claims no rights in the meshes you generate.",
+            "accepted": true,
+            "required_by": [
+                "hunyuan3d-2.1:fp16",
+                "hunyuan3d-paint"
+            ],
+            "required_by_styles": [
+                {
+                    "name": "hunyuan3d-2.1:fp16",
+                    "description": "Hunyuan3D 2.1 \u2014 image-to-3D mesh with the 3.3B MoE shape model"
+                },
+                {
+                    "name": "hunyuan3d-paint",
+                    "description": "Hunyuan3D 2.1 PBR paint \u2014 albedo + metallic-roughness texturing weights"
+                }
+            ]
+        }
+    ]
+}
