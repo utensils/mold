@@ -75,6 +75,28 @@ public struct RenderDraft: Hashable, Sendable {
     /// legacy singular `lora` field (`types.rs:3419-3444`) -- there is no
     /// Swift equivalent of it and there never will be.
     public var loras: [LoraChoice] = []
+    // LTX-2 keyframe interpolation and continuation ("extend"). The
+    // invariants -- mutually exclusive, an extend parks the source image,
+    // overlap snapped to the recipe's own temporal grid -- live in
+    // `RenderDraft+Clip.swift`, beside the pure functions that enforce them.
+    public var keyframes: [KeyframeCondition] = []
+    /// An existing clip to continue, base64. `extendVideoName` is display
+    /// only -- there is no `extend_video_name` on the wire (`types.rs:2098-2102`).
+    public var extendVideo: String?
+    public var extendVideoName: String?
+    /// Carryover pixel frames for the continuation. `nil` sends nothing, so
+    /// the server fills in the family's own default (decision 12, M4
+    /// design) -- see `RenderDraft.snappedOverlap`.
+    public var extendOverlapFrames: Int?
+    /// Conditioning audio for LTX-2 audio-to-video, base64. `audioFileName`
+    /// is display only -- no `audio_file_name` on the wire.
+    public var audioFile: String?
+    public var audioFileName: String?
+    /// Reference video conditioning, base64. `sourceVideoName` is display
+    /// only -- no `source_video_name` on the wire.
+    public var sourceVideo: String?
+    public var sourceVideoName: String?
+
     /// What the CURRENT recipe cannot take, held so it comes back
     /// (`RenderDraft+Park.swift`).
     public var parked = ParkedConditioning()

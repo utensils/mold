@@ -54,6 +54,23 @@ public extension RenderDraft {
         // images are reconciled first so the exclusive/replaces check below
         // reads the post-truncation list, matching the order this logic ran
         // in before parking existed.
+        // Keyframes and an extend continuation reconcile FIRST: both can park
+        // or restore the source image below, and an extend also pins the
+        // request's video-only reading (`RenderDraft+Audio.swift`).
+        draft.reconcileKeyframes(supported: recipe.capabilities.acceptsKeyframes)
+        draft.reconcileExtend(supported: recipe.capabilities.supportsExtend == true)
+        draft.reconcileAudioFile(supported: recipe.capabilities.acceptsSourceAudio)
+        draft.reconcileSourceVideo(supported: recipe.capabilities.acceptsSourceVideo)
+        // Keyframes and an extend are mutually exclusive on ONE request
+        // (`validation.rs:1851-1853`); `addingKeyframe`/`settingExtend` keep
+        // that true while a person edits, but the two live in SEPARATE parks
+        // and a recipe switch can restore both at once. Extend wins -- it
+        // already parks the source image below, the stronger claim.
+        if draft.extendVideo != nil, !draft.keyframes.isEmpty {
+            draft.parked.keyframes = draft.keyframes
+            draft.keyframes = []
+        }
+
         let references = recipe.capabilities.referenceImages
         let referencesVisible = references?.mode.isVisible == true
         draft.reconcileEditImages(supported: referencesVisible, maxCount: references?.maxCount)
@@ -67,9 +84,14 @@ public extension RenderDraft {
         // (fact 1 in the M4 design, `manifest.rs:265-270`), not that there is
         // no source path -- the raw `sourceImage?.isSupported` this block
         // used to read got that backwards for every still model in the fleet.
+        // An extend is a third claimant, and the strongest one -- it pins the
+        // continuation's first frames from the source clip's own tail
+        // (`validation.rs:1845-1849`).
         let takenByReferences = !draft.editImages.isEmpty
             && (references?.sourceRelation == .exclusive || references?.sourceRelation == .replaces)
-        draft.reconcileSourceImage(supported: recipe.capabilities.readsSourceImage && !takenByReferences)
+        draft.reconcileSourceImage(
+            supported: recipe.capabilities.readsSourceImage && !takenByReferences && draft.extendVideo == nil
+        )
 
         // The mask needs BOTH the recipe's own permission and a surviving
         // source image -- an orphaned mask over no source is meaningless

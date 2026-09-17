@@ -105,6 +105,28 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(GenerationRecipe.self, from: Data(json.utf8))
     }
 
+    /// A recipe's `RecipeCapabilities` block alone, for the tests that ask a
+    /// group's own `isShown` a question rather than reading a whole recipe
+    /// -- `RecipeCapabilities` has no public memberwise init either. Each
+    /// feature flag becomes an `adjustable`/`hidden` `FeatureControl`
+    /// (`nil` stays absent, which every reader treats as unavailable).
+    static func recipeCapabilities(
+        supportsAudio: Bool? = nil, supportsExtend: Bool? = nil,
+        keyframes: Bool? = nil, audio: Bool? = nil, sourceVideo: Bool? = nil
+    ) -> RecipeCapabilities {
+        func feature(_ available: Bool?) -> String {
+            guard let available else { return "null" }
+            return #"{"mode": "\#(available ? "adjustable" : "hidden")", "required": false, "reason": null}"#
+        }
+        let json = """
+        {"supports_audio": \(supportsAudio.map { "\($0)" } ?? "null"),
+         "supports_extend": \(supportsExtend.map { "\($0)" } ?? "null"),
+         "keyframes": \(feature(keyframes)), "audio": \(feature(audio)),
+         "source_video": \(feature(sourceVideo))}
+        """
+        return try! MoldJSON.decoder.decode(RecipeCapabilities.self, from: Data(json.utf8))
+    }
+
     static func exportOptions(_ formats: [String] = ["png"]) -> ExportOptions {
         let list = formats.map { "\"\($0)\"" }.joined(separator: ",")
         return try! MoldJSON.decoder.decode(ExportOptions.self, from: Data(#"{"formats": [\#(list)]}"#.utf8))

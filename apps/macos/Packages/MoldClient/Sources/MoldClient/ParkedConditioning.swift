@@ -18,6 +18,14 @@ public struct ParkedConditioning: Hashable, Sendable {
     public var identity: IdentityConditioning?
     public var control: ControlConditioning?
     public var loras: [LoraChoice] = []
+    public var keyframes: [KeyframeCondition] = []
+    public var extendVideo: String?
+    public var extendVideoName: String?
+    public var extendOverlapFrames: Int?
+    public var audioFile: String?
+    public var audioFileName: String?
+    public var sourceVideo: String?
+    public var sourceVideoName: String?
 
     public init() {}
 }

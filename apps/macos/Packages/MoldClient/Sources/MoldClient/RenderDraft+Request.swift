@@ -29,8 +29,13 @@ public extension RenderDraft {
         request.pipeline = pipeline
         request.enableAudio = enableAudio ? true : nil
         request.videoOnly = VideoOnlyPolicy.requestValue(enabled: videoOnly, videoOnlyInputs)
-        request.sourceImage = sourceImage
-        request.sourceImageName = sourceImageName
+        // An extend is the strongest claimant on the request's first frames
+        // (`RenderDraft+Recipe.swift`'s `adopting`); this belt matches
+        // `idStartStep`'s own -- the source well and the extend well are two
+        // independent controls, and a value going stale between them must
+        // never reach the wire alongside the extend that outranks it.
+        request.sourceImage = extendVideo == nil ? sourceImage : nil
+        request.sourceImageName = extendVideo == nil ? sourceImageName : nil
         request.editImages = editImages.isEmpty ? nil : editImages
         request.referenceWeight = editImages.isEmpty ? nil : referenceWeight
         // Strength only means something with something to apply it to.
@@ -40,6 +45,7 @@ public extension RenderDraft {
         request.loras = loras.isEmpty ? nil : loras
         applyIdentity(to: &request, maxPhotos: maxIdentityPhotos)
         applyControl(to: &request)
+        applyClip(to: &request)
 
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         request.title = trimmedTitle.isEmpty ? nil : trimmedTitle

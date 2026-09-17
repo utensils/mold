@@ -60,6 +60,19 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     public var controlImage: String?
     public var controlModel: String?
     public var controlScale: Double?
+    /// LTX-2 keyframe interpolation (`types.rs:2367-2377`). Never sent
+    /// alongside `extendVideo` (`validation.rs:1851-1853`).
+    public var keyframes: [KeyframeCondition]?
+    /// An existing clip to continue, base64. No wire `name` field.
+    public var extendVideo: String?
+    /// `step·k+1`, strictly below `frames`; absent means the family's own
+    /// default (`validation.rs:1855-1880`, decision 12 in the M4 design).
+    public var extendOverlapFrames: Int?
+    /// Conditioning audio for audio-to-video, base64. No wire `name` field.
+    public var audioFile: String?
+    /// Reference video for video-to-video, base64. No wire `name` field.
+    /// Never sent alongside `extendVideo` (`validation.rs:1834-1840`).
+    public var sourceVideo: String?
     /// Echoed back from the recipe's own advertised `formats` -- a `String`
     /// rather than a Swift enum, so the app's whole job is to echo one back
     /// without inventing a spelling that could drift from the recipe's.
@@ -114,7 +127,8 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
              saveToGallery, frames, fps, pipeline, enableAudio, videoOnly, sourceImage,
              sourceImageName, strength, editImages, referenceWeight, maskImage, loras, idImage,
              idImageName, idImages, idImageNames, idWeight, idStartStep, controlImage,
-             controlModel, controlScale, outputFormat, upscaleModel, title, tags, collection,
+             controlModel, controlScale, keyframes, extendVideo, extendOverlapFrames, audioFile,
+             sourceVideo, outputFormat, upscaleModel, title, tags, collection,
              originalPrompt, promptTransform, batchId, batchIndex, batchCount
     }
 }

@@ -2,13 +2,12 @@ import MoldClient
 import MoldStyle
 import SwiftUI
 
-/// Everything that shapes the clip itself -- LTX-2's audio branch, in this
-/// slice. S6b adds keyframes, an extend continuation, and the two
-/// conditioning wells beneath Sound; those rows widen `isShown` to cover a
-/// temporal recipe with no audio branch (wan's `extend`, say), which is why
-/// this slice keeps the gate narrow -- a group with a title and nothing
-/// inside it is the same trap `GenerateInspector`'s own doc comment warns
-/// against.
+/// Everything that shapes the clip itself: LTX-2's audio branch, keyframe
+/// interpolation, an extend continuation, and the two conditioning wells
+/// (`ClipGroup+Media.swift`). Every row exists only where the recipe
+/// advertises it, so a temporal recipe with no audio branch at all -- wan's
+/// `extend`, say -- still has something to show, which is why `isShown`
+/// below reads every row rather than just `supportsAudio`.
 struct ClipGroup: View {
     let recipe: GenerationRecipe?
     @Binding var draft: RenderDraft
@@ -16,6 +15,10 @@ struct ClipGroup: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             soundSection
+            keyframesSection
+            extendSection
+            audioFileSection
+            sourceVideoSection
         }
     }
 
@@ -56,5 +59,9 @@ struct ClipGroup: View {
 extension ClipGroup {
     static func isShown(capabilities: RecipeCapabilities) -> Bool {
         capabilities.supportsAudio == true
+            || capabilities.acceptsKeyframes
+            || capabilities.supportsExtend == true
+            || capabilities.acceptsSourceAudio
+            || capabilities.acceptsSourceVideo
     }
 }

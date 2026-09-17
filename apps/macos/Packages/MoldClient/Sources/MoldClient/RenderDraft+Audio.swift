@@ -18,14 +18,12 @@ public extension RenderDraft {
 
     /// `VideoOnlyPolicy`'s four conflicts, read off THIS draft -- so the Clip
     /// group's sentence and `RenderDraft+Request.swift`'s wire value agree.
-    /// The last two stay `false` until S6b's `audioFile`/`extendVideo` fields
-    /// exist to answer them.
     var videoOnlyInputs: VideoOnlyPolicy.Inputs {
         VideoOnlyPolicy.Inputs(
             audioEnabled: enableAudio,
             audioOnlyPipeline: pipeline == "t2a",
-            hasConditioningAudio: false,
-            isExtend: false
+            hasConditioningAudio: audioFile != nil,
+            isExtend: extendVideo != nil
         )
     }
 }
