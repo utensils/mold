@@ -15,4 +15,15 @@ ln -s /Applications "$STAGE/Applications"
 
 rm -f "$OUT"
 hdiutil create -volname "Mold" -srcfolder "$STAGE" -ov -format UDZO "$OUT" >/dev/null
+
+# The disk image is signed too. Notarization and stapling work without it, but
+# an unsigned DMG is an unsigned file until the ticket is checked, and signing
+# it is one line (review 05-L4).
+IDENTITY="${MOLD_SIGN_IDENTITY:-}"
+if [ -n "$IDENTITY" ]; then
+  codesign --force --timestamp --sign "$IDENTITY" "$OUT"
+  codesign --verify --verbose=2 "$OUT"
+else
+  echo "  (MOLD_SIGN_IDENTITY unset -- the disk image itself is unsigned)" >&2
+fi
 echo "dmg: $OUT"

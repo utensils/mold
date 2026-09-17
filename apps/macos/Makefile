@@ -174,7 +174,11 @@ lint-a11y: ## Every file with a systemName image must name or opt out of it
 	if [ "$$fail" = 1 ]; then exit 1; fi
 	@echo "  a11y ok"
 
-VERSION ?= 0.1.0
+# ONE source of truth, `project.yml`'s MARKETING_VERSION -- which is what the
+# bundle actually reports. It was duplicated here as a second literal, so
+# `make release` could name a DMG after a version the app inside it did not
+# claim (review 05-L4).
+VERSION ?= $(shell awk -F'"' '/MARKETING_VERSION:/ { print $$2; exit }' project.yml)
 DIST := $(CURDIR)/dist
 RELEASE_APP := $(BUILD)/Release/Mold.app
 
