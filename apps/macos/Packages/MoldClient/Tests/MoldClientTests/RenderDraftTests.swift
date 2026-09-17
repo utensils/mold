@@ -321,22 +321,105 @@ private func sizedRecipe(_ resolution: ResolutionProfile) -> GenerationRecipe {
     #expect(adopted.height == 832)
 }
 
+/// The wan resolution block exactly as plato advertises it
+/// (`recipe-wan.json`, `wan22-t2v-a14b:q8`): a BUCKET domain with
+/// `off_bucket: warn`, and a real alignment, minimum and pixel budget beside
+/// it. Every one of those is non-`Option` on the Rust side and therefore
+/// always on the wire -- which is why a test that switched them all off could
+/// not have caught what 01#7's first fix broke.
+private func wanResolution() throws -> ResolutionProfile {
+    let set = try MoldJSON.decoder.decode(
+        GenerationProfileSet.self, from: RepoFixtures.fixture("recipe-wan.json"))
+    return try #require(set.recipe(named: "default")).resolution
+}
+
 /// **Fails today**: `fit` snaps EVERY `.buckets` recipe, so a wan clip
 /// rendered at an off-ladder size -- which its host admits with a warning --
 /// came back as a different shape on reuse, silently (finding 01#7).
-@Test func aWarnedOffBucketSizeIsKeptRatherThanSnapped() {
-    let warned = ResolutionProfile(
-        domain: .buckets, alignment: nil, minWidth: nil, minHeight: nil,
-        maxPixels: nil, maxAxisPixels: nil, offBucket: .warn,
-        aspectGroups: [AspectGroup(id: "square", label: "Square", presets: [
-            SizePreset(id: "a", width: 832, height: 832, tier: nil),
-        ])])
+@Test func aWarnedOffBucketSizeIsKeptRatherThanSnapped() throws {
+    let wan = try wanResolution()
+    #expect(wan.domain == .buckets)
+    #expect(wan.offBucket == .warn)
+
     var draft = RenderDraft()
     draft.width = 1024
     draft.height = 768
-    let adopted = draft.adopting(sizedRecipe(warned), isNewModel: false)
+    let adopted = draft.adopting(sizedRecipe(wan), isNewModel: false)
+    // Already legal for this profile -- on the grid, over the minimum, under
+    // the budget -- so it survives, off-ladder though it is.
     #expect(adopted.width == 1024)
     #expect(adopted.height == 768)
+}
+
+/// **Fails today**: the `warn` guard returned from the WHOLE `.buckets` arm,
+/// so nothing else was applied either. `warn` switches off the bucket
+/// MEMBERSHIP check alone -- `validate_resolution`
+/// (`generation_profile.rs:1327-1404`) still enforces the grid, the minimums
+/// and `max_pixels` for a warned profile, so an off-grid carried size became a
+/// hard 422 where the old snap at least rendered.
+@Test func aWarnedProfileStillHonoursItsGridAndItsBudget() throws {
+    let wan = try wanResolution()
+    let alignment = try #require(wan.alignment)
+    let maxPixels = try #require(wan.maxPixels)
+
+    // Off the grid (1368 % 16 == 8), carried off a recipe with a finer one.
+    var offGrid = RenderDraft()
+    offGrid.width = 1368
+    offGrid.height = 768
+    let aligned = offGrid.adopting(sizedRecipe(wan), isNewModel: false)
+    #expect(aligned.width % alignment == 0)
+    #expect(aligned.height % alignment == 0)
+
+    // Over the budget, carried off a recipe with a larger one.
+    var oversize = RenderDraft()
+    oversize.width = 2048
+    oversize.height = 1152
+    let clamped = oversize.adopting(sizedRecipe(wan), isNewModel: false)
+    #expect(clamped.width * clamped.height <= maxPixels)
+    #expect(clamped.width % alignment == 0)
+    #expect(clamped.height % alignment == 0)
+    #expect(clamped.width >= (wan.minWidth ?? 0))
+    #expect(clamped.height >= (wan.minHeight ?? 0))
+}
+
+/// `wan22-ti2v-5b` is a 32-grid checkpoint: same wire shape, coarser grid.
+/// 1360 is a multiple of 16 but not of 32 -- the exact size the regression
+/// shipped to a host that refuses it.
+@Test func aCoarserWarnedGridStillTakesACarriedSize() {
+    let coarse = ResolutionProfile(
+        domain: .buckets, alignment: 32, minWidth: 64, minHeight: 64,
+        maxPixels: 1_800_000, maxAxisPixels: nil, offBucket: .warn,
+        aspectGroups: [AspectGroup(id: "wide", label: "Wide", presets: [
+            SizePreset(id: "a", width: 1280, height: 720, tier: nil),
+        ])])
+    var draft = RenderDraft()
+    draft.width = 1360
+    draft.height = 768
+    let adopted = draft.adopting(sizedRecipe(coarse), isNewModel: false)
+
+    #expect(adopted.width % 32 == 0)
+    #expect(adopted.height % 32 == 0)
+    // Still off the ladder: `warn` keeps the shape, it does not snap it.
+    #expect(adopted.width != 1280)
+}
+
+/// Aspect is the one bound that cannot be clamped without changing the shape
+/// the size is FOR, so a size outside the band falls back to the ladder --
+/// the only legal answer left.
+@Test func aWarnedSizeOutsideTheAspectBandFallsBackToTheLadder() {
+    let banded = ResolutionProfile(
+        domain: .buckets, alignment: 16, minWidth: 64, minHeight: 64,
+        maxPixels: 1_800_000, maxAxisPixels: nil,
+        minAspectRatio: 0.5, maxAspectRatio: 2.0, offBucket: .warn,
+        aspectGroups: [AspectGroup(id: "wide", label: "Wide", presets: [
+            SizePreset(id: "a", width: 1280, height: 720, tier: nil),
+        ])])
+    var draft = RenderDraft()
+    draft.width = 1600
+    draft.height = 400
+    let adopted = draft.adopting(sizedRecipe(banded), isNewModel: false)
+    #expect(adopted.width == 1280)
+    #expect(adopted.height == 720)
 }
 
 /// **Fails today**: alignment rounds to the NEAREST multiple AFTER the pixel
