@@ -221,11 +221,6 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// What `clearHistory` was asked, in call order -- `nil` is "clear
     /// everything", a number is the `keep` it trimmed to.
     nonisolated(unsafe) var historyCleared: [Int?] = []
-    nonisolated(unsafe) var configListing: ConfigListing?
-    /// What `setConfig` was asked, in call order.
-    nonisolated(unsafe) var configWrites: [(String, ConfigScalar)] = []
-    /// What `resetConfig` was asked, in call order.
-    nonisolated(unsafe) var configResets: [String] = []
 
     func expand(_ request: ExpandRequest) async throws -> ExpandResponse {
         try record("expand")
@@ -246,23 +241,6 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         try record("clearHistory")
         historyCleared.append(keep)
     }
-    func config() async throws -> ConfigListing {
-        try record("config")
-        guard let configListing else { throw notPlanted() }
-        return configListing
-    }
-    @discardableResult
-    func setConfig(_ key: String, to value: ConfigScalar) async throws -> ConfigEntry {
-        try record("setConfig")
-        configWrites.append((key, value))
-        return ConfigEntry(key: key, value: value, source: "db")
-    }
-    @discardableResult
-    func resetConfig(_ key: String) async throws -> ConfigEntry {
-        try record("resetConfig")
-        configResets.append(key)
-        return ConfigEntry(key: key, value: .null, source: "default")
-    }
 
     /// Answered per MODEL -- a model absent from this dictionary is
     /// unplanted, the same "throw when nothing was planted" rule every other
@@ -282,6 +260,24 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         guard let rows = loraRows[model] else { throw notPlanted() }
         return rows
     }
+
+    // MARK: - Config (M7 S1)
+
+    /// Route implementations live in `FakeBackend+Config.swift` -- an
+    /// extension cannot declare stored properties, the same rule
+    /// `FakeBackend+Models.swift` documents.
+    nonisolated(unsafe) var configListing: ConfigListing?
+    /// What `setConfig` was asked, in call order.
+    nonisolated(unsafe) var configWrites: [(String, ConfigScalar)] = []
+    /// What `resetConfig` was asked, in call order.
+    nonisolated(unsafe) var configResets: [String] = []
+    nonisolated(unsafe) var profilesAnswer: ConfigProfiles?
+    /// Consumed FIFO by `pairingSession()`, so a test can plant a keyed
+    /// answer then a keyless one and see a store react to each in turn.
+    nonisolated(unsafe) var pairingSessions: [PairingSession] = []
+    nonisolated(unsafe) var pairedClientsAnswer: PairedClients?
+    /// Every id `revokePairedClient` was asked to revoke, in call order.
+    nonisolated(unsafe) var revokedClients: [String] = []
 
     // MARK: - Queue
 

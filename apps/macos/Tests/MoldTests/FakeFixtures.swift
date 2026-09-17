@@ -501,6 +501,30 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(ConfigListing.self, from: data)
     }
 
+    /// One `ConfigEntry`, for a case the plato fixture doesn't already cover.
+    /// `ConfigEntry` already has a public memberwise init; this exists so a
+    /// store test reads the same `FakeFixtures.x(...)` shape as every other
+    /// row builder here rather than switching conventions for one type.
+    static func configEntry(
+        _ key: String, value: ConfigScalar, source: String,
+        envVar: String? = nil, restartRequired: Bool? = nil
+    ) -> ConfigEntry {
+        ConfigEntry(
+            key: key, value: value, source: source, envVar: envVar, restartRequired: restartRequired)
+    }
+
+    /// A `GET /api/pairing/clients` row. `PairedClient` also has a public
+    /// memberwise init; this fills in the fields a test usually doesn't care
+    /// about.
+    static func pairedClient(
+        _ id: String, name: String = "James's iPhone", clientKind: String = "mobile",
+        createdAtMs: Int64 = 1_700_000_000_000, lastUsedAtMs: Int64? = nil
+    ) -> PairedClient {
+        PairedClient(
+            id: id, name: name, clientKind: clientKind, createdAtMs: createdAtMs,
+            lastUsedAtMs: lastUsedAtMs)
+    }
+
     /// Live on plato (design fact 9): `hf` configured from the environment,
     /// masked `hf_••••hhml`; `civitai` not configured. The same relative-path
     /// trick as `configListing` -- this bundle cannot see `MoldClientTests`'

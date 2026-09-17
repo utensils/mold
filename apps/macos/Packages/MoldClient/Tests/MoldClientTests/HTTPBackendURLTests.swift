@@ -88,6 +88,10 @@ private let backend = HTTPBackend(
         _ = try await backend.config()
         _ = try await backend.setConfig("models.m.default_steps", to: .number(20))
         _ = try await backend.resetConfig("models.m.default_steps")
+        _ = try await backend.configProfiles()
+        _ = try await backend.pairingSession()
+        _ = try await backend.pairedClients()
+        try await backend.revokePairedClient("client-1")
         _ = try await backend.deleteModel("m")
         _ = try await backend.modelComponents("m")
         try await backend.loadModel("m", gpu: nil)
@@ -244,4 +248,11 @@ private let backend = HTTPBackend(
     #expect(request.httpMethod == "POST")
     #expect(request.url?.path() == "/api/generation-batches/transfer")
     #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
+}
+
+/// M7 S1, test 12: a paired client's id rides as ONE path component, the
+/// same rule the catalog id bug taught.
+@Test func revokingAClientEscapesItsId() {
+    let url = backend.request("/api/pairing/clients/\(backend.escaped("client one"))", method: "DELETE").url
+    #expect(url?.path() == "/api/pairing/clients/client%20one")
 }
