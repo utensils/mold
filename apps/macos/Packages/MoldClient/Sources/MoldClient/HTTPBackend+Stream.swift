@@ -8,8 +8,12 @@ extension HTTPBackend {
     /// A `text/event-stream` route as parsed frames. The status is checked
     /// before the first byte -- a 401 is `.unauthorized` like every other
     /// route, not a stream that opens and then goes silent.
+    ///
+    /// The one buffer in the pipeline: the parsers below it are lazy
+    /// adapters that hold nothing, and this is where a consumer that cannot
+    /// keep up stops costing memory (`StreamBuffering`).
     func stream(_ path: String, timeout: TimeInterval) -> AsyncThrowingStream<ServerSentEvent, Error> {
-        AsyncThrowingStream { continuation in
+        AsyncThrowingStream(bufferingPolicy: .bufferingOldest(StreamBuffering.frames)) { continuation in
             let task = Task {
                 do {
                     var request = self.request(path)

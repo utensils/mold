@@ -43,9 +43,12 @@ public extension HTTPBackend {
     /// Follows a batch to settlement.
     ///
     /// Every frame is a COMPLETE status, never a delta, so a dropped
-    /// connection costs nothing: reconnecting re-reads the whole truth.
+    /// connection costs nothing: reconnecting re-reads the whole truth. That
+    /// is also why the buffering policy is `latestOnly` -- an older frame
+    /// says nothing the newer one does not, and the settled frame is always
+    /// the last (`StreamBuffering`).
     func batchEvents(id: String) -> AsyncThrowingStream<BatchStatus, Error> {
-        AsyncThrowingStream { continuation in
+        AsyncThrowingStream(bufferingPolicy: .bufferingNewest(StreamBuffering.latestOnly)) { continuation in
             let task = Task {
                 do {
                     // A stream has no business timing out while it sits idle

@@ -47,24 +47,37 @@ public struct SSEParser: Sendable {
     }
 }
 
-public extension AsyncSequence where Element == String, Self: Sendable {
-    /// Parses a line sequence into events.
-    func serverSentEvents() -> AsyncThrowingStream<ServerSentEvent, Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task {
-                var parser = SSEParser()
-                do {
-                    for try await line in self {
-                        if let event = parser.consume(line: line) {
-                            continuation.yield(event)
-                        }
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+/// A line sequence parsed into events.
+///
+/// Lazy for the same reason `MoldLines` is: a `Task` pumping an
+/// `AsyncThrowingStream` here would be a second unbounded buffer between the
+/// socket and a consumer that cannot keep up, and there is no `yield` that
+/// blocks. Pulling, the whole way down, means one line is read for one
+/// `next()`.
+public struct ServerSentEventStream<Base: AsyncSequence & Sendable>: AsyncSequence, Sendable
+where Base.Element == String {
+    public typealias Element = ServerSentEvent
+
+    let base: Base
+
+    public struct AsyncIterator: AsyncIteratorProtocol {
+        var base: Base.AsyncIterator
+        var parser = SSEParser()
+
+        public mutating func next() async throws -> ServerSentEvent? {
+            while let line = try await base.next() {
+                if let event = parser.consume(line: line) { return event }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            return nil
         }
     }
+
+    public func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(base: base.makeAsyncIterator())
+    }
+}
+
+public extension AsyncSequence where Element == String, Self: Sendable {
+    /// Parses a line sequence into events.
+    func serverSentEvents() -> ServerSentEventStream<Self> { ServerSentEventStream(base: self) }
 }

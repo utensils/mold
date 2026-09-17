@@ -11,8 +11,12 @@ extension HTTPBackend {
     /// answers nil for all of them -- which is the contract, not a gap: a
     /// client that treats an unrecognised tag as a failure breaks the first
     /// time a machine is upgraded ahead of it.
+    ///
+    /// Each frame is its own fact -- a print appearing, a job landing -- so
+    /// the policy is a generous ceiling rather than "keep the latest"
+    /// (`StreamBuffering.frames`).
     public func events() -> AsyncThrowingStream<MoldEvent, Error> {
-        AsyncThrowingStream { continuation in
+        AsyncThrowingStream(bufferingPolicy: .bufferingOldest(StreamBuffering.frames)) { continuation in
             let task = Task {
                 do {
                     // An idle machine says nothing for hours, and that is the

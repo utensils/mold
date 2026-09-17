@@ -61,8 +61,12 @@ public extension HTTPBackend {
     }
 
     /// Progress for every download on this host.
+    ///
+    /// Several models fetch at once, so a frame is one model's progress and
+    /// not a whole picture -- a ceiling, never "keep the latest"
+    /// (`StreamBuffering.frames`).
     func downloadEvents() -> AsyncThrowingStream<DownloadEvent, Error> {
-        AsyncThrowingStream { continuation in
+        AsyncThrowingStream(bufferingPolicy: .bufferingOldest(StreamBuffering.frames)) { continuation in
             let task = Task {
                 do {
                     for try await frame in stream("/api/downloads/stream", timeout: 3_600) {

@@ -24,8 +24,13 @@ extension HTTPBackend {
     /// not a fault -- the caller decides.
     public func resources() async throws -> ResourceSnapshot { try await get("/api/resources") }
 
+    /// This machine's own telemetry, as it samples it.
+    ///
+    /// A telemetry snapshot is a whole picture of one moment, and a stale one
+    /// is worth nothing beside a fresh one -- so the policy is `latestOnly`
+    /// (`StreamBuffering`).
     public func resourceStream() -> AsyncThrowingStream<ResourceSnapshot, Error> {
-        AsyncThrowingStream { continuation in
+        AsyncThrowingStream(bufferingPolicy: .bufferingNewest(StreamBuffering.latestOnly)) { continuation in
             let task = Task {
                 do {
                     for try await frame in stream("/api/resources/stream", timeout: 86_400) {
