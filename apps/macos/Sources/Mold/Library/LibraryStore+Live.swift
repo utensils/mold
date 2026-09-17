@@ -32,10 +32,13 @@ extension LibraryStore {
 
     private func apply(_ change: MoldEvent.Gallery, from host: MoldHost.ID) {
         // An edit this app made is already on screen, and the machine is
-        // echoing it back. Applying it again is harmless for a row that rides
-        // along and a wasted re-list for one that does not, so anything still
-        // in flight for this machine means the echo is ours: skip it.
-        guard outbox.chain(for: host).isEmpty else { return }
+        // echoing it back. Applying it again is a wasted re-list -- but that
+        // is only true of the ROW the edit names, and this guard used to be
+        // the whole chain: a `gallery_added` for a render landing while a star
+        // was in flight was discarded, and nothing re-listed afterwards. See
+        // `GalleryEcho`, which also remembers the machine so `drain` repairs
+        // the one case that remains.
+        guard !echo.isEcho(change, on: host, pending: outbox.chain(for: host)) else { return }
 
         switch change {
         case let .updated(filename, row), let .restored(filename, row):

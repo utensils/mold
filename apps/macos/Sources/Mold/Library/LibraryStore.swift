@@ -44,6 +44,9 @@ final class LibraryStore {
     var outbox = MutationOutbox()
     /// The machines whose chain a task is already walking.
     var draining: Set<MoldHost.ID> = []
+    /// Which live frames are this app's own edit coming back, and which
+    /// machines are owed a re-list because one was skipped. See `GalleryEcho`.
+    var echo = GalleryEcho()
 
     init(hosts: HostStore) {
         self.hosts = hosts

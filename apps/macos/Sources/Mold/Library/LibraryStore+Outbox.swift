@@ -46,6 +46,12 @@ extension LibraryStore {
                     await relist(host)
                 }
             }
+            // A frame from this machine was skipped as our own echo while the
+            // chain was running. Ours is now settled, so what that frame might
+            // ALSO have been saying -- another client editing the same row --
+            // is the only thing left, and reading the listing again is how it
+            // is recovered.
+            if echo.takeStale(host) { await relist(host) }
             // Membership moved, so every machine's collection counts are stale.
             if touchedCollections { await reloadCollections() }
         }
