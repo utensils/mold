@@ -15,6 +15,8 @@ struct SettingsView: View {
                 .tabItem { Label("Storage", systemImage: "internaldrive") }
             LocalEngineSettings()
                 .tabItem { Label("This Mac", systemImage: "cpu") }
+            AdvancedSettings()
+                .tabItem { Label("Advanced", systemImage: "gearshape.2") }
         }
         // 440, not 400 -- measured against Accounts, the tallest tab now.
         .frame(width: 560, height: 440)

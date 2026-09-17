@@ -126,6 +126,7 @@ struct MoldApp: App {
                 .environment(engine)
                 .environment(materializer)
                 .environment(catalog)
+                .environment(modelDefaults)
         }
     }
 }
