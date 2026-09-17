@@ -70,6 +70,41 @@ extension QueueStore {
     func groups(on host: MoldHost.ID) -> [QueueGroup] {
         QueueGroup.build(entries(on: host), children: children[host] ?? [:])
     }
+
+    /// One action reaching every LIVE row of a group, serialized, then a
+    /// single re-read -- the same "N calls, one re-read" shape reorder's
+    /// batch move takes (design decision 4), reused here for a group's own
+    /// Pause/Resume/Cancel rather than one re-read per child. A settled row
+    /// (complete, failed, cancelled) is left alone even when it rides along
+    /// in `group.rows`.
+    func act(_ action: QueueRow.Action, onLiveChildrenOf group: QueueGroup, host: MoldHost.ID) async {
+        guard let client = hosts.backend(for: host) else { return }
+        for entry in group.rows where entry.state.isLive {
+            do {
+                switch action {
+                case .cancel: try await client.cancelJob(id: entry.id)
+                case .pause: try await client.pauseJob(id: entry.id)
+                case .resume: try await client.resumeJob(id: entry.id)
+                // Retry needs a `QueueAuthority` per row, not a bare id, and
+                // belongs to `QueueHoldRow` -- not a group-wide action.
+                case .retry: continue
+                }
+                hosts.succeeded(on: host)
+            } catch {
+                hosts.report(error, on: host, doing: groupVerb(action))
+            }
+        }
+        await poll(host)
+    }
+
+    private func groupVerb(_ action: QueueRow.Action) -> String {
+        switch action {
+        case .cancel: "cancel that job"
+        case .pause: "pause that job"
+        case .resume: "resume that job"
+        case .retry: "retry that job"
+        }
+    }
 }
 
 private extension Array {

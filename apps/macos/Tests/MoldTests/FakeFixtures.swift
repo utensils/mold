@@ -95,6 +95,20 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(Capabilities.self, from: Data(json.utf8))
     }
 
+    /// `capabilities.queue` -- absence of the whole block, or of any one
+    /// field, is a definitive `false` for `canReorderQueue` /
+    /// `canCancelAllQueued` / `canPauseOneJob` (design M6 decision 5), which
+    /// is exactly why the defaults here are `false` rather than omitted.
+    static func capabilities(
+        canReorder: Bool = false, canCancelAll: Bool = false, canPauseJob: Bool = false
+    ) -> Capabilities {
+        let json = #"""
+        {"queue": {"can_reorder": \#(canReorder), "can_cancel_all": \#(canCancelAll),
+         "can_pause_job": \#(canPauseJob)}}
+        """#
+        return try! MoldJSON.decoder.decode(Capabilities.self, from: Data(json.utf8))
+    }
+
     /// The whole `identity` block present or entirely absent -- absence is
     /// the definitive no `supportsIdentity` reads (`types.rs:11555-11557`).
     static func capabilities(identity: Bool) -> Capabilities {
@@ -511,5 +525,12 @@ extension FakeFixtures {
         let civitaiJSON = state(civitaiConfigured, civitaiSource, civitaiMasked)
         let json = #"{"hf": \#(hfJSON), "civitai": \#(civitaiJSON)}"#
         return try! MoldJSON.decoder.decode(CatalogCredentialStatus.self, from: Data(json.utf8))
+    }
+
+    /// `DELETE /api/queue`'s answer -- `QueueCancelResult` has no public
+    /// memberwise init either.
+    static func queueCancelResult(_ cancelled: Int) -> QueueCancelResult {
+        try! MoldJSON.decoder.decode(
+            QueueCancelResult.self, from: Data(#"{"cancelled": \#(cancelled)}"#.utf8))
     }
 }
