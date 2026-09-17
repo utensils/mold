@@ -56,6 +56,27 @@
 	</dict>
 	<key>NSHumanReadableCopyright</key>
 	<string>Utensils</string>
+	<!-- Sparkle. The feed here is the STABLE one and it is the default; the
+	     nightly feed is chosen at runtime by `UpdateFeedDelegate`, which is
+	     the supported way to move an app between channels (`SUFeedURL` on the
+	     updater is deprecated in Sparkle 2, the delegate's
+	     `feedURLString(for:)` is not). Both URLs are pinned by
+	     `UpdateFeedTests`, and this one again by `assert-sparkle-key.sh`.
+
+	     GitHub Releases only, exactly like the Tauri app's two manifests
+	     (`desktop/src-tauri/src/updater.rs:23-26`). No gh-pages, no
+	     utensils.io. -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/utensils/mold/releases/latest/download/mold-native-appcast.xml</string>
+	<!-- Substituted from the build setting of the same name. A Release whose
+	     value is still the placeholder is refused before signing. -->
+	<key>SUPublicEDKey</key>
+	<string>$(MOLD_SPARKLE_PUBLIC_ED_KEY)</string>
+	<!-- Once a day when the user has agreed to automatic checks. Sparkle asks
+	     on the first check rather than assuming, so `SUEnableAutomaticChecks`
+	     is deliberately absent. -->
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 	<!-- Hosts are reached over the LAN and over Tailscale, so macOS will ask
 	     for local network permission on first connection. -->
 	<key>NSLocalNetworkUsageDescription</key>

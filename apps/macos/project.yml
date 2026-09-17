@@ -30,6 +30,17 @@ settings:
     CODE_SIGNING_REQUIRED: "NO"
     CODE_SIGN_STYLE: Manual
     DEVELOPMENT_TEAM: ""
+    # Sparkle's EdDSA public key, which `Info.plist` publishes as
+    # `SUPublicEDKey`. A public key is not a secret -- it ships to every user
+    # inside the bundle -- so it belongs here, in one place, rather than in a
+    # repository secret. The PRIVATE half is the owner's and lives only in the
+    # `MOLD_NATIVE_SPARKLE_KEY` secret.
+    #
+    # This placeholder is what makes a Release FAIL CLOSED:
+    # `scripts/assert-sparkle-key.sh` runs before signing and refuses anything
+    # that is not a real 32-byte key. Debug builds are unaffected and have no
+    # updater at all. Replacing it is a one-time owner step (README, "Updates").
+    MOLD_SPARKLE_PUBLIC_ED_KEY: REPLACE_WITH_SPARKLE_PUBLIC_KEY
   configs:
     Release:
       SWIFT_COMPILATION_MODE: wholemodule
@@ -47,6 +58,12 @@ packages:
     path: Packages/MoldClient
   MoldStyle:
     path: Packages/MoldStyle
+  # Pinned to an EXACT version, not a range. This is the one dependency that
+  # can replace the whole app on someone's Mac; which revision does that is a
+  # reviewed decision, not whatever happened to resolve on a release runner.
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: "2.10.0"
 
 configFiles:
   Debug: Engine.xcconfig
@@ -61,6 +78,7 @@ targets:
     dependencies:
       - package: MoldClient
       - package: MoldStyle
+      - package: Sparkle
     settings:
       base:
         PRODUCT_NAME: Mold
