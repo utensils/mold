@@ -107,7 +107,7 @@ import Testing
         let queued = outbox.enqueue(edit(.favorite(true), [plato: ["a.png"]]))
         outbox.retry(queued[0].id)
         #expect(outbox.head(for: plato)?.id == queued[0].id)
-        #expect(outbox.head(for: plato)?.attempts == 2)
+        #expect(outbox.head(for: plato)?.attempts == 1)
     }
 
     /// Whether trying again could plausibly work. Retrying something that

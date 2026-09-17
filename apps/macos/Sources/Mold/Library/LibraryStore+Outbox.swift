@@ -5,17 +5,12 @@ import MoldClient
 //
 // The optimistic change is already on screen by the time anything here runs,
 // so nothing below is about making an edit happen -- it is about the screen
-// eventually agreeing with the machine, or saying so.
+// eventually agreeing with the machine, or saying so. WHEN to send, how long
+// to wait, and when to give up is `MutationOutbox`'s own policy now -- see
+// `MutationOutbox+Policy` -- so this file keeps only what needs the store:
+// the wire call itself, the local report, and `relist`.
 @MainActor
 extension LibraryStore {
-
-    /// How many times one entry is sent before we stop and repair.
-    ///
-    /// Four, with a widening wait: a Tailscale link that drops usually comes
-    /// back inside a few seconds, and a machine that is still gone after ~15
-    /// is gone in a way waiting will not fix. The person is told then, rather
-    /// than watching an edit hang indefinitely on a machine they turned off.
-    private static let maxAttempts = 4
 
     func send(_ edit: PrintEdit) {
         outbox.enqueue(edit)
@@ -30,27 +25,25 @@ extension LibraryStore {
         Task {
             defer { draining.remove(host) }
             var touchedCollections = false
-            while let entry = outbox.head(for: host) {
-                if case .collection = entry.change { touchedCollections = true }
-                guard let client = hosts.backend(for: host) else {
-                    // The machine was removed. Its rows went with it.
-                    outbox.failed(entry.id)
-                    continue
-                }
-                do {
-                    try await send(entry, to: client)
-                    outbox.succeeded(entry.id)
-                    hosts.succeeded(on: host)
-                } catch {
-                    let transient = (error as? MoldClientError)?.isTransient ?? false
-                    if transient, entry.attempts < Self.maxAttempts {
-                        outbox.retry(entry.id)
-                        try? await Task.sleep(for: .seconds(pow(2.0, Double(entry.attempts - 1))))
-                    } else {
-                        hosts.report(error, on: host, doing: entry.change.verb)
-                        outbox.failed(entry.id)
-                        await relist(host)
-                    }
+            var lastError: Error?
+            loop: while true {
+                switch outbox.next(for: host) {
+                case .idle:
+                    break loop
+                case let .send(entry):
+                    if case .collection = entry.change { touchedCollections = true }
+                    lastError = await attempt(entry, on: host)
+                case let .wait(duration, then: entry):
+                    if case .collection = entry.change { touchedCollections = true }
+                    try? await Task.sleep(for: duration)
+                    lastError = await attempt(entry, on: host)
+                case let .giveUp(entry, orphaned: _):
+                    // `relist` re-reads the machine and replays what is
+                    // still queued, which is how these rows get repaired --
+                    // the same thing `attempt`'s own give-up below does.
+                    hosts.report(lastError ?? MoldClientError.malformedResponse,
+                                 on: host, doing: entry.change.verb)
+                    await relist(host)
                 }
             }
             // Membership moved, so every machine's collection counts are stale.
@@ -58,43 +51,43 @@ extension LibraryStore {
         }
     }
 
-    /// Sends one queued entry.
-    ///
-    /// A title is the one change that is not a bulk mutation: it is a PATCH on
-    /// a single print, and so it carries no operation id and no fence. That is
-    /// safe precisely because it is idempotent -- setting a title twice is
-    /// setting a title -- where adding a tag twice would not be.
-    private func send(_ entry: MutationOutbox.Entry, to client: any MoldBackend) async throws {
-        if case let .title(_, to) = entry.change {
-            for filename in entry.filenames {
-                try await client.patch(filename, with: GalleryPatch(title: to))
-            }
-            return
+    /// Sends one entry and settles it with the outbox: gone on success, kept
+    /// for another round on a transient failure, gone and reported on
+    /// anything else. Returns the error, if any, so a later give-up still
+    /// has something to tell the person.
+    @discardableResult
+    private func attempt(_ entry: MutationOutbox.Entry, on host: MoldHost.ID) async -> Error? {
+        guard let client = hosts.backend(for: host) else {
+            // The machine was removed. Its rows went with it.
+            outbox.failed(entry.id)
+            return nil
         }
-        try await client.mutate(mutation(for: entry))
+        do {
+            try await send(entry, to: client)
+            outbox.succeeded(entry.id)
+            hosts.succeeded(on: host)
+            return nil
+        } catch {
+            if (error as? MoldClientError)?.isTransient == true {
+                outbox.retry(entry.id)
+            } else {
+                hosts.report(error, on: host, doing: entry.change.verb)
+                outbox.failed(entry.id)
+                await relist(host)
+            }
+            return error
+        }
     }
 
-    /// The wire form of one queued entry.
-    private func mutation(for entry: MutationOutbox.Entry) -> GalleryBulkMutation {
-        // The entry's own id, every attempt: the host applies a given
-        // operation once, so reusing it is what makes a retry safe.
-        switch entry.change {
-        case let .favorite(on):
-            GalleryBulkMutation(filenames: entry.filenames, favorite: on,
-                                operationId: entry.id)
-        case let .tag(name, adding):
-            GalleryBulkMutation(filenames: entry.filenames,
-                                addTags: adding ? [name] : [],
-                                removeTags: adding ? [] : [name],
-                                operationId: entry.id)
-        case let .collection(name, slug, filing):
-            GalleryBulkMutation(filenames: entry.filenames,
-                                addToCollection: filing ? .named(name) : nil,
-                                removeFromCollectionSlug: filing ? nil : slug,
-                                operationId: entry.id)
-        case .title:
-            // Unreachable: `send` takes titles down the PATCH route above.
-            GalleryBulkMutation(filenames: entry.filenames, operationId: entry.id)
+    /// Sends one queued entry in its wire form.
+    private func send(_ entry: MutationOutbox.Entry, to client: any MoldBackend) async throws {
+        switch entry.wire {
+        case let .patch(patch, filenames):
+            for filename in filenames {
+                try await client.patch(filename, with: patch)
+            }
+        case let .mutate(mutation):
+            try await client.mutate(mutation)
         }
     }
 

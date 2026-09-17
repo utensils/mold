@@ -24,6 +24,10 @@ public struct MutationOutbox: Sendable {
 
     private var chains: [MoldHost.ID: [Entry]] = [:]
 
+    /// How many times one entry is sent before `next(for:)` gives up on it.
+    /// See `MutationOutbox+Policy` for the widening wait between attempts.
+    public var maxAttempts: Int = 4
+
     public init() {}
 
     public var isEmpty: Bool { chains.values.allSatisfy(\.isEmpty) }
@@ -40,7 +44,7 @@ public struct MutationOutbox: Sendable {
         var queued: [Entry] = []
         for (host, filenames) in edit.targets.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
             let entry = Entry(id: UUID().uuidString, host: host, change: edit.change,
-                              filenames: filenames, attempts: 1)
+                              filenames: filenames, attempts: 0)
             chains[host, default: []].append(entry)
             queued.append(entry)
         }
