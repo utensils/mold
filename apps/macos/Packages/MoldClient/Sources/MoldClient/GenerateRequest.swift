@@ -28,6 +28,23 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// field mean different things to the host.
     public var editImages: [String]?
     public var referenceWeight: Double?
+    /// Base64 PNG, opaque grayscale. Sent only when `sourceImage` is also set
+    /// -- `validation.rs:3101-3107` refuses a mask with no source.
+    public var maskImage: String?
+    /// The adapter stack. There is no `lora`/singular field on this Swift
+    /// request and there never will be: `types.rs:3419-3444` shows the
+    /// server still accepts a legacy singular `lora`, but this app always
+    /// speaks the plural `loras` form.
+    public var loras: [LoraChoice]?
+    /// One identity photograph. Mutually exclusive with `idImages` --
+    /// `IdentityConditioning.wire(maxPhotos:)` is the only place either gets
+    /// set, and it produces one or the other, never both (`identity.rs:981`).
+    public var idImage: String?
+    public var idImageName: String?
+    public var idImages: [String]?
+    public var idImageNames: [String]?
+    public var idWeight: Double?
+    public var idStartStep: Int?
     /// Echoed back from the recipe's own advertised `formats` -- a `String`
     /// rather than a Swift enum, so the app's whole job is to echo one back
     /// without inventing a spelling that could drift from the recipe's.
@@ -69,35 +86,20 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         self.saveToGallery = saveToGallery
     }
 
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(prompt, forKey: .prompt)
-        try container.encode(model, forKey: .model)
-        try container.encode(width, forKey: .width)
-        try container.encode(height, forKey: .height)
-        try container.encode(steps, forKey: .steps)
-        try container.encode(guidance, forKey: .guidance)
-        try container.encode(batchSize, forKey: .batchSize)
-        try container.encodeIfPresent(negativePrompt, forKey: .negativePrompt)
-        try container.encodeIfPresent(seed, forKey: .seed)
-        try container.encodeIfPresent(saveToGallery, forKey: .saveToGallery)
-        try container.encodeIfPresent(frames, forKey: .frames)
-        try container.encodeIfPresent(fps, forKey: .fps)
-        try container.encodeIfPresent(sourceImage, forKey: .sourceImage)
-        try container.encodeIfPresent(sourceImageName, forKey: .sourceImageName)
-        try container.encodeIfPresent(strength, forKey: .strength)
-        try container.encodeIfPresent(editImages, forKey: .editImages)
-        try container.encodeIfPresent(referenceWeight, forKey: .referenceWeight)
-        try container.encodeIfPresent(outputFormat, forKey: .outputFormat)
-        try container.encodeIfPresent(upscaleModel, forKey: .upscaleModel)
-        try container.encodeIfPresent(title, forKey: .title)
-        try container.encodeIfPresent(tags, forKey: .tags)
-        try container.encodeIfPresent(collection, forKey: .collection)
-        try container.encodeIfPresent(originalPrompt, forKey: .originalPrompt)
-        try container.encodeIfPresent(promptTransform, forKey: .promptTransform)
-        try container.encodeIfPresent(batchId, forKey: .batchId)
-        try container.encodeIfPresent(batchIndex, forKey: .batchIndex)
-        try container.encodeIfPresent(batchCount, forKey: .batchCount)
+    /// Declared explicitly, rather than left to the compiler, ONLY because a
+    /// synthesized `CodingKeys` is `private` and therefore invisible from
+    /// `GenerateRequest+Encoding.swift`'s `encode(to:)` -- every other type
+    /// in this package leaves `CodingKeys` to `MoldJSON`'s snake_case
+    /// conversion (see its own doc comment) and this is the sole exception,
+    /// forced by splitting the encoder out for size. Case names still match
+    /// the properties one for one, so there is nothing here for a typo to
+    /// hide behind.
+    enum CodingKeys: String, CodingKey {
+        case prompt, model, width, height, steps, guidance, batchSize, negativePrompt, seed,
+             saveToGallery, frames, fps, sourceImage, sourceImageName, strength, editImages,
+             referenceWeight, maskImage, loras, idImage, idImageName, idImages, idImageNames,
+             idWeight, idStartStep, outputFormat, upscaleModel, title, tags, collection,
+             originalPrompt, promptTransform, batchId, batchIndex, batchCount
     }
 }
 

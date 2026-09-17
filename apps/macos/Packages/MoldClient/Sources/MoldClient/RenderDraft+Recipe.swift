@@ -8,6 +8,12 @@ public extension RenderDraft {
     ///
     /// Switching models is not a reason to lose a prompt, but it IS a reason
     /// to stop asking for 50 steps from a recipe whose maximum is 8.
+    ///
+    /// The parking reconciliation below (source image, edit images, mask,
+    /// identity, adapters) runs unconditionally, whether `isNewModel` is
+    /// `true` (a fresh model) or `false` (a recipe switch on the SAME model,
+    /// e.g. one LTX-2 pipeline to another) -- either way the question is the
+    /// same one: can the recipe about to run read what the draft is holding.
     public func adopting(_ recipe: GenerationRecipe, isNewModel: Bool) -> RenderDraft {
         var draft = self
         if isNewModel {
@@ -42,33 +48,45 @@ public extension RenderDraft {
             draft.fps = nil
         }
 
-        // Carrying a source image to a recipe that cannot read one would send
-        // bytes the host must refuse.
-        if recipe.capabilities.sourceImage?.isSupported != true {
-            draft.sourceImage = nil
-            draft.sourceImageName = nil
-        }
-
+        // Conditioning the recipe cannot currently take is PARKED rather than
+        // dropped, so it comes back if the next model can read it again
+        // (`RenderDraft+Park.swift`; decision 4 in the M4 design). Edit
+        // images are reconciled first so the exclusive/replaces check below
+        // reads the post-truncation list, matching the order this logic ran
+        // in before parking existed.
         let references = recipe.capabilities.referenceImages
-        if references?.mode.isVisible != true {
-            draft.editImages = []
-            draft.referenceWeight = nil
-        } else if let max = references?.maxCount, draft.editImages.count > max {
-            draft.editImages = Array(draft.editImages.prefix(max))
-        }
-        // `exclusive` means ONE render carries a source image or references,
-        // never both. Keeping whichever was added last would be guessing, so
-        // references win -- they are the more specific instruction.
-        if references?.sourceRelation == .exclusive, !draft.editImages.isEmpty {
-            draft.sourceImage = nil
-            draft.sourceImageName = nil
-        }
-        // `replaces` means the references ARE the conditioning: no source, and
-        // no strength to apply.
-        if references?.sourceRelation == .replaces, !draft.editImages.isEmpty {
-            draft.sourceImage = nil
-            draft.sourceImageName = nil
-        }
+        let referencesVisible = references?.mode.isVisible == true
+        draft.reconcileEditImages(supported: referencesVisible, maxCount: references?.maxCount)
+        if !referencesVisible { draft.referenceWeight = nil }
+
+        // `exclusive`/`replaces` mean ONE render carries a source image OR
+        // references, never both. Keeping whichever was added last would be
+        // guessing, so references win -- they are the more specific
+        // instruction. `readsSourceImage` is the CORRECTED reading of an
+        // absent `sourceImage` block: absence means the recipe reads one
+        // (fact 1 in the M4 design, `manifest.rs:265-270`), not that there is
+        // no source path -- the raw `sourceImage?.isSupported` this block
+        // used to read got that backwards for every still model in the fleet.
+        let takenByReferences = !draft.editImages.isEmpty
+            && (references?.sourceRelation == .exclusive || references?.sourceRelation == .replaces)
+        draft.reconcileSourceImage(supported: recipe.capabilities.readsSourceImage && !takenByReferences)
+
+        // The mask needs BOTH the recipe's own permission and a surviving
+        // source image -- an orphaned mask over no source is meaningless
+        // (`validation.rs:3101-3107`).
+        draft.reconcileMask(supported: recipe.capabilities.acceptsMask && draft.sourceImage != nil)
+
+        // Identity is positive-only: `supportsIdentity != true` means the
+        // well is not drawn and the staged photo is held, because sending it
+        // to an unqualified checkpoint is a refusal, not a silent ignore
+        // (`identity.rs:1011-1013`).
+        draft.reconcileIdentity(supported: recipe.capabilities.supportsIdentity == true)
+
+        draft.reconcileLoras(
+            supported: recipe.capabilities.loraStack != nil,
+            maxCount: recipe.capabilities.loraStack?.maxCount
+        )
+
         if recipe.capabilities.negativePrompt?.isAvailable != true {
             draft.negativePrompt = ""
         }

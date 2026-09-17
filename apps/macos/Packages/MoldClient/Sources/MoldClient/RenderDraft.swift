@@ -29,6 +29,22 @@ public struct RenderDraft: Hashable, Sendable {
     /// Target, index 0 is that one.
     public var editImages: [String] = []
     public var referenceWeight: Double?
+    /// A repaint mask over `sourceImage`, base64 PNG. Meaningless without a
+    /// source, and dropped at request time when there is none
+    /// (`validation.rs:3101-3107`).
+    public var maskImage: String?
+    /// Face-identity conditioning. One value whether it carries one
+    /// photograph or four -- the wire shape is chosen at request time from
+    /// the host's `multi_photo`, so `id_image` and `id_images` can never
+    /// both be set (`IdentityConditioning.wire(maxPhotos:)`).
+    public var identity: IdentityConditioning?
+    /// The adapter stack, in the order it was added. Never written into the
+    /// legacy singular `lora` field (`types.rs:3419-3444`) -- there is no
+    /// Swift equivalent of it and there never will be.
+    public var loras: [LoraChoice] = []
+    /// What the CURRENT recipe cannot take, held so it comes back
+    /// (`RenderDraft+Park.swift`).
+    public var parked = ParkedConditioning()
 
     /// Filing: title, tags and a collection to file the finished print
     /// under, gated on `canOrganize` at the call site.
