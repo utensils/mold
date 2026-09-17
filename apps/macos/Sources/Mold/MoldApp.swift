@@ -142,6 +142,7 @@ struct MoldApp: App {
             ModelCommands()
             QueueCommands()
             MachineCommands()
+            UpdateCommands()
         }
 
         Settings {

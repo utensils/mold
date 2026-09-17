@@ -40,6 +40,11 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
         #endif
         guard MoldNotifications.isInsideBundle() else { return }
         UNUserNotificationCenter.current().delegate = self
+        // Sparkle needs a real `.app` around it too -- it installs over the
+        // bundle it is running from -- so it starts behind the same guard.
+        // Touching `shared` is what builds it; in a build with no updater
+        // this is `nil` and nothing is constructed, scheduled or fetched.
+        _ = SoftwareUpdates.shared
     }
 
     /// Mirrors `NSApp.isActive` onto `LandedPrints`, which is what decides

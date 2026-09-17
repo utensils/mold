@@ -48,6 +48,9 @@ struct GeneralSettings: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            // Absent in a build with no updater, which is every Debug build
+            // and every UAT run (`SoftwareUpdates`).
+            UpdatesSettings()
             Section {
                 Picker("Media cache", selection: $capMegabytes) {
                     ForEach(Self.mediaCacheChoices, id: \.self) { megabytes in
