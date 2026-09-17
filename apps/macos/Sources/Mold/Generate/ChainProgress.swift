@@ -14,7 +14,15 @@ struct ChainProgress: Equatable {
     var currentStage: Int = 1
     var step: Int?
     var total: Int?
+    /// A host restart PARKS an ephemeral chain rather than losing it, and it
+    /// can be resumed (CLAUDE.md, "Scripted sequences"). Not a failure, and
+    /// not something to settle.
+    var isPaused = false
 
     /// What the capsule says under the spinner.
-    var label: String { "Clip \(currentStage) of \(stageCount)" }
+    var label: String {
+        isPaused
+            ? "Paused after clip \(currentStage) of \(stageCount)"
+            : "Clip \(currentStage) of \(stageCount)"
+    }
 }

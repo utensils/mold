@@ -24,6 +24,19 @@ final class ChainRun {
     var active: ChainProgress?
     var task: Task<Void, Never>?
     var host: MoldHost.ID?
+    /// The first reconnect delay. A constructor parameter so a test pins the
+    /// BEHAVIOUR rather than waiting out a constant.
+    let firstBackoff: Duration
+
+    init(firstBackoff: Duration = .seconds(1)) { self.firstBackoff = firstBackoff }
+
+    /// `2^n`, capped at 32 s -- the same shape `HostStore+Events.watch` uses,
+    /// because it is the same question: a machine that is briefly unreachable
+    /// is still the machine the work is on.
+    func backoff(_ attempt: Int) -> Duration {
+        let capped = Swift.min(attempt, 5)
+        return firstBackoff * (1 << capped)
+    }
     /// Which start owns this type's state. `creating`, `withdrawn`, `active`,
     /// `host` and `task` are all instance state shared by every `start()`, so
     /// without a token an OLDER task's landing clears the flags of the one

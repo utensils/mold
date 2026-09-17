@@ -12,9 +12,12 @@ struct ChainRunTests {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
 
-    private func makeController(_ backend: FakeBackend, host: MoldHost) -> GenerateController {
+    private func makeController(
+        _ backend: FakeBackend, host: MoldHost, reconnect: Duration = .milliseconds(1)
+    ) -> GenerateController {
         let hosts = HostStore(hosts: [host]) { _ in backend }
-        let controller = GenerateController(hosts: hosts, defaults: ConfigStore(hosts: hosts))
+        let controller = GenerateController(hosts: hosts, defaults: ConfigStore(hosts: hosts),
+                                            chain: ChainRun(firstBackoff: reconnect))
         controller.modelName = "ltx-2-19b:fp8"
         controller.modelFamily = "ltx2"
         controller.hostID = host.id
@@ -180,6 +183,37 @@ struct ChainRunTests {
         backend.releaseChainCreate()
         await settle { backend.cancelledChainJobIds.count == 2 }
         #expect(backend.calls.contains("chainJobEvents") == false)
+    }
+
+    /// A dropped stream is not a settlement. **Fails today**: the catch ran
+    /// `settle()`, which FORGOT the job -- so a thirty-second Wi-Fi blip in
+    /// the middle of a twelve-clip render discarded the app's only record of a
+    /// job that kept burning GPU, and there was no reconnect to replace it.
+    @Test func adroppedStreamReconnectsAndKeepsTheJob() async {
+        let plato = machine()
+        let backend = FakeBackend(host: plato)
+        let controller = makeController(backend, host: plato)
+        backend.chainJobAnswer = try! MoldJSON.decoder.decode(
+            CreateChainJobResponse.self, from: Data(#"{"job_id": "chain-6"}"#.utf8))
+        backend.chainEventsHeldOpen.insert("chain-6")
+        backend.chainJobDetails["chain-6"] = try! MoldJSON.decoder.decode(
+            ChainJobDetail.self, from: Data(#"""
+            {"id": "chain-6", "state": "running", "model": "m", "stage_count": 3,
+             "current_stage": 1, "error": null, "finalizes": []}
+            """#.utf8))
+
+        controller.submit(on: plato, backend: backend, routing: routing)
+        await settle { backend.calls.contains("chainJobEvents") }
+
+        backend.failChainEvents(for: "chain-6")
+        await settle { backend.calls.filter { $0 == "chainJobEvents" }.count == 2 }
+
+        // Still on the canvas, still recoverable, and the stage counter was
+        // re-read from the host rather than invented.
+        #expect(controller.run.isBusy)
+        #expect(controller.run.stage == "Clip 2 of 3")
+        #expect(PendingChain.all()["chain-6"] == plato.id.uuidString)
+        #expect(backend.calls.contains("chainJob"))
     }
 
     /// A refusal is the SERVER's sentence and nothing is submitted at all.

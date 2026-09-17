@@ -455,6 +455,13 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         chainEventContinuations[id]?.yield(event)
     }
 
+    /// Drops an id's stream the way a network blip does -- the follow must
+    /// treat this as "lost contact", never as "the job ended".
+    func failChainEvents(for id: String) {
+        let continuation = chainEventContinuations.removeValue(forKey: id)
+        continuation?.finish(throwing: MoldClientError.unreachable("dropped"))
+    }
+
     // MARK: - Create
 
     nonisolated(unsafe) var expandAnswer: ExpandResponse?

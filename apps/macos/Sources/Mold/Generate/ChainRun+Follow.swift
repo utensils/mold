@@ -5,26 +5,39 @@ import MoldClient
 // purely for size.
 @MainActor
 extension ChainRun {
+    /// Follows the job until the SERVER says it is over.
+    ///
+    /// A dropped stream is not a settlement: the job is durable and keeps
+    /// rendering, so this reconnects with the same `2^n` backoff capped at 32 s
+    /// that `HostStore+Events.watch` uses, re-reading the job each time so the
+    /// stage counter resyncs rather than being invented. The record in
+    /// `PendingChain` is KEPT throughout -- it used to be forgotten here, which
+    /// threw away the app's only handle on a job that was still burning GPU.
+    /// Only a terminal state read from the host ends this loop.
     func follow(
         _ jobId: String, on host: MoldHost.ID, backend: any MoldBackend, report: Reporter
     ) async {
-        do {
-            for try await event in backend.chainJobEvents(id: jobId) {
-                guard !Task.isCancelled else { return }
-                if apply(event, jobId: jobId, host: host, report: report) { return }
+        var attempt = 0
+        while !Task.isCancelled {
+            do {
+                for try await event in backend.chainJobEvents(id: jobId) {
+                    guard !Task.isCancelled else { return }
+                    attempt = 0
+                    if apply(event, jobId: jobId, host: host, report: report) { return }
+                }
+            } catch {
+                // A dropped stream. The job is durable and still rendering.
             }
-            // The stream ended without a terminal frame. READ the job once
-            // rather than leaving the canvas spinning -- and never by
-            // creating it again, which would render the whole thing twice.
+            // Ended or dropped, the question is the same and the SERVER
+            // answers it: READ the job once -- never create it again, which
+            // would render the whole thing twice. A read that itself fails is
+            // the same bad minute as the stream, and is retried.
             guard !Task.isCancelled else { return }
-            settleFromDetail(try await backend.chainJob(id: jobId), host: host, report: report)
-        } catch {
+            if let detail = try? await backend.chainJob(id: jobId),
+               settleFromDetail(detail, host: host, report: report) { return }
             guard !Task.isCancelled else { return }
-            // A dropped stream does NOT mean the work stopped: the job is
-            // durable and is still going to finish. Not a settlement.
-            settle()
-            report.failed("Lost contact while rendering. "
-                + "The job may still be running — check the Queue.")
+            try? await Task.sleep(for: backoff(attempt))
+            attempt += 1
         }
     }
 
@@ -39,10 +52,10 @@ extension ChainRun {
             update({ progress in
                 progress.stageCount = max(detail.stageCount, 1)
                 progress.currentStage = max(detail.currentStage + 1, 1)
+                progress.isPaused = detail.state == .paused
             }, report: report)
-            guard detail.state.isTerminal else { return false }
-            settleFromDetail(detail, host: host, report: report)
-            return true
+            return detail.state.isTerminal
+                && settleFromDetail(detail, host: host, report: report)
         case let .stageStart(stage):
             // A new clip resets the step counter: the old one belonged to the
             // clip before it and would read as progress that already happened.
@@ -53,6 +66,7 @@ extension ChainRun {
                 progress.currentStage = max(stage + 1, progress.currentStage)
                 progress.step = step
                 progress.total = total
+                progress.isPaused = false
             }, report: report)
         case .stageDone, .finalizing, .other:
             break
@@ -61,12 +75,16 @@ extension ChainRun {
             report.finished(galleryFilename, host)
             return true
         case let .stateChanged(state, error):
-            guard state.isTerminal else { return false }
+            // A PARKED chain is not over: a host restart parks an ephemeral
+            // chain and it can be resumed (CLAUDE.md, "Scripted sequences").
+            guard state.isTerminal else {
+                update({ $0.isPaused = state == .paused }, report: report)
+                return false
+            }
             settle()
             switch state {
-            // `finalized` normally arrives first and has already returned;
-            // a `completed` reaching here is a job that published nothing
-            // this client can fetch.
+            // `finalized` normally arrives first and has already returned; a
+            // `completed` reaching here published nothing this client fetches.
             case .completed: report.finished(nil, host)
             case .cancelled: report.failed("Cancelled")
             default: report.failed(error ?? "The render didn't finish.")
@@ -76,19 +94,25 @@ extension ChainRun {
         return false
     }
 
-    private func settleFromDetail(
+    /// Settles from a READ of the job. `false` means it is not over and the
+    /// follow reconnects -- the record stays, because the job stays.
+    func settleFromDetail(
         _ detail: ChainJobDetail, host: MoldHost.ID, report: Reporter
-    ) {
+    ) -> Bool {
+        guard detail.state.isTerminal else {
+            update({ progress in
+                progress.stageCount = max(detail.stageCount, 1)
+                progress.currentStage = max(detail.currentStage + 1, 1)
+                progress.isPaused = detail.state == .paused
+            }, report: report)
+            return false
+        }
         settle()
         switch detail.state {
-        case .completed: report.finished(detail.galleryFilename, host)
         case .cancelled: report.failed("Cancelled")
         case .failed: report.failed(detail.error ?? "The render didn't finish.")
-        default:
-            // Not terminal, and the stream is gone: the job is still running
-            // on a durable host and this client simply stopped watching.
-            report.failed("Lost contact while rendering. "
-                + "The job may still be running — check the Queue.")
+        default: report.finished(detail.galleryFilename, host)
         }
+        return true
     }
 }

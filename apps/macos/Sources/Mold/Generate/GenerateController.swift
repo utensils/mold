@@ -59,7 +59,7 @@ final class GenerateController {
     var activeBatch: ActiveBatch?
     /// Stop, and a second press, while an admission is unanswered.
     let submissions = SubmissionFence()
-    let chain = ChainRun()  // the ephemeral chain a too-long clip becomes
+    let chain: ChainRun  // the ephemeral chain a too-long clip becomes
     /// The beat between a batch settling and the next one taking the canvas.
     let handoff: ResultHandoff
     /// Batches this pane admitted while another was still on screen, in
@@ -72,11 +72,13 @@ final class GenerateController {
     internal(set) var queued: [QueuedRun] = []
 
     init(hosts: HostStore, defaults: ConfigStore,
-         handoff: ResultHandoff = ResultHandoff(), probe: PlacementProbe = PlacementProbe()) {
+         handoff: ResultHandoff = ResultHandoff(), probe: PlacementProbe = PlacementProbe(),
+         chain: ChainRun = ChainRun()) {
         self.hosts = hosts
         self.defaults = defaults
         self.handoff = handoff
         self.probe = probe
+        self.chain = chain
     }
 
     /// Adopts a model while KEEPING the draft that was just restored.
