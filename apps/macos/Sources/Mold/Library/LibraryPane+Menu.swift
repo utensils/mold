@@ -51,10 +51,14 @@ extension LibraryPane {
         return LibraryFile(
             count: entries.count,
             exportFormats: entries.count == 1 ? actions.exportFormats(for: entries[0]) : [],
+            meshExports: entries.count == 1 && entries[0].print.isMesh
+                ? actions.meshExports(for: entries[0]) : nil,
             save: { actions.save(entries) },
             export: { format in
                 guard entries.count == 1, let entry = entries.first else { return }
-                actions.export(entry, as: format)
+                // The same door the tile's menu takes, so a turntable asks for
+                // its controls from here too.
+                actions.requestExport(entry, as: format)
             }
         )
     }

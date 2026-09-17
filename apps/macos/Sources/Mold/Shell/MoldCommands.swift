@@ -36,11 +36,11 @@ struct MoldCommands: Commands {
 
         CommandGroup(after: .saveItem) {
             Menu("Export…") {
-                ForEach(libraryFile?.exportFormats ?? [], id: \.self) { format in
-                    Button(format.uppercased()) { libraryFile?.export(format) }
+                ForEach(libraryFile?.exportItems ?? [], id: \.format) { item in
+                    Button(item.title) { libraryFile?.export(item.format) }
                 }
             }
-            .disabled(libraryFile?.exportFormats.isEmpty ?? true)
+            .disabled(libraryFile?.exportItems.isEmpty ?? true)
             .keyboardShortcut("e", modifiers: [.command, .shift])
             // Counted, like its right-click twin: the menu bar said "Save a
             // Copy…" over four selected prints and then wrote four files.
