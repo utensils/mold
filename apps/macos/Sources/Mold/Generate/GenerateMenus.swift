@@ -89,6 +89,14 @@ enum GenerateMenus {
         return Row.ordered([GenerateAction.resetReferenceWeight.row])
     }
 
+    /// The Sampler group. Its one verb puts every control back to the
+    /// recipe's own value; a group nobody has touched has nothing to put
+    /// back, so it answers empty and no menu is attached.
+    static func sampler(touched: Bool) -> [Row] {
+        guard touched else { return [] }
+        return Row.ordered([GenerateAction.resetSampler.row])
+    }
+
     /// A recent prompt. There is no per-entry delete verb on the wire -- the
     /// history route offers `clear` alone -- so "Remove from History" is
     /// deliberately absent rather than shown and broken.

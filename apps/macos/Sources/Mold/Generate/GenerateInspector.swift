@@ -29,6 +29,8 @@ struct GenerateInspector: View {
     private var showsRefine = true
     @AppStorage("createShowsClip", store: AppStorageSuite.defaults)
     private var showsClip = true
+    @AppStorage("createShowsSampler", store: AppStorageSuite.defaults)
+    private var showsSampler = false
     @AppStorage("createShowsOutput", store: AppStorageSuite.defaults)
     private var showsOutput = true
     @AppStorage("createShowsFileUnder", store: AppStorageSuite.defaults)
@@ -77,6 +79,12 @@ struct GenerateInspector: View {
                 }
                 .font(.callout)
             }
+            if SamplerGroup.isShown(sampler) {
+                DisclosureGroup("Sampler", isExpanded: $showsSampler) {
+                    SamplerGroup(offered: sampler, draft: $draft).padding(.top, 6)
+                }
+                .font(.callout)
+            }
             DisclosureGroup("Output", isExpanded: $showsOutput) {
                 OutputGroup(output: recipe?.capabilities.output, models: hostModels, draft: $draft)
                     .padding(.top, 6)
@@ -91,6 +99,13 @@ struct GenerateInspector: View {
             }
             RecentGroup(host: host, draft: $draft, isExpanded: $showsRecent, isBusy: controller.run.isBusy)
         }
+    }
+
+    /// What this recipe offers the Sampler group, resolved once so the rows
+    /// drawn and the values parked read the same answer.
+    private var sampler: AdvancedControlsOffered {
+        AdvancedControlsOffered.resolve(
+            recipe: recipe, in: model?.generationProfile, family: model?.family)
     }
 
     private var capabilities: Capabilities? {
