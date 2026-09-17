@@ -16,6 +16,7 @@ struct GeneralSettings: View {
     @AppStorage(PrintMaterializer.capKey, store: AppStorageSuite.defaults)
     private var capMegabytes = PrintMaterializer.defaultCapMegabytes
     @Environment(PrintMaterializer.self) private var materializer
+    @Environment(ThumbnailCache.self) private var thumbnails
     @State private var used = 0
     @State private var pendingReset: Destruction?
 
@@ -57,6 +58,9 @@ struct GeneralSettings: View {
                 LabeledContent("Using", value: used > 0 ? bytes(used) : "Nothing")
                 Button("Empty Now") {
                     materializer.purge()
+                    // Both caches, or "Empty Now" leaves the thumbnails
+                    // behind and the figure above it is not what is on disk.
+                    thumbnails.purge()
                     used = 0
                 }
                 .disabled(used == 0)

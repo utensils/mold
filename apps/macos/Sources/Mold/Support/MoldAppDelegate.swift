@@ -12,6 +12,7 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     /// Set by the composition root, which owns all four.
     var engine: MoldEngine?
     var materializer: PrintMaterializer?
+    var thumbnails: ThumbnailCache?
     var landedPrints: LandedPrints?
     /// The fleet's own 10 s tick. It lives here rather than on a view because
     /// the app being active is an APPLICATION fact, and a window closing must
@@ -55,9 +56,12 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // The cache is disposable and local, so it goes first and without
-        // ceremony: whatever it holds can be fetched again.
+        // The caches are disposable and local, so they go first and without
+        // ceremony: whatever they hold can be fetched again. BOTH of them --
+        // the thumbnails are a second on-disk copy of somebody's library, and
+        // the README's "emptied when Mold quits" was only ever true of one.
         materializer?.purge()
+        thumbnails?.purge()
 
         guard let engine, case .running = engine.state else { return .terminateNow }
         // `stop()` is a POST to the engine's own shutdown route and a join --

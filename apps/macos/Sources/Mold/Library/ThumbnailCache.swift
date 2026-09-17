@@ -16,17 +16,37 @@ final class ThumbnailCache {
     /// fast scroll issues the same request several times over.
     private var inFlight: [String: Task<NSImage?, Never>] = [:]
     private let session: URLSession
+    /// Kept so `purge` can empty it. A `URLSession`'s own `urlCache` is the
+    /// same object, but reading it back is not guaranteed to be.
+    private let responses: URLCache
 
-    init() {
+    /// `session` is a parameter so a test can stub the protocol -- nothing
+    /// else builds one, and the default is the only one the app uses.
+    init(session: URLSession? = nil) {
         images.totalCostLimit = 96 * 1024 * 1024
-        let configuration = URLSessionConfiguration.default
-        configuration.urlCache = URLCache(
-            memoryCapacity: 32 * 1024 * 1024,
-            diskCapacity: 512 * 1024 * 1024
-        )
-        // Let the server's ETag decide freshness rather than a local guess.
-        configuration.requestCachePolicy = .useProtocolCachePolicy
-        session = URLSession(configuration: configuration)
+        // Deliberately modest, and emptied with everything else: this is the
+        // SECOND on-disk copy of somebody's library on this Mac, and the
+        // README's promise -- capped, and emptied when Mold quits -- was true
+        // of the media cache and false of this one, which sat at 512 MB and
+        // was swept by nothing. A thumbnail is cheap to fetch again.
+        responses = URLCache(memoryCapacity: 32 * 1024 * 1024,
+                             diskCapacity: 64 * 1024 * 1024)
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.default
+            configuration.urlCache = responses
+            // Let the server's ETag decide freshness rather than a local guess.
+            configuration.requestCachePolicy = .useProtocolCachePolicy
+            self.session = URLSession(configuration: configuration)
+        }
+    }
+
+    /// Empties both tiers. Called when Mold quits and by Settings ▸ Empty Now,
+    /// the same two doors the media cache answers.
+    func purge() {
+        images.removeAllObjects()
+        responses.removeAllCachedResponses()
     }
 
     func cached(_ key: String) -> NSImage? { images.object(forKey: key as NSString) }

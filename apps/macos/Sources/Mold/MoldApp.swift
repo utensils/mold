@@ -75,6 +75,7 @@ struct MoldApp: App {
                 .task {
                     delegate.engine = engine
                     delegate.materializer = materializer
+                    delegate.thumbnails = thumbnails
                     delegate.landedPrints = landedPrints
                     delegate.dockBadge.follow(landedPrints)
                     // `applicationDidBecomeActive` has already fired by the
@@ -131,6 +132,8 @@ struct MoldApp: App {
                 .environment(hosts)
                 .environment(engine)
                 .environment(materializer)
+                // Settings ▸ Empty Now empties BOTH caches.
+                .environment(thumbnails)
                 .environment(catalog)
                 .environment(modelDefaults)
                 .environment(library)
