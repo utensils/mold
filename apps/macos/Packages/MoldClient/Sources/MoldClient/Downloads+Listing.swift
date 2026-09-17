@@ -21,6 +21,24 @@ public struct DownloadsListing: Codable, Hashable, Sendable {
         self.queued = queued
         self.history = history
     }
+
+    /// An absent list is an EMPTY list, never a failed decode.
+    ///
+    /// `active_jobs` is `#[serde(default)]` on the Rust side
+    /// (`types.rs:13279-13280`) precisely because a host that predates it
+    /// sends only `active` -- and a synthesized `init(from:)` requires every
+    /// non-optional key, so such a host made the whole `DownloadsListing`
+    /// throw. This one is decoded inside `downloadEvents`' `try?`, so the
+    /// failure was invisible: the snapshot frame -- the ONLY way this app
+    /// learns about a `mold pull` at a terminal -- silently vanished and the
+    /// downloads popover stayed empty forever.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        activeJobs = try container.decodeIfPresent([DownloadJob].self, forKey: .activeJobs) ?? []
+        active = try container.decodeIfPresent(DownloadJob.self, forKey: .active)
+        queued = try container.decodeIfPresent([DownloadJob].self, forKey: .queued) ?? []
+        history = try container.decodeIfPresent([DownloadJob].self, forKey: .history) ?? []
+    }
 }
 
 /// One entry in a `DownloadsListing` (`types.rs:13045-13062`).
