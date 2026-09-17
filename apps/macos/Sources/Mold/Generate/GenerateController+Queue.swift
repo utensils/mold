@@ -54,19 +54,7 @@ extension GenerateController {
                 RunQueueing.forget(next)
                 continue
             }
-            switch next {
-            case let .batch(batch):
-                activeBatch = batch
-                runTask = Task { [weak self] in
-                    await self?.follow(batch.admitted, backend: backend, host: batch.host)
-                }
-            case let .chain(admitted):
-                // A chain job the host already holds: re-attaching to it IS
-                // following it, exactly as it is after a relaunch.
-                chain.reattach(jobId: admitted.jobId, stageCount: admitted.stageCount,
-                               on: admitted.host, backend: backend,
-                               report: ChainSubmission.reporter(for: self))
-            }
+            RunQueueing.follow(next, on: self, backend: backend)
             return
         }
     }

@@ -17,25 +17,29 @@ import MoldClient
 final class ChainRun {
     /// The job on screen, or nil. Written before the follow starts so Stop
     /// always has something to cancel.
-    private(set) var active: ChainProgress?
-    private var task: Task<Void, Never>?
-    private var host: MoldHost.ID?
+    ///
+    /// Everything below is the type's own state, deliberately not `private`:
+    /// `private` does not cross files for one type, and `ChainRun+Lifecycle`
+    /// and `ChainRun+Follow` are this type split for size, not other callers.
+    var active: ChainProgress?
+    var task: Task<Void, Never>?
+    var host: MoldHost.ID?
     /// Which start owns this type's state. `creating`, `withdrawn`, `active`,
     /// `host` and `task` are all instance state shared by every `start()`, so
     /// without a token an OLDER task's landing clears the flags of the one
     /// after it -- and the Stop aimed at the newer chain then found nothing to
     /// stop and let it render to completion.
-    private var generation = 0
+    var generation = 0
     /// A create is in the air. Set SYNCHRONOUSLY by `start`, so a Stop
     /// pressed in the same turn is answered even though there is no job id
     /// to cancel yet.
-    private var creating = false
+    var creating = false
     /// Stop was pressed while the create was unanswered. The task is
     /// deliberately NOT cancelled there -- the POST has very likely already
     /// reached the host, and killing it would leave a chain rendering with
     /// nobody holding its id (`SubmissionFence`'s lesson, one door along).
     /// The landing reads this and withdraws the job the host just minted.
-    private var withdrawn = false
+    var withdrawn = false
 
     /// What the follow reports back. The controller supplies these rather
     /// than this type reaching into it, so the whole lifecycle is testable
@@ -116,41 +120,5 @@ final class ChainRun {
         task = Task { [weak self] in
             await self?.follow(jobId, on: host, backend: backend, report: report)
         }
-    }
-
-    /// Stops the job on its own machine. `false` means there was nothing to
-    /// stop, which is the caller's cue to stop whatever else is on screen.
-    @discardableResult
-    func stop(backend: (MoldHost.ID) -> (any MoldBackend)?) -> Bool {
-        if creating {
-            // Nothing to cancel YET. The landing does it.
-            withdrawn = true
-            active = nil
-            return true
-        }
-        guard let active, let host else { return false }
-        task?.cancel()
-        task = nil
-        self.active = nil
-        PendingChain.forget(active.jobId)
-        // Cancelled by the user, not lost: nothing to recover on relaunch.
-        guard let backend = backend(host) else { return true }
-        Task { try? await backend.cancelChainJob(id: active.jobId) }
-        return true
-    }
-
-    /// Not `private`: `ChainRun+Follow` is the event loop, in its own file for
-    /// size.
-    func update(_ transform: (inout ChainProgress) -> Void, report: ChainRun.Reporter) {
-        guard var progress = active else { return }
-        transform(&progress)
-        active = progress
-        report.progress(progress)
-    }
-
-    func settle() {
-        task = nil
-        if let active { PendingChain.forget(active.jobId) }
-        active = nil
     }
 }
