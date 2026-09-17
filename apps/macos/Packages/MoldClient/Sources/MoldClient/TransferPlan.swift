@@ -102,7 +102,8 @@ public enum TransferPlan {
             case .tooLarge:
                 return .outcome(.refused(
                     "\(destinationLabel) wouldn't take it: the job's media is larger than a machine "
-                        + "will accept in one request (about 48 MB). The original is still here."))
+                        + "will accept in one request (\(RequestBodyLimit.sentence)). "
+                        + "The original is still here."))
             case let .rejected(message):
                 return .outcome(.refused(message))
             case .ambiguous:

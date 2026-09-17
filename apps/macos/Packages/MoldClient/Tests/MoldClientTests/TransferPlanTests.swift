@@ -97,11 +97,18 @@ private func next(
     #expect(result == .step(.complete))
 }
 
-@Test func aBodyTooLargeSaysWhatTheLimitIs() {
+/// **Fails today**: the sentence says "about 48 MB", which matches no
+/// constant in this repo. The real ceiling is `MAX_REQUEST_BODY_BYTES`
+/// (`crates/mold-server/src/lib.rs:178`), which
+/// `HTTPBackend+Transfer.swift:19-22` already documents correctly as 64 MiB.
+@Test func aBodyTooLargeSaysWhatTheLimitActuallyIs() {
     let result = next(.admit, .admitResult(.tooLarge))
     #expect(result == .outcome(.refused(
         "hal9000 wouldn't take it: the job's media is larger than a machine will accept in one request "
-            + "(about 48 MB). The original is still here.")))
+            + "(64 MB). The original is still here.")))
+    // And the words come from the number, not beside it.
+    #expect(RequestBodyLimit.bytes == 64 * 1024 * 1024)
+    #expect(RequestBodyLimit.sentence == "64 MB")
 }
 
 @Test func aDefiniteRejectionDoesNotLookUp() {
