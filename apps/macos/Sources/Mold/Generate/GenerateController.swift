@@ -11,7 +11,7 @@ final class GenerateController {
     let hosts: HostStore
     /// What a machine has been told a model's controls should start at --
     /// read on adoption, after the recipe's own numbers, and never on a KEPT
-    /// draft. See `applyStoredDefaults`.
+    /// draft. See `GenerateController+Defaults.applyStoredDefaults`.
     let defaults: ConfigStore
     var draft = RenderDraft()
     var hostID: MoldHost.ID?
@@ -61,12 +61,15 @@ final class GenerateController {
     ///
     /// Reuse has already filled in the size, steps and guidance the print was
     /// made with; treating this as a fresh model choice would immediately
-    /// overwrite them with the recipe's defaults.
+    /// overwrite them with the recipe's defaults. Also pins `machineChoice`
+    /// to this host (M8 decision 2): the model was adopted THERE, so "Use
+    /// These Settings" must not leave the run pointed at Auto.
     func adopt(model: Model, on host: MoldHost.ID, keepingDraft: Bool) {
         modelName = model.name
         modelFamily = model.family
         hostID = host
         recipeID = nil
+        machineChoice = host
         guard let recipe = model.defaultRecipe else { return }
         let isNewModel = !keepingDraft
         draft = draft.adopting(recipe, isNewModel: isNewModel)
@@ -91,32 +94,6 @@ final class GenerateController {
     func selectRecipe(_ recipe: GenerationRecipe) {
         recipeID = recipe.id
         draft = draft.adopting(recipe, isNewModel: false)
-    }
-
-    /// Puts a machine's stored per-model defaults on top of the recipe's own
-    /// numbers -- but only on a NEW model; `applying` is already a no-op on a
-    /// kept draft, and this skips the store read entirely in that case.
-    ///
-    /// If this host's listing has never been read, nothing is applied yet;
-    /// a refresh is kicked off and, once it lands, applied retroactively --
-    /// but only if this is STILL the selected model and host by then. A
-    /// second model choice made while that refresh was in flight makes its
-    /// answer moot, and re-applying it over whatever is now on screen would
-    /// silently overwrite a choice made in between.
-    private func applyStoredDefaults(
-        for model: Model, on host: MoldHost.ID, recipe: GenerationRecipe, isNewModel: Bool
-    ) {
-        guard isNewModel else { return }
-        guard defaults.hasLoaded(on: host) else {
-            Task { [weak self] in
-                await self?.defaults.refresh(on: host)
-                guard let self, self.modelName == model.name, self.hostID == host else { return }
-                self.draft = self.draft.applying(
-                    self.defaults.defaults(for: model.name, on: host), recipe: recipe, isNewModel: true)
-            }
-            return
-        }
-        draft = draft.applying(defaults.defaults(for: model.name, on: host), recipe: recipe, isNewModel: true)
     }
 
     /// Asks the host where this would run and roughly how long it would take.

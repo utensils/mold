@@ -27,6 +27,16 @@ public struct SizePreset: Codable, Hashable, Sendable, Identifiable {
     /// `recommended`, or another tier the server may add later.
     public let tier: String?
 
+    /// For an off-ladder size a client builds itself -- a Reuse can carry
+    /// pixels no advertised preset names, and that size is still shown, not
+    /// snapped to the nearest one (`ShapeControl.resolve`).
+    public init(id: String, width: Int, height: Int, tier: String? = nil) {
+        self.id = id
+        self.width = width
+        self.height = height
+        self.tier = tier
+    }
+
     public var label: String { "\(width) × \(height)" }
 }
 
