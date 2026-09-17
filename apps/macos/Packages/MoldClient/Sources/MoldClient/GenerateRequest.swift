@@ -76,6 +76,29 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// Echoed back from the recipe's own advertised `formats` -- a `String`
     /// rather than a Swift enum, so the app's whole job is to echo one back
     /// without inventing a spelling that could drift from the recipe's.
+    /// The sampler, echoed from the recipe's own advertised `schedulers`. A
+    /// `String` rather than a Swift enum for the same reason `outputFormat`
+    /// is one: the server's `Scheduler` is a STRICT enum (`types.rs:138-154`)
+    /// and inventing a spelling would refuse the whole body.
+    public var scheduler: String?
+    /// CFG++. Sent only as `true` -- absence IS `false` to the server
+    /// (`types.rs:3293`), so an explicit `false` would be a value nobody chose.
+    public var cfgPlus: Bool?
+    /// Wan's flow shift (`types.rs:2152`). Absent keeps the tier's own.
+    public var sampleShift: Double?
+    /// Wan's Lightning distill strengths, per expert (`types.rs:2158-2161`).
+    /// Absent is 1.0.
+    public var distillStrengthHigh: Double?
+    public var distillStrengthLow: Double?
+    /// LTX-2's per-request guidance overrides. NEVER sent empty: an absent
+    /// field keeps the pipeline's own constant, and `{}` is refused outright
+    /// (`validation.rs:1728-1733`).
+    public var guidanceOverrides: Ltx2GuidanceOverrides?
+    /// Opaque client-shaped crop/pad provenance. The engine never reads it --
+    /// the fitting happens here, before the bytes ship -- but recording it
+    /// verbatim is what lets Reuse restore the crop controls
+    /// (`types.rs:3268-3273`).
+    public var sourceFit: SourceFit?
     public var outputFormat: String?
     public var upscaleModel: String?
     /// User-authored print title. Validated at admission; absent means
@@ -112,38 +135,5 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
         self.negativePrompt = negativePrompt
         self.seed = seed
         self.saveToGallery = saveToGallery
-    }
-
-    /// Declared explicitly, rather than left to the compiler, ONLY because a
-    /// synthesized `CodingKeys` is `private` and therefore invisible from
-    /// `GenerateRequest+Encoding.swift`'s `encode(to:)` -- every other type
-    /// in this package leaves `CodingKeys` to `MoldJSON`'s snake_case
-    /// conversion (see its own doc comment) and this is the sole exception,
-    /// forced by splitting the encoder out for size. Case names still match
-    /// the properties one for one, so there is nothing here for a typo to
-    /// hide behind.
-    enum CodingKeys: String, CodingKey {
-        case prompt, model, width, height, steps, guidance, batchSize, negativePrompt, seed,
-             saveToGallery, frames, fps, pipeline, enableAudio, videoOnly, sourceImage,
-             sourceImageName, strength, editImages, referenceWeight, maskImage, loras, idImage,
-             idImageName, idImages, idImageNames, idWeight, idStartStep, controlImage,
-             controlModel, controlScale, keyframes, extendVideo, extendOverlapFrames, audioFile,
-             sourceVideo, outputFormat, upscaleModel, title, tags, collection,
-             originalPrompt, promptTransform, batchId, batchIndex, batchCount
-    }
-}
-
-/// A batch is one atomic admission of up to 64 ordered children. There is no
-/// separate "single render" path on the server -- a one-off is a batch of one.
-public struct BatchAdmission: Codable, Sendable {
-    /// Minted on the device and PERSISTED BEFORE SENDING. This is the
-    /// idempotency fence: if the response is lost, the work is recovered by
-    /// asking the host about this id, never by submitting again.
-    public let clientBatchId: String
-    public let requests: [GenerateRequest]
-
-    public init(clientBatchId: String = UUID().uuidString, requests: [GenerateRequest]) {
-        self.clientBatchId = clientBatchId
-        self.requests = requests
     }
 }

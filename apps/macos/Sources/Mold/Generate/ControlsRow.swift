@@ -62,6 +62,16 @@ struct ControlsRow: View {
                     }
                 }
             }
+            // IP-Adapter's pull, beside Strength because it is the same kind
+            // of question about the other well. `combines` is the one relation
+            // where both can be on screen at once, which is the whole point of
+            // it (`SourceImageMode.singleAndReferences`).
+            if let weight = ReferenceWeightControl.resolve(
+                recipe: recipe, model: model, media: draft.media) {
+                ControlLabel("Reference") {
+                    ReferenceWeightControl(control: weight, draft: $draft)
+                }
+            }
             ControlLabel("Seed") { SeedControl(draft: $draft) }
             ControlLabel("Batch") { BatchControl(maximum: maxBatch, draft: $draft) }
         }

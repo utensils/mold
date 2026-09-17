@@ -43,6 +43,9 @@ enum GenerateAction: Hashable, CaseIterable {
     case resetStrength
     case removeAdapter
 
+    // A numeric control whose default is the recipe's own.
+    case resetReferenceWeight
+
     // A recent prompt.
     case usePrompt
     case copyPrompt
@@ -65,6 +68,7 @@ enum GenerateAction: Hashable, CaseIterable {
         case .removeAllReferences: "Remove All"
         case .clearMask: "Clear Mask"
         case .resetStrength: "Reset Strength"
+        case .resetReferenceWeight: "Reset Weight"
         case .usePrompt: "Use Prompt"
         }
     }

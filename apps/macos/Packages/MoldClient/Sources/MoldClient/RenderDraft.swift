@@ -59,6 +59,12 @@ public struct RenderDraft: Hashable, Sendable {
     /// parking rule that protects all of them across a recipe switch
     /// (`DraftMedia.swift`).
     public var media = DraftMedia()
+    /// The sampler controls a recipe advertises -- the solver, CFG++, wan's
+    /// flow shift and distill strengths, LTX-2's guidance overrides -- and
+    /// the parking rule that protects them across a recipe switch
+    /// (`AdvancedControls.swift`). Every one is absent from the request until
+    /// somebody moves it.
+    public var advanced = AdvancedControls()
 
     /// Filing: title, tags and a collection to file the finished print
     /// under, gated on `canOrganize` at the call site.

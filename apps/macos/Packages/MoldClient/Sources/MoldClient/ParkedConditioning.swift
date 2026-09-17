@@ -14,6 +14,12 @@ public struct ParkedConditioning: Hashable, Sendable {
     public var sourceImage: String?
     public var sourceImageName: String?
     public var editImages: [String] = []
+    /// The IP-Adapter weight, held for a recipe that advertises no weight
+    /// control. Parked rather than dropped for the same reason a picture is:
+    /// a switch to a model with no `reference_images.weight` and back used to
+    /// silently reset a deliberately-chosen strength to the next recipe's
+    /// default.
+    public var referenceWeight: Double?
     public var maskImage: String?
     public var identity: IdentityConditioning?
     public var control: ControlConditioning?

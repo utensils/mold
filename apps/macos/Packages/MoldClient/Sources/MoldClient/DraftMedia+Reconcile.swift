@@ -43,8 +43,17 @@ public extension DraftMedia {
         sourceMode = SourceImageMode(references: references)
         let referencesVisible = references != nil
         reconcileEditImages(supported: referencesVisible, maxCount: references?.maxCount)
+        // The weight rides with the WEIGHT CONTROL, not with the strip: a
+        // recipe can advertise references and no `weight` block at all (every
+        // `replaces` recipe does, and so does any host predating the field),
+        // and a value carried onto one would be a number nothing on screen
+        // explains. Parked, never dropped -- `reference_images.weight` is a
+        // `FloatControl` whose range travels WITH the capability
+        // (`generation_profile.rs:470-484`), so the honest reading of an
+        // absent control is "not offered here", not "reset to zero".
+        Self.reconcile(&referenceWeight, &parked.referenceWeight,
+                       supported: referencesVisible && references?.weight?.mode.isVisible == true)
         if !referencesVisible {
-            referenceWeight = nil
             lastExclusiveWrite = nil
         }
 

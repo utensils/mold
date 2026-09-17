@@ -80,6 +80,15 @@ enum GenerateMenus {
         return Row.ordered(actions.map(\.row))
     }
 
+    /// The reference-weight slider. Its ONE verb is putting it back to the
+    /// recipe's own default, which a slider already sitting there has nothing
+    /// to offer -- so that row answers empty and no menu is attached at all,
+    /// the same rule the unpainted mask row follows.
+    static func referenceWeight(isAtDefault: Bool) -> [Row] {
+        guard !isAtDefault else { return [] }
+        return Row.ordered([GenerateAction.resetReferenceWeight.row])
+    }
+
     /// A recent prompt. There is no per-entry delete verb on the wire -- the
     /// history route offers `clear` alone -- so "Remove from History" is
     /// deliberately absent rather than shown and broken.

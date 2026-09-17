@@ -99,7 +99,7 @@ final class GenerateController {
             return
         }
         let isNewModel = !keepingDraft
-        draft = draft.adopting(recipe, isNewModel: isNewModel, family: model.family, model: model.name)
+        draft = draft.adopting(recipe, isNewModel: isNewModel, for: model)
         applyStoredDefaults(for: model, on: host, recipe: recipe, isNewModel: isNewModel)
     }
 
@@ -114,16 +114,17 @@ final class GenerateController {
             draft.media.sourceMode = .single
             return
         }
-        draft = draft.adopting(recipe, isNewModel: isNewModel, family: model.family, model: model.name)
+        draft = draft.adopting(recipe, isNewModel: isNewModel, for: model)
         applyStoredDefaults(for: model, on: host, recipe: recipe, isNewModel: isNewModel)
     }
 
     /// Switches recipe on the SAME model -- one of LTX-2's pipelines, most
     /// often. Re-adopts the draft against it exactly like a model change
     /// does: steps, guidance, size, format and every group re-read.
-    func selectRecipe(_ recipe: GenerationRecipe) {
+    func selectRecipe(_ recipe: GenerationRecipe, in profile: GenerationProfileSet?) {
         recipeID = recipe.id
-        draft = draft.adopting(recipe, isNewModel: false, family: modelFamily, model: modelName)
+        draft = draft.adopting(recipe, isNewModel: false, family: modelFamily,
+                               model: modelName, profile: profile)
     }
 
     /// Asks the host where this would run -- see `PlacementProbe`.

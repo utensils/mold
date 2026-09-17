@@ -20,7 +20,7 @@ extension GeneratePane {
                 recipes: selectedModel?.generationProfile?.recipes ?? [],
                 selected: recipe
             ) { recipe in
-                controller.selectRecipe(recipe)
+                controller.selectRecipe(recipe, in: selectedModel?.generationProfile)
             }
         }
         ToolbarItem {

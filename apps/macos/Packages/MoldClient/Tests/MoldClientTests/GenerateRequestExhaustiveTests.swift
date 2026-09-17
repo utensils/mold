@@ -47,6 +47,15 @@ import Testing
         request.extendOverlapFrames = 9
         request.audioFile = "AUD"
         request.sourceVideo = "SRCVID"
+        request.scheduler = "uni-pc"
+        request.cfgPlus = true
+        request.sampleShift = 5.0
+        request.distillStrengthHigh = 1.0
+        request.distillStrengthLow = 0.8
+        request.guidanceOverrides = Ltx2GuidanceOverrides(
+            stgScale: 1.0, stgBlocks: [3], rescaleScale: 0.7,
+            modalityScale: 3.0, skipStep: 0)
+        request.sourceFit = .default
         request.outputFormat = "png"
         request.upscaleModel = "real-esrgan-x4plus:fp16"
         request.title = "Robots"

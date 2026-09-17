@@ -3,6 +3,14 @@ import Foundation
 // Reconciling a draft against the recipe that will run it. Split from the
 // draft's own shape purely for size.
 public extension RenderDraft {
+    /// `adopting`, given the `Model` the recipe came from: its family, its
+    /// name and its whole profile in one argument, so a caller that HAS the
+    /// model does not spell three out.
+    func adopting(_ recipe: GenerationRecipe, isNewModel: Bool, for model: Model) -> RenderDraft {
+        adopting(recipe, isNewModel: isNewModel, family: model.family,
+                 model: model.name, profile: model.generationProfile)
+    }
+
     /// Adopts a recipe: takes its defaults for anything the previous model
     /// can't vouch for, and clamps what it can keep.
     ///
@@ -18,9 +26,16 @@ public extension RenderDraft {
     /// `family` and `model` are read ONLY by the legacy reference rule, for a
     /// host that advertises no `reference_images` block at all
     /// (`DraftMedia.reconcile(for:family:model:)`).
+    ///
+    /// `profile` is the model's WHOLE recipe set, read only by
+    /// `AdvancedControlsOffered` -- LTX-2's guidance overrides belong to the
+    /// model, not to the one recipe in hand, so a switch between its pipelines
+    /// must not park them. Defaults to nil, which reads as "no profile" and
+    /// offers no guidance controls.
     public func adopting(
         _ recipe: GenerationRecipe, isNewModel: Bool,
-        family: String? = nil, model: String? = nil
+        family: String? = nil, model: String? = nil,
+        profile: GenerationProfileSet? = nil
     ) -> RenderDraft {
         var draft = self
         if isNewModel {
@@ -66,6 +81,13 @@ public extension RenderDraft {
         // dropped, so it comes back if the next model can read it again
         // (`DraftMedia+Reconcile.swift`; decision 4 in the M4 design).
         draft.media.reconcile(for: recipe.capabilities, family: family, model: model)
+
+        // The sampler controls take the same rescue: a solver, a flow shift or
+        // an STG scale the new recipe does not advertise is PARKED, so
+        // stepping onto a model that cannot take it and back hands it over
+        // rather than quietly resetting it (`AdvancedControls+Park.swift`).
+        draft.advanced.reconcile(with: AdvancedControlsOffered.resolve(
+            recipe: recipe, in: profile, family: family))
 
         if recipe.capabilities.negativePrompt?.isAvailable != true {
             draft.negativePrompt = ""

@@ -1,5 +1,31 @@
 import Foundation
 
+// The wire key list, in an extension rather than nested in the struct's own
+// declaration purely for size -- it is still `GenerateRequest.CodingKeys` and
+// still visible from `encode(to:)` below, which is the whole reason it is
+// spelled out at all rather than synthesized (a synthesized one is private).
+extension GenerateRequest {
+    /// Declared explicitly, rather than left to the compiler, ONLY because a
+    /// synthesized `CodingKeys` is `private` and therefore invisible from
+    /// `GenerateRequest+Encoding.swift`'s `encode(to:)` -- every other type
+    /// in this package leaves `CodingKeys` to `MoldJSON`'s snake_case
+    /// conversion (see its own doc comment) and this is the sole exception,
+    /// forced by splitting the encoder out for size. Case names still match
+    /// the properties one for one, so there is nothing here for a typo to
+    /// hide behind.
+    enum CodingKeys: String, CodingKey {
+        case prompt, model, width, height, steps, guidance, batchSize, negativePrompt, seed,
+             saveToGallery, frames, fps, pipeline, enableAudio, videoOnly, sourceImage,
+             sourceImageName, strength, editImages, referenceWeight, maskImage, loras, idImage,
+             idImageName, idImages, idImageNames, idWeight, idStartStep, controlImage,
+             controlModel, controlScale, keyframes, extendVideo, extendOverlapFrames, audioFile,
+             sourceVideo, scheduler, cfgPlus, sampleShift, distillStrengthHigh,
+             distillStrengthLow, guidanceOverrides, sourceFit,
+             outputFormat, upscaleModel, title, tags, collection,
+             originalPrompt, promptTransform, batchId, batchIndex, batchCount
+    }
+}
+
 // The hand-written wire encoding for `GenerateRequest`. Split out of
 // `GenerateRequest.swift` purely for size -- the struct is closing in on
 // eighty fields across M4's three slices and the two halves were already
@@ -49,6 +75,13 @@ public extension GenerateRequest {
         try container.encodeIfPresent(extendOverlapFrames, forKey: .extendOverlapFrames)
         try container.encodeIfPresent(audioFile, forKey: .audioFile)
         try container.encodeIfPresent(sourceVideo, forKey: .sourceVideo)
+        try container.encodeIfPresent(scheduler, forKey: .scheduler)
+        try container.encodeIfPresent(cfgPlus, forKey: .cfgPlus)
+        try container.encodeIfPresent(sampleShift, forKey: .sampleShift)
+        try container.encodeIfPresent(distillStrengthHigh, forKey: .distillStrengthHigh)
+        try container.encodeIfPresent(distillStrengthLow, forKey: .distillStrengthLow)
+        try container.encodeIfPresent(guidanceOverrides, forKey: .guidanceOverrides)
+        try container.encodeIfPresent(sourceFit, forKey: .sourceFit)
         try container.encodeIfPresent(outputFormat, forKey: .outputFormat)
         try container.encodeIfPresent(upscaleModel, forKey: .upscaleModel)
         try container.encodeIfPresent(title, forKey: .title)
