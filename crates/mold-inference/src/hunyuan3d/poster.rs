@@ -1355,53 +1355,73 @@ mod tests {
     /// The viewer's four literals are the poster's, or the 3-D view opens on
     /// a camera the gallery tile never used.
     ///
-    /// `studio/lib/meshViewerCamera.ts` is the TS half of ONE camera
-    /// convention; there is no build step that could keep the two in step, so
-    /// this test reads that file and compares. The same read-the-source guard
-    /// the prompting corpus uses on its own bash fences.
+    /// `studio/lib/meshViewerCamera.ts` is the TS half and
+    /// `apps/macos/.../MeshViewerCamera.swift` the Swift half of ONE camera
+    /// convention; there is no build step that could keep any of the three in
+    /// step, so this test reads those files and compares. The same
+    /// read-the-source guard the prompting corpus uses on its own bash fences.
+    ///
+    /// The Swift half keeps the Rust SPELLING of the four names rather than a
+    /// Swift one, because this test finds them by name.
     #[test]
     fn the_viewer_mirrors_the_poster_camera() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../studio/lib/meshViewerCamera.ts"
-        );
-        let source = std::fs::read_to_string(path).unwrap_or_else(|error| {
-            panic!("cannot read the viewer's camera module at {path}: {error}")
-        });
+        const VIEWERS: [&str; 2] = [
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../studio/lib/meshViewerCamera.ts"
+            ),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../apps/macos/Packages/MoldClient/Sources/MoldClient/MeshViewerCamera.swift"
+            ),
+        ];
 
-        for (name, rust) in [
-            ("POSTER_AZIMUTH_DEG", POSTER_AZIMUTH_DEG),
-            ("POSTER_ELEVATION_DEG", POSTER_ELEVATION_DEG),
-            ("POSTER_MARGIN", POSTER_MARGIN),
-            ("TURNTABLE_AZIMUTH_STEP_SIGN", TURNTABLE_AZIMUTH_STEP_SIGN),
-        ] {
-            let ts = ts_export_const(&source, name)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{path} does not export `{name}`. It and \
-                         crates/mold-inference/src/hunyuan3d/poster.rs are ONE camera \
-                         convention: change both files together."
-                    )
-                })
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "{path}: {error}. The export is there but its value is not a \
-                         plain number this test can compare against \
-                         crates/mold-inference/src/hunyuan3d/poster.rs."
-                    )
-                });
-            assert!(
-                (ts - rust).abs() < 1e-6,
-                "{name} is {ts} in studio/lib/meshViewerCamera.ts and {rust} in \
-                 crates/mold-inference/src/hunyuan3d/poster.rs. The viewer, the poster \
-                 and the turntable are ONE camera convention: change both files \
-                 together, and re-run the studio tests as well as this one."
-            );
+        for path in VIEWERS {
+            let source = std::fs::read_to_string(path).unwrap_or_else(|error| {
+                panic!("cannot read the viewer's camera module at {path}: {error}")
+            });
+
+            for (name, rust) in [
+                ("POSTER_AZIMUTH_DEG", POSTER_AZIMUTH_DEG),
+                ("POSTER_ELEVATION_DEG", POSTER_ELEVATION_DEG),
+                ("POSTER_MARGIN", POSTER_MARGIN),
+                ("TURNTABLE_AZIMUTH_STEP_SIGN", TURNTABLE_AZIMUTH_STEP_SIGN),
+            ] {
+                let viewer = ts_export_const(&source, name)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{path} does not export `{name}`. It and \
+                             crates/mold-inference/src/hunyuan3d/poster.rs are ONE camera \
+                             convention: change both files together."
+                        )
+                    })
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{path}: {error}. The export is there but its value is not a \
+                             plain number this test can compare against \
+                             crates/mold-inference/src/hunyuan3d/poster.rs."
+                        )
+                    });
+                assert!(
+                    (viewer - rust).abs() < 1e-6,
+                    "{name} is {viewer} in {path} and {rust} in \
+                     crates/mold-inference/src/hunyuan3d/poster.rs. The viewer, the poster \
+                     and the turntable are ONE camera convention: change every file \
+                     together, and re-run the studio and macOS tests as well as this one."
+                );
+            }
         }
     }
 
-    /// `export const NAME = <number>;` from a TypeScript source, with an
-    /// optional trailing `// comment`.
+    /// `export const NAME = <number>;` from a TypeScript source, or
+    /// `[public] [static] let NAME [: Type] = <number>` from a Swift one, with
+    /// an optional trailing `// comment` either way.
+    ///
+    /// One parser for both spellings because it is policing ONE fact in two
+    /// places, and a second copy of the hand-parsing would be a second thing
+    /// to get wrong. The Swift form is indented inside an `enum`, so the line
+    /// is trimmed and its access/`static` modifiers are stripped before the
+    /// keyword is matched.
     ///
     /// A hand parser rather than a regex: `regex` is not a dependency of this
     /// crate, and the shape being matched is fixed by the file this test
@@ -1415,8 +1435,26 @@ mod tests {
     #[cfg(test)]
     fn ts_export_const(source: &str, name: &str) -> Option<Result<f32, String>> {
         for line in source.lines() {
-            let line = line.trim();
-            let Some(rest) = line.strip_prefix("export const ") else {
+            let mut line = line.trim();
+            // Swift's access and `static` modifiers, stripped in the order
+            // Swift writes them, so `public static let` reaches `let`.
+            for modifier in [
+                "public ",
+                "package ",
+                "internal ",
+                "fileprivate ",
+                "private ",
+            ] {
+                if let Some(rest) = line.strip_prefix(modifier) {
+                    line = rest.trim_start();
+                    break;
+                }
+            }
+            line = line.strip_prefix("static ").unwrap_or(line).trim_start();
+            let Some(rest) = line
+                .strip_prefix("export const ")
+                .or_else(|| line.strip_prefix("let "))
+            else {
                 continue;
             };
             let Some((declared, value)) = rest.split_once('=') else {
@@ -1471,6 +1509,40 @@ mod tests {
         let error = ts_export_const(source, "NOT_A_NUMBER")
             .expect("the export is present")
             .expect_err("`Math.PI / 6` is not a plain number");
+        assert!(
+            error.contains("could not parse the value of NOT_A_NUMBER"),
+            "{error}"
+        );
+    }
+
+    /// The Swift half of the same parser: indented, `static`, access
+    /// modifiers, an optional type annotation, and no trailing semicolon.
+    #[test]
+    fn the_swift_parser_reads_what_it_claims_to() {
+        let source = "public enum MeshViewerCamera {\n\
+                      \x20   public static let A = 30.0\n\
+                      \x20   static let B: Double = -1.0\n\
+                      \x20   let C = 0.08 // the poster's margin\n\
+                      \x20   private static let D: Double = 7\n\
+                      \x20   internal static let LONG_NAME_A = 20.0\n\
+                      \x20   var NOT_A_LET = 5.0\n\
+                      \x20   static let NOT_A_NUMBER = Double.pi / 6\n\
+                      }\n";
+        let value = |name| ts_export_const(source, name).map(|parsed| parsed.expect("a number"));
+        assert_eq!(value("A"), Some(30.0));
+        assert_eq!(value("B"), Some(-1.0));
+        // A trailing comment is part of the line, not part of the value.
+        assert_eq!(value("C"), Some(0.08));
+        assert_eq!(value("D"), Some(7.0));
+        assert_eq!(value("LONG_NAME_A"), Some(20.0));
+
+        // A `var` is not a constant, and a missing name is `None` either way.
+        assert_eq!(ts_export_const(source, "NOT_A_LET"), None);
+        assert_eq!(ts_export_const(source, "MISSING"), None);
+
+        let error = ts_export_const(source, "NOT_A_NUMBER")
+            .expect("the declaration is present")
+            .expect_err("`Double.pi / 6` is not a plain number");
         assert!(
             error.contains("could not parse the value of NOT_A_NUMBER"),
             "{error}"
