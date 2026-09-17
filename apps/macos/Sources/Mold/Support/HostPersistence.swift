@@ -15,15 +15,49 @@ import MoldClient
 /// (review 05-H5).
 enum HostPersistence {
     private static let key = "hosts"
+    /// Preferences that would not decode, kept rather than left to be
+    /// overwritten by the next save -- the rule `SecretStore` follows for
+    /// `secrets.json.corrupt` and the Tauri app for `settings.json.invalid`.
+    static let unreadableKey = "hosts.unreadable"
 
     static func load(from defaults: UserDefaults = AppStorageSuite.defaults,
                      secrets: SecretStore = .shared) -> [MoldHost]? {
-        guard let data = defaults.data(forKey: key) else { return nil }
-        guard let stored = try? MoldJSON.localDecoder.decode([StoredHost].self, from: data),
-              !stored.isEmpty
+        guard let data = defaults.data(forKey: key),
+              let stored = decode(data, in: defaults)
         else { return nil }
         LegacyKeychain.migrateIfNeeded(stored, into: secrets, defaults: defaults)
         return stored.map { $0.host(apiKey: apiKey(for: $0.id, in: secrets)) }
+    }
+
+    /// A SAVED but empty list is `[]`, never `nil`.
+    ///
+    /// `HostStore.seededHosts` reads `nil` as "never saved" and seeds
+    /// `MOLD_NATIVE_HOSTS` over it, so answering `nil` for an emptied list
+    /// resurrected on every launch exactly the machines somebody had just
+    /// removed -- the resurrection its own comment says it prevents
+    /// (review 05-L5).
+    ///
+    /// A document that does not decode is parked before anything can overwrite
+    /// it, and every element that DOES read is kept: one malformed machine
+    /// must not forget the others.
+    private static func decode(_ data: Data, in defaults: UserDefaults) -> [StoredHost]? {
+        if let stored = try? MoldJSON.localDecoder.decode([StoredHost].self, from: data) {
+            return stored
+        }
+        defaults.set(data, forKey: unreadableKey)
+        let partial = (try? MoldJSON.localDecoder.decode([Readable].self, from: data)) ?? []
+        let hosts = partial.compactMap(\.host)
+        return hosts.isEmpty ? nil : hosts
+    }
+
+    /// One element of the saved list, or nothing. Decoding the array through
+    /// this keeps the machines that read when one of them does not.
+    private struct Readable: Decodable {
+        let host: StoredHost?
+
+        init(from decoder: Decoder) throws {
+            host = try? StoredHost(from: decoder)
+        }
     }
 
     static func save(_ hosts: [MoldHost], to defaults: UserDefaults = AppStorageSuite.defaults) {

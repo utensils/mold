@@ -55,6 +55,7 @@ enum PreferencesReset {
         "notifyRenders",
         "mediaCacheMegabytes",
         "hosts",
+        "hosts.unreadable",
         "pendingBatches",
         "keychainKeysMigrated",
     ]
