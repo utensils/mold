@@ -21,6 +21,8 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
     /// The Dock is an APPLICATION surface, so its observer lives here and
     /// not on a view -- see `DockBadge`.
     let dockBadge = DockBadge()
+    /// The "Finishing…" panel and the one-time reply to macOS.
+    let quit = EngineQuit()
     /// What a notification click should do, applied by the composition root
     /// -- this delegate only decodes the payload (`MoldNotifications.swift`).
     var onNotificationRoute: ((NotificationRoute) -> Void)?
@@ -64,12 +66,15 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
         thumbnails?.purge()
 
         guard let engine, case .running = engine.state else { return .terminateNow }
-        // `stop()` is a POST to the engine's own shutdown route and a join --
-        // seconds, not instants. Answering "later" is what keeps macOS from
-        // killing the process mid-publish.
-        Task {
+        // `stop()` is a POST to the engine's own shutdown route and a join
+        // for the SERVER's budget -- 45 s, not 8. Answering "later" is what
+        // keeps macOS from killing the process mid-publish; the panel is what
+        // keeps that wait from reading as a hang, and it carries the one way
+        // out (review 05-M7).
+        quit.present(seconds: EngineShutdownBudget.seconds)
+        Task { [quit] in
             await engine.stop()
-            NSApplication.shared.reply(toApplicationShouldTerminate: true)
+            quit.reply()
         }
         return .terminateLater
     }
