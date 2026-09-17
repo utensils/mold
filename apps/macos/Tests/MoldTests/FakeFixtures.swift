@@ -106,11 +106,13 @@ extension FakeFixtures {
     /// `canCancelAllQueued` / `canPauseOneJob` (design M6 decision 5), which
     /// is exactly why the defaults here are `false` rather than omitted.
     static func capabilities(
-        canReorder: Bool = false, canCancelAll: Bool = false, canPauseJob: Bool = false
+        canReorder: Bool = false, canCancelAll: Bool = false, canPauseJob: Bool = false,
+        cooperativeCancellation: Bool = false
     ) -> Capabilities {
         let json = #"""
         {"queue": {"can_reorder": \#(canReorder), "can_cancel_all": \#(canCancelAll),
-         "can_pause_job": \#(canPauseJob)}}
+         "can_pause_job": \#(canPauseJob),
+         "cooperative_cancellation": \#(cooperativeCancellation)}}
         """#
         return try! MoldJSON.decoder.decode(Capabilities.self, from: Data(json.utf8))
     }

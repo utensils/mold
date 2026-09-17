@@ -25,14 +25,22 @@ extension QueuePane {
             let entries = queue.entries(on: host.id)
             guard let entry = entries.first(where: { $0.id == selection }) else { continue }
             let canReorder = hosts.capabilities[host.id]?.canReorderQueue == true
-            let canPauseJob = hosts.capabilities[host.id]?.canPauseOneJob == true
+            // The same authority the row's own buttons and contextual menu
+            // read, so this menu can never offer something they do not.
+            let actions = QueueRowActions.resolve(entry, on: hosts.capabilities[host.id])
             return QueueSelection.Job(
-                canPause: (entry.state == .running || entry.state == .queued) && canPauseJob,
-                canResume: entry.state == .paused && canPauseJob,
+                canPause: actions.pause,
+                canResume: actions.resume,
+                // Narrower than `actions.retry` on purpose: this menu knows
+                // the row's BATCH CHILD, which is the only place `error_code`
+                // and the host's own `retryable` live (`routes.rs:2951-2956`).
+                // A missing-model hold's own button is Pull-then-Retry
+                // (`QueueHoldRow.swift`), which needs the download store this
+                // menu item does not carry.
                 canRetry: plainlyRetryable(queue.hold(for: entry, on: host.id)),
                 canMoveUp: canReorder && QueueRow.canMove(entry.id, .up, in: entries),
                 canMoveDown: canReorder && QueueRow.canMove(entry.id, .down, in: entries),
-                canCancel: entry.state.isLive,
+                canCancel: actions.cancel,
                 moveToDestinations: entry.state == .held ? transfers.transferDestinations(from: host.id) : [],
                 pause: { act(.pause, on: entry, host: host) },
                 resume: { act(.resume, on: entry, host: host) },
@@ -45,9 +53,7 @@ extension QueuePane {
         return nil
     }
 
-    /// Only `.prose(_, retryable: true)` -- a missing-model hold's own
-    /// button is Pull-then-Retry (`QueueHoldRow.swift`), which needs the
-    /// download store this menu item does not carry.
+    /// Only `.prose(_, retryable: true)`.
     private func plainlyRetryable(_ hold: QueueHold?) -> Bool {
         if case let .prose(_, retryable) = hold { return retryable }
         return false

@@ -6,6 +6,10 @@ struct QueueRow: View {
     enum MoveDirection { case up, down }
 
     let entry: QueueEntry
+    /// What this machine will actually honour for this row, resolved once by
+    /// `QueueRowActions` and read by both the glyph buttons and the
+    /// contextual menu -- so the two can never offer different things.
+    let actions: QueueRowActions
     /// Overrides the second line. A batch child names its place IN THE
     /// BATCH rather than the machine's overall queue position -- see
     /// `QueueBatchRow`.
@@ -51,21 +55,19 @@ struct QueueRow: View {
 
     @ViewBuilder private var buttons: some View {
         HStack(spacing: 4) {
-            // Retry is offered only where the host said it would help. A held
-            // job whose cause is unfixed will just hold again.
-            if entry.state == .held, entry.retryable != false {
+            if actions.retry {
                 Button { act(.retry) } label: { Image(systemName: "arrow.clockwise") }
                     .help("Try this job again")
             }
-            if entry.state == .running || entry.state == .queued {
+            if actions.pause {
                 Button { act(.pause) } label: { Image(systemName: "pause") }
                     .help("Pause this job")
             }
-            if entry.state == .paused {
+            if actions.resume {
                 Button { act(.resume) } label: { Image(systemName: "play") }
                     .help("Resume this job")
             }
-            if entry.state.isLive {
+            if actions.cancel {
                 Button { act(.cancel) } label: { Image(systemName: "xmark") }
                     .help("Cancel this job")
             }
@@ -74,15 +76,22 @@ struct QueueRow: View {
         .labelStyle(.iconOnly)
     }
 
+    /// The same four actions, the same gates, in the Queue menu's own words
+    /// and its own order -- and nothing here is ever disabled, the
+    /// "absent, not disabled" rule this whole pane follows. Destructive last,
+    /// behind a divider, exactly as `QueueHoldRow`'s menu already does.
     @ViewBuilder private var menu: some View {
-        if entry.state == .held { Button("Try Again") { act(.retry) } }
+        if actions.pause { Button("Pause Job") { act(.pause) } }
+        if actions.resume { Button("Resume Job") { act(.resume) } }
+        if actions.retry { Button("Try Again") { act(.retry) } }
         // Drag alone is unreachable from the keyboard and invisible to
         // Help ▸ Search -- these are the same move, offered a second way.
         if isReorderable {
             if canMoveUp { Button("Move Up", action: moveUp) }
             if canMoveDown { Button("Move Down", action: moveDown) }
         }
-        if entry.state.isLive {
+        if actions.cancel {
+            Divider()
             Button("Cancel Job", role: .destructive) { act(.cancel) }
         }
     }

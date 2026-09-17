@@ -63,18 +63,40 @@ struct QueuePaneTests {
         let plato = machine()
         let fake = FakeBackend(host: plato)
         let hosts = HostStore(hosts: [plato]) { _ in fake }
+        hosts.capabilities[plato.id] = FakeFixtures.capabilities(cooperativeCancellation: true)
         let queue = QueueStore(hosts: hosts)
-        let entries = [
+        let group = QueueGroup.build(mixedBatch, children: [:])[0]
+
+        await queue.act(.cancel, onLiveChildrenOf: group, host: plato.id)
+
+        #expect(fake.callCount("cancelJob") == 2)
+    }
+
+    /// The group dispatch asks each child what THIS machine will honour, so
+    /// a batch's Cancel on a host that cannot stop running work clears the
+    /// waiting child and leaves the running one alone -- rather than sending
+    /// a call the machine would refuse (`types.rs:11475-11479`).
+    @Test func aGroupCancelSkipsARunningChildTheMachineCannotStop() async {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        hosts.capabilities[plato.id] = FakeFixtures.capabilities()
+        let queue = QueueStore(hosts: hosts)
+        let group = QueueGroup.build(mixedBatch, children: [:])[0]
+
+        await queue.act(.cancel, onLiveChildrenOf: group, host: plato.id)
+
+        #expect(fake.callCount("cancelJob") == 1)
+    }
+
+    /// One batch with a child in each of the four states that matter.
+    private var mixedBatch: [QueueEntry] {
+        [
             FakeFixtures.queueEntry("live-1", state: "queued", batchId: "batch"),
             FakeFixtures.queueEntry("live-2", state: "running", batchId: "batch"),
             FakeFixtures.queueEntry("done", state: "complete", batchId: "batch"),
             FakeFixtures.queueEntry("dead", state: "cancelled", batchId: "batch"),
         ]
-        let group = QueueGroup.build(entries, children: [:])[0]
-
-        await queue.act(.cancel, onLiveChildrenOf: group, host: plato.id)
-
-        #expect(fake.callCount("cancelJob") == 2)
     }
 
     // MARK: - Reorder

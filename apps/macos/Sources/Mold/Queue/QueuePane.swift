@@ -82,6 +82,8 @@ struct QueuePane: View {
         if group.isExpandable {
             QueueBatchRow(
                 group: group,
+                actions: QueueRowActions.group(group.rows, on: hosts.capabilities[host.id]),
+                childActions: { QueueRowActions.resolve($0, on: hosts.capabilities[host.id]) },
                 rowAct: { action, entry in act(action, on: entry, host: host) },
                 groupAct: { action in Task { await queue.act(action, onLiveChildrenOf: group, host: host.id) } },
                 canMoveUp: canReorder && QueueBatchRow.canMove(group, .up, in: groups),
@@ -101,7 +103,9 @@ struct QueuePane: View {
             } else {
                 let reorderable = canReorder && entry.state.isReorderable
                 QueueRow(
-                    entry: entry, isReorderable: reorderable,
+                    entry: entry,
+                    actions: QueueRowActions.resolve(entry, on: hosts.capabilities[host.id]),
+                    isReorderable: reorderable,
                     canMoveUp: reorderable && QueueRow.canMove(entry.id, .up, in: entries),
                     canMoveDown: reorderable && QueueRow.canMove(entry.id, .down, in: entries),
                     moveUp: { move(entry.id, .up, host: host, entries: entries) },

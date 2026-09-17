@@ -6,6 +6,11 @@ import SwiftUI
 /// triangle over a single child is a control that reveals nothing.
 struct QueueBatchRow: View {
     let group: QueueGroup
+    /// What the machine will honour for ANY of this batch's children, and
+    /// the same answer per child -- one authority for the group's buttons,
+    /// its menu, and each child row (`QueueRowActions`).
+    let actions: QueueRowActions
+    let childActions: (QueueEntry) -> QueueRowActions
     /// What one CHILD's own row asked for.
     let rowAct: (QueueRow.Action, QueueEntry) -> Void
     /// What the GROUP's own row asked for -- every live child at once,
@@ -23,7 +28,8 @@ struct QueueBatchRow: View {
     var body: some View {
         DisclosureGroup {
             ForEach(group.rows) { entry in
-                QueueRow(entry: entry, caption: entry.batchWaitDescription,
+                QueueRow(entry: entry, actions: childActions(entry),
+                         caption: entry.batchWaitDescription,
                          act: { rowAct($0, entry) })
                     .padding(.leading, 20)
             }
@@ -46,22 +52,45 @@ struct QueueBatchRow: View {
         .contextMenu { menu }
     }
 
+    /// The batch's own buttons a second way, in the Queue menu's words and
+    /// order -- "every" because a group item reaches every child it applies
+    /// to, which is what distinguishes it from a child row's own item.
     @ViewBuilder private var menu: some View {
+        if actions.pause { Button("Pause Every Job") { groupAct(.pause) } }
+        if actions.resume { Button("Resume Every Job") { groupAct(.resume) } }
         if canMoveUp { Button("Move Up", action: moveUp) }
         if canMoveDown { Button("Move Down", action: moveDown) }
+        if actions.cancel {
+            Divider()
+            Button("Cancel Every Job", role: .destructive) { groupAct(.cancel) }
+        }
+    }
+
+    /// The titles `menu` draws, in order, so a test pins them without
+    /// rendering a menu -- `QueueHoldRow.menuTitles`'s shape.
+    static func menuTitles(
+        _ actions: QueueRowActions, canMoveUp: Bool, canMoveDown: Bool
+    ) -> [String] {
+        var titles: [String] = []
+        if actions.pause { titles.append("Pause Every Job") }
+        if actions.resume { titles.append("Resume Every Job") }
+        if canMoveUp { titles.append("Move Up") }
+        if canMoveDown { titles.append("Move Down") }
+        if actions.cancel { titles.append("Cancel Every Job") }
+        return titles
     }
 
     @ViewBuilder private var buttons: some View {
         HStack(spacing: 4) {
-            if group.rows.contains(where: { $0.state == .running || $0.state == .queued }) {
+            if actions.pause {
                 Button { groupAct(.pause) } label: { Image(systemName: "pause") }
-                    .help("Pause every live job in this batch")
+                    .help("Pause every waiting job in this batch")
             }
-            if group.rows.contains(where: { $0.state == .paused }) {
+            if actions.resume {
                 Button { groupAct(.resume) } label: { Image(systemName: "play") }
                     .help("Resume every paused job in this batch")
             }
-            if group.rows.contains(where: { $0.state.isLive }) {
+            if actions.cancel {
                 Button { groupAct(.cancel) } label: { Image(systemName: "xmark") }
                     .help("Cancel every live job in this batch")
             }

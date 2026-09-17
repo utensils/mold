@@ -102,7 +102,13 @@ extension QueueStore {
     func act(_ action: QueueRow.Action, onLiveChildrenOf group: QueueGroup, host: MoldHost.ID) async {
         guard !refuseIfFixture(host, doing: groupVerb(action)) else { return }
         guard let client = hosts.backend(for: host) else { return }
-        for entry in group.rows where entry.state.isLive {
+        // Each child asked again, through the same authority its own row
+        // drew from: a batch with one waiting and one running child pauses
+        // the waiting one and leaves the other alone, rather than sending a
+        // call the machine refuses by name (`routes.rs:7706-7710`).
+        let capabilities = hosts.capabilities[host]
+        for entry in group.rows
+        where QueueRowActions.resolve(entry, on: capabilities).offers(action) {
             do {
                 switch action {
                 case .cancel: try await client.cancelJob(id: entry.id)
