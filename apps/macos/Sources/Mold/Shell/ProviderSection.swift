@@ -34,15 +34,9 @@ struct ProviderSection: View {
         }
         // The row's own Clear, reachable from the row itself -- the same call,
         // offered on the same condition, never a second opinion about when a
-        // token can be cleared.
-        .contextMenu {
-            RowActionMenu(actions: menu) { _ in Task { await clear() } }
-        }
-    }
-
-    private var menu: [RowAction<String>] {
-        guard row.offersClear else { return [] }
-        return [RowAction(kind: "clear", title: "Clear \(name) Token", isDestructive: true)]
+        // token can be cleared. A provider with nothing stored offers nothing,
+        // and so gets no menu rather than an empty one.
+        .rowActionMenu(row.menu(named: name)) { _ in Task { await clear() } }
     }
 
     /// The field empties on success -- the machine never hands the token

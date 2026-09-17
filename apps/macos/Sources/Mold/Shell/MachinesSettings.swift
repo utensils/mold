@@ -55,13 +55,10 @@ struct MachinesSettings: View {
                     // A simultaneous gesture, so opening the editor does not
                     // cost the row its ordinary click-to-select.
                     .simultaneousGesture(TapGesture(count: 2).onEnded { edit(host) })
-                    .contextMenu {
-                        RowActionMenu(
-                            actions: MachineRowActions.offered(
-                                isManaged: isManaged(host),
-                                isDefault: hosts.defaultMachine == host.id)
-                        ) { perform($0, on: host) }
-                    }
+                    .rowActionMenu(
+                        MachineRowActions.offered(isManaged: isManaged(host),
+                                                  isDefault: hosts.defaultMachine == host.id)
+                    ) { perform($0, on: host) }
             }
         }
         .alternatingRowBackgrounds()

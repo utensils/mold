@@ -35,6 +35,7 @@ Shell preferences or host editing).
 | info · two live writers clobber each other | fixed | `db95f051` | `SecretStoreTests.aSecondWriterDoesNotClobberTheFirst` |
 | info · no fsync before the Keychain delete | fixed | `a853ce5d` | — (covered by `writeOwnerOnly`) |
 | info · `LegacyKeychain` has no `MOLD_NATIVE_FRESH` gate | fixed | `f300191d` | `HostSecretsTests.aFreshRunNeverTouchesTheRealKeychain` |
+| info · a menu that opens EMPTY | fixed | this lane's last commit | `RowActionTests.aRowWithNoApplicableActionCarriesNoMenu`, `.everyOtherSurfaceAlwaysHasSomethingToOffer` |
 
 **E1** is the one that could have cost somebody a key: the file now WINS over the Keychain item,
 because it is newer by construction — nothing but a deliberate save puts a value there — and the
@@ -49,11 +50,19 @@ cleans up, and `fsync`s it before the rename.
 allowlist entry have no caller in this lane. Lane F (Wave 2, 05-H1) is the caller, and it needs the
 API to exist before it can land. If Lane F slips, this moves with it.
 
-The review's remaining informational notes were taken except two, both stated rather than
-silently dropped: `HostPersistence.decode` still answers `nil` when EVERY element is malformed
-(the bytes are parked, nothing is lost, and re-seeding a list that read as nothing is the lesser
-wrong), and `ProviderSection`'s `.contextMenu` still opens empty for a provider with nothing
-stored (cosmetic).
+**The empty menu was not cosmetic** and is now the shared type's rule, not a guard at one call
+site: `RowAction.offersMenu` is the decision and `.rowActionMenu(_:perform:)` is the only door
+(a `View` overload and a `TableRowContent` one, because `TableRow` is not a `View`), so a row with
+no applicable action gets NO `.contextMenu` attached — never an empty one, never a disabled
+placeholder. Accounts is the surface that has the case: `AccountsRow.menu(named:)` is empty for an
+unset token AND for an environment one, which has nothing on this machine to clear. The other
+three call sites were swept in the same test: every machine row and every config-entry shape —
+env-locked, null secret, empty string, and a curated row with Reset filtered out — still resolves
+to at least one action, so none of them can reach the empty case by accident.
+
+One informational note stands, stated rather than silently dropped: `HostPersistence.decode` still
+answers `nil` when EVERY element is malformed. The bytes are parked, nothing is lost, and
+re-seeding a list that read as nothing is the lesser wrong.
 
 Not this lane, and marked so for Lane F: **H1**, **H2**, **H3**, **H4**, **M1–M10**, **M14–M17**,
 **L1** (CI), **L2**, **L3**, **L4**, **L8**, **L9** are engine / FFI / release / CI. **L7**
@@ -64,9 +73,10 @@ list names; it is untouched here.
 
 - **`SecretStore`** (`Packages/MoldClient/Sources/MoldClient/SecretStore*.swift`) is a port of
   `desktop/src-tauri/src/secrets.rs`: flat `{"name": "value"}` under
-  `~/Library/Application Support/io.utensils.mold.native/secrets.json`, `0600` set on the temp file
-  BEFORE an atomic `rename(2)` (`replaceItemAt` would carry the OLD file's mode onto the new one),
-  an unparseable file parked once as `secrets.json.corrupt`, one `Mutex` around the whole
+  `~/Library/Application Support/io.utensils.mold.native/secrets.json`, the temp file created
+  `0600` AT creation and `fsync`ed before an atomic `rename(2)` (`replaceItemAt` would carry the
+  OLD file's mode onto the new one), an unparseable file parked once as `secrets.json.corrupt`, an
+  unreadable one refused outright, one `Mutex` and one `flock(2)` around the whole
   read-modify-write, names limited to `remote-api-key.<host uuid>` and `local-engine-api-key`.
   Errors are thrown. `localEngineAPIKey(environment:)` is there for **Lane F** with
   `local_server_api_key`'s precedence: non-empty `MOLD_API_KEY` → stored → a fresh UUID stored
@@ -153,8 +163,8 @@ alike — reproduced exactly as described.
 ## Verification
 
 `make lint` green (three pre-existing large-type advisories only, none of them this lane's).
-`swift test` in `Packages/MoldClient`: **429** passed, and the same suite passes under
-`swift test -c release`. Full app bundle `xcodebuild test`: **409** in 62 suites passed. A Release
+`swift test` in `Packages/MoldClient`: **431** passed, and the same suite passes under
+`swift test -c release`. Full app bundle `xcodebuild test`: **411** in 62 suites passed. A Release
 build was made once to prove the `#else` arms compile and to count the hook strings in each binary
 (Debug dylib: all eight; Release executable: none); its output was deleted.
 

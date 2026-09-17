@@ -49,4 +49,45 @@ extension RowAction {
     static func ordered(_ actions: [RowAction]) -> [RowAction] {
         actions.filter { !$0.isDestructive } + actions.filter(\.isDestructive)
     }
+
+    /// Whether the row carries a contextual menu AT ALL.
+    ///
+    /// A right-click that opens an empty menu is worse than one that opens
+    /// nothing: it says there is something here and then does not say what.
+    /// A disabled placeholder is the same lie with an extra row. So a row
+    /// with no applicable action gets no `.contextMenu` attached -- and that
+    /// belongs here rather than at one call site, because every caller has
+    /// the case.
+    static func offersMenu(_ actions: [RowAction]) -> Bool { !actions.isEmpty }
+}
+
+extension View {
+    /// A row's contextual menu, or none. THE door: no caller attaches
+    /// `.contextMenu` around a `RowActionMenu` itself.
+    @ViewBuilder
+    func rowActionMenu<Kind: Hashable>(
+        _ actions: [RowAction<Kind>], perform: @escaping (Kind) -> Void
+    ) -> some View {
+        if RowAction.offersMenu(actions) {
+            contextMenu { RowActionMenu(actions: actions, perform: perform) }
+        } else {
+            self
+        }
+    }
+}
+
+extension TableRowContent {
+    /// The same door for a `Table`'s rows. `TableRow` is not a `View`, so it
+    /// needs its own overload rather than a second copy of the rule -- both
+    /// ask `RowAction.offersMenu`.
+    @TableRowBuilder<TableRowValue>
+    func rowActionMenu<Kind: Hashable>(
+        _ actions: [RowAction<Kind>], perform: @escaping (Kind) -> Void
+    ) -> some TableRowContent<TableRowValue> {
+        if RowAction.offersMenu(actions) {
+            contextMenu { RowActionMenu(actions: actions, perform: perform) }
+        } else {
+            self
+        }
+    }
 }

@@ -36,4 +36,12 @@ enum AccountsRow: Equatable {
     static func canSave(token: String) -> Bool {
         !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+
+    /// What a right-click on this provider's row offers -- the same one thing
+    /// the inline control does, on the same condition, and NOTHING when there
+    /// is nothing stored. `.rowActionMenu` then attaches no menu at all.
+    func menu(named name: String) -> [RowAction<String>] {
+        guard offersClear else { return [] }
+        return [RowAction(kind: "clear", title: "Clear \(name) Token", isDestructive: true)]
+    }
 }

@@ -23,6 +23,54 @@ struct RowActionTests {
         #expect(RowAction.ordered(declared).map(\.kind) == ["edit", "check", "remove"])
     }
 
+    /// **Fails today**: `ProviderSection` attached `.contextMenu` regardless,
+    /// so a right-click on a provider with no token stored opened an empty
+    /// menu -- which says there is something here and then does not say what.
+    /// A disabled placeholder is the same lie with an extra row. The rule
+    /// belongs to the shared type, because every caller has the case.
+    @Test func aRowWithNoApplicableActionCarriesNoMenu() {
+        #expect(!RowAction<String>.offersMenu([]))
+        #expect(RowAction.offersMenu([RowAction(kind: "clear", title: "Clear")]))
+
+        // Accounts is the surface that has the empty case.
+        #expect(AccountsRow.unset.menu(named: "Civitai").isEmpty)
+        #expect(AccountsRow.environment(masked: "hf_••••").menu(named: "Hugging Face").isEmpty,
+                "an environment token has nothing on this machine to clear")
+        let stored = AccountsRow.stored(masked: "hf_••••").menu(named: "Hugging Face")
+        #expect(stored.map(\.title) == ["Clear Hugging Face Token"])
+        #expect(stored.map(\.isDestructive) == [true])
+    }
+
+    /// The sweep the other call sites need: every shape they can hand
+    /// `.rowActionMenu` resolves to at least one action, so none of them can
+    /// reach the empty case by accident.
+    @Test func everyOtherSurfaceAlwaysHasSomethingToOffer() {
+        for isManaged in [true, false] {
+            for isDefault in [true, false] {
+                #expect(RowAction.offersMenu(
+                    MachineRowActions.offered(isManaged: isManaged, isDefault: isDefault)))
+            }
+        }
+
+        // An env-locked row cannot be written or reset; a null secret cannot
+        // be copied. Copy Key is what keeps both from being empty.
+        let awkward = [
+            FakeFixtures.configEntry("default_width", value: .number(768), source: "env",
+                                     envVar: "MOLD_DEFAULT_WIDTH"),
+            FakeFixtures.configEntry("default_width", value: .number(768), source: "env"),
+            FakeFixtures.configEntry("runpod.api_key", value: .null, source: "default"),
+            FakeFixtures.configEntry("models_dir", value: .string(""), source: "file"),
+        ]
+        for entry in awkward {
+            let advanced = ConfigRowActions.offered(for: entry)
+            #expect(RowAction.offersMenu(advanced), "Advanced: \(entry.key)/\(entry.source)")
+            // A curated pane filters Reset out -- it has no reset control to
+            // mirror -- and must still be left with something.
+            #expect(RowAction.offersMenu(advanced.filter { $0.kind != .reset }),
+                    "curated: \(entry.key)/\(entry.source)")
+        }
+    }
+
     // MARK: - Settings ▸ Machines
 
     @Test func aMachineRowOffersEverythingTheFooterDoes() {

@@ -99,10 +99,8 @@ struct AdvancedSettings: View {
                 .width(44)
         } rows: {
             ForEach(rows) { row in
-                TableRow(row).contextMenu {
-                    RowActionMenu(actions: ConfigRowActions.offered(for: row.entry)) { kind in
-                        perform(kind, on: row.entry, machine: machine)
-                    }
+                TableRow(row).rowActionMenu(ConfigRowActions.offered(for: row.entry)) { kind in
+                    perform(kind, on: row.entry, machine: machine)
                 }
             }
         }
