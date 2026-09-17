@@ -36,9 +36,29 @@ extension TransferPlan {
     /// `generationAdmission.ts:98-113`). 413 is its own case: the body is
     /// simply too large, which is definite but names a different sentence
     /// than a generic rejection.
+    ///
+    /// `.unauthorized` and `.licenseRequired` are their own cases on
+    /// `MoldClientError` rather than an `.http` with a status, so matching
+    /// only `.http` left both falling through to `.ambiguous`: the plan then
+    /// issued a SECOND authenticated lookup against the same machine, which
+    /// failed the same way, and told the user to "retry this same destination
+    /// to check safely" -- advice that can never succeed, for a refusal that
+    /// was definite and pre-commit. Both name what would actually resolve
+    /// them, in the destination's terms rather than this machine's.
     public static func classifyAdmitFailure(_ error: Error) -> AdmitResult {
-        guard let clientError = error as? MoldClientError, case let .http(status, code, message) = clientError
-        else { return .ambiguous }
+        guard let clientError = error as? MoldClientError else { return .ambiguous }
+        if case .unauthorized = clientError {
+            return .rejected(
+                "The destination needs an API key, and this Mac does not have the right one. "
+                    + "Add it in Settings and try again.")
+        }
+        if case let .licenseRequired(refusal, mismatch) = clientError {
+            return .rejected(
+                mismatch
+                    ? "The destination pins different terms for \(refusal.name)."
+                    : "\(refusal.name) has to be accepted on the destination first.")
+        }
+        guard case let .http(status, code, message) = clientError else { return .ambiguous }
         if status == 413 { return .tooLarge }
         if status == 503, let code, preCommitRefusalCodes.contains(code) {
             return .rejected(message ?? "The destination refused this request.")
