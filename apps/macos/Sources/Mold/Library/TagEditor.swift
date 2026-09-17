@@ -78,11 +78,29 @@ struct TagEditor: View {
         // Renaming and deleting reach EVERY print on EVERY machine, which is a
         // different act from taking the tag off this one -- so it lives on the
         // contextual menu and says so, rather than sitting next to the x.
-        .contextMenu {
-            Button("Show Everything Tagged \u{201C}\(tag)\u{201D}") { filterBy(tag) }
-            Divider()
-            Button("Rename Tag Everywhere…") { renaming = TagName(tag) }
-            Button("Delete Tag Everywhere…", role: .destructive) { actions.deleteTag(tag) }
+        .rowActionMenu(Self.menu(for: tag)) { perform($0, on: tag) }
+    }
+
+    /// One tag's menu. Grouped by hand, because the divider separates what
+    /// this chip does from what reaches every machine -- and Delete Tag
+    /// Everywhere… is destructive but belongs with its neighbour rather than
+    /// behind a second divider.
+    static func menu(for tag: String) -> [RowAction<TagAction>] {
+        [
+            RowAction(kind: .filter, title: "Show Everything Tagged \u{201C}\(tag)\u{201D}"),
+            .separator,
+            RowAction(kind: .rename, title: "Rename Tag Everywhere…"),
+            RowAction(kind: .delete, title: "Delete Tag Everywhere…", isDestructive: true),
+        ]
+    }
+
+    enum TagAction: Hashable { case filter, rename, delete }
+
+    private func perform(_ action: TagAction, on tag: String) {
+        switch action {
+        case .filter: filterBy(tag)
+        case .rename: renaming = TagName(tag)
+        case .delete: actions.deleteTag(tag)
         }
     }
 }

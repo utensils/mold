@@ -41,12 +41,14 @@ struct Sidebar: View {
                         .tag(Row.shelf(.collection(slug: shelf.slug)))
                 }
                 shelfRow(.trash)
-                    .contextMenu {
-                        Button("Empty Trash…", role: .destructive) {
-                            LibraryActions(hosts: hosts, library: library,
-                                           confirmDestruction: confirmDestruction).emptyTrash()
-                        }
-                        .disabled(library.trashed.isEmpty)
+                    // Present and inert on an empty trash, not absent: the
+                    // Library menu's own `Empty Trash…` says the same thing
+                    // the same way.
+                    .rowActionMenu([RowAction(kind: LibraryAction.emptyTrash,
+                                              title: "Empty Trash…", isDestructive: true,
+                                              isDisabled: library.trashed.isEmpty)]) { _ in
+                        LibraryActions(hosts: hosts, library: library,
+                                       confirmDestruction: confirmDestruction).emptyTrash()
                     }
                 Button("New Collection…", systemImage: "plus") { isCreating = true }
                     .buttonStyle(.plain)

@@ -47,8 +47,8 @@ struct LibrarySelectionTests {
         let performed = Performed()
         let selection = selection(count: 1, editing: false, performed: performed)
 
-        #expect(selection.plan.items.filter { !$0.isDivider }.map(\.id)
-            == ["open", "quickLook", "reuse", "favorite", "copy", "save", "trash"])
+        #expect(selection.plan.items.compactMap(\.kind)
+            == [.open, .quickLook, .reuse, .favorite(true), .copy, .save, .trash])
 
         selection.perform(.quickLook)
         #expect(performed.actions == [.quickLook])

@@ -22,7 +22,7 @@ struct LibraryCommands: Commands {
 
         CommandMenu("Library") {
             if let library {
-                LibraryMenuItems(items: library.plan.items, perform: library.perform)
+                RowActionMenu(actions: library.plan.items, perform: library.perform)
                     .modifier(LibraryShortcuts(selection: library))
             }
         }

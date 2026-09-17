@@ -34,15 +34,13 @@ struct CollectionRow: View {
         // The same three the Library menu offers, from the same declaration --
         // they used to live only here, unreachable from the keyboard and
         // invisible to Help ▸ Search, and worded differently besides.
-        .contextMenu {
-            LibraryMenuItems(items: menu.items) { action in
-                switch action {
-                case .renameCollection: renaming = shelf
-                case let .setCollectionHidden(hidden):
-                    Task { await library.setShelfHidden(shelf, hidden: hidden) }
-                case .deleteCollection: confirmDelete()
-                default: break
-                }
+        .rowActionMenu(menu.items) { action in
+            switch action {
+            case .renameCollection: renaming = shelf
+            case let .setCollectionHidden(hidden):
+                Task { await library.setShelfHidden(shelf, hidden: hidden) }
+            case .deleteCollection: confirmDelete()
+            default: break
             }
         }
         .destructionDialog($pending)

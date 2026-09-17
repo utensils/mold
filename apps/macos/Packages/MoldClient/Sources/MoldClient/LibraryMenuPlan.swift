@@ -12,7 +12,11 @@ import Foundation
 /// Pure, so the order, the wording and the gating are a test rather than
 /// something you check by right-clicking. `Share` is deliberately absent: it
 /// is a `ShareLink`, a system control rather than an action this app performs,
-/// and both surfaces already render the same one.
+/// and both surfaces already render the same one -- it rides along as
+/// `rowActionMenu`'s `extra`.
+///
+/// The offer is a `[RowAction<LibraryAction>]` like every other menu in the
+/// app; this type is only what the list is resolved FROM.
 public enum LibraryAction: Hashable, Sendable {
     case open
     case reuse
@@ -30,30 +34,6 @@ public enum LibraryAction: Hashable, Sendable {
     case renameCollection
     case setCollectionHidden(Bool)
     case deleteCollection
-}
-
-/// One row of the offer: a command, a submenu, or a divider.
-public struct LibraryMenuItem: Hashable, Sendable, Identifiable {
-    public let id: String
-    public let title: String
-    public let action: LibraryAction?
-    public let children: [LibraryMenuItem]
-    public let isDestructive: Bool
-
-    public var isDivider: Bool { action == nil && children.isEmpty && title.isEmpty }
-    public var isSubmenu: Bool { !children.isEmpty }
-
-    public static let divider = LibraryMenuItem(id: "divider", title: "", action: nil,
-                                                children: [], isDestructive: false)
-
-    public init(id: String, title: String, action: LibraryAction? = nil,
-                children: [LibraryMenuItem] = [], isDestructive: Bool = false) {
-        self.id = id
-        self.title = title
-        self.action = action
-        self.children = children
-        self.isDestructive = isDestructive
-    }
 }
 
 /// What to offer for a given selection.

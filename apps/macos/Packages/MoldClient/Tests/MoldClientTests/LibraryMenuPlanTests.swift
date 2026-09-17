@@ -25,79 +25,91 @@ import Testing
                         exportFormats: formats, canReuse: canReuse, trashCount: trashCount)
     }
 
-    private func ids(_ plan: LibraryMenuPlan) -> [String] {
-        plan.items.filter { !$0.isDivider }.map(\.id)
+    /// Every row that is not a divider, by the words on it -- which pins the
+    /// WORDING as well as the order, and is the same question a submenu can
+    /// be asked (it has no action of its own to be named by).
+    private func titles(_ plan: LibraryMenuPlan) -> [String] {
+        plan.items.filter { !$0.isSeparator }.map(\.title)
+    }
+
+    private func kinds(_ plan: LibraryMenuPlan) -> [LibraryAction] {
+        plan.items.compactMap(\.kind)
     }
 
     /// The whole offer, in order -- what BOTH menus draw.
     @Test func oneSelectedPrintIsOfferedEverythingInOneOrder() {
-        let offered = ids(plan(shelves: [shelf("Smurfs")], formats: ["mp4"]))
-        #expect(offered == ["open", "quickLook", "reuse", "favorite", "file",
-                            "copy", "save", "export", "trash"])
+        let offered = plan(shelves: [shelf("Smurfs")], formats: ["mp4"])
+        #expect(titles(offered) == ["Open", "Quick Look “robot.png”", "Use These Settings",
+                                    "Add to Favourites", "Move to Collection", "Copy",
+                                    "Save a Copy…", "Export…", "Move to Trash"])
+        #expect(kinds(offered) == [.open, .quickLook, .reuse, .favorite(true),
+                                   .copy, .save, .trash])
     }
 
     /// Destructive last, after a divider, and marked.
     @Test func whatDestroysSomethingComesLastAndSaysSo() {
         let items = plan().items
         let last = items.last
-        #expect(last?.id == "trash")
+        #expect(last?.kind == .trash)
         #expect(last?.isDestructive == true)
-        #expect(items.dropLast().last?.isDivider == true)
-        #expect(items.filter(\.isDestructive).allSatisfy { $0.id == "trash" })
+        #expect(items.dropLast().last?.isSeparator == true)
+        #expect(items.filter(\.isDestructive).map(\.kind) == [.trash])
     }
 
     /// A row with nothing applicable gets NO menu, never an empty one.
     @Test func nothingSelectedIsNoMenuAtAll() {
         #expect(plan(count: 0, canReuse: false).items.isEmpty)
         #expect(plan(scope: .trash, count: 0).items.isEmpty)
+        #expect(!RowAction.offersMenu(plan(count: 0, canReuse: false).items))
     }
 
     @Test func severalSelectedPrintsDropTheOnesThatOnlyMakeSenseForOne() {
-        let offered = ids(plan(count: 3, formats: ["mp4"]))
-        #expect(!offered.contains("reuse"))
-        #expect(!offered.contains("export"))
-        #expect(offered.contains("trash"))
+        let offered = plan(count: 3, formats: ["mp4"])
+        #expect(!kinds(offered).contains(.reuse))
+        #expect(!titles(offered).contains("Export…"))
+        #expect(kinds(offered).contains(.trash))
     }
 
     @Test func theTrashOffersItsOwnThings() {
-        let offered = ids(plan(scope: .trash, trashCount: 4))
-        #expect(offered == ["putBack", "deleteForever", "emptyTrash"])
-        #expect(plan(scope: .trash, trashCount: 4).items.filter(\.isDestructive)
-            .map(\.id) == ["deleteForever", "emptyTrash"])
+        let offered = plan(scope: .trash, trashCount: 4)
+        #expect(kinds(offered) == [.putBack, .deleteForever, .emptyTrash])
+        #expect(offered.items.filter(\.isDestructive).map(\.kind)
+            == [.deleteForever, .emptyTrash])
     }
 
     /// The shelf's own three, which lived only in the sidebar's right-click
     /// menu and so were unreachable from the keyboard.
     @Test func showingACollectionOffersWhatToDoWithIt() {
         let smurfs = shelf("Smurfs")
-        let offered = ids(plan(scope: .collection, shelves: [smurfs], enclosing: smurfs))
-        #expect(offered.contains("unfile"))
-        #expect(offered.suffix(3) == ["renameCollection", "hideCollection", "deleteCollection"])
+        let offered = plan(scope: .collection, shelves: [smurfs], enclosing: smurfs)
+        #expect(kinds(offered).contains(.unfile(slug: "smurfs")))
+        #expect(titles(offered).suffix(3)
+            == ["Rename “Smurfs”…", "Hide from All Prints", "Delete Collection…"])
     }
 
     @Test func aHiddenCollectionIsOfferedTheOtherHalfOfTheToggle() {
         let hidden = shelf("Smurfs", hidden: true)
         let items = plan(scope: .collection, enclosing: hidden).items
-        #expect(items.first { $0.id == "hideCollection" }?.title == "Show in All Prints")
-        #expect(items.first { $0.id == "hideCollection" }?.action == .setCollectionHidden(false))
+        let toggle = items.first { $0.kind == .setCollectionHidden(false) }
+        #expect(toggle?.title == "Show in All Prints")
     }
 
     // MARK: - One wording
 
     @Test func favouriteIsSpeltTheWayTheSidebarSpellsIt() {
-        #expect(plan().items.first { $0.id == "favorite" }?.title == "Add to Favourites")
-        #expect(plan(allFavorite: true).items.first { $0.id == "favorite" }?.title
+        #expect(plan().items.first { $0.kind == .favorite(true) }?.title == "Add to Favourites")
+        #expect(plan(allFavorite: true).items.first { $0.kind == .favorite(false) }?.title
             == "Remove from Favourites")
     }
 
     @Test func quickLookNamesWhatItIsAbout() {
-        #expect(plan().items.first { $0.id == "quickLook" }?.title == "Quick Look “robot.png”")
-        #expect(plan(count: 4).items.first { $0.id == "quickLook" }?.title
+        #expect(plan().items.first { $0.kind == .quickLook }?.title == "Quick Look “robot.png”")
+        #expect(plan(count: 4).items.first { $0.kind == .quickLook }?.title
             == "Quick Look 4 Prints")
     }
 
     @Test func savingSeveralSaysHowMany() {
-        #expect(plan(count: 3).items.first { $0.id == "save" }?.title == "Save 3 Copies…")
+        #expect(plan(count: 3).items.first { $0.kind == .save }?.title == "Save 3 Copies…")
     }
 
     // MARK: - Dividers
@@ -106,18 +118,18 @@ import Testing
         for one in [plan(), plan(count: 3), plan(canReuse: false),
                     plan(scope: .trash, trashCount: 2), plan(scope: .trash)] {
             let items = one.items
-            #expect(items.first?.isDivider != true)
-            #expect(items.last?.isDivider != true)
-            #expect(!zip(items, items.dropFirst()).contains { $0.isDivider && $1.isDivider })
+            #expect(items.first?.isSeparator != true)
+            #expect(items.last?.isSeparator != true)
+            #expect(!zip(items, items.dropFirst()).contains { $0.isSeparator && $1.isSeparator })
         }
     }
 
     /// Every submenu has something in it -- a "Move to Collection" with no
     /// collections is a dead end.
     @Test func aSubmenuIsOnlyOfferedWhenItHasEntries() {
-        #expect(!ids(plan(shelves: [])).contains("file"))
-        #expect(!ids(plan(formats: [])).contains("export"))
-        #expect(plan(shelves: [shelf("Smurfs")]).items.first { $0.id == "file" }?
-            .children.map(\.action) == [.file(slug: "smurfs")])
+        #expect(!titles(plan(shelves: [])).contains("Move to Collection"))
+        #expect(!titles(plan(formats: [])).contains("Export…"))
+        #expect(plan(shelves: [shelf("Smurfs")]).items.first { $0.isSubmenu }?
+            .children.map(\.kind) == [.file(slug: "smurfs")])
     }
 }

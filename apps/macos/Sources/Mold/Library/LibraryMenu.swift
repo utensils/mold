@@ -7,9 +7,10 @@ import SwiftUI
 /// just that print when it isn't -- which is what every Mac app does and what
 /// stops a stray right-click throwing away a careful selection.
 ///
-/// WHAT it offers is `LibraryMenuPlan`'s, not this view's: the menu bar draws
-/// the same list, in the same order, with the same words.
-struct LibraryMenu: View {
+/// WHAT it offers is `LibraryMenuPlan`'s, not this type's: the menu bar draws
+/// the same list, in the same order, with the same words, through the same
+/// `RowActionMenu`.
+struct LibraryMenu {
     let targets: [LibraryEntry]
     let scope: LibraryScope
     let actions: LibraryActions
@@ -18,18 +19,19 @@ struct LibraryMenu: View {
     let trashCount: Int
     let open: (() -> Void)?
 
-    var body: some View {
-        LibraryMenuItems(items: plan.items) { action in
-            actions.perform(action, on: targets, scope: scope, open: open)
-        }
-        // Outside the plan: a real `ShareLink` -- AirDrop, Messages, Mail,
-        // Photos, Save to Files -- which is a system control and not something
-        // this app performs. The file is fetched when the sheet asks for it.
-        if !scope.isTrash, !targets.isEmpty {
-            ShareLink(items: targets.map(actions.draggable)) { print in
-                SharePreview(print.filename)
-            }
-        }
+    var items: [LibraryMenuPlan.Item] { plan.items }
+
+    func perform(_ action: LibraryAction) {
+        actions.perform(action, on: targets, scope: scope, open: open)
+    }
+
+    /// Outside the plan: a real `ShareLink` -- AirDrop, Messages, Mail,
+    /// Photos, Save to Files -- which is a system control and not something
+    /// this app performs. The file is fetched when the sheet asks for it.
+    /// Empty where there is nothing to share, which draws no item.
+    var share: [DraggablePrint] {
+        guard !scope.isTrash else { return [] }
+        return targets.map(actions.draggable)
     }
 
     private var plan: LibraryMenuPlan {
@@ -44,6 +46,17 @@ struct LibraryMenu: View {
             canReuse: actions.reuse != nil && open != nil,
             trashCount: trashCount
         )
+    }
+}
+
+extension View {
+    /// One print's menu, from the one list.
+    func libraryMenu(_ menu: LibraryMenu) -> some View {
+        rowActionMenu(menu.items, perform: menu.perform) {
+            if !menu.share.isEmpty {
+                ShareLink(items: menu.share) { print in SharePreview(print.filename) }
+            }
+        }
     }
 }
 

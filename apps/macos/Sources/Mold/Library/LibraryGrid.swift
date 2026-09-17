@@ -99,11 +99,10 @@ struct LibraryGrid: View {
             .onTapGesture(count: 2) { onOpen(entry.id) }
             .onTapGesture { click(entry) }
             .draggable(actions.draggable(entry))
-            .contextMenu {
+            .libraryMenu(
                 LibraryMenu(targets: targets(for: entry), scope: scope, actions: actions,
                             shelves: shelves, enclosingShelf: enclosingShelf,
-                            trashCount: trashCount, open: { onOpen(entry.id) })
-            }
+                            trashCount: trashCount, open: { onOpen(entry.id) }))
         }
     }
 
