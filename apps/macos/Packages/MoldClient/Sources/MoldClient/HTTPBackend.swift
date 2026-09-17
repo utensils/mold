@@ -77,21 +77,41 @@ extension HTTPBackend {
     /// more than the largest licence refusal and still nothing to hold.
     static let refusalBodyLimit = 8 * 1024
 
-    /// At most `refusalBodyLimit` bytes of a refused response.
+    /// How long a refused response gets to finish saying why.
     ///
-    /// Whatever arrived before a read failed is what there is to report: the
-    /// status is already known, and a truncated body simply decodes to
-    /// nothing, which is the same answer as no body at all.
-    static func refusalBody(_ bytes: some AsyncSequence<UInt8, some Error>) async -> Data {
-        var data = Data()
-        data.reserveCapacity(refusalBodyLimit)
-        do {
-            for try await byte in bytes {
-                data.append(byte)
-                if data.count >= refusalBodyLimit { break }
+    /// The size ceiling is not enough on its own: a non-2xx promises neither
+    /// that the body is small nor that the connection CLOSES, and the error
+    /// path already knows the status, so waiting on a held-open socket for a
+    /// sentence it does not need was a hang -- up to the request's own
+    /// timeout, which on `events` and `resourceStream` is 86,400 seconds.
+    static let refusalBodyDeadline: Duration = .seconds(3)
+
+    /// At most `refusalBodyLimit` bytes of a refused response, and at most
+    /// `within` waiting for them.
+    ///
+    /// Whatever arrived before the deadline or a read failure is what there
+    /// is to report: the status is already known, and a truncated body simply
+    /// decodes to nothing, which is the same answer as no body at all.
+    static func refusalBody(
+        _ bytes: some AsyncSequence<UInt8, some Error> & Sendable,
+        within deadline: Duration = refusalBodyDeadline
+    ) async -> Data {
+        // A box rather than a return value: the racing read may be CANCELLED
+        // part way, and what it had by then is still the best answer there is.
+        let read = PartialBody()
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                do {
+                    for try await byte in bytes {
+                        if read.append(byte) >= refusalBodyLimit { return }
+                    }
+                } catch {}
             }
-        } catch {}
-        return data
+            group.addTask { try? await Task.sleep(for: deadline) }
+            await group.next()
+            group.cancelAll()
+        }
+        return read.bytes
     }
 
     /// A body that is not mold's JSON envelope, when it is short enough to be
