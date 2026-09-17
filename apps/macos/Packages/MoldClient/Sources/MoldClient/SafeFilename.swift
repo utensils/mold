@@ -40,9 +40,6 @@ public enum SafeFilename {
         case relative
         /// Starts with a dot, which hides the file and is never a print's name.
         case hidden
-        /// Percent-decodes into something that is not a single component --
-        /// `..%2Fevil` arrives from JSON as those nine literal characters.
-        case encodedSeparator
         /// Anything `lastPathComponent` disagrees with: an absolute path, a
         /// trailing separator, a name that is not one component after all.
         case notOneComponent
@@ -85,28 +82,49 @@ public enum SafeFilename {
         guard (name as NSString).lastPathComponent == name else {
             throw refuse(.notOneComponent)
         }
-        if let decoded = name.removingPercentEncoding, decoded != name,
-           decoded != (decoded as NSString).lastPathComponent || decoded.hasPrefix(".") {
-            throw refuse(.encodedSeparator)
-        }
+        // Deliberately NOT a percent-decode rule. `a%2Fb.png` is a legal
+        // single component on disk -- nothing between here and the file system
+        // decodes it, `URL.appending(path:)` least of all -- and refusing it
+        // dropped that print from the listing entirely, visible only in a
+        // private log line. The checks above are the whole rule.
         return name
     }
 
     /// The file this name names inside `directory`, or `nil` when it would not
     /// stay there.
     ///
-    /// Standardised on both sides and compared by PARENT, so the answer is
-    /// "this is one component inside that directory" and not "the string
-    /// starts with the right prefix" -- which `/tmp/cache-evil` satisfies for
-    /// `/tmp/cache`.
+    /// Compared by PARENT, so the answer is "this is one component inside that
+    /// directory" and not "the string starts with the right prefix" -- which
+    /// `/tmp/cache-evil` satisfies for `/tmp/cache`.
+    ///
+    /// The parent is resolved through symlinks, because `standardizedFileURL`
+    /// removes `.` and `..` and stops there: any other unsandboxed process on
+    /// this Mac can plant a link at the cache directory and `write(to:)`
+    /// follows it. The LEAF is deliberately not resolved -- it is refused
+    /// outright by `isFreshDestination` at the write, because a link there is
+    /// a file this app did not create and has no business writing through.
     public static func url(_ name: String, in directory: URL) -> URL? {
         guard isSafe(name) else { return nil }
-        let base = directory.standardizedFileURL
+        let base = directory.resolvingSymlinksInPath().standardizedFileURL
         let file = base.appending(path: name).standardizedFileURL
         guard directoryPath(file.deletingLastPathComponent()) == directoryPath(base),
               file.lastPathComponent == name
         else { return nil }
         return file
+    }
+
+    /// Whether this app may write to `file` -- true when nothing is there, or
+    /// when what is there is an ordinary file it can replace.
+    ///
+    /// A symbolic link is refused: `Data.write(to:)` FOLLOWS one, so a link
+    /// planted at a cache path is server-controlled bytes landing wherever it
+    /// points. This is the leaf half of `url(_:in:)`'s containment, and the
+    /// two are always used together.
+    public static func isFreshDestination(_ file: URL) -> Bool {
+        let values = try? file.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey])
+        guard let values else { return true }  // nothing there at all
+        if values.isSymbolicLink == true { return false }
+        return values.isRegularFile ?? true
     }
 
     /// A directory's path without the trailing separator `deletingLastPathComponent`

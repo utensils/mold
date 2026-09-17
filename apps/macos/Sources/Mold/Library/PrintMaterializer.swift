@@ -87,7 +87,20 @@ final class PrintMaterializer {
         let task = Task<URL?, Never> { [file, folder] in
             guard let data = await fetch() else { return nil }
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            guard (try? data.write(to: file)) != nil else { return nil }
+            // `write(to:)` follows a symbolic link, and this app is not
+            // sandboxed: a link planted at this path by anything else on the
+            // Mac would put the machine's bytes wherever it points.
+            guard SafeFilename.isFreshDestination(file) else { return nil }
+            do {
+                try data.write(to: file)
+            } catch {
+                // A failed write used to return `nil` through a `try?` and the
+                // person saw a preview that never opened -- the exact symptom
+                // the cache note exists to replace.
+                self.note = "Mold could not keep “\(entry.print.displayName)” on "
+                    + "this Mac: \(error.localizedDescription)"
+                return nil
+            }
             return file
         }
         inFlight[flightKey] = task

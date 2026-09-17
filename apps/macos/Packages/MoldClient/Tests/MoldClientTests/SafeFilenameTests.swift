@@ -18,6 +18,12 @@ import Testing
         "a print with spaces.png",
         "Café ☕.png",
         "100%25 sure.png",
+        // Percent-encoding is not decoded by anything between the wire and the
+        // file system, so this is a legal single component -- refusing it made
+        // the print vanish from the listing with only a private log line.
+        "a%2Fb.png",
+        "%5Cnot-a-separator.png",
+        "%2e%2e%2fevil.png",
         "under_score-and.dots.glb",
     ])
     func anOrdinaryPrintNameIsKept(_ name: String) throws {
@@ -40,9 +46,6 @@ import Testing
         ("bell\u{07}.png", .controlCharacter),
         ("newline\n.png", .controlCharacter),
         ("..%2Fevil.png", .hidden),
-        ("evil%2F..%2Fx.png", .encodedSeparator),
-        ("%2e%2e%2fevil.png", .encodedSeparator),
-        ("%2Fabsolute.png", .encodedSeparator),
     ])
     func aNameThatIsNotOneSafeComponentIsRefused(_ name: String,
                                                  _ reason: SafeFilename.Reason) {
@@ -64,6 +67,39 @@ import Testing
         let root = URL(filePath: "/tmp/mold-cache")
         let file = try #require(SafeFilename.url("robot.png", in: root))
         #expect(file.path(percentEncoded: false) == "/tmp/mold-cache/robot.png")
+    }
+
+    /// A symlink planted in the cache by anything else on this unsandboxed
+    /// Mac: `write(to:)` follows one, so a destination that IS one is refused.
+    @Test func aSymbolicLinkIsNotAFreshDestination() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appending(path: "mold-safe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appending(path: "target.txt")
+        try Data("x".utf8).write(to: target)
+        let link = dir.appending(path: "robot.png")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        #expect(!SafeFilename.isFreshDestination(link))
+        #expect(SafeFilename.isFreshDestination(dir.appending(path: "nothing-here.png")))
+        #expect(SafeFilename.isFreshDestination(target))
+    }
+
+    /// A link at the DIRECTORY is resolved before containment is judged, or
+    /// "inside the cache" is a statement about a path rather than a place.
+    @Test func aSymlinkedDirectoryResolvesToWhereItActuallyPoints() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appending(path: "mold-safe-\(UUID().uuidString)")
+        let real = base.appending(path: "real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let link = base.appending(path: "link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+        let file = try #require(SafeFilename.url("robot.png", in: link))
+        #expect(file.deletingLastPathComponent().resolvingSymlinksInPath()
+            == real.resolvingSymlinksInPath())
     }
 
     @Test func aTraversingNameResolvesToNothing() {
