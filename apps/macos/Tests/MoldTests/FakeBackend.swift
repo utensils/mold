@@ -179,6 +179,21 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// Not `private`: `FakeBackend+Models.swift` (M5 S1b's routes, split out
     /// to keep this file from growing further) calls both from a different
     /// file in the same type.
+    /// How long a route takes to answer. For a test that has to make
+    /// something happen WHILE a call is in flight -- an edit enqueued during
+    /// a drain's trailing re-list, say -- which no planted answer can express.
+    /// Awaited by the routes that read it; a route with no entry is instant,
+    /// so nothing existing changes.
+    nonisolated(unsafe) var delays: [String: Duration] = [:]
+
+    /// Holds a route open for its planted delay. `await`ed, never slept on the
+    /// caller's behalf: the store's task suspends exactly where a real round
+    /// trip would.
+    func pause(_ route: String) async {
+        guard let delay = delays[route] else { return }
+        try? await Task.sleep(for: delay)
+    }
+
     func record(_ route: String) throws {
         callsLock.withLock { recorded.append(route) }
         if let planted = plantedErrors[route] { throw planted }
@@ -596,6 +611,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     func gallery(etag: String?) async throws -> Fetched<[GalleryPrint]> {
         try record("gallery")
+        await pause("gallery")
         return .fresh(prints, etag: "fake-etag")
     }
     func trashedPrints(etag: String?) async throws -> Fetched<[GalleryPrint]> {
@@ -603,7 +619,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         return .fresh(trashedRows, etag: "fake-etag")
     }
     func patch(_ filename: String, with patch: GalleryPatch) async throws { try record("patch") }
-    func mutate(_ mutation: GalleryBulkMutation) async throws { try record("mutate") }
+    func mutate(_ mutation: GalleryBulkMutation) async throws {
+        try record("mutate")
+        await pause("mutate")
+    }
     func trash(_ filenames: [String]) async throws { try record("trash") }
     func restoreFromTrash(_ filenames: [String]) async throws { try record("restoreFromTrash") }
     func deleteForever(_ filenames: [String]) async throws { try record("deleteForever") }

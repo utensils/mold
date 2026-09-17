@@ -56,6 +56,35 @@ struct LibraryStoreLiveTests {
         #expect(fake.callCount("gallery") == 0)
     }
 
+    /// **Fails today**: `drain` holds `draining` until its whole task ends --
+    /// including the trailing `relist` and `reloadCollections`, both full round
+    /// trips. An edit enqueued in that window calls `drain`, hits the guard and
+    /// returns, and the running task never looks at the outbox again: the star
+    /// sits on screen forever and never reaches the machine.
+    @Test func anEditMadeDuringTheTrailingRelistStillReachesTheMachine() async {
+        let machine = host("plato")
+        let fake = FakeBackend(host: machine)
+        fake.prints = [FakeFixtures.print("star.png"), FakeFixtures.print("second.png")]
+        let hosts = HostStore(hosts: [machine]) { _ in fake }
+        let library = LibraryStore(hosts: hosts)
+        let rows = [FakeFixtures.print("star.png"), FakeFixtures.print("second.png")]
+            .map { LibraryEntry(host: machine, print: $0) }
+        library.perHost[machine.id] = rows
+
+        // The trailing re-list is held open and the second star is made while
+        // it is in flight -- the only moment that reproduces this.
+        fake.delays["gallery"] = .milliseconds(200)
+        library.setFavorite(true, on: [rows[0]])
+        hosts.listeners.forEach {
+            $0(machine.id, .gallery(.updated(filename: "star.png", row: nil)))
+        }
+        await settle(until: { fake.calls.contains("gallery") })
+        library.setFavorite(true, on: [rows[1]])
+
+        await settle(until: { fake.calls.filter { $0 == "mutate" }.count == 2 })
+        #expect(fake.calls.filter { $0 == "mutate" }.count == 2)
+    }
+
     /// A frame skipped as our own echo may ALSO have been another client
     /// editing that row. Once our chain is settled, that is the only thing it
     /// could still have been saying, so the machine is read again.
@@ -68,13 +97,21 @@ struct LibraryStoreLiveTests {
         library.perHost[machine.id] = [LibraryEntry(host: machine,
                                                     print: FakeFixtures.print("star.png"))]
 
+        // The mutation is held open and the frame is delivered while it is in
+        // flight, so the frame provably arrives while the chain is pending --
+        // asserting one `gallery` call alone could not tell the
+        // skip-then-repair from a drain that had already finished and simply
+        // took the frame's own `row: nil` re-list.
+        fake.delays["mutate"] = .milliseconds(200)
         library.setFavorite(true, on: library.perHost[machine.id] ?? [])
+        await settle(until: { fake.calls.contains("mutate") })
         hosts.listeners.forEach {
             $0(machine.id, .gallery(.updated(filename: "star.png", row: nil)))
         }
 
         await settle(until: { fake.calls.contains("gallery") })
-        #expect(fake.calls.contains("mutate"))
-        #expect(fake.callCount("gallery") == 1)
+        // The frame was SKIPPED (no re-list while the chain ran) and the
+        // machine was read exactly once, after the mutation settled.
+        #expect(fake.calls == ["mutate", "gallery"])
     }
 }
