@@ -69,11 +69,7 @@ struct RefineGroup: View {
     }
 
     private func loadMaskPreview() async {
-        guard let base64 = draft.media.maskImage, let data = Data(base64Encoded: base64) else {
-            maskPreview = nil
-            return
-        }
-        maskPreview = NSImage(data: data)
+        maskPreview = await PicturePreview.decode(draft.media.maskImage)
     }
 }
 

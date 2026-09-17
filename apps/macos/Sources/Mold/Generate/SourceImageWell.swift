@@ -13,13 +13,28 @@ import SwiftUI
 struct SourceImageWell: View {
     @Binding var draft: RenderDraft
 
-    @Environment(HostStore.self) private var hosts
-    @Environment(LibraryStore.self) private var library
+    @Environment(HostStore.self) var hosts
+    @Environment(LibraryStore.self) var library
     @State private var targeted = false
-    @State private var preview: NSImage?
+    @State var preview: NSImage?
     @State private var showsLibrary = false
+    /// What a file the engine cannot read said, beside the control that
+    /// collected it rather than in a 422 after the upload (finding 02#7).
+    @State var importFailure: String?
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            menu
+            if let importFailure {
+                Text(importFailure)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 140, alignment: .leading)
+            }
+        }
+    }
+
+    private var menu: some View {
         Menu {
             menuItems
         } label: {
@@ -37,16 +52,15 @@ struct SourceImageWell: View {
         // The preview follows the DRAFT, not this well's own load path: a
         // source can arrive from a parked restore, a Reuse, or the UAT seed,
         // and a well that only previews what it loaded itself showed the
-        // placeholder glyph over a picture that was really there.
+        // placeholder glyph over a picture that was really there. Decoded off
+        // the main actor -- a 50 MB still is a visible stall otherwise.
         .task(id: draft.media.sourceImage) {
-            preview = draft.media.sourceImage
-                .flatMap { Data(base64Encoded: $0) }
-                .flatMap { NSImage(data: $0) }
+            preview = await PicturePreview.decode(draft.media.sourceImage)
         }
         .task { seedLibraryPickerIfRequested() }
         .accessibilityLabel("Source picture")
         .sheet(isPresented: $showsLibrary) {
-            LibraryPickerSheet { entry, data in apply((data, entry.print.filename)) }
+            LibraryPickerSheet(pick: apply)
         }
     }
 
@@ -87,41 +101,6 @@ struct SourceImageWell: View {
             .padding(4)
             .background(Chrome.badgeBackdrop, in: Circle())
             .padding(3)
-    }
-
-    private func handle(_ drop: PictureDrop) {
-        Task {
-            do {
-                apply(try await PictureSource.bytes(of: drop, hosts: hosts, library: library))
-            } catch {
-                if case let .print(id) = drop {
-                    hosts.report(error, on: id.host, doing: "fetch that picture")
-                }
-            }
-        }
-    }
-
-    private func chooseFile() {
-        guard let url = PictureSource.chooseFile(), let data = try? Data(contentsOf: url) else { return }
-        apply((data, url.lastPathComponent))
-    }
-
-    private func clear() {
-        draft.media.sourceImage = nil
-        draft.media.sourceImageName = nil
-        preview = nil
-    }
-
-    private func apply(_ picked: (data: Data, name: String)) {
-        // mold takes every byte field as base64 on the wire, so the encode
-        // happens here rather than at request time -- the draft holds exactly
-        // what will be sent.
-        draft.media.sourceImage = picked.data.base64EncodedString()
-        draft.media.sourceImageName = picked.name
-        // Last write wins on an EXCLUSIVE recipe: attaching here parks the
-        // reference strip rather than refusing the drop (`ExclusiveWells`).
-        draft.media.lastExclusiveWrite = .source
-        preview = NSImage(data: picked.data)
     }
 
     /// `MOLD_NATIVE_LIBRARY_PICKER=1` opens the sheet once at launch, the

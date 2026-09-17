@@ -29,9 +29,7 @@ struct IdentityPhotoWell: View {
         .frame(width: 52, height: 52)
         .clipShape(RoundedRectangle(cornerRadius: Chrome.wellRadius, style: .continuous))
         .overlay(alignment: .topTrailing) { removeButton }
-        .task(id: photo.encoded) {
-            image = Data(base64Encoded: photo.encoded).flatMap(NSImage.init(data:))
-        }
+        .task(id: photo.encoded) { image = await PicturePreview.decode(photo.encoded) }
         .help(photo.name)
     }
 

@@ -37,12 +37,16 @@ enum PictureSource {
     /// A print's bytes come from the machine that holds it, through the same
     /// route Quick Look uses (`MoldBackend.media`) -- never a second copy
     /// kept on this Mac.
+    ///
+    /// A FILE goes through `PictureImport`, which reads, conforms and encodes
+    /// it off the main actor; a print's bytes are already something mold made,
+    /// so only the encode moves.
     static func bytes(
         of drop: PictureDrop, hosts: HostStore, library: LibraryStore
-    ) async throws -> (data: Data, name: String) {
+    ) async throws -> ImportedPicture {
         switch drop {
         case let .file(url):
-            return (try Data(contentsOf: url), url.lastPathComponent)
+            return try await PictureImport.load(url, accepting: PictureImport.engineReadable)
         case let .print(id):
             guard let entry = (library.items + library.trashed).first(where: { $0.id == id }) else {
                 throw MoldClientError.malformedResponse
@@ -52,7 +56,7 @@ enum PictureSource {
             }
             let trashed = entry.print.trashedAt != nil
             let data = try await backend.media(entry.print.filename, trashed: trashed)
-            return (data, entry.print.filename)
+            return await PictureImport.encoded(data, name: entry.print.filename)
         }
     }
 }

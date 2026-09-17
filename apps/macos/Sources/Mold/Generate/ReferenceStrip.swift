@@ -16,14 +16,25 @@ struct ReferenceStrip: View {
     @Environment(LibraryStore.self) private var library
     @State private var targeted = false
     @State private var showsLibrary = false
+    /// What a file the engine cannot read said, beside the control that
+    /// collected it rather than in a 422 after the upload (finding 02#7).
+    @State private var importFailure: String?
 
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(Array(draft.media.editImages.enumerated()), id: \.offset) { index, encoded in
-                well(index: index, encoded: encoded)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                ForEach(Array(draft.media.editImages.enumerated()), id: \.offset) { index, encoded in
+                    well(index: index, encoded: encoded)
+                }
+                if draft.media.editImages.count < (capability.maxCount ?? 1) {
+                    addWell
+                }
             }
-            if draft.media.editImages.count < (capability.maxCount ?? 1) {
-                addWell
+            if let importFailure {
+                Text(importFailure)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 160, alignment: .leading)
             }
         }
     }
@@ -81,7 +92,7 @@ struct ReferenceStrip: View {
         .help(addWellLabel)
         .accessibilityLabel(addWellLabel)
         .sheet(isPresented: $showsLibrary) {
-            LibraryPickerSheet { entry, data in append((data, entry.print.filename)) }
+            LibraryPickerSheet(pick: append)
         }
     }
 
@@ -104,47 +115,31 @@ struct ReferenceStrip: View {
             } catch {
                 if case let .print(id) = drop {
                     hosts.report(error, on: id.host, doing: "fetch that picture")
+                } else {
+                    importFailure = error.reasonSentence
                 }
             }
         }
     }
 
+    /// The panel runs on the main actor -- it has to -- but the read, the
+    /// transcode and the base64 do not (finding 02#10).
     private func chooseFile() {
-        guard let url = PictureSource.chooseFile(), let data = try? Data(contentsOf: url) else { return }
-        append((data, url.lastPathComponent))
-    }
-
-    private func append(_ picked: (data: Data, name: String)) {
-        guard draft.media.editImages.count < (capability.maxCount ?? 1) else { return }
-        draft.media.editImages.append(picked.data.base64EncodedString())
-        // Last write wins on an EXCLUSIVE recipe (`ExclusiveWells`).
-        draft.media.lastExclusiveWrite = .references
-    }
-}
-
-/// One reference thumbnail, decoded once per encoded string rather than once
-/// per keystroke -- `body` re-runs on every draft edit (a slider drag fires
-/// many), and `Data(base64Encoded:)` plus `NSImage(data:)` were both inside
-/// it. The pattern `RunCanvas` uses for its own preview and result images.
-private struct ReferenceWell: View {
-    let encoded: String
-
-    @State private var image: NSImage?
-
-    var body: some View {
-        ZStack {
-            if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            } else {
-                Chrome.wellFill
+        guard let url = PictureSource.chooseFile() else { return }
+        Task {
+            do {
+                append(try await PictureImport.load(url, accepting: PictureImport.engineReadable))
+            } catch {
+                importFailure = error.reasonSentence
             }
         }
-        .frame(width: 52, height: 52)
-        .clipShape(RoundedRectangle(cornerRadius: Chrome.wellRadius, style: .continuous))
-        .task(id: encoded) {
-            image = Data(base64Encoded: encoded).flatMap(NSImage.init(data:))
-        }
+    }
+
+    private func append(_ picked: ImportedPicture) {
+        guard draft.media.editImages.count < (capability.maxCount ?? 1) else { return }
+        draft.media.editImages.append(picked.encoded)
+        // Last write wins on an EXCLUSIVE recipe (`ExclusiveWells`).
+        draft.media.lastExclusiveWrite = .references
+        importFailure = nil
     }
 }

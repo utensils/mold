@@ -10,7 +10,10 @@ import SwiftUI
 /// `rows` and `caption` are pure (`LibraryPicker.rows`, `caption(count:)`),
 /// so the grid's own filtering and footer text are tested with no view.
 struct LibraryPickerSheet: View {
-    let pick: (LibraryEntry, Data) -> Void
+    /// Handed an `ImportedPicture`, already base64'd off the main actor
+    /// (`PictureImport`) -- the wells hold what will be sent, not raw bytes
+    /// they would have to encode on the main thread (finding 02#10).
+    let pick: (ImportedPicture) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @Environment(LibraryStore.self) private var library
@@ -72,8 +75,8 @@ struct LibraryPickerSheet: View {
         Task {
             defer { isFetching = false }
             do {
-                let picked = try await PictureSource.bytes(of: .print(selected), hosts: hosts, library: library)
-                pick(entry, picked.data)
+                pick(try await PictureSource.bytes(
+                    of: .print(selected), hosts: hosts, library: library))
                 dismiss()
             } catch {
                 hosts.report(error, on: selected.host, doing: "fetch that picture")

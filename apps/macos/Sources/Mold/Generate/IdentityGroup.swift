@@ -16,6 +16,11 @@ struct IdentityGroup: View {
     @Binding var draft: RenderDraft
 
     @State private var targeted = false
+    /// The server reads a PNG signature and then JPEG markers and nothing
+    /// else (`identity.rs:831-880`), while the panel offered HEIC -- the
+    /// default format of every iPhone photograph. The refusal belongs beside
+    /// the control, not in a 422 after the upload (finding 02#7).
+    @State private var importFailure: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -37,6 +42,9 @@ struct IdentityGroup: View {
                 Stepper(value: startStepBinding, in: Identity.startStepRange(steps: draft.steps)) {
                     Text(startStepBinding.wrappedValue.formatted())
                 }
+            }
+            if let importFailure {
+                Text(importFailure).font(.caption).foregroundStyle(.secondary)
             }
             if maxPhotos > 1 {
                 Text("Several photographs of one person are averaged into one identity.")
@@ -73,11 +81,25 @@ struct IdentityGroup: View {
         for url in panel.urls { append(url) }
     }
 
+    /// Reads, conforms to PNG/JPEG and encodes off the main actor. A HEIC or
+    /// TIFF photograph is TRANSCODED rather than refused -- it is the likeliest
+    /// picture of a face on this Mac, and re-encoding it is the whole fix.
     private func append(_ url: URL) {
-        guard photos.count < maxPhotos, let data = try? Data(contentsOf: url) else { return }
-        var conditioning = draft.media.identity ?? IdentityConditioning(photos: [])
-        conditioning.photos.append(IdentityPhoto(encoded: data.base64EncodedString(), name: url.lastPathComponent))
-        draft.media.identity = conditioning
+        guard photos.count < maxPhotos else { return }
+        Task {
+            do {
+                let picked = try await PictureImport.load(
+                    url, accepting: PictureImport.identityReadable)
+                guard photos.count < maxPhotos else { return }
+                var conditioning = draft.media.identity ?? IdentityConditioning(photos: [])
+                conditioning.photos.append(
+                    IdentityPhoto(encoded: picked.encoded, name: picked.name))
+                draft.media.identity = conditioning
+                importFailure = nil
+            } catch {
+                importFailure = error.reasonSentence
+            }
+        }
     }
 
     private func remove(_ photo: IdentityPhoto) {
