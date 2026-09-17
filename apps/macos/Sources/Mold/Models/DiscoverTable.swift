@@ -12,9 +12,11 @@ struct DiscoverTable: View {
     @Binding var searchText: String
     @Environment(HostStore.self) private var hosts
     @Environment(CatalogStore.self) private var catalog
-    @Environment(DownloadStore.self) private var downloads
+    // Not `private`: `DiscoverTable+Cells.swift` reads both, and `private`
+    // does not cross a file boundary even within one type.
+    @Environment(DownloadStore.self) var downloads
     @State private var selection: CatalogEntry.ID?
-    @State private var detailEntry: CatalogEntry?
+    @State var detailEntry: CatalogEntry?
 
     private var capabilities: Capabilities? { hosts.capabilities[host.id] }
     private var entries: [CatalogEntry] { catalog.entries(on: host.id) }
@@ -86,61 +88,6 @@ struct DiscoverTable: View {
         .padding(.vertical, 6)
     }
 
-    /// The row's own controls a second way -- nothing here is ever disabled,
-    /// the same "absent, not disabled" rule the State column follows, and
-    /// nothing destructive happens to a catalog row so there is no divider
-    /// to draw.
-    @ViewBuilder private func menu(for entry: CatalogEntry) -> some View {
-        ForEach(DiscoverRow.menuItems(for: entry)) { item in
-            switch item {
-            case .details:
-                Button(item.title) { detailEntry = entry }
-            case .install:
-                Button(item.title) { Task { await downloads.install(entry.id, on: host) } }
-            case let .openPage(url):
-                Link(item.title, destination: url)
-            }
-        }
-    }
-
-    private func nameCell(_ entry: CatalogEntry) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 4) {
-                Text(entry.name).lineLimit(1)
-                if let badge = Self.nsfwBadge(entry) {
-                    Text(badge).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                }
-            }
-            if let author = entry.author {
-                Text(author).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
-        }
-        .contentShape(Rectangle())
-        // `.onTapGesture(count: 2)` eats the single click the `Table`'s own
-        // `selection:` needs, so double-clicking a row opened its details
-        // while never selecting it -- and the Details… item below reads the
-        // entry it was built for, not the selection, precisely because of
-        // that. `.simultaneousGesture` leaves the single click alone (M8's
-        // own `List`-row finding).
-        .simultaneousGesture(TapGesture(count: 2).onEnded { detailEntry = entry })
-    }
-
-    @ViewBuilder private func stateCell(_ entry: CatalogEntry) -> some View {
-        switch DiscoverRow.resolve(entry) {
-        case .installed:
-            Label("Installed", systemImage: "checkmark.circle.fill")
-                .font(.caption).foregroundStyle(.secondary)
-        case .install:
-            Button("Install") { Task { await downloads.install(entry.id, on: host) } }
-                .buttonStyle(.bordered).controlSize(.small)
-        case let .unsupported(pageURL):
-            HStack(spacing: 6) {
-                Text("Not supported").font(.caption).foregroundStyle(.secondary)
-                if let pageURL { Link("Open Page", destination: pageURL).font(.caption) }
-            }
-        }
-    }
-
     private var loadMore: some View {
         HStack {
             Spacer()
@@ -159,5 +106,4 @@ struct DiscoverTable: View {
                                    description: Text("Nothing matches on this machine's catalog."))
         }
     }
-
 }

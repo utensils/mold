@@ -14,9 +14,19 @@ import MoldClient
 /// Lets a store's own tasks run. A watcher is an unstructured `Task`, so
 /// nothing about it has happened yet when the call that started it returns --
 /// a test asserts on what it DID, not on the instant it was made.
+/// The budget is not politeness. The whole app bundle shares ONE main actor,
+/// so a suite running beside others -- each with live watchers, coalescers and
+/// stream tasks of its own -- can be starved of it for longer than the old
+/// half-second tail, which is what made two tests red in one run out of four
+/// and green in isolation. It returns the instant the condition holds, so a
+/// green run costs exactly what it did before; only a slow one waits longer.
+///
+/// Settle on the STATE the assertion reads, never on a call count: a fake
+/// records the call before the store has applied its answer, so a count can be
+/// satisfied by work that has not landed.
 @MainActor
 func settle(until condition: () -> Bool) async {
-    for step in 0 ..< 200 {
+    for step in 0 ..< 500 {
         if condition() { return }
         if step < 100 { await Task.yield() } else { try? await Task.sleep(for: .milliseconds(5)) }
     }

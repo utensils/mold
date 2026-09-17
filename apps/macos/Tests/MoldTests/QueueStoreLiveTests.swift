@@ -44,9 +44,16 @@ struct QueueStoreLiveTests {
 
         for i in 0 ..< 64 { backend.emit(.job(.queued(id: "job-\(i)", model: "flux-dev"))) }
 
-        await settle { backend.callCount("queue") == 1 }
-        #expect(backend.callCount("queue") == 1)
+        // Settled on the ROWS, not on `callCount`: the fake records the call
+        // before the store has applied its answer, so a count can be
+        // satisfied by a read whose result is not in `byHost` yet.
+        await settle { !queue.entries(on: plato.id).isEmpty }
         #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        // One read for the whole burst -- the coalescer's entire point. A
+        // stream that DROPPED a frame is allowed exactly one more, its
+        // `.resyncRequired` re-read (which skips the coalescing delay by
+        // design); 64 frames are never 64 reads.
+        #expect((1 ... 2).contains(backend.callCount("queue")))
     }
 
     /// The server emits `generation_states_committed` explicitly so a bulk
@@ -62,9 +69,9 @@ struct QueueStoreLiveTests {
 
         backend.emit(.job(.statesCommitted))
 
-        await settle { backend.callCount("queue") == 1 }
-        #expect(backend.callCount("queue") == 1)
+        await settle { !queue.entries(on: plato.id).isEmpty }
         #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        #expect((1 ... 2).contains(backend.callCount("queue")))
     }
 
     /// **Fails today**: there is no resync handling at all. A long

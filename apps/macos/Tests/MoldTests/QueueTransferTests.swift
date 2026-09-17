@@ -124,11 +124,13 @@ struct QueueTransferTests {
 
         let outcome = await transfers.transfer(entry, from: source.id, to: destination.id)
 
+        // The number is `MAX_REQUEST_BODY_BYTES` (`lib.rs:178`), spelled by
+        // the one constant that holds it -- "about 48 MB" matched nothing.
         #expect(outcome == .refused(
             "hal9000 wouldn't take it: the job's media is larger than a machine will accept in one request "
-                + "(about 48 MB). The original is still here."))
+                + "(64 MB). The original is still here."))
         #expect(!sourceFake.calls.contains("completeTransfer"))
-        #expect(hosts.failures.first?.sentence.contains("about 48 MB") == true)
+        #expect(hosts.failures.first?.sentence.contains(RequestBodyLimit.sentence) == true)
     }
 
     /// **Fails today**: `completeTransfer` failing is not distinguished from

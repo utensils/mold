@@ -87,8 +87,14 @@ struct ModelActionsTests {
         #expect(fake.callCount("deleteModel") == 0)
 
         captured?.perform()
-        await settle(until: { fake.callCount("deleteModel") == 1 })
+        // Settled on what the assertion reads. `deleteModel` records its call
+        // and appends its argument in the same turn, so a count adds nothing
+        // here -- but `perform()` starts an unstructured `Task`, and on a
+        // main actor shared with three other suites it can wait a while for
+        // its first turn.
+        await settle(until: { !fake.deletedModels.isEmpty })
         #expect(fake.deletedModels == ["flux-dev:q4"])
+        #expect(fake.callCount("deleteModel") == 1)
     }
 
     @Test func aRemovalThatKeptSomethingSaysWhatAndWhy() {

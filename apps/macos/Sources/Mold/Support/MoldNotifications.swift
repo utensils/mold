@@ -40,7 +40,9 @@ final class MoldNotifications {
     private let queue: QueueStore
     private let hosts: HostStore
     private let library: LibraryStore
-    private let center: any NotificationCenterProtocol
+    /// Not `private`: `+Delivery.swift` hands it every request, and
+    /// `private` does not cross a file boundary even within one type.
+    let center: any NotificationCenterProtocol
     private let defaults: UserDefaults
     private let coalesceDelay: Duration
     private let isBundled: Bool
@@ -49,12 +51,14 @@ final class MoldNotifications {
     private var pendingFinished: [MoldHost.ID: [LandedPrints.Landing]] = [:]
     private var coalescers: [MoldHost.ID: Task<Void, Never>] = [:]
     /// The one authorization request, once there is something to say.
-    private var authorization: Task<Void, Never>?
+    /// Written from `+Delivery.swift`, same cross-file reason as `center`.
+    var authorization: Task<Void, Never>?
     /// Every notification this object has handed the centre, chained: each
     /// waits for the one before it, and the first waits for authorization to
     /// be ANSWERED. Not `private(set)` for the app's sake -- nothing reads it
-    /// -- but for the tests', which await this instead of polling.
-    private(set) var deliveries: Task<Void, Never>?
+    /// -- but for the tests', which await this instead of polling. Written
+    /// from `+Delivery.swift`, so `internal` rather than `private(set)`.
+    var deliveries: Task<Void, Never>?
 
     /// Read live, the same reason `LandedPrints.enabled` is: this is a plain
     /// object, and the preference can change under it at any time.
@@ -130,45 +134,5 @@ final class MoldNotifications {
         guard shouldNotify else { return }
         let machine = hosts.host(host)?.name ?? "that machine"
         post(title: "Failed on \(machine)", body: sentence, userInfo: ["kind": "failure", "host": host.uuidString])
-    }
-
-    /// Asks once, and answers only when the person has ANSWERED.
-    ///
-    /// `requestAuthorization` is asynchronous, and the old code fired it and
-    /// called `add` in the same turn -- so the very first notification of a
-    /// session was posted while authorization was still `.notDetermined` and
-    /// was dropped. The person saw the permission alert and no notification,
-    /// which reads as the toggle not working.
-    private func authorized() async {
-        if let authorization { return await authorization.value }
-        let task = Task { [weak self] in
-            guard let self else { return }
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                center.requestAuthorization(options: [.alert, .sound]) { _, _ in
-                    continuation.resume()
-                }
-            }
-        }
-        authorization = task
-        await task.value
-    }
-
-    /// Chained rather than fired: each delivery waits for the one before it,
-    /// so they arrive in the order they were decided AND only the first pays
-    /// for authorization.
-    private func post(title: String, body: String, userInfo: [String: String]) {
-        let previous = deliveries
-        deliveries = Task { [weak self] in
-            await previous?.value
-            guard let self else { return }
-            await authorized()
-            let content = UNMutableNotificationContent()
-            content.title = title
-            content.body = body
-            content.userInfo = userInfo
-            center.add(
-                UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil),
-                withCompletionHandler: nil)
-        }
     }
 }

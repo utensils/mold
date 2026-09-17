@@ -44,9 +44,12 @@ struct RunQueueTests {
         #expect(controller.run.isBusy)
         controller.submit(on: plato, backend: backend)
 
-        await settle { backend.calls.filter { $0 == "submit" }.count == 2 }
-        await settle { controller.queuedCount == 1 }
+        // Settled on the STATE the assertions read, not on a call count: the
+        // fake records `submit` before the controller has adopted its answer,
+        // so the count is satisfied while `activeBatch` is still nil.
+        await settle { controller.activeBatch?.id == "batch-1" && controller.queuedCount == 1 }
 
+        #expect(backend.calls.filter { $0 == "submit" }.count == 2)
         #expect(controller.run.isBusy)
         #expect(controller.activeBatch?.id == "batch-1")
         #expect(controller.queuedCount == 1)
