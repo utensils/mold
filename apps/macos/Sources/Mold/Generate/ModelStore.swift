@@ -70,9 +70,10 @@ final class ModelStore {
     func hasLoaded(on host: MoldHost.ID) -> Bool { byHost[host] != nil }
 
     /// Only things a person would pick to make a picture: no prompt-expansion
-    /// LLMs, no upscalers, no ControlNets.
+    /// LLMs, no upscalers, no ControlNets -- and no mesh families, which this
+    /// app cannot yet draw (`Model.isPictureMaker`).
     func generators(on host: MoldHost.ID) -> [Model] {
-        (byHost[host] ?? []).filter(\.isGenerator)
+        (byHost[host] ?? []).filter(\.isPictureMaker)
     }
 
     /// Installed and complete, which is what can run right now.
