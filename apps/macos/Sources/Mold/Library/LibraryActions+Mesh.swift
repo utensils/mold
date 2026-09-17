@@ -24,4 +24,27 @@ extension LibraryActions {
             bytes, ceiling: min(ResponseCeiling.media, GLB.maximumBytes),
             what: "that mesh")
     }
+
+    /// A mesh's file for Quick Look: the host's POSTER, named `.png`.
+    ///
+    /// macOS ships no GLB preview generator, so materializing the stored
+    /// bytes gave the panel a container it draws a generic icon for -- after
+    /// downloading however many megabytes it was. The poster is the picture
+    /// the gallery tile already shows and the 3-D view's own home frame, so
+    /// previewing a mesh shows the mesh.
+    ///
+    /// The `.png` extension is the whole point: Quick Look routes on it, and
+    /// a poster written under the print's `.glb` name previews no better than
+    /// the mesh did.
+    func meshPosterFile(for entry: LibraryEntry) async -> (url: URL, title: String)? {
+        guard let materializer, let backend = hosts.backend(for: entry.hostID) else {
+            return nil
+        }
+        let stem = MeshExport.filename(entry.print.filename, format: "png")
+        let url = await materializer.url(for: entry, named: stem) {
+            try? await backend.thumbnail(entry.print.filename, size: 1024,
+                                         trashed: entry.print.trashedAt != nil)
+        }
+        return url.map { ($0, entry.print.displayName) }
+    }
 }

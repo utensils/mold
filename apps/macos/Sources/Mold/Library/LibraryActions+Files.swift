@@ -22,8 +22,22 @@ extension LibraryActions {
 
     /// Space. Downloads first, so the panel opens on the picture rather than
     /// on an empty frame that fills in later.
+    ///
+    /// A MESH is previewed by its poster (`meshPosterFile`): macOS ships no
+    /// GLB preview generator, so the stored bytes produced a generic icon --
+    /// after downloading all of them.
     func quickLook(_ entries: [LibraryEntry]) {
-        Task { QuickLook.shared.show(await files(for: entries)) }
+        Task {
+            var files: [(url: URL, title: String)] = []
+            for entry in entries {
+                if entry.print.isMesh {
+                    if let poster = await meshPosterFile(for: entry) { files.append(poster) }
+                } else if let file = await self.files(for: [entry]).first {
+                    files.append(file)
+                }
+            }
+            QuickLook.shared.show(files)
+        }
     }
 
     /// Saves several prints into one folder the person chose.

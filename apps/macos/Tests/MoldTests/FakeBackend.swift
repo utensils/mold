@@ -62,6 +62,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var serverStatus: ServerStatus?
     nonisolated(unsafe) var capabilityBlock: Capabilities?
     nonisolated(unsafe) var exportBlock: ExportOptions?
+    nonisolated(unsafe) var thumbnailAnswer: Data?
     /// Every mesh export body this double was asked for, in order.
     nonisolated(unsafe) var exportRequests: [MeshExportRequest] = []
     nonisolated(unsafe) var downloadTicket: DownloadTicket?
@@ -655,6 +656,11 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         try record("media")
         guard let mediaAnswer else { throw notPlanted() }
         return mediaAnswer
+    }
+    func thumbnail(_ filename: String, size: Int, trashed: Bool) async throws -> Data {
+        try record("thumbnail")
+        guard let thumbnailAnswer else { throw notPlanted() }
+        return thumbnailAnswer
     }
     func exportOptions() async throws -> ExportOptions {
         try record("exportOptions")

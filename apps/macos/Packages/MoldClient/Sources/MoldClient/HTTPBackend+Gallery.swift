@@ -69,6 +69,18 @@ public extension HTTPBackend {
         return try await bytes(for: request)
     }
 
+    /// The host's own rendered POSTER for a print, with the API key.
+    ///
+    /// Thumbnails are deliberately not ticketable (`MediaURL`), so this is the
+    /// one route that reaches one -- which is what lets Quick Look show a
+    /// mesh's poster instead of a container macOS has no previewer for.
+    func thumbnail(_ filename: String, size: Int, trashed: Bool) async throws -> Data {
+        var path = "/api/gallery/thumbnail/\(escaped(filename))"
+            + "?size=\(RouteEscaping.escapedQueryValue(String(size)))"
+        if trashed { path += "&view=trash" }
+        return try await bytes(for: request(path))
+    }
+
     /// The original bytes as stored.
     func media(_ filename: String, trashed: Bool) async throws -> Data {
         try await bytes(for: mediaRequest(filename, trashed: trashed))

@@ -63,15 +63,21 @@ final class PrintMaterializer {
     }
 
     /// A file for this print, downloading it if the cache has not got one.
-    func url(for entry: LibraryEntry, fetch: @escaping () async -> Data?) async -> URL? {
+    ///
+    /// `named` overrides the file's NAME inside the per-print folder, which is
+    /// what a mesh's Quick Look needs: its bytes are the host's poster, and a
+    /// `.png` written under a `.glb` name is a file macOS will not preview.
+    func url(for entry: LibraryEntry, named name: String? = nil,
+             fetch: @escaping () async -> Data?) async -> URL? {
         let key = Self.key(for: entry)
+        let filename = name ?? entry.print.filename
         // Both components are resolved through `SafeFilename`, which proves the
         // result is still inside the directory it was built from. The name was
         // already refused at the decode; this is the belt for that brace, and
         // it is what makes "server string, then `write(to:)`" untrue of this
         // function whatever else changes upstream of it.
         guard let folder = SafeFilename.url(key, in: cacheRoot),
-              let file = SafeFilename.url(entry.print.filename, in: folder)
+              let file = SafeFilename.url(filename, in: folder)
         else { return nil }
         if FileManager.default.fileExists(atPath: file.path) {
             touch(file)
@@ -81,7 +87,7 @@ final class PrintMaterializer {
         // two different prints that fall back to the same timestamp version
         // used to coalesce onto one download and hand one of them the
         // other's file.
-        let flightKey = "\(key)/\(entry.print.filename)"
+        let flightKey = "\(key)/\(filename)"
         if let running = inFlight[flightKey] { return await running.value }
 
         let task = Task<URL?, Never> { [file, folder] in

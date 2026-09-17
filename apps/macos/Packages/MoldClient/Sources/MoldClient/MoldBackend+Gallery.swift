@@ -17,6 +17,8 @@ public protocol MoldGalleryBackend: Sendable {
     /// The stored bytes. A trashed print lives behind the trash view, exactly
     /// as the listing does.
     func media(_ filename: String, trashed: Bool) async throws -> Data
+    /// The host's rendered poster for a print, at its own size.
+    func thumbnail(_ filename: String, size: Int, trashed: Bool) async throws -> Data
     func exportOptions() async throws -> ExportOptions
     /// Converts on the machine that holds the print, so the app needs no
     /// decoder for every container mold can write.
