@@ -98,9 +98,25 @@ struct AdvancedSettings: View {
             TableColumn("") { row in resetButton(row, machine: machine) }
                 .width(44)
         } rows: {
-            ForEach(rows) { row in TableRow(row) }
+            ForEach(rows) { row in
+                TableRow(row).contextMenu {
+                    RowActionMenu(actions: ConfigRowActions.offered(for: row.entry)) { kind in
+                        perform(kind, on: row.entry, machine: machine)
+                    }
+                }
+            }
         }
         .alternatingRowBackgrounds(.disabled)
+    }
+
+    /// The menu's one door. Reset is the SAME call the row's own Reset button
+    /// makes, so the column and the menu cannot drift.
+    private func perform(_ kind: ConfigRowActions.Kind, on entry: ConfigEntry, machine: MoldHost) {
+        if kind == .reset {
+            Task { await store.reset(entry.key, on: machine.id) }
+            return
+        }
+        ConfigRowActions.copied(kind, from: entry).map(Clipboard.put)
     }
 
     @ViewBuilder private func keyCell(_ row: Row) -> some View {

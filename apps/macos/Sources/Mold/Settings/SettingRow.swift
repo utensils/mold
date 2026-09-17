@@ -81,6 +81,14 @@ struct SettingRow: View {
             }
         }
         .task(id: entry) { text = entry.editableText }
+        // The same list Advanced's own rows carry, minus Reset: a curated
+        // pane has no reset control to mirror, and offering one only here
+        // would make the two panes disagree about what a row can do.
+        .contextMenu {
+            RowActionMenu(actions: ConfigRowActions.offered(for: entry).filter { $0.kind != .reset }) {
+                ConfigRowActions.copied($0, from: entry).map(Clipboard.put)
+            }
+        }
     }
 
     @ViewBuilder private var editor: some View {

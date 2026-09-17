@@ -55,6 +55,13 @@ struct MachinesSettings: View {
                     // A simultaneous gesture, so opening the editor does not
                     // cost the row its ordinary click-to-select.
                     .simultaneousGesture(TapGesture(count: 2).onEnded { edit(host) })
+                    .contextMenu {
+                        RowActionMenu(
+                            actions: MachineRowActions.offered(
+                                isManaged: isManaged(host),
+                                isDefault: hosts.defaultMachine == host.id)
+                        ) { perform($0, on: host) }
+                    }
             }
         }
         .alternatingRowBackgrounds()
@@ -115,6 +122,19 @@ struct MachinesSettings: View {
     private func removeSelected() {
         guard let selected else { return }
         remove(selected)
+    }
+
+    /// The right-click menu's one door. Every item ends up in the same call
+    /// the inline control makes -- `edit` and `remove` are literally the
+    /// footer's own buttons, so the two surfaces cannot drift apart.
+    private func perform(_ kind: MachineRowActions.Kind, on host: MoldHost) {
+        switch kind {
+        case .edit: edit(host)
+        case .checkNow: Task { await hosts.refresh(host) }
+        case .copyAddress: Clipboard.put(HostAddress.displayString(for: host.baseURL))
+        case .setDefault: hosts.setDefault(host)
+        case .remove: remove(host)
+        }
     }
 
     /// Asks first, always. The removal takes the machine's stored key with it
