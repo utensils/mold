@@ -20,7 +20,40 @@ Shell preferences or host editing).
 | UAT hooks ship in Release | fixed | `67184017` | `NativeUATTests` (3) |
 | context menus (explicit goal) | done | `05ed1032` | `RowActionTests` (7) |
 | README key sentences | done | `98cdd1e6` | — |
-| — file-size floor after the above | done | `3fd8a1b4` | — |
+| — file-size floor after the above | done | `3fd8a1b4`, `b8cd2ba7` | — |
+
+### Adversarial review (`review/REVIEW-E.md`), second pass
+
+| id | status | commit | test |
+|---|---|---|---|
+| E1 HIGH · a retried migration overwrites a NEWER key | fixed | `f352e654` | `HostSecretsTests.aRetriedMigrationKeepsTheKeyTheUserJustTyped`, `.anItemGoesOnlyAfterTheFileProvesItHasTheKey` |
+| E2 MED-HIGH · an UNREADABLE secrets.json is clobbered | fixed | `c62ebe7e` | `SecretStoreTests.anUnreadableFileIsNeverWrittenOver` |
+| E3 MED · a failed write leaves the document world-readable | fixed | `a853ce5d` | `SecretStoreTests.aTemporaryFileIsOwnerOnlyFromItsFirstByte`, `.aFailedWriteLeavesNoPlaintextBehind` |
+| E4 · `localEngineAPIKey` has no caller | intentional | — | see below |
+| E5 · the cross-lane list was incomplete | fixed | this file | — |
+| E6 · a package test cannot hold in Release | fixed | `0a24db66` | `SecretStoreTests.aFreshRunUsesAThrowawayDirectory` (both configurations run) |
+| info · two live writers clobber each other | fixed | `db95f051` | `SecretStoreTests.aSecondWriterDoesNotClobberTheFirst` |
+| info · no fsync before the Keychain delete | fixed | `a853ce5d` | — (covered by `writeOwnerOnly`) |
+| info · `LegacyKeychain` has no `MOLD_NATIVE_FRESH` gate | fixed | `f300191d` | `HostSecretsTests.aFreshRunNeverTouchesTheRealKeychain` |
+
+**E1** is the one that could have cost somebody a key: the file now WINS over the Keychain item,
+because it is newer by construction — nothing but a deliberate save puts a value there — and the
+item is deleted only once `persistedValue` (a fresh read from disk, never the cache that would
+answer with what we meant to write) says the file holds it. **E2** is a refusal rather than a park,
+because whatever stopped the read will stop the rename: reads AND writes throw, so the blank
+key field an unreadable store produces can no longer become a delete. **E3** creates the temp file
+`0600` at creation via `FileManager.createFile(atPath:contents:attributes:)`, inside the `do` that
+cleans up, and `fsync`s it before the rename.
+
+**E4 is deliberate and stays**: `SecretStore.localEngineAPIKey` and the `local-engine-api-key`
+allowlist entry have no caller in this lane. Lane F (Wave 2, 05-H1) is the caller, and it needs the
+API to exist before it can land. If Lane F slips, this moves with it.
+
+The review's remaining informational notes were taken except two, both stated rather than
+silently dropped: `HostPersistence.decode` still answers `nil` when EVERY element is malformed
+(the bytes are parked, nothing is lost, and re-seeding a list that read as nothing is the lesser
+wrong), and `ProviderSection`'s `.contextMenu` still opens empty for a provider with nothing
+stored (cosmetic).
 
 Not this lane, and marked so for Lane F: **H1**, **H2**, **H3**, **H4**, **M1–M10**, **M14–M17**,
 **L1** (CI), **L2**, **L3**, **L4**, **L8**, **L9** are engine / FFI / release / CI. **L7**
@@ -54,15 +87,48 @@ list names; it is untouched here.
   config rows get Copy Key / Copy Value / Copy `<env var>` / Reset to Default — a secret's value is
   never copyable; an Accounts provider gets Clear `<name>` Token on exactly `offersClear`.
 
-## Cross-lane
+## Cross-lane — every file this lane touched outside its own list
 
-- `Sources/Mold/Shell/RootView.swift` (2 lines) and `Sources/Mold/Support/HostStore.swift` (1 line)
-  now ask `NativeUAT` instead of `ProcessInfo` directly. No behaviour change in Debug. (`67184017`)
-- `Sources/Mold/Shell/ProviderSection.swift` gains a `.contextMenu` and a 4-line `menu` property.
-  Nobody's lane list names this file; it is Accounts' own row. (`05ed1032`)
-- `Packages/MoldClient/Sources/MoldClient/StoredHost.swift` — two doc-comment sentences that said
-  the key travels through the Keychain. Lane A owns the file; this is comment text only. (`f11a4779`)
-  Its test file's own such sentence, the same way, in this lane's last commit.
+Sequence the picks around these. Everything else the lane touched is in PLAN.md:130-131's own
+list (`Support/{Keychain,HostPersistence,HostStore+Editing,AppStorageSuite}.swift`,
+`Settings/**`, `Shell/{HostEditor,MachinesSettings,AccountsSettings}.swift`) or is a new file or
+a test.
+
+**Lane B — `Generate/**`**
+
+- `Generate/GeneratePane+UAT.swift` (2 hunks, `67184017`): `MOLD_NATIVE_SOURCE_IMAGE` and
+  `MOLD_NATIVE_LIBRARY_PICKER` read through `NativeUAT` instead of `ProcessInfo`, so a Release
+  build ignores them. `GenerateUAT.envVar` keeps its name and value. No Debug behaviour change.
+
+**Lane D — `Queue/**`, `Machines/**`**
+
+- `Queue/QueuePane+UAT.swift` (1 hunk, `67184017`): `MOLD_NATIVE_QUEUE_FIXTURE`, same change.
+- `Machines/PairingSection+UAT.swift` (1 hunk, `67184017`): `MOLD_NATIVE_PAIRING_FIXTURE`, same.
+
+**Lane A — `Packages/MoldClient/**`**
+
+- `StoredHost.swift` (`f11a4779`) and `Tests/MoldClientTests/StoredHostTests.swift` (`d022c847`):
+  doc-comment sentences only, naming `SecretStore` where they named the Keychain.
+- NEW files, no conflict surface: `SecretStore.swift`, `SecretStore+File.swift`,
+  `SecretStore+Local.swift`, `SecretStoreError.swift`, `Tests/…/SecretStoreTests.swift`.
+
+**Unassigned by PLAN.md, but touched here**
+
+- `Support/HostStore.swift` (1 hunk, `67184017`) — `MOLD_NATIVE_HOSTS` through `NativeUAT`.
+- `Support/NativeUAT.swift`, `Support/LegacyKeychain.swift` — NEW (the latter replaces the
+  deleted `Support/Keychain.swift`).
+- `Shell/RootView.swift` (2 hunks, `67184017`) — `MOLD_NATIVE_DESTINATION` through `NativeUAT`.
+- `Shell/GeneralSettings.swift` (2 hunks, `0322a6ea`) — the Reset button's two sentences, so
+  behaviour and copy agree (05-M13).
+- `Shell/ProviderSection.swift` (1 hunk, `05ed1032`) — a `.contextMenu` and a 4-line `menu`
+  property; it is the Accounts row `Shell/AccountsSettings.swift` renders.
+- NEW in `Shell/`: `RowAction.swift`, `MachineRowActions.swift`, `MachineRemoval.swift`,
+  `Clipboard.swift`.
+
+Every `67184017` hunk is the same mechanical substitution
+(`ProcessInfo.processInfo.environment["MOLD_NATIVE_…"]` → `NativeUAT.<case>.value()`), so a
+conflict there resolves by taking whichever side has the other lane's logic and re-applying the
+substitution.
 
 ## Requests for Lane F (do not act on these here)
 
@@ -81,11 +147,17 @@ list names; it is untouched here.
 
 ## Nothing judged wrong
 
-Every finding this lane took reproduced exactly as the report described it.
+Every finding this lane took — from `05-shell-engine-release.md` and from the adversarial review
+alike — reproduced exactly as described.
 
 ## Verification
 
 `make lint` green (three pre-existing large-type advisories only, none of them this lane's).
-`swift test` in `Packages/MoldClient`: **425** passed. Full app bundle `xcodebuild test`: **406** in
-62 suites passed. A Release build was made once to prove the `#else` arms compile and to count the
-hook strings in each binary; its output was deleted.
+`swift test` in `Packages/MoldClient`: **429** passed, and the same suite passes under
+`swift test -c release`. Full app bundle `xcodebuild test`: **409** in 62 suites passed. A Release
+build was made once to prove the `#else` arms compile and to count the hook strings in each binary
+(Debug dylib: all eight; Release executable: none); its output was deleted.
+
+One flake seen once, on a test this lane does not touch and which passes alone and on a re-run of
+the whole bundle: `ModelActionsTests.theMenuAndTheContextualMenuCallTheSameThing`. Recorded here
+rather than ignored.
