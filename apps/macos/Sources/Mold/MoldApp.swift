@@ -86,6 +86,7 @@ struct MoldApp: App {
             SidebarCommands()
             MoldCommands(destination: $destination)
             LibraryCommands()
+            ModelCommands()
         }
 
         Settings {

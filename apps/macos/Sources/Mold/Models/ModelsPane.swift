@@ -11,6 +11,7 @@ struct ModelsPane: View {
     @Environment(HostStore.self) var hosts
     @Environment(ModelStore.self) var models
     @Environment(DownloadStore.self) var downloads
+    @Environment(LicenseStore.self) var licenses
 
     /// The same key the sidebar and `MachinesPane` declare, over the same
     /// suite -- one notion of "the machine you are working on" rather than
@@ -21,6 +22,16 @@ struct ModelsPane: View {
     @AppStorage("modelsSortAscending", store: AppStorageSuite.defaults) var sortAscending = true
     @State var query = ""
     @State var selection: Model.ID?
+    // Not `private`: `ModelsPane+Actions` reads and writes these too, same
+    // file-boundary reason as the doc comment above.
+    @State var pendingDestruction: Destruction?
+    @State var componentsModel: Model?
+    @State var licenseInfo: ThirdPartyLicense?
+    /// A removal's own one-line report -- there is no `HostFailure`-shaped
+    /// funnel for a SUCCESS, so this is a transient caption under the table
+    /// rather than a new store-wide mechanism for the one caller that needs
+    /// it (design S5).
+    @State var removalSummary: String?
 
     /// `ModelSort` itself is not `@AppStorage`-able -- it is not a primitive
     /// and not `RawRepresentable` -- so this reads and writes the two scalar
@@ -39,6 +50,13 @@ struct ModelsPane: View {
         @Bindable var downloads = downloads
         VStack(spacing: 0) {
             content
+            if let removalSummary {
+                Text(removalSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+            }
             ModelsFooter(count: candidates.count, host: host, status: status)
         }
         .failureBanner(hosts)
@@ -49,6 +67,14 @@ struct ModelsPane: View {
         .sheet(item: $downloads.pendingLicense) { pending in
             LicenseSheet(pending: pending)
         }
+        .sheet(item: $componentsModel) { model in
+            if let host { ComponentsSheet(model: model, host: host) }
+        }
+        .sheet(item: $licenseInfo) { license in
+            LicenseInfoSheet(license: license)
+        }
+        .destructionDialog($pendingDestruction)
+        .focusedSceneValue(\.modelSelection, modelSelection)
         .task { await load() }
         .onChange(of: hosts.reachability) { _, _ in adoptPreferredHost() }
     }
@@ -75,56 +101,14 @@ struct ModelsPane: View {
         }
     }
 
-    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem {
-            Picker("Machine", selection: selectedHostID) {
-                ForEach(hosts.hosts) { host in
-                    Text(host.name).tag(MoldHost.ID?.some(host.id))
-                }
-            }
-        }
-        // The Discover scope lands in S6 alongside the catalog browser it
-        // has something to show; a one-segment picker in the meantime would
-        // be a control with nothing to switch.
-        if let host {
-            ToolbarItem { DownloadsButton(host: host) }
-        }
-    }
-
     func progress(_ model: Model) -> DownloadStore.Progress? {
         guard let host else { return nil }
         return downloads.progress(for: model.name, on: host.id)
     }
 
-    func install(_ model: Model) {
-        guard let host else { return }
-        Task { await downloads.install(model.name, on: host) }
-    }
-
-    /// The Cancel action for a row mid-download, or `nil` off it. The job id
-    /// comes straight from `DownloadStore.active`'s own keys -- `progress`
-    /// alone does not carry it, and this is the one place both the id and
-    /// its progress are read from the same dictionary together.
-    func cancel(_ model: Model) -> (() -> Void)? {
-        guard let host,
-              let job = downloads.active[host.id]?.first(where: { $0.value.model == model.name })
-        else { return nil }
-        return { Task { await downloads.cancel(jobID: job.key, on: host) } }
-    }
-
     private func load() async {
         await models.refresh()
         adoptPreferredHost()
-    }
-
-    /// `selectedMachine` read and written the way `HostStore.machine(selected:)`
-    /// expects: a `Binding<MoldHost.ID?>` over the stored `uuidString`, shared
-    /// with the sidebar and `MachinesPane` rather than a picker of its own.
-    private var selectedHostID: Binding<MoldHost.ID?> {
-        Binding(
-            get: { hosts.machine(selected: selectedMachine)?.id },
-            set: { selectedMachine = $0?.uuidString ?? "" }
-        )
     }
 
     /// Land on a machine once one has answered.

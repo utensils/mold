@@ -202,6 +202,36 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(ModelComponentsResponse.self, from: Data(json.utf8))
     }
 
+    /// One component row with a path and a repair name -- what a MISSING
+    /// component actually carries, which the plain three-field `rows:` above
+    /// always leaves null.
+    static func modelComponentRow(
+        kind: String, name: String, present: Bool, path: String? = nil, repairModel: String? = nil,
+        optionsCount: Int = 0
+    ) -> ModelComponentStatus {
+        let options = (0 ..< optionsCount).map {
+            #"{"label": "option-\#($0)", "path": "/models/option-\#($0)", "present": true}"#
+        }.joined(separator: ",")
+        let json = #"""
+        {"kind": "\#(kind)", "name": "\#(name)", "present": \#(present),
+         "path": \#(path.map { "\"\($0)\"" } ?? "null"),
+         "repair_model": \#(repairModel.map { "\"\($0)\"" } ?? "null"),
+         "options": [\#(options)]}
+        """#
+        return try! MoldJSON.decoder.decode(ModelComponentStatus.self, from: Data(json.utf8))
+    }
+
+    /// Assembles a listing from already-built rows, for a test that needs a
+    /// row `modelComponents(_:rows:)`'s plain tuple can't express -- a
+    /// missing component's repair name, or the 103-option `transformer` slot
+    /// measured on plato (design fact 4, M5).
+    static func modelComponents(_ model: String, statuses: [ModelComponentStatus]) -> ModelComponentsResponse {
+        let componentsData = try! MoldJSON.encoder.encode(statuses)
+        let componentsJSON = String(data: componentsData, encoding: .utf8)!
+        let json = #"{"model": "\#(model)", "components": \#(componentsJSON)}"#
+        return try! MoldJSON.decoder.decode(ModelComponentsResponse.self, from: Data(json.utf8))
+    }
+
     /// A frame from `GET /api/downloads/stream` -- `DownloadEvent` has no
     /// public memberwise init either. `listing` is what a `snapshot` frame
     /// carries; every other frame leaves it `nil`.

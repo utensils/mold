@@ -21,14 +21,12 @@ struct LibraryActions {
     /// read -- nothing here fetches bytes without it.
     var materializer: PrintMaterializer?
 
-    /// Something permanent, waiting on an answer.
-    struct Destruction: Identifiable {
-        let id = UUID()
-        let title: String
-        let message: String
-        let verb: String
-        let perform: () -> Void
-    }
+    /// Moved to `Shell/Destruction.swift` (M5 S5, decision 12) so the Models
+    /// pane can raise the same confirm without depending on a Library type.
+    /// Kept as a typealias so every existing `LibraryActions.Destruction` and
+    /// unqualified `Destruction(...)` inside this type's extensions still
+    /// compiles unchanged.
+    typealias Destruction = Mold.Destruction
 
     func toggleFavorite(_ entries: [LibraryEntry]) {
         // If any is not a favourite, the action makes them all favourites --

@@ -8,7 +8,7 @@ extension View {
     /// the sidebar's Empty Trash, and a collection's own delete -- and all
     /// three meant the same thing: never a typed phrase. Making somebody
     /// retype a word does not make them read the sentence.
-    func destructionDialog(_ pending: Binding<LibraryActions.Destruction?>) -> some View {
+    func destructionDialog(_ pending: Binding<Destruction?>) -> some View {
         confirmationDialog(
             pending.wrappedValue?.title ?? "",
             isPresented: Binding(get: { pending.wrappedValue != nil },
