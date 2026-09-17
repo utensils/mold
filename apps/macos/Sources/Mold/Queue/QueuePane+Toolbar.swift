@@ -14,9 +14,32 @@ extension QueuePane {
             }
             .disabled(queue.isLoading)
         }
+        if !queueGate.machines.isEmpty {
+            ToolbarItem { gateControl }
+        }
         if !emptyQueueTargets.isEmpty {
             ToolbarItem { emptyQueueControl }
         }
+    }
+
+    /// The whole-queue gate, from the SAME offer the Queue menu draws. One
+    /// machine is a plain button; more than one is a menu naming each --
+    /// Empty Queue…'s own idiom, so a mixed fleet is never ambiguous.
+    @ViewBuilder private var gateControl: some View {
+        let gate = queueGate
+        if gate.machines.count == 1, let machine = gate.machines.first {
+            Button(machine.title) { gate.toggle(machine.id) }
+        } else {
+            Menu("Queue") {
+                RowActionMenu(actions: gate.items(), perform: gate.toggle)
+            }
+        }
+    }
+
+    /// The machines whose queue is paused right now, so the pane can say so
+    /// whether or not they have rows.
+    var pausedMachines: [MoldHost] {
+        hosts.hosts.filter { queue.canPauseQueue(on: $0.id) && queue.isQueuePaused(on: $0.id) }
     }
 
     /// Not `private`: `QueuePane+Commands.swift`'s Empty Queue… item reads

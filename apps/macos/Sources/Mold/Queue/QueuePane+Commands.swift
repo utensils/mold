@@ -9,8 +9,20 @@ extension QueuePane {
     var queueSelection: QueueSelection? {
         let job = selectedJob
         let emptyQueue = emptyQueueAction
-        guard job != nil || emptyQueue != nil else { return nil }
-        return QueueSelection(job: job, emptyQueue: emptyQueue)
+        let gate = queueGate
+        guard job != nil || emptyQueue != nil || !gate.machines.isEmpty else { return nil }
+        return QueueSelection(job: job, gate: gate, emptyQueue: emptyQueue)
+    }
+
+    /// The whole-queue gate, per machine that advertises it. The pane's own
+    /// toolbar control reads this same value, so the two cannot disagree
+    /// about the word on them.
+    var queueGate: QueueGateOffer {
+        QueueGateOffer(
+            machines: QueueStore.gateTargets(hosts.hosts, capabilities: hosts.capabilities)
+                .map { QueueGateOffer.Machine(id: $0.id, name: $0.name,
+                                              isPaused: queue.isQueuePaused(on: $0.id)) },
+            toggle: { host in Task { await queue.toggleQueuePaused(on: host) } })
     }
 
     /// `selection` is one id across every host's flat rows AND every batch

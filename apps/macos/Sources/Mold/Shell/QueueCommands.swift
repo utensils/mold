@@ -31,6 +31,10 @@ struct QueueCommands: Commands {
 /// `ModelSelection` and `LibrarySelection` already take.
 struct QueueSelection: Equatable {
     let job: Job?
+    /// The whole-queue gate, per machine that advertises it. Defaulted to
+    /// EMPTY -- no machine offering it draws nothing, which is also what
+    /// every surface that does not carry the gate at all should get.
+    var gate = QueueGateOffer(machines: [], toggle: { _ in })
     /// `nil` when no machine advertises it (design decision 5) --
     /// `QueuePane+Commands.emptyQueueAction` mirrors
     /// `QueuePane+Toolbar.emptyQueueTargets` exactly.
@@ -53,7 +57,8 @@ struct QueueSelection: Equatable {
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.job == rhs.job && (lhs.emptyQueue == nil) == (rhs.emptyQueue == nil)
+        lhs.job == rhs.job && lhs.gate == rhs.gate
+            && (lhs.emptyQueue == nil) == (rhs.emptyQueue == nil)
     }
 
     /// Everything the Queue menu can offer: a row's own actions, a machine to
@@ -61,6 +66,7 @@ struct QueueSelection: Equatable {
     enum Item: Hashable {
         case act(QueueRowActions.Kind)
         case moveTo(MoldHost.ID)
+        case pauseQueue(MoldHost.ID)
         case emptyQueue
     }
 
@@ -89,6 +95,9 @@ struct QueueSelection: Equatable {
             if job.canCancel { items.append(QueueRowActions.item(.cancel).mapKind(Item.act)) }
         }
         items.append(.separator)
+        // The whole QUEUE, not a row -- which is why it sits with Empty
+        // Queue… rather than with the selected job's own pause.
+        items += gate.items().map { $0.mapKind(Item.pauseQueue) }
         if emptyQueue != nil { items.append(RowAction(kind: .emptyQueue, title: "Empty Queue…")) }
         return items
     }
@@ -109,6 +118,7 @@ struct QueueSelection: Equatable {
         case .act(.moveDown): job?.moveDown()
         case .act(.cancel): job?.cancel()
         case let .moveTo(host): job?.moveTo(host)
+        case let .pauseQueue(host): gate.toggle(host)
         case .emptyQueue: emptyQueue?()
         }
     }

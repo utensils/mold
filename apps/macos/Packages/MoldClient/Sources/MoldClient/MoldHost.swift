@@ -44,6 +44,10 @@ public struct ServerStatus: Hashable, Codable, Sendable {
     /// this (`routes.rs:5931-5948`, design fact 3, M5). `nil` on a host that
     /// predates the field, which is a real absence, not a zero.
     public let modelsDisk: ModelsDisk?
+    /// Whether this machine is dispatching new work at all
+    /// (`POST /api/queue/pause`). `nil` on a machine that predates the field,
+    /// which reads as not paused -- it has no gate to be behind.
+    public let queuePaused: Bool?
 
     public struct GPU: Hashable, Codable, Sendable {
         public let ordinal: Int

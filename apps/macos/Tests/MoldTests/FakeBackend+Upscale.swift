@@ -44,6 +44,13 @@ final class FakeExtras: @unchecked Sendable {
     /// unexpectedly fails the test rather than quietly getting an idle
     /// machine.
     nonisolated(unsafe) var activitySnapshot: ActiveWorkSnapshot?
+
+    /// Every whole-queue gate call, as `paused` was ASKED for.
+    nonisolated(unsafe) var gateCalls: [Bool] = []
+    /// What the gate answers with, overriding the ask -- how a test plants a
+    /// machine that refuses to move, and proves the store writes the
+    /// MACHINE's answer rather than its own intent.
+    nonisolated(unsafe) var gateAnswer: Bool?
 }
 
 extension FakeBackend {

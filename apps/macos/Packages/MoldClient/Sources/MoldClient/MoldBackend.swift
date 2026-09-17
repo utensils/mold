@@ -26,5 +26,6 @@ public protocol MoldBackend:
     MoldStatusBackend, MoldGenerationBackend, MoldCreateBackend, MoldQueueBackend,
     MoldDownloadsBackend, MoldLicencesBackend, MoldMachinesBackend, MoldGalleryBackend,
     MoldOrganizationBackend, MoldStreamsBackend, MoldModelsBackend, MoldCatalogBackend,
-    MoldConfigBackend, MoldChainBackend, MoldUpscaleBackend, MoldActivityBackend
+    MoldConfigBackend, MoldChainBackend, MoldUpscaleBackend, MoldActivityBackend,
+    MoldQueueGateBackend
 {}

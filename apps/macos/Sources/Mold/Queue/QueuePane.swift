@@ -24,7 +24,7 @@ struct QueuePane: View {
 
     var body: some View {
         Group {
-            if queue.all.isEmpty, alsoRunning.isEmpty {
+            if queue.all.isEmpty, alsoRunning.isEmpty, pausedMachines.isEmpty {
                 ContentUnavailableView(
                     queue.isLoading ? "Checking each machine…" : "Nothing queued",
                     systemImage: "list.bullet.indent",
@@ -32,14 +32,18 @@ struct QueuePane: View {
                 )
             } else {
                 List(selection: $selection) {
+                    // A paused machine says so whether or not it has rows:
+                    // an empty queue behind a closed gate looks exactly like
+                    // an idle machine, and it is not one.
+                    ForEach(pausedMachines) { host in
+                        Label(QueueGateOffer.pausedSentence(machine: host.name),
+                              systemImage: "pause.circle")
+                            .foregroundStyle(.secondary)
+                    }
                     ForEach(hosts.hosts) { host in
                         let entries = queue.entries(on: host.id)
                         if !entries.isEmpty {
                             Section(host.name) {
-                                if queue.queuePaused[host.id] == true {
-                                    Label("This machine's queue is paused.", systemImage: "pause.circle")
-                                        .foregroundStyle(.secondary)
-                                }
                                 rows(host: host, entries: entries)
                             }
                         }
