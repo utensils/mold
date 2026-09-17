@@ -13,31 +13,14 @@ struct QueueCommands: Commands {
 
     var body: some Commands {
         CommandMenu("Queue") {
-            if let job = selection?.job {
-                if job.canPause { Button("Pause Job", action: job.pause) }
-                if job.canResume { Button("Resume Job", action: job.resume) }
-                if job.canRetry { Button("Try Again", action: job.retry) }
-                if job.canMoveUp || job.canMoveDown {
-                    Divider()
-                    if job.canMoveUp { Button("Move Up", action: job.moveUp) }
-                    if job.canMoveDown { Button("Move Down", action: job.moveDown) }
-                }
-                if !job.moveToDestinations.isEmpty {
-                    Divider()
-                    MoveToMenu(destinations: job.moveToDestinations, send: job.moveTo)
-                }
-                if job.canCancel {
-                    Divider()
+            if let selection {
+                RowActionMenu(actions: selection.offered, perform: selection.perform) { item in
                     // ⌘⌫, the Library's own Move to Trash chord: the selected
                     // row leaves the queue from the keyboard, and Help ▸
-                    // Search finds it.
-                    Button("Cancel Job", role: .destructive, action: job.cancel)
-                        .keyboardShortcut(.delete, modifiers: .command)
+                    // Search finds it. The menu bar is the only surface that
+                    // carries chords -- a contextual menu shows none.
+                    item == .act(.cancel) ? KeyboardShortcut(.delete, modifiers: .command) : nil
                 }
-            }
-            if let emptyQueue = selection?.emptyQueue {
-                if selection?.job != nil { Divider() }
-                Button("Empty Queue…", action: emptyQueue)
             }
         }
     }
@@ -73,22 +56,61 @@ struct QueueSelection: Equatable {
         lhs.job == rhs.job && (lhs.emptyQueue == nil) == (rhs.emptyQueue == nil)
     }
 
-    /// The titles this selection actually offers, in the order the menu
-    /// draws them -- pulled out of `body` so a test can pin exactly what
-    /// shows without rendering a menu (design M6 S3).
-    var offeredTitles: [String] {
-        var titles: [String] = []
+    /// Everything the Queue menu can offer: a row's own actions, a machine to
+    /// send the job to, and emptying the whole queue.
+    enum Item: Hashable {
+        case act(QueueRowActions.Kind)
+        case moveTo(MoldHost.ID)
+        case emptyQueue
+    }
+
+    /// THE list the menu draws, grouped the way the menu bar groups it. It
+    /// used to be `body` and a hand-maintained `offeredTitles` beside it,
+    /// restating the same seven titles and the same seven gates -- and no
+    /// test could read `body`, so they agreed by hand.
+    ///
+    /// The separators are declared, so `RowAction.rendered` keeps this order
+    /// and only trims what the gating left out: an empty Move to ▸, and any
+    /// divider with nothing on one side of it.
+    var offered: [RowAction<Item>] {
+        var items: [RowAction<Item>] = []
         if let job {
-            if job.canPause { titles.append("Pause Job") }
-            if job.canResume { titles.append("Resume Job") }
-            if job.canRetry { titles.append("Try Again") }
-            if job.canMoveUp { titles.append("Move Up") }
-            if job.canMoveDown { titles.append("Move Down") }
-            if !job.moveToDestinations.isEmpty { titles.append("Move to") }
-            if job.canCancel { titles.append("Cancel Job") }
+            let row = QueueRowActions(pause: job.canPause, resume: job.canResume,
+                                      retry: job.canRetry, cancel: job.canCancel)
+            items += row.offered().filter { $0.kind != .cancel }.map { $0.mapKind(Item.act) }
+            items.append(.separator)
+            if job.canMoveUp { items.append(QueueRowActions.item(.moveUp).mapKind(Item.act)) }
+            if job.canMoveDown { items.append(QueueRowActions.item(.moveDown).mapKind(Item.act)) }
+            items.append(.separator)
+            items.append(RowAction(title: "Move to", children: job.moveToDestinations.map {
+                RowAction(kind: Item.moveTo($0.id), title: $0.caption)
+            }))
+            items.append(.separator)
+            if job.canCancel { items.append(QueueRowActions.item(.cancel).mapKind(Item.act)) }
         }
-        if emptyQueue != nil { titles.append("Empty Queue…") }
-        return titles
+        items.append(.separator)
+        if emptyQueue != nil { items.append(RowAction(kind: .emptyQueue, title: "Empty Queue…")) }
+        return items
+    }
+
+    /// The titles this selection actually offers, in the order the menu draws
+    /// them -- so a test can pin exactly what shows without rendering a menu
+    /// (design M6 S3). A submenu is named, not enumerated.
+    var offeredTitles: [String] {
+        RowAction.rendered(offered).filter { !$0.isSeparator }.map(\.title)
+    }
+
+    func perform(_ item: Item) {
+        switch item {
+        case .act(.pause): job?.pause()
+        case .act(.resume): job?.resume()
+        case .act(.retry): job?.retry()
+        case .act(.moveUp): job?.moveUp()
+        case .act(.moveDown): job?.moveDown()
+        case .act(.cancel): job?.cancel()
+        case let .moveTo(host): job?.moveTo(host)
+        case .emptyQueue: emptyQueue?()
+        }
     }
 }
 

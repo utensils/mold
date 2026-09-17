@@ -11,18 +11,26 @@ import SwiftUI
 struct RowActionMenu<Kind: Hashable>: View {
     let actions: [RowAction<Kind>]
     let perform: (Kind) -> Void
+    /// The menu bar's chords, asked per item. A contextual menu carries none,
+    /// which is why this answers nothing by default -- and why a chord is a
+    /// property of the SURFACE rather than of the action: the same Cancel Job
+    /// is ⌘⌫ in the Queue menu and bare on a row.
+    var shortcut: (Kind) -> KeyboardShortcut? = { _ in nil }
 
     var body: some View {
         ForEach(RowAction.rendered(actions)) { action in
             if action.isSeparator {
                 Divider()
             } else if action.isSubmenu {
-                Menu(action.title) { RowActionMenu(actions: action.children, perform: perform) }
+                Menu(action.title) {
+                    RowActionMenu(actions: action.children, perform: perform, shortcut: shortcut)
+                }
             } else if let kind = action.kind {
                 Button(action.title, role: action.isDestructive ? .destructive : nil) {
                     perform(kind)
                 }
                 .disabled(action.isDisabled)
+                .keyboardShortcut(shortcut(kind))
             }
         }
     }

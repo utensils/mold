@@ -70,6 +70,21 @@ struct QueueRowActions: Equatable {
     /// is the only way to reach a move from the keyboard.
     enum Kind: Hashable {
         case pause, resume, retry, moveUp, moveDown, cancel
+
+        /// The words, ONCE. A row's contextual menu and the Queue menu in the
+        /// menu bar spelt all six of these out separately, ten files apart,
+        /// and a comment claimed a test held them together -- which no test
+        /// could, because one of the two lists was a `body`.
+        var title: String {
+            switch self {
+            case .pause: "Pause Job"
+            case .resume: "Resume Job"
+            case .retry: "Try Again"
+            case .moveUp: "Move Up"
+            case .moveDown: "Move Down"
+            case .cancel: "Cancel Job"
+            }
+        }
     }
 
     /// THE list the contextual menu draws -- rendered by `.rowActionMenu`,
@@ -82,13 +97,20 @@ struct QueueRowActions: Equatable {
     /// than a comment claiming it.
     func offered(canMoveUp: Bool = false, canMoveDown: Bool = false) -> [RowAction<Kind>] {
         var items: [RowAction<Kind>] = []
-        if pause { items.append(RowAction(kind: .pause, title: "Pause Job")) }
-        if resume { items.append(RowAction(kind: .resume, title: "Resume Job")) }
-        if retry { items.append(RowAction(kind: .retry, title: "Try Again")) }
-        if canMoveUp { items.append(RowAction(kind: .moveUp, title: "Move Up")) }
-        if canMoveDown { items.append(RowAction(kind: .moveDown, title: "Move Down")) }
-        if cancel { items.append(RowAction(kind: .cancel, title: "Cancel Job", isDestructive: true)) }
+        if pause { items.append(Self.item(.pause)) }
+        if resume { items.append(Self.item(.resume)) }
+        if retry { items.append(Self.item(.retry)) }
+        if canMoveUp { items.append(Self.item(.moveUp)) }
+        if canMoveDown { items.append(Self.item(.moveDown)) }
+        if cancel { items.append(Self.item(.cancel)) }
         return RowAction.ordered(items)
+    }
+
+    /// One row of a queue menu, wherever it is drawn. Cancel is the only
+    /// destructive one, so it is last and behind a divider by
+    /// `RowAction.rendered`'s rule rather than by each surface's.
+    static func item(_ kind: Kind) -> RowAction<Kind> {
+        RowAction(kind: kind, title: kind.title, isDestructive: kind == .cancel)
     }
 
     /// A whole batch's menu. The same gates and the same order; the words say
