@@ -32,7 +32,14 @@ extension GenerateController {
         let followingNow = !run.isBusy
         if followingNow {
             run = .submitting
-            runTask?.cancel()
+            // NEVER while a POST is unanswered. `runTask` is the whole
+            // submit-and-follow task, so cancelling it there would abort a
+            // request the host has very likely already admitted -- leaving a
+            // render nobody holds the id of. Only a FOLLOW is interruptible
+            // (finding 02#2, one step further along).
+            if !submissions.hasUnansweredPost {
+                runTask?.cancel()
+            }
             submissions.begin(admission.clientBatchId)
         }
         let task = Task { [weak self] in
@@ -49,7 +56,9 @@ extension GenerateController {
                 case .cancel:
                     PendingBatch.forget(admission.clientBatchId)
                     self.cancelOnItsMachine(active)
-                    self.followNext()
+                    // Only if nothing has taken the canvas since: a withdrawn
+                    // render must not displace the one that replaced it.
+                    if !self.run.isBusy { self.followNext() }
                 case .queue:
                     self.queued.append(active)
                 case .follow:
@@ -57,8 +66,13 @@ extension GenerateController {
                     await self.follow(accepted, backend: backend, host: host.id)
                 }
             } catch {
-                PendingBatch.forget(admission.clientBatchId)
                 guard let self else { return }
+                // A CANCELLED post may well have reached the host. Forgetting
+                // its recovery record would orphan exactly the render the
+                // fence exists to keep findable.
+                if !(error is CancellationError) {
+                    PendingBatch.forget(admission.clientBatchId)
+                }
                 guard followingNow else {
                     // The render on screen is unaffected by a second one
                     // failing to be admitted -- report it, don't replace `run`.
@@ -67,8 +81,9 @@ extension GenerateController {
                 }
                 switch self.submissions.land(admission.clientBatchId) {
                 case .follow: self.run = .failed(error.sentence)
-                // Stop already answered for this one; the queue still moves.
-                case .cancel: self.followNext()
+                // Stop already answered for this one; the queue still moves,
+                // unless something has taken the canvas since.
+                case .cancel: if !self.run.isBusy { self.followNext() }
                 // Superseded: a failure here must not replace what took the
                 // canvas from it.
                 case .queue: break
@@ -84,7 +99,7 @@ extension GenerateController {
     func follow(_ initial: BatchStatus, backend: any MoldBackend,
                 host: MoldHost.ID) async {
         run = .running(initial, nil)
-        let preview = pollPreview(initial, backend: backend)
+        let preview = PreviewPoll.follow(initial, backend: backend, of: self)
         defer { preview.cancel() }
 
         do {
@@ -114,30 +129,6 @@ extension GenerateController {
             // host the job is still going to run. Not a settlement -- the
             // queue does not advance on its own here.
             run = .failed("Lost contact while rendering. The job may still be running — check the Queue.")
-        }
-    }
-
-    /// Step progress and the denoise preview, which the events stream
-    /// deliberately does not carry.
-    ///
-    /// With several children, one settles while the others keep running --
-    /// so this re-reads the current run's status every tick and follows
-    /// whichever child is still live, falling back to the last one it had
-    /// rather than going quiet the moment the first child finishes.
-    private func pollPreview(_ status: BatchStatus, backend: any MoldBackend) -> Task<Void, Never> {
-        var target = status.children.first?.jobId
-        return Task { [weak self] in
-            while !Task.isCancelled {
-                if case let .running(current, _) = self?.run {
-                    target = current.children.first { $0.state.isLive }?.jobId ?? target
-                }
-                if let jobId = target,
-                   let progress = try? await backend.jobPreview(jobId: jobId),
-                   case let .running(current, _) = self?.run {
-                    self?.run = .running(current, progress)
-                }
-                try? await Task.sleep(for: .milliseconds(700))
-            }
         }
     }
 

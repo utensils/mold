@@ -11,18 +11,20 @@ import Foundation
 /// `PendingBatch` for launch recovery to find. The user pressed Stop, saw an
 /// error banner, and the GPU kept going (finding 02#2).
 ///
-/// This is the fence. One admission at a time, and a flag saying whether Stop
-/// was pressed before the host answered -- the submit task asks on the way out
-/// and cancels the id the HOST returned, which is the only id that can be
-/// cancelled.
+/// This is the fence, and it is KEYED BY CLIENT BATCH ID rather than a single
+/// slot. A single slot lost the stop the moment Generate was pressed again --
+/// `run` goes `.idle` on Stop, so the button is live immediately -- and the
+/// withdrawn batch then landed as an ordinary queued one and took the canvas
+/// later, never cancelled. A stop belongs to the ID it was aimed at and
+/// survives any number of later submissions.
 @MainActor
 final class SubmissionFence {
     /// What the in-flight admission should do once the host answers.
     enum Landing: Equatable {
         /// Follow it, as usual.
         case follow
-        /// Stop was pressed while it was in the air: cancel the id the host
-        /// just minted and drop its recovery record.
+        /// Stop was pressed for THIS id while it was in the air: cancel the
+        /// batch the host just minted and drop its recovery record.
         case cancel
         /// Another submission took the canvas while this one was in the air.
         /// It is a perfectly good batch -- it queues, exactly as a second
@@ -30,30 +32,51 @@ final class SubmissionFence {
         case queue
     }
 
-    private var inFlight: String?
-    private var stopRequested = false
+    /// The id the canvas is following, while its POST is unanswered.
+    private var following: String?
+    /// Every POST still in the air, stopped or not. A submit task must never
+    /// be cancelled while one of these is outstanding.
+    private var unanswered: Set<String> = []
+    /// Ids whose Stop was pressed before the host answered.
+    private var stopped: Set<String> = []
 
-    /// Whether a submission the canvas is following is still unanswered.
-    var isPending: Bool { inFlight != nil }
+    /// Whether the canvas is waiting on an admission it would follow.
+    var isPending: Bool { following != nil }
+
+    /// Whether any POST at all is still unanswered -- including one the user
+    /// has already stopped, which still has to reach its `land` so the batch
+    /// the host minted can be cancelled.
+    var hasUnansweredPost: Bool { !unanswered.isEmpty }
 
     func begin(_ clientBatchId: String) {
-        inFlight = clientBatchId
-        stopRequested = false
+        following = clientBatchId
+        unanswered.insert(clientBatchId)
+        // A fresh id cannot carry an older id's stop, and must not clear one.
+        stopped.remove(clientBatchId)
     }
 
-    /// What to do with the admission that just landed.
+    /// What to do with the admission that just landed. A recorded stop wins
+    /// over everything else, whatever has taken the canvas since.
     func land(_ clientBatchId: String) -> Landing {
-        guard inFlight == clientBatchId else { return .queue }
-        inFlight = nil
-        defer { stopRequested = false }
-        return stopRequested ? .cancel : .follow
+        unanswered.remove(clientBatchId)
+        guard stopped.remove(clientBatchId) == nil else {
+            if following == clientBatchId { following = nil }
+            return .cancel
+        }
+        guard following == clientBatchId else { return .queue }
+        following = nil
+        return .follow
     }
 
     /// Records that Stop was pressed. `false` means nothing was in the air,
     /// which is the caller's cue to stop the batch on screen instead.
+    ///
+    /// The id stops being the FOLLOWED one at once: a render the user
+    /// withdrew must never take the canvas when its answer arrives.
     func requestStop() -> Bool {
-        guard inFlight != nil else { return false }
-        stopRequested = true
+        guard let following else { return false }
+        stopped.insert(following)
+        self.following = nil
         return true
     }
 }

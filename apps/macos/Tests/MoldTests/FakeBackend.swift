@@ -112,6 +112,18 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// Set before a `submit` to hold it in the air until `releaseSubmit()`.
     nonisolated(unsafe) var holdsSubmit = false
     nonisolated(unsafe) private var submitGate: (() -> Void)?
+    /// A release that arrived before the gate was installed -- `settle` sees
+    /// the call RECORDED before `submit` has suspended, so without this (and
+    /// without the lock ordering the two) a release lands in the window
+    /// between and the test hangs to its timeout.
+    nonisolated(unsafe) private var submitReleased = false
+    /// `submitAnswers`, `submittedAdmissions` and the gate are all touched
+    /// from two cooperative threads the moment two presses overlap. Unguarded
+    /// `Array.removeFirst()` from two threads is a data race AND makes which
+    /// press gets which answer a coin toss -- which is the real cause of
+    /// `aSecondGenerateWhileOneRunsIsAdmittedAndQueued`'s flake, not a
+    /// `settle` timing out.
+    private let submitLock = NSLock()
     /// Planted per `id`, since a test drives `submit` then reads the same
     /// batch back through `batchStatus(id:)` once its events stream ends.
     nonisolated(unsafe) var batchStatusAnswers: [String: BatchStatus] = [:]
@@ -238,18 +250,45 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     }
     func submit(_ admission: BatchAdmission) async throws -> BatchStatus {
         try record("submit")
-        submittedAdmissions.append(admission)
+        // The answer is claimed BEFORE any suspension, under the lock, so two
+        // overlapping presses get their answers in submission order however
+        // their tasks interleave.
+        let (claimed, holding) = submitLock.withLock { () -> (BatchStatus?, Bool) in
+            submittedAdmissions.append(admission)
+            let answer = submitAnswers.isEmpty ? nil : submitAnswers.removeFirst()
+            let held = holdsSubmit
+            holdsSubmit = false
+            return (answer, held)
+        }
+
         // Held open so a test can press Stop while an admission is GENUINELY
         // in the air -- the window finding 02#2 is about.
-        if holdsSubmit {
-            holdsSubmit = false
+        if holding {
             await withCheckedContinuation { continuation in
-                submitGate = { continuation.resume() }
+                submitLock.lock()
+                if submitReleased {
+                    submitReleased = false
+                    submitLock.unlock()
+                    continuation.resume()
+                } else {
+                    submitGate = { continuation.resume() }
+                    submitLock.unlock()
+                }
             }
         }
-        if !submitAnswers.isEmpty { return submitAnswers.removeFirst() }
+        if let claimed { return claimed }
         guard let submitAnswer else { throw notPlanted() }
         return submitAnswer
+    }
+
+    /// Lets a held-open `submit` answer, whether or not it has suspended yet.
+    func releaseSubmit() {
+        submitLock.lock()
+        let gate = submitGate
+        submitGate = nil
+        if gate == nil { submitReleased = true }
+        submitLock.unlock()
+        gate?()
     }
     func batchStatus(id: String) async throws -> BatchStatus {
         try record("batchStatus")
@@ -274,7 +313,8 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     }
     func cancelBatch(id: String) async throws {
         try record("cancelBatch")
-        cancelledBatchIds.append(id)
+        // Two withdrawn submissions can land from two threads.
+        submitLock.withLock { cancelledBatchIds.append(id) }
     }
 
     // MARK: - Create
@@ -624,13 +664,6 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
             self.batchEventsContinuations[id] = continuation
         }
     }
-    /// Lets a held-open `submit` answer.
-    func releaseSubmit() {
-        let gate = submitGate
-        submitGate = nil
-        gate?()
-    }
-
     /// Pushes one frame into an id's held-open `batchEvents` stream.
     func emitBatchEvent(_ status: BatchStatus, for id: String) {
         batchEventsContinuations[id]?.yield(status)

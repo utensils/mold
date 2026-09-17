@@ -83,6 +83,10 @@ extension GenerateController {
         // The submit task cancels the id the host returns (finding 02#2).
         if submissions.requestStop() {
             run = .idle
+            // Anything already waiting starts now rather than sitting behind
+            // a POST the user has withdrawn; that POST's own landing checks
+            // `run.isBusy` before it advances the queue again.
+            followNext()
             return
         }
         guard let active = activeBatch else {

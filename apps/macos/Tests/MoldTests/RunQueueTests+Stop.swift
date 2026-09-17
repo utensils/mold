@@ -28,6 +28,14 @@ struct RunStopFenceTests {
         FakeFixtures.batchStatus(id: id, clientBatchId: clientId, [.init(1, state: "running")])
     }
 
+    /// The client batch id the pane minted for its nth submission, so a test
+    /// plants an answer the fake will hand back for that exact admission.
+    private func clientId(_ backend: FakeBackend, _ index: Int) -> String {
+        backend.submittedAdmissions[index].clientBatchId
+    }
+
+    // MARK: - Stop before the answer
+
     /// **Fails today**: `stop()` guards on `activeBatch`, which on a
     /// first-ever render is nil -- so Stop did nothing at all while the POST
     /// already on its way was admitted, rendered to completion and was never
@@ -51,6 +59,7 @@ struct RunStopFenceTests {
         #expect(backend.cancelledBatchIds == ["batch-1"])
         #expect(controller.activeBatch == nil)
         #expect(!backend.calls.contains("batchEvents"))
+        #expect(!PendingBatch.all().keys.contains(clientId(backend, 0)))
     }
 
     /// **Fails today**: Stop during `.submitting` cancelled the PREVIOUS,
@@ -60,8 +69,7 @@ struct RunStopFenceTests {
         let plato = machine()
         let backend = FakeBackend(host: plato)
         let controller = makeController(backend, host: plato)
-        let first = status("batch-1", "client-1")
-        backend.submitAnswers = [first, status("batch-2", "client-2")]
+        backend.submitAnswers = [status("batch-1", "client-1"), status("batch-2", "client-2")]
         backend.batchStatusAnswers["batch-1"] = FakeFixtures.batchStatus(
             id: "batch-1", clientBatchId: "client-1", [.init(1, state: "complete", seed: 7)])
 
@@ -80,10 +88,14 @@ struct RunStopFenceTests {
         #expect(backend.cancelledBatchIds == ["batch-2"])
     }
 
-    /// A second press while a Stop-ed submission is still in the air takes the
-    /// canvas; the earlier one queues rather than being cancelled or stomping
-    /// over what replaced it (M8 decision 8).
-    @Test func aSubmissionSupersededWhileInFlightQueuesInstead() async {
+    // MARK: - Stop, then Generate again before the answer
+
+    /// **Fails today**: the fence held ONE `stopRequested` flag, and `begin`
+    /// reset it -- so pressing Generate again while the stopped POST was still
+    /// in the air discarded the Stop entirely. The withdrawn batch landed as
+    /// an ordinary queued one, was never cancelled, and took the canvas later.
+    /// A user who presses Stop has withdrawn that render.
+    @Test func aStoppedSubmissionIsStillCancelledWhenAnotherTakesTheCanvas() async {
         let plato = machine()
         let backend = FakeBackend(host: plato)
         let controller = makeController(backend, host: plato)
@@ -99,10 +111,124 @@ struct RunStopFenceTests {
         await settle { backend.calls.filter { $0 == "submit" }.count == 2 }
         backend.releaseSubmit()
 
-        await settle { controller.queuedCount == 1 }
-        #expect(backend.cancelledBatchIds.isEmpty)
-        #expect(controller.queuedCount == 1)
+        await settle { backend.cancelledBatchIds.count == 1 }
+        #expect(backend.cancelledBatchIds == ["batch-1"])
+        // Withdrawn, so it never queues and never takes the canvas.
+        #expect(controller.queuedCount == 0)
+        #expect(controller.activeBatch?.id != "batch-1")
+        #expect(!PendingBatch.all().keys.contains(clientId(backend, 0)))
     }
+
+    /// The second press must not abort the first POST either: `runTask` is the
+    /// whole submit-and-follow task, and cancelling it would leave the host
+    /// running a batch nobody holds the id of.
+    @Test func aSecondPressNeverAbortsAnUnansweredPost() async {
+        let plato = machine()
+        let backend = FakeBackend(host: plato)
+        let controller = makeController(backend, host: plato)
+        backend.submitAnswers = [status("batch-1", "client-1"), status("batch-2", "client-2")]
+        backend.batchEventsHeldOpen.insert("batch-2")
+        backend.holdsSubmit = true
+
+        controller.submit(on: plato, backend: backend)
+        await settle { backend.calls.contains("submit") }
+        controller.stop()
+        controller.submit(on: plato, backend: backend)
+        await settle { backend.calls.filter { $0 == "submit" }.count == 2 }
+        backend.releaseSubmit()
+
+        // It answered rather than throwing a cancellation, which is what lets
+        // the cancel above reach the host at all.
+        await settle { backend.cancelledBatchIds.count == 1 }
+        #expect(backend.submittedAdmissions.count == 2)
+    }
+
+    // MARK: - Stop, then the submission FAILS
+
+    /// A POST that is refused after a Stop reports nothing and replaces
+    /// nothing: the user already withdrew it.
+    @Test func aStoppedSubmissionThatFailsIsSilent() async {
+        let plato = machine()
+        let backend = FakeBackend(host: plato)
+        let controller = makeController(backend, host: plato)
+        backend.refuses = ["submit"]
+        backend.holdsSubmit = true
+
+        controller.submit(on: plato, backend: backend)
+        await settle { backend.calls.contains("submit") }
+        controller.stop()
+        backend.releaseSubmit()
+        await settle { !controller.submissions.hasUnansweredPost }
+
+        guard case .idle = controller.run else {
+            Issue.record("expected .idle, got \(controller.run)")
+            return
+        }
+        #expect(controller.hosts.failures.isEmpty)
+    }
+
+    // MARK: - Two stops
+
+    /// Two withdrawn submissions are two cancels, in whatever order they land.
+    @Test func twoStoppedSubmissionsAreBothCancelled() async {
+        let plato = machine()
+        let backend = FakeBackend(host: plato)
+        let controller = makeController(backend, host: plato)
+        backend.submitAnswers = [status("batch-1", "client-1"), status("batch-2", "client-2")]
+
+        backend.holdsSubmit = true
+        controller.submit(on: plato, backend: backend)
+        await settle { backend.calls.contains("submit") }
+        controller.stop()
+        backend.releaseSubmit()
+        await settle { backend.cancelledBatchIds.count == 1 }
+
+        backend.holdsSubmit = true
+        controller.submit(on: plato, backend: backend)
+        await settle { backend.calls.filter { $0 == "submit" }.count == 2 }
+        controller.stop()
+        backend.releaseSubmit()
+        await settle { backend.cancelledBatchIds.count == 2 }
+
+        #expect(backend.cancelledBatchIds == ["batch-1", "batch-2"])
+        #expect(controller.queuedCount == 0)
+    }
+
+    // MARK: - The fence itself
+
+    /// The keyed rule, without a backend: a stop belongs to the ID it was
+    /// aimed at and survives any number of later submissions.
+    @Test func theFenceRemembersAStopPerClientBatchId() {
+        let fence = SubmissionFence()
+        fence.begin("a")
+        #expect(fence.requestStop())
+        fence.begin("b")
+        #expect(fence.land("a") == .cancel)
+        #expect(fence.land("b") == .follow)
+
+        // Nothing in the air is the caller's cue to stop what is on screen.
+        #expect(!fence.requestStop())
+
+        // A superseded submission queues; it was never withdrawn.
+        fence.begin("c")
+        fence.begin("d")
+        #expect(fence.land("c") == .queue)
+        #expect(fence.land("d") == .follow)
+
+        // An unanswered POST is what forbids cancelling the submit task.
+        fence.begin("e")
+        #expect(fence.hasUnansweredPost)
+        _ = fence.land("e")
+        #expect(!fence.hasUnansweredPost)
+        // Including one already stopped -- it still has to reach its landing.
+        fence.begin("f")
+        _ = fence.requestStop()
+        #expect(fence.hasUnansweredPost)
+        #expect(fence.land("f") == .cancel)
+        #expect(!fence.hasUnansweredPost)
+    }
+
+    // MARK: - The beat before the next batch (02#9)
 
     /// **Fails today**: `settle` called `followNext()` in the same turn, so
     /// the first batch's picture, result bar and failure summary could be
