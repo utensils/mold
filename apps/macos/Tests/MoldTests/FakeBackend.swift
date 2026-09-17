@@ -225,8 +225,16 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// that asking one machine does not stop the others being asked.
     nonisolated(unsafe) var statusHeldOpen = false
     nonisolated(unsafe) private var statusWaiters: [CheckedContinuation<Void, Never>] = []
+    /// The release is a LATCH, not a broadcast. `releaseStatus()` used to
+    /// resume whoever happened to be waiting at that instant, so a `status()`
+    /// that had recorded its call but not yet parked its continuation waited
+    /// for a wake-up that had already happened -- and `settle`, being bounded,
+    /// returned long before the test's own `await tick.value` hung the whole
+    /// bundle. Measured: 22 minutes, one suite, no output.
+    nonisolated(unsafe) private var statusReleased = false
 
     func releaseStatus() {
+        statusReleased = true
         let waiting = statusWaiters
         statusWaiters = []
         for continuation in waiting { continuation.resume() }
@@ -234,7 +242,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     func status() async throws -> ServerStatus {
         try record("status")
-        if statusHeldOpen {
+        if statusHeldOpen, !statusReleased {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 statusWaiters.append(continuation)
             }
