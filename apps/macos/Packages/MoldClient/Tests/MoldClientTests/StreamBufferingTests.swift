@@ -96,9 +96,11 @@ private final class CountingBytes: AsyncSequence, @unchecked Sendable {
     // body -- so the lead is what tells them apart.
     let construction = /(?<lead>->[ ]*)?AsyncThrowingStream(<[^>]*>)?(?<open>[ ]*[({])/
     var unpoliced: [String] = []
+    var buffers: [String] = []
     for file in files {
         let source = try String(contentsOf: file, encoding: .utf8)
         for match in source.matches(of: construction) where match.lead == nil {
+            buffers.append(file.lastPathComponent)
             let policed = match.open.hasSuffix("(")
                 && source[match.range.upperBound...].hasPrefix("bufferingPolicy:")
             guard !policed else { continue }
@@ -107,4 +109,16 @@ private final class CountingBytes: AsyncSequence, @unchecked Sendable {
         }
     }
     #expect(unpoliced == [])
+
+    // **Fails today**: `stream(_:timeout:)` builds one too, STACKED under
+    // each of these -- so `events()`'s declared 512 was 512 on top of another
+    // independent 512, and "one buffer in the pipeline" was not true. The
+    // four routes are the only places a buffer belongs, because they are the
+    // only places that know what losing a frame COSTS.
+    #expect(Set(buffers) == [
+        "HTTPBackend+Events.swift",     // MoldEvent
+        "HTTPBackend+Work.swift",       // DownloadEvent
+        "HTTPBackend+Generation.swift", // BatchStatus
+        "HTTPBackend+Machines.swift",   // ResourceSnapshot
+    ])
 }

@@ -12,18 +12,20 @@ extension HTTPBackend {
     /// client that treats an unrecognised tag as a failure breaks the first
     /// time a machine is upgraded ahead of it.
     ///
-    /// Each frame is its own fact -- a print appearing, a job landing -- so
-    /// the policy is a generous ceiling rather than "keep the latest"
-    /// (`StreamBuffering.frames`).
+    /// Each frame is a piece of state this client will not be told again, so
+    /// a loss is never silent: the buffer keeps the NEWEST
+    /// (`StreamBuffering.frames`) and `yieldOrResync` announces any drop as
+    /// `.resyncRequired`, which is what the server itself sends when ITS
+    /// buffer overruns.
     public func events() -> AsyncThrowingStream<MoldEvent, Error> {
-        AsyncThrowingStream(bufferingPolicy: .bufferingOldest(StreamBuffering.frames)) { continuation in
+        AsyncThrowingStream(bufferingPolicy: .bufferingNewest(StreamBuffering.frames)) { continuation in
             let task = Task {
                 do {
                     // An idle machine says nothing for hours, and that is the
                     // stream working rather than the stream stuck.
                     for try await frame in stream("/api/events", timeout: 86_400) {
                         if let event = MoldEvent(name: frame.name, data: frame.data) {
-                            continuation.yield(event)
+                            continuation.yieldOrResync(event)
                         }
                     }
                     continuation.finish()
