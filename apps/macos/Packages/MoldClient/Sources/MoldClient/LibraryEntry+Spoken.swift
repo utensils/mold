@@ -33,8 +33,9 @@ public extension LibraryEntry {
     }
 
     private func remaining(_ now: Date) -> String {
-        guard let purge = print.purgeAt else { return "no purge date" }
-        let days = Int((Double(purge) - now.timeIntervalSince1970) / 86_400)
+        guard let days = TrashCountdown.days(until: print.purgeAt, now: now) else {
+            return "no purge date"
+        }
         if days <= 0 { return "today" }
         return days == 1 ? "1 day left" : "\(days) days left"
     }

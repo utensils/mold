@@ -56,8 +56,8 @@ struct LibraryCell: View {
     /// How long the machine will keep a trashed print. Each one carries its
     /// own countdown, which is why the trash is never collapsed or grouped.
     @ViewBuilder private var trashCountdown: some View {
-        if let purge = entry.print.purgeAt {
-            let days = max(0, Int((Double(purge) - Date.now.timeIntervalSince1970) / 86_400))
+        if let left = TrashCountdown.days(until: entry.print.purgeAt) {
+            let days = max(0, left)
             Text(days == 0 ? "today" : "\(days)d")
                 .font(.caption2)
                 .monospacedDigit()
@@ -66,7 +66,7 @@ struct LibraryCell: View {
                 .padding(.vertical, 2)
                 .background(Chrome.badgeBackdrop, in: Capsule())
                 .padding(5)
-                .help("Purged in \(days) days")
+                .help(days == 0 ? "Purged today" : "Purged in \(days) days")
         }
     }
 

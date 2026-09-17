@@ -1,10 +1,6 @@
 import MoldClient
 import SwiftUI
 
-// `SizeMenu` (one buried "1024 × 1024" menu) is retired -- `ShapeControl.swift`
-// replaces it with aspect + size, two menus (M8 decision 3). This file keeps
-// its name; only `SeedControl` below still lives here.
-
 /// The seed, and whether it is held still between renders.
 struct SeedControl: View {
     @Binding var draft: RenderDraft

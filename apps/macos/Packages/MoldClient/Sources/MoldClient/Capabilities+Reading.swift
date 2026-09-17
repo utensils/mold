@@ -44,8 +44,6 @@ public extension Capabilities {
     /// re-listing 1,500.
     var supportsGalleryRowEvents: Bool { gallery?.rowEvents ?? false }
 
-    var canDeletePrints: Bool { gallery?.canDelete ?? false }
-
     /// A host that does not persist outputs hands back bytes and keeps
     /// nothing, so there is no library to show for it.
     var persistsOutputs: Bool { gallery?.persistsOutputs ?? true }

@@ -58,5 +58,8 @@ final class ResultHandoff {
         release = nil
     }
 
+    /// The test seam: whether a hand-off is still parked, waiting for the
+    /// batch it belongs to. Nothing in the app asks -- the hand-off answers
+    /// by releasing -- but a test cannot see a closure being held.
     var isHolding: Bool { release != nil }
 }

@@ -69,8 +69,6 @@ public enum Identity {
     public static let weightStep = 0.05
     /// `identity.rs:302` (`ID_START_STEP_DEFAULT`).
     public static let startStepDefault = 0
-    /// `identity.rs:400` (`ID_IMAGES_MAX`).
-    public static let maxPhotosCeiling = 4
 
     /// `id_start_step` must be strictly less than the run's own step count
     /// (`identity.rs:560-566`, `validate_id_start_step`), so the bound MOVES

@@ -11,9 +11,6 @@ public struct PlacementPreview: Codable, Hashable, Sendable {
     public let candidate: PlacementCandidate?
     public let pendingDownloads: [String]?
     public let missingComponents: [String]?
-
-    /// The host has somewhere to run this now.
-    public var isPlanned: Bool { outcome == "planned" }
 }
 
 public struct PlacementCandidate: Codable, Hashable, Sendable {

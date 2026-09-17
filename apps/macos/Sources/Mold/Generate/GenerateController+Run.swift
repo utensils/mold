@@ -132,5 +132,4 @@ extension GenerateController {
         }
     }
 
-    func dismissResult() { run = .idle }
 }

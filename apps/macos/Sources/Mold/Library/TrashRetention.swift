@@ -29,16 +29,12 @@ enum TrashRetention {
         return "These are deleted after \(days) \(days == 1 ? "day" : "days")."
     }
 
-    /// What one print has left, for its own machine's countdown.
-    ///
-    /// `purge_at` is derived by the host from the retention in force RIGHT
-    /// NOW, never stored — so it moves when somebody changes the setting, and
-    /// it is the only number worth showing per print.
+    /// What one print has left, for its own machine's countdown. The DAYS
+    /// are `TrashCountdown`'s, which the tile badge and VoiceOver also read;
+    /// only the sentence is this file's.
     static func remaining(for print: GalleryPrint, now: Date = .now) -> String? {
-        guard let purgeAt = print.purgeAt else { return nil }
-        let due = Date(timeIntervalSince1970: TimeInterval(purgeAt))
-        guard due > now else { return "Deleting soon" }
-        let days = Calendar.current.dateComponents([.day], from: now, to: due).day ?? 0
+        guard let days = TrashCountdown.days(until: print.purgeAt, now: now) else { return nil }
+        if days < 0 { return "Deleting soon" }
         if days < 1 { return "Deleting today" }
         return "Deleting in \(days) \(days == 1 ? "day" : "days")"
     }

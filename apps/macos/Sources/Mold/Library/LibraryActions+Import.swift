@@ -29,7 +29,16 @@ extension LibraryActions {
     private func send(_ urls: [URL], to host: MoldHost) async {
         guard let client = hosts.backend(for: host.id) else { return }
         for url in urls {
-            guard let data = try? Data(contentsOf: url) else { continue }
+            let data: Data
+            do {
+                data = try Data(contentsOf: url)
+            } catch {
+                // Ten files chosen, nine imported, no message -- the same
+                // silence `saveAll` was rewritten to stop. The upload failure
+                // below already reports; the READ did not.
+                hosts.report(error, on: host.id, doing: "import “\(url.lastPathComponent)”")
+                return
+            }
             // The file's own date, so an old picture lands where it belongs in
             // a day-sectioned timeline instead of at the top of today.
             let made = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?

@@ -16,15 +16,11 @@ public enum Chrome {
     public static let thumbnailRadius: CGFloat = 8
     /// The smallest enclosed thing: a swatch, a badge backing.
     public static let tileRadius: CGFloat = 5
-    /// Half of a 22pt chip, so a chip is a stadium.
-    public static let chipRadius: CGFloat = 11
     public static let fieldRadius: CGFloat = 6
 
     /// One control row. Sliders, menus and steppers all sit on this height so
     /// a row of mixed controls has one baseline.
     public static let fieldHeight: CGFloat = 26
-    public static let barHeight: CGFloat = 42
-    public static let sidebarRowHeight: CGFloat = 28
 
     public static let shadowRadius: CGFloat = 22
     public static let shadowY: CGFloat = 8
@@ -38,9 +34,7 @@ public extension Chrome {
     /// Washes are built from `.primary` and `.accentColor` on purpose: they
     /// inherit the system appearance and the user's own accent, so there is
     /// no palette to maintain and nothing to re-tune for dark mode.
-    static let hoverWash = Color.primary.opacity(0.12)
     static let wellFill = Color.primary.opacity(0.06)
-    static let wellFillHovered = Color.primary.opacity(0.10)
     static let wellFillTargeted = Color.accentColor.opacity(0.14)
     /// Backs a badge drawn over a picture, where a semantic color would be
     /// illegible against arbitrary pixels.

@@ -47,8 +47,6 @@ public extension Model {
     /// True for `cv:…` / `hf:…`, which decides which install route a name
     /// takes (design fact 2, M5). Derived from `catalogPrefixes`, so there is
     /// one spelling of the namespace check.
-    var isCatalogModel: Bool { Self.isCatalogName(name) }
-
     static func isCatalogName(_ name: String) -> Bool {
         guard let colon = name.firstIndex(of: ":") else { return false }
         return catalogPrefixes.contains(String(name[..<colon]))

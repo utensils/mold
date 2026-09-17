@@ -60,8 +60,15 @@ enum HostPersistence {
         }
     }
 
+    /// An encode that fails writes NOTHING, rather than writing nil -- which
+    /// is what the read side (and `HostStore.seededHosts`) takes as "never
+    /// saved", and so is the door the machine resurrection above is about,
+    /// reached from the other side. Keeping the last good list is always the
+    /// better answer than forgetting every machine.
     static func save(_ hosts: [MoldHost], to defaults: UserDefaults = AppStorageSuite.defaults) {
-        defaults.set(try? MoldJSON.localEncoder.encode(hosts.map(StoredHost.init)), forKey: key)
+        guard let encoded = try? MoldJSON.localEncoder.encode(hosts.map(StoredHost.init))
+        else { return }
+        defaults.set(encoded, forKey: key)
     }
 
     /// One machine's key, because somebody typed one -- or emptied the field,

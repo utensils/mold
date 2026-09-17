@@ -13,8 +13,7 @@ extension RecentGroup {
         case .usePrompt:
             Self.pick(entry, into: &draft)
         case .copyPrompt:
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(entry.prompt, forType: .string)
+            Clipboard.put(entry.prompt)
         default:
             break
         }

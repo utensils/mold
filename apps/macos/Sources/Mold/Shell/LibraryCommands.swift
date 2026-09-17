@@ -34,7 +34,7 @@ struct LibraryCommands: Commands {
 /// A modifier rather than items of its own: the plan decides WHAT is offered,
 /// and this decides which of those rows a chord reaches. Applied to the whole
 /// group because SwiftUI has no way to name one item from outside it -- so the
-/// two that carry keys are bound here as their own copies, and the plan's
+/// three that carry keys are bound here as their own copies, and the plan's
 /// rows stay what the tile draws.
 private struct LibraryShortcuts: ViewModifier {
     let selection: LibrarySelection

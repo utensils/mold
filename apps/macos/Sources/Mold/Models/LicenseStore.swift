@@ -38,6 +38,9 @@ final class LicenseStore {
         byHost[host]?.first { $0.requiredBy.contains(model) }
     }
 
+    /// The test seam: consent as this host last reported it. The app reads
+    /// `licence(gating:on:)` instead, which answers the question a render
+    /// actually asks.
     func isAccepted(_ id: String, on host: MoldHost.ID) -> Bool {
         byHost[host]?.first { $0.id == id }?.accepted ?? false
     }

@@ -55,7 +55,7 @@ struct LibraryFile: Equatable {
     let count: Int
     /// What the SINGLE selected print can also be saved as -- empty when
     /// more than one print is selected or it has no other form
-    /// (`LibraryMenu.swift`'s own `exportMenu` gate).
+    /// (`LibraryMenu.swift`'s own `exportFormats` gate).
     let exportFormats: [String]
     let save: () -> Void
     let export: (String) -> Void

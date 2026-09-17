@@ -32,7 +32,7 @@ struct ModelStateCell: View {
                 Button {
                     install(model)
                 } label: {
-                    Text("\(bytes(Int64(remaining))) to finish")
+                    Text("\(FileBytes.text(Int64(remaining))) to finish")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -54,7 +54,7 @@ struct ModelStateCell: View {
                     .progressViewStyle(.linear)
                     .frame(width: 100)
                 if let done = progress.bytesDone, let total = progress.bytesTotal {
-                    Text("\(bytes(done)) of \(bytes(total))")
+                    Text(FileBytes.progress(done: done, total: total))
                         .font(.caption2)
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
@@ -71,9 +71,5 @@ struct ModelStateCell: View {
                 .help("Cancel this download")
             }
         }
-    }
-
-    private func bytes(_ count: Int64) -> String {
-        count.formatted(.byteCount(style: .file))
     }
 }

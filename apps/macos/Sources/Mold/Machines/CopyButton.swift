@@ -7,8 +7,7 @@ struct CopyButton: View {
 
     var body: some View {
         Button("Copy \(what)", systemImage: "document.on.document") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(value, forType: .string)
+            Clipboard.put(value)
         }
         .labelStyle(.iconOnly)
         .buttonStyle(.borderless)

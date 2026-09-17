@@ -32,10 +32,6 @@ struct ModelsFooter: View {
         let base = "\(count) installed on \(hostName)"
         guard let disk else { return base }
         let used = disk.totalBytes - disk.freeBytes
-        return "\(base) · \(bytes(used)) of \(bytes(disk.totalBytes)) used"
-    }
-
-    private static func bytes(_ count: UInt64) -> String {
-        Int64(clamping: count).formatted(.byteCount(style: .file))
+        return "\(base) · \(FileBytes.text(used)) of \(FileBytes.text(disk.totalBytes)) used"
     }
 }

@@ -30,11 +30,7 @@ extension DownloadsPopover {
             var detailText: String {
                 guard isActive else { return error ?? "Done" }
                 guard let bytesDone, let bytesTotal, bytesTotal > 0 else { return "Waiting" }
-                return "\(bytes(bytesDone)) of \(bytes(bytesTotal))"
-            }
-
-            private func bytes(_ count: Int64) -> String {
-                count.formatted(.byteCount(style: .file))
+                return FileBytes.progress(done: bytesDone, total: bytesTotal)
             }
         }
 

@@ -44,9 +44,17 @@ extension GeneratePane {
         return references.hasRoom(for: controller.draft.media.editImages.count)
     }
 
+    /// Reports rather than shrugging: Save a Copy and Copy both start with
+    /// this fetch, and a machine that has gone away or refused made all three
+    /// of their buttons do nothing at all.
     private func bytes(of result: BatchResult) async -> Data? {
         guard let host, let filename = result.filename else { return nil }
-        return try? await hosts.backend(for: host).media(filename, trashed: false)
+        do {
+            return try await hosts.backend(for: host).media(filename, trashed: false)
+        } catch {
+            hosts.report(error, on: host.id, doing: "fetch that picture")
+            return nil
+        }
     }
 
     private func saveResult(_ result: BatchResult) async {
@@ -54,7 +62,12 @@ extension GeneratePane {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = filename
         guard await panel.begin() == .OK, let url = panel.url else { return }
-        try? data.write(to: url)
+        do {
+            try data.write(to: url)
+        } catch {
+            guard let host else { return }
+            hosts.report(error, on: host.id, doing: "save that picture")
+        }
     }
 
     private func copyResult(_ result: BatchResult) async {

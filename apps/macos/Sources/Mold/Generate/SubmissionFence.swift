@@ -40,9 +40,6 @@ final class SubmissionFence {
     /// Ids whose Stop was pressed before the host answered.
     private var stopped: Set<String> = []
 
-    /// Whether the canvas is waiting on an admission it would follow.
-    var isPending: Bool { following != nil }
-
     /// Whether any POST at all is still unanswered -- including one the user
     /// has already stopped, which still has to reach its `land` so the batch
     /// the host minted can be cancelled.

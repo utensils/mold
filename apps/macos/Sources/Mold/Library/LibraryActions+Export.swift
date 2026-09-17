@@ -38,7 +38,15 @@ extension LibraryActions {
             let stem = (entry.print.filename as NSString).deletingPathExtension
             panel.nameFieldStringValue = "\(stem).\(format)"
             guard await panel.begin() == .OK, let url = panel.url else { return }
-            try? data.write(to: url)
+            do {
+                try data.write(to: url)
+            } catch {
+                // A disk full, a read-only folder: the person chose Export…,
+                // waited for the machine to convert, picked a destination --
+                // and got no file and no message. `saveAll` already reports
+                // this exact failure; nobody fixed the export half.
+                hosts.report(error, on: entry.hostID, doing: "save that export")
+            }
         }
     }
 }
