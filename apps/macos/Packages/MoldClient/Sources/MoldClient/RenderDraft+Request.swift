@@ -26,6 +26,9 @@ public extension RenderDraft {
         )
         request.frames = frames
         request.fps = fps
+        request.pipeline = pipeline
+        request.enableAudio = enableAudio ? true : nil
+        request.videoOnly = VideoOnlyPolicy.requestValue(enabled: videoOnly, videoOnlyInputs)
         request.sourceImage = sourceImage
         request.sourceImageName = sourceImageName
         request.editImages = editImages.isEmpty ? nil : editImages

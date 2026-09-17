@@ -27,6 +27,8 @@ struct GenerateInspector: View {
     private var showsIdentity = true
     @AppStorage("createShowsRefine", store: AppStorageSuite.defaults)
     private var showsRefine = true
+    @AppStorage("createShowsClip", store: AppStorageSuite.defaults)
+    private var showsClip = true
     @AppStorage("createShowsOutput", store: AppStorageSuite.defaults)
     private var showsOutput = true
     @AppStorage("createShowsFileUnder", store: AppStorageSuite.defaults)
@@ -64,6 +66,13 @@ struct GenerateInspector: View {
             if RefineGroup.isShown(recipe: recipe, models: hostModels) {
                 DisclosureGroup("Refine", isExpanded: $showsRefine) {
                     RefineGroup(recipe: recipe, models: hostModels, draft: $draft, destination: $destination)
+                        .padding(.top, 6)
+                }
+                .font(.callout)
+            }
+            if let recipe, ClipGroup.isShown(capabilities: recipe.capabilities) {
+                DisclosureGroup("Clip", isExpanded: $showsClip) {
+                    ClipGroup(recipe: recipe, draft: $draft)
                         .padding(.top, 6)
                 }
                 .font(.callout)

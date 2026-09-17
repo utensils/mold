@@ -16,6 +16,14 @@ extension GeneratePane {
             }
         }
         ToolbarItem {
+            RecipePicker(
+                recipes: selectedModel?.generationProfile?.recipes ?? [],
+                selected: recipe
+            ) { recipe in
+                controller.selectRecipe(recipe)
+            }
+        }
+        ToolbarItem {
             Button { showsInspector.toggle() } label: {
                 Label("Inspector", systemImage: "sidebar.trailing")
             }

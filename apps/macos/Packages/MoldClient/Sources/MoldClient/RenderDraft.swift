@@ -35,6 +35,19 @@ public struct RenderDraft: Hashable, Sendable {
     /// Clip length, for the families that make one.
     public var frames: Int?
     public var fps: Int?
+    /// LTX-2's chosen way of running, echoed straight from the adopted
+    /// recipe's own `request_selector.pipeline` -- `nil` on `auto`, which
+    /// means "let the server pick" and must never be spelled as the string
+    /// `"auto"` (`RenderDraft+Recipe.swift`'s `adopting`).
+    public var pipeline: String?
+    /// The opt-in for LTX-2's audio branch. Sent only when `true`
+    /// (`RenderDraft+Request.swift`) -- a `false` still reaches the wire as
+    /// absence, because an explicit `false` conflicts with an audio-only
+    /// pipeline (`validation.rs:3555`).
+    public var enableAudio: Bool = false
+    /// Skips the audio branch on a video render. Never sent while
+    /// `VideoOnlyPolicy` finds a conflict -- see `RenderDraft.videoOnlyInputs`.
+    public var videoOnly: Bool = false
     /// A still to condition on, already base64-encoded, with the name the host
     /// should record for it.
     public var sourceImage: String?

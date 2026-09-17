@@ -96,30 +96,24 @@ public extension RenderDraft {
         if recipe.capabilities.negativePrompt?.isAvailable != true {
             draft.negativePrompt = ""
         }
-        return draft
-    }
 
-    /// Puts a machine's stored per-model defaults (`ModelDefaultsStore`) on
-    /// top of a newly adopted recipe's own numbers, field by field, clamped
-    /// through the same `IntegerControl`/`FloatControl` this file's
-    /// `adopting` uses. A no-op when this is not a new model -- a KEPT draft
-    /// (a reuse) is never overwritten by what a machine has on file; the
-    /// print's own numbers are the more specific instruction.
-    public func applying(_ defaults: ModelDefaults, recipe: GenerationRecipe, isNewModel: Bool) -> RenderDraft {
-        guard isNewModel else { return self }
-        var draft = self
-        if let steps = defaults.steps { draft.steps = recipe.steps.clamp(steps) }
-        if let guidance = defaults.guidance { draft.guidance = recipe.guidance.clamp(guidance) }
-        if defaults.width != nil || defaults.height != nil {
-            if let width = defaults.width { draft.width = width }
-            if let height = defaults.height { draft.height = height }
-            // A default outside the recipe's own bucket list or bounds must
-            // not be submitted -- the same fit a carried-over size gets.
-            draft.fit(to: recipe.resolution)
+        // Echoed straight through on every adopt. `nil` on `auto`.
+        draft.pipeline = recipe.requestSelector?.pipeline
+
+        // A format picked against a different recipe must not survive onto
+        // one that cannot deliver it -- `t2a`'s `formats` is `["wav"]` alone,
+        // and a carried-over "mp4" would 422 rather than fall back.
+        if let output = recipe.capabilities.output, let format = draft.outputFormat,
+           !output.formats.contains(format) {
+            draft.outputFormat = nil
         }
-        if let negativePrompt = defaults.negativePrompt,
-           recipe.capabilities.negativePrompt?.isAvailable == true {
-            draft.negativePrompt = negativePrompt
+
+        // `enable_audio`/`video_only` are LTX-2-only (`validation.rs:3255`,
+        // `:3258`); carried onto a family that cannot generate an audio
+        // branch, either would arm a mismatch 422.
+        if recipe.capabilities.supportsAudio != true {
+            draft.enableAudio = false
+            draft.videoOnly = false
         }
         return draft
     }

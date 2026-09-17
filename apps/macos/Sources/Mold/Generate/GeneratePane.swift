@@ -93,7 +93,15 @@ struct GeneratePane: View {
         return models.model(named: name, on: host.id)
     }
 
-    private var recipe: GenerationRecipe? { selectedModel?.defaultRecipe }
+    /// Not `private`: the toolbar's recipe picker needs it too. An id the
+    /// current model does not advertise falls back to its own default.
+    var recipe: GenerationRecipe? {
+        if let recipeID = controller.recipeID,
+           let recipe = selectedModel?.generationProfile?.recipe(named: recipeID) {
+            return recipe
+        }
+        return selectedModel?.defaultRecipe
+    }
 
     /// What this machine will admit in one batch. Absent means an older host,
     /// which is one at a time.

@@ -16,6 +16,10 @@ final class GenerateController {
     var draft = RenderDraft()
     var hostID: MoldHost.ID?
     var modelName: String?
+    /// Which of the chosen model's recipes is running -- `nil` means its
+    /// default. Reset to `nil` on every model change; `selectRecipe` is the
+    /// only place that sets it to something else.
+    var recipeID: String?
     /// The chosen model's family, e.g. `"flux"` -- what an expand or remix
     /// request resolves through the prompting registry. Kept alongside
     /// `modelName` rather than re-derived, because the controller does not
@@ -62,6 +66,7 @@ final class GenerateController {
         modelName = model.name
         modelFamily = model.family
         hostID = host
+        recipeID = nil
         guard let recipe = model.defaultRecipe else { return }
         let isNewModel = !keepingDraft
         draft = draft.adopting(recipe, isNewModel: isNewModel)
@@ -74,9 +79,18 @@ final class GenerateController {
         modelName = model.name
         modelFamily = model.family
         hostID = host
+        if isNewModel { recipeID = nil }
         guard let recipe = model.defaultRecipe else { return }
         draft = draft.adopting(recipe, isNewModel: isNewModel)
         applyStoredDefaults(for: model, on: host, recipe: recipe, isNewModel: isNewModel)
+    }
+
+    /// Switches recipe on the SAME model -- one of LTX-2's pipelines, most
+    /// often. Re-adopts the draft against it exactly like a model change
+    /// does: steps, guidance, size, format and every group re-read.
+    func selectRecipe(_ recipe: GenerationRecipe) {
+        recipeID = recipe.id
+        draft = draft.adopting(recipe, isNewModel: false)
     }
 
     /// Puts a machine's stored per-model defaults on top of the recipe's own

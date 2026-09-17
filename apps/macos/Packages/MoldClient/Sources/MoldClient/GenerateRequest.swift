@@ -20,6 +20,14 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     public var saveToGallery: Bool?
     public var frames: Int?
     public var fps: Int?
+    /// Which of LTX-2's pipelines to run -- echoed from the recipe's own
+    /// `request_selector.pipeline` string, never spelled `"auto"`.
+    public var pipeline: String?
+    /// LTX-2's audio branch. Sent only as `true` -- see `RenderDraft.request`.
+    public var enableAudio: Bool?
+    /// Skips the audio branch on a video render. Sent only as `true`, and
+    /// only when `VideoOnlyPolicy` finds no conflict.
+    public var videoOnly: Bool?
     /// Base64, as mold encodes every byte field on the wire.
     public var sourceImage: String?
     public var sourceImageName: String?
@@ -103,11 +111,11 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// hide behind.
     enum CodingKeys: String, CodingKey {
         case prompt, model, width, height, steps, guidance, batchSize, negativePrompt, seed,
-             saveToGallery, frames, fps, sourceImage, sourceImageName, strength, editImages,
-             referenceWeight, maskImage, loras, idImage, idImageName, idImages, idImageNames,
-             idWeight, idStartStep, controlImage, controlModel, controlScale, outputFormat,
-             upscaleModel, title, tags, collection, originalPrompt, promptTransform, batchId,
-             batchIndex, batchCount
+             saveToGallery, frames, fps, pipeline, enableAudio, videoOnly, sourceImage,
+             sourceImageName, strength, editImages, referenceWeight, maskImage, loras, idImage,
+             idImageName, idImages, idImageNames, idWeight, idStartStep, controlImage,
+             controlModel, controlScale, outputFormat, upscaleModel, title, tags, collection,
+             originalPrompt, promptTransform, batchId, batchIndex, batchCount
     }
 }
 
