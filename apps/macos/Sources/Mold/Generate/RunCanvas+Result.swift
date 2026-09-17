@@ -14,14 +14,15 @@ extension RunCanvas {
     /// here waits on bytes.
     @ViewBuilder func finishedView(_ outcome: BatchOutcome) -> some View {
         VStack(spacing: 12) {
-            media
+            media(of: outcome)
             // Absent for a batch of one, so the ordinary case is
             // byte-identical to before a batch could be more than one child.
             if outcome.results.count > 1 {
-                ResultStrip(results: outcome.results, host: host, selected: $selected)
+                ResultStrip(results: outcome.results, host: host,
+                            actions: actions, selected: $selected)
             }
             if let current = selectedResult(in: outcome) {
-                ResultBar(result: current, host: host, showInLibrary: showInLibrary)
+                ResultBar(result: current, host: host, actions: actions)
             }
             if let summary = outcome.failureSummary {
                 Text(summary).font(.callout).foregroundStyle(.secondary)
@@ -30,7 +31,7 @@ extension RunCanvas {
         .padding(24)
     }
 
-    @ViewBuilder private var media: some View {
+    @ViewBuilder private func media(of outcome: BatchOutcome) -> some View {
         switch result {
         case .loading:
             ProgressView("Fetching what you made…")
@@ -42,13 +43,19 @@ extension RunCanvas {
                 .onTapGesture(perform: togglePrompt)
                 .accessibilityAddTraits(.isButton)
                 .accessibilityHint("Hides the prompt so the picture fills the pane")
+                // The big picture offers the same menu as its strip tile.
+                .modifier(OptionalResultMenu(result: selectedResult(in: outcome), actions: actions))
         case let .clip(player):
             // Streamed, not downloaded, exactly as `LibraryViewer` plays one:
             // a clip can be hundreds of megabytes and waiting for all of it
             // before the first frame is not playback.
             VideoPlayer(player: player)
                 .aspectRatio(contentMode: .fit)
-                .onDisappear { player.pause() }
+                .onDisappear {
+                    player.pause()
+                    player.replaceCurrentItem(with: nil)
+                }
+                .modifier(OptionalResultMenu(result: selectedResult(in: outcome), actions: actions))
         case .mesh:
             // SEAM for Wave 3 · F1: the interactive `MeshView` replaces this
             // whole arm. Until then the canvas names what it made and the bar
@@ -71,40 +78,44 @@ extension RunCanvas {
 
     func loadResult() async {
         // A player left running behind a new result keeps playing its audio.
-        if case let .clip(previous) = result { previous.pause() }
+        if case let .clip(previous) = result {
+            previous.pause()
+            previous.replaceCurrentItem(with: nil)
+        }
         result = .loading
         guard let filename = resultFilename, let host else { return }
         let backend = hosts.backend(for: host)
-        switch PrintKind(filename: filename) {
+        switch PrintKind(playbackOf: filename) {
         case .clip:
-            do {
-                // `AVPlayer` builds its own requests and cannot carry
-                // `X-Api-Key`, so the URL is minted with a media ticket on a
-                // keyed host -- the same shared verb the Library plays through.
-                let player = AVPlayer(url: try await backend.playableURL(for: filename))
-                player.play()
-                result = .clip(player)
-            } catch {
-                result = .unavailable(error.reasonSentence)
-            }
+            await playClip(filename, backend: backend, remintsLeft: 1)
         case .mesh:
             result = .mesh
+            onResultShown()
         case .picture:
             do {
                 let data = try await backend.media(filename, trashed: false)
                 guard let image = NSImage(data: data) else {
-                    result = .unavailable("The machine sent this back in a form this Mac "
-                        + "cannot show. It is in the Library.")
+                    show(.unavailable("The machine sent this back in a form this Mac "
+                        + "cannot show. It is in the Library."))
                     return
                 }
-                result = .picture(image)
+                show(.picture(image))
             } catch {
-                result = .unavailable(error.reasonSentence)
+                show(.unavailable(error.reasonSentence))
             }
         }
     }
 
-    private func selectedResult(in outcome: BatchOutcome) -> BatchResult? {
+    /// Every terminal media state goes through here, because the beat the
+    /// queue waits for is about the PICTURE being drawn -- acknowledging when
+    /// the container appeared meant acknowledging while it still read
+    /// "Fetching what you made…" (finding 02#9, second half).
+    func show(_ media: RunResultMedia) {
+        result = media
+        onResultShown()
+    }
+
+    func selectedResult(in outcome: BatchOutcome) -> BatchResult? {
         outcome.results.indices.contains(selected) ? outcome.results[selected] : nil
     }
 }

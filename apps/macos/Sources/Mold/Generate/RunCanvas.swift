@@ -6,7 +6,9 @@ import SwiftUI
 struct RunCanvas: View {
     let state: RunState
     let host: MoldHost?
-    let showInLibrary: () -> Void
+    /// What a finished result can do -- the same closures the result bar's
+    /// buttons and the contextual menu beside them both perform.
+    let actions: ResultActions
     /// Clicking the picture -- and only the picture, never the empty canvas or
     /// the buttons under it -- tucks the prompt away and brings it back.
     let togglePrompt: () -> Void
@@ -30,14 +32,15 @@ struct RunCanvas: View {
             case .running:
                 running
             case let .finished(outcome, _):
+                // The queue is released by the MEDIA arm reaching a drawn
+                // state (`RunCanvas+Result.show`), not by this container
+                // appearing: at that instant `result` is still `.loading`.
                 finishedView(outcome)
-                    // Not `onAppear`: SwiftUI reuses this view for the NEXT
-                    // settled batch, and a second outcome must release the
-                    // queue as surely as the first.
-                    .task(id: outcome) { onResultShown() }
             case let .failed(message):
                 ContentUnavailableView("That didn't finish", systemImage: "exclamationmark.triangle",
                                        description: Text(message))
+                    // A failure sentence is a drawn outcome too.
+                    .task(id: message) { onResultShown() }
             }
         }
         // Decoded on change, never in `body`: `body` re-runs on every progress
