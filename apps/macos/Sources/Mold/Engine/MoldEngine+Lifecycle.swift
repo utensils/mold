@@ -18,6 +18,46 @@ extension MoldEngine {
         onEngineGone = { [weak hosts] in hosts?.dropLocalEngine() }
     }
 
+    /// Resolves the launch and runs the one-shot preamble, at most once.
+    /// `nil` means the refusal is already on `state`.
+    @discardableResult
+    func prepared() -> EngineLaunch? {
+        #if MOLD_EMBEDDED_ENGINE
+        if let launch { return launch }
+        let resolved: EngineLaunch
+        do {
+            resolved = try EngineLaunchPlan.resolve(
+                home: MoldHome.resolve(), secrets: .shared, logDirectory: Self.logDirectory)
+        } catch {
+            // Nothing one-shot has been consumed, so Start can be pressed
+            // again once the drive is back or the store is writable.
+            transition(to: .failed(Failure(
+                reason: (error as? EngineLaunchRefusal)?.reason ?? "The engine couldn't start.",
+                relaunchNeeded: false)))
+            return nil
+        }
+        let code = resolved.home.withCString { home in
+            resolved.apiKey.withCString { key in
+                resolved.logDirectory.withCString { logs in
+                    mold_engine_bootstrap(home, key, logs)
+                }
+            }
+        }
+        guard code == 0 else {
+            transition(to: .failed(Failure(
+                reason: "The engine couldn't prepare itself. Relaunch Mold to try again — "
+                    + "Mold's log in ~/Library/Logs/Mold has the detail.",
+                relaunchNeeded: true)))
+            return nil
+        }
+        record(resolved)
+        if case .failed = state { transition(to: .stopped) }
+        return resolved
+        #else
+        return nil
+        #endif
+    }
+
     /// Whether Start can do anything. `.failed` counts only where nothing
     /// one-shot has been consumed yet.
     var canStart: Bool { MoldEngine.canStart(state) }
@@ -39,44 +79,11 @@ extension MoldEngine {
         #endif
     }
 
-    /// Stops the engine by asking it to, which is the only way an embedder
-    /// can: `run_server`'s shutdown trigger is reachable through `POST
-    /// /api/shutdown` and nothing else.
-    ///
-    /// The join gets the server's OWN budget. It used to get 8 s, and the
-    /// result was discarded — so quitting during a render cut the drain and
-    /// left the gallery writer lease behind (review 05-M7).
-    func stop() async {
-        #if MOLD_EMBEDDED_ENGINE
-        guard case let .running(port) = state else { return }
-        watchdog?.cancel()
-        transition(to: .stopping)
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/shutdown")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 5
-        if let key = launch?.apiKey { request.setValue(key, forHTTPHeaderField: "X-Api-Key") }
-        _ = try? await URLSession.shared.data(for: request)
-        // Off the main thread: this blocks for the whole budget, and the
-        // shutdown request above already yielded.
-        let budget = EngineShutdownBudget.milliseconds
-        let joined = await Task.detached { mold_engine_join(budget) }.value
-        // The engine bootstraps at most once per process, so `.stopped` would
-        // be a lie: there is nothing left to start.
-        transition(to: .unavailable(
-            joined
-                ? "The engine starts once per launch. Relaunch Mold to start it again."
-                : "The engine was still finishing when Mold quit. Relaunch Mold to start it again."
-        ))
-        onEngineGone?()
-        #endif
-    }
-
     #if MOLD_EMBEDDED_ENGINE
-    private func bring(up launch: EngineLaunch) async {
-        if let refusal = await EngineInterlock.otherServer() {
-            transition(to: .failed(MoldEngine.Failure(reason: refusal, relaunchNeeded: false)))
-            return
-        }
+    func bring(up launch: EngineLaunch) async {
+        // On the actor: one open(2) and one non-blocking flock on a local
+        // path, which is microseconds and cannot wait on a lock.
+        advisory = EngineInterlock.advisory(for: EngineInterlock.homeWriter())
         let port = await Task.detached { mold_engine_alloc_port() }.value
         guard port != 0 else {
             transition(to: .failed(MoldEngine.Failure(
@@ -109,7 +116,7 @@ extension MoldEngine {
 
     /// Asks the engine thread whether it is still there. Nothing did, so a
     /// dead engine stayed `.running` forever.
-    private func watch() {
+    func watch() {
         watchdog?.cancel()
         watchdog = Task { [weak self] in
             while !Task.isCancelled {

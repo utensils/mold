@@ -65,15 +65,18 @@ final class MoldAppDelegate: NSObject, NSApplicationDelegate {
         materializer?.purge()
         thumbnails?.purge()
 
-        guard let engine, case .running = engine.state else { return .terminateNow }
-        // `stop()` is a POST to the engine's own shutdown route and a join
-        // for the SERVER's budget -- 45 s, not 8. Answering "later" is what
-        // keeps macOS from killing the process mid-publish; the panel is what
-        // keeps that wait from reading as a hang, and it carries the one way
-        // out (review 05-M7).
-        quit.present(seconds: EngineShutdownBudget.seconds)
+        // EVERY state with an engine thread in it, not just `.running`:
+        // `.starting` is inside `recover_storage` or the one-time v2 -> v3
+        // authority upgrade, and `.stopping` is mid-drain after Stop Engine.
+        // Both used to be answered `.terminateNow`, which is the hard kill the
+        // whole drain exists to avoid (review F2).
+        guard let engine, engine.isDraining else { return .terminateNow }
+        // Answering "later" is what keeps macOS from killing the process
+        // mid-publish; the panel keeps that wait from reading as a hang, and
+        // it carries the one way out (review 05-M7).
+        quit.present(seconds: EngineShutdownBudget.totalSeconds)
         Task { [quit] in
-            await engine.stop()
+            await engine.finishForQuit()
             quit.reply()
         }
         return .terminateLater

@@ -17,8 +17,11 @@ final class MoldEngine {
         case starting
         case running(port: UInt16)
         /// Draining. The app has asked the engine to stop and is waiting out
-        /// the server's own budget.
-        case stopping
+        /// the server's own budget. The sentence is carried because a drain
+        /// that OVERRUNS that budget is a different thing to say: the engine
+        /// thread is still writing, and this process can never start another
+        /// (review F1b).
+        case stopping(String)
         case failed(Failure)
     }
 
@@ -48,6 +51,10 @@ final class MoldEngine {
     /// STARTED with is the one "This Mac" has to present back to it.
     private(set) var launch: EngineLaunch?
 
+    /// Written once, by `prepared()`, for the same reason `transition(to:)`
+    /// exists: one writer, and a greppable one.
+    func record(_ resolved: EngineLaunch) { launch = resolved }
+
     /// Polls the engine's liveness while it is running, so a panic or a
     /// `run_server` that returned `Err` becomes `.failed` rather than a
     /// machine list entry pointing at a closed port (review 05-M1).
@@ -56,6 +63,10 @@ final class MoldEngine {
     /// Called when a running engine stops or dies, so the machine list can
     /// drop "This Mac". Set by the composition root, which owns both.
     var onEngineGone: (() -> Void)?
+
+    /// What is true but not a refusal — today, only that something else is
+    /// already publishing into this home (`EngineInterlock`).
+    var advisory: String?
 
     /// True when the staticlib was linked in.
     static var isLinked: Bool {
@@ -85,6 +96,15 @@ final class MoldEngine {
     /// its prints stay attributable to this Mac in the merged library.
     static let localHostID = UUID(uuidString: "00000000-0000-4000-A000-000000000001")!
 
+    /// Whether a phone could ever be paired with this machine.
+    ///
+    /// False for this Mac's own engine, whatever it advertises: it binds
+    /// 127.0.0.1, so a pairing issued there encodes a URL that resolves, on
+    /// the phone, to the phone. It became reachable at all only because the
+    /// engine is started WITH a key now, which makes `auth_required` true
+    /// (review F4).
+    static func isPairable(_ host: MoldHost) -> Bool { host.id != localHostID }
+
     /// Prepares this process for an engine, as early in the launch as the app
     /// has a main actor.
     ///
@@ -100,46 +120,6 @@ final class MoldEngine {
     /// `run_server` taking the home and the key as parameters instead of
     /// through the environment — a change to the engine, not to the embedder.
     func bootstrapAtLaunch() { _ = prepared() }
-
-    /// Resolves the launch and runs the one-shot preamble, at most once.
-    /// `nil` means the refusal is already on `state`.
-    @discardableResult
-    func prepared() -> EngineLaunch? {
-        #if MOLD_EMBEDDED_ENGINE
-        if let launch { return launch }
-        let resolved: EngineLaunch
-        do {
-            resolved = try EngineLaunchPlan.resolve(
-                home: MoldHome.resolve(), secrets: .shared, logDirectory: Self.logDirectory)
-        } catch {
-            // Nothing one-shot has been consumed, so Start can be pressed
-            // again once the drive is back or the store is writable.
-            state = .failed(Failure(
-                reason: (error as? EngineLaunchRefusal)?.reason ?? "The engine couldn't start.",
-                relaunchNeeded: false))
-            return nil
-        }
-        let code = resolved.home.withCString { home in
-            resolved.apiKey.withCString { key in
-                resolved.logDirectory.withCString { logs in
-                    mold_engine_bootstrap(home, key, logs)
-                }
-            }
-        }
-        guard code == 0 else {
-            state = .failed(Failure(
-                reason: "The engine couldn't prepare itself. Relaunch Mold to try again — "
-                    + "Mold's log in ~/Library/Logs/Mold has the detail.",
-                relaunchNeeded: true))
-            return nil
-        }
-        launch = resolved
-        if case .failed = state { state = .stopped }
-        return resolved
-        #else
-        return nil
-        #endif
-    }
 
     static var logDirectory: String {
         FileManager.default.homeDirectoryForCurrentUser
