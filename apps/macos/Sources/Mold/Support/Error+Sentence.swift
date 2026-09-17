@@ -34,6 +34,16 @@ extension Error {
     }
 }
 
+extension Error {
+    /// `reason`, standing on its own -- for a place with no machine-as-subject
+    /// clause ahead of it, such as the popover a failed rewrite answers in.
+    var reasonSentence: String {
+        let reason = reason
+        guard let first = reason.first else { return reason }
+        return first.uppercased() + reason.dropFirst()
+    }
+}
+
 private func lowercasingFirstLetter(of string: String) -> String {
     guard let first = string.first else { return string }
     return first.lowercased() + string.dropFirst()

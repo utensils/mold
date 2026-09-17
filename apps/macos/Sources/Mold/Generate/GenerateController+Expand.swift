@@ -67,7 +67,7 @@ extension GenerateController {
             // A failed rewrite is about the prompt in front of you, not the
             // machine's health -- the answer belongs in the popover the wand
             // opened, never in the machine banner.
-            expansion = .refused(error.reason)
+            expansion = .refused(error.reasonSentence)
         }
     }
 
@@ -94,7 +94,7 @@ extension GenerateController {
         } catch is CancellationError {
             expansion = .idle
         } catch {
-            expansion = .refused(error.reason)
+            expansion = .refused(error.reasonSentence)
         }
     }
 

@@ -55,6 +55,9 @@ struct PromptWand: View {
         .controlSize(.small)
         .opacity(visibility.isReady ? 1 : 0.4)
         .help(help(for: visibility))
+        // A symbol-only button has no name of its own; VoiceOver would read
+        // the glyph's identifier. The help text is the name.
+        .accessibilityLabel(help(for: visibility))
     }
 
     private var showsPopover: Binding<Bool> {

@@ -12,9 +12,15 @@ extension HTTPBackend {
         }
     }
 
-    func post<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
+    /// `timeout` is the ordinary 10 s unless a route says otherwise -- a
+    /// prompt rewrite may have to load its LLM first, and a 10 s idle limit
+    /// turned every cold expansion into "the request timed out".
+    func post<Body: Encodable, T: Decodable>(
+        _ path: String, body: Body, timeout: TimeInterval = 10
+    ) async throws -> T {
         var request = self.request(path)
         request.httpMethod = "POST"
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try MoldJSON.encoder.encode(body)
         let data = try await bytes(for: request)
