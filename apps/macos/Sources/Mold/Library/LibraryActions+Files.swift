@@ -25,4 +25,33 @@ extension LibraryActions {
     func quickLook(_ entries: [LibraryEntry]) {
         Task { QuickLook.shared.show(await files(for: entries)) }
     }
+
+    /// Saves several prints into one folder the person chose.
+    ///
+    /// Nothing there is ever destroyed: a name already in the folder, or
+    /// already claimed by an earlier print in this same selection, gets the
+    /// Finder's ` 2` suffix. This path used to `removeItem` at the
+    /// destination first -- so somebody's own `robot.png` went, with no
+    /// overwrite prompt (the single-print `NSSavePanel` asks; this never did)
+    /// -- and `Robot.png` beside `robot.png` collapsed to one file on the
+    /// case-insensitive volume APFS is by default: ten prints asked for, nine
+    /// saved, no message.
+    func saveAll(_ entries: [LibraryEntry], into folder: URL) async {
+        let existing = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        var names = SaveNames(existing: existing)
+        for entry in entries {
+            guard let source = await files(for: [entry]).first else { continue }
+            // The person chose THIS folder and nothing above it.
+            guard let destination = SafeFilename.url(names.claim(entry.print.filename),
+                                                     in: folder) else { continue }
+            do {
+                try FileManager.default.copyItem(at: source.url, to: destination)
+            } catch {
+                // A disk full, a read-only folder: silent before, through a
+                // `try?` that swallowed it whole.
+                hosts.report(error, on: entry.hostID, doing: "save that print")
+                return
+            }
+        }
+    }
 }

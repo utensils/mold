@@ -82,24 +82,22 @@ struct LibraryActions {
                 panel.nameFieldStringValue = first.print.filename
                 guard await panel.begin() == .OK, let url = panel.url,
                       let source = await files(for: [first]).first else { return }
-                try? FileManager.default.removeItem(at: url)
-                try? FileManager.default.copyItem(at: source.url, to: url)
+                // The panel already asked about replacing, so removing first
+                // is what the person agreed to -- but a failure here is theirs
+                // to hear about, not something to swallow.
+                do {
+                    try? FileManager.default.removeItem(at: url)
+                    try FileManager.default.copyItem(at: source.url, to: url)
+                } catch {
+                    hosts.report(error, on: first.hostID, doing: "save that print")
+                }
             } else {
                 let panel = NSOpenPanel()
                 panel.canChooseDirectories = true
                 panel.canChooseFiles = false
                 panel.prompt = "Save Here"
                 guard await panel.begin() == .OK, let folder = panel.url else { return }
-                for entry in entries {
-                    // The person chose `folder` and nothing above it. A name
-                    // that would land anywhere else is not saved -- this path
-                    // REMOVES before it copies, so an unchecked one is a
-                    // delete wherever the machine points it.
-                    guard let destination = SafeFilename.url(entry.print.filename, in: folder),
-                          let source = await files(for: [entry]).first else { continue }
-                    try? FileManager.default.removeItem(at: destination)
-                    try? FileManager.default.copyItem(at: source.url, to: destination)
-                }
+                await saveAll(entries, into: folder)
             }
         }
     }
