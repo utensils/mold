@@ -65,7 +65,7 @@ final class ThumbnailCache {
             // Thumbnails are NOT ticketable -- the media-token route covers
             // only full media. An authenticated host needs the header here.
             if let apiKey = host.apiKey, !apiKey.isEmpty {
-                request.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
+                request.setValue(apiKey, forHTTPHeaderField: RedirectGuard.keyHeader)
             }
             // Streamed and BOUNDED, not `data(for:)`: a thumbnail is tens of
             // kilobytes and the answer is decoded into an `NSImage`, so an
@@ -74,7 +74,8 @@ final class ThumbnailCache {
             // before a byte is read, and the count is kept as it arrives
             // because a host that lies about the length is exactly the one
             // this guards against.
-            guard let (stream, response) = try? await session.bytes(for: request),
+            guard let (stream, response) = try? await session.bytes(
+                for: request, delegate: RedirectGuard(origin: host.baseURL)),
                   let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode),
                   http.expectedContentLength <= Int64(ResponseCeiling.thumbnail),
