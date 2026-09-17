@@ -29,11 +29,19 @@ struct SettingRow: View {
         let entry: ConfigEntry
         let refusal: String?
 
+        /// The machine was started with this key in its environment, so a PUT
+        /// answers 403 `ENV_OVERRIDDEN` before it tries
+        /// (`routes_config.rs:195-201`). `ConfigValueField` has always drawn
+        /// such a row read-only; a curated pane drew a live stepper that
+        /// snapped back the moment it was dragged (review 05-M11).
+        var isEnvOwned: Bool { entry.isEnvOwned }
+
         /// Whether the number editor draws a `Stepper` beside its field --
-        /// only where the key itself declares a step.
+        /// only where the key itself declares a step, and never on a row
+        /// nothing can write.
         var showsStepper: Bool {
-            if case let .number(_, _, step) = setting.editor { return step != nil }
-            return false
+            guard !isEnvOwned, case let .number(_, _, step) = setting.editor else { return false }
+            return step != nil
         }
     }
 
@@ -52,6 +60,11 @@ struct SettingRow: View {
             Text(setting.help)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if entry.isEnvOwned {
+                Text(Self.envOwnedReason(entry))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
             // The server's own answer (`entry.needsRestart`), never a
             // client-authored list -- `SourceBadge` draws the identical
             // caption in Advanced, but a curated pane shows no source badge
@@ -71,12 +84,32 @@ struct SettingRow: View {
     }
 
     @ViewBuilder private var editor: some View {
-        switch setting.editor {
-        case .toggle: toggleField
-        case .text: textField
-        case let .number(min, max, step): numberField(min: min, max: max, step: step)
-        case let .choice(options): choiceField(options)
+        if entry.isEnvOwned {
+            envOwnedField
+        } else {
+            switch setting.editor {
+            case .toggle: toggleField
+            case .text: textField
+            case let .number(min, max, step): numberField(min: min, max: max, step: step)
+            case let .choice(options): choiceField(options)
+            }
         }
+    }
+
+    /// The value as plain text, and the variable that owns it -- the same
+    /// shape `ConfigValueField.envOwnedField` draws in Advanced, so one
+    /// machine reads the same either side of the Settings window.
+    private var envOwnedField: some View {
+        Text(entry.editableText.isEmpty ? "Not set" : entry.editableText)
+            .foregroundStyle(.secondary)
+    }
+
+    /// Why the row has no control. One line, in the machine's own terms.
+    static func envOwnedReason(_ entry: ConfigEntry) -> String {
+        guard let envVar = entry.envVar else {
+            return "Set by this machine's environment, which wins over anything saved here."
+        }
+        return "Set by \(envVar) on this machine, which wins over anything saved here."
     }
 
     private var toggleField: some View {

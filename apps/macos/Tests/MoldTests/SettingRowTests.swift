@@ -38,6 +38,30 @@ struct SettingRowTests {
         #expect(plan?.showsStepper == true)
     }
 
+    /// **Fails today**: `ConfigValueField.resolve` has always mapped
+    /// `isEnvOwned` to a read-only row, but `SettingRow` never consulted it.
+    /// 12 of the 24 curated keys carry an env var, so on a machine started
+    /// with `MOLD_DEFAULT_WIDTH=768` the Generation pane drew a live stepper;
+    /// dragging it PUT, the server answered 403 `ENV_OVERRIDDEN`
+    /// (`routes_config.rs:195-201`) and the control snapped back
+    /// (review 05-M11).
+    @Test func anEnvOwnedRowIsReadOnlyAndSaysWhy() {
+        let entry = FakeFixtures.configEntry(
+            "default_width", value: .number(768), source: "env", envVar: "MOLD_DEFAULT_WIDTH")
+        let plan = SettingRow.resolve(widthSetting, entry: entry)
+
+        #expect(plan?.isEnvOwned == true)
+        #expect(plan?.showsStepper == false, "an env-owned row offers no control to drag")
+        #expect(SettingRow.envOwnedReason(entry).contains("MOLD_DEFAULT_WIDTH"))
+    }
+
+    /// A machine that reports no variable name still says the row is locked.
+    @Test func anEnvOwnedRowWithNoNamedVariableStillExplainsItself() {
+        let entry = FakeFixtures.configEntry("default_width", value: .number(768), source: "env")
+        #expect(SettingRow.resolve(widthSetting, entry: entry)?.isEnvOwned == true)
+        #expect(SettingRow.envOwnedReason(entry).contains("environment"))
+    }
+
     @Test func aNumberWithNoStepDrawsNoStepper() {
         // No curated key declares a nil step today -- built directly so the
         // negative case is real rather than assumed.
