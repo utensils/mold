@@ -22,6 +22,8 @@ extension LibraryActions {
             if let shelf = library.shelf(slug: slug) { library.file(targets, into: shelf) }
         case let .unfile(slug):
             if let shelf = library.shelf(slug: slug) { library.unfile(targets, from: shelf) }
+        case .upscale:
+            upscale(targets)
         case .copy:
             copy(targets)
         case .save:

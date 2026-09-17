@@ -13,6 +13,8 @@ struct LibraryPane: View {
     @Environment(GenerateController.self) var generate
     @Environment(ModelStore.self) var models
     @Environment(PrintMaterializer.self) var materializer
+    /// Make Bigger… and the clip jobs it starts.
+    @Environment(UpscaleStore.self) var upscales
     /// The WINDOW's undo manager. The store registers against it so Edit ▸
     /// Undo, which SwiftUI wires to the responder chain, finds our edits --
     /// and so a focused text field still keeps ⌘Z for itself.
@@ -49,7 +51,7 @@ struct LibraryPane: View {
     var actions: LibraryActions {
         LibraryActions(hosts: hosts, library: library, reuse: reuse,
                        confirmDestruction: { pendingDestruction = $0 },
-                       materializer: materializer,
+                       materializer: materializer, upscales: upscales,
                        collectionAction: { performCollection($0) },
                        meshExport: { meshExport = $0 })
     }
@@ -93,6 +95,9 @@ struct LibraryPane: View {
             // the events are deltas and a client that has read nothing has
             // nothing to apply them to.
             .task { await actions.reload() }
+            // The clip upscales already running on each machine. One listing
+            // per machine, so a job survives a restart and a second Mac.
+            .task { await upscales.recover() }
             .onAppear { library.undo.manager = undoManager }
             .onAppear { revealIfNeeded() }
             .onChange(of: undoManager) { _, manager in library.undo.manager = manager }

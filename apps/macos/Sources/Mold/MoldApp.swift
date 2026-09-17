@@ -19,6 +19,7 @@ struct MoldApp: App {
     @State private var models: ModelStore
     @State private var generate: GenerateController
     @State private var queue: QueueStore
+    @State private var upscales: UpscaleStore
     @State private var transfers: TransferStore
     @State private var licenses: LicenseStore
     @State private var downloads: DownloadStore
@@ -48,9 +49,12 @@ struct MoldApp: App {
         _hosts = State(initialValue: hosts)
         let library = LibraryStore(hosts: hosts)
         _library = State(initialValue: library)
-        _models = State(initialValue: ModelStore(hosts: hosts))
+        let models = ModelStore(hosts: hosts)
+        _models = State(initialValue: models)
         let queue = QueueStore(hosts: hosts)
         _queue = State(initialValue: queue)
+        _upscales = State(initialValue: UpscaleStore(
+            hosts: hosts, models: models, library: library))
         _transfers = State(initialValue: TransferStore(hosts: hosts, queue: queue))
         let licenses = LicenseStore(hosts: hosts)
         _licenses = State(initialValue: licenses)
@@ -107,6 +111,7 @@ struct MoldApp: App {
                 .environment(models)
                 .environment(generate)
                 .environment(queue)
+                .environment(upscales)
                 .environment(transfers)
                 .environment(licenses)
                 .environment(downloads)

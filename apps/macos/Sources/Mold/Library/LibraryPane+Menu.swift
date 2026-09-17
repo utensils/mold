@@ -26,6 +26,7 @@ extension LibraryPane {
             trashCount: library.trashed.count,
             name: entries.count == 1 ? entries[0].print.displayName : nil,
             canReuse: entries.count == 1,
+            canUpscale: actions.canUpscale(entries),
             share: navigation.scope.isTrash ? [] : entries.map(actions.draggable),
             perform: { action in
                 actions.perform(action, on: entries, scope: navigation.scope,

@@ -20,6 +20,9 @@ struct LibraryActions {
     /// Turns prints into files on this disk. Absent in contexts that only
     /// read -- nothing here fetches bytes without it.
     var materializer: PrintMaterializer?
+    /// Making a print bigger, on the machine that holds it. Absent in
+    /// contexts with no store to act through, which reads as "cannot".
+    var upscales: UpscaleStore?
     /// What to do about the SHELF being shown -- rename it, hide it, delete
     /// it. Declared in the menu plan so both menus offer the three, and
     /// answered by whoever owns the sheet and the confirm.

@@ -24,6 +24,8 @@ public enum LibraryAction: Hashable, Sendable {
     case favorite(Bool)
     case file(slug: String)
     case unfile(slug: String)
+    /// Upscale this print on the machine that holds it.
+    case upscale
     case copy
     case save
     case export(format: String)
@@ -55,13 +57,17 @@ public struct LibraryMenuPlan: Sendable {
     /// a single Turntable… that opens the sheet.
     public let meshExports: MeshExport.Split?
     public let canReuse: Bool
+    /// Whether the machine holding this print advertises upscaling it -- a
+    /// clip needs `video_upscale`, a still `gallery_image` as well. Absence
+    /// is a definitive no, and the item is then ABSENT rather than inert.
+    public let canUpscale: Bool
     public let trashCount: Int
 
     public init(scope: LibraryScopeKind, count: Int, allFavorite: Bool = false,
                 name: String? = nil, shelves: [CollectionShelf] = [],
                 enclosingShelf: CollectionShelf? = nil, exportFormats: [String] = [],
                 meshExports: MeshExport.Split? = nil,
-                canReuse: Bool = false, trashCount: Int = 0) {
+                canReuse: Bool = false, canUpscale: Bool = false, trashCount: Int = 0) {
         self.meshExports = meshExports
         self.scope = scope
         self.count = count
@@ -71,6 +77,7 @@ public struct LibraryMenuPlan: Sendable {
         self.enclosingShelf = enclosingShelf
         self.exportFormats = exportFormats
         self.canReuse = canReuse
+        self.canUpscale = canUpscale
         self.trashCount = trashCount
     }
 }

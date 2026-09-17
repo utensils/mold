@@ -26,6 +26,13 @@ public extension LibraryMenuPlan {
         if canReuse, count == 1 {
             items += [.separator, Item(kind: .reuse, title: "Use These Settings")]
         }
+        // Beside Use These Settings, because both make a NEW print out of
+        // this one. One print at a time: the clip half is a durable job per
+        // print, and starting several at once would queue a machine full of
+        // work from one click.
+        if canUpscale, count == 1 {
+            items += [.separator, Item(kind: .upscale, title: "Make Bigger…")]
+        }
         items += [
             .separator,
             Item(kind: .favorite(!allFavorite), title: favoriteTitle),
