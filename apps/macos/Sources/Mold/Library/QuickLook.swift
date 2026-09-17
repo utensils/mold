@@ -30,6 +30,15 @@ final class QuickLook: NSObject, @unchecked Sendable {
         // Space toggles, the way it does in the Finder.
         if panel.isVisible { panel.orderOut(nil) } else { panel.makeKeyAndOrderFront(nil) }
     }
+
+    /// The files the panel is holding.
+    ///
+    /// The panel reads its item's URL lazily, from its own queues, so a file
+    /// it is showing must not be evicted out from under it -- which is what
+    /// the media cache asks this for before it deletes anything.
+    var heldURLs: [URL] {
+        items.withLock { $0.compactMap(\.previewItemURL) }
+    }
 }
 
 extension QuickLook: QLPreviewPanelDataSource {

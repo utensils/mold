@@ -23,19 +23,51 @@ extension PrintMaterializer {
                   let values = try? file.resourceValues(forKeys: keys),
                   let bytes = values.fileSize
             else { return nil }
-            // Access date where the file system keeps one; modification date
-            // otherwise, which `touch` is what keeps current.
-            let used = values.contentAccessDate ?? values.contentModificationDate ?? .distantPast
+            // Modification date FIRST, because `touch` is what maintains the
+            // recency this is meant to read and modification is all it writes.
+            // Preferring the access date meant APFS's own answer -- which the
+            // OS updates for its own reasons, and never for ours -- decided
+            // the eviction order, and the LRU's hand-kept signal was never
+            // read at all.
+            let used = values.contentModificationDate ?? values.contentAccessDate ?? .distantPast
             return CacheBudget.File(name: folder.lastPathComponent, bytes: bytes, lastUsed: used)
         }
     }
 
     var usedBytes: Int { contents.reduce(0) { $0 + $1.bytes } }
 
-    func enforceBudget() {
-        for name in CacheBudget.evictions(from: contents, cap: capBytes) {
+    /// Evicts down to the cap, sparing what is in use.
+    ///
+    /// `keeping` is the print just written: this runs between the write and
+    /// the return, so a clip bigger than the whole cap used to be downloaded,
+    /// written, deleted, and its URL handed back -- after which Quick Look
+    /// showed an empty panel, a save wrote nothing through its `try?`, and the
+    /// drag reported a generic failure. Nothing was told. A file too big to
+    /// keep still goes, but AFTER the thing that asked for it has had it, and
+    /// the person is told why it will not be there next time.
+    ///
+    /// Whatever `inUse` names is spared for the same reason: Quick Look reads
+    /// its item's URL lazily. A drag promise needs no entry there -- the
+    /// Finder holds an open descriptor, which an unlink does not invalidate.
+    func enforceBudget(keeping key: String? = nil) {
+        var spared = Set(inUse().map {
+            $0.deletingLastPathComponent().lastPathComponent
+        })
+        if let key { spared.insert(key) }
+        for name in CacheBudget.evictions(from: contents, cap: capBytes)
+        where !spared.contains(name) {
             try? FileManager.default.removeItem(at: cacheRoot.appending(path: name))
         }
+    }
+
+    /// Says so when a print cannot be kept, instead of letting it disappear.
+    func noteIfTooLarge(_ file: URL, named name: String) {
+        let bytes = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard bytes > capBytes else { return }
+        let size = ByteCountFormatStyle().format(Int64(bytes))
+        let cap = ByteCountFormatStyle().format(Int64(capBytes))
+        note = "“\(name)” is \(size) and the media cache holds \(cap), "
+            + "so Mold cannot keep a copy. Settings ▸ Storage sets the cap."
     }
 
     /// Marks a file as used now, so the least-recently-used rule has something

@@ -12,6 +12,11 @@ import Testing
 /// not sandboxed.
 @MainActor
 struct PrintMaterializerTests {
+    /// What a preview panel would be holding, without opening one.
+    @MainActor private final class Held {
+        var urls: [URL] = []
+    }
+
     private func root() -> URL {
         FileManager.default.temporaryDirectory
             .appending(path: "mold-materializer-\(UUID().uuidString)")
@@ -60,6 +65,90 @@ struct PrintMaterializerTests {
             .standardizedFileURL == root.standardizedFileURL)
         #expect(!FileManager.default.fileExists(
             atPath: root.deletingLastPathComponent().appending(path: "escaped").path))
+    }
+
+    // MARK: - The budget
+
+    /// **Fails today**: `url(for:fetch:)` runs `enforceBudget()` between the
+    /// write and the return (`PrintMaterializer.swift:74`), and
+    /// `CacheBudget.evictions` correctly refuses to keep a file bigger than
+    /// the whole cap -- so the clip is downloaded, written, deleted, and a URL
+    /// to the deleted file is handed back. Every consumer then fails with no
+    /// message.
+    @Test func aPrintTooBigForTheCacheIsStillHandedOverAndSaidOutLoud() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        AppStorageSuite.defaults.set(0, forKey: PrintMaterializer.capKey)
+        defer { AppStorageSuite.defaults.removeObject(forKey: PrintMaterializer.capKey) }
+        let materializer = PrintMaterializer(root: root)
+
+        let url = try #require(await materializer.url(for: entry("clip.mp4")) {
+            Data(repeating: 7, count: 4_096)
+        })
+
+        #expect(FileManager.default.fileExists(atPath: url.path))
+        let note = try #require(materializer.note)
+        #expect(note.contains("clip.mp4"))
+    }
+
+    /// The panel reads its item's URL lazily, from its own queues.
+    @Test func aFileQuickLookIsShowingIsNotEvictedUnderIt() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let held = Held()
+        let materializer = PrintMaterializer(root: root, inUse: { held.urls })
+        let open = try #require(await materializer.url(for: entry("open.png")) {
+            Data(repeating: 1, count: 2_048)
+        })
+        held.urls = [open]
+
+        AppStorageSuite.defaults.set(0, forKey: PrintMaterializer.capKey)
+        defer { AppStorageSuite.defaults.removeObject(forKey: PrintMaterializer.capKey) }
+        materializer.enforceBudget()
+
+        #expect(FileManager.default.fileExists(atPath: open.path))
+    }
+
+    /// An ordinary print, with nothing holding it, still goes when the cache
+    /// is over its cap -- the sparing is about what is in use, not a reprieve.
+    @Test func aPrintNothingIsHoldingIsStillEvicted() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let materializer = PrintMaterializer(root: root)
+        let old = try #require(await materializer.url(for: entry("old.png")) {
+            Data(repeating: 1, count: 2_048)
+        })
+
+        AppStorageSuite.defaults.set(0, forKey: PrintMaterializer.capKey)
+        defer { AppStorageSuite.defaults.removeObject(forKey: PrintMaterializer.capKey) }
+        materializer.enforceBudget()
+
+        #expect(!FileManager.default.fileExists(atPath: old.path))
+    }
+
+    /// **Fails today**: `contents` prefers `contentAccessDate`
+    /// (`PrintMaterializer+Budget.swift:28`) while `touch` writes only the
+    /// MODIFICATION date, so on APFS -- which does keep access dates -- the
+    /// hand-maintained recency signal was never the one read.
+    @Test func touchingAFileIsWhatDecidesHowRecentlyItWasUsed() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let materializer = PrintMaterializer(root: root)
+        let older = try #require(await materializer.url(for: entry("older.png")) {
+            Data(repeating: 1, count: 8)
+        })
+        _ = try #require(await materializer.url(for: entry("newer.png")) {
+            Data(repeating: 1, count: 8)
+        })
+
+        // Deliberately BACKDATED: the file was just written, so only `touch`'s
+        // own attribute can make it look like the older of the two.
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1_000)],
+            ofItemAtPath: older.path)
+
+        let oldestName = materializer.contents.min { $0.lastUsed < $1.lastUsed }?.name
+        #expect(oldestName == older.deletingLastPathComponent().lastPathComponent)
     }
 
     /// mold's own versions carry a colon, which the Finder renders as a slash.

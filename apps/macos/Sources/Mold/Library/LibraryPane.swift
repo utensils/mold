@@ -102,6 +102,7 @@ struct LibraryPane: View {
 
         return content(showing)
             .failureBanner(hosts)
+            .mediaCacheNote(materializer)
             .trailingColumn(isShowing: showsInspector) {
                 LibraryInspector(entries: showing.selected,
                                  host: showing.selected.first.flatMap(host(of:)),

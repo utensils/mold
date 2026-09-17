@@ -24,11 +24,23 @@ final class PrintMaterializer {
 
     /// Where the cached files live. Internal so `+Budget` can walk it.
     let cacheRoot: URL
+    /// One sentence when a print could not be kept -- read by the Library, so
+    /// "too large for the cache" is said out loud rather than presenting as a
+    /// preview that never opens. `internal(set)`: `+Budget` writes it.
+    internal(set) var note: String?
     /// Two askers for the same print share one download.
     private var inFlight: [String: Task<URL?, Never>] = [:]
 
-    init(root: URL? = nil) {
+    /// Files something is reading right now, which eviction must spare.
+    ///
+    /// The Quick Look panel by default -- it reads its item's URL lazily, from
+    /// its own queues, so deleting the directory under it leaves an empty
+    /// panel. A parameter because a test should not have to open one.
+    @ObservationIgnored let inUse: @MainActor () -> [URL]
+
+    init(root: URL? = nil, inUse: @escaping @MainActor () -> [URL] = { QuickLook.shared.heldURLs }) {
         self.cacheRoot = root ?? Self.defaultRoot
+        self.inUse = inUse
         try? FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
     }
 
@@ -75,8 +87,12 @@ final class PrintMaterializer {
         let url = await task.value
         inFlight[flightKey] = nil
         // After, never before: evicting to make room for a file whose size is
-        // still unknown would either be a guess or a second round trip.
-        enforceBudget()
+        // still unknown would either be a guess or a second round trip. And
+        // `keeping:` what was just written, or a print larger than the cap is
+        // deleted here and its URL handed back to a caller that then fails
+        // silently.
+        if let url { noteIfTooLarge(url, named: entry.print.displayName) }
+        enforceBudget(keeping: key)
         return url
     }
 
