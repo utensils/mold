@@ -193,8 +193,16 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         guard let status = batchStatusAnswers[id] else { throw notPlanted() }
         return status
     }
+    /// Answered per CLIENT BATCH ID. Unplanted is a real 404, not
+    /// `notPlanted()`'s bare `.unreachable` -- a transfer's `checkPriorAttempt`
+    /// reads "nothing landed yet" from exactly that status, and a test that
+    /// wants a genuine transport failure here plants one in `plantedErrors`.
     func batchStatus(clientBatchId: String) async throws -> BatchStatus {
-        try record("batchStatusByClientId"); throw notPlanted()
+        try record("batchStatusByClientId")
+        guard let status = batchStatusByClientId[clientBatchId] else {
+            throw MoldClientError.http(status: 404, code: nil, message: "No batch with that client id.")
+        }
+        return status
     }
     func jobPreview(jobId: String) async throws -> JobProgress? {
         try record("jobPreview")
@@ -280,6 +288,9 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     /// Answered per JOB ID, same "absent is unplanted" rule as every other
     /// listing here.
     nonisolated(unsafe) var queueJobDetails: [String: QueueJobDetail] = [:]
+    /// Answered per CLIENT BATCH ID by `batchStatus(clientBatchId:)` -- absent
+    /// is a real 404 ("nothing landed yet"), not `notPlanted()`.
+    nonisolated(unsafe) var batchStatusByClientId: [String: BatchStatus] = [:]
     /// A FIFO per host id, so a test can plant "before" and "after" a retry
     /// and see the store pick up the second answer on its next call.
     nonisolated(unsafe) var batchListings: [BatchStatusListing] = []

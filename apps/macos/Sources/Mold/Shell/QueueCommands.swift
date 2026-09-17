@@ -22,6 +22,10 @@ struct QueueCommands: Commands {
                     if job.canMoveUp { Button("Move Up", action: job.moveUp) }
                     if job.canMoveDown { Button("Move Down", action: job.moveDown) }
                 }
+                if !job.moveToDestinations.isEmpty {
+                    Divider()
+                    MoveToMenu(destinations: job.moveToDestinations, send: job.moveTo)
+                }
                 if job.canCancel {
                     Divider()
                     Button("Cancel Job", role: .destructive, action: job.cancel)
@@ -47,12 +51,17 @@ struct QueueSelection: Equatable {
 
     struct Job: Equatable {
         let canPause, canResume, canRetry, canMoveUp, canMoveDown, canCancel: Bool
+        /// Empty off a held row, or when nothing else on the fleet is up and
+        /// generating -- `MoveToMenu`'s own "absent, not disabled" rule.
+        let moveToDestinations: [TransferStore.TransferDestination]
         let pause, resume, retry, moveUp, moveDown, cancel: () -> Void
+        let moveTo: (MoldHost.ID) -> Void
 
         static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.canPause == rhs.canPause && lhs.canResume == rhs.canResume
                 && lhs.canRetry == rhs.canRetry && lhs.canMoveUp == rhs.canMoveUp
                 && lhs.canMoveDown == rhs.canMoveDown && lhs.canCancel == rhs.canCancel
+                && lhs.moveToDestinations == rhs.moveToDestinations
         }
     }
 
@@ -71,6 +80,7 @@ struct QueueSelection: Equatable {
             if job.canRetry { titles.append("Try Again") }
             if job.canMoveUp { titles.append("Move Up") }
             if job.canMoveDown { titles.append("Move Down") }
+            if !job.moveToDestinations.isEmpty { titles.append("Move to") }
             if job.canCancel { titles.append("Cancel Job") }
         }
         if emptyQueue != nil { titles.append("Empty Queue…") }

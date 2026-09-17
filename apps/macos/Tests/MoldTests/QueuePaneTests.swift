@@ -208,14 +208,26 @@ struct QueuePaneTests {
 
         let runningJob = QueueSelection.Job(
             canPause: true, canResume: false, canRetry: false, canMoveUp: false, canMoveDown: true,
-            canCancel: true, pause: {}, resume: {}, retry: {}, moveUp: {}, moveDown: {}, cancel: {})
+            canCancel: true, moveToDestinations: [], pause: {}, resume: {}, retry: {}, moveUp: {},
+            moveDown: {}, cancel: {}, moveTo: { _ in })
         let running = QueueSelection(job: runningJob, emptyQueue: nil)
         #expect(running.offeredTitles == ["Pause Job", "Move Down", "Cancel Job"])
 
         let held = QueueSelection.Job(
             canPause: false, canResume: false, canRetry: true, canMoveUp: false, canMoveDown: false,
-            canCancel: true, pause: {}, resume: {}, retry: {}, moveUp: {}, moveDown: {}, cancel: {})
+            canCancel: true, moveToDestinations: [], pause: {}, resume: {}, retry: {}, moveUp: {},
+            moveDown: {}, cancel: {}, moveTo: { _ in })
         #expect(QueueSelection(job: held, emptyQueue: {}).offeredTitles == ["Try Again", "Cancel Job", "Empty Queue…"])
+    }
+
+    /// **Fails today**: `Job.moveToDestinations` does not exist yet.
+    @Test func aHeldSelectionWithAMachineToSendToOffersMoveTo() {
+        let destination = TransferStore.TransferDestination(id: UUID(), name: "hal9000", queueDepth: 2)
+        let held = QueueSelection.Job(
+            canPause: false, canResume: false, canRetry: true, canMoveUp: false, canMoveDown: false,
+            canCancel: true, moveToDestinations: [destination], pause: {}, resume: {}, retry: {},
+            moveUp: {}, moveDown: {}, cancel: {}, moveTo: { _ in })
+        #expect(QueueSelection(job: held, emptyQueue: nil).offeredTitles == ["Try Again", "Move to", "Cancel Job"])
     }
 
     // MARK: - Fixture

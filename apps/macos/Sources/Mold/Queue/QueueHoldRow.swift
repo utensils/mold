@@ -17,6 +17,8 @@ struct QueueHoldRow: View {
     let hold: QueueHold
     let pullThenRetry: (String) -> Void
     let tryAgain: () -> Void
+    let moveToDestinations: [TransferStore.TransferDestination]
+    let moveTo: (MoldHost.ID) -> Void
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -32,7 +34,7 @@ struct QueueHoldRow: View {
                     ForEach(Self.actions(for: hold), id: \.self) { action in
                         button(for: action)
                     }
-                    // S4: MoveToMenu
+                    MoveToMenu(destinations: moveToDestinations, send: moveTo)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)

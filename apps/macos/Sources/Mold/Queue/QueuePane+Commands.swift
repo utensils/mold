@@ -33,12 +33,14 @@ extension QueuePane {
                 canMoveUp: canReorder && QueueRow.canMove(entry.id, .up, in: entries),
                 canMoveDown: canReorder && QueueRow.canMove(entry.id, .down, in: entries),
                 canCancel: entry.state.isLive,
+                moveToDestinations: entry.state == .held ? transfers.transferDestinations(from: host.id) : [],
                 pause: { act(.pause, on: entry, host: host) },
                 resume: { act(.resume, on: entry, host: host) },
                 retry: { act(.retry, on: entry, host: host) },
                 moveUp: { move(entry.id, .up, host: host, entries: entries) },
                 moveDown: { move(entry.id, .down, host: host, entries: entries) },
-                cancel: { act(.cancel, on: entry, host: host) })
+                cancel: { act(.cancel, on: entry, host: host) },
+                moveTo: { moveTo(entry, from: host, to: $0) })
         }
         return nil
     }

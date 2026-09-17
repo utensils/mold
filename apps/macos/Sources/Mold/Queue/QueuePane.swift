@@ -7,6 +7,7 @@ struct QueuePane: View {
     // `LibraryPane.swift`'s `hosts`/`library` aren't private either.
     @Environment(HostStore.self) var hosts
     @Environment(QueueStore.self) var queue
+    @Environment(TransferStore.self) var transfers
     /// For `pullThenRetry(_:entry:host:)`'s own `QueueHoldRow.pullThenRetry` call.
     @Environment(DownloadStore.self) var downloads
     /// Not `private`, and deliberately: the toolbar button that raises this
@@ -44,6 +45,7 @@ struct QueuePane: View {
             }
         }
         .failureBanner(hosts)
+        .transferCaption(transfers.summary)
         .navigationTitle("Queue")
         .navigationSubtitle(QueueSummary.sentence(queue.all))
         .toolbar { toolbar }
@@ -92,7 +94,9 @@ struct QueuePane: View {
                 QueueHoldRow(
                     entry: entry, hold: hold,
                     pullThenRetry: { model in pullThenRetry(model, entry: entry, host: host) },
-                    tryAgain: { act(.retry, on: entry, host: host) })
+                    tryAgain: { act(.retry, on: entry, host: host) },
+                    moveToDestinations: transfers.transferDestinations(from: host.id),
+                    moveTo: { moveTo(entry, from: host, to: $0) })
             } else {
                 let reorderable = canReorder && entry.state.isReorderable
                 QueueRow(
@@ -123,13 +127,6 @@ struct QueuePane: View {
             case .resume: await queue.resume(entry, on: host.id)
             case .retry: await queue.retry(entry, on: host.id)
             }
-            await load()
-        }
-    }
-
-    private func pullThenRetry(_ model: String, entry: QueueEntry, host: MoldHost) {
-        Task {
-            await QueueHoldRow.pullThenRetry(model, entry: entry, host: host, downloads: downloads, queue: queue)
             await load()
         }
     }
