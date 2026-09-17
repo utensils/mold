@@ -159,6 +159,106 @@ struct HeartbeatTests {
         #expect(hosts.watchers[plato.id] != nil)
     }
 
+    /// **Fails today**: `tick()` asks for capabilities only through
+    /// `hosts.refresh(host)`, and calls it only for a host that is NOT up.
+    /// `/api/capabilities` is fetched in exactly one place and with `try?`
+    /// (`HostStore+Reachability.swift:46-50`), so one transient failure at
+    /// launch leaves `capabilities[id]` nil forever: `wantsEvents` is false,
+    /// so the machine gets no event stream ever, and `wantsPoll` is true, so
+    /// it is polled at full rate instead. The one state where ⌘R is still
+    /// the only way out -- hidden behind a poll that looks like it works.
+    @Test func anUpMachineThatNeverSaidWhatItCanDoIsAskedAgain() async {
+        let plato = machine()
+        let backend = FakeBackend(host: plato)
+        backend.serverStatus = FakeFixtures.serverStatus()
+        backend.exportBlock = FakeFixtures.exportOptions()
+        // Answers `/api/status` and refuses `/api/capabilities`.
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let queue = QueueStore(hosts: hosts)
+        await hosts.refresh(plato)
+        #expect(hosts.isUp(plato))
+        #expect(hosts.capabilities[plato.id] == nil)
+        let beat = heartbeat(hosts, queue)
+
+        backend.capabilityBlock = FakeFixtures.capabilities(events: true)
+        await beat.tick()
+
+        #expect(hosts.capabilities[plato.id] != nil)
+        await settle { backend.callCount("events") == 1 }
+        #expect(hosts.watchers[plato.id] != nil)
+    }
+
+    /// And it is not asked on every tick forever. A machine that answers
+    /// `/api/status` and keeps failing `/api/capabilities` backs off, rather
+    /// than costing a request every ten seconds for the life of the app.
+    @Test func aMachineThatKeepsRefusingItsCapabilitiesIsAskedLessOften() async {
+        let plato = machine()
+        let backend = FakeBackend(host: plato)
+        backend.serverStatus = FakeFixtures.serverStatus()
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let queue = QueueStore(hosts: hosts)
+        await hosts.refresh(plato)
+        let asked = backend.callCount("capabilities")
+        let beat = heartbeat(hosts, queue)
+
+        await beat.tick()
+        #expect(backend.callCount("capabilities") == asked + 1)
+
+        // The next tick is inside the backoff window.
+        await beat.tick()
+        #expect(backend.callCount("capabilities") == asked + 1)
+
+        // And it does come back round, rather than giving up.
+        for _ in 0 ..< 4 { await beat.tick() }
+        #expect(backend.callCount("capabilities") > asked + 1)
+    }
+
+    /// **Fails today**: `tick()` is a plain `for` with an `await` inside, so
+    /// a machine that is off holds the loop for its whole connect timeout and
+    /// every machine behind it waits. `HostStore.refreshAll` already uses a
+    /// task group for exactly this reason.
+    @Test func oneSlowMachineDoesNotHoldUpTheRest() async {
+        let slow = machine("plato"), quick = machine("hal9000")
+        let slowBackend = FakeBackend(host: slow)
+        slowBackend.statusHeldOpen = true
+        let quickBackend = fake(for: quick, events: false)
+        quickBackend.queueListing = FakeFixtures.queueListing(["job-1"])
+        let hosts = HostStore(hosts: [slow, quick]) { host in
+            host.id == slow.id ? slowBackend : quickBackend
+        }
+        let queue = QueueStore(hosts: hosts)
+        // `quick` is up and cannot stream, so a tick owes it a queue read.
+        await hosts.refresh(quick)
+        let beat = heartbeat(hosts, queue)
+
+        // `slow` is first in the list and its status never answers.
+        let tick = Task { await beat.tick() }
+        await settle { quickBackend.callCount("queue") == 1 }
+
+        #expect(quickBackend.callCount("queue") == 1, "asked while the first machine was still answering")
+        slowBackend.releaseStatus()
+        await tick.value
+    }
+
+    /// A tick that was cancelled -- `stop()` while one is in flight -- asks
+    /// nothing.
+    @Test func aCancelledTickAsksNothing() async {
+        let plato = machine()
+        let backend = fake(for: plato, events: false)
+        backend.queueListing = FakeFixtures.queueListing(["job-1"])
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let queue = QueueStore(hosts: hosts)
+        await hosts.refresh(plato)
+        let before = backend.calls.count
+        let beat = heartbeat(hosts, queue)
+
+        let tick = Task { await beat.tick() }
+        tick.cancel()
+        await tick.value
+
+        #expect(backend.calls.count == before)
+    }
+
     // MARK: - Waking up
 
     /// **Fails today**: nothing observes `NSWorkspace.didWakeNotification`, so

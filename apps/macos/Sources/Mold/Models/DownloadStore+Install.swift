@@ -77,11 +77,11 @@ extension DownloadStore {
     /// `CancellationError` and turned this into a tight spin on the MAIN
     /// ACTOR for as long as the download ran. And a machine whose download
     /// stream is alive but whose job never reaches a terminal frame stops
-    /// this after `settlementBudget` rather than parking it forever -- a
-    /// weights fetch is slow, so the budget is generous, not tight.
+    /// this after `budget` rather than parking it forever -- a weights fetch
+    /// is slow, so the budget is generous, not tight.
     ///
-    /// `after` is a parameter rather than a constant so a test pins the
-    /// timeout without waiting one out, the `HostHeartbeat` rule.
+    /// `budget` and `every` are parameters rather than constants so a test
+    /// pins the timeout without waiting one out, the `HostHeartbeat` rule.
     func awaitSettlement(
         of model: String, on host: MoldHost.ID,
         within budget: Duration = .seconds(60 * 60), polling every: Duration = .milliseconds(100)

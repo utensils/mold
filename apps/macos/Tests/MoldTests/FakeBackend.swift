@@ -187,8 +187,25 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     // MARK: - Status
 
+    /// Holds `status()` open until `releaseStatus()`, the way a machine that
+    /// is off holds a connection until it times out. A test uses it to prove
+    /// that asking one machine does not stop the others being asked.
+    nonisolated(unsafe) var statusHeldOpen = false
+    nonisolated(unsafe) private var statusWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func releaseStatus() {
+        let waiting = statusWaiters
+        statusWaiters = []
+        for continuation in waiting { continuation.resume() }
+    }
+
     func status() async throws -> ServerStatus {
         try record("status")
+        if statusHeldOpen {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                statusWaiters.append(continuation)
+            }
+        }
         guard let serverStatus else { throw notPlanted() }
         return serverStatus
     }

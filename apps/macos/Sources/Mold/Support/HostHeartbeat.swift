@@ -18,13 +18,38 @@ import MoldClient
 /// competing with the first.
 @MainActor
 final class HostHeartbeat {
-    private let hosts: HostStore
-    private let queue: QueueStore
+    // Not `private`: `+Tick.swift` is where every decision about them lives,
+    // and `private` does not cross a file boundary even within one type.
+    let hosts: HostStore
+    let queue: QueueStore
     /// A constructor parameter, never a constant, so a test drives ten ticks
     /// in a few milliseconds instead of sleeping through them.
     private let interval: Duration
     private var ticker: Task<Void, Never>?
-    private var wakeObserver: (any NSObjectProtocol)?
+    /// Held so it can be given back. `addObserver(forName:…)`'s token is the
+    /// only handle on that registration, and a centre outliving this object
+    /// would otherwise keep calling a block for a heartbeat nobody has.
+    private let wakeCenter: NotificationCenter
+    private var wakeObserver: WakeObserver?
+
+    /// The registration token, boxed. Swift 6 refuses to let a nonisolated
+    /// `deinit` touch a stored property of a non-`Sendable` type, and
+    /// `NSObjectProtocol` is not one -- but this token is created in exactly
+    /// one place and only ever handed straight back to the centre it came
+    /// from, which is what the box says out loud.
+    /// `nonisolated` because this file's default isolation is `MainActor`
+    /// and a `deinit` is not.
+    private nonisolated final class WakeObserver: @unchecked Sendable {
+        let token: any NSObjectProtocol
+        init(_ token: any NSObjectProtocol) { self.token = token }
+    }
+
+    /// How many ticks have run, and when each machine may be asked for its
+    /// capabilities again. Not `private`: `+Tick.swift` is the only reader,
+    /// and `private` does not cross a file boundary.
+    var ticks = 0
+    var capabilityRetryTick: [MoldHost.ID: Int] = [:]
+    var capabilityFailures: [MoldHost.ID: Int] = [:]
 
     /// `NSWorkspace`'s own centre in production; a test hands in a plain one
     /// and posts `wakeName` itself -- the `LandedPrints` idiom, where the
@@ -37,16 +62,19 @@ final class HostHeartbeat {
         self.hosts = hosts
         self.queue = queue
         self.interval = interval
-        wakeObserver = wakeCenter.addObserver(forName: wakeName, object: nil, queue: nil) { [weak self] _ in
-            Task { @MainActor in self?.wake() }
-        }
+        self.wakeCenter = wakeCenter
+        wakeObserver = WakeObserver(
+            wakeCenter.addObserver(forName: wakeName, object: nil, queue: nil) { [weak self] _ in
+                Task { @MainActor in self?.wake() }
+            })
     }
 
     deinit {
-        // Cancelling from `deinit` is the one thing that cannot hop actors,
-        // and neither of these needs to: `Task.cancel()` and
-        // `removeObserver` are both safe from any thread.
+        // Neither of these needs to hop actors, which is what makes them
+        // safe from a `deinit`: `Task.cancel()` and `removeObserver` are
+        // both callable from any thread.
         ticker?.cancel()
+        if let wakeObserver { wakeCenter.removeObserver(wakeObserver.token) }
     }
 
     /// Starts ticking. Idempotent -- a second call while one is running is
@@ -72,25 +100,6 @@ final class HostHeartbeat {
     func stop() {
         ticker?.cancel()
         ticker = nil
-    }
-
-    /// One pass over the fleet. Not `private`: the tests drive a single tick
-    /// rather than racing the loop, and `@testable` needs it visible.
-    func tick() async {
-        for host in hosts.hosts {
-            // A machine that is not answering is asked again -- this is the
-            // only thing that lets one that was off at launch join without
-            // the person pressing ⌘R. `refresh` reconciles the event streams
-            // itself, so coming back also opens its stream.
-            guard hosts.isUp(host) else {
-                await hosts.refresh(host)
-                continue
-            }
-            // It IS up: the only thing left to ask is the queue, and only of
-            // a machine that cannot stream it.
-            guard queue.wantsPoll(host.id) else { continue }
-            await queue.refresh(on: host.id)
-        }
     }
 
     /// The Mac woke up. Every socket opened before the sleep is dead, and the
