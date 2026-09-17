@@ -19,6 +19,15 @@ struct StepSegments: View {
             }
         }
         .accessibilityElement()
-        .accessibilityLabel("Step \(done) of \(total)")
+        .accessibilityLabel(Self.reading(done: done, total: total).label)
+        .accessibilityValue(Self.reading(done: done, total: total).value)
+    }
+
+    /// Pure, so VoiceOver's two strings are pinned with no view rendered.
+    /// Split from the label the old single-string version folded them into
+    /// (design S7): a value re-announces as the strip moves, where a label
+    /// alone would be re-read as an unchanged name.
+    static func reading(done: Int, total: Int) -> (label: String, value: String) {
+        ("Progress", "Step \(done) of \(total)")
     }
 }

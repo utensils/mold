@@ -229,6 +229,14 @@ a script driving the mouse across the desktop.
 - No `bytes.lines` in `MoldClient`. URLSession's splitter drops empty lines,
   and an empty line is what ends an SSE frame -- the download stream was
   silent for months because of it. `moldLines()` keeps them.
+- `lint-a11y` is a hard gate: every file under `Sources/Mold` with an
+  `Image(systemName:` must also carry `accessibilityLabel`, `.help(`,
+  `Label(`, `Label {`, `accessibilityElement`, or the opt-out comment
+  `// a11y:`. It is a per-FILE floor, not the audit -- it cannot see whether
+  the modifier lands on the glyph that needs it rather than a sibling (a
+  tooltip on the row does not name the button inside it), so a file can pass
+  the rule and still be wrong. Use the opt-out only for a glyph that is
+  genuinely decorative beside its own text.
 
 `make test` runs two bundles: the `MoldClient` package (wire types, parsers,
 the outbox policy, a stub `URLProtocol` for the transport) and the app's own

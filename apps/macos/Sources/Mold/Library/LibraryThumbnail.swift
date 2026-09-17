@@ -27,6 +27,7 @@ struct LibraryThumbnail: View {
                         .interpolation(.medium)
                         .aspectRatio(contentMode: .fill)
                 } else {
+                    // a11y: placeholder inside LibraryCell, which carries the label
                     Image(systemName: entry.print.isVideo ? "film" : "photo")
                         .font(.title3)
                         .foregroundStyle(.tertiary)

@@ -20,13 +20,14 @@ final class PairingStore {
     /// "not asked yet" or "asked and it answered cleanly" -- `.paired` is
     /// the only positive fact worth keeping, set from a 403 caught by CODE
     /// (`PAIRING_OPERATOR_REQUIRED`), never by status alone, and cleared the
-    /// moment a listing actually succeeds.
-    private(set) var authority: [MoldHost.ID: Authority] = [:]
+    /// moment a listing actually succeeds. Not `private(set)`: `+Fixture.swift`'s
+    /// `seed(from:)` seeds it too, for the same cross-file reason as `byHost`.
+    internal(set) var authority: [MoldHost.ID: Authority] = [:]
     /// At most one pairing session in flight, and which machine it is for --
     /// a phone scanning a code from the wrong machine would be pairing to
-    /// nothing.
-    private(set) var session: PairingSession?
-    private(set) var sessionHost: MoldHost.ID?
+    /// nothing. Not `private(set)`, same reason as `authority` above.
+    internal(set) var session: PairingSession?
+    internal(set) var sessionHost: MoldHost.ID?
     /// See `+Fixture.swift`: set by `seed(from:)`, and checked by every
     /// method below that would otherwise reach a backend. Not `private(set)`
     /// for the same cross-file reason as `byHost`.

@@ -8,8 +8,11 @@ import SwiftUI
 extension ModelsPane {
     var table: some View {
         Table(of: Model.self, selection: $selection, sortOrder: sortOrder) {
+            // The bare name: `baseTitle` drops the trailing variant words
+            // (`headline` would repeat "Q4" beside the Variant column's own
+            // chip -- M5 S3 UAT).
             TableColumn("Model", value: \.sortHeadline) { model in
-                Text(model.headline).help(model.name)
+                Text(model.baseTitle).help(model.name)
             }
             TableColumn("Variant", value: \.sortVariant) { model in
                 variantCell(model)

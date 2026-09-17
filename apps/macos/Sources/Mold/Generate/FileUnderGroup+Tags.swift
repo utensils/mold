@@ -63,6 +63,7 @@ struct FileUnderTagsRow: View {
             }
             Button(action: remove) { Image(systemName: "xmark") }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Remove the tag “\(tag)”")
         }
         .font(.caption)
         .padding(.horizontal, 7)

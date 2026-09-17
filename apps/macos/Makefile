@@ -24,7 +24,7 @@ SIGN := CODE_SIGN_IDENTITY="$(or $(MOLD_DEV_SIGN_IDENTITY),-)"
 XCB      := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) \
             -derivedDataPath $(BUILD)/DerivedData CONFIGURATION_BUILD_DIR=$(BUILD)/$(CONFIG) $(SIGN)
 
-.PHONY: help gen build run uat test lint lint-layers lint-color lint-size lint-type-size clean \
+.PHONY: help gen build run uat test lint lint-layers lint-color lint-size lint-type-size lint-a11y clean \
         engine engine-clean engine-config signed dmg notarize release
 
 help: ## Show this help
@@ -95,7 +95,7 @@ test: gen ## Run every test bundle: the package, then the app's own store tests
 	@cd Packages/MoldClient && swift test
 	@$(XCB) -destination 'platform=macOS,arch=arm64' test | grep -Ev '^\s*$$' | tail -5
 
-lint: lint-layers lint-color lint-size lint-type-size ## Run every architecture lint
+lint: lint-layers lint-color lint-size lint-type-size lint-a11y ## Run every architecture lint
 
 lint-layers: ## MoldClient stays UI-free; only the root may build a backend
 	@# MoldStyle is the design system and of course imports SwiftUI. MoldClient
@@ -139,6 +139,24 @@ lint-type-size: ## Advisory: flag a type whose files together exceed $(TYPE_MAX)
 	    END { for (t in total) if (total[t] > max) \
 	      printf "  large type: %s (%d lines across its files)\n", t, total[t] }' \
 	  | sort
+
+lint-a11y: ## Every file with a systemName image must name or opt out of it
+	@# A per-site grep cannot be honest about which glyph carries a label --
+	@# a same-line rule is mostly false positives, and a scan window misses
+	@# a sibling @ViewBuilder or falls for a NEIGHBOUR's `.help(` (design S7,
+	@# M7). This is a per-FILE floor: a file with a symbol in it must also
+	@# carry a real label somewhere, or say by name why the glyph needs
+	@# none. It cannot see whether the modifier actually reaches the right
+	@# view -- that is still a human call, not this rule's.
+	@fail=0; \
+	for f in $$(grep -rl 'Image(systemName:' Sources/Mold --include='*.swift'); do \
+	  if ! grep -qE 'accessibilityLabel|\.help\(|Label\(|Label \{|accessibilityElement|// a11y:' "$$f"; then \
+	    echo "  no VoiceOver label and no // a11y: opt-out: $$f"; \
+	    fail=1; \
+	  fi; \
+	done; \
+	if [ "$$fail" = 1 ]; then exit 1; fi
+	@echo "  a11y ok"
 
 VERSION ?= 0.1.0
 DIST := $(CURDIR)/dist

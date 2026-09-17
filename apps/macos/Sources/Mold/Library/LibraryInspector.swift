@@ -61,6 +61,7 @@ struct LibraryInspector: View {
             }
         } else {
             VStack(spacing: 6) {
+                // a11y: decorative, described by the text beside it
                 Image(systemName: "square.stack")
                     .font(.largeTitle)
                     .foregroundStyle(.tertiary)

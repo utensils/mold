@@ -26,6 +26,8 @@ struct FailureBanner: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
+                .accessibilityLabel("Dismiss")
+                .help("Dismiss this message")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)

@@ -66,9 +66,18 @@ struct ReferenceStrip: View {
                 for url in urls { append(url) }
                 return true
             } isTargeted: { targeted = $0 }
-            .help(capability.primaryIsTarget && draft.media.editImages.isEmpty
-                  ? "Choose the picture to edit"
-                  : "Add a reference picture")
+            .help(addWellLabel)
+            .accessibilityElement()
+            .accessibilityLabel(addWellLabel)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { choose() }
+    }
+
+    /// The one sentence the add well's tooltip and its VoiceOver label share.
+    private var addWellLabel: String {
+        capability.primaryIsTarget && draft.media.editImages.isEmpty
+            ? "Choose the picture to edit"
+            : "Add a reference picture"
     }
 
     private func label(_ index: Int) -> String {

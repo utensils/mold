@@ -59,6 +59,10 @@ struct IdentityGroup: View {
                 return true
             } isTargeted: { targeted = $0 }
             .help("Add a photograph of the face to preserve")
+            .accessibilityElement()
+            .accessibilityLabel("Add a photograph of the face to preserve")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { choose() }
     }
 
     private func choose() {

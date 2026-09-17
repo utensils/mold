@@ -112,7 +112,8 @@ struct PairingTests {
         let client = PairedClient(
             id: "client-1", name: "iPhone", clientKind: "mobile", createdAtMs: 0, lastUsedAtMs: nil)
         let fixture = PairingStore.Fixture(hosts: [
-            "plato": PairedClients(authRequired: true, pairingAvailable: true, clients: [client])
+            "plato": PairingStore.HostFixture(
+                clients: PairedClients(authRequired: true, pairingAvailable: true, clients: [client]))
         ])
 
         store.seed(from: fixture)
@@ -126,5 +127,54 @@ struct PairingTests {
         #expect(fake.calls.isEmpty)
         #expect(hosts.failures.contains { $0.sentence.contains("fixture") })
         #expect(store.byHost[plato.id]?.clients.map(\.id) == ["client-1"])
+    }
+
+    /// The orchestrator's own addition to S7: a fixture can seed an
+    /// in-flight session directly, so `PairingSheet` has a code and a
+    /// countdown to draw for a UAT screenshot with no live host at all.
+    /// `createSession` still refuses -- seeding is not the same door as a
+    /// real request, and the seeded session must survive that refusal
+    /// untouched.
+    @Test func aFixtureCanSeedAnInFlightSession() async {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let store = PairingStore(hosts: hosts)
+        let session = PairingSession(
+            token: "tok", expiresAt: 4_102_444_800_000, authRequired: true,
+            instanceId: "instance-1", hostname: "plato")
+        let fixture = PairingStore.Fixture(hosts: [
+            "plato": PairingStore.HostFixture(
+                clients: PairedClients(authRequired: true, pairingAvailable: true, clients: []),
+                session: session)
+        ])
+
+        store.seed(from: fixture)
+
+        #expect(store.session == session)
+        #expect(store.sessionHost == plato.id)
+
+        await store.createSession(on: plato.id)
+
+        #expect(fake.calls.isEmpty)
+        #expect(store.session == session)
+    }
+
+    /// `operator_required: true` seeds the 403 state directly, so the
+    /// "this app's key can't manage this machine" screenshot needs no live
+    /// host either.
+    @Test func aFixtureCanSeedOperatorRequired() {
+        let plato = machine()
+        let hosts = HostStore(hosts: [plato]) { _ in FakeBackend(host: plato) }
+        let store = PairingStore(hosts: hosts)
+        let fixture = PairingStore.Fixture(hosts: [
+            "plato": PairingStore.HostFixture(
+                clients: PairedClients(authRequired: true, pairingAvailable: true, clients: []),
+                operatorRequired: true)
+        ])
+
+        store.seed(from: fixture)
+
+        #expect(store.authority[plato.id] == .paired)
     }
 }

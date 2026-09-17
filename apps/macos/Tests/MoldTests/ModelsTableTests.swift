@@ -89,6 +89,19 @@ struct ModelsTableTests {
         #expect(ordered.map(\.name) == ["flux-dev:bf16", "flux-dev:q4", "flux-devl:fp16"])
     }
 
+    /// M5 S3 UAT: the Model column drew `headline`, which for a tagged
+    /// model already ends in the variant word the Variant column's own chip
+    /// repeats ("FLUX.1 Dev Q4" beside a "Q4" chip). The column draws
+    /// `baseTitle` instead -- the bare model name, tag left to the chip
+    /// alone (design S7, M7).
+    @Test func theModelColumnHeadlineCarriesNoVariantTag() {
+        let model = FakeFixtures.model("flux-dev:q4", downloaded: true, description: "FLUX.1 Dev Q4 — fast")
+
+        #expect(model.baseTitle == "FLUX.1 Dev")
+        #expect(model.tag == "q4")
+        #expect(!model.baseTitle.localizedCaseInsensitiveContains(model.tag ?? "NEVER MATCH"))
+    }
+
     @Test func sectionsCarryTheServersOwnFamilyName() {
         let rows = [FakeFixtures.model("ltx2-13b:bf16", family: "ltx2", downloaded: true)]
 
