@@ -7,6 +7,7 @@ struct MachinesSettings: View {
     @State private var selection: MoldHost.ID?
     @State private var isAdding = false
     @State private var editingID: MoldHost.ID?
+    @State private var pendingRemoval: Destruction?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,6 +27,7 @@ struct MachinesSettings: View {
                 hosts.update(MoldHost(id: host.id, name: name, baseURL: url, apiKey: key))
             }
         }
+        .destructionDialog($pendingRemoval)
         .task { openEditorIfRequested() }
     }
 
@@ -72,7 +74,8 @@ struct MachinesSettings: View {
     private var footer: some View {
         HStack(spacing: 8) {
             Button("Add a machine", systemImage: "plus") { isAdding = true }
-            Button("Remove the selected machine", systemImage: "minus") { removeSelected() }
+            // The ellipsis is the promise the dialog keeps: this button asks.
+            Button("Remove the selected machine…", systemImage: "minus") { removeSelected() }
                 .disabled(selected.map(isManaged) != true)
             Button("Edit the selected machine", systemImage: "pencil") {
                 if let selected { edit(selected) }
@@ -114,9 +117,13 @@ struct MachinesSettings: View {
         remove(selected)
     }
 
+    /// Asks first, always. The removal takes the machine's stored key with it
+    /// and there is no undo on either side (review 05-H6).
     private func remove(_ host: MoldHost) {
         guard isManaged(host) else { return }
-        hosts.remove(host)
-        if selection == host.id { selection = nil }
+        pendingRemoval = MachineRemoval.destruction(of: host) {
+            hosts.remove(host)
+            if selection == host.id { selection = nil }
+        }
     }
 }
