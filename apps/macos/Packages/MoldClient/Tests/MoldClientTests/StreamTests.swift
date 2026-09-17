@@ -8,37 +8,16 @@ import Testing
 // empty lines, not `URLSession`'s `.lines`, which drops the blank line that
 // ends an SSE frame.
 
-/// Serves canned responses by path, so a test never opens a real socket.
-final class StubURLProtocol: URLProtocol {
+/// This suite's own response table (`StubTransport` says why each suite needs
+/// one).
+final class StubURLProtocol: StubTransport {
     nonisolated(unsafe) static var responses: [String: (status: Int, body: Data)] = [:]
-
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        let path = request.url?.path ?? ""
-        guard let fixture = Self.responses[path] else {
-            client?.urlProtocol(self, didFailWithError: MoldClientError.malformedResponse)
-            return
-        }
-        let response = HTTPURLResponse(
-            url: request.url!, statusCode: fixture.status, httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "text/event-stream"])!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: fixture.body)
-        client?.urlProtocolDidFinishLoading(self)
+    override class func response(for path: String) -> (status: Int, body: Data)? {
+        responses[path]
     }
-
-    override func stopLoading() {}
 }
 
-private func stubbedBackend() -> HTTPBackend {
-    let config = URLSessionConfiguration.ephemeral
-    config.protocolClasses = [StubURLProtocol.self]
-    return HTTPBackend(
-        host: MoldHost(name: "stub", baseURL: URL(string: "http://stub:7680")!),
-        session: URLSession(configuration: config))
-}
+private func stubbedBackend() -> HTTPBackend { StubURLProtocol.backend() }
 
 // Serialized: every test stubs the same static `responses` table, and this
 // suite is the one place that mutates it.

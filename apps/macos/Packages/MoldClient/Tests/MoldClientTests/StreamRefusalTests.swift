@@ -7,13 +7,17 @@ import Testing
 // route, and has to read the same way. `StreamTests` owns the happy paths and
 // the 401; this suite is about the body that comes with a refusal.
 
-private func stubbed() -> HTTPBackend {
-    let config = URLSessionConfiguration.ephemeral
-    config.protocolClasses = [StubURLProtocol.self]
-    return HTTPBackend(
-        host: MoldHost(name: "stub", baseURL: URL(string: "http://stub:7680")!),
-        session: URLSession(configuration: config))
+/// Its own table: `StreamTests` plants a 401 on `/api/events` and this suite
+/// plants a 503 on the same route, and swift-testing does not serialize
+/// BETWEEN suites (`StubTransport`).
+private final class RefusalTransport: StubTransport {
+    nonisolated(unsafe) static var responses: [String: (status: Int, body: Data)] = [:]
+    override class func response(for path: String) -> (status: Int, body: Data)? {
+        responses[path]
+    }
 }
+
+private func stubbed() -> HTTPBackend { RefusalTransport.backend() }
 
 @Suite(.serialized)
 struct StreamRefusalTests {
@@ -27,7 +31,7 @@ struct StreamRefusalTests {
     /// plain GET goes through `check(_:_:)` and reads correctly.
     @Test func aRefusedStreamKeepsTheMachinesOwnSentence() async {
         let body = #"{"error":"This machine is restarting. Try again shortly.","code":"SERVER_RESTARTING"}"#
-        StubURLProtocol.responses["/api/events"] = (503, Data(body.utf8))
+        RefusalTransport.responses["/api/events"] = (503, Data(body.utf8))
         let backend = stubbed()
 
         await #expect {
@@ -45,7 +49,7 @@ struct StreamRefusalTests {
     @Test func aStreamCanRefuseForALicence() async {
         let refusal = #"{"id":"h3","name":"Hunyuan3D 2.1","url":"https://x/l","canonical":"c","sha256":"ab","summary":"s"}"#
         let body = #"{"error":"terms","code":"LICENSE_NOT_ACCEPTED","license":\#(refusal)}"#
-        StubURLProtocol.responses["/api/downloads/stream"] = (403, Data(body.utf8))
+        RefusalTransport.responses["/api/downloads/stream"] = (403, Data(body.utf8))
         let backend = stubbed()
 
         await #expect {
@@ -61,7 +65,7 @@ struct StreamRefusalTests {
     /// is still `.unauthorized` -- the body is additional evidence, never the
     /// thing the answer depends on.
     @Test func aRefusalWithNoBodyStillNamesItsStatus() async {
-        StubURLProtocol.responses["/api/resources/stream"] = (500, Data())
+        RefusalTransport.responses["/api/resources/stream"] = (500, Data())
         let backend = stubbed()
 
         await #expect {
@@ -77,7 +81,7 @@ struct StreamRefusalTests {
     /// object. A megabyte of it must not become a megabyte in a message.
     @Test func aRefusalBodyIsReadUnderACeiling() async {
         let huge = String(repeating: "x", count: 4 * 1024 * 1024)
-        StubURLProtocol.responses["/api/events"] = (500, Data(huge.utf8))
+        RefusalTransport.responses["/api/events"] = (500, Data(huge.utf8))
         let backend = stubbed()
 
         await #expect {
