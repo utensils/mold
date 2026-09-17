@@ -32,7 +32,13 @@ help: ## Show this help
 	  awk 'BEGIN{FS=":.*?## "}{printf "  \033[1m%-12s\033[0m %s\n", $$1, $$2}'
 
 ENGINE_DIR := $(CURDIR)/rust/mold-macos-ffi
-ENGINE_TARGET ?= /Volumes/ExternalStorage/cargo-targets/mold-macos-ffi
+# In-repo and gitignored by default, so `make engine` works on any Mac. It is
+# tens of GB and rebuilt often, so point it at another volume if this disk is
+# the one you care about:
+#   make engine ENGINE_TARGET=/Volumes/ExternalStorage/cargo-targets/mold-macos-ffi
+# (`ENGINE_TARGET` in the environment works too; this used to BE that path,
+# and `make engine` simply failed on every other Mac -- review 05-M17.)
+ENGINE_TARGET ?= $(CURDIR)/rust/target
 ENGINE_LIB := $(ENGINE_TARGET)/release/libmold_macos_ffi.a
 
 engine: ## Build mold's Rust engine and link it into the app
@@ -92,6 +98,10 @@ uat: build ## Launch against a throwaway prefs domain and a throwaway mold home
 	  ./build/$(CONFIG)/Mold.app/Contents/MacOS/Mold
 
 test: gen ## Run every test bundle: the package, then the app's own store tests
+	@# The release path's one testable script. It synthesises the /nix/store
+	@# load commands a remote-only build cannot produce, so the fixup and its
+	@# fail-closed arm are exercised without a 40-minute engine build.
+	@scripts/tests/linkage-fixup.sh
 	@cd Packages/MoldClient && swift test
 	@# pipefail, or the grep/tail pair answers 0 for a failed run and the gate
 	@# passes on a red suite.
@@ -164,8 +174,23 @@ VERSION ?= 0.1.0
 DIST := $(CURDIR)/dist
 RELEASE_APP := $(BUILD)/Release/Mold.app
 
-signed: ## Release build, signed for distribution (needs MOLD_SIGN_IDENTITY)
+# `release` used to depend on nothing that builds the engine, and
+# Engine.xcconfig is gitignored -- so a fresh clone notarized a remote-only
+# client and said nothing (05-H4). Say ALLOW_REMOTE_ONLY=1 to mean it.
+ifeq ($(ALLOW_REMOTE_ONLY),1)
+ENGINE_PREREQ :=
+else
+ENGINE_PREREQ := engine
+endif
+
+signed: $(ENGINE_PREREQ) ## Release build, signed for distribution (needs MOLD_SIGN_IDENTITY)
 	@CONFIG=Release $(MAKE) build
+ifneq ($(ALLOW_REMOTE_ONLY),1)
+	@scripts/assert-embedded-engine.sh "$(RELEASE_APP)"
+endif
+	@# BEFORE signing: `install_name_tool` invalidates a signature, so the
+	@# order is not a preference. Fails closed on a surviving /nix/store ref.
+	@scripts/fix-macos-native-linkage.sh "$(RELEASE_APP)"
 	@scripts/sign-release.sh "$(RELEASE_APP)"
 
 dmg: ## Package the signed app as a DMG

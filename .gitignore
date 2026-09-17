@@ -109,11 +109,15 @@ __pycache__/
 # Native macOS app (apps/macos). The Xcode project is generated from
 # project.yml by `make gen`; checking it in would create a second source of
 # truth that silently drifts.
-*.xcodeproj
-DerivedData/
+# Scoped like the three entries that already were: these are one app's build
+# products, not the repo's (review 05-L8).
+apps/macos/**/*.xcodeproj
+apps/macos/**/DerivedData/
 apps/macos/build/
 apps/macos/**/build/
-.swiftpm/
-.build/
-Engine.xcconfig
+apps/macos/**/.swiftpm/
+apps/macos/**/.build/
+apps/macos/Engine.xcconfig
 apps/macos/dist/
+# `make engine`'s default cargo target dir (Makefile ENGINE_TARGET).
+apps/macos/rust/target/
