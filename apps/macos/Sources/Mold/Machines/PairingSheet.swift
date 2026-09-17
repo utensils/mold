@@ -45,8 +45,16 @@ struct PairingSheet: View {
         case remaining(TimeInterval)
         case expired
 
+        /// `expires_at` is unix SECONDS, not milliseconds: `auth.rs:216`
+        /// adds `PAIRING_TOKEN_TTL_SECS` to `unix_timestamp()`, which is
+        /// `.as_secs()` (`auth.rs:633-638`), and `routes.rs:9502` puts that
+        /// on the wire. Studio subtracts it from `Date.now() / 1000` for the
+        /// same reason (`MobilePairingCard.vue:36-37`). `PairedClient
+        /// .lastUsedAtMs` IS milliseconds -- that is a different field, and
+        /// dividing this one by 1000 put every live code in 1970 and drew
+        /// it as "Expired".
         static func resolve(expiresAt: UInt64, now: Date) -> Countdown {
-            let remaining = TimeInterval(expiresAt) / 1_000 - now.timeIntervalSince1970
+            let remaining = TimeInterval(expiresAt) - now.timeIntervalSince1970
             return remaining > 0 ? .remaining(remaining) : .expired
         }
 

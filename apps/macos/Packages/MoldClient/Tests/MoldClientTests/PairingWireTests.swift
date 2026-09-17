@@ -11,7 +11,9 @@ import Testing
     let session = try MoldJSON.decoder.decode(
         PairingSession.self, from: RepoFixtures.fixture("pairing-session-keyed.json"))
     #expect(session.token == "6f2a9c8e4b1d47a3ae7c9f0b2d5e8a41")
-    #expect(session.expiresAt == 1_700_000_120_000)
+    // Unix SECONDS, the unit `auth.rs:216` issues and `routes.rs:9502`
+    // sends -- `unix_timestamp()` is `.as_secs()` (`auth.rs:633-638`).
+    #expect(session.expiresAt == 1_700_000_120)
     #expect(session.authRequired)
     #expect(session.instanceId == "inst-keyed-1")
     #expect(session.hostname == "forge")
@@ -54,7 +56,7 @@ import Testing
 /// byte-for-byte spelling before pinning it here.
 @Test func aPairingUrlIsByteIdenticalToTheStudios() throws {
     let session = PairingSession(
-        token: "abc def+ghi:jkl/mno", expiresAt: 1_700_000_000_000, authRequired: true,
+        token: "abc def+ghi:jkl/mno", expiresAt: 1_700_000_000, authRequired: true,
         instanceId: "inst-1", hostname: nil)
     let payload = try #require(
         MobilePairingPayload(
@@ -64,7 +66,7 @@ import Testing
     #expect(
         url.absoluteString
             == "mold://pair?version=1&base_url=https%3A%2F%2F100.105.134.43%3A7680"
-            + "&token=abc+def%2Bghi%3Ajkl%2Fmno&expires_at=1700000000000"
+            + "&token=abc+def%2Bghi%3Ajkl%2Fmno&expires_at=1700000000"
             + "&instance_id=inst-1&name=James%27s+Phone")
 }
 

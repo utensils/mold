@@ -141,7 +141,7 @@ struct PairingTests {
         let hosts = HostStore(hosts: [plato]) { _ in fake }
         let store = PairingStore(hosts: hosts)
         let session = PairingSession(
-            token: "tok", expiresAt: 4_102_444_800_000, authRequired: true,
+            token: "tok", expiresAt: 4_102_444_800, authRequired: true,
             instanceId: "instance-1", hostname: "plato")
         let fixture = PairingStore.Fixture(hosts: [
             "plato": PairingStore.HostFixture(
