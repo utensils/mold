@@ -1,0 +1,72 @@
+name: macOS native app
+
+# `grep -rn 'apps/macos' .github/` used to return nothing across all fifteen
+# workflows: no build, no `make test` (a real XCTest bundle, including the
+# contract tests that parse `config_keys.rs`), no `make lint` (five
+# architecture rules), no signing. A drift in the Rust config registry shipped
+# unnoticed (review 05-L1).
+#
+# The runner is `macos-26` because the app's deployment target is macOS 26.0
+# and nothing older carries that SDK. Two workflows in this repo already run
+# there (`testflight-ios.yml`, `testflight-ios-verify.yml`), so it is a real
+# hosted image and this is a real check rather than a dispatch-only placeholder.
+
+# The two path lists are spelled out twice because GitHub Actions does not
+# support YAML anchors in workflow files. Keep them identical.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/macos/**"
+      - ".github/workflows/macos-native.yml"
+      # The app's contract tests PARSE these, so a change here can turn the
+      # macOS suite red without touching apps/macos.
+      - "crates/mold-core/src/config_keys.rs"
+      - "crates/mold-server/src/lib.rs"
+  pull_request:
+    paths:
+      - "apps/macos/**"
+      - ".github/workflows/macos-native.yml"
+      - "crates/mold-core/src/config_keys.rs"
+      - "crates/mold-server/src/lib.rs"
+  workflow_dispatch:
+
+concurrency:
+  group: macos-native-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint and test
+    runs-on: macos-26
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: apps/macos
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Show the toolchain
+        run: |
+          xcodebuild -version
+          echo "macOS SDK: $(xcrun --show-sdk-version --sdk macosx)"
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      # Remote-only, so CI never needs the Rust toolchain or a 40-minute
+      # engine build. What that costs is stated in the ledger: the
+      # `#if MOLD_EMBEDDED_ENGINE` arm is not compiled here.
+      - name: Unlink the engine
+        run: make engine-clean
+
+      - name: Architecture lints
+        run: make lint
+
+      # `make test` = the release path's linkage script test, the MoldClient
+      # package suite, then the app-bundle suite.
+      - name: Tests
+        run: make test

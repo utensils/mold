@@ -60,17 +60,61 @@ Five C functions, and nothing about a render crosses them — the app speaks HTT
 to loopback, exactly as it speaks to a machine on the network. Stopping is a
 `POST /api/shutdown`, the only shutdown trigger an embedder can reach.
 
-Two consequences worth knowing: the engine starts **at most once per process**
-(mold's models-dir override is a process-lifetime `OnceLock`), and once it is
-linked, `run_server` installs a process-wide SIGTERM handler — so `pkill` no
-longer quits the app.
+The engine starts **at most once per process** (mold's models-dir override is
+a process-lifetime `OnceLock`), which is why Settings ▸ This Mac offers
+Relaunch Mold rather than an inert Start after a failure that has spent it.
+`run_server` installs a process-wide SIGTERM handler; the app installs its own
+once the engine answers, so `kill` and `pkill` quit Mold through the same
+drain the menu uses.
+
+Its preamble runs from `MoldApp.init`, before any store exists, because it
+writes `MOLD_HOME`, `MOLD_API_KEY` and `MOLD_CORS_ORIGIN` with `setenv` and
+that is not safe beside a concurrent `getenv`. `.running` is published only
+once `GET /api/status` answers on the chosen port — on a cold home with a big
+gallery, "started" and "listening" are a long way apart — and while it runs,
+its liveness is polled, so an engine that dies leaves the machine list instead
+of pointing at a closed port. Starting is refused outright while another mold
+answers at `http://127.0.0.1:7680`: two engines on one home strand each
+other's queued work.
+
+Quitting gives the engine the **server's** budget, `MOLD_SHUTDOWN_ABORT_SECS`
+or 45 s, behind a small panel with a Quit Now — that budget is what the
+gallery writer lease is released after, and the app used to allow 8 s and
+discard the answer.
+
+`ENGINE_TARGET` is the cargo target directory; it defaults in-repo and
+gitignored, so override it if this disk is the one you care about:
+`make engine ENGINE_TARGET=/Volumes/Something/cargo-targets/mold-macos-ffi`.
 
 ## Releasing
 
 `make signed` (needs `MOLD_SIGN_IDENTITY`), then `make dmg`, then `make
-notarize` — or `make release` for all three. Signing is depth-first and never
-`--deep`, which re-signs nested code with the outer bundle's entitlements. The
-entitlements allow JIT because candle compiles its Metal shaders at runtime.
+notarize` — or `make release` for all three. `signed` depends on `engine` and
+refuses a bundle whose binary does not actually contain the engine, because
+`Engine.xcconfig` is gitignored and a fresh clone would otherwise notarize a
+remote-only client in silence; `ALLOW_REMOTE_ONLY=1` says you meant it. Before
+signing, `scripts/fix-macos-native-linkage.sh` retargets the `/nix/store`
+libc++ and libiconv loads the devshell link leaves behind and **fails the
+release** on any that survive — that path does not exist on anyone else's Mac
+and the app would die in dyld before `main`. Signing is depth-first and never
+`--deep`; nested code is signed without the app's entitlements, which is what
+`--deep` gets wrong. The entitlements allow JIT because candle compiles its
+Metal shaders at runtime; the two broader exemptions beside it each record the
+check owed before they can go.
+
+**arm64 only, macOS 26.0 or newer, and no updater.** The deployment target is
+macOS 26 (`project.yml`) and `ARCHS` is `arm64`, so every Intel Mac and every
+Mac not on Tahoe is out — the Tauri app set no minimum and built for both
+architectures. There is also no Sparkle, no feed and no in-app update, so a
+shipped build is replaced by downloading another DMG. Both are deliberate for
+now, and both are in "Not built yet".
+
+CI is `.github/workflows/macos-native.yml`, on `macos-26` (the only hosted
+image with the macOS 26 SDK), path-filtered to `apps/macos/**` plus the two
+Rust files the contract tests parse. It runs `make lint` and `make test`
+against a **remote-only** build, so the `#if MOLD_EMBEDDED_ENGINE` arm and the
+Rust crate are not compiled there; `make engine` and `cargo test` in
+`rust/mold-macos-ffi` remain a local gate.
 
 ## Not built yet
 
@@ -79,6 +123,10 @@ studio, an interactive mesh viewer (a GLB shows its poster), and large
 reference uploads -- mold's upload-session protocol is for
 MiniMax H3 and 3-D meshes, neither of which this app makes, so reference
 pictures always travel inline.
+
+No updater: there is no Sparkle, no appcast and no channel picker, where the
+Tauri app ships a minisign-signed `tauri-plugin-updater`. A new build is a new
+DMG. No Intel and nothing below macOS 26, either — see "Releasing".
 
 The app is never a *claimant*. It can issue a pairing for a keyed machine it
 already holds an operator key for (Machines ▸ that machine ▸ Pair a Phone…),
