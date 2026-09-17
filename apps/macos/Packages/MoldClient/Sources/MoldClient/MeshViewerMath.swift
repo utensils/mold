@@ -8,6 +8,12 @@ public enum MeshViewerMath {
     /// The tour's speed, radians a second.
     public static let autoRotateRadiansPerSecond = 0.25
 
+    /// How many edges [`edgeIndices`] reserves for up front: one mold mesh is
+    /// 40,000 triangles after decimation and the biggest measured raw surface
+    /// is ~500,000 (`CLAUDE.md`, the surface-nets entry), so a million covers
+    /// every real mesh without trusting a hostile index count.
+    static let edgeReserveHint = 1_000_000
+
     private static let tau = Double.pi * 2
 
     /// Folds any angle into `[-π, π)`.
@@ -55,10 +61,16 @@ public enum MeshViewerMath {
         }
         let vertexCount = maxIndex + 1
 
+        // Reserve for what a real mesh needs, not for what the file CLAIMS.
+        // A 256 MiB BIN of single-byte indices is 268 million triangles, and
+        // reserving a set slot plus two `UInt32`s each up front is several
+        // gigabytes before a single edge has been found. The cap is a hint,
+        // not a limit: past it the collections simply grow as they go.
+        let reserve = Swift.min(triangles, Self.edgeReserveHint)
         var seen = Set<UInt64>()
-        seen.reserveCapacity(triangles)
+        seen.reserveCapacity(reserve)
         var out = [UInt32]()
-        out.reserveCapacity(triangles * 2)
+        out.reserveCapacity(reserve * 2)
 
         func add(_ a: UInt32, _ b: UInt32) {
             if a == b { return }

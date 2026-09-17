@@ -53,9 +53,15 @@ nonisolated final class MeshScene: @unchecked Sendable {
               // default filled in rather than a second pipeline.
               let colors = device.buffer(mesh.colors ?? defaultColour),
               let uvs = device.buffer(mesh.uvs ?? [Float](repeating: 0, count: vertexCount * 2)),
-              let indices = mesh.indices.withUnsafeBytes({ bytes in
-                  device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count,
-                                    options: .storageModeShared)
+              // The same guard the sibling helper below carries. A parsed
+              // mesh can no longer be empty, but `baseAddress` is documented
+              // as possibly nil for an empty buffer and Metal rejects a
+              // zero-length one, so this failable init refuses rather than
+              // force-unwrapping an untrusted input's emptiness.
+              let indices = mesh.indices.withUnsafeBytes({ bytes -> (any MTLBuffer)? in
+                  guard let base = bytes.baseAddress, !bytes.isEmpty else { return nil }
+                  return device.makeBuffer(bytes: base, length: bytes.count,
+                                           options: .storageModeShared)
               })
         else { return nil }
 
@@ -86,9 +92,10 @@ nonisolated final class MeshScene: @unchecked Sendable {
         guard hasEdges else { return false }
         let list = MeshViewerMath.edgeIndices(sourceIndices)
         guard !list.isEmpty,
-              let buffer = list.withUnsafeBytes({ bytes in
-                  device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count,
-                                    options: .storageModeShared)
+              let buffer = list.withUnsafeBytes({ bytes -> (any MTLBuffer)? in
+                  guard let base = bytes.baseAddress, !bytes.isEmpty else { return nil }
+                  return device.makeBuffer(bytes: base, length: bytes.count,
+                                           options: .storageModeShared)
               })
         else { return false }
         edges = buffer

@@ -101,6 +101,13 @@ public enum GLB {
             // Non-indexed geometry: glTF says draw the vertices in order.
             indices = (0..<vertexCount).map(UInt32.init)
         }
+        // A mesh with nothing to draw is not a mesh. The reference tolerates
+        // it (`drawElements(0)` draws nothing); here it used to reach Metal as
+        // a zero-length buffer built off a nil base address, which is API
+        // misuse on an untrusted input.
+        guard !indices.isEmpty else {
+            throw GLBParseError("GLB mesh has no triangles")
+        }
         guard indices.count % 3 == 0 else {
             throw GLBParseError(
                 "GLB index count \(indices.count) is not a whole number of triangles")

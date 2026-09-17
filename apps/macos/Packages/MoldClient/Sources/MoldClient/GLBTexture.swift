@@ -33,6 +33,8 @@ enum GLBTexture {
             "image bufferView")
         let offset = try GLBDocument.int(view, "byteOffset", "image bufferView", fallback: 0)
         let length = try GLBDocument.int(view, "byteLength", "image bufferView")
+        // Two file-supplied numbers ADDED, each at most 2^53 by
+        // `GLBDocument.integer`: at most 2^54, so no overflow to trap on.
         guard offset + length <= bin.count else {
             throw GLBParseError(
                 "the baseColor image ends at byte \(offset + length), past the end of the "

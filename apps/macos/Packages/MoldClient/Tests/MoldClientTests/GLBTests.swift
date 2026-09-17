@@ -149,6 +149,96 @@ import Testing
         }.contains("index 7 at position 2 is past the 3-vertex"))
     }
 
+    // MARK: - Numbers that do not fit
+
+    /// **Fails today**: `needed = accessorOffset + (count - 1) * stride +
+    /// elementSize` was ported line for line from `glb.ts:314-315`, where the
+    /// arithmetic is IEEE doubles and an absurd product silently becomes
+    /// 1.8e19 and compares greater than the bufferView. Swift's `Int` TRAPS,
+    /// so this ~250-byte file was `Fatal error` -- a hard crash of an
+    /// unsandboxed app, from bytes off the network, BEFORE any bounds check.
+    @Test func refusesASpanThatCannotFitInMemoryRatherThanTrapping() {
+        let hostile: [String: Any] = [
+            "asset": ["version": "2.0"],
+            "meshes": [["primitives": [["attributes": ["POSITION": 0]]]]],
+            "accessors": [["type": "VEC3", "componentType": 5126,
+                           "count": 4_294_967_296, "bufferView": 0]],
+            "bufferViews": [["buffer": 0, "byteLength": 0,
+                             "byteStride": 4_294_967_296]],
+        ]
+        // The SAME refusal an ordinary too-large accessor gets, in the same
+        // words: a span that does not fit in 64 bits does not fit in a
+        // 0-byte bufferView either.
+        #expect(reason { _ = try GLB.parse(GLBFixture.assemble(hostile, [])) }
+            .contains("past the end of the buffer"))
+    }
+
+    /// The other half of the same product: a count no multiply can overflow,
+    /// against a stride that is merely absurd, and each on its own.
+    @Test func refusesEitherOperandOfTheSpanOnItsOwn() {
+        func file(count: Int, stride: Int) -> [UInt8] {
+            GLBFixture.assemble([
+                "asset": ["version": "2.0"],
+                "meshes": [["primitives": [["attributes": ["POSITION": 0]]]]],
+                "accessors": [["type": "VEC3", "componentType": 5126,
+                               "count": count, "bufferView": 0]],
+                "bufferViews": [["buffer": 0, "byteLength": 12, "byteStride": stride]],
+            ], [UInt8](repeating: 0, count: 12))
+        }
+        // A huge count with an ordinary stride, and an ordinary count with a
+        // huge stride: both are past the BIN chunk and both are sentences.
+        #expect(reason { _ = try GLB.parse(file(count: 9_007_199_254_740_991, stride: 12)) }
+            .contains("past the end of the buffer"))
+        #expect(reason { _ = try GLB.parse(file(count: 2, stride: 4_294_967_296)) }
+            .contains("past the end of the buffer"))
+        // The one-element case never multiplies the stride at all, so it is
+        // NOT refused for its stride: it gets the same answer the reference
+        // gives a one-vertex non-indexed mesh, which is that one vertex is not
+        // a triangle. The absurd stride is simply never used.
+        #expect(reason { _ = try GLB.parse(file(count: 1, stride: 4_294_967_296)) }
+            .contains("not a whole number of triangles"))
+    }
+
+    /// Every integer field is a non-negative WHOLE number; a negative or
+    /// fractional one is a sentence rather than a truncation.
+    @Test func refusesNegativeAndFractionalIntegerFields() {
+        for bad in [-1, -4_294_967_296] as [Int] {
+            var built = GLBFixture.buildDocument(GLBFixture.triangle)
+            var accessors = built.json["accessors"] as! [[String: Any]]
+            accessors[0]["count"] = bad
+            built.json["accessors"] = accessors
+            #expect(reason { _ = try GLB.parse(GLBFixture.assemble(built.json, built.bin)) }
+                .contains("non-integer \"count\""))
+        }
+        // NaN and infinity cannot be WRITTEN to JSON, so they are not inputs;
+        // a fraction and a number past 2^53 are.
+        for bad in [1.5, 3.0e30] {
+            var built = GLBFixture.buildDocument(GLBFixture.triangle)
+            var views = built.json["bufferViews"] as! [[String: Any]]
+            views[0]["byteOffset"] = bad
+            built.json["bufferViews"] = views
+            #expect(reason { _ = try GLB.parse(GLBFixture.assemble(built.json, built.bin)) }
+                .contains("non-integer \"byteOffset\""))
+        }
+        // A boolean is not a number either, whatever NSNumber bridging says.
+        var built = GLBFixture.buildDocument(GLBFixture.triangle)
+        var accessors = built.json["accessors"] as! [[String: Any]]
+        accessors[0]["count"] = true
+        built.json["accessors"] = accessors
+        #expect(reason { _ = try GLB.parse(GLBFixture.assemble(built.json, built.bin)) }
+            .contains("non-integer \"count\""))
+    }
+
+    /// A mesh with no triangles has nothing to draw, and used to reach Metal
+    /// as a zero-length index buffer built off a nil base address.
+    @Test func refusesAMeshWithNoTriangles() {
+        var spec = GLBFixture.triangle
+        spec.indices = []
+        let built = GLBFixture.buildDocument(spec)
+        #expect(reason { _ = try GLB.parse(GLBFixture.assemble(built.json, built.bin)) }
+            .contains("no triangles"))
+    }
+
     @Test func rejectsAJSONChunkThatIsNotJSON() {
         var buffer = GLBFixture.assemble(["asset": ["version": "2.0"]], [])
         // Corrupt the first byte of the JSON payload, which starts at byte 20.

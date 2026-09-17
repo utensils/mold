@@ -58,6 +58,10 @@ struct GLBAccessor {
         let viewOffset = try GLBDocument.int(view, "byteOffset", "\(label) bufferView",
                                              fallback: 0)
         let viewLength = try GLBDocument.int(view, "byteLength", "\(label) bufferView")
+        // A SUM of two file-supplied numbers, not a product: `GLBDocument`
+        // admits no integer past 2^53, so this is at most 2^54 and cannot
+        // overflow a 64-bit `Int`. Every other sum in this reader is bounded
+        // the same way; only the span below needed a guard of its own.
         guard viewOffset + viewLength <= bin.count else {
             throw GLBParseError(
                 "the \(label) bufferView ends at byte \(viewOffset + viewLength), past the "
@@ -74,7 +78,24 @@ struct GLBAccessor {
         }
         let accessorOffset = try GLBDocument.int(accessor, "byteOffset", "\(label) accessor",
                                                  fallback: 0)
-        let needed = count == 0 ? 0 : accessorOffset + (count - 1) * stride + elementSize
+
+        // The ONE product over two file-supplied numbers, and the one place
+        // this reader is deliberately NOT a line-for-line port. `glb.ts:314`
+        // computes the same expression in IEEE doubles, where an absurd
+        // `count` times an absurd `byteStride` silently becomes 1.8e19,
+        // compares greater than `viewLength` and throws the sentence below.
+        // Swift's `Int` TRAPS on that multiply, so a ~250-byte hostile file
+        // crashed the app outright, before any bounds check ran.
+        //
+        // Reported-overflow arithmetic, saturating at `Int.max` rather than
+        // refusing separately: a span that does not fit in 64 bits certainly
+        // does not fit in the bufferView, so it falls into the SAME refusal
+        // the reference gives it, with the same words. Saturation is only
+        // ever reached by a file no writer produces, and `Int.max` is honest
+        // about what was asked for.
+        let needed = count == 0 ? 0 : Self.span(count: count, stride: stride,
+                                                offset: accessorOffset,
+                                                elementSize: elementSize)
         guard needed <= viewLength else {
             throw GLBParseError(
                 "the \(label) accessor reads \(needed) bytes from a \(viewLength)-byte "
@@ -84,6 +105,19 @@ struct GLBAccessor {
         return GLBAccessor(componentType: componentType, components: components, count: count,
                            start: viewOffset + accessorOffset, stride: stride,
                            componentSize: componentSize)
+    }
+
+    /// `offset + (count - 1) * stride + elementSize`, saturating at
+    /// `Int.max` instead of trapping. Every operand is a file-supplied number
+    /// this reader has not yet bounded.
+    private static func span(count: Int, stride: Int, offset: Int,
+                             elementSize: Int) -> Int {
+        let (rows, rowsOverflow) = (count - 1).multipliedReportingOverflow(by: stride)
+        if rowsOverflow { return .max }
+        let (withOffset, offsetOverflow) = rows.addingReportingOverflow(offset)
+        if offsetOverflow { return .max }
+        let (total, totalOverflow) = withOffset.addingReportingOverflow(elementSize)
+        return totalOverflow ? .max : total
     }
 
     func floats(in bin: [UInt8], label: String) throws -> [Float] {
