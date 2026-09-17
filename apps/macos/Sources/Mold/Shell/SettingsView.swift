@@ -7,6 +7,10 @@ struct SettingsView: View {
         TabView {
             GeneralSettings()
                 .tabItem { Label("General", systemImage: "gearshape") }
+            GenerationSettings()
+                .tabItem { Label("Generation", systemImage: "photo") }
+            ExpansionSettings()
+                .tabItem { Label("Expansion", systemImage: "wand.and.stars") }
             MachinesSettings()
                 .tabItem { Label("Machines", systemImage: "server.rack") }
             AccountsSettings()

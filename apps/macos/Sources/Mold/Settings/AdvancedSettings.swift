@@ -14,19 +14,16 @@ struct AdvancedSettings: View {
     @State private var query = ""
     @State private var selection: String?
 
-    /// The three whole-pane states, in the order they are checked. Named
-    /// `PaneState`, not `State` -- that name collides with SwiftUI's own
-    /// `@State` property wrapper inside this type's scope.
-    enum PaneState: Equatable { case noMachines, unavailable, loading, loaded }
+    /// The three whole-pane states, in the order they are checked -- shared
+    /// with Generation and Expansion (S4a) as `SettingsPaneState` /
+    /// `SettingsPane.resolve`, since every machine-scoped Settings tab needs
+    /// exactly the same switch. Kept as a forwarder so the existing call
+    /// sites and tests (`AdvancedSettings.resolve(...) == .unavailable`)
+    /// need no changes.
+    typealias PaneState = SettingsPaneState
 
-    /// Pure: which whole-pane state to draw, from the fleet and one
-    /// machine's own answer -- askable with no view, the same split
-    /// `DiscoverRow.resolve` uses for one cell.
     static func resolve(hosts: HostStore, store: ConfigStore, machine: MoldHost.ID?) -> PaneState {
-        guard !hosts.hosts.isEmpty, let machine else { return .noMachines }
-        if store.unavailable.contains(machine) { return .unavailable }
-        if !store.hasLoaded(on: machine) { return .loading }
-        return .loaded
+        SettingsPane.resolve(hosts: hosts, store: store, machine: machine)
     }
 
     private var machine: MoldHost? { hosts.machine(selected: selectedMachine) }
@@ -69,7 +66,7 @@ struct AdvancedSettings: View {
         let refusals = (store.refusals[machine.id] ?? [:]).mapValues(\.sentence)
         let rows = Self.rows(listing, query: query, refusals: refusals)
         VStack(alignment: .leading, spacing: 8) {
-            machinePicker
+            SettingsMachineHeader(hosts: hosts, selectedMachine: $selectedMachine)
             ProfileHeader(profiles: store.profiles[machine.id])
             table(rows, machine: machine)
             Text(Self.subtitle(showing: rows.count, total: listing?.entries.count ?? 0))
@@ -78,23 +75,6 @@ struct AdvancedSettings: View {
         }
         .padding(12)
         .searchable(text: $query, prompt: "Search settings")
-    }
-
-    private var machinePicker: some View {
-        Picker("Machine", selection: selectedHostID) {
-            ForEach(hosts.hosts) { host in
-                Text(host.name).tag(MoldHost.ID?.some(host.id))
-            }
-        }
-        .labelsHidden()
-        .frame(width: 220)
-    }
-
-    private var selectedHostID: Binding<MoldHost.ID?> {
-        Binding(
-            get: { machine?.id },
-            set: { selectedMachine = $0?.uuidString ?? "" }
-        )
     }
 
     private func table(_ rows: [Row], machine: MoldHost) -> some View {
