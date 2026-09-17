@@ -259,6 +259,71 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(Capabilities.self, from: Data(json.utf8))
     }
 
+    /// `capabilities.catalog` -- absent (`available: false`) is a host that
+    /// browses nothing, which `canBrowseCatalog` reads as a definitive no
+    /// (design M5 S6).
+    static func capabilities(catalog available: Bool, families: [String] = [], sort: [String] = []) -> Capabilities {
+        guard available else { return try! MoldJSON.decoder.decode(Capabilities.self, from: Data("{}".utf8)) }
+        let familiesJSON = families.map { "\"\($0)\"" }.joined(separator: ",")
+        let sortJSON = sort.map { "\"\($0)\"" }.joined(separator: ",")
+        let json = #"{"catalog": {"available": true, "families": [\#(familiesJSON)], "sort": [\#(sortJSON)]}}"#
+        return try! MoldJSON.decoder.decode(Capabilities.self, from: Data(json.utf8))
+    }
+
+    /// One catalog row -- `CatalogEntry` has no public memberwise init
+    /// either, so this decodes it the way the wire produces one.
+    static func catalogEntry(
+        id: String, name: String? = nil, family: String = "sd15", kind: String = "checkpoint",
+        sizeBytes: Int64? = nil, downloadCount: Int64 = 0, rating: Double? = nil, nsfw: Bool = false,
+        supported: Bool = true, installed: Bool = false, pageUrl: String? = nil,
+        license: String? = nil, commercial: Bool? = nil, derivatives: Bool? = nil, differentLicense: Bool? = nil,
+        author: String? = nil, description: String? = nil, thumbnailUrl: String? = nil,
+        tags: [String] = [], trainedWords: [String] = [], companions: [String] = [],
+        companionDetails: [(name: String, kind: String, repo: String?, sizeBytes: Int64?)] = []
+    ) -> CatalogEntry {
+        func str(_ value: String?) -> String { value.map { "\"\($0)\"" } ?? "null" }
+        func bool(_ value: Bool?) -> String { value.map { "\($0)" } ?? "null" }
+        let tagsJSON = tags.map { "\"\($0)\"" }.joined(separator: ",")
+        let wordsJSON = trainedWords.map { "\"\($0)\"" }.joined(separator: ",")
+        let companionsJSON = companions.map { "\"\($0)\"" }.joined(separator: ",")
+        let detailsJSON = companionDetails.map {
+            #"{"name": "\#($0.name)", "kind": "\#($0.kind)", "repo": \#(str($0.repo)), "size_bytes": \#($0.sizeBytes.map { "\($0)" } ?? "null")}"#
+        }.joined(separator: ",")
+        let json = """
+        {"id": "\(id)", "source": "civitai", "source_id": "0", "name": "\(name ?? id)",
+         "author": \(str(author)), "family": "\(family)", "kind": "\(kind)", "modality": "image",
+         "size_bytes": \(sizeBytes.map { "\($0)" } ?? "null"), "download_count": \(downloadCount),
+         "rating": \(rating.map { "\($0)" } ?? "null"), "likes": 0, "nsfw": \(nsfw),
+         "thumbnail_url": \(str(thumbnailUrl)), "description": \(str(description)),
+         "license": \(str(license)),
+         "license_flags": {"commercial": \(bool(commercial)), "derivatives": \(bool(derivatives)),
+                           "different_license": \(bool(differentLicense))},
+         "tags": [\(tagsJSON)], "companions": [\(companionsJSON)], "companion_details": [\(detailsJSON)],
+         "supported": \(supported), "installed": \(installed), "page_url": \(str(pageUrl)),
+         "trained_words": [\(wordsJSON)]}
+        """
+        return try! MoldJSON.decoder.decode(CatalogEntry.self, from: Data(json.utf8))
+    }
+
+    /// `GET /api/catalog/search`'s answer, assembled from already-built rows
+    /// -- `CatalogListing` has no public memberwise init either, so this
+    /// re-encodes the entries and decodes the whole page the way the wire
+    /// produces one (the same round-trip `modelComponents(_:statuses:)` uses).
+    static func catalogListing(
+        _ entries: [CatalogEntry], page: Int = 1, pageSize: Int = 20, total: Int? = nil,
+        providerErrors: [(source: String, message: String)] = []
+    ) -> CatalogListing {
+        let entriesJSON = String(data: try! MoldJSON.encoder.encode(entries), encoding: .utf8)!
+        let errorsJSON = providerErrors.map {
+            #"{"source": "\#($0.source)", "message": "\#($0.message)", "code": null, "retry_after_seconds": null}"#
+        }.joined(separator: ",")
+        let json = """
+        {"entries": \(entriesJSON), "page": \(page), "page_size": \(pageSize),
+         "total": \(total ?? entries.count), "provider_errors": [\(errorsJSON)]}
+        """
+        return try! MoldJSON.decoder.decode(CatalogListing.self, from: Data(json.utf8))
+    }
+
     /// One GPU, as `MachineStore` sees it. `DeviceInfo` has no public
     /// memberwise init either.
     static func deviceInfo(_ id: String, ordinal: Int, adminState: String = "enabled",

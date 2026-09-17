@@ -20,6 +20,7 @@ struct MoldApp: App {
     @State private var queue: QueueStore
     @State private var licenses: LicenseStore
     @State private var downloads: DownloadStore
+    @State private var catalog: CatalogStore
     @State private var machines: MachineStore
     @State private var promptHistory: PromptHistoryStore
     @State private var modelDefaults: ModelDefaultsStore
@@ -40,6 +41,7 @@ struct MoldApp: App {
         let licenses = LicenseStore(hosts: hosts)
         _licenses = State(initialValue: licenses)
         _downloads = State(initialValue: DownloadStore(hosts: hosts, licenses: licenses))
+        _catalog = State(initialValue: CatalogStore(hosts: hosts))
         let modelDefaults = ModelDefaultsStore(hosts: hosts)
         _modelDefaults = State(initialValue: modelDefaults)
         _promptHistory = State(initialValue: PromptHistoryStore(hosts: hosts))
@@ -69,6 +71,7 @@ struct MoldApp: App {
                 .environment(queue)
                 .environment(licenses)
                 .environment(downloads)
+                .environment(catalog)
                 .environment(machines)
                 .environment(promptHistory)
                 .environment(modelDefaults)

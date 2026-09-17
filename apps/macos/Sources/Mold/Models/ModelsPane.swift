@@ -20,6 +20,7 @@ struct ModelsPane: View {
     @AppStorage("modelsSortColumn", store: AppStorageSuite.defaults) var sortColumnRaw =
         ModelSort.Column.model.rawValue
     @AppStorage("modelsSortAscending", store: AppStorageSuite.defaults) var sortAscending = true
+    @AppStorage("modelsScope", store: AppStorageSuite.defaults) var scopeRaw = ModelScope.installed.rawValue
     @State var query = ""
     @State var selection: Model.ID?
     // Not `private`: `ModelsPane+Actions` reads and writes these too, same
@@ -41,6 +42,16 @@ struct ModelsPane: View {
         Binding(
             get: { ModelSort(column: ModelSort.Column(rawValue: sortColumnRaw) ?? .model, ascending: sortAscending) },
             set: { sortColumnRaw = $0.column.rawValue; sortAscending = $0.ascending }
+        )
+    }
+
+    /// Same shape as `sort`: a scalar `@AppStorage` key resolved through the
+    /// pure fallback rule, so a stored `.discover` from a machine that could
+    /// browse never strands the pane on one that cannot (design S3/S6).
+    var scope: Binding<ModelScope> {
+        Binding(
+            get: { ModelScope.resolved(stored: ModelScope(rawValue: scopeRaw) ?? .installed, available: availableScopes) },
+            set: { scopeRaw = $0.rawValue }
         )
     }
 
@@ -80,10 +91,11 @@ struct ModelsPane: View {
     }
 
     @ViewBuilder private var content: some View {
-        if sections.isEmpty {
-            empty
-        } else {
-            table
+        switch scope.wrappedValue {
+        case .installed:
+            if sections.isEmpty { empty } else { table }
+        case .discover:
+            if let host { DiscoverTable(host: host, searchText: $query) }
         }
     }
 

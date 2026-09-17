@@ -5,6 +5,16 @@ import SwiftUI
 // for size, the same reason `LibraryPane+Toolbar.swift` is its own file.
 extension ModelsPane {
     @ToolbarContentBuilder var toolbar: some ToolbarContent {
+        // Drawn only where there are two scopes to switch between -- never
+        // a segmented control with one segment (decision 8, M5).
+        if availableScopes.count > 1 {
+            ToolbarItem {
+                Picker("Scope", selection: scope) {
+                    ForEach(availableScopes, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+            }
+        }
         ToolbarItem {
             Picker("Machine", selection: selectedHostID) {
                 ForEach(hosts.hosts) { host in
@@ -12,9 +22,6 @@ extension ModelsPane {
                 }
             }
         }
-        // The Discover scope lands in S6 alongside the catalog browser it
-        // has something to show; a one-segment picker in the meantime would
-        // be a control with nothing to switch.
         if let host {
             ToolbarItem { DownloadsButton(host: host) }
         }

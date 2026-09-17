@@ -8,6 +8,13 @@ import SwiftUI
 extension ModelsPane {
     var host: MoldHost? { hosts.machine(selected: selectedMachine) }
 
+    /// Discover only where the CURRENT machine says it browses a catalog --
+    /// switching machines can change which scopes this picker offers
+    /// (design S6).
+    var availableScopes: [ModelScope] {
+        ModelScope.available(capabilities: host.flatMap { hosts.capabilities[$0.id] })
+    }
+
     /// The machine's own answer to `/api/status`, read for its `modelsDisk`
     /// figure -- `nil` off a host that hasn't answered, which the footer
     /// treats the same as one that predates the field.
