@@ -12,6 +12,7 @@ struct ModelsPane: View {
     @Environment(ModelStore.self) var models
     @Environment(DownloadStore.self) var downloads
     @Environment(LicenseStore.self) var licenses
+    @Environment(CatalogStore.self) var catalog
 
     /// The same key the sidebar and `MachinesPane` declare, over the same
     /// suite -- one notion of "the machine you are working on" rather than
@@ -68,7 +69,13 @@ struct ModelsPane: View {
                     .padding(.horizontal, 12)
                     .padding(.top, 4)
             }
-            ModelsFooter(count: candidates.count, host: host, status: status)
+            // Installed-only (design S3): Discover has its own result count
+            // in the subtitle, and a footer built from the Installed list
+            // would say "0 installed" while a Discover search is typed
+            // (design S6b).
+            if scope.wrappedValue == .installed {
+                ModelsFooter(count: installedCount, host: host, status: status)
+            }
         }
         .failureBanner(hosts)
         .navigationTitle("Models")
@@ -100,8 +107,7 @@ struct ModelsPane: View {
     }
 
     private var subtitle: String {
-        guard let host else { return "No machine" }
-        return "\(candidates.count) installed on \(host.name)"
+        Self.subtitle(scope: scope.wrappedValue, hostName: host?.name, installedCount: installedCount, discoverTotal: discoverTotal)
     }
 
     @ViewBuilder private var empty: some View {

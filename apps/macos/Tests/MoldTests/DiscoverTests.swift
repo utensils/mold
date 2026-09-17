@@ -159,4 +159,97 @@ struct DiscoverTests {
         #expect(DiscoverTable.nsfwBadge(FakeFixtures.catalogEntry(id: "cv:1", nsfw: false)) == nil)
         #expect(DiscoverTable.nsfwBadge(FakeFixtures.catalogEntry(id: "cv:1", nsfw: true)) == "NSFW")
     }
+
+    // MARK: - S6b: the subtitle/footer said "0 installed" while Discover's
+    // search field held text that matched none of the INSTALLED rows.
+
+    @Test func theInstalledSubtitleUsesTheMachinesUnfilteredTotal() {
+        #expect(ModelsPane.subtitle(scope: .installed, hostName: "plato", installedCount: 82, discoverTotal: nil)
+            == "82 installed on plato")
+    }
+
+    @Test func theDiscoverSubtitleSaysNothingBeforeASearchAnswers() {
+        #expect(ModelsPane.subtitle(scope: .discover, hostName: "plato", installedCount: 82, discoverTotal: nil) == "")
+    }
+
+    @Test func theDiscoverSubtitleReportsTheSearchsOwnTotalNeverTheInstalledCount() {
+        #expect(ModelsPane.subtitle(scope: .discover, hostName: "plato", installedCount: 82, discoverTotal: 32)
+            == "32 results on plato")
+        #expect(ModelsPane.subtitle(scope: .discover, hostName: "plato", installedCount: 82, discoverTotal: 1)
+            == "1 result on plato")
+    }
+
+    @Test func noMachineIsSaidRegardlessOfScope() {
+        #expect(ModelsPane.subtitle(scope: .installed, hostName: nil, installedCount: 0, discoverTotal: nil) == "No machine")
+        #expect(ModelsPane.subtitle(scope: .discover, hostName: nil, installedCount: 0, discoverTotal: 5) == "No machine")
+    }
+
+    @Test func aHostHasNotAnsweredUntilItsFirstSearchLands() async {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        fake.catalogPages[CatalogQuery(includeNSFW: false).queryString] = FakeFixtures.catalogListing([])
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let catalog = CatalogStore(hosts: hosts)
+
+        #expect(catalog.hasAnswered(on: plato.id) == false)
+
+        catalog.search(on: plato.id)
+        try? await Task.sleep(for: .milliseconds(400))
+        await settle { catalog.hasAnswered(on: plato.id) }
+
+        #expect(catalog.hasAnswered(on: plato.id))
+    }
+
+    // MARK: - S6b: the Sort picker drew with nothing selected.
+
+    @Test func adoptingAHostSeedsSortFromItsFirstAdvertisedOption() {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let catalog = CatalogStore(hosts: hosts)
+
+        catalog.adopt(plato.id, sortOptions: ["downloads", "recent", "rating"])
+
+        #expect(catalog.query(on: plato.id).sort == "downloads")
+    }
+
+    @Test func adoptingAHostWithNoAdvertisedSortsLeavesTheQueryUnsorted() {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let catalog = CatalogStore(hosts: hosts)
+
+        catalog.adopt(plato.id, sortOptions: [])
+
+        #expect(catalog.query(on: plato.id).sort == nil)
+    }
+
+    @Test func adoptingAHostNeverOverwritesASortAlreadyChosen() {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let catalog = CatalogStore(hosts: hosts)
+        catalog.setSort("rating", on: plato.id)
+
+        catalog.adopt(plato.id, sortOptions: ["downloads", "recent", "rating"])
+
+        #expect(catalog.query(on: plato.id).sort == "rating")
+    }
+
+    // MARK: - S6b: two blank rows appeared above Load more on a live capture.
+
+    @Test func withNothingMoreToLoadTheRowsFunctionReturnsExactlyTheEntries() {
+        let entries = [FakeFixtures.catalogEntry(id: "cv:1"), FakeFixtures.catalogEntry(id: "cv:2")]
+        #expect(DiscoverTable.rows(for: entries).count == entries.count)
+        #expect(DiscoverTable.rows(for: entries).map(\.id) == ["cv:1", "cv:2"])
+    }
+
+    @Test func duplicateEntriesNeverProduceMoreThanOneRowEach() {
+        let entries = [FakeFixtures.catalogEntry(id: "cv:1"), FakeFixtures.catalogEntry(id: "cv:1")]
+        #expect(DiscoverTable.rows(for: entries).count == 1)
+    }
+
+    @Test func noEntriesIsNoRows() {
+        #expect(DiscoverTable.rows(for: []).isEmpty)
+    }
 }

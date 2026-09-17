@@ -44,6 +44,20 @@ final class CatalogStore {
     func isSearching(on host: MoldHost.ID) -> Bool { byHost[host]?.isSearching ?? false }
     func credentials(on host: MoldHost.ID) -> CatalogCredentialStatus? { byHost[host]?.credentials }
 
+    /// `false` until this host's FIRST search answers -- the pane's Discover
+    /// subtitle says nothing rather than a fabricated "0 results" before
+    /// then (design S6b).
+    func hasAnswered(on host: MoldHost.ID) -> Bool { byHost[host]?.listing != nil }
+
+    /// The query's sort starts unset, which draws the Sort `Picker` with
+    /// nothing selected. Seeded from the machine's own first advertised
+    /// option the moment this host is adopted, and left alone once a
+    /// person (or an earlier adoption) has already chosen one (design S6b).
+    func adopt(_ host: MoldHost.ID, sortOptions: [String]) {
+        guard byHost[host]?.query.sort == nil, let first = sortOptions.first else { return }
+        byHost[host, default: HostState()].query.sort = first
+    }
+
     /// One provider being down while the other answered is a PARTIAL
     /// SUCCESS, not a failure -- shown as a note above the rows it did get,
     /// never through `hosts.failures` (design S6).

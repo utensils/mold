@@ -34,6 +34,7 @@ struct DiscoverTable: View {
             }
         }
         .task(id: host.id) {
+            catalog.adopt(host.id, sortOptions: capabilities?.catalogSortOptions ?? [])
             if catalog.entries(on: host.id).isEmpty { catalog.search(on: host.id) }
             await catalog.loadCredentials(on: host.id)
         }
@@ -42,15 +43,23 @@ struct DiscoverTable: View {
         .sheet(item: $detailEntry) { entry in CatalogDetailSheet(entry: entry, host: host) }
     }
 
+    /// Explicit `rows:`, never the plain data-array initializer: a "Load
+    /// more" affordance and a provider note are views AROUND this `Table`,
+    /// never rows inside it, and `.alternatingRowBackgrounds(.disabled)` stops
+    /// AppKit painting striped filler past the last real row as what a live
+    /// capture read as two blank rows (design S6b).
     private var table: some View {
-        Table(entries, selection: $selection) {
+        Table(of: CatalogEntry.self, selection: $selection) {
             TableColumn("Name") { entry in nameCell(entry) }
             TableColumn("Family") { entry in Text(entry.family) }
             TableColumn("Kind") { entry in Text(entry.kind) }
             TableColumn("Size") { entry in Text(Self.sizeText(entry)).foregroundStyle(.secondary) }
             TableColumn("Downloads") { entry in Text(Self.downloadsText(entry)).foregroundStyle(.secondary) }
             TableColumn("State") { entry in stateCell(entry) }
+        } rows: {
+            ForEach(Self.rows(for: entries)) { entry in TableRow(entry) }
         }
+        .alternatingRowBackgrounds(.disabled)
     }
 
     private var filters: some View {
@@ -61,10 +70,13 @@ struct DiscoverTable: View {
                 ForEach(capabilities?.catalogFamilies ?? [], id: \.self) { Text($0).tag(String?.some($0)) }
             }
             .frame(width: 160)
-            Picker("Sort", selection: Binding(get: { query.sort }, set: { catalog.setSort($0, on: host.id) })) {
-                ForEach(capabilities?.catalogSortOptions ?? [], id: \.self) { Text($0.capitalized).tag(String?.some($0)) }
+            // Hidden, not drawn empty, on a host that advertises no sorts.
+            if let sortOptions = capabilities?.catalogSortOptions, !sortOptions.isEmpty {
+                Picker("Sort", selection: Binding(get: { query.sort }, set: { catalog.setSort($0, on: host.id) })) {
+                    ForEach(sortOptions, id: \.self) { Text($0.capitalized).tag(String?.some($0)) }
+                }
+                .frame(width: 140)
             }
-            .frame(width: 140)
             if catalog.isSearching(on: host.id) { ProgressView().controlSize(.small) }
             Spacer()
         }
@@ -123,26 +135,4 @@ struct DiscoverTable: View {
         }
     }
 
-    /// "Civitai didn't answer." -- one provider failing beside rows the
-    /// other did return, never a banner (design S6 test 2).
-    static func providerNote(_ errors: [CatalogProviderError]) -> String? {
-        guard !errors.isEmpty else { return nil }
-        let names = errors.map { $0.source.capitalized }.joined(separator: ", ")
-        return "\(names) didn't answer."
-    }
-
-    static func sizeText(_ entry: CatalogEntry) -> String {
-        guard let bytes = entry.sizeBytes else { return "—" }
-        return Int64(bytes).formatted(.byteCount(style: .file))
-    }
-
-    static func downloadsText(_ entry: CatalogEntry) -> String {
-        let downloads = entry.downloadCount.formatted(.number.notation(.compactName))
-        guard let rating = entry.rating else { return downloads }
-        return "\(downloads) · \(rating.formatted(.number.precision(.fractionLength(1))))★"
-    }
-
-    /// `false` draws nothing -- never an affirmative "Safe" claim for the
-    /// ordinary case (design S6 test 7).
-    static func nsfwBadge(_ entry: CatalogEntry) -> String? { entry.nsfw ? "NSFW" : nil }
 }

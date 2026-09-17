@@ -15,6 +15,33 @@ extension ModelsPane {
         ModelScope.available(capabilities: host.flatMap { hosts.capabilities[$0.id] })
     }
 
+    /// The machine's own total, never narrowed by the search field -- the
+    /// footer and the Installed subtitle both say "how many this machine
+    /// has," a constant fact about the MACHINE, not "how many currently
+    /// match." Typing a Discover search into the shared field must not turn
+    /// this into "0 installed" (design S6b).
+    var installedCount: Int { host.map { models.installed(on: $0.id).count } ?? 0 }
+
+    /// `nil` until Discover's first search on this host has answered -- the
+    /// subtitle says nothing rather than a fabricated zero until then.
+    var discoverTotal: Int? {
+        guard let host, catalog.hasAnswered(on: host.id) else { return nil }
+        return catalog.total(on: host.id)
+    }
+
+    /// Pure so a test can ask the exact sentence without a view. Installed
+    /// says the machine's constant total (`installedCount`, never narrowed
+    /// by the search field); Discover says what IT knows -- the last
+    /// search's own total, or nothing at all before the first answer
+    /// (design S6b).
+    static func subtitle(scope: ModelScope, hostName: String?, installedCount: Int, discoverTotal: Int?) -> String {
+        guard let hostName else { return "No machine" }
+        guard scope == .discover else { return "\(installedCount) installed on \(hostName)" }
+        guard let discoverTotal else { return "" }
+        let noun = discoverTotal == 1 ? "result" : "results"
+        return "\(discoverTotal) \(noun) on \(hostName)"
+    }
+
     /// The machine's own answer to `/api/status`, read for its `modelsDisk`
     /// figure -- `nil` off a host that hasn't answered, which the footer
     /// treats the same as one that predates the field.
