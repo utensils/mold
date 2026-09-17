@@ -97,6 +97,7 @@ struct MoldApp: App {
                 .environment(hosts)
                 .environment(engine)
                 .environment(materializer)
+                .environment(catalog)
         }
     }
 }

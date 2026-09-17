@@ -420,4 +420,36 @@ extension FakeFixtures {
         let data = try! Data(contentsOf: fixtures.appending(path: name))
         return try! MoldJSON.decoder.decode(ConfigListing.self, from: data)
     }
+
+    /// Live on plato (design fact 9): `hf` configured from the environment,
+    /// masked `hf_••••hhml`; `civitai` not configured. The same relative-path
+    /// trick as `configListing` -- this bundle cannot see `MoldClientTests`'
+    /// own `RepoFixtures`.
+    static func credentialsFixture(_ name: String = "credentials-plato.json") -> CatalogCredentialStatus {
+        let fixtures = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // Tests/MoldTests
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // apps/macos
+            .appending(path: "Packages/MoldClient/Tests/MoldClientTests/Fixtures")
+        let data = try! Data(contentsOf: fixtures.appending(path: name))
+        return try! MoldJSON.decoder.decode(CatalogCredentialStatus.self, from: data)
+    }
+
+    /// A composed status for the cases the plato fixture doesn't cover (a
+    /// token stored ON this machine, or nothing at all) -- `CatalogCredentialStatus`
+    /// and `CatalogCredentialState` have no public memberwise init either.
+    static func credentialStatus(
+        hfConfigured: Bool = false, hfSource: String? = nil, hfMasked: String? = nil,
+        civitaiConfigured: Bool = false, civitaiSource: String? = nil, civitaiMasked: String? = nil
+    ) -> CatalogCredentialStatus {
+        func state(_ configured: Bool, _ source: String?, _ masked: String?) -> String {
+            let sourceJSON = source.map { "\"\($0)\"" } ?? "null"
+            let maskedJSON = masked.map { "\"\($0)\"" } ?? "null"
+            return #"{"configured": \#(configured), "source": \#(sourceJSON), "masked": \#(maskedJSON)}"#
+        }
+        let hfJSON = state(hfConfigured, hfSource, hfMasked)
+        let civitaiJSON = state(civitaiConfigured, civitaiSource, civitaiMasked)
+        let json = #"{"hf": \#(hfJSON), "civitai": \#(civitaiJSON)}"#
+        return try! MoldJSON.decoder.decode(CatalogCredentialStatus.self, from: Data(json.utf8))
+    }
 }

@@ -12,7 +12,10 @@ import MoldClient
 @MainActor
 @Observable
 final class CatalogStore {
-    private struct HostState {
+    // Not `private`: `CatalogStore+Credentials` (Settings ▸ Accounts, S7)
+    // reads and writes both from a second file, and `private` does not cross
+    // a file boundary even within one type.
+    struct HostState {
         var query = CatalogQuery(includeNSFW: false)
         /// The most recent page answered, kept for its `total` and
         /// `providerErrors` -- refreshed to whichever page last answered, so
@@ -29,7 +32,7 @@ final class CatalogStore {
     }
 
     let hosts: HostStore
-    private var byHost: [MoldHost.ID: HostState] = [:]
+    var byHost: [MoldHost.ID: HostState] = [:]
 
     init(hosts: HostStore) {
         self.hosts = hosts
@@ -117,14 +120,5 @@ final class CatalogStore {
         } catch {
             hosts.report(error, on: host, doing: "search the catalog")
         }
-    }
-
-    /// Read once per host -- a hint that a provider token would surface more
-    /// results, not a live setting (Settings ▸ Accounts, S7, is where one is
-    /// written).
-    func loadCredentials(on host: MoldHost.ID) async {
-        guard byHost[host]?.credentials == nil, let client = hosts.backend(for: host) else { return }
-        guard let status = try? await client.catalogCredentials() else { return }
-        byHost[host, default: HostState()].credentials = status
     }
 }
