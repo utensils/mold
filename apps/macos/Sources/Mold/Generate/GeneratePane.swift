@@ -7,8 +7,11 @@ import SwiftUI
 /// The picture takes the pane and the controls float over it, so what you are
 /// making stays the largest thing on screen.
 struct GeneratePane: View {
+    /// Not `private`: `GeneratePane+Result`, an extension in another file,
+    /// routes Show in Library through it.
     @Binding var destination: Destination
-    @Environment(HostStore.self) private var hosts
+    /// Not `private`, same reason -- the result verbs fetch bytes.
+    @Environment(HostStore.self) var hosts
     /// Not `private`: the toolbar's model picker, in an extension in another
     /// file, reads it too.
     @Environment(ModelStore.self) var models
@@ -75,8 +78,7 @@ struct GeneratePane: View {
                      : "Choose a model from the toolbar to start.")
             }
         } else {
-            RunCanvas(state: controller.run, host: host,
-                      showInLibrary: { destination = .library },
+            RunCanvas(state: controller.run, host: host, actions: resultActions,
                       togglePrompt: { controller.promptTucked.toggle() },
                       onResultShown: controller.handoff.acknowledge)
         }
@@ -118,23 +120,6 @@ struct GeneratePane: View {
         guard let host else { return "No machine" }
         guard let model = selectedModel else { return host.name }
         return "\(model.headline) · \(host.name)"
-    }
-
-    private func loadModels() async {
-        await models.refresh()
-        adoptFirstReadyModel()
-    }
-
-    /// Nothing chosen yet: start on something the machine can actually run.
-    ///
-    /// Also on reachability, because which machine `host` resolves to is an
-    /// answer this pane no longer probes for itself -- the root does the one
-    /// automatic check, and this adopts when it lands.
-    private func adoptFirstReadyModel() {
-        guard controller.modelName == nil, let host,
-              let first = models.ready(on: host.id).first
-        else { return }
-        controller.select(model: first, on: host.id)
     }
 
     private func startRun() {

@@ -32,13 +32,21 @@ struct CapsuleTests {
         #expect(LibraryPickerSheet.caption(count: 2) == "2 pictures")
     }
 
-    // MARK: - SourceImageWell.menuItems
+    // MARK: - The source well's menu
+    //
+    // ONE list now (`GenerateMenus.sourceWell`), rendered by the well's click
+    // menu and by its contextual menu alike. `GenerateMenusTests` pins the
+    // gating; these two keep the titles a person actually reads.
 
     @Test func emptyWellOffersNoRemove() {
-        #expect(SourceImageWell.menuItems(hasPicture: false) == ["Choose File…", "From Library…"])
+        let items = GenerateMenus.sourceWell(
+            hasPicture: false, canEditMask: true, canPaste: false)
+        #expect(items.all.map(\.title) == ["Choose File…", "Choose from Library…"])
     }
 
     @Test func filledWellAddsRemove() {
-        #expect(SourceImageWell.menuItems(hasPicture: true) == ["Choose File…", "From Library…", "Remove"])
+        let items = GenerateMenus.sourceWell(
+            hasPicture: true, canEditMask: false, canPaste: false)
+        #expect(items.all.map(\.title) == ["Choose File…", "Choose from Library…", "Remove"])
     }
 }

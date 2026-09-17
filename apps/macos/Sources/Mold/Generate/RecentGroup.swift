@@ -75,20 +75,6 @@ struct RecentGroup: View {
         }
     }
 
-    private func row(_ entry: HistoryEntry) -> some View {
-        Button { Self.pick(entry, into: &draft) } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.prompt).lineLimit(3)
-                Text("\(entry.model) · \(entry.usedAtDate, format: .relative(presentation: .named))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .buttonStyle(.plain)
-        .help("Puts this prompt back. The model and the controls stay as they are.")
-    }
-
     private var title: String {
         guard let host else { return "Recent" }
         return hosts.hosts.count > 1 ? "Recent on \(host.name)" : "Recent"

@@ -15,13 +15,18 @@ struct ImageConditioningWells: View {
     let model: Model?
     @Binding var draft: RenderDraft
 
+    @Environment(GenerateController.self) private var controller
+
     var body: some View {
         let layout = Self.layout(recipe: recipe, model: model, media: draft.media)
         if layout.showsSourceWell || layout.references != nil {
             VStack(alignment: .trailing, spacing: 4) {
                 HStack(alignment: .top, spacing: 8) {
                     if layout.showsSourceWell {
-                        SourceImageWell(draft: $draft)
+                        SourceImageWell(
+                            draft: $draft,
+                            canEditMask: RefineGroup.maskCapable(recipe.capabilities),
+                            openMaskEditor: { controller.showsMaskEditor = true })
                             .opacity(layout.parked == .source ? Self.parkedOpacity : 1)
                     }
                     if let references = layout.references {

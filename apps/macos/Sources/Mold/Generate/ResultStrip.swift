@@ -11,6 +11,7 @@ import SwiftUI
 struct ResultStrip: View {
     let results: [BatchResult]
     let host: MoldHost?
+    let actions: ResultActions
     @Binding var selected: Int
 
     @Environment(HostStore.self) private var hosts
@@ -20,6 +21,10 @@ struct ResultStrip: View {
     /// way the Library's title and tag fields already do, so one gate
     /// covers both panes.
     @FocusedValue(\.editingText) private var editingText: Bool?
+    /// And so does a focused `Slider` or `Stepper`, which AppKit alone can
+    /// answer for (`ArrowKeyClaim`). Re-read as the key window updates, and
+    /// written only when it CHANGES, so the strip's body is not churned.
+    @State private var responderClaimsArrows = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -28,6 +33,10 @@ struct ResultStrip: View {
             }
         }
         .task { await loadThumbnails() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didUpdateNotification)) { _ in
+            let claimed = ArrowKeyClaim.isClaimedNow
+            if claimed != responderClaimsArrows { responderClaimsArrows = claimed }
+        }
     }
 
     private func thumbnail(_ index: Int) -> some View {
@@ -54,10 +63,12 @@ struct ResultStrip: View {
         .keyboardShortcut(shortcut(for: index))
         .accessibilityLabel("Result \(index + 1) of \(results.count)")
         .accessibilityAddTraits(index == selected ? .isSelected : [])
+        .resultContextMenu(results[index], actions: actions)
     }
 
     private func shortcut(for index: Int) -> KeyboardShortcut? {
-        Self.key(for: index, selected: selected, editingText: editingText == true)
+        Self.key(for: index, selected: selected,
+                 arrowsAreClaimed: editingText == true || responderClaimsArrows)
             .map { KeyboardShortcut($0, modifiers: []) }
     }
 
@@ -78,13 +89,13 @@ extension ResultStrip {
     /// clicking that neighbour would, and a thumbnail at either end simply
     /// carries no shortcut rather than wrapping around.
     ///
-    /// An UNMODIFIED arrow is a window-scoped key equivalent, which is checked
-    /// before a focused field sees the key, so it stands down entirely while
-    /// anything is being typed into -- the prompt and the negative prompt
-    /// publish `editingText` for exactly this. Pure, so that stand-down is
+    /// `arrowsAreClaimed` is the ONE question (`ArrowKeyClaim`): a window
+    /// -scoped key equivalent is checked before the first responder sees the
+    /// key, so the strip stands down entirely while a caret, a `Slider` or a
+    /// `Stepper` is using the same two keys. Pure, so that stand-down is
     /// pinned by a test rather than by a view (finding 02#15).
-    static func key(for index: Int, selected: Int, editingText: Bool) -> KeyEquivalent? {
-        guard !editingText else { return nil }
+    static func key(for index: Int, selected: Int, arrowsAreClaimed: Bool) -> KeyEquivalent? {
+        guard !arrowsAreClaimed else { return nil }
         if index == selected - 1 { return .leftArrow }
         if index == selected + 1 { return .rightArrow }
         return nil

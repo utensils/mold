@@ -50,9 +50,13 @@ struct AdaptersGroup: View {
         }
         .help(helpText(for: choice, info: info))
         .contextMenu {
+            // The row's own vocabulary first -- it is not an action ON the
+            // row -- then the shared list (`GenerateMenus.adapterRow`).
             ForEach(info?.trainedWords ?? [], id: \.self) { word in
                 Button("Insert \"\(word)\"") { insert(word) }
             }
+            if !(info?.trainedWords ?? []).isEmpty { Divider() }
+            adapterMenu(choice)
         }
     }
 
@@ -92,7 +96,7 @@ struct AdaptersGroup: View {
         return "\(choice.name) — \(author)"
     }
 
-    private func scaleBinding(for choice: LoraChoice) -> Binding<Double> {
+    func scaleBinding(for choice: LoraChoice) -> Binding<Double> {
         Binding(
             get: { draft.media.loras.first { $0.path == choice.path }?.scale ?? Lora.defaultScale },
             set: { newValue in

@@ -86,21 +86,6 @@ struct ExpansionFenceTests {
         }
     }
 
-    /// An unmodified arrow is a window-scoped key equivalent and is checked
-    /// BEFORE a focused field sees the key, so the strip stands down entirely
-    /// while anything is being typed into (finding 02#15).
-    @Test func theResultStripYieldsEveryArrowToACaret() {
-        #expect(ResultStrip.key(for: 0, selected: 1, editingText: false) == .leftArrow)
-        #expect(ResultStrip.key(for: 2, selected: 1, editingText: false) == .rightArrow)
-        // Neither neighbour, so nothing to bind -- no wrap-around.
-        #expect(ResultStrip.key(for: 3, selected: 1, editingText: false) == nil)
-        #expect(ResultStrip.key(for: 1, selected: 1, editingText: false) == nil)
-        // A caret has the better claim on every one of them.
-        for index in 0 ... 3 {
-            #expect(ResultStrip.key(for: index, selected: 1, editingText: true) == nil)
-        }
-    }
-
     @Test func theSnapshotNamesEachThingThatMoved() {
         let host = UUID()
         let asked = ExpansionSnapshot(

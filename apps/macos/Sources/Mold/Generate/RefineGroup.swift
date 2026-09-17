@@ -64,6 +64,25 @@ struct RefineGroup: View {
                         .help("Remove this mask")
                     }
                 }
+                .contextMenu { maskMenu }
+            }
+        }
+    }
+
+    /// The mask row's menu, from the one list. An UNPAINTED row's inline
+    /// button already IS "Edit mask…", so `GenerateMenus.maskRow` answers
+    /// empty there and no menu is drawn at all.
+    @ViewBuilder private var maskMenu: some View {
+        let items = GenerateMenus.maskRow(hasMask: draft.media.maskImage != nil)
+        ForEach(items.ordinary, id: \.self) { action in
+            Button(action.title) { controller.showsMaskEditor = true }
+        }
+        if !items.destructive.isEmpty {
+            Divider()
+            ForEach(items.destructive, id: \.self) { _ in
+                Button(GenerateAction.clearMask.title, role: .destructive) {
+                    draft.media.maskImage = nil
+                }
             }
         }
     }

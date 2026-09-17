@@ -10,24 +10,23 @@ import SwiftUI
 struct ResultBar: View {
     let result: BatchResult
     let host: MoldHost?
-    let showInLibrary: () -> Void
-
-    @Environment(HostStore.self) private var hosts
-    @State private var saving = false
+    /// The SAME closures the contextual menu performs -- one definition of
+    /// each verb, two surfaces rendering it.
+    let actions: ResultActions
 
     var body: some View {
         HStack(spacing: 8) {
-            Button { Task { await save() } } label: {
+            Button { actions.save(result) } label: {
                 Label("Save a Copy", systemImage: "square.and.arrow.down")
             }
-            .disabled(saving || host == nil)
+            .disabled(host == nil)
 
-            Button { Task { await copy() } } label: {
+            Button { actions.copy(result) } label: {
                 Label("Copy", systemImage: "doc.on.doc")
             }
             .disabled(host == nil)
 
-            Button(action: showInLibrary) {
+            Button(action: actions.showInLibrary) {
                 Label("Show in Library", systemImage: "photo.on.rectangle.angled")
             }
 
@@ -42,26 +41,6 @@ struct ResultBar: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
-    }
-
-    private func bytes() async -> Data? {
-        guard let host, let filename = result.filename else { return nil }
-        return try? await hosts.backend(for: host).media(filename, trashed: false)
-    }
-
-    private func save() async {
-        saving = true
-        defer { saving = false }
-        guard let data = await bytes(), let filename = result.filename else { return }
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = filename
-        guard await panel.begin() == .OK, let url = panel.url else { return }
-        try? data.write(to: url)
-    }
-
-    private func copy() async {
-        guard let data = await bytes(), let image = NSImage(data: data) else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([image])
+        .resultContextMenu(result, actions: actions)
     }
 }
