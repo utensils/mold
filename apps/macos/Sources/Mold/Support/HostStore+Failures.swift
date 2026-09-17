@@ -38,6 +38,11 @@ extension HostStore {
     /// existing reach line alone, because the machine answering at all is a
     /// different fact than whatever it just refused.
     func report(_ error: Error, on host: MoldHost.ID, doing verb: String, now: Date = Date()) {
+        // A cancelled request is the app changing its mind -- a `.task(id:)`
+        // re-keying as a selection settles, a pane going away mid-request --
+        // not the machine failing. Recording it would tell the person their
+        // reachable machine can't be reached.
+        guard !(error is CancellationError) else { return }
         let name = name(of: host) ?? "That machine"
         guard case MoldClientError.unreachable = error else {
             failures.removeAll { $0.host == host && $0.verb == verb }

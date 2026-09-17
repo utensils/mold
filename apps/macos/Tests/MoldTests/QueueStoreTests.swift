@@ -44,4 +44,27 @@ struct QueueStoreTests {
         #expect(queue.entries(on: machine.id).map(\.id) == ["job-1"])
         #expect(hosts.failures.contains { $0.host == machine.id && $0.verb == "list its queue" })
     }
+
+    /// `hasLoaded` is what tells the Machines page "None installed" from "we
+    /// haven't asked yet" -- a never-listed host has no key in `byHost` at all.
+    @Test func aHostThatHasNeverBeenListedHasNotLoaded() async {
+        let machine = MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        let hosts = HostStore(hosts: [machine])
+        let queue = QueueStore(hosts: hosts)
+
+        #expect(queue.hasLoaded(on: machine.id) == false)
+    }
+
+    @Test func refreshingOneHostLoadsOnlyThatHostsQueue() async {
+        let plato = MoldHost(name: "plato", baseURL: URL(string: "http://plato")!)
+        let fake = FakeBackend(host: plato)
+        fake.queueListing = FakeFixtures.queueListing(["job-1"])
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let queue = QueueStore(hosts: hosts)
+
+        await queue.refresh(on: plato.id)
+
+        #expect(queue.hasLoaded(on: plato.id) == true)
+        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+    }
 }

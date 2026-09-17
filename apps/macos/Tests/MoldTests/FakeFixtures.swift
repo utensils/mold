@@ -51,8 +51,11 @@ extension FakeFixtures {
         return try! MoldJSON.decoder.decode(ExportOptions.self, from: Data(#"{"formats": [\#(list)]}"#.utf8))
     }
 
-    static func model(_ name: String, family: String = "flux") -> Model {
-        let json = #"{"name": "\#(name)", "family": "\#(family)", "description": "\#(name) — fake"}"#
+    static func model(_ name: String, family: String = "flux", sizeGb: Double? = nil) -> Model {
+        let json = #"""
+        {"name": "\#(name)", "family": "\#(family)", "description": "\#(name) — fake",
+         "size_gb": \#(sizeGb.map { "\($0)" } ?? "null")}
+        """#
         return try! MoldJSON.decoder.decode(Model.self, from: Data(json.utf8))
     }
 

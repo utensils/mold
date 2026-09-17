@@ -159,6 +159,31 @@ struct HostFailureTests {
         #expect(hosts.failures.isEmpty)
     }
 
+    /// A `.task(id:)` re-keying as a selection settles cancels whatever it was
+    /// mid-flight on -- that is the app changing its mind, not the machine
+    /// failing, and must never read as "can't be reached".
+    @Test func aCancelledRequestIsNotAFailure() {
+        let machine = host("plato")
+        let hosts = HostStore(hosts: [machine])
+        hosts.report(CancellationError(), on: machine.id, doing: "read its memory use")
+
+        #expect(hosts.failures.isEmpty)
+    }
+
+    /// Cancellation never erases an unrelated failure already on record --
+    /// it is a non-event, not a success.
+    @Test func aCancelledRequestLeavesAnExistingFailureAlone() {
+        let machine = host("plato")
+        let hosts = HostStore(hosts: [machine])
+        hosts.report(MoldClientError.http(status: 409, code: nil, message: "Busy."),
+                     on: machine.id, doing: "list its queue")
+
+        hosts.report(CancellationError(), on: machine.id, doing: "list its queue")
+
+        #expect(hosts.failures.count == 1)
+        #expect(hosts.failures.first?.sentence == "plato couldn't list its queue — busy.")
+    }
+
     @Test func anUnauthorizedMachineSaysItNeedsAKey() {
         let machine = host("plato")
         let hosts = HostStore(hosts: [machine])

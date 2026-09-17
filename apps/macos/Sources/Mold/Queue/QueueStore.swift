@@ -39,6 +39,24 @@ final class QueueStore {
         }
     }
 
+    /// One machine's queue, for a caller that only needs this host rather
+    /// than the whole fleet's -- the Machines pane opening on one machine.
+    /// Same failure-report shape as `refresh()`'s per-host branch.
+    func refresh(on host: MoldHost.ID) async {
+        guard let client = hosts.backend(for: host) else { return }
+        do {
+            byHost[host] = try await client.queue().merged
+            hosts.succeeded(on: host, doing: "list its queue")
+        } catch {
+            hosts.report(error, on: host, doing: "list its queue")
+        }
+    }
+
+    /// Whether this host has ever answered a queue listing -- distinct from
+    /// an empty answer, which means it truly has nothing queued. `nil` from
+    /// `byHost` is "not yet asked", not "asked and got nothing".
+    func hasLoaded(on host: MoldHost.ID) -> Bool { byHost[host] != nil }
+
     var all: [QueueEntry] { byHost.values.flatMap(\.self) }
 
     func entries(on host: MoldHost.ID) -> [QueueEntry] { byHost[host] ?? [] }

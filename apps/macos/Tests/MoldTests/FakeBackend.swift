@@ -40,6 +40,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var capabilityBlock: Capabilities?
     nonisolated(unsafe) var exportBlock: ExportOptions?
     nonisolated(unsafe) var downloadTicket: DownloadTicket?
+    nonisolated(unsafe) var modelRows: [Model] = []
 
     // MARK: - Machines
 
@@ -112,7 +113,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         guard let capabilityBlock else { throw notPlanted() }
         return capabilityBlock
     }
-    func models() async throws -> [Model] { try record("models"); return [] }
+    func models() async throws -> [Model] { try record("models"); return modelRows }
 
     // MARK: - Generation
 

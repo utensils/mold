@@ -40,6 +40,24 @@ final class ModelStore {
         }
     }
 
+    /// One machine's models, for a caller that only needs this host rather
+    /// than the whole fleet's -- the Machines pane opening on one machine.
+    /// Same failure-report shape as `refresh()`'s per-host branch.
+    func refresh(on host: MoldHost.ID) async {
+        guard let client = hosts.backend(for: host) else { return }
+        do {
+            byHost[host] = try await client.models()
+            hosts.succeeded(on: host, doing: "list its models")
+        } catch {
+            hosts.report(error, on: host, doing: "list its models")
+        }
+    }
+
+    /// Whether this host has ever answered a models listing -- distinct from
+    /// an empty answer, which means it truly has none installed. `nil` from
+    /// `byHost` is "not yet asked", not "asked and got nothing".
+    func hasLoaded(on host: MoldHost.ID) -> Bool { byHost[host] != nil }
+
     /// Only things a person would pick to make a picture: no prompt-expansion
     /// LLMs, no upscalers, no ControlNets.
     func generators(on host: MoldHost.ID) -> [Model] {

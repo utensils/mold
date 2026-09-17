@@ -70,8 +70,16 @@ extension HTTPBackend {
             }
             return (data, http)
         } catch let error as URLError {
-            throw MoldClientError.unreachable(error.localizedDescription)
+            throw Self.failure(for: error)
         }
+    }
+
+    /// A cancelled request is the app changing its mind -- a `.task(id:)`
+    /// re-keying, a view going away -- not the machine failing, so it must
+    /// never present as `.unreachable`. Every other `URLError` still becomes
+    /// the same reachability failure as before.
+    static func failure(for error: URLError) -> Error {
+        error.code == .cancelled ? CancellationError() : MoldClientError.unreachable(error.localizedDescription)
     }
 
     func check(_ http: HTTPURLResponse, _ data: Data) throws {
@@ -106,6 +114,8 @@ extension HTTPBackend {
                         continuation.yield(frame)
                     }
                     continuation.finish()
+                } catch let error as URLError {
+                    continuation.finish(throwing: Self.failure(for: error))
                 } catch {
                     continuation.finish(throwing: error)
                 }

@@ -117,17 +117,11 @@ extension MachinesPane {
     }
 
     private func workCount(_ host: MoldHost) -> String {
-        let live = queue.entries(on: host.id).filter(\.state.isLive)
-        guard !live.isEmpty else { return "Nothing queued" }
-        let running = live.count { $0.state == .running }
-        return "\(live.count - running) queued, \(running) running"
+        MachineFigures.workFigure(live: queue.hasLoaded(on: host.id)
+            ? queue.entries(on: host.id).filter(\.state.isLive) : nil)
     }
 
     private func modelCount(_ host: MoldHost) -> String {
-        let ready = models.ready(on: host.id)
-        guard !ready.isEmpty else { return "None installed" }
-        let size = ready.compactMap(\.sizeGb).reduce(0, +)
-        guard size > 0 else { return "\(ready.count) installed" }
-        return "\(ready.count) installed · \(size.formatted(.number.precision(.fractionLength(1)))) GB"
+        MachineFigures.modelFigure(ready: models.hasLoaded(on: host.id) ? models.ready(on: host.id) : nil)
     }
 }

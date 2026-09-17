@@ -20,8 +20,6 @@ struct MachinesPane: View {
     @AppStorage("selectedMachine", store: AppStorageSuite.defaults) var selectedMachine = ""
     @Binding var destination: Destination
     @State var editing: MoldHost?
-    /// Whether "Work here" and "Models here" have anything behind them yet.
-    @State private var countsLoaded = false
 
     var selected: MoldHost? { hosts.machine(selected: selectedMachine) }
 
@@ -50,7 +48,8 @@ struct MachinesPane: View {
         .task(id: selected?.id) {
             guard let id = selected?.id else { return }
             await machines.refresh(id)
-            await loadCounts()
+            await queue.refresh(on: id)
+            await models.refresh(on: id)
             machines.watchResources(on: id)
         }
         .onDisappear { machines.stopWatchingResources() }
@@ -105,22 +104,9 @@ struct MachinesPane: View {
         Task {
             await hosts.refresh(host)
             await machines.refresh(host.id)
-            countsLoaded = false
-            await loadCounts()
+            await queue.refresh(on: host.id)
+            await models.refresh(on: host.id)
         }
-    }
-
-    /// "Work here" and "Models here" read the stores the Queue and Models
-    /// panes fill. Landing here FIRST -- a cold launch on ⌘5 -- would
-    /// otherwise say "Nothing queued · None installed" about a machine
-    /// holding eighty models, which is a false answer rather than a missing
-    /// one. Once per pane rather than per selection, because both listings
-    /// are fleet-wide and answer for every machine at once.
-    private func loadCounts() async {
-        guard !countsLoaded else { return }
-        countsLoaded = true
-        await queue.refresh()
-        await models.refresh()
     }
 
     /// The GPUs, or the difference between a machine that does not report
