@@ -280,3 +280,23 @@ struct DiscoverTests {
         #expect(DiscoverTable.rows(for: []).isEmpty)
     }
 }
+
+/// **Fails today**: a catalog row's page link is whatever string the MACHINE
+/// sent, and it went straight to `NSWorkspace.open`. A hostile or compromised
+/// machine could hand this Mac `file:///…`, `ssh://…` or another app's
+/// deep-link scheme and have it opened on a click labelled "Open Page". A page
+/// is a web page: anything else is no page, so there is no item and no cell.
+@MainActor
+struct DiscoverPageLinkTests {
+    @Test func onlyAWebPageIsAPage() {
+        for hostile in ["file:///etc/passwd", "ssh://evil.example", "x-apple.systempreferences:",
+                        "javascript:alert(1)", "https://", "not a url"] {
+            let entry = FakeFixtures.catalogEntry(id: "hf:x", supported: false, pageUrl: hostile)
+            #expect(DiscoverRow.menuItems(for: entry).map(\.title) == ["Details…"], "\(hostile)")
+        }
+        for page in ["https://huggingface.co/x/y", "http://example.com/page"] {
+            let entry = FakeFixtures.catalogEntry(id: "hf:x", supported: false, pageUrl: page)
+            #expect(DiscoverRow.menuItems(for: entry).map(\.title) == ["Details…", "Open Page"], "\(page)")
+        }
+    }
+}

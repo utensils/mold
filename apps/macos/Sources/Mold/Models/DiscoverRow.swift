@@ -12,7 +12,7 @@ enum DiscoverRow: Equatable {
 
     static func resolve(_ entry: CatalogEntry) -> DiscoverRow {
         if entry.installed { return .installed }
-        guard entry.supported else { return .unsupported(pageURL: entry.pageUrl.flatMap(URL.init(string:))) }
+        guard entry.supported else { return .unsupported(pageURL: entry.pageUrl.flatMap(webPage)) }
         return .install
     }
 }
@@ -37,6 +37,18 @@ extension DiscoverRow {
             case .openPage: "Open Page"
             }
         }
+    }
+
+    /// The machine's string, as a page this Mac will open -- or nothing. It is
+    /// the MACHINE that sends it, and it goes to `NSWorkspace.open`, so a
+    /// `file:`, `ssh:` or another app's deep link is not a page: only http(s)
+    /// with a host is. No page means no item and no cell, never one that opens
+    /// something else.
+    static func webPage(_ string: String) -> URL? {
+        guard let url = URL(string: string), let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http", url.host()?.isEmpty == false
+        else { return nil }
+        return url
     }
 
     /// In the row's own reading order: the name cell leads, the State column
