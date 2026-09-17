@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-candle"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "candle-core-mold",
  "candle-nn-mold",
@@ -2605,7 +2605,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-catalog"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "mold-ai-core",
  "reqwest",
@@ -2619,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-core"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2649,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-db"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "anyhow",
  "fs2",
@@ -2668,7 +2668,7 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-inference"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2711,11 +2711,11 @@ dependencies = [
 
 [[package]]
 name = "mold-ai-scheduler"
-version = "0.29.0"
+version = "0.30.0"
 
 [[package]]
 name = "mold-ai-server"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "aead-stream",
  "anyhow",

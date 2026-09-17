@@ -19,9 +19,9 @@ crate-type = ["staticlib"]
 anyhow = "1"
 libc = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread"] }
-mold-core = { path = "../../../../crates/mold-core", package = "mold-ai-core", version = "0.29.0" }
-mold-db = { path = "../../../../crates/mold-db", package = "mold-ai-db", version = "0.29.0" }
-mold-server = { path = "../../../../crates/mold-server", package = "mold-ai-server", version = "0.29.0", features = [
+mold-core = { path = "../../../../crates/mold-core", package = "mold-ai-core" }
+mold-db = { path = "../../../../crates/mold-db", package = "mold-ai-db" }
+mold-server = { path = "../../../../crates/mold-server", package = "mold-ai-server", features = [
   "expand",
   "mdns",
   "mp4",
