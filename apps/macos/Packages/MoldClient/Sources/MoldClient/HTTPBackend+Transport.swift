@@ -68,9 +68,18 @@ extension HTTPBackend {
         return data
     }
 
+    /// The task delegate every request carries.
+    ///
+    /// Its only job is to take `X-Api-Key` off a redirect that leaves this
+    /// host's origin (`RedirectGuard`). Per TASK, so a caller's own session --
+    /// a stub in tests, a configured one in the app -- keeps whatever
+    /// delegate it already has.
+    var redirectGuard: RedirectGuard { RedirectGuard(origin: host.baseURL) }
+
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(
+                for: request, delegate: redirectGuard)
             guard let http = response as? HTTPURLResponse else {
                 throw MoldClientError.malformedResponse
             }

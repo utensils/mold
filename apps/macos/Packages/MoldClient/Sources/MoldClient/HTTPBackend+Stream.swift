@@ -20,7 +20,8 @@ extension HTTPBackend {
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     request.timeoutInterval = timeout
 
-                    let (bytes, response) = try await session.bytes(for: request)
+                    let (bytes, response) = try await session.bytes(
+                        for: request, delegate: redirectGuard)
                     guard let http = response as? HTTPURLResponse
                     else { throw MoldClientError.malformedResponse }
                     if !(200..<300).contains(http.statusCode) {
