@@ -5,44 +5,58 @@ import MoldClient
 @MainActor
 @Observable
 final class QueueStore {
-    private let hosts: HostStore
+    let hosts: HostStore
     private(set) var byHost: [MoldHost.ID: [QueueEntry]] = [:]
     private(set) var isLoading = false
 
-    init(hosts: HostStore) {
+    /// SOMEBODY paused this machine's whole queue -- names the QUEUE, not a
+    /// row. `internal(set)`: `QueueStore+Live` writes it, and `private(set)`
+    /// does not cross a file boundary.
+    internal(set) var queuePaused: [MoldHost.ID: Bool] = [:]
+
+    /// The typed half of a queue row, which `/api/queue` does not carry --
+    /// per machine, then per batch id. See `QueueStore+Batches`.
+    internal(set) var children: [MoldHost.ID: [String: [BatchChild]]] = [:]
+
+    /// One coalescing task per machine. Not `private`: `QueueStore+Live`
+    /// reads and writes it too.
+    var coalescers: [MoldHost.ID: Task<Void, Never>] = [:]
+
+    /// How long a burst of job frames waits before the one re-read it earns
+    /// -- a stored value, not a fixed constant, so a test can shrink it
+    /// instead of sleeping 250 ms per case.
+    let coalesceDelay: Duration
+
+    init(hosts: HostStore, coalesceDelay: Duration = .milliseconds(250)) {
         self.hosts = hosts
+        self.coalesceDelay = coalesceDelay
+        // For the life of the app -- `LibraryStore.swift:56`'s shape. The
+        // queue used to be poll-only, so a job that started, ran and
+        // finished between two visits to this pane was never seen at all.
+        hosts.onEvent { [weak self] host, event in self?.apply(event, from: host) }
     }
 
     func refresh() async {
         isLoading = true
         defer { isLoading = false }
-        await withTaskGroup(of: (MoldHost.ID, Result<QueueListing, Error>).self) { group in
+        await withTaskGroup(of: Void.self) { group in
             for host in hosts.hosts {
-                let client = hosts.backend(for: host)
-                group.addTask {
-                    do { return (host.id, .success(try await client.queue())) }
-                    catch { return (host.id, .failure(error)) }
-                }
-            }
-            for await (id, result) in group {
-                switch result {
-                case let .success(listing):
-                    byHost[id] = listing.merged
-                    hosts.succeeded(on: id, doing: "list its queue")
-                case let .failure(error):
-                    // A machine that cannot answer keeps the rows it last
-                    // showed -- blanking them says something happened to the
-                    // jobs, when what happened is a bad connection.
-                    hosts.report(error, on: id, doing: "list its queue")
-                }
+                group.addTask { await self.refresh(on: host.id) }
             }
         }
     }
 
-    /// One machine's queue, for a caller that only needs this host rather
-    /// than the whole fleet's -- the Machines pane opening on one machine.
-    /// Same failure-report shape as `refresh()`'s per-host branch.
+    /// One machine's queue, then its batches -- what every fallback calls.
     func refresh(on host: MoldHost.ID) async {
+        await poll(host)
+        await hydrate(on: host)
+    }
+
+    /// The one listing read: the first listing for a machine, a person
+    /// asking again, a machine `wantsPoll` says cannot stream, and after any
+    /// mutation this app makes (`act`, below) -- the row's new position is
+    /// the server's to state.
+    func poll(_ host: MoldHost.ID) async {
         guard let client = hosts.backend(for: host) else { return }
         do {
             byHost[host] = try await client.queue().merged
@@ -50,6 +64,12 @@ final class QueueStore {
         } catch {
             hosts.report(error, on: host, doing: "list its queue")
         }
+    }
+
+    /// Whether this machine cannot stream and needs an explicit poll instead.
+    /// Absent means an older host with no event route at all.
+    func wantsPoll(_ host: MoldHost.ID) -> Bool {
+        hosts.capabilities[host]?.hasEvents != true
     }
 
     /// Whether this host has ever answered a queue listing -- distinct from
@@ -105,6 +125,9 @@ final class QueueStore {
         } catch {
             hosts.report(error, on: host, doing: verb)
         }
+        // Fallback (d): the row's new position, or that it left the queue
+        // entirely, is the server's to state.
+        await poll(host)
     }
 }
 

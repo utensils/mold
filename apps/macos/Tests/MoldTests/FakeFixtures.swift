@@ -38,6 +38,16 @@ enum FakeFixtures {
         return try! MoldJSON.decoder.decode(QueueListing.self, from: Data(json.utf8))
     }
 
+    /// A listing built from already-decoded rows -- for a test that needs
+    /// more than a bare id, such as a batch id. Round-trips each row through
+    /// `QueueEntry`'s own `Encodable` conformance rather than a second copy
+    /// of the JSON `queueEntry` already built.
+    static func queueListing(entries: [QueueEntry]) -> QueueListing {
+        let rows = entries.map { String(data: try! MoldJSON.encoder.encode($0), encoding: .utf8)! }
+        let json = #"{"entries": [\#(rows.joined(separator: ","))], "liveOnlyEntries": null}"#
+        return try! MoldJSON.decoder.decode(QueueListing.self, from: Data(json.utf8))
+    }
+
     /// One child of a batch, decoded the way `/api/generation-batches/status`
     /// produces one -- `BatchChild` has no public memberwise init either.
     static func batchChild(
@@ -427,6 +437,31 @@ extension FakeFixtures {
         }.joined(separator: ",")
         let json = #"{"id": "\#(id)", "client_batch_id": "\#(clientBatchId)", "children": [\#(rows)]}"#
         return try! MoldJSON.decoder.decode(BatchStatus.self, from: Data(json.utf8))
+    }
+
+    /// A batch's status built from already-decoded children -- for a test
+    /// that needs a `revision` or an `errorCode`, which `BatchChildSpec`
+    /// does not carry. Use `FakeFixtures.batchChild(...)` to build them.
+    static func batchStatus(id: String = "batch-1", clientBatchId: String = "client-1",
+                            children: [BatchChild]) -> BatchStatus {
+        let rows = children.map { String(data: try! MoldJSON.encoder.encode($0), encoding: .utf8)! }
+        let json = #"{"id": "\#(id)", "client_batch_id": "\#(clientBatchId)", "children": [\#(rows.joined(separator: ","))]}"#
+        return try! MoldJSON.decoder.decode(BatchStatus.self, from: Data(json.utf8))
+    }
+
+    /// `POST /api/generation-batches/status`'s answer -- `BatchStatusListing`
+    /// has no public memberwise init either. `missingBatchIds` is what the
+    /// machine says it never heard of, among the ids a test asked about.
+    static func batchStatusListing(
+        _ batches: [BatchStatus], missingBatchIds: [String] = [], instanceId: String = "fake-instance"
+    ) -> BatchStatusListing {
+        let rows = batches.map { String(data: try! MoldJSON.encoder.encode($0), encoding: .utf8)! }
+        let missing = missingBatchIds.map { "\"\($0)\"" }.joined(separator: ",")
+        let json = #"""
+        {"instance_id": "\#(instanceId)", "batches": [\#(rows.joined(separator: ","))],
+         "missing": {"client_batch_ids": [], "batch_ids": [\#(missing)]}}
+        """#
+        return try! MoldJSON.decoder.decode(BatchStatusListing.self, from: Data(json.utf8))
     }
 
     /// A real `GET /api/config` from plato: 63 entries, 16 `models.*` rows
