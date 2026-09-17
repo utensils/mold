@@ -75,9 +75,11 @@ struct GeneralSettings: View {
                 Button("Reset These Preferences…") { pendingReset = resetDestruction }
             } footer: {
                 Text("""
-                     Puts the sidebar and inspector layout, the remembered \
-                     destination and machine, and every pane's own sort and \
-                     scope back to how Mold first opened. Your machines are untouched.
+                     Puts the sidebar and inspector layout, the thumbnail size, \
+                     the remembered destination, every pane's own sort and scope, \
+                     and the machines Mold remembers pointing at — the default one \
+                     included — back to how Mold first opened. Your machines and \
+                     their keys are untouched.
                      """)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -99,8 +101,9 @@ struct GeneralSettings: View {
         Destruction(
             title: "Reset These Preferences?",
             message: """
-                     Window layout, remembered destination and machine, and every pane's own sort and \
-                     sidebar state go back to their defaults. Your machines are untouched.
+                     Window layout, thumbnail size, the remembered destination, every pane's own \
+                     sort and scope, and the machines Mold remembers pointing at — the default one \
+                     included — go back to their defaults. Your machines and their keys are untouched.
                      """,
             verb: "Reset"
         ) {
