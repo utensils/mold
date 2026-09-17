@@ -13,7 +13,13 @@ import Foundation
 /// own menu type in the same week -- the Library's modelled submenus (Move to
 /// Collection ▸, Export ▸) and explicit grouping, which this one lacked, and
 /// so could not be folded in without them.
-public struct RowAction<Kind: Hashable>: Identifiable, Equatable {
+/// DELIBERATELY NOT `Identifiable`: a drawn menu can repeat itself. Every
+/// separator is `RowAction(title: "")`, and two submenus can share a title,
+/// so nothing in the VALUE tells one row from another. A rendered row is
+/// identified by its POSITION in the list it was rendered into, which is
+/// what `RowActionMenu` keys its `ForEach` on -- a content-derived `id` here
+/// handed SwiftUI the same identity for every divider in the menu.
+public struct RowAction<Kind: Hashable>: Equatable {
     /// What performing this row MEANS. `nil` on a submenu and on a separator,
     /// neither of which is something to do.
     public let kind: Kind?
@@ -34,10 +40,6 @@ public struct RowAction<Kind: Hashable>: Identifiable, Equatable {
         self.isDisabled = isDisabled
         self.children = children
     }
-
-    /// The kind where there is one, and the title otherwise -- a submenu has
-    /// no kind to be identified by, and two of them never share a title.
-    public var id: AnyHashable { kind.map(AnyHashable.init) ?? AnyHashable(title) }
 
     /// A rule the menu draws as a divider rather than a row.
     public static var separator: RowAction { RowAction(title: "") }

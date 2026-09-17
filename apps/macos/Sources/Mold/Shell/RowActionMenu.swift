@@ -17,8 +17,13 @@ struct RowActionMenu<Kind: Hashable>: View {
     /// is ⌘⌫ in the Queue menu and bare on a row.
     var shortcut: (Kind) -> KeyboardShortcut? = { _ in nil }
 
+    /// Keyed by POSITION, not by content: a drawn menu repeats itself --
+    /// every separator is the same value, and two submenus can share a title
+    /// -- so a content-derived identity handed SwiftUI "ID used by multiple
+    /// child views" for any menu with two dividers. The Queue menu draws up
+    /// to four.
     var body: some View {
-        ForEach(RowAction.rendered(actions)) { action in
+        ForEach(Array(RowAction.rendered(actions).enumerated()), id: \.offset) { _, action in
             if action.isSeparator {
                 Divider()
             } else if action.isSubmenu {

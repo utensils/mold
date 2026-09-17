@@ -21,6 +21,11 @@ public extension RowAction {
     /// list that carries no separator of its own gets the house one, before
     /// the first destructive item; and no menu opens, closes or doubles on a
     /// divider, whatever the gating above left out.
+    ///
+    /// A disabled COMMAND is kept and a submenu of disabled children is not,
+    /// on purpose: "present but inert" says a row cannot do this right now
+    /// (the sidebar's Empty Trash…), while a submenu says "there is more in
+    /// here" and then has nothing in it.
     static func rendered(_ actions: [RowAction]) -> [RowAction] {
         let live = actions.filter { $0.isSeparator || $0.kind != nil || $0.leadsSomewhere }
         return trimmingSeparators(live.contains(where: \.isSeparator) ? live : grouped(live))

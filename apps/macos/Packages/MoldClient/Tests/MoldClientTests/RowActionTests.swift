@@ -76,14 +76,31 @@ import Testing
         #expect(!RowAction.offersMenu([shelves]))
     }
 
-    /// A submenu has no action to be identified by, so it is identified by
-    /// its words -- two of them never share a title.
-    @Test func everyDrawnRowHasItsOwnIdentity() {
+    /// **Fails today**: `RowAction` is `Identifiable` with
+    /// `id = kind ?? title`, and every separator is `RowAction(title: "")` --
+    /// so a menu with two dividers hands SwiftUI the same identity twice, and
+    /// the renderer's `ForEach` is the one over `Identifiable`. Two submenus
+    /// sharing a title collide the same way.
+    ///
+    /// A drawn row is identified by WHERE IT IS, which is what
+    /// `RowActionMenu` keys on. This pins the repetition itself: the value
+    /// cannot tell these rows apart, so nothing may try.
+    @Test func aDrawnMenuRepeatsItselfAndIsKeyedByPosition() {
         let drawn = RowAction.rendered([
             Item(kind: "open", title: "Open"),
+            .separator,
             Item(title: "Move to Collection", children: [Item(kind: "a", title: "A")]),
-            Item(title: "Export…", children: [Item(kind: "png", title: "PNG")]),
+            Item(title: "Send to", children: [Item(kind: "b", title: "B")]),
+            .separator,
+            Item(title: "Send to", children: [Item(kind: "c", title: "C")]),
+            Item(kind: "trash", title: "Trash", isDestructive: true),
         ])
-        #expect(Set(drawn.map(\.id)).count == drawn.count)
+
+        #expect(drawn.count == 7)
+        // Two rows that are equal as values, in one list...
+        #expect(drawn.filter(\.isSeparator).count == 2)
+        // ...and two more a person tells apart only by where they are.
+        #expect(drawn.filter(\.isSubmenu).map(\.title)
+            == ["Move to Collection", "Send to", "Send to"])
     }
 }
