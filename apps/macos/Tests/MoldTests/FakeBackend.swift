@@ -52,6 +52,35 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var exportBlock: ExportOptions?
     nonisolated(unsafe) var downloadTicket: DownloadTicket?
     nonisolated(unsafe) var modelRows: [Model] = []
+    // MARK: - Models (M5 S1b)
+
+    /// Answered per MODEL, the same "absent is unplanted" rule as `loraRows`.
+    nonisolated(unsafe) var componentRows: [String: ModelComponentsResponse] = [:]
+    nonisolated(unsafe) var removalAnswers: [String: ModelRemoval] = [:]
+    /// Every model `deleteModel` was asked to remove, in call order.
+    nonisolated(unsafe) var deletedModels: [String] = []
+    /// Every `(model, gpu)` `loadModel` was asked for, in call order.
+    nonisolated(unsafe) var loadedModels: [(model: String, gpu: Int?)] = []
+    /// Every `(model, gpu)` `unloadModel` was asked for, in call order --
+    /// `model == nil` is "unload everything".
+    nonisolated(unsafe) var unloadedModels: [(model: String?, gpu: Int?)] = []
+    nonisolated(unsafe) var downloadsListing: DownloadsListing?
+
+    // MARK: - Catalog (M5 S1b)
+
+    /// Answered per QUERY STRING -- a test plants what one particular search
+    /// answers, not a fixed listing for every call.
+    nonisolated(unsafe) var catalogPages: [String: CatalogListing] = [:]
+    nonisolated(unsafe) var catalogInstallAnswer: CatalogInstall?
+    /// Every id `installCatalogEntry` was asked to install, in call order.
+    nonisolated(unsafe) var catalogInstalls: [String] = []
+    nonisolated(unsafe) var credentialStatus: CatalogCredentialStatus?
+    /// Every `(provider, token)` `setCatalogCredential` was asked to write,
+    /// in call order.
+    nonisolated(unsafe) var credentialWrites: [(provider: String, token: String)] = []
+    /// Every provider `clearCatalogCredential` was asked to clear, in call
+    /// order.
+    nonisolated(unsafe) var credentialClears: [String] = []
     /// Every admission `submit` was asked, in call order -- what a batch of
     /// four actually looked like on the wire.
     nonisolated(unsafe) var submittedAdmissions: [BatchAdmission] = []
@@ -99,7 +128,10 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     init(host: MoldHost) { self.host = host }
 
-    private func record(_ route: String) throws {
+    /// Not `private`: `FakeBackend+Models.swift` (M5 S1b's routes, split out
+    /// to keep this file from growing further) calls both from a different
+    /// file in the same type.
+    func record(_ route: String) throws {
         callsLock.withLock { recorded.append(route) }
         if let planted = plantedErrors[route] { throw planted }
         if refuses.contains(route) {
@@ -107,7 +139,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         }
     }
 
-    private func notPlanted() -> Error { MoldClientError.unreachable("not planted") }
+    func notPlanted() -> Error { MoldClientError.unreachable("not planted") }
 
     /// `DeviceInfo` has no public memberwise init -- like `GalleryPrint` and
     /// `QueueEntry` above, it is built the way the wire builds one, by

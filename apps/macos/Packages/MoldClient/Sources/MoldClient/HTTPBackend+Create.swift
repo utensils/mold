@@ -74,10 +74,3 @@ extension HTTPBackend {
         keep.map { "/api/history?keep=\($0)" } ?? "/api/history"
     }
 }
-
-public extension MoldBackend {
-    /// Clears the whole history. A protocol default rather than a parameter
-    /// default: an existential call can't see a default argument, and every
-    /// conformance (including the fake) gets this for free.
-    func clearHistory() async throws { try await clearHistory(keeping: nil) }
-}

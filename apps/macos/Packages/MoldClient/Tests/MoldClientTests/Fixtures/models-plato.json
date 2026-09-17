@@ -57,6 +57,68 @@
     "is_loaded": false,
     "downloaded": true,
     "hf_repo": "",
+    "disk_usage_bytes": 33461662,
     "remaining_download_bytes": 0
+  },
+  {
+    "name": "qwen3-expand:q8",
+    "family": "qwen3-expand",
+    "description": "Qwen3-1.7B Q8 \u2014 prompt expansion LLM (1.8GB)",
+    "size_gb": 1.7084423,
+    "is_loaded": false,
+    "downloaded": true,
+    "hf_repo": "Qwen/Qwen3-1.7B-GGUF",
+    "disk_usage_bytes": 1845848670,
+    "remaining_download_bytes": 0
+  },
+  {
+    "name": "flux-schnell:q8",
+    "family": "flux",
+    "description": "FLUX.1 Schnell Q8 \u2014 fast 4-step, general purpose",
+    "size_gb": 11.816455,
+    "is_loaded": false,
+    "downloaded": true,
+    "hf_repo": "city96/FLUX.1-schnell-gguf",
+    "disk_usage_bytes": 23061759552,
+    "remaining_download_bytes": 0
+  },
+  {
+    "name": "flux-schnell:bf16",
+    "family": "flux",
+    "description": "FLUX.1 Schnell BF16 \u2014 fast 4-step, full precision",
+    "size_gb": 22.148,
+    "is_loaded": false,
+    "downloaded": false,
+    "hf_repo": "black-forest-labs/FLUX.1-schnell",
+    "remaining_download_bytes": 23782506688
+  },
+  {
+    "name": "cv:252914",
+    "family": "sd15",
+    "description": "LCM version . Use it with 5-15 steps, ~2 cfg.",
+    "size_gb": 2.0837939,
+    "is_loaded": false,
+    "downloaded": true,
+    "hf_repo": "",
+    "disk_usage_bytes": 2083793937,
+    "remaining_download_bytes": 0,
+    "display_name": "DreamShaper - 8 LCM",
+    "kind": "checkpoint",
+    "modality": "image",
+    "nsfw": false
+  },
+  {
+    "name": "cv:1759168",
+    "family": "sdxl",
+    "description": "Juggernaut XL - Ragnarok",
+    "size_gb": 6.9388185,
+    "is_loaded": false,
+    "downloaded": true,
+    "hf_repo": "",
+    "disk_usage_bytes": 6938818517,
+    "remaining_download_bytes": 0,
+    "display_name": "Juggernaut XL - Ragnarok",
+    "kind": "checkpoint",
+    "modality": "image"
   }
 ]

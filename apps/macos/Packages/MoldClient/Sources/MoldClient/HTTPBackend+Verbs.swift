@@ -43,7 +43,12 @@ extension HTTPBackend {
     /// in a title slug. `/` is subtracted from the allowed set BECAUSE it is
     /// allowed in a path: left alone it would silently split one component
     /// into two and address a different route.
-    func escaped(_ component: String) -> String {
+    func escaped(_ component: String) -> String { Self.escaped(component) }
+
+    /// The static form, callable from a type that has no `HTTPBackend`
+    /// instance to hand -- `CatalogQuery.queryString` is built entirely
+    /// from its own fields, before any request exists.
+    static func escaped(_ component: String) -> String {
         component.addingPercentEncoding(
             withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))
         ) ?? component

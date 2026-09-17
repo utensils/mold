@@ -21,6 +21,23 @@ public struct Model: Codable, Hashable, Sendable, Identifiable {
     /// different state from "not installed", and says so in the UI.
     public let remainingDownloadBytes: Int?
     public let generationProfile: GenerationProfileSet?
+    /// Bytes this model occupies on the machine, present only when
+    /// `downloaded` (`catalog.rs:220-225`). NEVER SUM THIS COLUMN: a shared
+    /// VAE or encoder is counted once per model that references it -- the
+    /// machine's own figure is `/api/status.models_disk`.
+    public let diskUsageBytes: Int?
+    /// Catalog classification for a catalog-installed model. Absent for
+    /// manifest rows, whose `family` is sufficient, and for older servers.
+    public let kind: String?
+    /// Catalog modality (`image` / `video`). Same absence rule as `kind`.
+    public let modality: String?
+    /// Mature-content classification. `nil` means UNKNOWN, never safe.
+    public let nsfw: Bool?
+    /// Whether this build can execute this model. `nil` on servers that
+    /// predate the field: read as "runnable" (`runtimeAvailable != false`).
+    public let runtimeAvailable: Bool?
+    /// One sentence naming why `runtimeAvailable` is false.
+    public let runtimeUnavailableReason: String?
 
     public var id: String { name }
 }
@@ -51,17 +68,6 @@ public extension Model {
 
     /// True when a person picking "what should make this picture" should see it.
     var isGenerator: Bool { !isUtility && !isUpscaler && !isAuxiliary }
-
-    /// The part before the em-dash: "FLUX.1 Dev Q4".
-    ///
-    /// The manifest already writes every description this way, so the app
-    /// splits rather than inventing copy of its own.
-    var headline: String {
-        guard let range = description.range(of: " — ") else {
-            return displayName ?? description
-        }
-        return String(description[..<range.lowerBound])
-    }
 
     /// The part after the em-dash: "smaller/faster, good quality". This is the
     /// sentence that tells someone what the model is FOR.

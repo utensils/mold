@@ -28,7 +28,8 @@ private func loadModels() throws -> [Model] {
     let model = Model(
         name: "odd:tag", family: "flux", description: "No separator here",
         sizeGb: nil, isLoaded: nil, downloaded: nil, hfRepo: nil,
-        displayName: nil, remainingDownloadBytes: nil, generationProfile: nil
+        displayName: nil, remainingDownloadBytes: nil, generationProfile: nil, diskUsageBytes: nil, kind: nil, modality: nil,
+              nsfw: nil, runtimeAvailable: nil, runtimeUnavailableReason: nil
     )
     #expect(model.headline == "No separator here")
     #expect(model.tradeOff == nil)
@@ -45,7 +46,8 @@ private func loadModels() throws -> [Model] {
     func model(family: String) -> Model {
         Model(name: "x", family: family, description: "d", sizeGb: nil, isLoaded: nil,
               downloaded: nil, hfRepo: nil, displayName: nil,
-              remainingDownloadBytes: nil, generationProfile: nil)
+              remainingDownloadBytes: nil, generationProfile: nil, diskUsageBytes: nil, kind: nil, modality: nil,
+              nsfw: nil, runtimeAvailable: nil, runtimeUnavailableReason: nil)
     }
     #expect(model(family: "flux").isGenerator)
     #expect(model(family: "wan").isGenerator)
@@ -61,7 +63,8 @@ private func loadModels() throws -> [Model] {
     func model(_ name: String, _ description: String = "X — y") -> Model {
         Model(name: name, family: "flux", description: description, sizeGb: nil,
               isLoaded: nil, downloaded: nil, hfRepo: nil, displayName: nil,
-              remainingDownloadBytes: nil, generationProfile: nil)
+              remainingDownloadBytes: nil, generationProfile: nil, diskUsageBytes: nil, kind: nil, modality: nil,
+              nsfw: nil, runtimeAvailable: nil, runtimeUnavailableReason: nil)
     }
     #expect(model("flux-dev:q4").baseName == "flux-dev")
     #expect(model("flux-dev:q4").tag == "q4")
@@ -85,7 +88,8 @@ private func loadModels() throws -> [Model] {
     func model(_ name: String) -> Model {
         Model(name: name, family: "sdxl", description: "D — t", sizeGb: nil, isLoaded: nil,
               downloaded: nil, hfRepo: nil, displayName: nil,
-              remainingDownloadBytes: nil, generationProfile: nil)
+              remainingDownloadBytes: nil, generationProfile: nil, diskUsageBytes: nil, kind: nil, modality: nil,
+              nsfw: nil, runtimeAvailable: nil, runtimeUnavailableReason: nil)
     }
     // Two unrelated Civitai checkpoints must not share a base name, or they
     // group together as variants of each other.
@@ -102,7 +106,8 @@ private func loadModels() throws -> [Model] {
     func titled(_ description: String) -> String {
         Model(name: "n:q4", family: "flux2", description: description, sizeGb: nil,
               isLoaded: nil, downloaded: nil, hfRepo: nil, displayName: nil,
-              remainingDownloadBytes: nil, generationProfile: nil).baseTitle
+              remainingDownloadBytes: nil, generationProfile: nil, diskUsageBytes: nil, kind: nil, modality: nil,
+              nsfw: nil, runtimeAvailable: nil, runtimeUnavailableReason: nil).baseTitle
     }
     #expect(titled("FLUX.2 [dev] Q4 GGUF — smallest dev tier") == "FLUX.2 [dev]")
     #expect(titled("Flux.2 Klein-4B Base Q4 GGUF — undistilled") == "Flux.2 Klein-4B Base")

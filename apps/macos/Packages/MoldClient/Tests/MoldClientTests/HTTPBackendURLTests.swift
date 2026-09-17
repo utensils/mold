@@ -88,6 +88,17 @@ private let backend = HTTPBackend(
         _ = try await backend.config()
         _ = try await backend.setConfig("models.m.default_steps", to: .number(20))
         _ = try await backend.resetConfig("models.m.default_steps")
+        _ = try await backend.deleteModel("m")
+        _ = try await backend.modelComponents("m")
+        try await backend.loadModel("m", gpu: nil)
+        try await backend.unloadModel(model: nil, gpu: nil)
+        _ = try await backend.downloads()
+        _ = try await backend.installCatalogEntry(id: "cv:1")
+        _ = try await backend.searchCatalog(CatalogQuery())
+        _ = try await backend.catalogEntry(id: "cv:1")
+        _ = try await backend.catalogCredentials()
+        _ = try await backend.setCatalogCredential("hf", token: "t")
+        _ = try await backend.clearCatalogCredential("hf")
     }
     #expect(backend.host.name == "plato")
 }
@@ -138,4 +149,41 @@ private let backend = HTTPBackend(
     let trashed = backend.mediaRequest("a b.png", trashed: true).url
     #expect(trashed?.path() == "/api/gallery/image/a%20b.png")
     #expect(trashed?.query() == "view=trash")
+}
+
+/// M5 S1b: delete addresses a fixed `:model` segment (escaped, since it is
+/// ONE path component); load and unload carry the model in the BODY instead
+/// (`routes.rs:5324-5338`, `:5651-5660`); components and downloads are plain
+/// GETs; a catalog install addresses the WILDCARD `/api/catalog/*id` route,
+/// where a literal `/` in an `hf:owner/repo` id must survive rather than
+/// being escaped away; and a search's query string omits what was not asked.
+@Test func theModelRoutesAddressTheRightPaths() throws {
+    let deleteURL = backend.request(backend.modelPath("flux-dev:q4"), method: "DELETE").url
+    #expect(deleteURL?.path() == "/api/models/flux-dev:q4")
+
+    let componentsURL = backend.request(backend.modelComponentsPath("flux-schnell:q8")).url
+    #expect(componentsURL?.path() == "/api/models/flux-schnell:q8/components")
+
+    let downloadsURL = backend.request("/api/downloads").url
+    #expect(downloadsURL?.path() == "/api/downloads")
+
+    let loadBody = try MoldJSON.encoder.encode(LoadModelWireBody(model: "flux-dev:q4", gpu: 1))
+    let loadObject = try #require(JSONSerialization.jsonObject(with: loadBody) as? [String: Any])
+    #expect(loadObject["model"] as? String == "flux-dev:q4")
+    #expect(loadObject["gpu"] as? Int == 1)
+
+    let unloadBody = try MoldJSON.encoder.encode(UnloadModelWireBody(model: nil, gpu: nil))
+    let unloadObject = try #require(JSONSerialization.jsonObject(with: unloadBody) as? [String: Any])
+    #expect(unloadObject["model"] == nil)
+    #expect(unloadObject["gpu"] == nil)
+
+    // A literal `/` inside a catalog id must survive: the wildcard route is
+    // built to split on it, not to have it protected as one component.
+    let installURL = backend.request(backend.catalogDownloadPath("hf:owner/repo")).url
+    #expect(installURL?.path() == "/api/catalog/hf:owner/repo/download")
+    let cvURL = backend.request(backend.catalogDownloadPath("cv:252914")).url
+    #expect(cvURL?.path() == "/api/catalog/cv:252914/download")
+
+    let query = CatalogQuery(text: "dreamshaper", pageSize: 3)
+    #expect(query.queryString == "q=dreamshaper&page_size=3")
 }

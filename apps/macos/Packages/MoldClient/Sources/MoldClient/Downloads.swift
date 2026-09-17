@@ -33,6 +33,12 @@ public struct DownloadEvent: Codable, Sendable {
     public let bytesTotal: Int64?
     public let currentFile: String?
     public let error: String?
+    /// The FIRST frame every subscriber receives, `type == "snapshot"`
+    /// (`types.rs:13065-13070`). It is how a client learns about jobs it did
+    /// not start -- a `mold pull` at a terminal, or the web app on the same
+    /// machine -- so `DownloadStore` can adopt them on connect rather than
+    /// only ever knowing what THIS app queued.
+    public let listing: DownloadsListing?
 
     public var fraction: Double? {
         guard let done = bytesDone, let total = bytesTotal, total > 0 else { return nil }

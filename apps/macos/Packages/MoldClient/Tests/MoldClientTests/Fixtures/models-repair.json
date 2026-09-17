@@ -1,0 +1,13 @@
+[
+  {
+    "name": "flux-dev:q4",
+    "family": "flux",
+    "description": "FLUX.1 Dev Q4 — smaller/faster, good quality",
+    "size_gb": 7.01361,
+    "is_loaded": false,
+    "downloaded": true,
+    "hf_repo": "city96/FLUX.1-dev-gguf",
+    "disk_usage_bytes": 6012345678,
+    "remaining_download_bytes": 998877665
+  }
+]
