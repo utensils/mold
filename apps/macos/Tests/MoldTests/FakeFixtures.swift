@@ -19,10 +19,10 @@ enum FakeFixtures {
     /// silently exercising `.unknown`, not a live row.
     static func queueEntry(
         _ id: String, state: String = "queued", batchId: String? = nil,
-        clientBatchId: String? = nil, batchIndex: Int? = nil
+        clientBatchId: String? = nil, batchIndex: Int? = nil, model: String? = nil
     ) -> QueueEntry {
         let json = #"""
-        {"id": "\#(id)", "state": "\#(state)",
+        {"id": "\#(id)", "state": "\#(state)", "model": \#(model.map { "\"\($0)\"" } ?? "null"),
          "batch_id": \#(batchId.map { "\"\($0)\"" } ?? "null"),
          "client_batch_id": \#(clientBatchId.map { "\"\($0)\"" } ?? "null"),
          "batch_index": \#(batchIndex.map { "\($0)" } ?? "null")}

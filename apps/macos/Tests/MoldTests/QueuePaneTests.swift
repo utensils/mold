@@ -164,4 +164,91 @@ struct QueuePaneTests {
         #expect(fake.callCount("cancelAllQueued") == 1)
         #expect(fake.callCount("queue") == 1)
     }
+
+    // MARK: - Batch keyboard move
+
+    /// **Fails today**: `QueueBatchRow.moveCall` does not exist yet. A
+    /// dragged batch's own children land contiguous only when the calls
+    /// issue in ASCENDING target order (`QueueOrder.moves`'s own doc) -- this
+    /// pins that the keyboard twin reuses the identical translation, not a
+    /// second one that could disagree.
+    @Test func aBatchMovesFromTheKeyboardAsAscendingCalls() {
+        let entries = [
+            FakeFixtures.queueEntry("c1", state: "queued", batchId: "b", batchIndex: 0),
+            FakeFixtures.queueEntry("c2", state: "queued", batchId: "b", batchIndex: 1),
+            FakeFixtures.queueEntry("p1", state: "queued"),
+        ]
+        let groups = QueueGroup.build(entries, children: [:])
+        let batch = groups[0]
+        #expect(batch.isExpandable)
+
+        let calls = QueueBatchRow.moveCall(batch, .down, groups: groups, entries: entries)
+
+        #expect(calls.map(\.id) == ["c1", "c2"])
+        #expect(calls.map(\.position) == [1, 2])
+    }
+
+    @Test func aBatchAtTheTopCannotMoveUp() {
+        let entries = [
+            FakeFixtures.queueEntry("c1", state: "queued", batchId: "b", batchIndex: 0),
+            FakeFixtures.queueEntry("c2", state: "queued", batchId: "b", batchIndex: 1),
+            FakeFixtures.queueEntry("p1", state: "queued"),
+        ]
+        let groups = QueueGroup.build(entries, children: [:])
+        #expect(QueueBatchRow.canMove(groups[0], .up, in: groups) == false)
+        #expect(QueueBatchRow.canMove(groups[0], .down, in: groups))
+    }
+
+    // MARK: - Queue menu
+
+    /// **Fails today**: `QueueSelection` does not exist yet.
+    @Test func theQueueMenuOffersOnlyWhatApplies() {
+        let nothing = QueueSelection(job: nil, emptyQueue: nil)
+        #expect(nothing.offeredTitles.isEmpty)
+
+        let runningJob = QueueSelection.Job(
+            canPause: true, canResume: false, canRetry: false, canMoveUp: false, canMoveDown: true,
+            canCancel: true, pause: {}, resume: {}, retry: {}, moveUp: {}, moveDown: {}, cancel: {})
+        let running = QueueSelection(job: runningJob, emptyQueue: nil)
+        #expect(running.offeredTitles == ["Pause Job", "Move Down", "Cancel Job"])
+
+        let held = QueueSelection.Job(
+            canPause: false, canResume: false, canRetry: true, canMoveUp: false, canMoveDown: false,
+            canCancel: true, pause: {}, resume: {}, retry: {}, moveUp: {}, moveDown: {}, cancel: {})
+        #expect(QueueSelection(job: held, emptyQueue: {}).offeredTitles == ["Try Again", "Cancel Job", "Empty Queue…"])
+    }
+
+    // MARK: - Fixture
+
+    /// **Fails today**: `QueueStore.seed(from:)` does not exist yet. Every
+    /// mutation on a seeded store sends nothing to the fake and reports
+    /// through the same funnel a real refusal would (design M6 decision 27).
+    @Test func aFixtureQueueRefusesEveryMutation() async {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let queue = QueueStore(hosts: hosts)
+        let entry = FakeFixtures.queueEntry("job-1", state: "queued")
+        let fixture = QueueStore.Fixture(hosts: [
+            "plato": .init(queue: FakeFixtures.queueListing(entries: [entry]), batches: nil)
+        ])
+
+        queue.seed(from: fixture)
+        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+        #expect(queue.isSeeded)
+
+        await queue.cancel(entry, on: plato.id)
+        await queue.pause(entry, on: plato.id)
+        await queue.resume(entry, on: plato.id)
+        await queue.retry(entry, on: plato.id)
+        await queue.reorder([("job-1", 0)], on: plato.id)
+        await queue.cancelAll(on: plato.id)
+        await queue.refresh()
+
+        #expect(fake.calls.isEmpty)
+        #expect(hosts.failures.contains { $0.sentence.contains("fixture") })
+        // The refresh above never touched the network either -- the seeded
+        // row is exactly what was planted, not overwritten with nothing.
+        #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
+    }
 }

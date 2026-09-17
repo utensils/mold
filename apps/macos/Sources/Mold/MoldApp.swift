@@ -90,6 +90,7 @@ struct MoldApp: App {
             MoldCommands(destination: $destination)
             LibraryCommands()
             ModelCommands()
+            QueueCommands()
         }
 
         Settings {

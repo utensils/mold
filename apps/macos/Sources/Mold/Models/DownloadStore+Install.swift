@@ -64,6 +64,20 @@ extension DownloadStore {
         }
     }
 
+    /// Waits for the job(s) `install(_:on:)` just started for `model` to
+    /// leave `active`, then answers whether the settlement remembered for it
+    /// was a success. Polling, not pushed: nothing here turns a dictionary
+    /// write into something a caller can `await`, so `QueueHoldRow`'s
+    /// Pull-then-Retry (design M6 S3, decision 12) watches rather than
+    /// guessing with a fixed sleep. `false` on a cancelled or failed
+    /// download, where a retry would just hold the job again.
+    func awaitSettlement(of model: String, on host: MoldHost.ID) async -> Bool {
+        while isBusy(model, on: host) {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return finished[host]?.first(where: { $0.model == model })?.status == .completed
+    }
+
     private func track(_ jobIDs: [String], model: String, on host: MoldHost.ID) {
         var forHost = active[host] ?? [:]
         for id in jobIDs { forHost[id] = Progress(model: model) }

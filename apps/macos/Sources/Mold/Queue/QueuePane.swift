@@ -7,9 +7,15 @@ struct QueuePane: View {
     // `LibraryPane.swift`'s `hosts`/`library` aren't private either.
     @Environment(HostStore.self) var hosts
     @Environment(QueueStore.self) var queue
+    /// For `pullThenRetry(_:entry:host:)`'s own `QueueHoldRow.pullThenRetry` call.
+    @Environment(DownloadStore.self) var downloads
     /// Not `private`, and deliberately: the toolbar button that raises this
     /// lives in `QueuePane+Toolbar.swift`, another file.
     @State var pendingDestruction: Destruction?
+    /// The `List` selection -- a `QueueGroup.id` or a batch child's
+    /// `QueueEntry.id`, one string space. `QueuePane+Commands.swift` reads
+    /// it for the Queue menu's `FocusedValue`.
+    @State var selection: String?
 
     var body: some View {
         Group {
@@ -20,7 +26,7 @@ struct QueuePane: View {
                     description: Text(queue.isLoading ? "" : "Renders you start appear here.")
                 )
             } else {
-                List {
+                List(selection: $selection) {
                     ForEach(hosts.hosts) { host in
                         let entries = queue.entries(on: host.id)
                         if !entries.isEmpty {
@@ -44,6 +50,7 @@ struct QueuePane: View {
         .destructionDialog($pendingDestruction)
         .task { await load() }
         .focusedSceneValue(\.refreshAction) { Task { await load() } }
+        .focusedSceneValue(\.queueSelection, queueSelection)
     }
 
     /// One host's rows. `.onMove` is attached only when the machine
@@ -55,45 +62,60 @@ struct QueuePane: View {
         let groups = queue.groups(on: host.id)
         let canReorder = hosts.capabilities[host.id]?.canReorderQueue == true
         if canReorder {
-            ForEach(groups) { row($0, host: host, entries: entries, canReorder: true) }
+            ForEach(groups) { row($0, host: host, entries: entries, groups: groups, canReorder: true) }
                 .onMove { source, destination in
                     let calls = QueuePane.reorderCalls(
                         source: source, destination: destination, groups: groups, entries: entries)
                     Task { await queue.reorder(calls, on: host.id) }
                 }
         } else {
-            ForEach(groups) { row($0, host: host, entries: entries, canReorder: false) }
+            ForEach(groups) { row($0, host: host, entries: entries, groups: groups, canReorder: false) }
         }
     }
 
     @ViewBuilder
     private func row(
-        _ group: QueueGroup, host: MoldHost, entries: [QueueEntry], canReorder: Bool
+        _ group: QueueGroup, host: MoldHost, entries: [QueueEntry], groups: [QueueGroup], canReorder: Bool
     ) -> some View {
         if group.isExpandable {
             QueueBatchRow(
                 group: group,
                 rowAct: { action, entry in act(action, on: entry, host: host) },
-                groupAct: { action in Task { await queue.act(action, onLiveChildrenOf: group, host: host.id) } })
+                groupAct: { action in Task { await queue.act(action, onLiveChildrenOf: group, host: host.id) } },
+                canMoveUp: canReorder && QueueBatchRow.canMove(group, .up, in: groups),
+                canMoveDown: canReorder && QueueBatchRow.canMove(group, .down, in: groups),
+                moveUp: { moveBatch(group, .up, host: host, groups: groups, entries: entries) },
+                moveDown: { moveBatch(group, .down, host: host, groups: groups, entries: entries) })
         } else {
             let entry = group.rows[0]
-            let reorderable = canReorder && entry.state.isReorderable
-            QueueRow(
-                entry: entry, isReorderable: reorderable,
-                canMoveUp: reorderable && QueueRow.canMove(entry.id, .up, in: entries),
-                canMoveDown: reorderable && QueueRow.canMove(entry.id, .down, in: entries),
-                moveUp: { move(entry.id, .up, host: host, entries: entries) },
-                moveDown: { move(entry.id, .down, host: host, entries: entries) },
-                act: { act($0, on: entry, host: host) })
+            if entry.state == .held, let hold = queue.hold(for: entry, on: host.id) {
+                QueueHoldRow(
+                    entry: entry, hold: hold,
+                    pullThenRetry: { model in pullThenRetry(model, entry: entry, host: host) },
+                    tryAgain: { act(.retry, on: entry, host: host) })
+            } else {
+                let reorderable = canReorder && entry.state.isReorderable
+                QueueRow(
+                    entry: entry, isReorderable: reorderable,
+                    canMoveUp: reorderable && QueueRow.canMove(entry.id, .up, in: entries),
+                    canMoveDown: reorderable && QueueRow.canMove(entry.id, .down, in: entries),
+                    moveUp: { move(entry.id, .up, host: host, entries: entries) },
+                    moveDown: { move(entry.id, .down, host: host, entries: entries) },
+                    act: { act($0, on: entry, host: host) })
+            }
         }
     }
 
-    private func move(_ id: String, _ direction: QueueRow.MoveDirection, host: MoldHost, entries: [QueueEntry]) {
+    /// Not `private`: `QueuePane+Commands.swift`'s Move Up/Down items call
+    /// this too, and `private` does not cross a file boundary.
+    func move(_ id: String, _ direction: QueueRow.MoveDirection, host: MoldHost, entries: [QueueEntry]) {
         guard let call = QueueRow.moveCall(id, direction, in: entries) else { return }
         Task { await queue.reorder([call], on: host.id) }
     }
 
-    private func act(_ action: QueueRow.Action, on entry: QueueEntry, host: MoldHost) {
+    /// Not `private`: `QueuePane+Commands.swift`'s Pause/Resume/Try
+    /// Again/Cancel items call this too.
+    func act(_ action: QueueRow.Action, on entry: QueueEntry, host: MoldHost) {
         Task {
             switch action {
             case .cancel: await queue.cancel(entry, on: host.id)
@@ -105,9 +127,23 @@ struct QueuePane: View {
         }
     }
 
+    private func pullThenRetry(_ model: String, entry: QueueEntry, host: MoldHost) {
+        Task {
+            await QueueHoldRow.pullThenRetry(model, entry: entry, host: host, downloads: downloads, queue: queue)
+            await load()
+        }
+    }
+
     // Not `private`: `QueuePane+Toolbar.swift`'s Refresh button calls this
-    // too.
+    // too. Seeds once; `isSeeded` then short-circuits `refresh`'s own
+    // `poll`/`hydrate` (`QueueStore+Fixture.swift`), so a later Refresh press
+    // cannot overwrite the fixture with a real machine's own answer.
     func load() async {
+        guard !queue.isSeeded else { return }
+        if let fixture = Self.fixtureIfRequested() {
+            queue.seed(from: fixture)
+            return
+        }
         await queue.refresh()
     }
 }

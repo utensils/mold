@@ -33,3 +33,17 @@ extension QueuePane {
         return QueueOrder.moves(ids, after: neighbourID, in: entries)
     }
 }
+
+extension QueuePane {
+    /// The batch keyboard twin's own action: `QueueBatchRow.moveCall`
+    /// already did the translation, this only sends it and only when there
+    /// was anywhere to go.
+    func moveBatch(
+        _ group: QueueGroup, _ direction: QueueRow.MoveDirection, host: MoldHost,
+        groups: [QueueGroup], entries: [QueueEntry]
+    ) {
+        let calls = QueueBatchRow.moveCall(group, direction, groups: groups, entries: entries)
+        guard !calls.isEmpty else { return }
+        Task { await queue.reorder(calls, on: host.id) }
+    }
+}

@@ -19,7 +19,9 @@ extension QueuePane {
         }
     }
 
-    private var emptyQueueTargets: [MoldHost] {
+    /// Not `private`: `QueuePane+Commands.swift`'s Empty Queue… item reads
+    /// this too, and `private` does not cross a file boundary.
+    var emptyQueueTargets: [MoldHost] {
         Self.emptyQueueTargets(hosts.hosts, capabilities: hosts.capabilities)
     }
 
@@ -35,7 +37,9 @@ extension QueuePane {
         }
     }
 
-    private func confirmEmptyQueue(on host: MoldHost) {
+    /// Not `private`: `QueuePane+Commands.swift`'s Empty Queue… item calls
+    /// this too.
+    func confirmEmptyQueue(on host: MoldHost) {
         let entries = queue.entries(on: host.id)
         let waiting = entries.filter { $0.state == .queued }.count
         let paused = entries.filter { $0.state == .paused }.count

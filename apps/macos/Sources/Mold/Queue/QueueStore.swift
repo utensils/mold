@@ -6,7 +6,9 @@ import MoldClient
 @Observable
 final class QueueStore {
     let hosts: HostStore
-    private(set) var byHost: [MoldHost.ID: [QueueEntry]] = [:]
+    /// `internal(set)`: `QueueStore+Fixture.seed(from:)` writes it too, and
+    /// `private(set)` does not cross a file boundary.
+    internal(set) var byHost: [MoldHost.ID: [QueueEntry]] = [:]
     private(set) var isLoading = false
 
     /// SOMEBODY paused this machine's whole queue -- names the QUEUE, not a
@@ -17,6 +19,13 @@ final class QueueStore {
     /// The typed half of a queue row, which `/api/queue` does not carry --
     /// per machine, then per batch id. See `QueueStore+Batches`.
     internal(set) var children: [MoldHost.ID: [String: [BatchChild]]] = [:]
+
+    /// Set once by `seed(from:)` -- a UAT fixture, never a live host. Every
+    /// mutation below checks `refuseIfFixture` first, and `poll`/`hydrate`
+    /// return immediately, so a seeded store never overwrites its own
+    /// fixture with whatever a real machine of the same name answers (design
+    /// M6 decision 27, `QueueStore+Fixture.swift`).
+    internal(set) var isSeeded = false
 
     /// One coalescing task per machine. Not `private`: `QueueStore+Live`
     /// reads and writes it too.
@@ -57,7 +66,7 @@ final class QueueStore {
     /// mutation this app makes (`act`, below) -- the row's new position is
     /// the server's to state.
     func poll(_ host: MoldHost.ID) async {
-        guard let client = hosts.backend(for: host) else { return }
+        guard !isSeeded, let client = hosts.backend(for: host) else { return }
         do {
             byHost[host] = try await client.queue().merged
             hosts.succeeded(on: host, doing: "list its queue")
@@ -103,6 +112,7 @@ final class QueueStore {
     /// this store used to keep a third copy and buy it with a second
     /// `/api/status` call per machine per refresh.
     func retry(_ entry: QueueEntry, on host: MoldHost.ID) async {
+        guard !refuseIfFixture(host, doing: "retry that job") else { return }
         guard let instance = hosts.instanceID(of: host) else {
             hosts.report(NoInstanceKnown(), on: host, doing: "retry that job")
             return
@@ -118,6 +128,7 @@ final class QueueStore {
 
     private func act(_ entry: QueueEntry, on host: MoldHost.ID, doing verb: String,
                      _ body: (any MoldBackend) async throws -> Void) async {
+        guard !refuseIfFixture(host, doing: verb) else { return }
         guard let client = hosts.backend(for: host) else { return }
         do {
             try await body(client)
@@ -131,20 +142,8 @@ final class QueueStore {
     }
 }
 
-/// Not a network failure -- the host just hasn't told us which run it is yet.
-/// `report` still names the machine, because "refresh and try again" is what
-/// the person needs whichever produced the sentence.
-private struct NoInstanceKnown: LocalizedError {
-    var errorDescription: String? {
-        "This machine hasn't said which run it is; refresh and try again."
-    }
-}
-
-/// A held row with no batch to retry against -- `QueueEntry.authority(instanceId:)`
-/// came back `nil`. Retry has nothing to send; this is what surfaces that as a
-/// report rather than a silently ignored tap.
-private struct NotADurableBatchChild: LocalizedError {
-    var errorDescription: String? {
-        "This job isn't a durable batch child, so it can't be retried this way."
-    }
-}
+// `NoInstanceKnown`, `NotADurableBatchChild` and the fixture's own
+// `FixtureRefusal` -- every reason a mutation reports instead of reaching a
+// backend -- live in `QueueStore+Fixture.swift`, not `private` here (`private`
+// does not cross a file boundary), to keep this file under the file-size
+// rule.

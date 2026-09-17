@@ -81,7 +81,15 @@ struct QueueStoreLiveTests {
 
         backend.emit(.resyncRequired)
 
-        await settle { backend.callCount("queue") == 1 }
+        // Two different waits, not one polled on a fixed budget: the frame
+        // still has to cross the stream to the watcher task before `apply`
+        // stores the resync's own refresh in `coalescers[host]` (the same
+        // slot a job frame's coalesced re-read uses), but once it is there
+        // this AWAITS that exact task rather than polling for its side
+        // effect -- a race against a simulated network call under a loaded
+        // machine, which is what flaked before.
+        await settle { queue.coalescers[plato.id] != nil }
+        await queue.coalescers[plato.id]?.value
         #expect(backend.callCount("queue") == 1)
         #expect(queue.entries(on: plato.id).map(\.id) == ["job-1"])
     }

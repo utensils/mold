@@ -11,6 +11,14 @@ struct QueueBatchRow: View {
     /// What the GROUP's own row asked for -- every live child at once,
     /// serialized, then one re-read (`QueueStore.act(_:onLiveChildrenOf:)`).
     let groupAct: (QueueRow.Action) -> Void
+    /// Drag alone is unreachable from the keyboard -- the batch's own
+    /// keyboard twin of `QueueRow`'s Move Up/Down, gated the same way: only
+    /// on a machine that advertises reorder, and only at an edge that has
+    /// somewhere to go.
+    var canMoveUp = false
+    var canMoveDown = false
+    var moveUp: () -> Void = {}
+    var moveDown: () -> Void = {}
 
     var body: some View {
         DisclosureGroup {
@@ -35,6 +43,12 @@ struct QueueBatchRow: View {
             }
         }
         .padding(.vertical, 3)
+        .contextMenu { menu }
+    }
+
+    @ViewBuilder private var menu: some View {
+        if canMoveUp { Button("Move Up", action: moveUp) }
+        if canMoveDown { Button("Move Down", action: moveDown) }
     }
 
     @ViewBuilder private var buttons: some View {
@@ -65,6 +79,36 @@ struct QueueBatchRow: View {
             (count(.held), "held"), (count(.paused), "paused"),
         ].compactMap { n, word in n > 0 ? "\(n) \(word)" : nil }
         return clauses.isEmpty ? "Done" : clauses.joined(separator: ", ")
+    }
+}
+
+/// Where a whole batch asks to move to -- against its NEIGHBOURING GROUP, the
+/// same "compute source/destination, then let `QueuePane.reorderCalls` do the
+/// translation" shape a drag already takes, so there is exactly one place
+/// that knows what `Array.move(fromOffsets:toOffset:)`'s own semantics mean
+/// (design M6 S3).
+extension QueueBatchRow {
+    static func canMove(_ group: QueueGroup, _ direction: QueueRow.MoveDirection, in groups: [QueueGroup]) -> Bool {
+        guard group.rows.contains(where: { $0.state.isReorderable }),
+              let index = groups.firstIndex(where: { $0.id == group.id })
+        else { return false }
+        return direction == .up ? index > 0 : index < groups.count - 1
+    }
+
+    static func moveCall(
+        _ group: QueueGroup, _ direction: QueueRow.MoveDirection, groups: [QueueGroup], entries: [QueueEntry]
+    ) -> [(id: String, position: Int)] {
+        guard let index = groups.firstIndex(where: { $0.id == group.id }) else { return [] }
+        switch direction {
+        case .up:
+            guard index > 0 else { return [] }
+            return QueuePane.reorderCalls(
+                source: IndexSet(integer: index), destination: index - 1, groups: groups, entries: entries)
+        case .down:
+            guard index < groups.count - 1 else { return [] }
+            return QueuePane.reorderCalls(
+                source: IndexSet(integer: index), destination: index + 2, groups: groups, entries: entries)
+        }
     }
 }
 

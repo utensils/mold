@@ -16,7 +16,7 @@ extension QueueStore {
     /// child against what was already known, and drops a batch the machine
     /// answers `missing` for rather than keeping a stale copy.
     func hydrate(on host: MoldHost.ID) async {
-        guard let client = hosts.backend(for: host) else { return }
+        guard !isSeeded, let client = hosts.backend(for: host) else { return }
         let ids = Array(Set(entries(on: host).compactMap(\.batchId)))
         guard !ids.isEmpty else {
             children[host] = [:]
@@ -78,6 +78,7 @@ extension QueueStore {
     /// (complete, failed, cancelled) is left alone even when it rides along
     /// in `group.rows`.
     func act(_ action: QueueRow.Action, onLiveChildrenOf group: QueueGroup, host: MoldHost.ID) async {
+        guard !refuseIfFixture(host, doing: groupVerb(action)) else { return }
         guard let client = hosts.backend(for: host) else { return }
         for entry in group.rows where entry.state.isLive {
             do {

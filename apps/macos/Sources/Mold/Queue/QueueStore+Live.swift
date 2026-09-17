@@ -32,9 +32,14 @@ extension QueueStore {
             // this machine can be trusted and a coalescing delay would only
             // widen the hole. A pending coalesce is redundant once this runs,
             // not wrong, so it is cancelled rather than left to fire again.
+            //
+            // Stored in `coalescers`, the same slot `markDirty` uses, rather
+            // than left as a bare unstructured `Task` -- so a test can
+            // `await` the exact work this frame started instead of polling
+            // for its side effect on a fixed budget (that race is what made
+            // `aResyncReReadsWithoutWaiting` flake under a loaded machine).
             coalescers[host]?.cancel()
-            coalescers[host] = nil
-            Task { await refresh(on: host) }
+            coalescers[host] = Task { await refresh(on: host) }
         // Gallery, machine identity and device lifecycle are the other
         // stores' concerns -- see `LibraryStore+Live` and `MachineStore`.
         case .gallery, .authority, .deviceStateChanged:

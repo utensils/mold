@@ -12,6 +12,7 @@ extension QueueStore {
     /// one itself. Ends in the one re-read the row's new position is the
     /// server's to state.
     func reorder(_ calls: [(id: String, position: Int)], on host: MoldHost.ID) async {
+        guard !refuseIfFixture(host, doing: "reorder its queue") else { return }
         guard let client = hosts.backend(for: host) else { return }
         for call in calls {
             do {
@@ -28,6 +29,7 @@ extension QueueStore {
     /// work is untouched (`routes.rs:7854-7859`) -- the confirm that leads
     /// here says so, and the re-read afterward is what actually shows it.
     func cancelAll(on host: MoldHost.ID) async {
+        guard !refuseIfFixture(host, doing: "cancel everything waiting") else { return }
         guard let client = hosts.backend(for: host) else { return }
         do {
             try await client.cancelAllQueued()
