@@ -16,52 +16,56 @@ import Foundation
 public enum QueueOrder {
     /// The one PATCH for a single row moved to sit after `neighbour` (`nil`
     /// means the front). `nil` for a row that is not `isReorderable`.
-    ///
-    /// The candidate list is `entries` filtered to reorderable rows with `id`
-    /// itself removed, mirroring the server's own "remove, then re-insert"
-    /// (`generation_queue.rs:1815-1863`) -- so the position this computes is
-    /// exactly the slot the row will land in, not one off because the row was
-    /// still occupying it.
     public static func move(
         _ id: String, after neighbour: String?, in entries: [QueueEntry]
     ) -> (id: String, position: Int)? {
-        guard let entry = entries.first(where: { $0.id == id }), entry.state.isReorderable
-        else { return nil }
-        let candidates = entries.filter { $0.state.isReorderable && $0.id != id }
-        return (id, position(after: neighbour, in: candidates))
+        moves([id], after: neighbour, in: entries).first
     }
 
     /// A whole batch moved as a unit, as the calls to issue IN ORDER.
     ///
-    /// One PATCH moves one row (there is no multi-row route), and each call
-    /// sees the previous call's result -- so ascending target indices land
-    /// the children contiguous: after `(c1, k)` the candidate list has `c1`
-    /// at `k`, and `(c2, k+1)` inserts immediately behind it. Ascending is not
-    /// a style choice; descending interleaves them. Every id in `ids` is
-    /// removed from the candidate list up front, since all of them are about
-    /// to move regardless of order.
+    /// One PATCH moves one row (there is no multi-row route), and the server
+    /// resolves each one against the queue as it stands THEN: it removes only
+    /// the row that call names and re-inserts it
+    /// (`generation_queue.rs:1815-1836`). So the plan is computed the same
+    /// way -- against a working copy that every planned call is applied to
+    /// before the next is planned, each child aimed at sitting behind the one
+    /// ahead of it.
+    ///
+    /// Taking ONE base index from a list with every mover removed up front is
+    /// the wrong index space and splits the batch: `[A, c1, c2, N, B]` dropped
+    /// after `N` planned `(c1, 2), (c2, 3)`, which the server lands as
+    /// `[A, c1, N, c2, B]` -- the children on either side of the row they were
+    /// dropped behind. `after: nil` was the one case where the two spaces
+    /// coincide, which is why it looked right.
     public static func moves(
         _ ids: [String], after neighbour: String?, in entries: [QueueEntry]
     ) -> [(id: String, position: Int)] {
-        let moving = Set(ids)
-        let candidates = entries.filter { $0.state.isReorderable && !moving.contains($0.id) }
-        let base = position(after: neighbour, in: candidates)
+        // The server's candidate set is `state = 'queued'` alone -- not
+        // paused, not held (`generation_queue.rs:1815-1824`).
+        var order = entries.filter { $0.state.isReorderable }.map(\.id)
+        var anchor = neighbour
         var results: [(id: String, position: Int)] = []
         for id in ids {
-            guard let entry = entries.first(where: { $0.id == id }), entry.state.isReorderable
-            else { continue }
-            results.append((id, base + results.count))
+            guard let current = order.firstIndex(of: id) else { continue }
+            order.remove(at: current)
+            let target = position(after: anchor, in: order)
+            order.insert(id, at: target)
+            results.append((id, target))
+            // The next child goes behind THIS one, wherever it landed.
+            anchor = id
         }
         return results
     }
 
-    /// `requested_position.min(order.len())` (`generation_queue.rs:1815-1863`):
-    /// the neighbour's index in `candidates`, one past it -- or the front
-    /// when there is no neighbour, or none was found among the candidates --
-    /// clamped to `candidates.count` rather than trusted from the caller.
-    private static func position(after neighbour: String?, in candidates: [QueueEntry]) -> Int {
-        guard let neighbour, let index = candidates.firstIndex(where: { $0.id == neighbour })
-        else { return 0 }
-        return min(index + 1, candidates.count)
+    /// `requested_position.min(order.len())` (`generation_queue.rs:1815-1836`):
+    /// the neighbour's index in `order`, one past it -- or the front when
+    /// there is no neighbour, or none was found among the candidates --
+    /// clamped to `order.count` rather than trusted from the caller. `order`
+    /// is the candidate list with the moving row ALREADY removed, exactly as
+    /// the server has it when it reads the requested position.
+    private static func position(after neighbour: String?, in order: [String]) -> Int {
+        guard let neighbour, let index = order.firstIndex(of: neighbour) else { return 0 }
+        return min(index + 1, order.count)
     }
 }
