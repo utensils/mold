@@ -25,13 +25,11 @@ extension LibraryStore {
             .sorted { ($0.print.trashedAt ?? 0) > ($1.print.trashedAt ?? 0) }
     }
 
-    func rowsChanged() { revision &+= 1 }
-
     func rebuild() {
         items = perHost.values.flatMap(\.self)
             .filter { $0.print.trashedAt == nil }
             .sorted { $0.print.timestamp > $1.print.timestamp }
-        rowsChanged()
+        rows.bump()
     }
 
     func count(for host: MoldHost.ID) -> Int { perHost[host]?.count ?? 0 }

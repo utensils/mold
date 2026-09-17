@@ -98,10 +98,9 @@ extension LibraryStore {
     func relist(_ id: MoldHost.ID) async {
         guard let machine = hosts.host(id), let client = hosts.backend(for: id) else { return }
         etags[id] = nil
-        // What this machine had when we ASKED. A full listing is a round trip,
-        // and a `gallery_added` landing inside it names a print the answer in
-        // flight was composed before -- so assigning the answer wholesale
-        // dropped a print that had just arrived, and nothing re-listed again.
+        // What this machine had when we ASKED, which is what tells its answer
+        // apart from what happened while the answer was in flight. See
+        // `RelistMerge`.
         let asked = Set((perHost[id] ?? []).map(\.print.filename))
         let fetched: Fetched<[GalleryPrint]>
         do {
@@ -116,14 +115,9 @@ extension LibraryStore {
         }
         guard case let .fresh(prints, etag) = fetched else { return }
         if let etag { etags[id] = etag }
-        let answered = Set(prints.map(\.filename))
-        // A row the answer does not name and we did not have when we asked
-        // arrived while it was in flight. A row we DID have and the answer
-        // does not name is one the machine says is gone.
-        let arrivals = (perHost[id] ?? []).filter {
-            !answered.contains($0.print.filename) && !asked.contains($0.print.filename)
-        }
-        perHost[id] = prints.map { LibraryEntry(host: machine, print: $0) } + arrivals
+        perHost[id] = RelistMerge.merged(
+            answer: prints.map { LibraryEntry(host: machine, print: $0) },
+            onScreen: perHost[id] ?? [], asked: asked)
         hosts.succeeded(on: id, doing: "list its prints")
         replayPending(on: id)
         rebuild()

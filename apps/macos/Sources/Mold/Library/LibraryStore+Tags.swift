@@ -71,23 +71,12 @@ extension LibraryStore {
         }
     }
 
-    /// Rewrites or removes a tag on every print on screen.
+    /// Rewrites or removes a tag on every print on screen. What the rewrite
+    /// IS belongs to `TagRewrite`; this is which rows it runs over.
     private func retag(_ name: String, to replacement: String?) {
         for (hostID, list) in perHost {
-            perHost[hostID] = list.map { entry in
-                guard entry.print.tagList.contains(where: {
-                    $0.caseInsensitiveCompare(name) == .orderedSame
-                }) else { return entry }
-                var mutable = GalleryPrint.Mutable(entry.print)
-                var tags = mutable.tags ?? []
-                tags.removeAll { $0.caseInsensitiveCompare(name) == .orderedSame }
-                if let replacement,
-                   !tags.contains(where: { $0.caseInsensitiveCompare(replacement) == .orderedSame }) {
-                    tags.append(replacement)
-                }
-                mutable.tags = tags
-                return entry.replacingPrint(mutable.build())
-            }
+            perHost[hostID] = TagRewrite.applied(to: list, name: name,
+                                                 replacement: replacement)
         }
         rebuild()
     }

@@ -13,8 +13,7 @@ final class LibraryStore {
     /// The one object that knows which machines exist and how to reach them.
     let hosts: HostStore
 
-    /// `internal(set)` for the same reason `trashed` is: `rebuild()` lives in
-    /// `+Rows` and `private(set)` does not cross a file boundary.
+    /// `internal(set)`, like `trashed`: `rebuild()` lives in `+Rows`.
     internal(set) var items: [LibraryEntry] = []
     /// A count, not a flag: two overlapping refreshes (a manual ⌘R while an
     /// automatic one is still in flight, say) used to have the first one's
@@ -52,14 +51,8 @@ final class LibraryStore {
     /// One resync-driven re-list per machine at a time. See `RelistGate`.
     let relists = RelistGate()
 
-    /// Bumped whenever the rows change, so anything derived from them knows to
-    /// rebuild without comparing thousands of entries -- two libraries of the
-    /// same size differ by one print's favourite star. Stored here because a
-    /// stored property cannot live in an extension, and `internal(set)` for
-    /// the same reason `trashed` is -- `rowsChanged()` lives in `+Rows` and
-    /// `private(set)` does not cross a file boundary. See
-    /// `LibraryShowingCache`.
-    internal(set) var revision = 0
+    /// How many times the rows have changed. See `LibraryRevision`.
+    let rows = LibraryRevision()
 
     init(hosts: HostStore) {
         self.hosts = hosts

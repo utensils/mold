@@ -55,7 +55,7 @@ struct LibraryPane: View {
     // and threaded down, rather than each stage re-filtering the whole library
     // -- or this pass re-doing what the last one already worked out.
     var body: some View {
-        let showing = index.showing(pool: pool, revision: library.revision,
+        let showing = index.showing(pool: pool, revision: library.rows.value,
                                     query: resolved, selection: selection.items)
         return watched(showing)
             .focusedSceneValue(\.refreshAction) { Task { await actions.reload() } }

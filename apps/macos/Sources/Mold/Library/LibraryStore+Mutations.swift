@@ -36,7 +36,7 @@ extension LibraryStore {
         }
         trashed = trashPerHost.values.flatMap(\.self)
             .sorted { ($0.print.trashedAt ?? 0) > ($1.print.trashedAt ?? 0) }
-        rowsChanged()
+        rows.bump()
     }
 
     // MARK: - Mutations
