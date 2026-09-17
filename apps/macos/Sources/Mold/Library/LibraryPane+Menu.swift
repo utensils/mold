@@ -58,7 +58,15 @@ extension LibraryPane {
     /// Whether a caret in this window has the better claim on a bare key.
     /// The Library menu's Quick Look item binds an unmodified space, which
     /// AppKit offers to the menu before the field editor ever sees it.
-    var isEditingText: Bool { isSearchFocused || editingText == true }
+    ///
+    /// `TextEditingFocus` is the authority and answers for EVERY text field,
+    /// including the two sheets that publish no `editingText` of their own.
+    /// The two SwiftUI signals stay as a second opinion: they cost nothing and
+    /// they are the ones that answer for a focus AppKit has not posted about
+    /// yet.
+    var isEditingText: Bool {
+        TextEditingFocus.shared.isEditing || isSearchFocused || editingText == true
+    }
 
     /// The shelf the grid is currently showing, if it is showing one.
     private var enclosingShelf: CollectionShelf? {

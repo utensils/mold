@@ -69,6 +69,9 @@ struct MoldApp: App {
         Window("Mold", id: "main") {
             RootView(destination: $destination)
                 .task { ClickModifiers.startObserving() }
+                // Whether a caret owns the keyboard, asked once for the whole
+                // app -- what stands the Library's bare-space shortcut down.
+                .task { TextEditingFocus.shared.startObserving() }
                 // The delegate owns quitting, and quitting has to reach the
                 // engine and the cache. It is made by SwiftUI, so this is
                 // where the two meet.
