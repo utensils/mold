@@ -110,7 +110,10 @@ final class PrintMaterializer {
         // same rule the filename is judged against. mold's own versions carry
         // a colon, which is legal in a POSIX component and invisible here but
         // which the Finder renders as "/", so it goes either way.
-        let safe = SafeFilename.folded(version, fallback: String(entry.print.timestamp))
+        // Room for the machine's UUID and the dash: the whole thing is ONE
+        // component, and one byte over is a directory that cannot be created.
+        let safe = SafeFilename.folded(version, fallback: String(entry.print.timestamp),
+                                       limit: SafeFilename.maxBytes - 37)
         return "\(entry.hostID.uuidString)-\(safe)"
     }
 

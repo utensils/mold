@@ -84,11 +84,18 @@ the materializer is covered.
    offers no per-registration removal, so a refused edit drops this store's
    whole stack rather than one entry. Registering after the round trip is not
    an option — the synchronous registration is load-bearing for redo.
-4. **H1 found one more site than the report did**: `media_version` is
+4. **M1's echo window closes when the chain does, not a moment later.** An
+   echo that arrives AFTER its entry settles is no longer recognised as ours,
+   so a `gallery_updated` carrying no row would cost one extra listing. mold
+   records an organization mutation before it emits, so the row is normally
+   present and the frame is applied in place; the alternative -- a grace period
+   after each edit -- is timing state in exchange for a GET this app already
+   makes on every ⌘R.
+5. **H1 found one more site than the report did**: `media_version` is
    server-supplied too and is the only thing this app makes a DIRECTORY name
    out of. It is FOLDED rather than refused (a print with an odd version is
    still a print).
-5. Five files crossed the 150-line advisory as a result of this work and were
+6. Five files crossed the 150-line advisory as a result of this work and were
    split (`LibraryViewer+Mesh`, `LibraryGrid+Selection`, `LibraryStore+Rows`,
    `LibraryPane+Wiring` absorbing the pane's tail, `Shell/LibrarySelection`).
    `LibraryStore`'s TYPE total rose by ~11 lines (`revision`, `echo`, one

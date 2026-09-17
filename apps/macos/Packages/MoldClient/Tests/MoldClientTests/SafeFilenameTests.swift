@@ -88,5 +88,8 @@ import Testing
         #expect(SafeFilename.folded("../..", fallback: "1") == "-.-..")
         #expect(SafeFilename.folded("", fallback: "1700000000") == "1700000000")
         #expect(SafeFilename.folded(".", fallback: "1700000000") == "-")
+        // A folded value is usually part of a longer component.
+        #expect(SafeFilename.folded(String(repeating: "v", count: 400),
+                                    fallback: "1", limit: 8) == "vvvvvvvv")
     }
 }

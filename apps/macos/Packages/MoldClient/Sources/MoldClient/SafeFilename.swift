@@ -124,13 +124,18 @@ public enum SafeFilename {
     /// this app only uses because it needs a directory to put a print in. A
     /// filename is validated and refused; a version is folded, because
     /// refusing one would refuse the print.
-    public static func folded(_ value: String, fallback: String) -> String {
+    /// `limit` is there because a folded value is usually part of a longer
+    /// component -- a cache key is a machine's UUID AND this -- and a name
+    /// that is one byte too long is a directory nobody can create and a
+    /// materialization that silently answers nothing.
+    public static func folded(_ value: String, fallback: String,
+                              limit: Int = maxBytes) -> String {
         var folded = String(value.unicodeScalars.map { scalar -> Character in
             isControl(scalar) || "/\\:".unicodeScalars.contains(scalar)
                 ? "-" : Character(scalar)
         })
         if folded.hasPrefix(".") { folded = "-" + folded.dropFirst() }
-        while folded.utf8.count > maxBytes { folded.removeLast() }
+        while folded.utf8.count > Swift.min(limit, maxBytes) { folded.removeLast() }
         return isSafe(folded) ? folded : fallback
     }
 
