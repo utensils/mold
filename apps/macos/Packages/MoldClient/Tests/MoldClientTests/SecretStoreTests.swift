@@ -78,6 +78,45 @@ struct SecretStoreTests {
         #expect(try store.value(for: SecretStore.localEngineKeyName) == "new")
     }
 
+    /// **Fails today**: the temporary file was made by `Data.write(to:)`,
+    /// which creates at the process umask -- 0644 -- and was chmodded only on
+    /// the NEXT statement. A complete copy of every credential existed
+    /// world-readable for that window, and if the write itself threw
+    /// (ENOSPC, EDQUOT, EIO) it was never chmodded and never removed, because
+    /// it was created OUTSIDE the `do` that cleans up (review E3).
+    @Test func aTemporaryFileIsOwnerOnlyFromItsFirstByte() throws {
+        let (_, dir) = try scratch()
+        let path = dir.appending(path: "probe.tmp")
+
+        try SecretStore.writeOwnerOnly(Data("secret".utf8), to: path)
+
+        let attributes = try FileManager.default
+            .attributesOfItem(atPath: path.path(percentEncoded: false))
+        #expect((attributes[.posixPermissions] as? NSNumber)?.int16Value ?? 0 & 0o777 == 0o600)
+        #expect(try Data(contentsOf: path) == Data("secret".utf8))
+    }
+
+    /// A write that cannot land leaves nothing readable behind and changes
+    /// nothing that was already there.
+    @Test func aFailedWriteLeavesNoPlaintextBehind() throws {
+        let (store, dir) = try scratch()
+        let name = hostName()
+        try store.set("kept", for: name)
+        let before = try Data(contentsOf: dir.appending(path: "secrets.json"))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o500],
+                                              ofItemAtPath: dir.path(percentEncoded: false))
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700],
+                                                   ofItemAtPath: dir.path(percentEncoded: false))
+        }
+
+        #expect(throws: (any Error).self) { try store.set("new", for: name) }
+        let left = try FileManager.default.contentsOfDirectory(atPath: dir.path(percentEncoded: false))
+        #expect(!left.contains { $0.hasSuffix(".tmp") })
+        #expect(try Data(contentsOf: dir.appending(path: "secrets.json")) == before)
+    }
+
     @Test func secretsFileIsOwnerOnly() throws {
         let (store, dir) = try scratch()
         try store.set("k1", for: hostName())

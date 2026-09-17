@@ -27,11 +27,10 @@ extension SecretStore {
 
     /// Write the whole document, owner-only, atomically.
     ///
-    /// `0600` is set on the temporary file BEFORE the rename, not after it
-    /// (`secrets.rs:159-167`): a chmod afterwards leaves a window in which the
-    /// real path is world-readable, and `replaceItemAt` is not usable here
-    /// because it carries the ORIGINAL file's attributes onto the new one --
-    /// which would keep a 0644 left behind by an older build forever.
+    /// The temporary file is owner-only from its FIRST BYTE and every failure
+    /// path removes it. `replaceItemAt` is not usable here because it carries
+    /// the ORIGINAL file's attributes onto the new one -- which would keep a
+    /// 0644 left behind by an older build forever.
     func save(_ state: inout Loaded) throws {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -44,14 +43,11 @@ extension SecretStore {
             }
             state.corrupt = false
         }
-        let encoder = MoldJSON.localEncoder
         let temporary = directory.appending(path: "secrets.json.\(UUID().uuidString).tmp")
-        try encoder.encode(state.map).write(to: temporary)
         do {
-            try FileManager.default.setAttributes([.posixPermissions: 0o600],
-                                                  ofItemAtPath: temporary.path(percentEncoded: false))
+            try Self.writeOwnerOnly(MoldJSON.localEncoder.encode(state.map), to: temporary)
             // `rename(2)`, not `moveItem`: it is atomic, it replaces an
-            // existing file, and it does not touch the mode just set.
+            // existing file, and it does not touch the mode it was made with.
             guard rename(temporary.path(percentEncoded: false), url.path(percentEncoded: false)) == 0
             else {
                 throw SecretStoreError.couldNotReplace(path: url.path(percentEncoded: false),
@@ -61,5 +57,28 @@ extension SecretStore {
             try? FileManager.default.removeItem(at: temporary)
             throw error
         }
+    }
+
+    /// One file, created with mode `0600` and flushed to the platter.
+    ///
+    /// NOT `Data.write(to:)` plus a chmod: that creates at the process umask,
+    /// so a complete copy of every credential exists world-readable until the
+    /// next statement runs -- and if the write itself throws (ENOSPC, EDQUOT,
+    /// EIO) it is neither chmodded nor removed, and nothing ever cleans up a
+    /// UUID-named file (review E3). `createFile` applies the attributes AT
+    /// creation, so there is no window at all.
+    ///
+    /// The `fsync` is for the caller after it: `rename(2)` makes the metadata
+    /// durable but not the bytes, and `LegacyKeychain` deletes the only other
+    /// copy of a key the moment the write returns.
+    static func writeOwnerOnly(_ data: Data, to url: URL) throws {
+        let path = url.path(percentEncoded: false)
+        guard FileManager.default.createFile(atPath: path, contents: data,
+                                             attributes: [.posixPermissions: 0o600])
+        else { throw SecretStoreError.couldNotReplace(path: path, code: errno) }
+        let descriptor = open(path, O_RDONLY)
+        guard descriptor >= 0 else { return }
+        fsync(descriptor)
+        close(descriptor)
     }
 }
