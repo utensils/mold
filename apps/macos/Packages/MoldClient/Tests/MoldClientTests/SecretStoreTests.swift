@@ -127,8 +127,8 @@ struct SecretStoreTests {
     /// A UAT run must never be able to reach the real keys, which is the same
     /// promise `AppStorageSuite` makes for preferences.
     @Test func aFreshRunUsesAThrowawayDirectory() throws {
-        let real = try SecretStore.applicationSupport(environment: [:])
-        let fresh = try SecretStore.applicationSupport(environment: ["MOLD_NATIVE_FRESH": "1"])
+        let real = SecretStore.applicationSupport(environment: [:])
+        let fresh = SecretStore.applicationSupport(environment: ["MOLD_NATIVE_FRESH": "1"])
         #expect(real.lastPathComponent == SecretStore.directoryName)
         #expect(fresh.lastPathComponent == SecretStore.freshDirectoryName)
         #expect(real != fresh)

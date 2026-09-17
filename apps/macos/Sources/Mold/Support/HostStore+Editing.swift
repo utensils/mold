@@ -22,6 +22,7 @@ extension HostStore {
             apiKey: apiKey
         )
         hosts.append(host)
+        store(apiKey, for: host, doing: "save its key")
         persist()
         Task { await refresh(host) }
         return host
@@ -33,6 +34,10 @@ extension HostStore {
         updated.baseURL = HostAddress.normalize(host.baseURL.absoluteString) ?? host.baseURL
         updated.name = resolvedName(host.name, for: updated.baseURL)
         hosts[index] = updated
+        // The editor shows the stored key pre-filled, so an emptied field is
+        // somebody clearing it on purpose. Written HERE and only here: the
+        // list write below never touches a key (review 05-H5).
+        store(updated.apiKey, for: updated, doing: "save its key")
         persist()
         // The key or address may have changed, so EVERYTHING we knew is stale
         // -- the fleet identity included: a machine whose address changed that
@@ -84,8 +89,23 @@ extension HostStore {
         // silently un-default the machine being edited.
         if defaultMachine == host.id { defaultMachine = nil }
         reconcileEventStreams()
-        HostPersistence.forget(host)
+        do {
+            try HostPersistence.forget(host)
+        } catch {
+            report(error, on: host.id, doing: "remove its key")
+        }
         persist()
+    }
+
+    /// One machine's key, written because the person supplied or cleared one.
+    /// A failure is REPORTED -- the Keychain's swallowed `OSStatus` is how a
+    /// key could go missing with nobody told (review 05-H5).
+    private func store(_ apiKey: String?, for host: MoldHost, doing verb: String) {
+        do {
+            try HostPersistence.setAPIKey(apiKey, for: host.id)
+        } catch {
+            report(error, on: host.id, doing: verb)
+        }
     }
 
     /// Adds the in-process engine to the machine list.

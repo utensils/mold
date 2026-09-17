@@ -51,22 +51,22 @@ public final class SecretStore: Sendable {
         url = directory.appending(path: "secrets.json")
     }
 
-    /// `~/Library/Application Support/io.utensils.mold.native`, created if it
-    /// is not there yet.
+    /// `~/Library/Application Support/io.utensils.mold.native`. Deliberately
+    /// does not throw and does not create anything: resolving where the file
+    /// GOES cannot fail, and the directory is made by the first write.
     public static func applicationSupport(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         in fileManager: FileManager = .default
-    ) throws -> URL {
-        let root = try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                                       appropriateFor: nil, create: true)
+    ) -> URL {
+        let root = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.homeDirectoryForCurrentUser.appending(path: "Library/Application Support")
         let fresh = environment["MOLD_NATIVE_FRESH"] != nil
         return root.appending(path: fresh ? freshDirectoryName : directoryName)
     }
 
-    /// The store every surface in the app shares.
-    public static func shared() throws -> SecretStore {
-        SecretStore(directory: try applicationSupport())
-    }
+    /// The store every surface in the app shares. Lazy, so it reads the
+    /// environment once this process is running rather than at load.
+    public static let shared = SecretStore(directory: applicationSupport())
 
     // MARK: - Reading and writing one name
 
@@ -117,9 +117,11 @@ public final class SecretStore: Sendable {
 /// Why a secret could not be read or written. Surfaced, never swallowed: the
 /// Keychain's discarded `OSStatus` is exactly how a whole fleet's keys went
 /// missing without anybody being told.
-public enum SecretStoreError: Error, Equatable, CustomStringConvertible {
+public enum SecretStoreError: Error, Equatable, LocalizedError {
     case unknownName(String)
     case couldNotReplace(path: String, code: Int32)
+
+    public var errorDescription: String? { description }
 
     public var description: String {
         switch self {
