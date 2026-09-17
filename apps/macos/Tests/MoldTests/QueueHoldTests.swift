@@ -104,4 +104,47 @@ struct QueueHoldTests {
         #expect(fake.callCount("retryJob") == 0)
         #expect(downloads.finished[plato.id]?.first?.error == "disk full")
     }
+
+    /// **Fails today**: the wait is `while isBusy { try? await Task.sleep }`,
+    /// so a cancelled task spins at full speed on the MAIN ACTOR until the
+    /// download settles -- `try?` swallows the `CancellationError` the sleep
+    /// throws -- and a download that never reaches a terminal frame parks it
+    /// forever, there being no timeout either.
+    @Test func aWaitForADownloadThatNeverSettlesIsBoundedAndCancellable() async {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        fake.downloadTicket = FakeFixtures.downloadTicket("job-pull")
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
+        await downloads.install("z-image-turbo", on: plato)
+        await settle { fake.callCount("downloadEvents") == 1 }
+
+        // Nothing is ever yielded on that stream: the job stays in flight.
+        let settled = await downloads.awaitSettlement(
+            of: "z-image-turbo", on: plato.id,
+            within: .milliseconds(30), polling: .milliseconds(5))
+
+        #expect(!settled)
+        #expect(downloads.isBusy("z-image-turbo", on: plato.id))
+    }
+
+    @Test func aCancelledWaitEndsRatherThanSpinning() async {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        fake.downloadTicket = FakeFixtures.downloadTicket("job-pull")
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let downloads = DownloadStore(hosts: hosts, licenses: LicenseStore(hosts: hosts))
+        await downloads.install("z-image-turbo", on: plato)
+        await settle { fake.callCount("downloadEvents") == 1 }
+
+        let waiting = Task {
+            await downloads.awaitSettlement(
+                of: "z-image-turbo", on: plato.id, polling: .milliseconds(5))
+        }
+        // Let it reach the sleep, then change our mind.
+        await Task.yield()
+        waiting.cancel()
+
+        #expect(await waiting.value == false)
+    }
 }

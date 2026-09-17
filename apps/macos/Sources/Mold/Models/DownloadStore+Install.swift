@@ -71,9 +71,25 @@ extension DownloadStore {
     /// Pull-then-Retry (design M6 S3, decision 12) watches rather than
     /// guessing with a fixed sleep. `false` on a cancelled or failed
     /// download, where a retry would just hold the job again.
-    func awaitSettlement(of model: String, on host: MoldHost.ID) async -> Bool {
+    ///
+    /// Bounded twice over, because a loop with neither bound is how a wait
+    /// becomes a hang. Cancellation ends it: `try?` alone swallowed the
+    /// `CancellationError` and turned this into a tight spin on the MAIN
+    /// ACTOR for as long as the download ran. And a machine whose download
+    /// stream is alive but whose job never reaches a terminal frame stops
+    /// this after `settlementBudget` rather than parking it forever -- a
+    /// weights fetch is slow, so the budget is generous, not tight.
+    ///
+    /// `after` is a parameter rather than a constant so a test pins the
+    /// timeout without waiting one out, the `HostHeartbeat` rule.
+    func awaitSettlement(
+        of model: String, on host: MoldHost.ID,
+        within budget: Duration = .seconds(60 * 60), polling every: Duration = .milliseconds(100)
+    ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: budget)
         while isBusy(model, on: host) {
-            try? await Task.sleep(for: .milliseconds(100))
+            guard ContinuousClock.now < deadline else { return false }
+            do { try await Task.sleep(for: every) } catch { return false }
         }
         return finished[host]?.first(where: { $0.model == model })?.status == .completed
     }
