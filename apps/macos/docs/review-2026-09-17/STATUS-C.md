@@ -110,3 +110,66 @@ tests in 62 suites green.
    `LibraryPane+Wiring` absorbing the pane's tail, `Shell/LibrarySelection`).
    `LibraryStore`'s TYPE total rose by ~11 lines (`revision`, `echo`, one
    comment); the new behaviour itself is in new types.
+
+## Round two — the adversarial review (`REVIEW-C.md`, 15 findings)
+
+| id | status | commit | test |
+| --- | --- | --- | --- |
+| C-8 the budget measured one file per folder | fixed | `46162dad` | `afolderHoldingSeveralPrintsIsMeasuredWhole`, `anEmptyFolderIsAccountedForAndSweptAway` |
+| C-6 an edit could be stranded by the drain's trailing awaits | fixed | `add8fa79` | `anEditMadeDuringTheTrailingRelistStillReachesTheMachine` |
+| the test that could not fail | fixed | `add8fa79` | `aMachineWhoseFrameWasSkipped…` now holds the mutation open and asserts the ORDER |
+| C-14 M5 left two of four fields unfixed | fixed | `4d827066` | `TextEditingFocusTests` |
+| resync relists were unbounded (Lane D seam) | fixed | `885c9799` | `RelistGateTests` (K markers → 2 reads) |
+| C-4 dead `json` ceiling, overstated guarantee | fixed | `ad6d3201` | `collectingStopsAtTheCeilingRatherThanAfterIt`, `anUnboundedAnswerIsRefusedRatherThanDecoded` |
+| C-1 the shipped thumbnail session was untested | fixed | `ad6d3201` | `ThumbnailCacheTests` now builds it through `init(stubbing:)` |
+| C-2 containment did not resist a symlink | fixed | `ef67a573` | `aSymbolicLinkIsNotAFreshDestination`, `aSymlinkedDirectoryResolves…` |
+| C-5 a legal `a%2Fb.png` was refused | fixed | `ef67a573` | `anOrdinaryPrintNameIsKept` |
+| C-3 multi-save destroyed an existing file | fixed | `c7d42583` | `SaveNamesSuite` (7 cases) |
+| C-11 a refusal wiped every undo entry | fixed | `e3ab9d91` | `aRefusedEditTakesBackItsOwnInverseAndNoOthers` |
+| C-9 Quick Look pinned folders forever | fixed | `9c76fa48` | `quickLookLettingGoUnpinsWhatItWasShowing` |
+| C-9b a spared entry stopped eviction | fixed | `9c76fa48` | `whatIsSparedComesOffTheBudgetRatherThanOutOfTheReckoning` |
+| C-10 `enforceBudget`'s doc contradicted it | fixed | `9c76fa48` | — (prose) |
+| C-7 a relist discarded what landed during it | fixed | `7c72a50b` | `aPrintLandingDuringARelistSurvivesIt`, `aRelistStillDropsWhatTheMachineNoLongerLists` |
+| C-12 caveat, the calendar day | fixed | `72615319` | `aNewDayReDerivesTheCut` |
+| C-13 the unreachable `?? ""` | fixed | `72615319` | — (dead branch removed) |
+| C-15 two menus that disagreed | fixed | `112c8974` | `LibraryMenuPlanSuite` (12 cases), `theMenuBarOffersThePlanAndNothingOfItsOwn` |
+| `try?` hiding real failures | fixed | `ef67a573`, `c7d42583` | the write and both save paths report now |
+| `LibraryStore` grew | partly given back | `56a458e9` | — |
+
+### Decisions a second reviewer should look at
+
+1. **C-12 (a)**: the design stands as the coordinator confirmed -- no day
+   headings under a non-chronological sort, the way Photos does it. Only the
+   caveat (the calendar was not in the cache key) was a defect.
+2. **C-4**: the thumbnail route is now bounded AS IT READS, because this lane
+   owns that session. The media route is still bounded on RETENTION only and
+   the type says so in as many words: the allocation bound is
+   `HTTPBackend+Transport.swift`'s to give, and `ResponseCeiling`'s doc names
+   it. Nothing dead is left.
+3. **C-11**: a per-edit `UndoToken` is the target, so `removeAllActions(withTarget:)`
+   removes exactly one entry. `forget()` survives for the case that really does
+   invalidate the stack (a tag deleted everywhere) and walks this store's own
+   tokens.
+4. **C-15**: `Share` is deliberately outside the plan -- it is a `ShareLink`,
+   a system control rather than an action this app performs -- and the menu bar
+   keeps its three chords, which a contextual menu has no business carrying.
+   Both surfaces draw everything else from `LibraryMenuPlan`.
+5. **The size rule**: `LibraryStore`'s type total is 894 against 834 at the
+   branch point. The review's own fixes put behaviour there (the outer drain
+   round for C-6, the relist seam for C-7, the echo and the gate). What could
+   leave has left -- `LibraryRevision`, `RelistMerge`, `TagRewrite`, and
+   earlier `GalleryEcho`, `RelistGate`, `LibraryShowingCache`, `SaveNames`,
+   `TextEditingFocus`, `LibraryMenuPlan` -- and the residual is declared here
+   rather than hidden.
+
+### Cross-lane edits added in this round
+
+- `Tests/MoldTests/FakeBackend.swift` -- a per-route `delays` knob and the two
+  routes that await it. Additive: a route with no entry is instant, so no
+  existing test changes behaviour. It is what makes "something happened WHILE
+  this call was in flight" testable at all.
+- `Sources/Mold/Shell/{LibraryCommands,LibrarySelection,CollectionRow}.swift`
+  -- C-15 and C-14.
+- `Sources/Mold/MoldApp.swift` -- one `.task` starts `TextEditingFocus`.
+- `Sources/Mold/Support/{MoldUndo,MoldAppDelegate}.swift` -- C-11 and a stale
+  comment.
