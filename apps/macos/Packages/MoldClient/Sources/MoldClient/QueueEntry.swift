@@ -73,11 +73,37 @@ public struct QueueListing: Codable, Sendable {
     /// all depending on which store answered first.
     public let liveOnlyEntries: [QueueEntry]?
 
+    /// The two lists as one, in an order that does not change unless the
+    /// queue does.
+    ///
+    /// `entries` arrives in the durable page's own `(created_at, rowid)`
+    /// traversal order -- which IS dispatch order (`routes.rs:7141-7168`) --
+    /// and a live row overlays the durable one IN PLACE rather than moving it.
+    ///
+    /// The comparator has to be TOTAL, because ties are the design rather
+    /// than a corner case: `assign_positions` (`job_registry.rs:57-64`) gives
+    /// a held row the position of the next row that can RUN, so every held
+    /// row ties with the queued one behind it, and every row with no position
+    /// ties with all the others. Sorting a Dictionary's values -- unspecified
+    /// order, re-randomised per launch -- with a non-stable `sorted(by:)`
+    /// meant two refreshes of an unchanged queue came back differently, and
+    /// since `List` identifies by id the rows visibly swapped places while
+    /// nothing had happened. Position, then the host's own index.
     public var merged: [QueueEntry] {
-        var byID: [String: QueueEntry] = [:]
-        for entry in entries { byID[entry.id] = entry }
-        for entry in liveOnlyEntries ?? [] { byID[entry.id] = entry }
-        return byID.values.sorted { ($0.position ?? .max) < ($1.position ?? .max) }
+        var ordered: [QueueEntry] = []
+        var indexByID: [String: Int] = [:]
+        for entry in entries + (liveOnlyEntries ?? []) {
+            if let index = indexByID[entry.id] {
+                ordered[index] = entry
+            } else {
+                indexByID[entry.id] = ordered.count
+                ordered.append(entry)
+            }
+        }
+        return ordered.enumerated()
+            .sorted { ($0.element.position ?? .max, $0.offset)
+                      < ($1.element.position ?? .max, $1.offset) }
+            .map(\.element)
     }
 }
 
