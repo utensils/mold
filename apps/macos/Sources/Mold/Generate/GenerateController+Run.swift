@@ -13,7 +13,13 @@ extension GenerateController {
     /// about that id -- submitting again would render twice.
     func submit(on host: MoldHost, backend: any MoldBackend) {
         guard let modelName, !run.isBusy else { return }
-        let admission = BatchAdmission(requests: [draft.request(model: modelName)])
+        // The Batch control already caps at `maxBatchOutputs`; this is a belt
+        // on the one path a stale draft could still exceed it.
+        let copies = min(draft.batchSize, hosts.capabilities(of: host)?.maxBatchOutputs ?? draft.batchSize)
+        let admission = BatchAdmission(requests: draft.requests(
+            model: modelName, copies: copies,
+            randomBase: .random(in: 0 ... UInt64(UInt32.max))
+        ))
         PendingBatch.remember(admission.clientBatchId, host: host.id)
 
         run = .submitting
@@ -67,32 +73,39 @@ extension GenerateController {
     }
 
     private func settle(_ status: BatchStatus, host: MoldHost.ID) {
-        guard let child = status.children.first else { return }
-        switch child.state {
-        case .complete:
-            if let result = child.result {
-                run = .finished(result, host: host)
-            }
-            PendingBatch.forget(status.clientBatchId)
-        case .failed, .cancelled:
-            run = .failed(child.error ?? "The render didn't finish.")
-            PendingBatch.forget(status.clientBatchId)
-        default:
-            if case let .running(_, progress) = run {
-                run = .running(status, progress)
+        if let outcome = BatchOutcome(settling: status) {
+            // Settled with any result at all is shown; settled with none is
+            // the failure -- the fence is held until every child is in,
+            // never on the first one to arrive.
+            if outcome.results.isEmpty {
+                run = .failed(outcome.failures.first ?? "The render didn't finish.")
             } else {
-                run = .running(status, nil)
+                run = .finished(outcome, host: host)
             }
+            PendingBatch.forget(status.clientBatchId)
+        } else if case let .running(_, progress) = run {
+            run = .running(status, progress)
+        } else {
+            run = .running(status, nil)
         }
     }
 
     /// Step progress and the denoise preview, which the events stream
     /// deliberately does not carry.
+    ///
+    /// With several children, one settles while the others keep running --
+    /// so this re-reads the current run's status every tick and follows
+    /// whichever child is still live, falling back to the last one it had
+    /// rather than going quiet the moment the first child finishes.
     private func pollPreview(_ status: BatchStatus, backend: any MoldBackend) -> Task<Void, Never> {
-        Task { [weak self] in
-            guard let jobId = status.children.first?.jobId else { return }
+        var target = status.children.first?.jobId
+        return Task { [weak self] in
             while !Task.isCancelled {
-                if let progress = try? await backend.jobPreview(jobId: jobId),
+                if case let .running(current, _) = self?.run {
+                    target = current.children.first { $0.state.isLive }?.jobId ?? target
+                }
+                if let jobId = target,
+                   let progress = try? await backend.jobPreview(jobId: jobId),
                    case let .running(current, _) = self?.run {
                     self?.run = .running(current, progress)
                 }

@@ -6,7 +6,7 @@ enum RunState {
     case idle
     case submitting
     case running(BatchStatus, JobProgress?)
-    case finished(BatchResult, host: MoldHost.ID)
+    case finished(BatchOutcome, host: MoldHost.ID)
     case failed(String)
 
     var isBusy: Bool {

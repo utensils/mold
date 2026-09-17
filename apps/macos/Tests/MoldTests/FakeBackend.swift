@@ -41,6 +41,16 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var exportBlock: ExportOptions?
     nonisolated(unsafe) var downloadTicket: DownloadTicket?
     nonisolated(unsafe) var modelRows: [Model] = []
+    /// Every admission `submit` was asked, in call order -- what a batch of
+    /// four actually looked like on the wire.
+    nonisolated(unsafe) var submittedAdmissions: [BatchAdmission] = []
+    nonisolated(unsafe) var submitAnswer: BatchStatus?
+    /// Planted per `id`, since a test drives `submit` then reads the same
+    /// batch back through `batchStatus(id:)` once its events stream ends.
+    nonisolated(unsafe) var batchStatusAnswers: [String: BatchStatus] = [:]
+    /// `jobId` asked, in call order -- which child the preview poll followed.
+    nonisolated(unsafe) var jobPreviewCalls: [String] = []
+    nonisolated(unsafe) var mediaAnswer: Data?
 
     // MARK: - Machines
 
@@ -117,19 +127,33 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     // MARK: - Generation
 
+    /// `copies` asked, in call order -- what a batch of four previews as.
+    nonisolated(unsafe) var placementCopiesRequested: [Int] = []
+
     func placementPreview(_ request: GenerateRequest, copies: Int) async throws -> PlacementPreview {
-        try record("placementPreview"); throw notPlanted()
+        try record("placementPreview")
+        placementCopiesRequested.append(copies)
+        throw notPlanted()
     }
     func submit(_ admission: BatchAdmission) async throws -> BatchStatus {
-        try record("submit"); throw notPlanted()
+        try record("submit")
+        submittedAdmissions.append(admission)
+        guard let submitAnswer else { throw notPlanted() }
+        return submitAnswer
     }
     func batchStatus(id: String) async throws -> BatchStatus {
-        try record("batchStatus"); throw notPlanted()
+        try record("batchStatus")
+        guard let status = batchStatusAnswers[id] else { throw notPlanted() }
+        return status
     }
     func batchStatus(clientBatchId: String) async throws -> BatchStatus {
         try record("batchStatusByClientId"); throw notPlanted()
     }
-    func jobPreview(jobId: String) async throws -> JobProgress? { try record("jobPreview"); return nil }
+    func jobPreview(jobId: String) async throws -> JobProgress? {
+        try record("jobPreview")
+        jobPreviewCalls.append(jobId)
+        return nil
+    }
     func cancelBatch(id: String) async throws { try record("cancelBatch") }
 
     // MARK: - Create
@@ -256,7 +280,9 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         return filename
     }
     func media(_ filename: String, trashed: Bool) async throws -> Data {
-        try record("media"); throw notPlanted()
+        try record("media")
+        guard let mediaAnswer else { throw notPlanted() }
+        return mediaAnswer
     }
     func exportOptions() async throws -> ExportOptions {
         try record("exportOptions")

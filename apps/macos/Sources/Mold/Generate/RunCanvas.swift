@@ -11,9 +11,13 @@ struct RunCanvas: View {
     /// the buttons under it -- tucks the prompt away and brings it back.
     let togglePrompt: () -> Void
 
-    @Environment(HostStore.self) private var hosts
+    /// Not `private`: `RunCanvas+Result` reads all three from its own
+    /// extension methods, and `private` does not cross files for the same
+    /// type.
+    @Environment(HostStore.self) var hosts
     @State private var preview: NSImage?
-    @State private var result: NSImage?
+    @State var result: NSImage?
+    @State var selected = 0
 
     var body: some View {
         ZStack {
@@ -22,8 +26,8 @@ struct RunCanvas: View {
                 idle
             case .running:
                 running
-            case let .finished(finished, _):
-                finishedView(finished)
+            case let .finished(outcome, _):
+                finishedView(outcome)
             case let .failed(message):
                 ContentUnavailableView("That didn't finish", systemImage: "exclamationmark.triangle",
                                        description: Text(message))
@@ -34,6 +38,10 @@ struct RunCanvas: View {
         .onChange(of: state.previewData, initial: true) { _, data in
             preview = data.flatMap(NSImage.init(data:))
         }
+        // A fresh submission starts the selection over -- otherwise a batch
+        // of one after a batch of four could restore a stale index 2 with
+        // nothing at position 2 to show.
+        .onChange(of: state.isBusy) { _, busy in if busy { selected = 0 } }
         .task(id: resultFilename) { await loadResult() }
     }
 
@@ -65,35 +73,5 @@ struct RunCanvas: View {
                 }
             }
         }
-    }
-
-    @ViewBuilder private func finishedView(_ finished: BatchResult) -> some View {
-        if let result {
-            VStack(spacing: 12) {
-                Image(nsImage: result)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fit)
-                    .onTapGesture(perform: togglePrompt)
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityHint("Hides the prompt so the picture fills the pane")
-                ResultBar(result: finished, host: host, showInLibrary: showInLibrary)
-            }
-            .padding(24)
-        } else {
-            ProgressView("Fetching your picture…")
-        }
-    }
-
-    private var resultFilename: String? {
-        guard case let .finished(finished, _) = state else { return nil }
-        return finished.filename
-    }
-
-    private func loadResult() async {
-        guard let filename = resultFilename, let host else { result = nil; return }
-        guard let data = try? await hosts.backend(for: host).media(filename, trashed: false)
-        else { return }
-        result = NSImage(data: data)
     }
 }

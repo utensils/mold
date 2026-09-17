@@ -39,6 +39,10 @@ struct PromptPanel: View {
         .padding(16)
         .panel(.floating)
         .frame(maxWidth: Self.maxWidth)
+        // Published the same way the Library's title and tag fields already
+        // do, so `ResultStrip`'s arrow-key shortcuts stand down for a caret
+        // here exactly as they do for one there.
+        .focusedValue(\.editingText, promptFocused ? true : nil)
     }
 
     @ViewBuilder private func prompt(_ recipe: GenerationRecipe) -> some View {
@@ -63,6 +67,12 @@ struct PromptPanel: View {
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .lineLimit(1...3)
+                            // Shares the one focus state with the prompt
+                            // field above: a bare `Bool` binding answers
+                            // "is either of these two typing", which is
+                            // exactly what a caret's claim on an arrow key
+                            // needs.
+                            .focused($promptFocused)
                     }
                 }
                 if let references = recipe.capabilities.referenceImages,

@@ -60,13 +60,16 @@ final class GenerateController {
     func refreshPlacement(on host: MoldHost) {
         placementTask?.cancel()
         guard let modelName else { return }
-        let request = draft.request(model: modelName)
+        let request = draft.placementRequest(model: modelName)
+        let copies = draft.batchSize
         let client = hosts.backend(for: host)
         placementTask = Task {
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
             do {
-                placement = try await client.placementPreview(request, copies: 1)
+                // Four one-output children preview as four copies of one
+                // output, not as one four-output child.
+                placement = try await client.placementPreview(request, copies: copies)
                 placementError = nil
             } catch is CancellationError {
                 // Superseded by a later control change, not a failed request.

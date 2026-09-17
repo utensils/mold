@@ -107,4 +107,39 @@ extension FakeFixtures {
         """
         return try! MoldJSON.decoder.decode(DiscoveryPeer.self, from: Data(json.utf8))
     }
+
+    /// One child of a batch, as `batchStatus` composes it. `state` also
+    /// decides whether `result` rides along -- a live or failed child has
+    /// none.
+    struct BatchChildSpec {
+        let index: Int
+        let jobId: String
+        let state: String
+        let seed: UInt64?
+        let error: String?
+
+        init(_ index: Int, jobId: String? = nil, state: String = "running",
+             seed: UInt64? = nil, error: String? = nil) {
+            self.index = index
+            self.jobId = jobId ?? "job-\(index)"
+            self.state = state
+            self.seed = seed
+            self.error = error
+        }
+    }
+
+    /// A batch's status, decoded the way the wire produces one -- `BatchStatus`
+    /// and `BatchChild` have no public memberwise init either.
+    static func batchStatus(id: String = "batch-1", clientBatchId: String = "client-1",
+                            _ children: [BatchChildSpec]) -> BatchStatus {
+        let rows = children.map { child -> String in
+            let result = child.state == "complete"
+                ? #"{"filename": "\#(child.jobId).png", "seed": \#(child.seed.map { "\($0)" } ?? "null")}"#
+                : "null"
+            let errorJSON = child.error.map { "\"\($0)\"" } ?? "null"
+            return #"{"index": \#(child.index), "job_id": "\#(child.jobId)", "state": "\#(child.state)", "error": \#(errorJSON), "result": \#(result)}"#
+        }.joined(separator: ",")
+        let json = #"{"id": "\#(id)", "client_batch_id": "\#(clientBatchId)", "children": [\#(rows)]}"#
+        return try! MoldJSON.decoder.decode(BatchStatus.self, from: Data(json.utf8))
+    }
 }
