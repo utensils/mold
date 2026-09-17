@@ -62,7 +62,10 @@ extension HostStore {
         } catch MoldClientError.unauthorized {
             return .needsKey
         } catch {
-            return .down(error.sentence)
+            // The sidebar row reads this alone, so it is a sentence on its own
+            // -- "Could not connect to the server." -- not the banner's
+            // machine-first clause.
+            return .down(error.reasonSentence)
         }
     }
 
