@@ -1,0 +1,52 @@
+{
+ "instance_id": "ff00bea2-a8fc-4ffa-80c6-f5f80cfa5580",
+ "batches": [
+  {
+   "id": "batch-mixed",
+   "client_batch_id": "client-mixed",
+   "instance_id": "ff00bea2-a8fc-4ffa-80c6-f5f80cfa5580",
+   "durable": true,
+   "children": [
+    {
+     "index": 0,
+     "job_id": "b-child-1",
+     "state": "held",
+     "error": "deferred generation preparation failed: LoRA adapter is no longer readable",
+     "error_code": null,
+     "retryable": true,
+     "created_at_ms": 1789200030000,
+     "updated_at_ms": 1789200030000,
+     "revision": 1
+    },
+    {
+     "index": 1,
+     "job_id": "b-child-2",
+     "state": "accepted",
+     "created_at_ms": 1789200031000,
+     "updated_at_ms": 1789200031000,
+     "revision": 1
+    },
+    {
+     "index": 2,
+     "job_id": "b-child-3",
+     "state": "accepted",
+     "created_at_ms": 1789200032000,
+     "updated_at_ms": 1789200032000,
+     "revision": 1
+    },
+    {
+     "index": 3,
+     "job_id": "b-child-4",
+     "state": "accepted",
+     "created_at_ms": 1789200033000,
+     "updated_at_ms": 1789200033000,
+     "revision": 1
+    }
+   ]
+  }
+ ],
+ "missing": {
+  "client_batch_ids": [],
+  "batch_ids": ["batch-unknown"]
+ }
+}

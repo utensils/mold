@@ -18,18 +18,11 @@ public extension HTTPBackend {
         _ = try await postRaw("/api/queue/\(id)/resume", body: EmptyBody())
     }
 
-    /// The one route that moves a job BACKWARD, from held to accepted. It needs
-    /// the full fenced identity so a retry cannot be aimed at the wrong job.
-    func retryJob(_ entry: QueueEntry, instanceId: String) async throws {
-        struct Retry: Encodable {
-            let instanceId: String
-            let batchId: String?
-            let clientBatchId: String?
-            let jobId: String
-        }
-        _ = try await postRaw("/api/queue/\(entry.id)/retry", body: Retry(
-            instanceId: instanceId, batchId: entry.batchId,
-            clientBatchId: entry.clientBatchId, jobId: entry.id))
+    /// The one route that moves a job BACKWARD, from held to queued. It needs
+    /// the full fenced identity so a retry cannot be aimed at the wrong job
+    /// (`routes.rs:7617-7650`).
+    func retryJob(_ authority: QueueAuthority) async throws {
+        _ = try await postRaw("/api/queue/\(authority.jobId)/retry", body: authority)
     }
 
     // MARK: - Downloads

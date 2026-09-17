@@ -13,17 +13,42 @@ enum FakeFixtures {
         return try! MoldJSON.decoder.decode(GalleryPrint.self, from: Data(json.utf8))
     }
 
-    static func queueEntry(_ id: String, state: String = "accepted") -> QueueEntry {
-        let json = #"{"id": "\#(id)", "state": "\#(state)"}"#
+    /// `state` defaults to `"queued"` -- the ordinary waiting row. This used
+    /// to default to `"accepted"`, a string `/api/queue` never actually sends
+    /// (design M6 fact 1): every test that didn't override `state` was
+    /// silently exercising `.unknown`, not a live row.
+    static func queueEntry(
+        _ id: String, state: String = "queued", batchId: String? = nil,
+        clientBatchId: String? = nil, batchIndex: Int? = nil
+    ) -> QueueEntry {
+        let json = #"""
+        {"id": "\#(id)", "state": "\#(state)",
+         "batch_id": \#(batchId.map { "\"\($0)\"" } ?? "null"),
+         "client_batch_id": \#(clientBatchId.map { "\"\($0)\"" } ?? "null"),
+         "batch_index": \#(batchIndex.map { "\($0)" } ?? "null")}
+        """#
         return try! MoldJSON.decoder.decode(QueueEntry.self, from: Data(json.utf8))
     }
 
     /// A listing with no `liveOnlyEntries` -- `QueueListing`'s own init is not
     /// public, so a planted answer is decoded the way the wire produces one.
     static func queueListing(_ ids: [String]) -> QueueListing {
-        let entries = ids.map { #"{"id": "\#($0)", "state": "accepted"}"# }.joined(separator: ",")
+        let entries = ids.map { #"{"id": "\#($0)", "state": "queued"}"# }.joined(separator: ",")
         let json = #"{"entries": [\#(entries)], "liveOnlyEntries": null}"#
         return try! MoldJSON.decoder.decode(QueueListing.self, from: Data(json.utf8))
+    }
+
+    /// One child of a batch, decoded the way `/api/generation-batches/status`
+    /// produces one -- `BatchChild` has no public memberwise init either.
+    static func batchChild(
+        _ jobId: String, state: String = "held", errorCode: String? = nil, revision: UInt64? = nil
+    ) -> BatchChild {
+        let json = #"""
+        {"index": 0, "job_id": "\#(jobId)", "state": "\#(state)",
+         "error_code": \#(errorCode.map { "\"\($0)\"" } ?? "null"),
+         "revision": \#(revision.map { "\($0)" } ?? "null")}
+        """#
+        return try! MoldJSON.decoder.decode(BatchChild.self, from: Data(json.utf8))
     }
 }
 

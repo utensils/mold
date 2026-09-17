@@ -75,8 +75,9 @@ final class QueueStore {
         await act(entry, on: host, doing: "resume that job") { try await $0.resumeJob(id: entry.id) }
     }
 
-    /// Only meaningful for a held job, and only with the host's instance id --
-    /// retrying against a host that has restarted would aim at nothing.
+    /// Only meaningful for a held job that is a durable batch child, and only
+    /// with the host's instance id -- retrying against a host that has
+    /// restarted would aim at nothing.
     ///
     /// The identity comes from `HostStore`, which already holds it twice over:
     /// this store used to keep a third copy and buy it with a second
@@ -86,8 +87,12 @@ final class QueueStore {
             hosts.report(NoInstanceKnown(), on: host, doing: "retry that job")
             return
         }
+        guard let authority = entry.authority(instanceId: instance) else {
+            hosts.report(NotADurableBatchChild(), on: host, doing: "retry that job")
+            return
+        }
         await act(entry, on: host, doing: "retry that job") {
-            try await $0.retryJob(entry, instanceId: instance)
+            try await $0.retryJob(authority)
         }
     }
 
@@ -109,5 +114,14 @@ final class QueueStore {
 private struct NoInstanceKnown: LocalizedError {
     var errorDescription: String? {
         "This machine hasn't said which run it is; refresh and try again."
+    }
+}
+
+/// A held row with no batch to retry against -- `QueueEntry.authority(instanceId:)`
+/// came back `nil`. Retry has nothing to send; this is what surfaces that as a
+/// report rather than a silently ignored tap.
+private struct NotADurableBatchChild: LocalizedError {
+    var errorDescription: String? {
+        "This job isn't a durable batch child, so it can't be retried this way."
     }
 }

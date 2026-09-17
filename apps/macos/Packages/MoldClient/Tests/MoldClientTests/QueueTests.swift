@@ -18,12 +18,13 @@ private func listing() throws -> QueueListing {
     func entry(_ id: String, position: Int, state: QueueState) -> QueueEntry {
         QueueEntry(id: id, model: "m", state: state, position: position,
                    startedAtUnixMs: nil, heldReason: nil, error: nil, retryable: nil,
-                   durable: nil, batchId: nil, clientBatchId: nil, dispatchAttempts: nil)
+                   durable: nil, batchId: nil, clientBatchId: nil, dispatchAttempts: nil,
+                   gpu: nil, targetGpu: nil, batchIndex: nil, explicitlyPaused: nil, replayed: nil)
     }
     let listing = QueueListing(
-        entries: [entry("a", position: 0, state: .accepted)],
+        entries: [entry("a", position: 0, state: .queued)],
         liveOnlyEntries: [entry("a", position: 0, state: .running),
-                          entry("b", position: 1, state: .accepted)]
+                          entry("b", position: 1, state: .queued)]
     )
     // "a" appears once, and the live view of it wins.
     #expect(listing.merged.count == 2)
@@ -39,15 +40,16 @@ private func listing() throws -> QueueListing {
 }
 
 @Test func queuePositionReadsAsPlaceInLine() {
-    func accepted(position: Int?) -> QueueEntry {
-        QueueEntry(id: "x", model: nil, state: .accepted, position: position,
+    func queued(position: Int?) -> QueueEntry {
+        QueueEntry(id: "x", model: nil, state: .queued, position: position,
                    startedAtUnixMs: nil, heldReason: nil, error: nil, retryable: nil,
-                   durable: nil, batchId: nil, clientBatchId: nil, dispatchAttempts: nil)
+                   durable: nil, batchId: nil, clientBatchId: nil, dispatchAttempts: nil,
+                   gpu: nil, targetGpu: nil, batchIndex: nil, explicitlyPaused: nil, replayed: nil)
     }
-    #expect(accepted(position: 0).waitDescription == "Next up")
-    #expect(accepted(position: 3).waitDescription == "#4 in line")
+    #expect(queued(position: 0).waitDescription == "Next up")
+    #expect(queued(position: 3).waitDescription == "#4 in line")
     // An unknown position says the host is working, not a made-up cause.
-    #expect(accepted(position: nil).waitDescription == "Waiting on the host")
+    #expect(queued(position: nil).waitDescription == "Waiting on the host")
 }
 
 @Test func anUnknownStateFromANewerHostDoesNotFailTheDecode() throws {

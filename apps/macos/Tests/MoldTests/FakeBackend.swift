@@ -277,15 +277,60 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     // MARK: - Queue
 
+    /// Answered per JOB ID, same "absent is unplanted" rule as every other
+    /// listing here.
+    nonisolated(unsafe) var queueJobDetails: [String: QueueJobDetail] = [:]
+    /// A FIFO per host id, so a test can plant "before" and "after" a retry
+    /// and see the store pick up the second answer on its next call.
+    nonisolated(unsafe) var batchListings: [BatchStatusListing] = []
+    /// Every `(id, position)` `reorderJob` was asked for, in call order.
+    nonisolated(unsafe) var reorders: [(id: String, position: Int)] = []
+    /// Every `cancelAllQueued` call's answer, planted per call in order --
+    /// `nil` throws as unplanted, same rule as everything else on this fake.
+    nonisolated(unsafe) var cancelAllAnswer: QueueCancelResult?
+    /// Set once `cancelAllQueued` is actually called -- a test asserting it
+    /// was NOT called reads this rather than `calls.contains`.
+    nonisolated(unsafe) var cancelledAll = false
+    /// Every authority `retryJob` was asked to retry, in call order -- what a
+    /// retry actually sent, not just that one was sent.
+    nonisolated(unsafe) var retriedAuthorities: [QueueAuthority] = []
+    /// Every ids array `batchStatuses` was asked for, in call order.
+    nonisolated(unsafe) var batchStatusQueries: [[String]] = []
+
     func queue() async throws -> QueueListing {
         try record("queue")
         guard let queueListing else { throw notPlanted() }
         return queueListing
     }
+    func queueJob(id: String) async throws -> QueueJobDetail {
+        try record("queueJob")
+        guard let detail = queueJobDetails[id] else { throw notPlanted() }
+        return detail
+    }
     func cancelJob(id: String) async throws { try record("cancelJob") }
     func pauseJob(id: String) async throws { try record("pauseJob") }
     func resumeJob(id: String) async throws { try record("resumeJob") }
-    func retryJob(_ entry: QueueEntry, instanceId: String) async throws { try record("retryJob") }
+    func reorderJob(id: String, position: Int) async throws {
+        try record("reorderJob")
+        reorders.append((id: id, position: position))
+    }
+    func retryJob(_ authority: QueueAuthority) async throws {
+        try record("retryJob")
+        retriedAuthorities.append(authority)
+    }
+    @discardableResult
+    func cancelAllQueued() async throws -> QueueCancelResult {
+        try record("cancelAllQueued")
+        cancelledAll = true
+        guard let cancelAllAnswer else { throw notPlanted() }
+        return cancelAllAnswer
+    }
+    func batchStatuses(batchIds: [String]) async throws -> BatchStatusListing {
+        try record("batchStatuses")
+        batchStatusQueries.append(batchIds)
+        guard !batchListings.isEmpty else { throw notPlanted() }
+        return batchListings.removeFirst()
+    }
 
     // MARK: - Downloads
 

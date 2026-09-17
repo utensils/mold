@@ -60,8 +60,11 @@ import Testing
 
     /// Unknown tags are IGNORED, never errors. mold adds events, and a client
     /// that treats a new one as a failure breaks on a server upgrade.
+    /// `chain_job_started` is a REAL tag mold sends and a deliberate case of
+    /// this, not a made-up one -- see `MoldEvent.init(name:data:)`'s
+    /// `default:` arm (M6 decision, `types.rs:13209-13214`).
     @Test func anUnknownEventIsIgnoredRatherThanFailing() {
-        #expect(MoldEvent(name: "event", data: #"{"type":"job_started","id":"j1"}"#) == nil)
+        #expect(MoldEvent(name: "event", data: #"{"type":"chain_job_started","id":"c1","model":"m"}"#) == nil)
         #expect(MoldEvent(name: "event", data: #"{"type":"something_new_in_0_30"}"#) == nil)
         #expect(MoldEvent(name: "event", data: "not json at all") == nil)
         #expect(MoldEvent(name: nil, data: "") == nil)

@@ -54,6 +54,31 @@ public enum BatchChildState: String, OpenWireEnum {
     }
 }
 
+/// `POST /api/generation-batches/status`'s answer -- authoritative state for
+/// every batch the caller asked about, plus the ids that named nothing on
+/// this machine. A READ despite the route's verb: `spawn_queue_read`
+/// (`routes.rs:3396-3401`), a POST only because up to
+/// `QueueBatchStatusLimit.identities` ids do not fit in a query string.
+public struct BatchStatusListing: Codable, Sendable {
+    public let instanceId: String
+    public let batches: [BatchStatus]
+    public let missing: Missing
+
+    /// The ids this call asked about that named no batch on this machine --
+    /// never a failure, since a stale cached id is an ordinary outcome.
+    public struct Missing: Codable, Hashable, Sendable {
+        public let clientBatchIds: [String]
+        public let batchIds: [String]
+    }
+}
+
+/// `MAX_GENERATION_BATCH_STATUS_IDENTITIES` (`routes.rs:2896`) -- the cap a
+/// caller must chunk against; `batchStatuses(batchIds:)` does not chunk for
+/// you.
+public enum QueueBatchStatusLimit {
+    public static let identities = 256
+}
+
 public struct BatchResult: Codable, Hashable, Sendable {
     public let filename: String?
     public let seed: UInt64?

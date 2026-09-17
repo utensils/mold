@@ -16,6 +16,9 @@ extension LibraryStore {
         // `MachineStore` is what reads `/api/devices` again.
         case .deviceStateChanged:
             break
+        // Queue lifecycle is `QueueStore`'s concern (M6), not the gallery's.
+        case .job, .queue:
+            break
         case .resyncRequired:
             // The stream admitted it dropped deltas, so nothing on screen for
             // this machine can be trusted. Reading the listing again is the

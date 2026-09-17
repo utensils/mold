@@ -1,0 +1,115 @@
+{
+ "entries": [
+  {
+   "id": "q-standalone",
+   "model": "flux-dev:q8",
+   "state": "queued",
+   "started_at_unix_ms": 1789200000000,
+   "position": 0,
+   "durable": true,
+   "replayed": false,
+   "dispatch_attempts": 0
+  },
+  {
+   "id": "r-running",
+   "model": "flux-dev:q8",
+   "state": "running",
+   "started_at_unix_ms": 1789200005000,
+   "position": 0,
+   "gpu": 1,
+   "durable": true,
+   "replayed": false,
+   "dispatch_attempts": 1
+  },
+  {
+   "id": "p-explicit",
+   "model": "flux-dev:q8",
+   "state": "paused",
+   "started_at_unix_ms": 1789200010000,
+   "position": 1,
+   "durable": true,
+   "replayed": false,
+   "dispatch_attempts": 0,
+   "explicitly_paused": true
+  },
+  {
+   "id": "p-restart",
+   "model": "flux-dev:q8",
+   "state": "paused",
+   "started_at_unix_ms": 1789200015000,
+   "position": 2,
+   "durable": true,
+   "replayed": true,
+   "dispatch_attempts": 0
+  },
+  {
+   "id": "h-standalone",
+   "model": "flux2-dev:q8",
+   "state": "held",
+   "started_at_unix_ms": 1789200020000,
+   "position": 3,
+   "durable": true,
+   "replayed": false,
+   "dispatch_attempts": 1,
+   "held_reason": "GPU ran out of memory loading or running 'flux2-dev:q8'.",
+   "error": "GPU ran out of memory loading or running 'flux2-dev:q8'.",
+   "retryable": true
+  },
+  {
+   "id": "b-child-1",
+   "model": "flux-dev:q8",
+   "state": "held",
+   "started_at_unix_ms": 1789200030000,
+   "position": 4,
+   "durable": true,
+   "replayed": false,
+   "dispatch_attempts": 0,
+   "held_reason": "deferred generation preparation failed: LoRA adapter is no longer readable",
+   "error": "deferred generation preparation failed: LoRA adapter is no longer readable",
+   "retryable": true,
+   "batch_id": "batch-mixed",
+   "client_batch_id": "client-mixed",
+   "batch_index": 1
+  },
+  {
+   "id": "b-child-2",
+   "model": "flux-dev:q8",
+   "state": "queued",
+   "started_at_unix_ms": 1789200031000,
+   "position": 4,
+   "durable": true,
+   "replayed": false,
+   "dispatch_attempts": 0,
+   "batch_id": "batch-mixed",
+   "client_batch_id": "client-mixed",
+   "batch_index": 2
+  },
+  {
+   "id": "b-child-3",
+   "model": "flux-dev:q8",
+   "state": "queued",
+   "started_at_unix_ms": 1789200032000,
+   "position": 5,
+   "durable": true,
+   "replayed": false,
+   "dispatch_attempts": 0,
+   "batch_id": "batch-mixed",
+   "client_batch_id": "client-mixed",
+   "batch_index": 3
+  },
+  {
+   "id": "b-child-4",
+   "model": "flux-dev:q8",
+   "state": "queued",
+   "started_at_unix_ms": 1789200033000,
+   "position": 6,
+   "durable": true,
+   "replayed": false,
+   "dispatch_attempts": 0,
+   "batch_id": "batch-mixed",
+   "client_batch_id": "client-mixed",
+   "batch_index": 4
+  }
+ ],
+ "live_only_entries": []
+}

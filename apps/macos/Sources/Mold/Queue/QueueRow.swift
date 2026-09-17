@@ -40,7 +40,7 @@ struct QueueRow: View {
                 Button { act(.retry) } label: { Image(systemName: "arrow.clockwise") }
                     .help("Try this job again")
             }
-            if entry.state == .running || entry.state == .accepted {
+            if entry.state == .running || entry.state == .queued {
                 Button { act(.pause) } label: { Image(systemName: "pause") }
                     .help("Pause this job")
             }
@@ -71,7 +71,7 @@ struct QueueRow: View {
         case .failed: "exclamationmark.triangle"
         case .cancelled, .cancelling: "xmark.circle"
         case .complete: "checkmark.circle"
-        case .accepted, .unknown: "clock"
+        case .queued, .unknown: "clock"
         }
     }
 }

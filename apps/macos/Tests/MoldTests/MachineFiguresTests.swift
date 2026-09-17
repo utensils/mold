@@ -34,7 +34,7 @@ struct MachineFiguresTests {
 
     @Test func liveEntriesSplitIntoQueuedAndRunning() {
         let live = [
-            FakeFixtures.queueEntry("a", state: "accepted"),
+            FakeFixtures.queueEntry("a", state: "queued"),
             FakeFixtures.queueEntry("b", state: "running"),
         ]
         #expect(MachineFigures.workFigure(live: live) == "1 queued, 1 running")
