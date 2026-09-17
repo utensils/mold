@@ -98,8 +98,10 @@ uat: build ## Launch against a throwaway prefs domain and a throwaway mold home
 	@rm -rf "$(UAT_HOME)" && mkdir -p "$(UAT_HOME)"
 	@echo "  prefs: io.utensils.mold.native.fresh (emptied, including its secrets)"
 	@echo "  home:  $(UAT_HOME) (emptied -- the engine starts here with no models)"
+	@# Absolute, so `macos-uat`'s `pkill -f` pattern can match this argv
+	@# and reap the previous run (review F6).
 	@MOLD_NATIVE_FRESH=1 MOLD_HOME="$(UAT_HOME)" \
-	  ./build/$(CONFIG)/Mold.app/Contents/MacOS/Mold
+	  "$(BUILD)/$(CONFIG)/Mold.app/Contents/MacOS/Mold"
 
 test: gen ## Run every test bundle: the package, then the app's own store tests
 	@# The release path's one testable script. It synthesises the /nix/store

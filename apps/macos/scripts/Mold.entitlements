@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- RELEASE. `Mold.Debug.entitlements` is the dev twin and is strictly wider;
+     `project.yml` picks per configuration. They were one file, so a shipped
+     build carried an exemption whose stated reason was a DEBUG-only path
+     (review F7). -->
 <plist version="1.0">
 <dict>
 	<!-- Not sandboxed: the app reaches arbitrary machines on the LAN and over
@@ -11,35 +15,31 @@
 	<true/>
 	<key>com.apple.security.network.server</key>
 	<true/>
-	<!-- Candle compiles its Metal shaders at RUNTIME from source strings, so
-	     the hardened runtime must allow JIT. Without this the embedded engine
-	     cannot build a single kernel and every local render fails at load. -->
+	<!-- Candle compiles its Metal shaders at RUNTIME from source strings. The
+	     usual reading is that this is therefore needed; the usual reading may
+	     be wrong, because `MTLDevice.makeLibrary(source:)` compiles out of
+	     process in the Metal compiler XPC service and the result is loaded as
+	     GPU code, not as CPU-executable pages — hardened Metal apps normally
+	     ship with none of these. It is kept only because nobody has yet
+	     watched a signed build render.
+	     The check owed, exactly: remove this key, `make signed`, launch the
+	     signed Release bundle, run one local render on Metal, and confirm no
+	     `EXC_BAD_ACCESS` and nothing in ~/Library/Logs/Mold about shader
+	     compilation. -->
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
 	<!-- Strictly broader than allow-jit: it removes the MAP_JIT requirement
 	     process-wide, which is the mitigation allow-jit exists to preserve.
-	     It is kept only because nobody has yet watched a SIGNED, hardened
-	     build render on Metal without it, and dropping it blind ships an app
-	     whose every local render fails at model load. The check owed, exactly:
-	     remove this key, `make signed`, launch the signed Release bundle, run
-	     one local render on Metal, and confirm no
-	     `EXC_BAD_ACCESS`/`mmap` failure in ~/Library/Logs/Mold
-	     (review 05-M14). -->
+	     Kept on the same terms and owing the same check, which should be run
+	     for this key FIRST — if a signed Metal render works without it, this
+	     one goes whatever happens to allow-jit. -->
 	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
 	<true/>
-	<!-- The reason this key USED to carry -- "the embedded engine links libc++
-	     from the Nix store, which carries no Team ID" -- is gone:
-	     `scripts/fix-macos-native-linkage.sh` retargets those loads to
-	     /usr/lib before signing and fails the release if any survive
-	     (review 05-H3). What is left is the DEV path: a Debug build loads
-	     `Mold.debug.dylib` and the SwiftPM PackageFrameworks beside it, and
-	     the note that the test host crashed on launch once dev builds carried
-	     a real identity was written from that. Those are signed with the same
-	     identity, so library validation should now be satisfied. Should is
-	     not verified. The check owed, exactly: remove this key, `make build`
-	     under MOLD_DEV_SIGN_IDENTITY, launch, and `make test` -- then the
-	     same for `make signed`. -->
-	<key>com.apple.security.cs.disable-library-validation</key>
-	<true/>
+	<!-- `com.apple.security.cs.disable-library-validation` is deliberately
+	     ABSENT here. The reason it used to carry — "the embedded engine links
+	     libc++ from the Nix store" — is gone: `fix-macos-native-linkage.sh`
+	     retargets those loads to /usr/lib before signing and fails the release
+	     if any survive. The only surviving reason was the DEBUG path, which is
+	     in the Debug file. -->
 </dict>
 </plist>

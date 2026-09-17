@@ -73,11 +73,17 @@ targets:
         ENABLE_PREVIEWS: "YES"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Mold/Engine/MoldEngineBridge.h
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
         # Baked in at every build, not just `make release`'s final re-sign, so
         # a Debug build under a real signing identity (see
-        # MOLD_DEV_SIGN_IDENTITY in the Makefile) carries the same
-        # library-validation exemption the test host needs to launch.
-        CODE_SIGN_ENTITLEMENTS: scripts/Mold.entitlements
+        # MOLD_DEV_SIGN_IDENTITY in the Makefile) carries the
+        # library-validation exemption the test host needs to launch -- and
+        # RELEASE does not, because that exemption's only surviving reason is
+        # this Debug path (review F7).
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: scripts/Mold.Debug.entitlements
+        Release:
+          CODE_SIGN_ENTITLEMENTS: scripts/Mold.entitlements
     scheme:
       testTargets:
         - MoldTests

@@ -26,10 +26,15 @@ enum EngineSignals {
     /// guarantee, and it is an ordering rather than a lock.
     static func forwardTerminationToTheApp() {
         guard source == nil else { return }
-        // `DispatchSourceSignal` observes delivery through kqueue and does
-        // NOT change the disposition, so without this the default (or
-        // tokio's) action still runs.
-        signal(SIGTERM, SIG_IGN)
+        // Deliberately NO `signal(SIGTERM, SIG_IGN)`. `SIG_IGN`, unlike a
+        // handler, survives fork+exec, and the engine spawns `ffmpeg`
+        // (`crates/mold-server/src/video_upscale.rs`) — every such child would
+        // then ignore SIGTERM, so a stuck upscale could only be ended with
+        // SIGKILL (review F8). It is not needed: `DispatchSourceSignal`
+        // observes through `EVFILT_SIGNAL`, which fires whatever the
+        // disposition, and the default action is already displaced by
+        // `run_server`'s own tokio handler — which is installed before the
+        // listener binds, and this runs only after `/api/status` answers.
         let installed = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         installed.setEventHandler {
             MainActor.assumeIsolated { NSApplication.shared.terminate(nil) }

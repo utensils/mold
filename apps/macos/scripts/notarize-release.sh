@@ -28,4 +28,9 @@ fi
 # captive portal".
 xcrun stapler staple "$DMG"
 xcrun stapler validate "$DMG"
+
+# What Gatekeeper will actually say. `stapler validate` answers "a ticket is
+# attached", which is close but not the same question, and nothing else in
+# `make release` ever gets a positive assessment (review F10).
+spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
 echo "notarized: $DMG"

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- DEBUG ONLY, and never signed into a release: `project.yml` selects this
+     file for the Debug configuration and `scripts/Mold.entitlements` for
+     Release. Everything here that Release does not have is here because a DEV
+     build loads code a shipped one does not (review F7). -->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<!-- A Debug build loads `Mold.debug.dylib` and the SwiftPM
+	     PackageFrameworks beside the executable, and the test host bundle
+	     crashed on launch the moment dev builds started carrying a real
+	     identity instead of ad-hoc (MOLD_DEV_SIGN_IDENTITY in the Makefile).
+	     Those dylibs are signed with that same identity, so library validation
+	     should now be satisfied and this should be removable — should is not
+	     verified. The check owed, exactly: remove this key, `make build` under
+	     MOLD_DEV_SIGN_IDENTITY, launch, and `make test`. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

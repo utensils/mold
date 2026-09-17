@@ -1891,11 +1891,15 @@
                   # (desktop/src-tauri/tauri.conf.json), so the plain form
                   # SIGTERMed Mold Desktop -- and with it an embedded engine
                   # that might have been mid-render (review 05-M10).
+                  #
+                  # `pkill -f` matches ARGV, so the launch below must be by the
+                  # same absolute path this pattern uses; it was relative, and
+                  # the pattern matched nothing at all (review F6).
                   pkill -f "$PWD/build/Debug/Mold.app/Contents/MacOS/Mold" 2>/dev/null || true
                   # Exec'd rather than `open`ed: LaunchServices starts an app
                   # with a fresh environment, which would drop MOLD_NATIVE_HOSTS
                   # and send stdout somewhere you cannot watch.
-                  exec ./build/Debug/Mold.app/Contents/MacOS/Mold "$@"
+                  exec "$PWD/build/Debug/Mold.app/Contents/MacOS/Mold" "$@"
                 '';
               }
               {
@@ -1905,7 +1909,8 @@
                 command = ''
                   set -euo pipefail
                   cd apps/macos
-                  # By bundle path, so Mold Desktop is left alone (05-M10).
+                  # By bundle path, so Mold Desktop is left alone (05-M10);
+                  # `make uat` launches by this same absolute path (F6).
                   pkill -f "$PWD/build/Debug/Mold.app/Contents/MacOS/Mold" 2>/dev/null || true
                   exec make uat
                 '';
