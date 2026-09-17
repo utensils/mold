@@ -10,8 +10,10 @@ struct ConfigValueField: View {
     let entry: ConfigEntry
     let onSet: (ConfigScalar) async -> Void
 
-    @State private var text = ""
-    @FocusState private var focused: Bool
+    // Internal, not private: `ConfigValueField+Fields` reads these, and
+    // `private` does not cross a file boundary even within one type.
+    @State var text = ""
+    @FocusState var focused: Bool
 
     /// What one row draws, from the entry alone -- pure, the same
     /// `DiscoverRow.resolve` idiom the Models table's State column uses.
@@ -35,7 +37,7 @@ struct ConfigValueField: View {
         return Plan(kind: kind, envVar: entry.envVar, showsReset: entry.canReset)
     }
 
-    private var plan: Plan { Self.resolve(entry) }
+    var plan: Plan { Self.resolve(entry) }
 
     var body: some View {
         Group {
@@ -48,58 +50,6 @@ struct ConfigValueField: View {
         }
         .task(id: entry) { text = entry.editableText }
         .accessibilityLabel(entry.key)
-    }
-
-    private var envOwnedField: some View {
-        HStack(spacing: 4) {
-            Text(entry.editableText.isEmpty ? "Not set" : entry.editableText)
-                .foregroundStyle(.secondary)
-            if let envVar = plan.envVar {
-                Text(envVar).font(.caption).foregroundStyle(.tertiary)
-            }
-        }
-    }
-
-    private var toggleField: some View {
-        Toggle(isOn: toggleBinding) { EmptyView() }
-            .labelsHidden()
-    }
-
-    private var toggleBinding: Binding<Bool> {
-        Binding(
-            get: { entry.value == .bool(true) },
-            set: { newValue in Task { await onSet(.bool(newValue)) } }
-        )
-    }
-
-    private var secretField: some View {
-        HStack(spacing: 6) {
-            SecureField(entry.secretState, text: $text)
-                .focused($focused)
-                .onSubmit { commit(onBlur: false) }
-            Text(entry.secretState).font(.caption).foregroundStyle(.secondary)
-            // The explicit clear an empty Return is no longer allowed to be
-            // (review 05-M12), and the same shape `Shell/AccountsRow.swift`
-            // already offers for a catalog token: present only where there is
-            // something stored to remove.
-            if entry.value != .null {
-                Button("Clear") { Task { await onSet(.null) } }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-            }
-        }
-        .onChange(of: focused) { wasFocused, isFocused in
-            if wasFocused, !isFocused { commit(onBlur: true) }
-        }
-    }
-
-    private var textLikeField: some View {
-        TextField(plan.kind == .unset ? "Not set" : "", text: $text)
-            .focused($focused)
-            .onSubmit { commit(onBlur: false) }
-            .onChange(of: focused) { wasFocused, isFocused in
-                if wasFocused, !isFocused { commit(onBlur: true) }
-            }
     }
 
     /// What one commit sends, or nothing. A non-number reverts rather than
@@ -130,7 +80,7 @@ struct ConfigValueField: View {
         return scalar
     }
 
-    private func commit(onBlur: Bool) {
+    func commit(onBlur: Bool) {
         guard let scalar = Self.commitScalar(text: text, entry: entry, onBlur: onBlur) else {
             text = entry.editableText
             return
