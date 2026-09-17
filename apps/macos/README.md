@@ -10,7 +10,7 @@ generation and the library. No 3-D studio.
 
 | | |
 | --- | --- |
-| **Generate** | Every control comes from the model's own generation profile, so a model added to mold tomorrow gets correct controls with no change here. Stills and clips (length in seconds, snapped to the family's frame grid), source images with strength, ordered reference images, batches, negative prompts. Durable submission, live step progress and denoise preview, then the picture with Save / Copy / Show in Library. Clicking the picture tucks the controls off the bottom edge, leaving a lip that still carries the step marks; clicking it again or pressing Escape brings them back. |
+| **Generate** | Every control comes from the model's own generation profile, so a model added to mold tomorrow gets correct controls with no change here. Stills and clips (length in seconds, snapped to the family's frame grid), source images with strength, ordered reference images, batches, negative prompts. Durable submission, live step progress and denoise preview, then the picture with Save / Copy / Show in Library. Clicking the picture tucks the controls off the bottom edge, leaving a lip that still carries the step marks; clicking it again or pressing Escape brings them back. A wand on the prompt rewrites it or suggests other ways to say it, in place, with the original kept. The inspector holds the format, an upscaler, whether it is saved at all, what to file it under, and the prompts this machine was last asked for. Batch N is N variations of one idea, not N copies. |
 | **Library** | Every machine's prints in one day-sectioned timeline, host-badged. Select with the mouse or the keyboard, open in place, play video, favourite, tag, trash, restore, save, copy, drag to the Finder, and export a clip or mesh into whatever the host will convert it to. Collections are sidebar rows, merged across the fleet by slug, and you file prints by dragging onto one. Search with real tokens (`tag:`, a machine, `is:video`), sort, and set the tile size. Recently Deleted carries each print's own countdown, Put Back and Delete Immediately. Name a print, tag it, file it, and rename or delete a tag across every machine at once. Favourite, tag, filing and renaming are all **undoable** from the Edit menu. Space is Quick Look, and every print can be shared, saved or dragged out. File ▸ Import to adds a picture, clip or mesh from this Mac to a machine. Refreshes by ETag, and follows each machine's live event stream — a print favourited, tagged or trashed somewhere else appears here without a refresh. |
 | **Queue** | Work in flight per machine, with the host's own actionable reason on each row, and retry / pause / resume / cancel. |
 | **Models** | Variants grouped under the model they belong to, each with the manifest's plain-English trade-off, size and install state. Install and repair with live byte progress. |
@@ -19,7 +19,7 @@ generation and the library. No 3-D studio.
 | **This Mac** | mold's own Rust engine, running in-process on Metal. It joins the machine list like any other and is reached over the same HTTP. |
 
 Shortcuts: ⌘1–⌘5 for the destinations, ⌘R to refresh, ⌘↩ to generate, ⌘, for
-Settings, ⌥⌘I for the inspector, ⌃⌘S to hide or show the sidebar, ⌥⌘F to
+Settings, ⌥⌘I for the inspector (on Generate and on Library, each remembering its own), ⌥-click the wand to remix, ⌃⌘S to hide or show the sidebar, ⌥⌘F to
 favourite, ⌘⌫ to trash, ⌘Z to undo, Space for Quick Look, Escape to leave the
 viewer.
 Every shortcut is declared once in `MoldCommands` or `LibraryCommands` and only
@@ -63,14 +63,13 @@ entitlements allow JIT because candle compiles its Metal shaders at runtime.
 
 ## Not built yet
 
-Prompt expansion, LoRAs and identity conditioning, inpainting, the model
-catalog, chain jobs (scripted sequences are CLI and API only by design), the
+LoRAs and identity conditioning, inpainting, the model catalog, chain jobs (scripted sequences are CLI and API only by design), the
 3-D studio, and pairing-based onboarding for keyed hosts.
 
-## Three things about the wire that the docs do not say
+## Four things about the wire that the docs do not say
 
 The first two were found by reading frames off a live host, and both fail
-silently; the third is a rule with two halves.
+silently; the third is a rule with two halves; the fourth is a refusal.
 
 `GET /api/events` opens with `event: authority` and then sends **everything
 else** as the literal `event: event`, with the real tag in the payload's
@@ -89,6 +88,13 @@ A GPU's on/off switch is live only when **two** capability flags agree:
 dispatch. A legacy, observe or maintenance runtime can carry the first without
 the second, and persisting a change it cannot enforce is a lie -- so the card
 reads as read-only there. `DeviceControl.resolve` is that rule, tested.
+
+A batch's size is the **length of `requests`**, never `batch_size`.
+`POST /api/generation-batches` refuses any child whose `batch_size` is not 1,
+so Batch N is N one-output requests sharing a prompt, a filing and a logical
+batch id, differing only by seed -- the same shape the web app sends. And
+per-model defaults are the eight `models.<name>.<field>` config keys and
+nothing more; `model_prefs` has no route on any mold.
 
 ## Running it
 
