@@ -14,6 +14,8 @@ struct DestinationDetail: View {
             ModelsPane()
         case .queue:
             QueuePane()
+        case .machines:
+            MachinesPane(destination: $destination)
         }
     }
 }

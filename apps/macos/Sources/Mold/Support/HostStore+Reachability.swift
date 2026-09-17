@@ -84,4 +84,15 @@ extension HostStore {
     var preferredHost: MoldHost? {
         hosts.first(where: isUp) ?? hosts.first
     }
+
+    /// The machine a remembered `uuidString` names, or somewhere real.
+    ///
+    /// The Machines pane and the sidebar each read the same `@AppStorage` key
+    /// and both resolve it HERE, because a stored id outlives the machine it
+    /// named: removing a machine must land you on another one rather than on
+    /// an empty page that cannot be got out of.
+    func machine(selected stored: String?) -> MoldHost? {
+        guard let stored, let id = UUID(uuidString: stored) else { return preferredHost }
+        return host(id) ?? preferredHost
+    }
 }

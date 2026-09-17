@@ -68,7 +68,7 @@ extension NavigationSplitViewVisibility {
 }
 
 enum Destination: String, Hashable, CaseIterable, Identifiable {
-    case generate, library, queue, models
+    case generate, library, queue, models, machines
 
     var id: Self { self }
 
@@ -90,6 +90,7 @@ enum Destination: String, Hashable, CaseIterable, Identifiable {
         // "Models", never "Styles". A person choosing one needs to know what
         // it does, and the manifest already says so in plain language.
         case .models: "Models"
+        case .machines: "Machines"
         }
     }
 
@@ -99,6 +100,9 @@ enum Destination: String, Hashable, CaseIterable, Identifiable {
         case .library: "photo.on.rectangle.angled"
         case .queue: "list.bullet.indent"
         case .models: "cube"
+        // The glyph the app already means "machine" by -- the Settings empty
+        // state and the library's machine chip both use it.
+        case .machines: "server.rack"
         }
     }
 }

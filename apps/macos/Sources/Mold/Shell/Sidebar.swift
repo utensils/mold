@@ -12,6 +12,10 @@ struct Sidebar: View {
     @Environment(LibraryStore.self) private var library
     @Environment(LibraryNavigation.self) private var navigation
     @Binding var destination: Destination
+    /// The same key `MachinesPane` declares, over the same suite. Two views
+    /// sharing one preference by name stay in sync with no plumbing -- the
+    /// arrangement `destination` itself already uses.
+    @AppStorage("selectedMachine", store: AppStorageSuite.defaults) private var selectedMachine = ""
 
     @State private var renaming: CollectionShelf?
     @State private var isCreating = false
@@ -51,7 +55,9 @@ struct Sidebar: View {
 
             Section("Machines") {
                 ForEach(hosts.hosts) { host in
-                    HostRow(host: host, reachability: hosts.reachability(of: host))
+                    MachineRow(host: host, reachability: hosts.reachability(of: host),
+                               destination: $destination)
+                        .tag(Row.machine(host.id))
                 }
             }
         }
@@ -92,18 +98,29 @@ struct Sidebar: View {
         }
     }
 
-    /// One selection over two kinds of row. Picking a shelf also moves to the
-    /// Library, because choosing what to look at and choosing to look are the
-    /// same act -- making them two clicks would be a bug people report.
+    /// One selection over three kinds of row. Picking a shelf or a machine
+    /// also moves to its pane, because choosing what to look at and choosing
+    /// to look are the same act -- making them two clicks would be a bug
+    /// people report.
     private var selection: Binding<Row?> {
         Binding(
-            get: { destination == .library ? .shelf(navigation.scope) : .destination(destination) },
+            get: {
+                switch destination {
+                case .library: .shelf(navigation.scope)
+                case .machines: hosts.machine(selected: selectedMachine).map { .machine($0.id) }
+                    ?? .destination(.machines)
+                default: .destination(destination)
+                }
+            },
             set: { row in
                 switch row {
                 case let .destination(item): destination = item
                 case let .shelf(scope):
                     navigation.scope = scope
                     destination = .library
+                case let .machine(id):
+                    selectedMachine = id.uuidString
+                    destination = .machines
                 case nil: break
                 }
             }
@@ -113,28 +130,6 @@ struct Sidebar: View {
     private enum Row: Hashable {
         case destination(Destination)
         case shelf(LibraryScope)
-    }
-}
-
-/// One machine in the sidebar. Not selectable: a machine is something the
-/// library is filtered BY, not a place to go, and the filter is a search chip.
-private struct HostRow: View {
-    let host: MoldHost
-    let reachability: HostStore.Reachability
-
-    var body: some View {
-        HStack(spacing: 8) {
-            HostStatusDot(reachability: reachability)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(host.name)
-                if let detail = reachability.summary {
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-        }
-        .help(HostAddress.displayString(for: host.baseURL))
+        case machine(MoldHost.ID)
     }
 }
