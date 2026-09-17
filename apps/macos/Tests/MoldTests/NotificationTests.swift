@@ -138,6 +138,60 @@ struct NotificationTests {
         #expect(notifications.enabled)
     }
 
+    /// **Fails today**: `hydrate(on:)` snapshots `children[host]` BEFORE its
+    /// first `await` and writes it back only at the end, and nothing stops
+    /// two running at once -- `refresh(on:)` has several concurrent callers
+    /// (the SSE coalescer, `QueuePane.load()`, `MachinesPane`'s `.task(id:)`
+    /// and its Refresh). Both then compute `before` from the same snapshot,
+    /// both see the same `held → failed` transition, and both post -- and a
+    /// failure notification is deliberately never coalesced. Pressing ⌘R
+    /// while a `job_state_committed` frame is in flight is enough.
+    @Test func twoOverlappingHydrationsNotifyAboutOneFailureOnce() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        // The only route here that actually suspends, so two callers can
+        // genuinely interleave rather than each running straight through.
+        backend.batchStatusesYields = true
+        backend.queueListing = FakeFixtures.queueListing(entries: [
+            FakeFixtures.queueEntry("job-1", state: "running", batchId: "batch-1", clientBatchId: "client-1"),
+        ])
+        backend.batchListings = [FakeFixtures.batchStatusListing([
+            FakeFixtures.batchStatus(id: "batch-1", children: [FakeFixtures.batchChild("job-1", state: "running")]),
+        ])]
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let queue = QueueStore(hosts: hosts)
+        await queue.refresh(on: plato.id)
+
+        let defaults = scratchDefaults()
+        let center = FakeNotificationCenter()
+        let notifications = MoldNotifications(
+            landedPrints: LandedPrints(hosts: hosts, defaults: defaults), queue: queue, hosts: hosts,
+            library: LibraryStore(hosts: hosts), center: center, defaults: defaults,
+            coalesceDelay: .milliseconds(20), executablePath: insideBundle)
+
+        backend.queueListing = FakeFixtures.queueListing(entries: [
+            FakeFixtures.queueEntry("job-1", state: "failed", batchId: "batch-1", clientBatchId: "client-1"),
+        ])
+        await queue.poll(plato.id)
+        let failed = FakeFixtures.batchStatusListing([
+            FakeFixtures.batchStatus(id: "batch-1", children: [
+                FakeFixtures.batchChild("job-1", state: "failed", error: "GPU crashed"),
+            ]),
+        ])
+        backend.batchListings = [failed, failed]
+
+        async let first: Void = queue.hydrate(on: plato.id)
+        async let second: Void = queue.hydrate(on: plato.id)
+        _ = await (first, second)
+
+        // Both callers still get a fresh read -- serialized, not coalesced.
+        // Three in all: the one the setup's `refresh` made, plus these two.
+        #expect(backend.callCount("batchStatuses") == 3)
+        #expect(center.posted.count == 1)
+        #expect(center.posted.first?.title == "Failed on plato")
+        #expect(notifications.enabled)
+    }
+
     @Test func aRetryableHoldDoesNotNotify() async {
         let plato = machine()
         let backend = fake(for: plato)

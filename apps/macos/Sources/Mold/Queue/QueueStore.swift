@@ -31,6 +31,11 @@ final class QueueStore {
     /// reads and writes it too.
     var coalescers: [MoldHost.ID: Task<Void, Never>] = [:]
 
+    /// The last batch hydration started for each machine, so the next one
+    /// runs AFTER it rather than beside it -- see `QueueStore+Batches
+    /// .hydrate(on:)`. Not `private` for the same cross-file reason.
+    var hydrations: [MoldHost.ID: Task<Void, Never>] = [:]
+
     /// How long a burst of job frames waits before the one re-read it earns
     /// -- a stored value, not a fixed constant, so a test can shrink it
     /// instead of sleeping 250 ms per case.

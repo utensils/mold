@@ -319,6 +319,12 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var retriedAuthorities: [QueueAuthority] = []
     /// Every ids array `batchStatuses` was asked for, in call order.
     nonisolated(unsafe) var batchStatusQueries: [[String]] = []
+    /// Makes `batchStatuses` actually SUSPEND. Every other route here answers
+    /// without one, so an `async` call to it runs straight through and two
+    /// "concurrent" callers never interleave at all -- which is the only way
+    /// to reproduce two overlapping hydrations. Off by default: it changes
+    /// the scheduling of every test that reads a batch.
+    nonisolated(unsafe) var batchStatusesYields = false
     /// Answered per JOB ID, same "absent is unplanted" rule as `queueJobDetails`.
     nonisolated(unsafe) var exportBodies: [String: Data] = [:]
     /// Every admission `admitTransfer` was asked for, in call order -- what a
@@ -360,6 +366,7 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     func batchStatuses(batchIds: [String]) async throws -> BatchStatusListing {
         try record("batchStatuses")
         batchStatusQueries.append(batchIds)
+        if batchStatusesYields { await Task.yield() }
         guard !batchListings.isEmpty else { throw notPlanted() }
         return batchListings.removeFirst()
     }

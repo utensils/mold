@@ -15,7 +15,35 @@ extension QueueStore {
     /// Reads every batch this machine's current listing mentions, merges each
     /// child against what was already known, and drops a batch the machine
     /// answers `missing` for rather than keeping a stale copy.
+    ///
+    /// ONE at a time per machine. `refresh(on:)` has several concurrent
+    /// callers -- the SSE coalescer, `QueuePane.load()`, `MachinesPane`'s
+    /// `.task(id:)` and its Refresh -- and the body below reads
+    /// `children[host]` before its first `await` and writes it back only at
+    /// the end. Two overlapping runs therefore both computed `before` from
+    /// the same snapshot, both saw the same `held → failed` transition, and
+    /// both called `onOutcome`: two "Failed on plato" banners for one job,
+    /// because a failure notification is deliberately never coalesced
+    /// (`MoldNotifications.swift:123-127`). Pressing ⌘R while a
+    /// `job_state_committed` frame was in flight was enough.
+    ///
+    /// Serialized rather than coalesced: the second caller wants a FRESH
+    /// read, it just must not take its `before` from a world the first one
+    /// has already moved on from.
     func hydrate(on host: MoldHost.ID) async {
+        let previous = hydrations[host]
+        // No `await` between the read above and the write below, so on the
+        // main actor this claim is atomic.
+        let mine = Task { [weak self] in
+            await previous?.value
+            await self?.hydrateNow(on: host)
+        }
+        hydrations[host] = mine
+        await mine.value
+        if hydrations[host] == mine { hydrations[host] = nil }
+    }
+
+    private func hydrateNow(on host: MoldHost.ID) async {
         guard !isSeeded, let client = hosts.backend(for: host) else { return }
         let ids = Array(Set(entries(on: host).compactMap(\.batchId)))
         guard !ids.isEmpty else {
