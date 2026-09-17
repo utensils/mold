@@ -21,6 +21,9 @@ public protocol MoldGalleryBackend: Sendable {
     /// Converts on the machine that holds the print, so the app needs no
     /// decoder for every container mold can write.
     func export(_ filename: String, format: String) async throws -> Data
+    /// The same route carrying the optional controls a mesh export takes --
+    /// the geometry knobs, or a turntable's frames and fps, never both.
+    func export(_ filename: String, request: MeshExportRequest) async throws -> Data
     /// A URL a player can open directly, ticketed where the host needs it.
     /// Throws rather than falling back to an unticketed URL: on a keyed host
     /// a failed ticket means the player would 401, not play silently wrong.

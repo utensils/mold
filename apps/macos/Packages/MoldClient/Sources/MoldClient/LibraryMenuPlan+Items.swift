@@ -41,12 +41,25 @@ public extension LibraryMenuPlan {
             Item(kind: .copy, title: "Copy"),
             Item(kind: .save, title: saveTitle),
         ]
-        if count == 1 {
-            items.append(Item(title: "Export…", children: exportFormats.map {
-                Item(kind: .export(format: $0), title: $0.uppercased())
-            }))
-        }
+        if count == 1 { items.append(Item(title: "Export…", children: exportItems)) }
         return items + [.separator, Item(kind: .trash, title: "Move to Trash", isDestructive: true)]
+    }
+
+    /// What Export… holds. A clip's containers are one entry each; a mesh's
+    /// come from its host's advertised list, with the animated ones collapsed
+    /// into the ONE entry that opens the turntable sheet. An empty submenu is
+    /// dropped by `rendered`, so a host advertising nothing leaves no row.
+    private var exportItems: [Item] {
+        guard let meshExports else {
+            return exportFormats.map { Item(kind: .export(format: $0), title: $0.uppercased()) }
+        }
+        var items = meshExports.files.map {
+            Item(kind: .export(format: $0), title: $0.uppercased())
+        }
+        if !meshExports.animations.isEmpty {
+            items.append(Item(kind: .exportTurntable, title: "Turntable…"))
+        }
+        return items
     }
 
     /// Recently Deleted. `Empty Trash…` belongs here too -- it was on the

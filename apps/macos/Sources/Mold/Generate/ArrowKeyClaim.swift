@@ -16,9 +16,12 @@ enum ArrowKeyClaim {
     /// Real AppKit types rather than class-name matching, so a test builds the
     /// actual controls. An `NSTextField` being edited hands off to its field
     /// editor (an `NSTextView`), so both are named.
+    /// `MeshMetalView` joins them: a focused 3-D view ORBITS with the arrows,
+    /// and the Library viewer's previous/next are window-scoped equivalents
+    /// that would otherwise step to the next print mid-drag (review F1).
     static func claims(_ responder: NSResponder?) -> Bool {
         switch responder {
-        case is NSTextView, is NSTextField, is NSSlider, is NSStepper: true
+        case is NSTextView, is NSTextField, is NSSlider, is NSStepper, is MeshMetalView: true
         default: false
         }
     }

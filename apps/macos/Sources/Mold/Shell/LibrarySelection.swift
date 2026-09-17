@@ -25,6 +25,9 @@ struct LibrarySelection: Equatable {
     /// What one selected print can be converted into, and how much is in the
     /// trash -- both of which the plan needs and the menu bar cannot see.
     let exportFormats: [String]
+    /// A MESH's containers, from the holding host's advertised list. Nil for
+    /// anything else, which keeps `exportFormats` the clip's answer.
+    let meshExports: MeshExport.Split?
     let trashCount: Int
     let name: String?
     let canReuse: Bool
@@ -47,8 +50,8 @@ struct LibrarySelection: Equatable {
     var plan: LibraryMenuPlan {
         LibraryMenuPlan(scope: scope.menuKind, count: count, allFavorite: allFavorite,
                         name: name, shelves: shelves, enclosingShelf: enclosingShelf,
-                        exportFormats: exportFormats, canReuse: canReuse,
-                        trashCount: trashCount)
+                        exportFormats: exportFormats, meshExports: meshExports,
+                        canReuse: canReuse, trashCount: trashCount)
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -56,7 +59,8 @@ struct LibrarySelection: Equatable {
             && lhs.scope == rhs.scope && lhs.shelves == rhs.shelves
             && lhs.enclosingShelf == rhs.enclosingShelf
             && lhs.isEditingText == rhs.isEditingText
-            && lhs.exportFormats == rhs.exportFormats && lhs.trashCount == rhs.trashCount
+            && lhs.exportFormats == rhs.exportFormats
+            && lhs.meshExports == rhs.meshExports && lhs.trashCount == rhs.trashCount
             && lhs.name == rhs.name && lhs.canReuse == rhs.canReuse
     }
 }

@@ -43,6 +43,8 @@ struct LibraryMenu {
             shelves: shelves,
             enclosingShelf: enclosingShelf,
             exportFormats: targets.count == 1 ? actions.exportFormats(for: targets[0]) : [],
+            meshExports: targets.count == 1 && targets[0].print.isMesh
+                ? actions.meshExports(for: targets[0]) : nil,
             canReuse: actions.reuse != nil && open != nil,
             trashCount: trashCount
         )

@@ -27,7 +27,9 @@ extension LibraryActions {
         case .save:
             save(targets)
         case let .export(format):
-            if let entry = targets.first { export(entry, as: format) }
+            if let entry = targets.first { requestExport(entry, as: format) }
+        case .exportTurntable:
+            if let entry = targets.first { requestTurntable(entry) }
         case .trash:
             moveToTrash(targets)
         case .putBack:

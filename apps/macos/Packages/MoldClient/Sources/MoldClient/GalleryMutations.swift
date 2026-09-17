@@ -104,23 +104,20 @@ public struct TagCount: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
-/// What a host will convert a stored print into.
+/// What a host will convert a stored CLIP into.
 ///
-/// One flat list covering both kinds: `gif`/`apng`/`webp` are what a clip
-/// becomes, and `obj`/`stl`/`ply`/`zip` are what a mesh becomes — a mesh can
-/// also become an animated turntable, which is why the animated formats are
-/// not video-only.
+/// `GET /api/gallery/export-options` answers one flat list covering both
+/// kinds, and the animated containers are the clip's half of it.
+///
+/// There is deliberately no mesh view here any more. A mesh's containers are
+/// `capabilities.mesh.export_formats` — the host's own advertised list, split
+/// by `MeshExport.split` — and the client set this used to filter through
+/// (`obj`/`stl`/`ply`/`zip`) could neither see a container a host added nor
+/// tell a turntable's options from a transcode's (review 03-L1).
 public struct ExportOptions: Codable, Hashable, Sendable {
     public let formats: [String]
 
-    private static let animated: Set<String> = ["gif", "apng", "webp"]
-    private static let geometry: Set<String> = ["obj", "stl", "ply", "zip"]
-
-    /// What a clip can be turned into.
-    public var forVideo: [String] { formats.filter(Self.animated.contains) }
-
-    /// What a mesh can be turned into: geometry files, plus a turntable.
-    public var forMesh: [String] {
-        formats.filter { Self.geometry.contains($0) || Self.animated.contains($0) }
-    }
+    /// What a clip can be turned into: the animated containers only, which is
+    /// a fact about clips rather than about one host.
+    public var forVideo: [String] { formats.filter(MeshExport.animated.contains) }
 }

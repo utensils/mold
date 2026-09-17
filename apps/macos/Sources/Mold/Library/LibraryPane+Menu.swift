@@ -21,6 +21,8 @@ extension LibraryPane {
             enclosingShelf: enclosingShelf,
             isEditingText: isEditingText,
             exportFormats: entries.count == 1 ? actions.exportFormats(for: entries[0]) : [],
+            meshExports: entries.count == 1 && entries[0].print.isMesh
+                ? actions.meshExports(for: entries[0]) : nil,
             trashCount: library.trashed.count,
             name: entries.count == 1 ? entries[0].print.displayName : nil,
             canReuse: entries.count == 1,

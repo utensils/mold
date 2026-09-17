@@ -24,6 +24,11 @@ struct LibraryActions {
     /// it. Declared in the menu plan so both menus offer the three, and
     /// answered by whoever owns the sheet and the confirm.
     var collectionAction: ((LibraryAction) -> Void)?
+    /// Set by whoever owns the export sheet. A mesh export carries controls
+    /// the host advertised -- a print size, an up axis, a turntable's frames
+    /// -- so the ones that have any ASK before converting. Absent in contexts
+    /// with nowhere to put a sheet, where the host's own defaults are used.
+    var meshExport: ((MeshExportPrompt) -> Void)?
 
     /// Moved to `Shell/Destruction.swift` (M5 S5, decision 12) so the Models
     /// pane can raise the same confirm without depending on a Library type.

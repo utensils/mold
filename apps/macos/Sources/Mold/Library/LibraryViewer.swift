@@ -27,6 +27,11 @@ struct LibraryViewer: View {
     /// fields through `editingText`.
     @Environment(\.isSearching) private var isSearching
     @FocusedValue(\.editingText) private var editingText: Bool?
+    /// And so does a focused 3-D view, which ORBITS with the arrows and which
+    /// only AppKit can answer for (`ArrowKeyClaim`). Re-read as the key window
+    /// updates, and written only when it CHANGES, so the viewer's body is not
+    /// churned on every window notification.
+    @State private var responderClaimsArrows = false
 
     var body: some View {
         ZStack {
@@ -51,6 +56,10 @@ struct LibraryViewer: View {
         .background(.background)
         .overlay(alignment: .top) { bar }
         .task(id: entry.id) { await load() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didUpdateNotification)) { _ in
+            let claimed = ArrowKeyClaim.isClaimedNow
+            if claimed != responderClaimsArrows { responderClaimsArrows = claimed }
+        }
     }
 
     /// Video plays in place rather than as a poster you have to export to see.
@@ -116,8 +125,11 @@ struct LibraryViewer: View {
     /// typing, so you leave it before Escape means "back" again.
     private var isEditing: Bool { isSearching || editingText == true }
 
+    /// Escape still means "back" while a 3-D view has focus -- it is the arrows
+    /// the mesh claims, and a viewer you cannot leave would be worse than one
+    /// whose arrows do two things.
     private func stepping(_ key: KeyEquivalent) -> KeyboardShortcut? {
-        isEditing ? nil : KeyboardShortcut(key, modifiers: [])
+        isEditing || responderClaimsArrows ? nil : KeyboardShortcut(key, modifiers: [])
     }
 
     private func load() async {

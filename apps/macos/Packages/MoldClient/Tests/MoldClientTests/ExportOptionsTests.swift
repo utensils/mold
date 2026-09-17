@@ -4,20 +4,20 @@ import Testing
 @testable import MoldClient
 
 // `GET /api/gallery/export-options` answers ONE flat list covering both
-// kinds, and the two views of it deliberately OVERLAP: a mesh can be exported
-// as an animated turntable, so `forMesh` is a union and `forVideo` is
-// animated-only. Nothing pinned that, and the two sets are one word apart.
+// kinds, and the CLIP's half of it is the animated containers. The mesh view
+// this type used to carry is gone: a mesh's containers are
+// `capabilities.mesh.export_formats`, the host's own advertised list, so a
+// client set could no longer hide a container a host added (review 03-L1).
 
 private func options(_ formats: [String]) throws -> ExportOptions {
     let json = try JSONSerialization.data(withJSONObject: ["formats": formats])
     return try MoldJSON.decoder.decode(ExportOptions.self, from: json)
 }
 
-/// One mixed list, read both ways.
-@Test func theTwoViewsSplitOneListAndOverlapOnTheAnimatedFormats() throws {
+/// One mixed list; a clip takes the animated half of it.
+@Test func aClipTakesTheAnimatedHalfOfTheHostsList() throws {
     let all = try options(["gif", "apng", "webp", "obj", "stl", "ply", "zip"])
     #expect(all.forVideo == ["gif", "apng", "webp"])
-    #expect(all.forMesh == ["gif", "apng", "webp", "obj", "stl", "ply", "zip"])
 }
 
 /// A clip is never offered a geometry file, and the order the host listed
@@ -25,16 +25,12 @@ private func options(_ formats: [String]) throws -> ExportOptions {
 @Test func aClipIsNeverOfferedGeometry() throws {
     let host = try options(["stl", "webp", "obj", "gif"])
     #expect(host.forVideo == ["webp", "gif"])
-    #expect(host.forMesh == ["stl", "webp", "obj", "gif"])
 }
 
-/// `glb` is the STORED form, not something a print is converted INTO, so it
-/// is in neither view even when the host lists it first
-/// (`capabilities.mesh.export_formats` puts it there so a client can see what
-/// it holds).
+/// `glb` is the STORED form, not something a print is converted INTO, so a
+/// clip is never offered it either.
 @Test func theStoredFormIsNotAnExport() throws {
     let host = try options(["glb", "obj", "gif"])
-    #expect(!host.forMesh.contains("glb"))
     #expect(!host.forVideo.contains("glb"))
 }
 
@@ -43,7 +39,6 @@ private func options(_ formats: [String]) throws -> ExportOptions {
 @Test func aFormatThisBuildDoesNotKnowIsSimplyNotOffered() throws {
     let host = try options(["gif", "avif", "obj"])
     #expect(host.forVideo == ["gif"])
-    #expect(host.forMesh == ["gif", "obj"])
 }
 
 /// An older host that answers nothing offers nothing, rather than a default
@@ -51,5 +46,4 @@ private func options(_ formats: [String]) throws -> ExportOptions {
 @Test func aHostWithNoExportsOffersNone() throws {
     let host = try options([])
     #expect(host.forVideo.isEmpty)
-    #expect(host.forMesh.isEmpty)
 }

@@ -62,6 +62,8 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     nonisolated(unsafe) var serverStatus: ServerStatus?
     nonisolated(unsafe) var capabilityBlock: Capabilities?
     nonisolated(unsafe) var exportBlock: ExportOptions?
+    /// Every mesh export body this double was asked for, in order.
+    nonisolated(unsafe) var exportRequests: [MeshExportRequest] = []
     nonisolated(unsafe) var downloadTicket: DownloadTicket?
     /// Every model name `startDownload` was asked to fetch, in call order --
     /// what a licence retry actually resent.
@@ -660,6 +662,12 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
         return exportBlock
     }
     func export(_ filename: String, format: String) async throws -> Data {
+        try record("export"); throw notPlanted()
+    }
+    /// The body is recorded, not dropped: what a mesh export ASKS for is the
+    /// thing worth asserting.
+    func export(_ filename: String, request: MeshExportRequest) async throws -> Data {
+        exportRequests.append(request)
         try record("export"); throw notPlanted()
     }
     func playableURL(for filename: String) async throws -> URL {

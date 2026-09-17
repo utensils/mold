@@ -56,15 +56,24 @@ extension RunCanvas {
                     player.replaceCurrentItem(with: nil)
                 }
                 .modifier(OptionalResultMenu(result: selectedResult(in: outcome), actions: actions))
-        case .mesh:
-            // SEAM for Wave 3 · F1: the interactive `MeshView` replaces this
-            // whole arm. Until then the canvas names what it made and the bar
-            // below still saves it, copies it and opens it in the Library.
-            ContentUnavailableView {
-                Label("A 3-D model", systemImage: "cube.transparent")
-            } description: {
-                Text("Open it in the Library to look at it, or export it from there.")
-            }
+        case let .mesh(filename):
+            // The same `MeshCanvas` the Library viewer mounts, so a mesh looks
+            // the same wherever it is drawn and its home view is the poster
+            // the gallery tile will show.
+            MeshCanvas(
+                printID: filename,
+                fetch: { try await meshBytes(filename) },
+                poster: nil,
+                alt: "The 3-D object you just made",
+                offersAutoRotate: true,
+                // No Export here on purpose: a mesh export asks for controls
+                // through a sheet this pane does not own, and Show in Library
+                // below is one click from the menu that does. An offer this
+                // surface cannot honour is worse than no offer.
+                exports: MeshExport.Split(files: [], animations: []),
+                canSave: true,
+                canShowInLibrary: true,
+                perform: { perform($0, on: selectedResult(in: outcome)) })
         case let .unavailable(sentence):
             ContentUnavailableView("That didn't arrive", systemImage: "exclamationmark.triangle",
                                    description: Text(sentence))
@@ -89,8 +98,7 @@ extension RunCanvas {
         case .clip:
             await playClip(filename, backend: backend, remintsLeft: 1)
         case .mesh:
-            result = .mesh
-            onResultShown()
+            show(.mesh(filename: filename))
         case .picture:
             do {
                 let data = try await backend.media(filename, trashed: false)
@@ -127,6 +135,8 @@ enum RunResultMedia {
     case loading
     case picture(NSImage)
     case clip(AVPlayer)
-    case mesh
+    /// Drawn by `MeshCanvas`, which fetches the GLB itself: a mesh is bytes
+    /// this pane never has to hold, unlike a decoded picture.
+    case mesh(filename: String)
     case unavailable(String)
 }

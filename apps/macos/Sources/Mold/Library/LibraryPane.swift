@@ -42,12 +42,16 @@ struct LibraryPane: View {
     /// The shelf being renamed from the MENU BAR. The sidebar row has its own;
     /// both open the same sheet.
     @State var renamingShelf: CollectionShelf?
+    /// The mesh export waiting on its controls. Both doors -- the tile's menu
+    /// and the viewer's -- open this one sheet.
+    @State private var meshExport: MeshExportPrompt?
 
     var actions: LibraryActions {
         LibraryActions(hosts: hosts, library: library, reuse: reuse,
                        confirmDestruction: { pendingDestruction = $0 },
                        materializer: materializer,
-                       collectionAction: { performCollection($0) })
+                       collectionAction: { performCollection($0) },
+                       meshExport: { meshExport = $0 })
     }
 
     // Three stages rather than one chain: what is on screen, what dresses it,
@@ -72,6 +76,11 @@ struct LibraryPane: View {
             })
             .destructionDialog($pendingDestruction)
             .sheet(item: $renamingShelf) { ShelfNameSheet(shelf: $0) }
+            .sheet(item: $meshExport) { prompt in
+                MeshExportSheet(prompt: prompt) { request in
+                    actions.export(prompt.entry, request: request)
+                }
+            }
     }
 
     /// The pane, plugged in: what it does on appearing, and what it re-does

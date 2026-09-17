@@ -27,6 +27,10 @@ public enum LibraryAction: Hashable, Sendable {
     case copy
     case save
     case export(format: String)
+    /// A mesh's animated containers share ONE entry, which opens the sheet
+    /// that carries their frames, rate and size -- a turntable is a RENDER of
+    /// the mesh, not a transcode, and has options a transcode does not.
+    case exportTurntable
     case trash
     case putBack
     case deleteForever
@@ -44,14 +48,21 @@ public struct LibraryMenuPlan: Sendable {
     public let name: String?
     public let shelves: [CollectionShelf]
     public let enclosingShelf: CollectionShelf?
+    /// A CLIP's containers, one menu entry each.
     public let exportFormats: [String]
+    /// A MESH's containers, from the holding host's own advertised list. The
+    /// geometry files are one entry each and the animated ones collapse into
+    /// a single Turntable… that opens the sheet.
+    public let meshExports: MeshExport.Split?
     public let canReuse: Bool
     public let trashCount: Int
 
     public init(scope: LibraryScopeKind, count: Int, allFavorite: Bool = false,
                 name: String? = nil, shelves: [CollectionShelf] = [],
                 enclosingShelf: CollectionShelf? = nil, exportFormats: [String] = [],
+                meshExports: MeshExport.Split? = nil,
                 canReuse: Bool = false, trashCount: Int = 0) {
+        self.meshExports = meshExports
         self.scope = scope
         self.count = count
         self.allFavorite = allFavorite

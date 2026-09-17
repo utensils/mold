@@ -52,10 +52,19 @@ public extension HTTPBackend {
     /// The conversion happens on the machine that holds the print, so the app
     /// never needs a decoder for every container mold can write.
     func export(_ filename: String, format: String) async throws -> Data {
+        try await export(filename, request: .geometry(format: format, nil))
+    }
+
+    /// The same route with the optional controls filled in.
+    ///
+    /// `MeshExportRequest` carries at most ONE of the two groups, because the
+    /// server refuses geometry keys on a turntable and turntable keys on a
+    /// geometry container -- so a body built here can never be one it rejects.
+    func export(_ filename: String, request body: MeshExportRequest) async throws -> Data {
         var request = self.request("/api/gallery/export/\(escaped(filename))")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["format": format])
+        request.httpBody = try MoldJSON.encoder.encode(body)
         request.timeoutInterval = 300
         return try await bytes(for: request)
     }
