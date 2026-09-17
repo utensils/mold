@@ -64,7 +64,15 @@ public enum MeshExport {
     /// this only names the copy that leaves the app. The advertised list is
     /// the host's, so this deliberately does not validate the format.
     public static func filename(_ filename: String, format: String) -> String {
-        let stem = (filename as NSString).deletingPathExtension
+        // `filename.replace(/\.[^.]+$/, "")`, and NOT
+        // `NSString.deletingPathExtension`, which keeps a dot-file's whole name
+        // -- so `.glb` would have exported as `.glb.stl` rather than falling
+        // back to the stem.
+        var stem = filename
+        if let dot = filename.lastIndex(of: "."), filename.index(after: dot) < filename.endIndex,
+           !filename[filename.index(after: dot)...].contains(".") {
+            stem = String(filename[..<dot])
+        }
         return "\(stem.isEmpty ? "mold-mesh" : stem).\(normalise(format))"
     }
 
