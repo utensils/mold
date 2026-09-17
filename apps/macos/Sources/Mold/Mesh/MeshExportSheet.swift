@@ -19,6 +19,16 @@ struct MeshExportPrompt: Identifiable {
     /// name what the file will measure.
     let bounds: MeshBounds?
 
+    /// Whether "as stored" is a choice AT ALL for this container.
+    ///
+    /// The wire has no way to ask a size-defaulting format to skip scaling --
+    /// an absent `size_mm` is read as the host's OWN default, which is 100 mm
+    /// for STL and PLY (`validation.rs:2666`). So it is offered exactly where
+    /// that default is already null, which is the reference's own rule
+    /// (`ui/components/MeshGeometryFields.vue:64`). Offering it anywhere else
+    /// labels a 100 mm file "as stored".
+    var offersAsStored: Bool { geometry?.sizeMm == nil }
+
     init(entry: LibraryEntry, format: String, geometry: MeshExportGeometry?,
          capabilities: MeshExportGeometryCapabilities?, bounds: MeshBounds? = nil) {
         id = "\(entry.id.host)#\(entry.id.filename)#\(format)"
@@ -45,6 +55,8 @@ struct MeshExportSheet: View {
         let resolved = prompt.geometry
             ?? MeshExportGeometry(sizeMm: nil, upAxis: .y, origin: .floor)
         _geometry = State(initialValue: resolved)
+        // Forced on wherever "as stored" is not a choice, so the toggle can
+        // never leave `size_mm` absent on a format whose default is a size.
         _scaled = State(initialValue: resolved.sizeMm != nil)
     }
 
@@ -84,7 +96,7 @@ struct MeshExportSheet: View {
         var resolved = geometry
         // "As stored" is the ABSENT key, and it is only ever offered where the
         // host's own default for this container is already unscaled.
-        if !scaled { resolved.sizeMm = nil }
+        if !scaled, prompt.offersAsStored { resolved.sizeMm = nil }
         return .geometry(format: prompt.format,
                          prompt.capabilities == nil ? nil : resolved)
     }

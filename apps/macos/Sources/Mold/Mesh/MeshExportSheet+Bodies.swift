@@ -8,8 +8,13 @@ extension MeshExportSheet {
 
     @ViewBuilder var geometryBody: some View {
         if let capabilities = prompt.capabilities {
-            Toggle("Resize for printing", isOn: $scaled)
-            if scaled {
+            // Only where the host's own default for this format is unscaled:
+            // everywhere else an absent `size_mm` means ITS default, not
+            // "leave it alone", and the toggle would be a lie.
+            if prompt.offersAsStored {
+                Toggle("Resize for printing", isOn: $scaled)
+            }
+            if scaled || !prompt.offersAsStored {
                 HStack {
                     Text("Longest side")
                     Slider(value: Binding(
@@ -47,7 +52,7 @@ extension MeshExportSheet {
     /// What `resolved` would post, so the sentence and the request agree.
     var resolved: MeshExportGeometry {
         var value = geometry
-        if !scaled { value.sizeMm = nil }
+        if !scaled, prompt.offersAsStored { value.sizeMm = nil }
         return value
     }
 

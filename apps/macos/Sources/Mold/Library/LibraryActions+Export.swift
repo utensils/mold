@@ -50,6 +50,14 @@ extension LibraryActions {
     /// advertised knobs to ask about. Everything else converts straight away,
     /// which is what a clip's containers have always done.
     func requestExport(_ entry: LibraryEntry, as format: String, bounds: MeshBounds? = nil) {
+        // A CLIP's only containers are `gif`/`apng`/`webp`, so the animated
+        // test ALONE sent every video export through the turntable sheet --
+        // which posts `transparent`, and the server refuses that outright for
+        // anything but a mesh turntable. The kind is half the question.
+        guard entry.print.isMesh else {
+            export(entry, as: format)
+            return
+        }
         let animated = MeshExport.isAnimated(format)
         let geometry = animated ? nil : meshGeometry(for: entry, format: format)
         guard let meshExport, animated || geometry != nil else {
