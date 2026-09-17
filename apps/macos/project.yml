@@ -23,7 +23,9 @@ settings:
     # Tailscale, and holds a models directory the user points at.
     ENABLE_APP_SANDBOX: "NO"
     # Ad-hoc, so `make build` works on a machine with no signing identity.
-    # `make release` re-signs properly.
+    # `make release` re-signs properly. The Makefile overrides this with
+    # MOLD_DEV_SIGN_IDENTITY when this Mac has a real identity, so a dev
+    # build keeps one identity across rebuilds and TCC grants persist.
     CODE_SIGN_IDENTITY: "-"
     CODE_SIGNING_REQUIRED: "NO"
     CODE_SIGN_STYLE: Manual
@@ -63,6 +65,11 @@ targets:
         ENABLE_PREVIEWS: "YES"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Mold/Engine/MoldEngineBridge.h
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Baked in at every build, not just `make release`'s final re-sign, so
+        # a Debug build under a real signing identity (see
+        # MOLD_DEV_SIGN_IDENTITY in the Makefile) carries the same
+        # library-validation exemption the test host needs to launch.
+        CODE_SIGN_ENTITLEMENTS: scripts/Mold.entitlements
     scheme:
       testTargets:
         - MoldTests

@@ -18,5 +18,12 @@
 	<true/>
 	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
 	<true/>
+	<!-- The embedded engine links libc++ from the Nix store, which carries no
+	     Team ID the hardened runtime recognizes as ours. With library
+	     validation on, a real (non-ad-hoc) signature refuses to load it --
+	     the test host bundle crashes on launch the moment dev builds carry a
+	     real identity instead of ad-hoc. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
 </dict>
 </plist>

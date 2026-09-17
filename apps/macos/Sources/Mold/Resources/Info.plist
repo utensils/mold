@@ -39,6 +39,10 @@
 	     for local network permission on first connection. -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Mold connects to mold servers on your local network.</string>
+	<!-- The mold home can live on an external drive, which macOS treats as a
+	     removable volume and gates behind its own permission. -->
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Mold keeps its models, prints and settings in your mold home, which is on this volume.</string>
 	<!-- A print dragged inside Mold travels as its identity, so a drop onto a
 	     collection accepts prints and not every JSON file on the disk. -->
 	<key>UTExportedTypeDeclarations</key>

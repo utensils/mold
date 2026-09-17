@@ -10,8 +10,19 @@ SCHEME   := Mold
 CONFIG   ?= Debug
 BUILD    := $(CURDIR)/build
 APP      := $(BUILD)/$(CONFIG)/Mold.app
+
+# Dev builds are signed with a real identity when this Mac has one, so the
+# app keeps ONE identity across rebuilds and macOS remembers its answers --
+# ad-hoc signing made every build a new app to TCC, and the "removable
+# volume" prompt came back on every launch. Falls back to ad-hoc where there
+# is no identity, so `make build` still works on a machine without one.
+MOLD_DEV_SIGN_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null \
+  | grep -oE '"(Developer ID Application: [^"]+|Apple Development: [^"]+)"' \
+  | sort -t'"' -k2,2r | head -1 | tr -d '"')
+SIGN := CODE_SIGN_IDENTITY="$(or $(MOLD_DEV_SIGN_IDENTITY),-)"
+
 XCB      := xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) \
-            -derivedDataPath $(BUILD)/DerivedData CONFIGURATION_BUILD_DIR=$(BUILD)/$(CONFIG)
+            -derivedDataPath $(BUILD)/DerivedData CONFIGURATION_BUILD_DIR=$(BUILD)/$(CONFIG) $(SIGN)
 
 .PHONY: help gen build run uat test lint lint-layers lint-color lint-size lint-type-size clean \
         engine engine-clean engine-config signed dmg notarize release
