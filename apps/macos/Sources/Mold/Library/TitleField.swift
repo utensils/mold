@@ -29,6 +29,13 @@ struct TitleField: View {
             .onChange(of: entry.id) { _, _ in draft = entry.print.title ?? "" }
             .onAppear { draft = entry.print.title ?? "" }
             .accessibilityLabel("Title")
+            // A different print is a different field, and SwiftUI defines no
+            // order between the `onChange(of: editing)` that commits on focus
+            // loss and the `onChange(of: entry.id)` that resets the draft --
+            // so a selection changing while the field is focused could commit
+            // one print's draft onto the next. A fresh instance per print
+            // removes the question rather than reasoning about the ordering.
+            .id(entry.id)
     }
 
     private func commit() {

@@ -103,10 +103,13 @@ struct ShelfNameSheet: View {
         Task {
             if let shelf {
                 await library.renameShelf(shelf, to: named)
-            } else if let first = hosts.hosts.first {
+            } else if let machine = hosts.hosts.first(where: hosts.isUp) ?? hosts.hosts.first {
                 // Made on one machine; the others get their copy the first
-                // time something of theirs is filed into it.
-                await library.createShelf(named: named, on: first.id)
+                // time something of theirs is filed into it. So it may as well
+                // be one that is ANSWERING: the first in the list being down
+                // used to fail the whole thing and report, when any other
+                // machine would have done just as well.
+                await library.createShelf(named: named, on: machine.id)
             }
         }
         dismiss()
