@@ -8,9 +8,21 @@ import AppKit
 /// app used the wait for nothing.
 @MainActor
 final class MoldAppDelegate: NSObject, NSApplicationDelegate {
-    /// Set by the composition root, which owns both of these.
+    /// Set by the composition root, which owns all three.
     var engine: MoldEngine?
     var materializer: PrintMaterializer?
+    var landedPrints: LandedPrints?
+
+    /// Mirrors `NSApp.isActive` onto `LandedPrints`, which is what decides
+    /// whether a `gallery_added` frame counts and clears the badge on the
+    /// transition back to `true` (decision 21).
+    func applicationDidBecomeActive(_ notification: Notification) {
+        landedPrints?.isActive = true
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        landedPrints?.isActive = false
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // The cache is disposable and local, so it goes first and without

@@ -1,3 +1,4 @@
+import AppKit
 import MoldClient
 import SwiftUI
 
@@ -26,6 +27,7 @@ struct MoldApp: App {
     @State private var promptHistory: PromptHistoryStore
     @State private var modelDefaults: ModelDefaultsStore
     @State private var adapters: LoraStore
+    @State private var landedPrints: LandedPrints
     @State private var engine = MoldEngine()
     @State private var destination = Destination.launch
     @NSApplicationDelegateAdaptor(MoldAppDelegate.self) private var delegate
@@ -51,6 +53,7 @@ struct MoldApp: App {
         _generate = State(initialValue: GenerateController(hosts: hosts, defaults: modelDefaults))
         _machines = State(initialValue: MachineStore(hosts: hosts))
         _adapters = State(initialValue: LoraStore(hosts: hosts))
+        _landedPrints = State(initialValue: LandedPrints(hosts: hosts))
     }
 
     var body: some Scene {
@@ -63,6 +66,14 @@ struct MoldApp: App {
                 .task {
                     delegate.engine = engine
                     delegate.materializer = materializer
+                    delegate.landedPrints = landedPrints
+                }
+                // The Dock badge itself: `NSApp.dockTile` is the one AppKit
+                // call in this file that isn't a backend, and `LandedPrints`
+                // never touches AppKit so it stays testable with no app
+                // bundle at all.
+                .onChange(of: landedPrints.count) { _, count in
+                    NSApp.dockTile.badgeLabel = count > 0 ? "\(count)" : nil
                 }
                 .environment(hosts)
                 .environment(library)
@@ -80,6 +91,7 @@ struct MoldApp: App {
                 .environment(promptHistory)
                 .environment(modelDefaults)
                 .environment(adapters)
+                .environment(landedPrints)
                 .environment(engine)
                 // Below this the split view stops being a split view and
                 // starts being two cramped columns.

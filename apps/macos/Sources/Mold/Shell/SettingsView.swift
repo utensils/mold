@@ -5,6 +5,8 @@ import SwiftUI
 struct SettingsView: View {
     var body: some View {
         TabView {
+            GeneralSettings()
+                .tabItem { Label("General", systemImage: "gearshape") }
             MachinesSettings()
                 .tabItem { Label("Machines", systemImage: "server.rack") }
             AccountsSettings()
