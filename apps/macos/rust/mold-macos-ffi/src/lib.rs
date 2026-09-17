@@ -21,6 +21,29 @@ use std::time::Duration;
 /// The app owns the process, so an overrun must not wedge quitting.
 const HTTP_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
+/// The origin the embedded engine allows, which is deliberately one no browser
+/// page can ever present.
+///
+/// `build_cors_layer` (`crates/mold-server/src/lib.rs`) falls back to
+/// `CorsLayer::permissive()` -- `Access-Control-Allow-Origin: *` -- for an
+/// empty or absent `MOLD_CORS_ORIGIN`, so an engine started without one is
+/// READABLE by any page that finds its port. A non-empty value takes the
+/// restrictive arm, which is `AllowOrigin::exact`: tower-http stores it as
+/// `OriginInner::Const` and echoes it verbatim as the `Access-Control-Allow-Origin`
+/// header (`tower-http-0.6.8/src/cors/allow_origin.rs:40-42`), so the check that
+/// matters is the BROWSER's -- it lets a cross-origin read through only when
+/// that header is `*` or byte-equal to the requesting page's own origin.
+///
+/// A serialized origin is `scheme "://" host [":" port]`, or the literal
+/// `null`; none of those can contain a space. This value contains two, so no
+/// page can ever be granted by it, while it still parses as a `HeaderValue`
+/// (space is inside the allowed 0x20..=0x7E range) -- a malformed value is a
+/// HARD startup error, not a fallback, so it has to.
+///
+/// The app itself is unaffected: `URLSession` sends no `Origin` header and
+/// enforces no CORS, and the local `MoldHost` carries the API key.
+const EMBEDDED_CORS_ORIGIN: &str = "mold-embedded-engine no browser origin";
+
 static ENGINE: OnceLock<Mutex<Option<std::thread::JoinHandle<()>>>> = OnceLock::new();
 static ALIVE: AtomicBool = AtomicBool::new(false);
 static BOOTSTRAPPED: AtomicBool = AtomicBool::new(false);
@@ -71,6 +94,12 @@ pub unsafe extern "C" fn mold_engine_bootstrap(
         if !key.is_empty() {
             unsafe { std::env::set_var("MOLD_API_KEY", key) };
         }
+    }
+    // Set unconditionally and NOT taken from the caller: the embedded engine
+    // is never served to a browser, so there is no origin an embedder could
+    // legitimately name. An operator who has set one already gets theirs.
+    if std::env::var_os("MOLD_CORS_ORIGIN").is_none_or(|value| value.is_empty()) {
+        unsafe { std::env::set_var("MOLD_CORS_ORIGIN", EMBEDDED_CORS_ORIGIN) };
     }
 
     // A saved MOLD_HOME pointing at an offline external drive is recoverable
@@ -216,4 +245,29 @@ pub extern "C" fn mold_engine_join(timeout_ms: u64) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EMBEDDED_CORS_ORIGIN;
+
+    /// **Fails today**: nothing set `MOLD_CORS_ORIGIN`, so `build_cors_layer`
+    /// took its `CorsLayer::permissive()` arm and any page that found the
+    /// port could READ every reply.
+    #[test]
+    fn the_embedded_cors_origin_is_one_no_page_can_present() {
+        // The server parses it into a `HeaderValue` and treats a failure as a
+        // startup error, so this is the half that must not regress.
+        let parsed = EMBEDDED_CORS_ORIGIN
+            .parse::<http::HeaderValue>()
+            .expect("the embedded origin must parse, or the engine refuses to start");
+        assert_eq!(parsed.as_bytes(), EMBEDDED_CORS_ORIGIN.as_bytes());
+
+        // A serialized origin is `scheme://host[:port]` or `null`. None of
+        // those can hold a space, so a browser can never match this.
+        assert!(EMBEDDED_CORS_ORIGIN.contains(' '));
+        assert_ne!(EMBEDDED_CORS_ORIGIN, "*");
+        assert_ne!(EMBEDDED_CORS_ORIGIN, "null");
+        assert!(!EMBEDDED_CORS_ORIGIN.contains("://"));
+    }
 }

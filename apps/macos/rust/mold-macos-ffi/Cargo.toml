@@ -27,6 +27,11 @@ mold-server = { path = "../../../../crates/mold-server", package = "mold-ai-serv
   "mp4",
 ] }
 
+[dev-dependencies]
+# Only so the CORS origin can be asserted to PARSE the way the server parses
+# it -- a malformed `MOLD_CORS_ORIGIN` is a hard startup error there.
+http = "1"
+
 [features]
 default = []
 metal = ["mold-server/metal"]

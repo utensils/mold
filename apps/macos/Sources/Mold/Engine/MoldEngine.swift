@@ -32,11 +32,23 @@ final class MoldEngine {
         #endif
     }
 
+    /// What this launch resolved, kept because the API key the engine was
+    /// STARTED with is the one "This Mac" has to present back to it.
+    private(set) var launch: EngineLaunch?
+
     var host: MoldHost? {
-        guard case let .running(port) = state,
-              let url = URL(string: "http://127.0.0.1:\(port)")
-        else { return nil }
-        return MoldHost(id: Self.localHostID, name: "This Mac", baseURL: url)
+        guard case let .running(port) = state, let launch else { return nil }
+        return Self.localHost(port: port, apiKey: launch.apiKey)
+    }
+
+    /// The machine-list entry for an engine listening on `port`.
+    ///
+    /// It carries the key, which is the whole of review 05-H1 on this side:
+    /// the engine is started with `MOLD_API_KEY` set, so every route it serves
+    /// is authenticated and the app is the only caller that holds the answer.
+    static func localHost(port: UInt16, apiKey: String) -> MoldHost? {
+        guard let url = URL(string: "http://127.0.0.1:\(port)") else { return nil }
+        return MoldHost(id: localHostID, name: "This Mac", baseURL: url, apiKey: apiKey)
     }
 
     /// A fixed id so the local engine keeps its identity across launches and
@@ -52,20 +64,30 @@ final class MoldEngine {
         // launched from Finder is handed no environment at all, so reading
         // MOLD_HOME alone meant the engine ran against `~/.mold` while the CLI
         // and the Tauri app used the home someone had actually chosen.
-        let resolved = MoldHome.resolve()
-        if let reason = resolved.unavailableReason {
-            state = .failed(reason)
+        let launch: EngineLaunch
+        do {
+            launch = try EngineLaunchPlan.resolve(
+                home: MoldHome.resolve(),
+                secrets: .shared,
+                logDirectory: MoldEngine.logDirectory
+            )
+        } catch {
+            state = .failed((error as? EngineLaunchRefusal)?.reason ?? "The engine couldn't start.")
             return
         }
-        let home = resolved.url.path(percentEncoded: false)
-        let logs = MoldEngine.logDirectory
+        self.launch = launch
+        let home = launch.home
+        let key = launch.apiKey
+        let logs = launch.logDirectory
         Task.detached(priority: .userInitiated) {
             // The engine starts at most ONCE per process: the models-dir
             // override is a process-lifetime OnceLock and tracing installs a
             // global subscriber, so changing either means relaunching.
             let bootstrapped = home.withCString { homePtr in
-                logs.withCString { logPtr in
-                    mold_engine_bootstrap(homePtr, nil, logPtr)
+                key.withCString { keyPtr in
+                    logs.withCString { logPtr in
+                        mold_engine_bootstrap(homePtr, keyPtr, logPtr)
+                    }
                 }
             }
             guard bootstrapped == 0 else {
@@ -111,7 +133,7 @@ final class MoldEngine {
         #endif
     }
 
-    private static var logDirectory: String {
+    static var logDirectory: String {
         FileManager.default.homeDirectoryForCurrentUser
             .appending(path: "Library/Logs/Mold").path
     }

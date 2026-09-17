@@ -43,15 +43,19 @@ struct LocalEngineSettings: View {
                 }
             }
 
-            // Fact 7 (design): this engine is keyless, so `auth_required`
-            // is always false and it can never hold a paired client.
-            // Pairing lives on the Machines destination instead, for a
-            // machine the app holds an operator key for (design decision
-            // 12) -- the actual pairing UI there is S5, not yet built.
+            // The engine is started WITH a key (review 05-H1): loopback is
+            // not a boundary a browser respects, and a keyless engine let any
+            // page that found the port read and delete the library. The key
+            // is this app's; a phone still cannot reach 127.0.0.1 on this
+            // Mac, so pairing here would hand out a credential nothing could
+            // use. Pairing lives on the Machines destination, for a machine
+            // reachable over the network.
             Section {
                 Text("""
-                     This Mac's engine has no API key, so there's nothing to pair. \
-                     Pair a phone with a machine under Machines instead.
+                     This Mac's engine is reached over loopback with a key only this app \
+                     holds, so nothing else on this Mac — or in a browser — can drive it. \
+                     A phone can't reach loopback here, so pair one with a machine under \
+                     Machines instead.
                      """)
                 .font(.caption)
                 .foregroundStyle(.secondary)
