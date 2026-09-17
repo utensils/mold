@@ -26,9 +26,9 @@ final class GenerateController {
     /// otherwise hold the `Model` it was chosen from.
     var modelFamily: String?
 
-    private(set) var placement: PlacementPreview?
-    private(set) var placementError: String?
-    private var placementTask: Task<Void, Never>?
+    /// Where a render would run and roughly how long it would take. Its own
+    /// type (`PlacementProbe`); the views read it directly.
+    let probe: PlacementProbe
 
     /// Where a prompt rewrite stands. `GenerateController+Expand` reads and
     /// writes this; it lives here because every other piece of the pane's
@@ -64,10 +64,12 @@ final class GenerateController {
     /// files -- the same reason `HostStore.failures` is `internal(set)`.
     internal(set) var queued: [ActiveBatch] = []
 
-    init(hosts: HostStore, defaults: ConfigStore, handoff: ResultHandoff = ResultHandoff()) {
+    init(hosts: HostStore, defaults: ConfigStore,
+         handoff: ResultHandoff = ResultHandoff(), probe: PlacementProbe = PlacementProbe()) {
         self.hosts = hosts
         self.defaults = defaults
         self.handoff = handoff
+        self.probe = probe
     }
 
     /// Adopts a model while KEEPING the draft that was just restored.
@@ -109,32 +111,8 @@ final class GenerateController {
         draft = draft.adopting(recipe, isNewModel: false, family: modelFamily, model: modelName)
     }
 
-    /// Asks the host where this would run and roughly how long it would take.
-    ///
-    /// Read-only -- it reserves nothing. Debounced, because it fires on every
-    /// control change and a slider produces a great many of those.
+    /// Asks the host where this would run -- see `PlacementProbe`.
     func refreshPlacement(on host: MoldHost) {
-        placementTask?.cancel()
-        guard let modelName else { return }
-        let request = draft.placementRequest(
-            model: modelName, maxIdentityPhotos: hosts.capabilities(of: host)?.maxIdentityPhotos ?? 0
-        )
-        let copies = draft.batchSize
-        let client = hosts.backend(for: host)
-        placementTask = Task {
-            try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled else { return }
-            do {
-                // Four one-output children preview as four copies of one
-                // output, not as one four-output child.
-                placement = try await client.placementPreview(request, copies: copies)
-                placementError = nil
-            } catch is CancellationError {
-                // Superseded by a later control change, not a failed request.
-            } catch {
-                placement = nil
-                placementError = error.sentence
-            }
-        }
+        probe.refresh(draft: draft, model: modelName, on: host, hosts: hosts)
     }
 }

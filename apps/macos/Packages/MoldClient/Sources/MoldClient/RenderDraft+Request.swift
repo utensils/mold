@@ -75,9 +75,8 @@ public extension RenderDraft {
     /// the LENGTH of this array, capped by
     /// `queue.heterogeneous_batch_max_outputs`. They share one prompt, one
     /// filing and one logical `batchId`, and differ only by seed, so four
-    /// presses of one button give four variations rather than four copies.
-    /// This mirrors the fleet's other GUI exactly
-    /// (`web/src/pages/CreatePage.vue:3457-3464`).
+    /// presses give four variations rather than four copies, mirroring the
+    /// fleet's other GUI (`web/src/pages/CreatePage.vue:3457-3464`).
     ///
     /// `randomBase` is injected so the fan-out is a pure function a test can
     /// pin; production passes `UInt64.random(in: 0 ... UInt64(UInt32.max))`,
@@ -109,9 +108,11 @@ public extension RenderDraft {
     /// The count goes in `PlacementRequest.copies` and the request itself
     /// stays a single output, or the host multiplies the two and previews
     /// sixteen pictures for a batch of four
-    /// (`studio/api/generationPlacement.ts:339-347`).
+    /// (`studio/api/generationPlacement.ts:339-347`). REDACTED, because a
+    /// preview prices a render rather than making one --
+    /// `GenerateRequest.redactedForPlacement`.
     func placementRequest(model: String, maxIdentityPhotos: Int = 0) -> GenerateRequest {
-        request(model: model, maxIdentityPhotos: maxIdentityPhotos)
+        request(model: model, maxIdentityPhotos: maxIdentityPhotos).redactedForPlacement()
     }
 
     /// Fills in the identity fields from `identity`, choosing `id_image` vs

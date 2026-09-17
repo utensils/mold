@@ -17,7 +17,8 @@ struct BatchOutcomeTests {
 
     private func makeController(_ backend: FakeBackend, host: MoldHost) -> GenerateController {
         let hosts = HostStore(hosts: [host]) { _ in backend }
-        let controller = GenerateController(hosts: hosts, defaults: ConfigStore(hosts: hosts))
+        let controller = GenerateController(
+            hosts: hosts, defaults: ConfigStore(hosts: hosts), probe: PlacementProbe(debounce: .zero))
         controller.modelName = "flux-dev:q4"
         controller.hostID = host.id
         controller.draft.prompt = "a cat"
@@ -199,10 +200,29 @@ struct BatchOutcomeTests {
         controller.draft.batchSize = 4
 
         controller.refreshPlacement(on: plato)
-        // `refreshPlacement` debounces 350ms before it calls out.
-        try? await Task.sleep(for: .milliseconds(400))
+        // `PlacementProbe` debounces before it calls out -- a constructor
+        // parameter, so this waits on the call rather than on a clock.
         await settle { backend.callCount("placementPreview") == 1 }
 
         #expect(backend.placementCopiesRequested.last == 4)
+    }
+
+    /// The probe is a planning READ: it prices a render, so it carries no
+    /// prompt, no media bytes and no filing (finding 02#5).
+    @Test func aPlacementPreviewSendsARedactedRequest() async {
+        let plato = machine()
+        let backend = FakeBackend(host: plato)
+        let controller = makeController(backend, host: plato)
+        controller.draft.prompt = "a tin robot"
+        controller.draft.tags = ["unannounced"]
+        controller.draft.media.sourceImage = "SOURCEBYTES"
+
+        controller.refreshPlacement(on: plato)
+        await settle { backend.callCount("placementPreview") == 1 }
+
+        let sent = backend.placementRequests.last
+        #expect(sent?.prompt == "")
+        #expect(sent?.sourceImage == "")
+        #expect(sent?.tags == nil)
     }
 }

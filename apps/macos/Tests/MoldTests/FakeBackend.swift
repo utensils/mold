@@ -226,10 +226,14 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     /// `copies` asked, in call order -- what a batch of four previews as.
     nonisolated(unsafe) var placementCopiesRequested: [Int] = []
+    /// Every request the probe actually sent -- WHAT a planning read carried,
+    /// not merely that one happened (finding 02#5).
+    nonisolated(unsafe) var placementRequests: [GenerateRequest] = []
 
     func placementPreview(_ request: GenerateRequest, copies: Int) async throws -> PlacementPreview {
         try record("placementPreview")
         placementCopiesRequested.append(copies)
+        placementRequests.append(request)
         throw notPlanted()
     }
     func submit(_ admission: BatchAdmission) async throws -> BatchStatus {

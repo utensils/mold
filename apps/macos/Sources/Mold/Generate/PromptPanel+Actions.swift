@@ -24,7 +24,7 @@ extension PromptPanel {
             // hundreds of characters: flexible and truncating, so it takes
             // whatever the buttons leave and never widens the capsule (the
             // buttons are `fixedSize`, so they are never the ones squeezed).
-            PlacementHint(placement: controller.placement, error: controller.placementError)
+            PlacementHint(placement: controller.probe.placement, error: controller.probe.error)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
