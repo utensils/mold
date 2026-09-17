@@ -78,6 +78,15 @@ struct ConfigValueField: View {
                 .focused($focused)
                 .onSubmit { commit(onBlur: false) }
             Text(entry.secretState).font(.caption).foregroundStyle(.secondary)
+            // The explicit clear an empty Return is no longer allowed to be
+            // (review 05-M12), and the same shape `Shell/AccountsRow.swift`
+            // already offers for a catalog token: present only where there is
+            // something stored to remove.
+            if entry.value != .null {
+                Button("Clear") { Task { await onSet(.null) } }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+            }
         }
         .onChange(of: focused) { wasFocused, isFocused in
             if wasFocused, !isFocused { commit(onBlur: true) }
@@ -100,9 +109,15 @@ struct ConfigValueField: View {
     /// "<set>" is a mask, and the parser reads an empty string as `.null`,
     /// so a blur that committed unconditionally would clear the API key on
     /// the machine for anyone who clicked into the field and away again.
-    /// Return always commits, which is how an empty submit clears a key.
+    ///
+    /// An EMPTY secret is now a no-op on Return too. A secret field always
+    /// renders empty, so nothing at all distinguished "I typed nothing" from
+    /// "clear it": tab into `runpod.api_key` in the Advanced table, hesitate,
+    /// press Return, and the credential was gone (review 05-M12). Clearing is
+    /// the row's own Clear button, which says so.
     static func commitScalar(text: String, entry: ConfigEntry, onBlur: Bool) -> ConfigScalar? {
         if onBlur, text == entry.editableText { return nil }
+        if entry.editor == .secret, text.isEmpty { return nil }
         return ConfigEntry.scalar(from: text, editor: entry.editor)
     }
 

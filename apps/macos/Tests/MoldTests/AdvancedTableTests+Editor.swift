@@ -55,15 +55,23 @@ struct AdvancedTableEditorTests {
 
     /// The one trap the editor must not fall into: a secret's field starts
     /// EMPTY (the "<set>" is a mask), and the parser turns an empty string
-    /// into `.null` -- so a blur that committed unconditionally would clear
-    /// the API key on the machine for anyone who clicked into the field and
-    /// clicked away. A blur commits only what changed; Return always commits.
-    @Test func leavingASecretFieldUntouchedSendsNothing() {
+    /// into `.null` -- so a commit that went through unconditionally would
+    /// clear the API key on the machine.
+    ///
+    /// **Fails today** on the Return case: a blur already commited only what
+    /// changed, but Return commited whatever was in the field, and an empty
+    /// secret field is indistinguishable from an untouched one. Tab into
+    /// `runpod.api_key`, hesitate, press Return, and the credential was gone
+    /// (review 05-M12). Clearing is the row's own Clear button now.
+    @Test func anEmptySecretFieldNeverClearsTheStoredCredential() {
         let entry = FakeFixtures.configEntry("runpod.api_key", value: .string("<set>"), source: "db")
 
         #expect(ConfigValueField.commitScalar(text: "", entry: entry, onBlur: true) == nil)
-        #expect(ConfigValueField.commitScalar(text: "", entry: entry, onBlur: false) == .null)
+        #expect(ConfigValueField.commitScalar(text: "", entry: entry, onBlur: false) == nil)
         #expect(ConfigValueField.commitScalar(text: "rp-1", entry: entry, onBlur: true) == .string("rp-1"))
+        // An ordinary text row is unaffected: emptying one IS how it unsets.
+        let text = FakeFixtures.configEntry("models_dir", value: .string("/data"), source: "db")
+        #expect(ConfigValueField.commitScalar(text: "", entry: text, onBlur: false) == .null)
     }
 
     @Test func aBlurWithNoChangeSendsNoWrite() {
