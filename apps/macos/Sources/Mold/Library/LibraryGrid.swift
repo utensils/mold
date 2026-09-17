@@ -61,16 +61,14 @@ struct LibraryGrid: View {
         // Claimed after a yield rather than in `onAppear`: a `@FocusState`
         // written in the pass that inserts the view is dropped.
         .task { await Task.yield(); focused = true }
-        .onKeyPress(.leftArrow) { move(.left) }
-        .onKeyPress(.rightArrow) { move(.right) }
-        .onKeyPress(.upArrow) { move(.up) }
-        .onKeyPress(.downArrow) { move(.down) }
-        .onKeyPress(.return) { openLead() }
-        // Space is Quick Look everywhere else on the Mac. Return opens in
+        // One handler, because what these keys mean depends on what is HELD
+        // with them -- and `onKeyPress(_ key:)` matches its key whatever that
+        // is. Space is Quick Look everywhere else on the Mac; Return opens in
         // place, which is the app's own viewer and the only one that plays a
-        // clip with the machine's media ticket.
-        .onKeyPress(.space) { quickLookSelection() }
-        .onKeyPress(.delete) { trashSelection() }
+        // clip with the machine's media ticket. See `LibraryGridKeys`.
+        .onKeyPress(keys: LibraryGridKeys.keys) { press in
+            perform(LibraryGridKeys.action(for: press.key, modifiers: press.modifiers))
+        }
     }
 
     private var gridColumns: [GridItem] {
@@ -124,9 +122,16 @@ struct LibraryGrid: View {
         selection = cursor.clicking(entry.id, ClickModifiers.current, from: selection)
     }
 
-    private func move(_ move: LibraryCursor.Move) -> KeyPress.Result {
-        selection = cursor.moving(move, ClickModifiers.current, from: selection)
-        return .handled
+    private func perform(_ action: LibraryGridAction?) -> KeyPress.Result {
+        switch action {
+        case let .move(move, modifier):
+            selection = cursor.moving(move, modifier, from: selection)
+            return .handled
+        case .open: return openLead()
+        case .quickLook: return quickLookSelection()
+        case .trash: return trashSelection()
+        case nil: return .ignored
+        }
     }
 
     private func openLead() -> KeyPress.Result {
