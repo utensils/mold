@@ -157,4 +157,49 @@ struct LandedPrintsTests {
 
         #expect(landed.count == 0)
     }
+
+    // MARK: - The badge itself
+
+    /// Zero is NO badge, not a badge reading "0".
+    @Test func anEmptyCountPaintsNoBadgeAtAll() {
+        #expect(DockBadge.label(for: 0) == nil)
+        #expect(DockBadge.label(for: 1) == "1")
+        #expect(DockBadge.label(for: 12) == "12")
+    }
+
+    /// **Fails today**: the badge is an `.onChange(of:)` on `RootView`
+    /// (`MoldApp.swift:88-90`), so it tracks the count only while that view
+    /// is mounted -- and this app does not terminate when its last window
+    /// closes. `LandedPrints` goes on counting either way, which is what
+    /// makes the two disagree.
+    @Test func theBadgeFollowsTheCountWithNoViewInvolved() async {
+        let plato = machine()
+        let backend = fake(for: plato)
+        let hosts = HostStore(hosts: [plato]) { _ in backend }
+        let landed = LandedPrints(hosts: hosts, defaults: scratchDefaults())
+        landed.isActive = false
+        // A sentinel for "no badge", so `.last` is a plain `String?` rather
+        // than a `String??` where `nil` would also mean "never painted".
+        var painted: [String] = []
+        let badge = DockBadge { painted.append($0 ?? "none") }
+        badge.follow(landed)
+        await connect(plato, hosts: hosts, backend: backend)
+
+        // Painted once on adoption: whatever is true now, not only what
+        // changes later.
+        #expect(painted == ["none"])
+
+        backend.emit(.gallery(.added(filename: "a.png", row: nil)))
+        await settle { painted.last == "1" }
+        #expect(painted.last == "1")
+
+        backend.emit(.gallery(.added(filename: "b.png", row: nil)))
+        await settle { painted.last == "2" }
+        #expect(painted.last == "2")
+
+        // Coming back to the app clears what accumulated while away.
+        landed.isActive = true
+        await settle { painted.last == "none" }
+        #expect(painted.last == "none")
+    }
 }

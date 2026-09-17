@@ -76,6 +76,7 @@ struct MoldApp: App {
                     delegate.engine = engine
                     delegate.materializer = materializer
                     delegate.landedPrints = landedPrints
+                    delegate.dockBadge.follow(landedPrints)
                     // `applicationDidBecomeActive` has already fired by the
                     // time this scene's task runs, so the launch start is
                     // here rather than there; `start()` is idempotent, so the
@@ -88,13 +89,6 @@ struct MoldApp: App {
                     delegate.onNotificationRoute = { route in
                         applyNotificationRoute(route, destination: $destination, navigation: libraryNavigation)
                     }
-                }
-                // The Dock badge itself: `NSApp.dockTile` is the one AppKit
-                // call in this file that isn't a backend, and `LandedPrints`
-                // never touches AppKit so it stays testable with no app
-                // bundle at all.
-                .onChange(of: landedPrints.count) { _, count in
-                    NSApp.dockTile.badgeLabel = count > 0 ? "\(count)" : nil
                 }
                 .environment(hosts)
                 .environment(library)
