@@ -104,7 +104,7 @@ private func repairModels() throws -> [Model] {
     let qs = query.queryString
     // A `/` is legal and unambiguous in a query VALUE, so the query escaper
     // leaves it readable -- unlike the path escaper, which must protect it
-    // (`HTTPBackend.escapedQueryValue`).
+    // (`RouteEscaping.escapedQueryValue`).
     #expect(qs.contains("q=a%20b/c%23d"))
     #expect(qs.contains("family=sd15"))
     #expect(qs.contains("page_size=3"))

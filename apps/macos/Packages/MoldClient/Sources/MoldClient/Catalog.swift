@@ -34,7 +34,7 @@ public struct CatalogQuery: Hashable, Sendable {
     /// value. `escapedQueryValue`, never `escaped` -- see its doc comment.
     public var queryString: String {
         var parts: [String] = []
-        let escape = HTTPBackend.escapedQueryValue
+        let escape = RouteEscaping.escapedQueryValue
         if let text, !text.isEmpty { parts.append("q=\(escape(text))") }
         if let family { parts.append("family=\(escape(family))") }
         if let kind { parts.append("kind=\(escape(kind))") }

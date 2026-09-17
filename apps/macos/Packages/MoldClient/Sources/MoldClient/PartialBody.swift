@@ -2,7 +2,7 @@ import Foundation
 
 /// Bytes a read had collected when it was cut short.
 ///
-/// `refusalBody` races a read against a deadline, and the read's own return
+/// `RefusalBody.read` races a read against a deadline, and the read's own return
 /// value is lost when the deadline wins -- so what it managed to collect
 /// lands here instead. A refusal body is usually complete long before the
 /// deadline; this exists for the case where the connection is held open and

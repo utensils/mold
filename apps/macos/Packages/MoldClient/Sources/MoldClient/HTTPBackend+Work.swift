@@ -50,7 +50,7 @@ public extension HTTPBackend {
                 return ticket
             }
         }
-        try check(http, data)
+        try HTTPRefusal.check(http, data)
         throw MoldClientError.malformedResponse
     }
 

@@ -11,12 +11,12 @@ import Testing
 // cancellation reads as "this machine can't be reached".
 
 @Test func aCancelledRequestThrowsCancellationNotUnreachable() {
-    let error = HTTPBackend.failure(for: URLError(.cancelled))
+    let error = TransportFailure.from(URLError(.cancelled))
     #expect(error is CancellationError)
 }
 
 @Test func everyOtherURLErrorStillMeansUnreachable() {
-    let error = HTTPBackend.failure(for: URLError(.timedOut))
+    let error = TransportFailure.from(URLError(.timedOut))
     guard case let MoldClientError.unreachable(reason) = error else {
         Issue.record("expected .unreachable, got \(error)")
         return

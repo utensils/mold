@@ -28,7 +28,7 @@ private struct HeldOpen: AsyncSequence, Sendable {
     func makeAsyncIterator() -> Iterator { Iterator(remaining: prefix[...]) }
 }
 
-/// **Fails today**: `refusalBody` is bounded by SIZE and nothing else, so it
+/// **Fails today**: `RefusalBody.read` is bounded by SIZE and nothing else, so it
 /// waits on a connection that is never going to say anything more -- up to
 /// the request's own timeout, which on `resourceStream` and `events` is
 /// 86,400 seconds. The error path, which already knows the status, hangs
@@ -36,7 +36,7 @@ private struct HeldOpen: AsyncSequence, Sendable {
 @Test func aBodyOnAHeldOpenConnectionGivesUpAndReportsWhatArrived() async {
     let body = Data(#"{"error":"restarting","code":"SERVER_RESTARTING"}"#.utf8)
     let started = ContinuousClock.now
-    let read = await HTTPBackend.refusalBody(
+    let read = await RefusalBody.read(
         HeldOpen(prefix: Array(body)), within: .milliseconds(200))
     let elapsed = ContinuousClock.now - started
 
@@ -51,16 +51,16 @@ private struct HeldOpen: AsyncSequence, Sendable {
 @Test func aBodyThatEndsIsReadImmediately() async {
     let body = Data(#"{"error":"nope"}"#.utf8)
     let started = ContinuousClock.now
-    let read = await HTTPBackend.refusalBody(Array(body).async, within: .seconds(30))
+    let read = await RefusalBody.read(Array(body).async, within: .seconds(30))
     #expect(ContinuousClock.now - started < .seconds(1))
     #expect(read == body)
 }
 
 /// The size ceiling still holds, and still wins when it is reached first.
 @Test func theSizeCeilingStillHolds() async {
-    let flood = Array(repeating: UInt8(ascii: "x"), count: HTTPBackend.refusalBodyLimit * 4)
-    let read = await HTTPBackend.refusalBody(flood.async, within: .seconds(30))
-    #expect(read.count == HTTPBackend.refusalBodyLimit)
+    let flood = Array(repeating: UInt8(ascii: "x"), count: RefusalBody.limit * 4)
+    let read = await RefusalBody.read(flood.async, within: .seconds(30))
+    #expect(read.count == RefusalBody.limit)
 }
 
 /// A source that throws hands back whatever it had: the status is already
@@ -78,7 +78,7 @@ private struct HeldOpen: AsyncSequence, Sendable {
         }
         func makeAsyncIterator() -> Iterator { Iterator() }
     }
-    #expect(await HTTPBackend.refusalBody(Torn(), within: .seconds(30)) == Data("aaa".utf8))
+    #expect(await RefusalBody.read(Torn(), within: .seconds(30)) == Data("aaa".utf8))
 }
 
 /// A plain array as an async byte source, for the cases that just need bytes.

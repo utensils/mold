@@ -20,6 +20,6 @@ extension HTTPBackend {
     /// Split out so the URL can be pinned without a network call, the same
     /// precedent as `historyPath(limit:)`.
     func loraPath(model: String) -> String {
-        "/api/loras?model=\(Self.escapedQueryValue(model))"
+        "/api/loras?model=\(RouteEscaping.escapedQueryValue(model))"
     }
 }
