@@ -32,6 +32,8 @@ struct LibraryViewer: View {
             Color.clear
             if entry.print.isVideo {
                 video
+            } else if entry.print.isMesh {
+                mesh
             } else if let image = full ?? placeholder {
                 Image(nsImage: image)
                     .resizable()
@@ -61,6 +63,45 @@ struct LibraryViewer: View {
                 .onDisappear { player.pause() }
         } else {
             ProgressView()
+        }
+    }
+
+    /// A mesh, as far as this app can show one today.
+    ///
+    /// The server renders a poster for every GLB and this draws it, at FULL
+    /// opacity and with a line saying what it is. It used to fall through to
+    /// the image arm, where `NSImage(data:)` returns nil for a GLB, so `full`
+    /// stayed nil and the poster sat at 0.55 and `.interpolation(.low)` --
+    /// this app's own visual language for "still loading" -- forever, with no
+    /// error and no way to tell it from a slow download. Quick Look does not
+    /// rescue it either: macOS ships no GLB preview generator.
+    ///
+    /// **The seam for the interactive viewer (M6/F1)**: an `MTKView` port of
+    /// `studio/components/MeshViewer.vue` replaces the `posterOrGlyph` below,
+    /// taking the GLB bytes from `actions.data(for:)` and falling back to
+    /// exactly this on any failure. Its home view IS this poster, by
+    /// construction -- `raster::sweep_fit_for` frames both.
+    @ViewBuilder private var mesh: some View {
+        VStack(spacing: 10) {
+            posterOrGlyph
+            Text("3-D object · Save a copy or File ▸ Export As to open it elsewhere")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .padding(24)
+    }
+
+    @ViewBuilder private var posterOrGlyph: some View {
+        if let placeholder {
+            Image(nsImage: placeholder)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+        } else {
+            Image(systemName: "cube")
+                .font(.system(size: 64))
+                .foregroundStyle(.tertiary)
+                .accessibilityLabel("3-D object")
         }
     }
 
@@ -134,7 +175,11 @@ struct LibraryViewer: View {
 
         guard let host else { return }
         placeholder = await cache.image(for: entry, host: host, size: 512)
-        guard let data = await actions.data(for: entry) else { return }
+        // A mesh stops at its poster: the stored bytes are a GLB, which
+        // `NSImage(data:)` cannot read, so fetching them would be megabytes
+        // downloaded to produce a nil. The interactive viewer is what will
+        // want them (see `mesh`).
+        guard !entry.print.isMesh, let data = await actions.data(for: entry) else { return }
         full = NSImage(data: data)
     }
 }

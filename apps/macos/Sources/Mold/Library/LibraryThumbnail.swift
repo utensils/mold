@@ -28,7 +28,10 @@ struct LibraryThumbnail: View {
                         .aspectRatio(contentMode: .fill)
                 } else {
                     // a11y: placeholder inside LibraryCell, which carries the label
-                    Image(systemName: entry.print.isVideo ? "film" : "photo")
+                    // The kind's own glyph: `LibraryToken` already names one
+                    // per kind, and a mesh drawn as `photo` said the wrong
+                    // thing about a print nothing else in the app could open.
+                    Image(systemName: LibraryToken.kind(entry.print.kind).symbol)
                         .font(.title3)
                         .foregroundStyle(.tertiary)
                 }
