@@ -24,7 +24,10 @@ extension LibraryStore {
             // this machine can be trusted. Reading the listing again is the
             // only honest repair -- the events that would have told us what
             // changed are the ones that went missing.
-            Task { await relist(host) }
+            // Through the gate: a burst of markers -- and every reconnect
+            // emits one -- is one read and at most one more behind it, rather
+            // than K concurrent reads of the same index racing to assign it.
+            Task { await relists.run(host) { await relist(host) } }
         case let .gallery(change):
             apply(change, from: host)
         }

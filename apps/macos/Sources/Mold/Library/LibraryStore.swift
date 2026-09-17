@@ -49,6 +49,8 @@ final class LibraryStore {
     /// Which live frames are this app's own edit coming back, and which
     /// machines are owed a re-list because one was skipped. See `GalleryEcho`.
     var echo = GalleryEcho()
+    /// One resync-driven re-list per machine at a time. See `RelistGate`.
+    let relists = RelistGate()
 
     /// Bumped whenever the rows change, so anything derived from them knows to
     /// rebuild without comparing thousands of entries -- two libraries of the
