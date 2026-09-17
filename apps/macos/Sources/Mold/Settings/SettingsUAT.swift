@@ -5,7 +5,7 @@ import Foundation
 /// (`MOLD_NATIVE_DESTINATION`) -- nine deterministic captures instead of
 /// nine menu presses.
 enum SettingsUAT {
-    static let envVar = "MOLD_NATIVE_SETTINGS_TAB"
+    static let envVar = NativeUAT.settingsTab.rawValue
 
     /// Pure: whether the hook asks for the Settings window at all -- naming
     /// a tab, even an unknown one, opens the window (`RootView` reads it
@@ -14,7 +14,7 @@ enum SettingsUAT {
     static func wantsSettings(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Bool {
-        environment[envVar] != nil
+        NativeUAT.settingsTab.isSet(in: environment)
     }
 
     /// Pure: which tab id to open, from the environment and the tabs that
@@ -23,6 +23,7 @@ enum SettingsUAT {
     static func initialTab(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> SettingsTab {
-        environment[envVar].flatMap(SettingsTab.init(rawValue:)) ?? SettingsTab.allCases[0]
+        NativeUAT.settingsTab.value(in: environment)
+            .flatMap(SettingsTab.init(rawValue:)) ?? SettingsTab.allCases[0]
     }
 }

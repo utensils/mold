@@ -76,7 +76,7 @@ extension HostStore {
         // when it starts; seeding a second entry at :7680 would put two things
         // called This Mac in the list, only one of which is real.
         var hosts: [MoldHost] = []
-        let seed = ProcessInfo.processInfo.environment["MOLD_NATIVE_HOSTS"] ?? ""
+        let seed = NativeUAT.hosts.value() ?? ""
         for entry in seed.split(separator: ",") {
             let parts = entry.split(separator: "=", maxSplits: 1)
             // Through the same normalizer the editor uses, so a devshell can

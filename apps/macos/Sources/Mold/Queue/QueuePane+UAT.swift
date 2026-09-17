@@ -12,7 +12,7 @@ extension QueuePane {
     /// broken path fails open to an ordinary live refresh rather than
     /// silently showing nothing.
     static func fixtureIfRequested() -> QueueStore.Fixture? {
-        guard let path = ProcessInfo.processInfo.environment["MOLD_NATIVE_QUEUE_FIXTURE"],
+        guard let path = NativeUAT.queueFixture.value(),
               let data = try? Data(contentsOf: URL(fileURLWithPath: path))
         else { return nil }
         return try? MoldJSON.decoder.decode(QueueStore.Fixture.self, from: data)

@@ -51,7 +51,7 @@ extension RootView {
     /// selecting a sidebar row -- this is what lets a UAT run photograph it
     /// without driving the menu bar.
     func openSettingsIfRequested() {
-        let requested = ProcessInfo.processInfo.environment["MOLD_NATIVE_DESTINATION"]
+        let requested = NativeUAT.destination.value()
         let sheets = [MachinesSettings.addOnLaunch, MachinesSettings.editOnLaunch]
         guard requested == "settings" || sheets.contains(requested ?? "") || SettingsUAT.wantsSettings()
         else { return }
@@ -75,7 +75,7 @@ enum Destination: String, Hashable, CaseIterable, Identifiable {
 
     /// Where the window opens: an explicit override, else where you were last.
     static var launch: Destination {
-        if let named = ProcessInfo.processInfo.environment["MOLD_NATIVE_DESTINATION"],
+        if let named = NativeUAT.destination.value(),
            let forced = Destination(rawValue: named) {
             return forced
         }

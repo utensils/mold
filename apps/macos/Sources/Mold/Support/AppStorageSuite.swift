@@ -10,7 +10,7 @@ enum AppStorageSuite {
     static let name = "io.utensils.mold.native.fresh"
 
     static var defaults: UserDefaults {
-        guard ProcessInfo.processInfo.environment["MOLD_NATIVE_FRESH"] != nil,
+        guard NativeUAT.fresh.isSet(),
               let scratch = UserDefaults(suiteName: name)
         else { return .standard }
         return scratch

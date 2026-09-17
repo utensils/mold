@@ -25,7 +25,7 @@ extension PairingStore {
     /// fails open to an ordinary live refresh rather than silently showing
     /// nothing.
     static func fixtureIfRequested() -> PairingStore.Fixture? {
-        guard let path = ProcessInfo.processInfo.environment["MOLD_NATIVE_PAIRING_FIXTURE"],
+        guard let path = NativeUAT.pairingFixture.value(),
               let data = try? Data(contentsOf: URL(fileURLWithPath: path))
         else { return nil }
         return try? MoldJSON.decoder.decode(PairingStore.Fixture.self, from: data)

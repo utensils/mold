@@ -60,7 +60,14 @@ public final class SecretStore: Sendable {
     ) -> URL {
         let root = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fileManager.homeDirectoryForCurrentUser.appending(path: "Library/Application Support")
+        // The app's `NativeUAT` gate, spelled again here because MoldClient
+        // cannot import the app: a Release build reads no UAT hook, so it can
+        // never be pointed at the throwaway directory.
+        #if DEBUG
         let fresh = environment["MOLD_NATIVE_FRESH"] != nil
+        #else
+        let fresh = false
+        #endif
         return root.appending(path: fresh ? freshDirectoryName : directoryName)
     }
 

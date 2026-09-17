@@ -13,7 +13,7 @@ extension GeneratePane {
     /// Not `private`: the main file's `.task` calls it.
     func seedSourceImageIfRequested() {
         guard controller.draft.media.sourceImage == nil,
-              let path = ProcessInfo.processInfo.environment["MOLD_NATIVE_SOURCE_IMAGE"],
+              let path = NativeUAT.sourceImage.value(),
               let data = try? Data(contentsOf: URL(fileURLWithPath: path))
         else { return }
         controller.draft.media.sourceImage = data.base64EncodedString()
@@ -25,11 +25,11 @@ extension GeneratePane {
 /// sheet at launch, mirroring `SettingsUAT`'s `MOLD_NATIVE_SETTINGS_TAB` --
 /// a deterministic capture instead of a menu press.
 enum GenerateUAT {
-    static let envVar = "MOLD_NATIVE_LIBRARY_PICKER"
+    static let envVar = NativeUAT.libraryPicker.rawValue
 
     static func wantsLibraryPicker(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Bool {
-        environment[envVar] != nil
+        NativeUAT.libraryPicker.isSet(in: environment)
     }
 }

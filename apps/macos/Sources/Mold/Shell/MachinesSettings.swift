@@ -39,7 +39,7 @@ struct MachinesSettings: View {
     static let editOnLaunch = "edit-machine"
 
     private func openEditorIfRequested() {
-        switch ProcessInfo.processInfo.environment["MOLD_NATIVE_DESTINATION"] {
+        switch NativeUAT.destination.value() {
         case Self.addOnLaunch: isAdding = true
         case Self.editOnLaunch: hosts.hosts.first.map(edit)
         default: break
