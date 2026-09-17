@@ -31,13 +31,19 @@ struct CollectionRow: View {
         } icon: {
             Image(systemName: shelf.hidden ? "rectangle.stack.badge.minus" : "rectangle.stack")
         }
+        // The same three the Library menu offers, from the same declaration --
+        // they used to live only here, unreachable from the keyboard and
+        // invisible to Help ▸ Search, and worded differently besides.
         .contextMenu {
-            Button("Rename…") { renaming = shelf }
-            Button(shelf.hidden ? "Show in All Prints" : "Hide from All Prints") {
-                Task { await library.setShelfHidden(shelf, hidden: !shelf.hidden) }
+            LibraryMenuItems(items: menu.items) { action in
+                switch action {
+                case .renameCollection: renaming = shelf
+                case let .setCollectionHidden(hidden):
+                    Task { await library.setShelfHidden(shelf, hidden: hidden) }
+                case .deleteCollection: confirmDelete()
+                default: break
+                }
             }
-            Divider()
-            Button("Delete Collection…", role: .destructive) { confirmDelete() }
         }
         .destructionDialog($pending)
         .dropDestination(for: PrintID.self) { ids, _ in
@@ -49,6 +55,11 @@ struct CollectionRow: View {
                 ? RoundedRectangle(cornerRadius: 6).fill(.selection.opacity(0.35))
                 : nil
         )
+    }
+
+    /// Only the shelf's own three: no prints are selected in the sidebar.
+    private var menu: LibraryMenuPlan {
+        LibraryMenuPlan(scope: .collection, count: 0, enclosingShelf: shelf)
     }
 
     private func file(_ ids: [PrintID]) {

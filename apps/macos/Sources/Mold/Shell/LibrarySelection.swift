@@ -22,19 +22,20 @@ struct LibrarySelection: Equatable {
     /// bare key equivalent is offered the key first, so anything the Library
     /// binds unmodified has to yield to a field being typed into.
     let isEditingText: Bool
+    /// What one selected print can be converted into, and how much is in the
+    /// trash -- both of which the plan needs and the menu bar cannot see.
+    let exportFormats: [String]
+    let trashCount: Int
+    let name: String?
+    let canReuse: Bool
 
     /// Not compared: a `DraggablePrint` is a closure in a trench coat, and the
     /// count above already changes whenever this list does.
     let share: [DraggablePrint]
 
-    let quickLook: () -> Void
-    let favorite: (Bool) -> Void
-    let file: (CollectionShelf) -> Void
-    let unfile: (CollectionShelf) -> Void
-    let trash: () -> Void
-    let putBack: () -> Void
-    let deleteForever: () -> Void
-    let emptyTrash: () -> Void
+    /// The one door every item goes through -- the same one the tile's menu
+    /// uses, so an item cannot mean two things.
+    let perform: (LibraryAction) -> Void
 
     var isEmpty: Bool { count == 0 }
 
@@ -42,11 +43,21 @@ struct LibrarySelection: Equatable {
     /// there is something to preview AND nothing is being typed into.
     var canQuickLook: Bool { !isEmpty && !isEditingText }
 
+    /// What to offer, declared once and drawn by both menus.
+    var plan: LibraryMenuPlan {
+        LibraryMenuPlan(scope: scope.menuKind, count: count, allFavorite: allFavorite,
+                        name: name, shelves: shelves, enclosingShelf: enclosingShelf,
+                        exportFormats: exportFormats, canReuse: canReuse,
+                        trashCount: trashCount)
+    }
+
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.count == rhs.count && lhs.allFavorite == rhs.allFavorite
             && lhs.scope == rhs.scope && lhs.shelves == rhs.shelves
             && lhs.enclosingShelf == rhs.enclosingShelf
             && lhs.isEditingText == rhs.isEditingText
+            && lhs.exportFormats == rhs.exportFormats && lhs.trashCount == rhs.trashCount
+            && lhs.name == rhs.name && lhs.canReuse == rhs.canReuse
     }
 }
 

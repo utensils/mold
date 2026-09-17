@@ -15,12 +15,18 @@ import Testing
 /// editor sees it, so typing "my cat" as a title fires Quick Look at the space.
 @MainActor
 struct LibrarySelectionTests {
-    private func selection(count: Int, editing: Bool) -> LibrarySelection {
+    private func selection(count: Int, editing: Bool,
+                           performed: Performed = Performed()) -> LibrarySelection {
         LibrarySelection(
             count: count, allFavorite: false, scope: .all, shelves: [],
-            enclosingShelf: nil, isEditingText: editing, share: [],
-            quickLook: {}, favorite: { _ in }, file: { _ in }, unfile: { _ in },
-            trash: {}, putBack: {}, deleteForever: {}, emptyTrash: {})
+            enclosingShelf: nil, isEditingText: editing, exportFormats: [],
+            trashCount: 0, name: nil, canReuse: count == 1, share: [],
+            perform: { performed.actions.append($0) })
+    }
+
+    /// What the menu asked for, without a menu.
+    @MainActor private final class Performed {
+        var actions: [LibraryAction] = []
     }
 
     @Test func quickLookIsOfferedForASelectionWithNoCaretInTheWindow() {
@@ -33,6 +39,19 @@ struct LibrarySelectionTests {
 
     @Test func quickLookIsNotOfferedForNothing() {
         #expect(!selection(count: 0, editing: false).canQuickLook)
+    }
+
+    /// The menu bar draws the SAME list a tile's right-click menu draws, and
+    /// performs it through the same door.
+    @Test func theMenuBarOffersThePlanAndNothingOfItsOwn() {
+        let performed = Performed()
+        let selection = selection(count: 1, editing: false, performed: performed)
+
+        #expect(selection.plan.items.filter { !$0.isDivider }.map(\.id)
+            == ["open", "quickLook", "reuse", "favorite", "copy", "save", "trash"])
+
+        selection.perform(.quickLook)
+        #expect(performed.actions == [.quickLook])
     }
 
     /// The menu redraws when the words on its items change -- and now also

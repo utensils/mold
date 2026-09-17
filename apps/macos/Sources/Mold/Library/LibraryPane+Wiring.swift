@@ -85,4 +85,26 @@ extension LibraryPane {
         }
         destination = .generate
     }
+
+    /// The three things the Library menu offers about the SHELF it is
+    /// showing. The sidebar's right-click menu answers the same three its own
+    /// way -- it owns a row, this owns the pane -- but both are offered the
+    /// same items, from `LibraryMenuPlan`.
+    func performCollection(_ action: LibraryAction) {
+        guard let shelf = enclosingShelf else { return }
+        switch action {
+        case .renameCollection:
+            renamingShelf = shelf
+        case let .setCollectionHidden(hidden):
+            Task { await library.setShelfHidden(shelf, hidden: hidden) }
+        case .deleteCollection:
+            actions.confirmDestruction?(Destruction(
+                title: "Delete “\(shelf.name)”?",
+                message: "The prints in it are kept. Only the collection goes.",
+                verb: "Delete Collection"
+            ) { Task { await library.deleteShelf(shelf) } })
+        default:
+            break
+        }
+    }
 }

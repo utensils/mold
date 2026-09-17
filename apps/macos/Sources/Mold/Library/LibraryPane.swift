@@ -39,11 +39,15 @@ struct LibraryPane: View {
     /// all of that per pass is work proportional to the whole library for a
     /// change that moved the cursor. See `LibraryShowingCache`.
     @State private var index = LibraryShowingCache()
+    /// The shelf being renamed from the MENU BAR. The sidebar row has its own;
+    /// both open the same sheet.
+    @State var renamingShelf: CollectionShelf?
 
     var actions: LibraryActions {
         LibraryActions(hosts: hosts, library: library, reuse: reuse,
                        confirmDestruction: { pendingDestruction = $0 },
-                       materializer: materializer)
+                       materializer: materializer,
+                       collectionAction: { performCollection($0) })
     }
 
     // Three stages rather than one chain: what is on screen, what dresses it,
@@ -67,6 +71,7 @@ struct LibraryPane: View {
                 navigation.rememberEdge()
             })
             .destructionDialog($pendingDestruction)
+            .sheet(item: $renamingShelf) { ShelfNameSheet(shelf: $0) }
     }
 
     /// The pane, plugged in: what it does on appearing, and what it re-does
@@ -126,6 +131,8 @@ struct LibraryPane: View {
                 sections: showing.sections, hosts: hosts.hosts, edge: navigation.edge,
                 showsHostBadges: showsHostBadges,
                 scope: navigation.scope, actions: actions, entries: showing.visible,
+                shelves: library.shelves, enclosingShelf: enclosingShelf,
+                trashCount: library.trashed.count,
                 selection: $selection, onOpen: { viewing = $0 }
             )
         }

@@ -11,6 +11,11 @@ struct LibraryGrid: View {
     let scope: LibraryScope
     let actions: LibraryActions
     let entries: [LibraryEntry]
+    /// What a tile's menu needs that a tile does not know: the shelves it
+    /// could be filed into, the one being shown, and how much is in the trash.
+    let shelves: [CollectionShelf]
+    let enclosingShelf: CollectionShelf?
+    let trashCount: Int
     @Binding var selection: LibraryCursor.Selection
     let onOpen: (PrintID) -> Void
 
@@ -96,7 +101,8 @@ struct LibraryGrid: View {
             .draggable(actions.draggable(entry))
             .contextMenu {
                 LibraryMenu(targets: targets(for: entry), scope: scope, actions: actions,
-                            open: { onOpen(entry.id) })
+                            shelves: shelves, enclosingShelf: enclosingShelf,
+                            trashCount: trashCount, open: { onOpen(entry.id) })
             }
         }
     }

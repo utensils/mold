@@ -9,80 +9,67 @@ import SwiftUI
 /// is reachable from the keyboard, and VoiceOver reads it -- none of which is
 /// true of a bar that materialises over the content.
 ///
-/// Every item here is the same call the contextual menu makes.
+/// Every item here is `LibraryMenuPlan`'s, which is also what a tile's
+/// right-click menu draws: the same items, in the same order, with the same
+/// words. The two used to be hand-written lists that disagreed about all
+/// three. What is added here and not there is the KEYS -- a contextual menu
+/// carries no shortcuts.
 struct LibraryCommands: Commands {
     @FocusedValue(\.librarySelection) private var library
-    @FocusedValue(\.libraryImport) private var importer
 
     var body: some Commands {
-        // Importing is a File thing, not a Library thing: it is where the
-        // Mac puts "bring something in from outside".
-        CommandGroup(after: .newItem) {
-            Menu("Import to") {
-                ForEach(importer?.machines ?? []) { machine in
-                    Button(machine.name) { importer?.run(machine) }
-                }
-            }
-            .disabled(importer?.machines.isEmpty ?? true)
-        }
+        CommandGroup(after: .newItem) { ImportCommands() }
 
         CommandMenu("Library") {
-            if library?.scope.isTrash == true {
-                trash
-            } else {
-                prints
+            if let library {
+                LibraryMenuItems(items: library.plan.items, perform: library.perform)
+                    .modifier(LibraryShortcuts(selection: library))
             }
         }
     }
+}
 
-    @ViewBuilder private var prints: some View {
-        // A bare space as a key equivalent is offered to the main menu BEFORE
-        // the field editor sees it, so an enabled item here takes the space
-        // bar out of the search field, the inspector's Title and "Add a tag"
-        // -- all three of which are only reachable with a selection, which is
-        // exactly when this item is not disabled. It stands down while text is
-        // being edited, the way the viewer's own key equivalents already do.
-        Button("Quick Look") { library?.quickLook() }
-            .keyboardShortcut(.space, modifiers: [])
-            .disabled(!(library?.canQuickLook ?? false))
-        // Share moved to File ▸ Share, off the same `librarySelection.share`
-        // (design decision 24, `MoldCommands.swift`) -- a Mac's Share belongs
-        // in File, not in a feature menu.
+/// The keys the menu bar adds to the shared plan.
+///
+/// A modifier rather than items of its own: the plan decides WHAT is offered,
+/// and this decides which of those rows a chord reaches. Applied to the whole
+/// group because SwiftUI has no way to name one item from outside it -- so the
+/// two that carry keys are bound here as their own copies, and the plan's
+/// rows stay what the tile draws.
+private struct LibraryShortcuts: ViewModifier {
+    let selection: LibrarySelection
+
+    func body(content: Content) -> some View {
+        content
         Divider()
-
-        Button(library?.allFavorite == true ? "Unfavorite" : "Favorite") {
-            library?.favorite(!(library?.allFavorite ?? false))
+        // Quick Look's bare space stands down while a caret is in the window:
+        // AppKit offers a key equivalent to the menu before the field editor
+        // sees it. See `TextEditingFocus`.
+        Button("Quick Look") { selection.perform(.quickLook) }
+            .keyboardShortcut(.space, modifiers: [])
+            .disabled(!selection.canQuickLook)
+        Button(selection.allFavorite ? "Remove from Favourites" : "Add to Favourites") {
+            selection.perform(.favorite(!selection.allFavorite))
         }
         .keyboardShortcut("f", modifiers: [.command, .option])
-        .disabled(library?.isEmpty ?? true)
+        .disabled(selection.isEmpty)
+        Button("Move to Trash") { selection.perform(.trash) }
+            .keyboardShortcut(.delete, modifiers: .command)
+            .disabled(selection.isEmpty || selection.scope.isTrash)
+    }
+}
 
-        Menu("Move to Collection") {
-            ForEach(library?.shelves ?? []) { shelf in
-                Button(shelf.name) { library?.file(shelf) }
+/// Importing is a File thing, not a Library thing: it is where the Mac puts
+/// "bring something in from outside".
+private struct ImportCommands: View {
+    @FocusedValue(\.libraryImport) private var importer
+
+    var body: some View {
+        Menu("Import to") {
+            ForEach(importer?.machines ?? []) { machine in
+                Button(machine.name) { importer?.run(machine) }
             }
         }
-        .disabled(library?.shelves.isEmpty ?? true || library?.isEmpty ?? true)
-
-        if let shelf = library?.enclosingShelf {
-            Button("Remove from \(shelf.name)") { library?.unfile(shelf) }
-                .disabled(library?.isEmpty ?? true)
-        }
-
-        Divider()
-
-        Button("Move to Trash") { library?.trash() }
-            .keyboardShortcut(.delete, modifiers: .command)
-            .disabled(library?.isEmpty ?? true)
-    }
-
-    @ViewBuilder private var trash: some View {
-        // The Finder's own words. "Restore" describes the mechanism; "Put
-        // Back" describes what happens to your picture.
-        Button("Put Back") { library?.putBack() }
-            .disabled(library?.isEmpty ?? true)
-        Button("Delete Immediately…") { library?.deleteForever() }
-            .disabled(library?.isEmpty ?? true)
-        Divider()
-        Button("Empty Trash…") { library?.emptyTrash() }
+        .disabled(importer?.machines.isEmpty ?? true)
     }
 }

@@ -6,11 +6,13 @@ extension LibraryPane {
 
     /// The selection, as the menu bar needs to see it.
     ///
-    /// Built from the same `actions` the contextual menu uses, so an item in
-    /// the menu bar and the same item on a right-click are literally the same
-    /// call -- there is no second path to keep in step.
+    /// WHAT is offered is `LibraryMenuPlan`'s -- the same list a tile's
+    /// right-click menu draws -- and this supplies what the plan cannot see
+    /// from a menu: the selection, the shelves, and the one door every item is
+    /// performed through.
     func menuSelection(_ showing: LibraryShowing) -> LibrarySelection {
         let entries = showing.selected
+        let actions = self.actions
         return LibrarySelection(
             count: entries.count,
             allFavorite: !entries.isEmpty && entries.allSatisfy(\.print.isFavorite),
@@ -18,15 +20,15 @@ extension LibraryPane {
             shelves: library.shelves,
             enclosingShelf: enclosingShelf,
             isEditingText: isEditingText,
+            exportFormats: entries.count == 1 ? actions.exportFormats(for: entries[0]) : [],
+            trashCount: library.trashed.count,
+            name: entries.count == 1 ? entries[0].print.displayName : nil,
+            canReuse: entries.count == 1,
             share: navigation.scope.isTrash ? [] : entries.map(actions.draggable),
-            quickLook: { actions.quickLook(entries) },
-            favorite: { _ in actions.toggleFavorite(entries) },
-            file: { shelf in library.file(entries, into: shelf) },
-            unfile: { shelf in library.unfile(entries, from: shelf) },
-            trash: { actions.moveToTrash(entries) },
-            putBack: { actions.restore(entries) },
-            deleteForever: { actions.deleteForever(entries) },
-            emptyTrash: { actions.emptyTrash() }
+            perform: { action in
+                actions.perform(action, on: entries, scope: navigation.scope,
+                                open: entries.count == 1 ? { viewing = entries[0].id } : nil)
+            }
         )
     }
 
@@ -39,7 +41,7 @@ extension LibraryPane {
     }
 
     /// What File ▸ Export… and File ▸ Save a Copy… offer -- the same calls
-    /// `LibraryMenu.swift`'s own "Save a Copy…" and "Export As" make, off the
+    /// `LibraryMenu.swift`'s own "Save a Copy…" and "Export…" make, off the
     /// same selection (design S6).
     func menuFile(_ showing: LibraryShowing) -> LibraryFile {
         let entries = showing.selected
@@ -69,7 +71,7 @@ extension LibraryPane {
     }
 
     /// The shelf the grid is currently showing, if it is showing one.
-    private var enclosingShelf: CollectionShelf? {
+    var enclosingShelf: CollectionShelf? {
         guard case let .collection(slug) = navigation.scope else { return nil }
         return library.shelf(slug: slug)
     }

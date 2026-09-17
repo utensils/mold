@@ -20,6 +20,10 @@ struct LibraryActions {
     /// Turns prints into files on this disk. Absent in contexts that only
     /// read -- nothing here fetches bytes without it.
     var materializer: PrintMaterializer?
+    /// What to do about the SHELF being shown -- rename it, hide it, delete
+    /// it. Declared in the menu plan so both menus offer the three, and
+    /// answered by whoever owns the sheet and the confirm.
+    var collectionAction: ((LibraryAction) -> Void)?
 
     /// Moved to `Shell/Destruction.swift` (M5 S5, decision 12) so the Models
     /// pane can raise the same confirm without depending on a Library type.
