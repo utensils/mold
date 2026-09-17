@@ -46,6 +46,12 @@ enum EngineLaunchPlan {
         logDirectory: String,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> EngineLaunch {
+        // Both halves of "which home", in mold's own order: a pointer that is
+        // damaged rather than absent fails CLOSED, because the engine forces
+        // this answer into `MOLD_HOME` and the Rust guard can never fire.
+        if let reason = MoldHome.pointerRefusal(environment: environment) {
+            throw EngineLaunchRefusal.home(reason)
+        }
         if let reason = home.unavailableReason { throw EngineLaunchRefusal.home(reason) }
         let key: String
         do {

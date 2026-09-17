@@ -18,30 +18,34 @@ struct EngineLaunchTests {
         return url
     }
 
-    private func home(_ url: URL) -> MoldHome {
-        MoldHome.resolve(environment: ["MOLD_HOME": url.path(percentEncoded: false)])
+    /// An environment naming an explicit home, so nothing here reads this
+    /// Mac's real pointer file or its real secrets.
+    private func environment(_ url: URL, _ extra: [String: String] = [:]) -> [String: String] {
+        extra.merging(["MOLD_HOME": url.path(percentEncoded: false)]) { current, _ in current }
     }
 
     @Test func theEngineIsStartedWithAKeyThatSurvivesTheLaunch() throws {
         let directory = scratch()
-        let secrets = SecretStore(directory: directory)
+        let env = environment(directory)
         let first = try EngineLaunchPlan.resolve(
-            home: home(directory), secrets: secrets, logDirectory: "/tmp", environment: [:])
+            home: MoldHome.resolve(environment: env), secrets: SecretStore(directory: directory),
+            logDirectory: "/tmp", environment: env)
         #expect(!first.apiKey.isEmpty)
 
         // A second launch -- a second process, so a cold store -- must present
         // the same key, or "This Mac" holds one the engine does not accept.
         let second = try EngineLaunchPlan.resolve(
-            home: home(directory), secrets: SecretStore(directory: directory),
-            logDirectory: "/tmp", environment: [:])
+            home: MoldHome.resolve(environment: env), secrets: SecretStore(directory: directory),
+            logDirectory: "/tmp", environment: env)
         #expect(second.apiKey == first.apiKey)
     }
 
     @Test func anOperatorsOwnKeyWins() throws {
         let directory = scratch()
+        let env = environment(directory, ["MOLD_API_KEY": "operator-key"])
         let launch = try EngineLaunchPlan.resolve(
-            home: home(directory), secrets: SecretStore(directory: directory),
-            logDirectory: "/tmp", environment: ["MOLD_API_KEY": "operator-key"])
+            home: MoldHome.resolve(environment: env), secrets: SecretStore(directory: directory),
+            logDirectory: "/tmp", environment: env)
         #expect(launch.apiKey == "operator-key")
     }
 
@@ -53,10 +57,12 @@ struct EngineLaunchTests {
             .appending(path: "engine-launch-blocker-\(UUID().uuidString)")
         FileManager.default.createFile(atPath: blocker.path(percentEncoded: false), contents: Data())
         let secrets = SecretStore(directory: blocker.appending(path: "inside"))
+        let env = environment(scratch())
 
         #expect(throws: EngineLaunchRefusal.self) {
             try EngineLaunchPlan.resolve(
-                home: home(scratch()), secrets: secrets, logDirectory: "/tmp", environment: [:])
+                home: MoldHome.resolve(environment: env), secrets: secrets,
+                logDirectory: "/tmp", environment: env)
         }
     }
 
@@ -74,6 +80,21 @@ struct EngineLaunchTests {
             try EngineLaunchPlan.resolve(
                 home: home, secrets: SecretStore(directory: scratch()),
                 logDirectory: "/tmp", environment: [:])
+        }
+    }
+
+    /// The engine forces its answer into `MOLD_HOME`, so mold's own
+    /// fail-closed guard can never fire -- this side has to.
+    @Test func aDamagedHomePointerRefusesRatherThanBuildingANewLibrary() {
+        let pointer = FileManager.default.temporaryDirectory
+            .appending(path: "engine-damaged-pointer-\(UUID().uuidString)")
+        try? "not/absolute".write(to: pointer, atomically: true, encoding: .utf8)
+        let env = ["MOLD_HOME_POINTER_PATH": pointer.path(percentEncoded: false)]
+
+        #expect(throws: EngineLaunchRefusal.self) {
+            try EngineLaunchPlan.resolve(
+                home: MoldHome.resolve(environment: env), secrets: SecretStore(directory: scratch()),
+                logDirectory: "/tmp", environment: env)
         }
     }
 
