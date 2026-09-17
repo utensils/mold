@@ -63,19 +63,29 @@ struct PeerSection: View {
 
     @ViewBuilder private func row(_ peer: DiscoveryPeer) -> some View {
         LabeledContent {
-            switch action(for: peer) {
-            case let .add(name, url):
-                Button("Add") { hosts.add(name: name, url: url, apiKey: nil) }
-            case .edit:
-                Button("Add…") { addingPeer = peer }
-            case .skip:
-                EmptyView()
-            }
+            add(peer)
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(peer.name)
                 Text(peer.url).font(.caption).foregroundStyle(.secondary)
             }
+        }
+        .contentShape(Rectangle())
+        // The row's one button a second way -- the SAME `action(for:)`, so
+        // the ellipsis (a sheet for a peer that wants a key) is drawn in both
+        // places or neither. `offered` has already dropped every `.skip`, so
+        // this is never an empty menu in practice.
+        .contextMenu { add(peer) }
+    }
+
+    @ViewBuilder private func add(_ peer: DiscoveryPeer) -> some View {
+        switch action(for: peer) {
+        case let .add(name, url):
+            Button("Add") { hosts.add(name: name, url: url, apiKey: nil) }
+        case .edit:
+            Button("Add…") { addingPeer = peer }
+        case .skip:
+            EmptyView()
         }
     }
 }

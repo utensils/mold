@@ -69,13 +69,20 @@ struct PairingSection: View {
 
     private func row(_ client: PairedClient) -> some View {
         LabeledContent {
-            Button("Revoke", role: .destructive) { confirmRevoke(client) }
+            // The ellipsis because it opens a dialog, the same rule
+            // "Delete…", "Components…" and "Empty Queue…" already follow --
+            // and the contextual menu says the identical thing.
+            Button("Revoke…", role: .destructive) { confirmRevoke(client) }
                 .buttonStyle(.link)
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(client.name)
                 Text(lastSeen(client)).font(.caption).foregroundStyle(.secondary)
             }
+        }
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button("Revoke…", role: .destructive) { confirmRevoke(client) }
         }
     }
 

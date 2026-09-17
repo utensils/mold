@@ -79,6 +79,37 @@ struct DeviceControlTests {
         #expect(DeviceControl.resolve(card(), on: nil, isChanging: false) == .readOnly)
     }
 
+    // MARK: - The contextual menu
+
+    /// **Fails today**: a GPU row has no contextual menu at all -- its one
+    /// control is a `Toggle` and nothing else, so a right click on a card
+    /// offers nothing.
+    ///
+    /// The menu is the SAME `DeviceControl` answer, so it can never offer a
+    /// switch the row does not: absent where the row is read-only, absent
+    /// while a card is mid-transition (asking again is a second request, not
+    /// a second answer), and naming the direction it would move.
+    @Test func aCardsMenuOffersExactlyTheControlItsRowDraws() {
+        let live = capabilities(lifecycle: true, v2Authoritative: true)
+        let name = "NVIDIA L40S  #0"
+
+        #expect(DeviceControl.resolve(card(), on: live, isChanging: false).menuItem(named: name)
+            == DeviceControl.MenuItem(title: "Stop Using \(name)", enable: false))
+        #expect(DeviceControl.resolve(card("disabled", on: false), on: live, isChanging: false)
+            .menuItem(named: name) == DeviceControl.MenuItem(title: "Use \(name)", enable: true))
+
+        #expect(DeviceControl.resolve(card("draining", on: false), on: live, isChanging: false)
+            .menuItem(named: name) == nil)
+        #expect(DeviceControl.resolve(card(), on: live, isChanging: true).menuItem(named: name) == nil)
+        #expect(DeviceControl.resolve(card(), on: nil, isChanging: false).menuItem(named: name) == nil)
+
+        // The other power, worded exactly as the row's own button is.
+        let restart = capabilities(restartEnable: true)
+        #expect(DeviceControl.resolve(card("disabled", on: false), on: restart, isChanging: false)
+            .menuItem(named: name)
+            == DeviceControl.MenuItem(title: "Enable at next restart", enable: true))
+    }
+
     @Test func aDeviceWithNoReportedTotalHasNoBar() {
         #expect(MemoryReading(used: 12, total: nil) == nil)
         #expect(MemoryReading(used: 12, total: 0) == nil)

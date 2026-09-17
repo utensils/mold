@@ -45,4 +45,32 @@ extension DeviceControl {
 
         return .readOnly
     }
+
+    /// The contextual menu's twin of whatever control this row draws --
+    /// `nil` where the row draws none, so a right click offers nothing
+    /// rather than something disabled.
+    ///
+    /// `named` is the row's own title, so the item reads as the switch's
+    /// accessibility name does ("Use NVIDIA L40S  #0"). A card mid-transition
+    /// is `.live(_, isEnabled: false)`: it has already been asked, and asking
+    /// again is a second request, not a second answer.
+    struct MenuItem: Equatable {
+        let title: String
+        /// What the item asks the machine for.
+        let enable: Bool
+    }
+
+    func menuItem(named name: String) -> MenuItem? {
+        switch self {
+        case let .live(isOn, isEnabled):
+            guard isEnabled else { return nil }
+            return isOn
+                ? MenuItem(title: "Stop Using \(name)", enable: false)
+                : MenuItem(title: "Use \(name)", enable: true)
+        case .enableAtRestart:
+            return MenuItem(title: "Enable at next restart", enable: true)
+        case .readOnly:
+            return nil
+        }
+    }
 }
