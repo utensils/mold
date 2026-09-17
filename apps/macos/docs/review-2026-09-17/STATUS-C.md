@@ -4,7 +4,7 @@ Branch `lane-c-library`, off `bc96d415`. Findings from `03-library.md`.
 
 | id | status | commit | test |
 | --- | --- | --- | --- |
-| H1 path traversal | fixed | `b3cdcbdd` | `SafeFilenameSuite` (17 refusals + containment), `GalleryListingSuite`, `PrintMaterializerTests` |
+| H1 path traversal | fixed | `b3cdcbdd`, `ab997d18` | `SafeFilenameSuite` (17 refusals + containment), `GalleryListingSuite`, `PrintMaterializerTests` |
 | M1 live events dropped while the outbox is pending | fixed | `1e90154f` | `GalleryEchoTests`, `LibraryStoreLiveTests` |
 | M2 the grid ignores Sort By | fixed | `89407056` | `theGridDrawsTheOrderTheQueryAskedFor` (all four sorts), `LibraryGroupingTests` |
 | M11 the library is re-derived per body pass | fixed | `89407056` | `LibraryShowingCacheTests` (counting budget) |
@@ -29,6 +29,16 @@ path construction (H1) all have tests now; `LibraryShowingTests`' self-derived
 assertion is replaced by `sections.flatMap(items) == visible` per sort;
 `ThumbnailCache` has a suite with an injected session; `CacheBudget`'s use by
 the materializer is covered.
+
+Housekeeping: `f9d71ed3` splits the five files this work pushed past the
+150-line advisory and updates `apps/macos/README.md`; `ab997d18` is an H1
+follow-up (a folded cache key has to leave room for the machine's UUID beside
+it, or a long `media_version` made a component nothing could create and the
+print materialized as nothing).
+
+Verified on this branch: `make lint` clean (the three pre-existing large types
+only), package `swift test` 443 tests green, app bundle `xcodebuild test` 408
+tests in 62 suites green.
 
 ## Deferred, and why
 
