@@ -40,6 +40,10 @@ struct RunQueueMachinesTests {
             FakeFixtures.batchStatus(id: "batch-1", clientBatchId: "client-batch-1", [.init(1, state: "complete", seed: 1)]),
             for: "batch-1")
         onPlato.finishBatchEvents(for: "batch-1")
+        // What the canvas does once the outcome is really on screen; without
+        // it the queue waits out `ResultHandoff`'s grace instead (02#9).
+        await settle { controller.handoff.isHolding }
+        controller.handoff.acknowledge()
         await settle { onHal.calls.contains("batchEvents") }
 
         #expect(controller.activeBatch?.host == hal.id)
