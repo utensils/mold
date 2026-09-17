@@ -42,6 +42,36 @@ import Testing
     /// The media ceiling is the server's own for one member, not a guess.
     @Test func theMediaCeilingMatchesWhatTheServerWillServe() {
         #expect(ResponseCeiling.media == 512 * 1_024 * 1_024)
-        #expect(ResponseCeiling.json < ResponseCeiling.media)
+    }
+
+    // MARK: - Bounded as it arrives
+
+    private func stream(_ bytes: [UInt8]) -> AsyncThrowingStream<UInt8, Error> {
+        AsyncThrowingStream { continuation in
+            for byte in bytes { continuation.yield(byte) }
+            continuation.finish()
+        }
+    }
+
+    @Test func anAnswerInsideTheCeilingIsCollectedWhole() async throws {
+        let collected = try await stream([1, 2, 3]).collected(upTo: 16)
+        #expect(collected == Data([1, 2, 3]))
+    }
+
+    /// **Fails today**: there is nothing that counts as it reads -- `checked`
+    /// measures a body that is already in memory, which is the allocation the
+    /// ceiling claims to prevent.
+    @Test func collectingStopsAtTheCeilingRatherThanAfterIt() async {
+        var thrown: (any Error)?
+        do { _ = try await stream(Array(repeating: 9, count: 100)).collected(upTo: 8) }
+        catch { thrown = error }
+
+        let refusal = thrown as? ResponseCeiling.Exceeded
+        #expect(refusal?.ceiling == 8)
+    }
+
+    @Test func anAnswerExactlyAtTheCeilingIsCollected() async throws {
+        let collected = try await stream(Array(repeating: 1, count: 8)).collected(upTo: 8)
+        #expect(collected.count == 8)
     }
 }

@@ -2,25 +2,28 @@ import Foundation
 
 /// How much of an answer this app is willing to hold.
 ///
-/// Every route goes through `session.data(for:)`, which buffers the complete
-/// body before anyone sees a byte of it, and nothing checks `Content-Length`
-/// or caps the result. A compromised or simply broken host can therefore
-/// answer a gallery listing or a print with an unbounded body and take the
-/// process down -- and the person's only evidence is an app that quit.
+/// Two different guarantees live here, and they are not the same strength:
 ///
-/// The real fix is a streamed `download(for:)` on the media routes, writing
-/// into the materializer's file instead of into memory. Until the transport
-/// does that, the ceiling is applied where an unbounded body is actually
-/// asked for, which turns an OOM into a refusal with a sentence.
+/// - **Bounded as it arrives** (`collected(upTo:)`), which is the real one: the
+///   declared length is refused before a byte is read and the count is kept as
+///   the bytes come in, so nothing large is ever allocated. The thumbnail
+///   route reads this way -- it builds its own session, so it can.
+/// - **Bounded on retention** (`checked(_:ceiling:what:)`), which is weaker and
+///   says so: `HTTPBackend` buffers every route whole through
+///   `session.data(for:)`, so by the time this runs the bytes are already in
+///   memory. It stops this app KEEPING a hostile print, writing it to the
+///   cache, and decoding ten of them into `NSImage` at once -- it does not stop
+///   the allocation. Doing that means `download(for:)`/`bytes(for:)` in the
+///   transport, which is `HTTPBackend+Transport.swift`'s to give.
 public enum ResponseCeiling {
     /// What the server itself will serve for one member
     /// (`gallery_source_media.rs`'s own 512 MiB ceiling). Anything past that
     /// is not a print mold made.
     public static let media = 512 * 1_024 * 1_024
 
-    /// A gallery index of ten thousand prints measures about 1.2 MB, and no
-    /// JSON route in this app answers with more than one index.
-    public static let json = 32 * 1_024 * 1_024
+    /// A rendered thumbnail is tens of kilobytes at `?size=512`, and the
+    /// answer is decoded into an `NSImage` on the main actor.
+    public static let thumbnail = 32 * 1_024 * 1_024
 
     /// The body back, or a refusal naming the ceiling it broke.
     public static func checked(_ data: Data, ceiling: Int, what: String) throws -> Data {
@@ -46,5 +49,26 @@ public enum ResponseCeiling {
             let cap = ByteCountFormatStyle().format(Int64(ceiling))
             return "It answered with \(size) of \(what), and Mold holds at most \(cap)."
         }
+    }
+}
+
+public extension AsyncSequence where Element == UInt8 {
+    /// The bytes, refused the moment they pass `ceiling`.
+    ///
+    /// Counted as it goes rather than measured afterwards, because a host that
+    /// lies about `Content-Length` -- or sends none -- is precisely the one a
+    /// ceiling exists for. The reserve is a guess at the answer's size and is
+    /// itself bounded, so a declared 40 GB cannot be allocated here either.
+    func collected(upTo ceiling: Int) async throws -> Data {
+        var data = Data()
+        data.reserveCapacity(Swift.min(ceiling, 1_024 * 1_024))
+        for try await byte in self {
+            guard data.count < ceiling else {
+                throw ResponseCeiling.Exceeded(bytes: ceiling + 1, ceiling: ceiling,
+                                               what: "that answer")
+            }
+            data.append(byte)
+        }
+        return data
     }
 }

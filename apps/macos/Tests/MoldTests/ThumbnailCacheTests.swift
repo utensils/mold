@@ -22,10 +22,11 @@ struct ThumbnailCacheTests {
         LibraryEntry(host: host, print: FakeFixtures.print(filename))
     }
 
+    /// Built by the app's own initializer, with only the protocol stubbed --
+    /// so the configuration that ships (its cache, its policy) is the one
+    /// under test. Injecting a whole session left that branch uncovered.
     private func cache() -> ThumbnailCache {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [StubProtocol.self]
-        return ThumbnailCache(session: URLSession(configuration: configuration))
+        ThumbnailCache(stubbing: [StubProtocol.self])
     }
 
     @Test func aKeyedMachineGetsTheKeyOnTheThumbnailItself() async {
@@ -71,6 +72,22 @@ struct ThumbnailCacheTests {
         #expect(StubProtocol.seen.count == 1)
     }
 
+    /// **Fails today**: the thumbnail goes through `session.data(for:)` with
+    /// no ceiling at all and straight into `NSImage(data:)`, so a host
+    /// answering without limit is an allocation this app never recovers from
+    /// -- fifty times over, once per tile on the first paint.
+    @Test func anUnboundedAnswerIsRefusedRatherThanDecoded() async {
+        StubProtocol.reset()
+        StubProtocol.bodyBytes = ResponseCeiling.thumbnail + 1_024
+        defer { StubProtocol.bodyBytes = nil }
+        let machine = host("plato", key: nil)
+
+        let image = await cache().image(for: entry("huge.png", on: machine),
+                                        host: machine, size: 256)
+
+        #expect(image == nil)
+    }
+
     /// The README's promise -- capped, and emptied when Mold quits -- has to be
     /// true of this cache too.
     @Test func purgingEmptiesWhatWasRemembered() async {
@@ -97,12 +114,17 @@ private nonisolated final class StubProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
+    /// When set, the stub answers with this many bytes instead of a picture --
+    /// a host with no regard for how much this app can hold.
+    nonisolated(unsafe) static var bodyBytes: Int?
+
     override func startLoading() {
         Self.lock.withLock { Self.seen.append(request) }
         let image = NSImage(size: NSSize(width: 1, height: 1))
         image.lockFocus()
         image.unlockFocus()
-        let data = image.tiffRepresentation ?? Data()
+        let data = Self.bodyBytes.map { Data(repeating: 7, count: $0) }
+            ?? image.tiffRepresentation ?? Data()
         let response = HTTPURLResponse(url: request.url!, statusCode: 200,
                                        httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)

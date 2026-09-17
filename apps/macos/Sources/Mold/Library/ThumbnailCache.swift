@@ -20,9 +20,12 @@ final class ThumbnailCache {
     /// same object, but reading it back is not guaranteed to be.
     private let responses: URLCache
 
-    /// `session` is a parameter so a test can stub the protocol -- nothing
-    /// else builds one, and the default is the only one the app uses.
-    init(session: URLSession? = nil) {
+    /// `stubbing` prepends protocol classes for a test and changes NOTHING
+    /// else: the session a test drives is built by the same lines the shipped
+    /// one is, so the configuration -- the cache, the policy -- is exercised
+    /// rather than bypassed. Injecting a whole session left the shipped
+    /// construction as the one branch nothing covered.
+    init(stubbing protocolClasses: [AnyClass]? = nil) {
         images.totalCostLimit = 96 * 1024 * 1024
         // Deliberately modest, and emptied with everything else: this is the
         // SECOND on-disk copy of somebody's library on this Mac, and the
@@ -31,15 +34,14 @@ final class ThumbnailCache {
         // was swept by nothing. A thumbnail is cheap to fetch again.
         responses = URLCache(memoryCapacity: 32 * 1024 * 1024,
                              diskCapacity: 64 * 1024 * 1024)
-        if let session {
-            self.session = session
-        } else {
-            let configuration = URLSessionConfiguration.default
-            configuration.urlCache = responses
-            // Let the server's ETag decide freshness rather than a local guess.
-            configuration.requestCachePolicy = .useProtocolCachePolicy
-            self.session = URLSession(configuration: configuration)
+        let configuration = URLSessionConfiguration.default
+        configuration.urlCache = responses
+        // Let the server's ETag decide freshness rather than a local guess.
+        configuration.requestCachePolicy = .useProtocolCachePolicy
+        if let protocolClasses {
+            configuration.protocolClasses = protocolClasses + (configuration.protocolClasses ?? [])
         }
+        session = URLSession(configuration: configuration)
     }
 
     /// Empties both tiers. Called when Mold quits and by Settings ▸ Empty Now,
@@ -65,9 +67,18 @@ final class ThumbnailCache {
             if let apiKey = host.apiKey, !apiKey.isEmpty {
                 request.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
             }
-            guard let (data, response) = try? await session.data(for: request),
+            // Streamed and BOUNDED, not `data(for:)`: a thumbnail is tens of
+            // kilobytes and the answer is decoded into an `NSImage`, so an
+            // unbounded body from a broken or hostile host is an allocation
+            // this app never recovers from. The declared length is refused
+            // before a byte is read, and the count is kept as it arrives
+            // because a host that lies about the length is exactly the one
+            // this guards against.
+            guard let (stream, response) = try? await session.bytes(for: request),
                   let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode)
+                  (200..<300).contains(http.statusCode),
+                  http.expectedContentLength <= Int64(ResponseCeiling.thumbnail),
+                  let data = try? await stream.collected(upTo: ResponseCeiling.thumbnail)
             else { return nil }
             return NSImage(data: data)
         }
