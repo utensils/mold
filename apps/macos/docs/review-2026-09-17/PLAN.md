@@ -257,3 +257,10 @@ float POSITION/NORMAL/TEXCOORD_0/COLOR_0(VEC3), buffer 0, embedded PNGs, no exte
   quit and relaunch — the draft is back, the keys are in `secrets.json` (0600) and the Keychain is empty.
 - Sparkle: `generate_appcast` output validates and the feed-allowlist test passes; an end-to-end
   update is verified only once James has installed the key.
+
+## Deviations recorded during execution
+
+- **Step 0 (05-H2)**: the plan said to teach `scripts/release/sync-release-pr.sh` about the FFI root.
+  That script only ever runs on `main`'s release PR and this branch never merges, so it could never
+  fire. Instead the `mold-ai-*` path dependencies carry no `version` requirement at all
+  (`publish = false`), which cannot drift. Commit `34cfa484`.
