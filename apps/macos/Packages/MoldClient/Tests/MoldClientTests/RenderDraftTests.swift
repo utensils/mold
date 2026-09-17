@@ -321,6 +321,49 @@ private func sizedRecipe(_ resolution: ResolutionProfile) -> GenerationRecipe {
     #expect(adopted.height == 832)
 }
 
+/// **Fails today**: `fit` snaps EVERY `.buckets` recipe, so a wan clip
+/// rendered at an off-ladder size -- which its host admits with a warning --
+/// came back as a different shape on reuse, silently (finding 01#7).
+@Test func aWarnedOffBucketSizeIsKeptRatherThanSnapped() {
+    let warned = ResolutionProfile(
+        domain: .buckets, alignment: nil, minWidth: nil, minHeight: nil,
+        maxPixels: nil, maxAxisPixels: nil, offBucket: .warn,
+        aspectGroups: [AspectGroup(id: "square", label: "Square", presets: [
+            SizePreset(id: "a", width: 832, height: 832, tier: nil),
+        ])])
+    var draft = RenderDraft()
+    draft.width = 1024
+    draft.height = 768
+    let adopted = draft.adopting(sizedRecipe(warned), isNewModel: false)
+    #expect(adopted.width == 1024)
+    #expect(adopted.height == 768)
+}
+
+/// **Fails today**: alignment rounds to the NEAREST multiple AFTER the pixel
+/// budget, which grows both axes back past it -- FLUX's 1,800,000 budget
+/// scales 2048x1152 to 1788x1006 and then aligns it to 1792x1008 =
+/// 1,806,336, which `validate_resolution` refuses (finding 01#8).
+@Test func alignmentNeverGrowsASizeBackPastThePixelBudget() {
+    let flux = ResolutionProfile(
+        domain: .dynamic, alignment: 16, minWidth: 256, minHeight: 256,
+        maxPixels: 1_800_000, maxAxisPixels: nil, offBucket: nil, aspectGroups: nil)
+    var draft = RenderDraft()
+    draft.width = 2048
+    draft.height = 1152
+    let adopted = draft.adopting(sizedRecipe(flux), isNewModel: false)
+
+    #expect(adopted.width * adopted.height <= 1_800_000)
+    #expect(adopted.width % 16 == 0)
+    #expect(adopted.height % 16 == 0)
+    // Under budget, so the ordinary nearest-rounding still applies.
+    var small = RenderDraft()
+    small.width = 1020
+    small.height = 1020
+    let fitted = small.adopting(sizedRecipe(flux), isNewModel: false)
+    #expect(fitted.width == 1024)
+    #expect(fitted.height == 1024)
+}
+
 @Test func aKeptDraftClampsToTheRangeOnADynamicRecipe() {
     let ranged = ResolutionProfile(
         domain: .dynamic, alignment: 16, minWidth: nil, minHeight: nil,

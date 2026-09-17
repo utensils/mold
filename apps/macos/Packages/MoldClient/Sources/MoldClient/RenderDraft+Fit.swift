@@ -16,6 +16,12 @@ public extension RenderDraft {
     mutating func fit(to resolution: ResolutionProfile) {
         switch resolution.domain {
         case .buckets:
+            // `warn` means the host ADMITS an off-ladder size and says so
+            // (`validation.rs:1366-1367` refuses one only on `reject`), so
+            // snapping it would silently re-render a reused print at a
+            // different shape. Wan is the one family that advertises it;
+            // absence still means `reject`, which is the safe reading.
+            guard (resolution.offBucket ?? .reject) != .warn else { return }
             guard let nearest = resolution.presets.min(by: {
                 distanceSquared(to: $0) < distanceSquared(to: $1)
             }) else { return }
@@ -36,8 +42,22 @@ public extension RenderDraft {
                 height = Swift.max(1, Int(Double(height) * scale))
             }
             if let alignment = resolution.alignment, alignment > 1 {
+                let unaligned = (width: width, height: height)
                 width = Self.aligned(width, to: alignment, atLeast: resolution.minWidth)
                 height = Self.aligned(height, to: alignment, atLeast: resolution.minHeight)
+                // Rounding to the NEAREST multiple can grow both axes back
+                // past the budget just enforced -- 1788x1006 (1,798,728 under
+                // FLUX's 1,800,000) aligns to 1792x1008 = 1,806,336, which
+                // `validate_resolution` refuses. A size the app itself fitted
+                // must never be rejected at submit, so the budget wins and
+                // the alignment falls to the multiple BELOW the scaled pair
+                // (not below the already-rounded-up one) (finding 01#8).
+                if let maxPixels = resolution.maxPixels, width * height > maxPixels {
+                    width = Self.alignedDown(unaligned.width, to: alignment,
+                                             atLeast: resolution.minWidth)
+                    height = Self.alignedDown(unaligned.height, to: alignment,
+                                              atLeast: resolution.minHeight)
+                }
             }
         case .sourceDriven, .none, .unknown:
             break
@@ -55,7 +75,19 @@ public extension RenderDraft {
     /// recipe's own minimum.
     private static func aligned(_ value: Int, to alignment: Int, atLeast floor: Int?) -> Int {
         let rounded = Swift.max(alignment, Int((Double(value) / Double(alignment)).rounded()) * alignment)
-        guard let floor, rounded < floor else { return rounded }
+        return raised(rounded, to: alignment, atLeast: floor)
+    }
+
+    /// The multiple at or BELOW `value` -- what a pixel budget needs, since
+    /// rounding to the nearest can grow past it. The recipe's own minimum
+    /// still wins: a size under it is refused whatever the budget says.
+    private static func alignedDown(_ value: Int, to alignment: Int, atLeast floor: Int?) -> Int {
+        let rounded = Swift.max(alignment, (value / alignment) * alignment)
+        return raised(rounded, to: alignment, atLeast: floor)
+    }
+
+    private static func raised(_ value: Int, to alignment: Int, atLeast floor: Int?) -> Int {
+        guard let floor, value < floor else { return value }
         return ((floor + alignment - 1) / alignment) * alignment
     }
 }
