@@ -46,7 +46,14 @@ final class PrintMaterializer {
     /// A file for this print, downloading it if the cache has not got one.
     func url(for entry: LibraryEntry, fetch: @escaping () async -> Data?) async -> URL? {
         let key = Self.key(for: entry)
-        let file = cacheRoot.appending(path: key).appending(path: entry.print.filename)
+        // Both components are resolved through `SafeFilename`, which proves the
+        // result is still inside the directory it was built from. The name was
+        // already refused at the decode; this is the belt for that brace, and
+        // it is what makes "server string, then `write(to:)`" untrue of this
+        // function whatever else changes upstream of it.
+        guard let folder = SafeFilename.url(key, in: cacheRoot),
+              let file = SafeFilename.url(entry.print.filename, in: folder)
+        else { return nil }
         if FileManager.default.fileExists(atPath: file.path) {
             touch(file)
             return file
@@ -58,13 +65,11 @@ final class PrintMaterializer {
         let flightKey = "\(key)/\(entry.print.filename)"
         if let running = inFlight[flightKey] { return await running.value }
 
-        let task = Task<URL?, Never> { [cacheRoot] in
+        let task = Task<URL?, Never> { [file, folder] in
             guard let data = await fetch() else { return nil }
-            let folder = cacheRoot.appending(path: key)
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let written = folder.appending(path: entry.print.filename)
-            guard (try? data.write(to: written)) != nil else { return nil }
-            return written
+            guard (try? data.write(to: file)) != nil else { return nil }
+            return file
         }
         inFlight[flightKey] = task
         let url = await task.value
@@ -83,10 +88,13 @@ final class PrintMaterializer {
     /// timestamp stands in, which at worst re-downloads once.
     private static func key(for entry: LibraryEntry) -> String {
         let version = entry.print.mediaVersion ?? String(entry.print.timestamp)
-        // mold's media versions carry a colon. Legal in a POSIX path component
-        // and invisible here, but the Finder renders one as "/" -- so it goes,
-        // rather than leaving a cache nobody can read the names of.
-        let safe = version.replacingOccurrences(of: ":", with: "-")
+        // `media_version` is the machine's string too, and this is the only
+        // place the app makes a DIRECTORY out of one -- so it is folded rather
+        // than refused (a print with an odd version is still a print) by the
+        // same rule the filename is judged against. mold's own versions carry
+        // a colon, which is legal in a POSIX component and invisible here but
+        // which the Finder renders as "/", so it goes either way.
+        let safe = SafeFilename.folded(version, fallback: String(entry.print.timestamp))
         return "\(entry.hostID.uuidString)-\(safe)"
     }
 

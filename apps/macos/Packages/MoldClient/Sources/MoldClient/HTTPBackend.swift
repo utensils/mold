@@ -46,8 +46,11 @@ public struct HTTPBackend: MoldBackend {
         if http.statusCode == 304 { return .notModified }
         try check(http, data)
         do {
-            let prints = try MoldJSON.decoder.decode([GalleryPrint].self, from: data)
-            return .fresh(prints, etag: http.value(forHTTPHeaderField: "ETag"))
+            // `GalleryListing`, not `[GalleryPrint]`: a row whose filename is
+            // not a safe path component is dropped and logged rather than
+            // losing the whole index over one of them.
+            let listing = try MoldJSON.decoder.decode(GalleryListing.self, from: data)
+            return .fresh(listing.prints, etag: http.value(forHTTPHeaderField: "ETag"))
         } catch {
             throw MoldClientError.malformedResponse
         }

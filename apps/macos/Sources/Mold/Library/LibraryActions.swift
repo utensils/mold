@@ -91,8 +91,12 @@ struct LibraryActions {
                 panel.prompt = "Save Here"
                 guard await panel.begin() == .OK, let folder = panel.url else { return }
                 for entry in entries {
-                    guard let source = await files(for: [entry]).first else { continue }
-                    let destination = folder.appending(path: entry.print.filename)
+                    // The person chose `folder` and nothing above it. A name
+                    // that would land anywhere else is not saved -- this path
+                    // REMOVES before it copies, so an unchecked one is a
+                    // delete wherever the machine points it.
+                    guard let destination = SafeFilename.url(entry.print.filename, in: folder),
+                          let source = await files(for: [entry]).first else { continue }
                     try? FileManager.default.removeItem(at: destination)
                     try? FileManager.default.copyItem(at: source.url, to: destination)
                 }

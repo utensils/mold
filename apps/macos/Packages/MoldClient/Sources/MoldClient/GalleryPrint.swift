@@ -110,3 +110,32 @@ public struct GalleryPrint: Codable, Hashable, Sendable {
     /// The collections this print is in, as ids ON ITS OWN MACHINE.
     public var collectionList: [String] { collections ?? [] }
 }
+
+// In an extension rather than in the body above, so the memberwise
+// initializer every construction site uses survives.
+public extension GalleryPrint {
+    /// Refuses a filename that is not a single safe path component.
+    ///
+    /// This app writes that name into its media cache and `removeItem`s at the
+    /// same path on a save, unsandboxed -- so the check belongs at the door,
+    /// where a hostile name never becomes a `GalleryPrint` at all, rather than
+    /// at each of the places that later builds a path out of one. Decoding a
+    /// LISTING drops such a row and keeps the rest; see `GalleryListing`.
+    init(from decoder: any Decoder) throws {
+        let row = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            filename: try SafeFilename.validated(row.decode(String.self, forKey: .filename)),
+            metadata: try row.decode(OutputMetadata.self, forKey: .metadata),
+            timestamp: try row.decode(UInt64.self, forKey: .timestamp),
+            format: try row.decodeIfPresent(String.self, forKey: .format),
+            sizeBytes: try row.decodeIfPresent(Int.self, forKey: .sizeBytes),
+            mediaVersion: try row.decodeIfPresent(String.self, forKey: .mediaVersion),
+            title: try row.decodeIfPresent(String.self, forKey: .title),
+            tags: try row.decodeIfPresent([String].self, forKey: .tags),
+            favorite: try row.decodeIfPresent(Bool.self, forKey: .favorite),
+            collections: try row.decodeIfPresent([String].self, forKey: .collections),
+            trashedAt: try row.decodeIfPresent(UInt64.self, forKey: .trashedAt),
+            purgeAt: try row.decodeIfPresent(UInt64.self, forKey: .purgeAt)
+        )
+    }
+}
