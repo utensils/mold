@@ -13,14 +13,31 @@ final class FakeExtras: @unchecked Sendable {
     /// job: recovery is a question about the whole listing, and MOVING a job
     /// -- rewriting this between two polls -- is how "it finished while we
     /// were asking" is said without a clock.
-    var framewiseJobs: [VideoUpscaleJob] = []
+    nonisolated(unsafe) var framewiseJobs: [VideoUpscaleJob] = []
     /// What `POST /api/video-upscale-jobs` answers. Unplanted throws, the
     /// same rule as every other route on this fake.
-    var startedFramewiseAnswer: VideoUpscaleJob?
-    var stillUpscaleAnswer: GalleryImageUpscale?
-    var upscaledStills: [(filename: String, model: String)] = []
-    var startedFramewise: [(filename: String, model: String)] = []
-    var framewiseTransitions: [(id: String, to: FramewiseTransition)] = []
+    nonisolated(unsafe) var startedFramewiseAnswer: VideoUpscaleJob?
+    nonisolated(unsafe) var stillUpscaleAnswer: GalleryImageUpscale?
+    nonisolated(unsafe) var upscaledStills: [(filename: String, model: String)] = []
+    nonisolated(unsafe) var startedFramewise: [(filename: String, model: String)] = []
+    nonisolated(unsafe) var framewiseTransitions: [(id: String, to: FramewiseTransition)] = []
+
+    /// Parks every `framewiseUpscale` answer until `releaseFramewise()`.
+    ///
+    /// Deliberately NOT `delays`, which sleeps: a sleep ends the instant its
+    /// task is cancelled, so a poll that is replaced answers immediately and
+    /// the one sequence worth testing -- an answer still in flight ACROSS the
+    /// replacement -- cannot be produced with it. A response already on the
+    /// wire does not vanish because the app changed its mind.
+    ///
+    /// Setting it ARMS it, so hold -> release -> hold again works; the
+    /// release is a LATCH, so an ask that records its call before parking its
+    /// continuation is not left waiting for a wake-up that already happened.
+    nonisolated(unsafe) var framewiseHeldOpen = false {
+        didSet { if framewiseHeldOpen { framewiseReleased = false } }
+    }
+    nonisolated(unsafe) var framewiseReleased = false
+    nonisolated(unsafe) var framewiseWaiters: [CheckedContinuation<Void, Never>] = []
 }
 
 extension FakeBackend {
@@ -55,10 +72,23 @@ extension FakeBackend {
     func framewiseUpscale(id: String) async throws -> VideoUpscaleJob {
         try record("framewiseUpscale")
         await pause("framewiseUpscale")
+        if extras.framewiseHeldOpen, !extras.framewiseReleased {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                extras.framewiseWaiters.append(continuation)
+            }
+        }
         guard let job = extras.framewiseJobs.first(where: { $0.id == id }) else {
             throw notPlanted()
         }
         return job
+    }
+
+    /// Lets every parked `framewiseUpscale` answer land.
+    func releaseFramewise() {
+        extras.framewiseReleased = true
+        let waiting = extras.framewiseWaiters
+        extras.framewiseWaiters = []
+        for continuation in waiting { continuation.resume() }
     }
 
     func transitionFramewiseUpscale(
