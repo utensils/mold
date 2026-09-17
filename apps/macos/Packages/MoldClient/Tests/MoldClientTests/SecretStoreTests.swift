@@ -221,12 +221,21 @@ struct SecretStoreTests {
     // MARK: - Where the file lives
 
     /// A UAT run must never be able to reach the real keys, which is the same
-    /// promise `AppStorageSuite` makes for preferences.
+    /// promise `AppStorageSuite` makes for preferences -- and a RELEASE build
+    /// reads no UAT hook at all, so there the answer is the real directory
+    /// whatever the environment says. Asserting the fresh path unconditionally
+    /// was a false failure under `swift test -c release` (review E6); the
+    /// app-side twin, `NativeUATTests.theSecretsDirectoryTakesTheSameGate`,
+    /// already had this right.
     @Test func aFreshRunUsesAThrowawayDirectory() throws {
         let real = SecretStore.applicationSupport(environment: [:])
         let fresh = SecretStore.applicationSupport(environment: ["MOLD_NATIVE_FRESH": "1"])
         #expect(real.lastPathComponent == SecretStore.directoryName)
+        #if DEBUG
         #expect(fresh.lastPathComponent == SecretStore.freshDirectoryName)
         #expect(real != fresh)
+        #else
+        #expect(fresh == real)
+        #endif
     }
 }
