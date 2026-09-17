@@ -80,7 +80,7 @@ struct LibraryUndoTests {
 
         // The favourite still happened, so undoing it is still offered.
         #expect(manager.canUndo)
-        #expect(manager.undoActionName == "Favorite")
+        #expect(manager.undoActionName == "Favourite")
     }
 
     @Test func aRefusedEditLeavesNoUndoEntryBehind() async {

@@ -1,3 +1,4 @@
+import MoldClient
 import SwiftUI
 
 /// Menu bar commands.
@@ -41,9 +42,13 @@ struct MoldCommands: Commands {
             }
             .disabled(libraryFile?.exportFormats.isEmpty ?? true)
             .keyboardShortcut("e", modifiers: [.command, .shift])
-            Button("Save a Copy…") { libraryFile?.save() }
-                .keyboardShortcut("s", modifiers: [.command, .shift])
-                .disabled((libraryFile?.count ?? 0) == 0)
+            // Counted, like its right-click twin: the menu bar said "Save a
+            // Copy…" over four selected prints and then wrote four files.
+            Button(LibraryMenuPlan.saveTitle(count: libraryFile?.count ?? 0)) {
+                libraryFile?.save()
+            }
+            .keyboardShortcut("s", modifiers: [.command, .shift])
+            .disabled((libraryFile?.count ?? 0) == 0)
             // A `ShareLink` in a menu already draws as "Share ▸" with the
             // system's own sharing services one level in -- the same control
             // `LibraryMenu.swift`'s own right-click menu uses, just moved

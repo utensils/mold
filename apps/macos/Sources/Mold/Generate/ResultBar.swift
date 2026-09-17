@@ -16,18 +16,23 @@ struct ResultBar: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            // The WORDS are `GenerateAction`'s, not this bar's: it said "Save
+            // a Copy" while the contextual menu on this very view said "Save
+            // a Copy…", which is one verb spelt two ways on one control. Only
+            // the glyphs belong here -- a menu item carries none.
             Button { actions.save(result) } label: {
-                Label("Save a Copy", systemImage: "square.and.arrow.down")
+                Label(GenerateAction.saveACopy.title, systemImage: "square.and.arrow.down")
             }
             .disabled(host == nil)
 
             Button { actions.copy(result) } label: {
-                Label("Copy", systemImage: "doc.on.doc")
+                Label(GenerateAction.copyResult.title, systemImage: "doc.on.doc")
             }
             .disabled(host == nil)
 
             Button(action: actions.showInLibrary) {
-                Label("Show in Library", systemImage: "photo.on.rectangle.angled")
+                Label(GenerateAction.showInLibrary.title,
+                      systemImage: "photo.on.rectangle.angled")
             }
 
             if let seed = result.seed {

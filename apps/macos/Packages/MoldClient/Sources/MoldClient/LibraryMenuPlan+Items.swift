@@ -91,7 +91,12 @@ public extension LibraryMenuPlan {
         allFavorite ? "Remove from Favourites" : "Add to Favourites"
     }
 
-    private var saveTitle: String {
-        count == 1 ? "Save a Copy…" : "Save \(count.formatted()) Copies…"
+    private var saveTitle: String { Self.saveTitle(count: count) }
+
+    /// Also the File menu's, which said "Save a Copy…" over four selected
+    /// prints and then wrote four files. Nothing selected keeps the singular:
+    /// the item is disabled there, and "Save 0 Copies…" is not a sentence.
+    static func saveTitle(count: Int) -> String {
+        count <= 1 ? "Save a Copy…" : "Save \(count.formatted()) Copies…"
     }
 }

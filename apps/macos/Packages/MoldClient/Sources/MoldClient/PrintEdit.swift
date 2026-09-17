@@ -24,7 +24,7 @@ public enum PrintChange: Hashable, Sendable {
     /// selection.
     public var actionName: String {
         switch self {
-        case let .favorite(on): on ? "Favorite" : "Unfavorite"
+        case let .favorite(on): on ? "Favourite" : "Unfavourite"
         case let .tag(_, adding): adding ? "Tag" : "Remove Tag"
         case let .collection(name, _, filing):
             filing ? "Move to \(name)" : "Remove from \(name)"

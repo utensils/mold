@@ -25,7 +25,7 @@ struct InspectorActions: View {
                 }
                 HStack {
                     Button { actions.toggleFavorite(entries) } label: {
-                        Label("Favorite", systemImage: allFavorite ? "star.fill" : "star")
+                        Label("Favourite", systemImage: allFavorite ? "star.fill" : "star")
                     }
                     Button { actions.quickLook(entries) } label: {
                         Label("Quick Look", systemImage: "eye")

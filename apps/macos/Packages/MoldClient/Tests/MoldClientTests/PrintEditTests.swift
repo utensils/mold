@@ -162,8 +162,8 @@ import Testing
     // MARK: - Names
 
     @Test func everyChangeNamesItselfForTheEditMenu() {
-        #expect(PrintChange.favorite(true).actionName == "Favorite")
-        #expect(PrintChange.favorite(false).actionName == "Unfavorite")
+        #expect(PrintChange.favorite(true).actionName == "Favourite")
+        #expect(PrintChange.favorite(false).actionName == "Unfavourite")
         #expect(PrintChange.tag("owls", adding: true).actionName == "Tag")
         #expect(PrintChange.tag("owls", adding: false).actionName == "Remove Tag")
         #expect(PrintChange.collection(name: "Hangar", slug: "hangar", filing: true)
