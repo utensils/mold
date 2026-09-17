@@ -31,6 +31,31 @@ private func entry(_ name: String, at seconds: UInt64 = 1_000,
         == LibraryGrouping.byDay(query.apply(to: pool)).flatMap(\.items).map(\.print.filename))
 }
 
+/// The grid draws `sections` and the viewer's ← → walk `visible`, so they have
+/// to BE the same list -- and both have to be what Sort By asked for.
+///
+/// **Fails today**: `LibraryGrouping.byDay` re-sorts every bucket newest-first
+/// and the days descending (`LibrarySection.swift:24-28`), so only `.newest`
+/// ever reaches the grid and under Oldest First the two walks move in opposite
+/// directions. The old assertion compared `sections` against `byDay(...)` --
+/// it re-derived the implementation and so could never fail.
+@Test(arguments: [LibrarySort.newest, .oldest, .largest, .name])
+func theGridDrawsTheOrderTheQueryAskedFor(_ sort: LibrarySort) {
+    let pool = [
+        PrintFixtures.entry("robot.png", host: plato, timestamp: 300, bytes: 10),
+        PrintFixtures.entry("turtle.png", host: plato, timestamp: 200, bytes: 900),
+        PrintFixtures.entry("chair.png", host: plato, timestamp: 100_000, bytes: 50),
+        PrintFixtures.entry("anvil.png", host: plato, timestamp: 100, bytes: 1),
+    ]
+    var query = LibraryQuery()
+    query.sort = sort
+
+    let showing = LibraryShowing(pool: pool, query: query, selection: [])
+
+    #expect(showing.sections.flatMap(\.items).map(\.id) == showing.visible.map(\.id))
+    #expect(showing.visible.map(\.id) == query.apply(to: pool).map(\.id))
+}
+
 @Test func aSelectionNamingARowTheQueryExcludesIsNotShownAsSelected() {
     let visible = entry("robot.png", at: 300)
     let excluded = entry("turtle.png", at: 200, favorite: true)

@@ -23,20 +23,35 @@ private func item(_ secondsAgo: Int, host: UUID = UUID()) -> LibraryEntry {
     )
 }
 
-@Test func groupsPrintsIntoDaysNewestFirst() {
+@Test func groupsPrintsIntoDaysInTheOrderItWasGivenThem() {
     // From midday, 30 hours back is the previous day whatever the clock says.
-    let sections = LibraryGrouping.byDay([item(0), item(60 * 60 * 30), item(120)])
+    // Handed in newest-first, which is what the default sort produces.
+    let sections = LibraryGrouping.byDay([item(0), item(120), item(60 * 60 * 30)])
 
     #expect(sections.count == 2)
     #expect(sections[0].items.count == 2)      // today
     #expect(sections[1].items.count == 1)      // yesterday-ish
-    #expect(sections[0].day > sections[1].day)
+    #expect(try! #require(sections[0].day) > #require(sections[1].day))
 }
 
-@Test func newestPrintLeadsItsDay() {
-    let sections = LibraryGrouping.byDay([item(600), item(60)])
-    let day = try! #require(sections.first)
-    #expect(day.items[0].print.timestamp > day.items[1].print.timestamp)
+/// The cut never re-orders: a day's prints come out in the order the query
+/// put them in, which is what makes the grid and the viewer agree.
+@Test func aDayKeepsTheOrderItWasGiven() {
+    let oldestFirst = LibraryGrouping.byDay([item(600), item(60)])
+    let day = try! #require(oldestFirst.first)
+    #expect(day.items[0].print.timestamp < day.items[1].print.timestamp)
+
+    let newestFirst = LibraryGrouping.byDay([item(60), item(600)])
+    let other = try! #require(newestFirst.first)
+    #expect(other.items[0].print.timestamp > other.items[1].print.timestamp)
+}
+
+/// Days follow the prints, not the calendar: an oldest-first list puts the
+/// oldest DAY first.
+@Test func theDaysFollowTheOrderTheirPrintsArrivedIn() {
+    let sections = LibraryGrouping.byDay([item(60 * 60 * 30), item(0)])
+    #expect(sections.count == 2)
+    #expect(try! #require(sections[0].day) < #require(sections[1].day))
 }
 
 @Test func todayAndYesterdayAreNamedRatherThanDated() {
@@ -55,6 +70,16 @@ private func item(_ secondsAgo: Int, host: UUID = UUID()) -> LibraryEntry {
     // A print from a previous year is ambiguous without the year on it.
     let year = Calendar.current.component(.year, from: lastYear)
     #expect(title.contains(String(year)))
+}
+
+/// An order days cannot describe comes out in one piece, with no heading --
+/// "Today" over a Largest First run would be a lie about the row under it.
+@Test func anOrderThatIsNotChronologicalIsNotCutIntoDays() {
+    let sections = LibraryGrouping.ungrouped([item(0), item(60 * 60 * 30)])
+    #expect(sections.count == 1)
+    #expect(sections[0].day == nil)
+    #expect(sections[0].items.count == 2)
+    #expect(LibraryGrouping.ungrouped([]).isEmpty)
 }
 
 @Test func printsFromDifferentHostsShareADaySection() {

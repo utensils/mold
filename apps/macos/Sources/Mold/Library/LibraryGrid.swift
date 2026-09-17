@@ -27,7 +27,9 @@ struct LibraryGrid: View {
                         Section {
                             ForEach(section.items) { cell($0) }
                         } header: {
-                            header(section)
+                            // A section with no day is the whole list in one
+                            // piece, under an order days cannot describe.
+                            if section.day != nil { header(section) }
                         }
                     }
                 }
@@ -100,7 +102,7 @@ struct LibraryGrid: View {
 
     private func header(_ section: LibrarySection) -> some View {
         HStack {
-            Text(LibraryGrouping.title(for: section.day)).font(.headline)
+            Text(section.day.map { LibraryGrouping.title(for: $0) } ?? "").font(.headline)
             Text(section.items.count.formatted())
                 .font(.subheadline).monospacedDigit().foregroundStyle(.secondary)
             Spacer()

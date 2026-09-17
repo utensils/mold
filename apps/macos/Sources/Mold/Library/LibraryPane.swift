@@ -29,6 +29,11 @@ struct LibraryPane: View {
     @AppStorage("libraryShowsInspector", store: AppStorageSuite.defaults)
     var showsInspector = true
     @State private var pendingDestruction: LibraryActions.Destruction?
+    /// The filtered, sorted and grouped library, kept between passes. A body
+    /// pass happens on every arrow key and every character typed, and re-doing
+    /// all of that per pass is work proportional to the whole library for a
+    /// change that moved the cursor. See `LibraryShowingCache`.
+    @State private var index = LibraryShowingCache()
 
     var actions: LibraryActions {
         LibraryActions(hosts: hosts, library: library, reuse: reuse,
@@ -37,10 +42,12 @@ struct LibraryPane: View {
     }
 
     // Three stages rather than one chain: what is on screen, what dresses it,
-    // and what plugs it in. `showing` is derived ONCE per body pass and
-    // threaded down, rather than each stage re-filtering the whole library.
+    // and what plugs it in. `showing` is derived once per DATA or QUERY change
+    // and threaded down, rather than each stage re-filtering the whole library
+    // -- or this pass re-doing what the last one already worked out.
     var body: some View {
-        let showing = LibraryShowing(pool: pool, query: resolved, selection: selection.items)
+        let showing = index.showing(pool: pool, revision: library.revision,
+                                    query: resolved, selection: selection.items)
         return watched(showing)
             .focusedSceneValue(\.refreshAction) { Task { await actions.reload() } }
             .focusedSceneValue(\.inspectorToggle, InspectorToggle(isShowing: showsInspector) {
