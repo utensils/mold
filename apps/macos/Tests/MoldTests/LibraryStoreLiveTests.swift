@@ -24,7 +24,7 @@ struct LibraryStoreLiveTests {
                                                     print: FakeFixtures.print("star.png"))]
 
         // A star on its way to the machine, and a render landing in the window.
-        library.outbox.enqueue(PrintEdit(change: .favorite(true),
+        library.mutations.outbox.enqueue(PrintEdit(change: .favorite(true),
                                          targets: [machine.id: ["star.png"]]))
         hosts.listeners.forEach {
             $0(machine.id, .gallery(.added(filename: "new.png",
@@ -44,7 +44,7 @@ struct LibraryStoreLiveTests {
         let library = LibraryStore(hosts: hosts)
         library.perHost[machine.id] = [LibraryEntry(host: machine,
                                                     print: FakeFixtures.print("star.png"))]
-        library.outbox.enqueue(PrintEdit(change: .favorite(true),
+        library.mutations.outbox.enqueue(PrintEdit(change: .favorite(true),
                                          targets: [machine.id: ["star.png"]]))
 
         // `row: nil` means "go and read" -- which, taken, would be a re-list.

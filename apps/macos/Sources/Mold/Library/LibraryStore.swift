@@ -40,11 +40,9 @@ final class LibraryStore {
     /// the window's, handed over by the pane -- see `MoldUndo`.
     let undo = MoldUndo()
 
-    /// Organization edits on their way to the machines. See
-    /// `LibraryStore+Outbox`.
-    var outbox = MutationOutbox()
-    /// The machines whose chain a task is already walking.
-    var draining: Set<MoldHost.ID> = []
+    /// Organization edits on their way to the machines, and the one task per
+    /// machine walking them there. See `LibraryMutations`.
+    let mutations = LibraryMutations()
     /// Which live frames are this app's own edit coming back, and which
     /// machines are owed a re-list because one was skipped. See `GalleryEcho`.
     var echo = GalleryEcho()

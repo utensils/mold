@@ -34,7 +34,7 @@ extension LibraryStore {
         }
         // The registration travels with the entries carrying this edit, so a
         // machine refusing ONE of them takes back exactly its own inverse.
-        undo.attach(token, to: send(edit))
+        undo.attach(token, to: mutations.send(edit, in: self))
     }
 
     /// The same change, applied to the rows on screen.

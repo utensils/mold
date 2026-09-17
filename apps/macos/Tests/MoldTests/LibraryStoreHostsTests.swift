@@ -71,7 +71,7 @@ struct LibraryStoreHostsTests {
         let library = LibraryStore(hosts: hosts)
 
         // Still on its way to the machine when the resync arrives.
-        library.outbox.enqueue(PrintEdit(change: .favorite(true), targets: [machine.id: ["a.png"]]))
+        library.mutations.outbox.enqueue(PrintEdit(change: .favorite(true), targets: [machine.id: ["a.png"]]))
 
         hosts.listeners.forEach { $0(machine.id, .resyncRequired) }
         try await waitUntil {

@@ -41,7 +41,7 @@ extension LibraryStore {
         // was in flight was discarded, and nothing re-listed afterwards. See
         // `GalleryEcho`, which also remembers the machine so `drain` repairs
         // the one case that remains.
-        guard !echo.isEcho(change, on: host, pending: outbox.chain(for: host)) else { return }
+        guard !echo.isEcho(change, on: host, pending: mutations.outbox.chain(for: host)) else { return }
 
         switch change {
         case let .updated(filename, row), let .restored(filename, row):
@@ -119,7 +119,7 @@ extension LibraryStore {
             answer: prints.map { LibraryEntry(host: machine, print: $0) },
             onScreen: perHost[id] ?? [], asked: asked)
         hosts.succeeded(on: id, doing: "list its prints")
-        replayPending(on: id)
+        mutations.replayPending(on: id, in: self)
         rebuild()
     }
 }
