@@ -167,11 +167,17 @@ struct QueuePaneTests {
 
     // MARK: - Batch keyboard move
 
-    /// **Fails today**: `QueueBatchRow.moveCall` does not exist yet. A
-    /// dragged batch's own children land contiguous only when the calls
-    /// issue in ASCENDING target order (`QueueOrder.moves`'s own doc) -- this
-    /// pins that the keyboard twin reuses the identical translation, not a
-    /// second one that could disagree.
+    /// A dragged batch's children have to land CONTIGUOUS and where the drop
+    /// was, and `QueueOrder.moves` plans each `PATCH` against the queue the
+    /// previous one left behind -- this pins that the keyboard twin reuses
+    /// the identical translation, not a second one that could disagree.
+    ///
+    /// The positions used to be asserted as `[1, 2]`, which is the plan the
+    /// OLD single-index-space `moves` produced and which the server lands as
+    /// `[p1, c1] ... c2` -- the two children on either side of the row they
+    /// were moved past (review 01#1). The contract is the final ORDER, so
+    /// that is what this asserts, replayed the way the server resolves it
+    /// (`generation_queue.rs:1815-1836`).
     @Test func aBatchMovesFromTheKeyboardAsAscendingCalls() {
         let entries = [
             FakeFixtures.queueEntry("c1", state: "queued", batchId: "b", batchIndex: 0),
@@ -185,7 +191,14 @@ struct QueuePaneTests {
         let calls = QueueBatchRow.moveCall(batch, .down, groups: groups, entries: entries)
 
         #expect(calls.map(\.id) == ["c1", "c2"])
-        #expect(calls.map(\.position) == [1, 2])
+        #expect(calls.map(\.position) == [2, 2])
+
+        var order = ["c1", "c2", "p1"]
+        for call in calls {
+            order.remove(at: order.firstIndex(of: call.id)!)
+            order.insert(call.id, at: min(call.position, order.count))
+        }
+        #expect(order == ["p1", "c1", "c2"])
     }
 
     @Test func aBatchAtTheTopCannotMoveUp() {
