@@ -92,4 +92,16 @@ extension FakeFixtures {
         """#
         return try! MoldJSON.decoder.decode(ResourceSnapshot.self, from: Data(json.utf8))
     }
+
+    /// One `GET /api/discovery/peers` row. `DiscoveryPeer` has no public
+    /// memberwise init either, so this decodes it the way the wire produces it.
+    static func discoveryPeer(_ name: String, url: String, authRequired: Bool = false,
+                              instanceId: String? = nil, isThisMachine: Bool = false) -> DiscoveryPeer {
+        let json = """
+        {"name": "\(name)", "url": "\(url)", "auth_required": \(authRequired),
+         "instance_id": \(instanceId.map { "\"\($0)\"" } ?? "null"),
+         "is_this_machine": \(isThisMachine)}
+        """
+        return try! MoldJSON.decoder.decode(DiscoveryPeer.self, from: Data(json.utf8))
+    }
 }

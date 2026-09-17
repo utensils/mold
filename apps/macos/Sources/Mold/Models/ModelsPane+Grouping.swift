@@ -18,9 +18,7 @@ extension ModelsPane {
         var isSolo: Bool { variants.count == 1 && variants[0].tag == nil }
     }
 
-    var host: MoldHost? {
-        hosts.hosts.first { $0.id == hostID } ?? hosts.preferredHost
-    }
+    var host: MoldHost? { hosts.machine(selected: selectedMachine) }
 
     var candidates: [Model] {
         guard let host else { return [] }

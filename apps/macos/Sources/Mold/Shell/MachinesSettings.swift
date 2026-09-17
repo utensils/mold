@@ -53,7 +53,6 @@ struct MachinesSettings: View {
                     // A simultaneous gesture, so opening the editor does not
                     // cost the row its ordinary click-to-select.
                     .simultaneousGesture(TapGesture(count: 2).onEnded { edit(host) })
-                    .contextMenu { menu(for: host) }
             }
         }
         .alternatingRowBackgrounds()
@@ -86,19 +85,6 @@ struct MachinesSettings: View {
         .labelStyle(.iconOnly)
         .buttonStyle(.borderless)
         .padding(8)
-    }
-
-    @ViewBuilder private func menu(for host: MoldHost) -> some View {
-        Button("Check Now") { Task { await hosts.refresh(host) } }
-        Button("Copy Address") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(host.baseURL.absoluteString, forType: .string)
-        }
-        if isManaged(host) {
-            Divider()
-            Button("Edit…") { edit(host) }
-            Button("Remove", role: .destructive) { remove(host) }
-        }
     }
 
     // MARK: - Actions

@@ -107,6 +107,18 @@ struct MachineStoreTests {
         #expect(!fakeB.resourceStreamEnded)
     }
 
+    @Test func refreshPeersFillsInWhatThatMachineFoundNearby() async {
+        let plato = machine()
+        let fake = FakeBackend(host: plato)
+        fake.peerRows = [FakeFixtures.discoveryPeer("bender", url: "http://bender:7680")]
+        let hosts = HostStore(hosts: [plato]) { _ in fake }
+        let machines = MachineStore(hosts: hosts)
+
+        await machines.refreshPeers(on: plato.id)
+
+        #expect(machines.peers[plato.id]?.map(\.name) == ["bender"])
+    }
+
     @Test func aSnapshotFillsInTheLiveFiguresForTheRightCard() async {
         let plato = machine()
         let fake = FakeBackend(host: plato)

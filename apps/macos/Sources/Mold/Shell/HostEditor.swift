@@ -33,6 +33,17 @@ struct HostEditor: View {
         _apiKey = State(initialValue: host?.apiKey ?? "")
     }
 
+    /// A machine we found but have never spoken to. It is an ADD -- `existing`
+    /// stays nil so the sheet says so -- with the address and name already
+    /// filled.
+    init(adding name: String, at address: String, save: @escaping (String, URL, String?) -> Void) {
+        self.existing = nil
+        self.save = save
+        _address = State(initialValue: address)
+        _name = State(initialValue: name)
+        _apiKey = State(initialValue: "")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(existing == nil ? "Add a Machine" : "Edit Machine")
