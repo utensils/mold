@@ -69,18 +69,30 @@ drain the menu uses.
 
 Its preamble runs from `MoldApp.init`, before any store exists, because it
 writes `MOLD_HOME`, `MOLD_API_KEY` and `MOLD_CORS_ORIGIN` with `setenv` and
-that is not safe beside a concurrent `getenv`. `.running` is published only
+that is not safe beside a concurrent `getenv`. It runs on every launch of an
+engine-linked build, whether or not you start the engine — so merely opening
+the app does the same preamble every `mold` `main()` does, including the
+one-shot `config.toml` → DB migration on a home that has never had one (it
+renames `config.toml` to `config.toml.migrated`). It is idempotent and guarded
+by a DB sentinel, so it happens once in the life of a home rather than once
+per launch; it is still a write to a home you may be sharing with Mold Desktop
+or `mold serve`. `.running` is published only
 once `GET /api/status` answers on the chosen port — on a cold home with a big
 gallery, "started" and "listening" are a long way apart — and while it runs,
 its liveness is polled, so an engine that dies leaves the machine list instead
-of pointing at a closed port. Starting is refused outright while another mold
-answers at `http://127.0.0.1:7680`: two engines on one home strand each
-other's queued work.
+of pointing at a closed port. If another mold is already publishing into the same home — read from the
+gallery writer lease, not from a port — Settings ▸ This Mac says so, naming
+its pid. It is a warning and not a refusal, because mold supports two servers
+on one home (`queue_journal.rs` is explicit about it, the writer lease is
+shared by design, and an unadopted queue is reported as an orphan rather than
+silently stranded); what was missing is that nobody was told.
 
-Quitting gives the engine the **server's** budget, `MOLD_SHUTDOWN_ABORT_SECS`
-or 45 s, behind a small panel with a Quit Now — that budget is what the
-gallery writer lease is released after, and the app used to allow 8 s and
-discard the answer.
+Quitting gives the engine the **server's** budget — `MOLD_SHUTDOWN_ABORT_SECS`
+or 45 s, plus what sits outside it — behind a small panel with a Quit Now, and
+it waits for a startup or an in-flight drain as well as for a running engine.
+The app used to allow 8 s and discard the answer. A drain that overruns even
+that says so rather than reporting the engine stopped: its thread is still
+writing, and this process can never start another.
 
 `ENGINE_TARGET` is the cargo target directory; it defaults in-repo and
 gitignored, so override it if this disk is the one you care about:
@@ -98,9 +110,11 @@ libc++ and libiconv loads the devshell link leaves behind and **fails the
 release** on any that survive — that path does not exist on anyone else's Mac
 and the app would die in dyld before `main`. Signing is depth-first and never
 `--deep`; nested code is signed without the app's entitlements, which is what
-`--deep` gets wrong. The entitlements allow JIT because candle compiles its
-Metal shaders at runtime; the two broader exemptions beside it each record the
-check owed before they can go.
+`--deep` gets wrong. The entitlements are per configuration: Release does
+**not** disable library validation (its only surviving reason was the Debug
+path's own dylibs), and the two it keeps — `allow-jit` and
+`allow-unsigned-executable-memory` — each record beside them the exact check
+owed before they can go, which needs a signed build rendering on Metal.
 
 **arm64 only, macOS 26.0 or newer, and no updater.** The deployment target is
 macOS 26 (`project.yml`) and `ARCHS` is `arm64`, so every Intel Mac and every
