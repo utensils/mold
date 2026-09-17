@@ -5,24 +5,24 @@ import SwiftUI
 // what there is. Split from the pane for size.
 extension LibraryPane {
 
-    var subtitle: String {
-        if selected.count > 1 { return "\(selected.count.formatted()) selected" }
-        let shown = visible.count
+    func subtitle(_ showing: LibraryShowing) -> String {
+        if showing.selected.count > 1 { return "\(showing.selected.count.formatted()) selected" }
+        let shown = showing.visible.count
         // "1 prints" is the tell of a string built by concatenation. The noun
         // agrees with the LAST number in the sentence, which is the pool's
         // when the query has narrowed one count out of another; the trash
         // reads "in the trash" either way, being a phrase and not a count.
-        let counted = navigation.query.isNarrowed ? pool.count : shown
+        let counted = navigation.query.isNarrowed ? showing.pool.count : shown
         let noun = navigation.scope.isTrash ? "in the trash" : (counted == 1 ? "print" : "prints")
         guard navigation.query.isNarrowed else { return "\(shown.formatted()) \(noun)" }
-        return "\(shown.formatted()) of \(pool.count.formatted()) \(noun)"
+        return "\(shown.formatted()) of \(showing.pool.count.formatted()) \(noun)"
     }
 
     var pool: [LibraryEntry] {
         navigation.scope.isTrash ? library.trashed : library.items
     }
 
-    @ViewBuilder var empty: some View {
+    @ViewBuilder func empty(_ showing: LibraryShowing) -> some View {
         if library.isLoading, library.items.isEmpty {
             ProgressView("Loading prints…")
         } else if navigation.query.isNarrowed {

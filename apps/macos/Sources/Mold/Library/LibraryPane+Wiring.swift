@@ -5,11 +5,11 @@ import SwiftUI
 extension LibraryPane {
 
     /// The subtitle, with the trash's retention sentence when there is one.
-    /// Its own property because the body grew past what the type checker will
+    /// Its own function because the body grew past what the type checker will
     /// infer in one expression.
-    var fullSubtitle: String {
-        guard let sentence = retentionSentence else { return subtitle }
-        return "\(subtitle) · \(sentence)"
+    func fullSubtitle(_ showing: LibraryShowing) -> String {
+        guard let sentence = retentionSentence else { return subtitle(showing) }
+        return "\(subtitle(showing)) · \(sentence)"
     }
 
     /// Only worth the ink when the grid can actually be showing two machines.
@@ -18,14 +18,16 @@ extension LibraryPane {
         return !navigation.query.tokens.contains { if case .machine = $0 { true } else { false } }
     }
 
-    func entry(_ id: PrintID) -> LibraryEntry? { visible.first { $0.id == id } }
+    func entry(_ id: PrintID, in visible: [LibraryEntry]) -> LibraryEntry? {
+        visible.first { $0.id == id }
+    }
 
     func host(of entry: LibraryEntry) -> MoldHost? {
         hosts.host(entry.hostID)
     }
 
     /// Walks the viewer through the list the grid is showing.
-    func step(_ delta: Int) {
+    func step(_ delta: Int, in visible: [LibraryEntry]) {
         guard let viewing, let index = visible.firstIndex(where: { $0.id == viewing })
         else { return }
         let next = min(max(index + delta, 0), visible.count - 1)
@@ -43,13 +45,5 @@ extension LibraryPane {
             query.tokens.append(token)
         }
         return query
-    }
-
-    var visible: [LibraryEntry] { resolved.apply(to: pool) }
-
-    var sections: [LibrarySection] { LibraryGrouping.byDay(visible) }
-
-    var selected: [LibraryEntry] {
-        visible.filter { selection.items.contains($0.id) }
     }
 }

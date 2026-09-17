@@ -59,17 +59,7 @@ struct Sidebar: View {
         .refreshable { await hosts.refreshAll() }
         .sheet(isPresented: $isCreating) { ShelfNameSheet(shelf: nil) }
         .sheet(item: $renaming) { ShelfNameSheet(shelf: $0) }
-        .confirmationDialog(
-            pendingDestruction?.title ?? "",
-            isPresented: Binding(get: { pendingDestruction != nil },
-                                 set: { if !$0 { pendingDestruction = nil } }),
-            presenting: pendingDestruction
-        ) { destruction in
-            Button(destruction.verb, role: .destructive, action: destruction.perform)
-            Button("Cancel", role: .cancel) {}
-        } message: { destruction in
-            Text(destruction.message)
-        }
+        .destructionDialog($pendingDestruction)
     }
 
     private func shelfRow(_ scope: LibraryScope) -> some View {

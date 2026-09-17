@@ -31,35 +31,24 @@ struct LibraryPane: View {
     }
 
     // Three stages rather than one chain: what is on screen, what dresses it,
-    // and what plugs it in.
+    // and what plugs it in. `showing` is derived ONCE per body pass and
+    // threaded down, rather than each stage re-filtering the whole library.
     var body: some View {
-        watched
+        let showing = LibraryShowing(pool: pool, query: resolved, selection: selection.items)
+        return watched(showing)
             .focusedSceneValue(\.refreshAction) { Task { await actions.reload() } }
             .focusedSceneValue(\.inspectorToggle, InspectorToggle(isShowing: showsInspector) {
                 showsInspector.toggle()
             })
-            .focusedSceneValue(\.librarySelection, menuSelection)
+            .focusedSceneValue(\.librarySelection, menuSelection(showing))
             .focusedSceneValue(\.libraryImport, menuImport)
-            // A plain confirm with a danger button. Never a typed phrase:
-            // making somebody retype a word does not make them read the
-            // sentence.
-            .confirmationDialog(
-                pendingDestruction?.title ?? "",
-                isPresented: Binding(get: { pendingDestruction != nil },
-                                     set: { if !$0 { pendingDestruction = nil } }),
-                presenting: pendingDestruction
-            ) { destruction in
-                Button(destruction.verb, role: .destructive, action: destruction.perform)
-                Button("Cancel", role: .cancel) {}
-            } message: { destruction in
-                Text(destruction.message)
-            }
+            .destructionDialog($pendingDestruction)
     }
 
     /// The pane, plugged in: what it does on appearing, and what it re-does
     /// when the machines or the shelves change under it.
-    private var watched: some View {
-        chrome
+    private func watched(_ showing: LibraryShowing) -> some View {
+        chrome(showing)
             // Its own data, and nothing else: `HostStore` reconciles its own
             // event streams, and the library listens from the moment it is
             // built. What still belongs here is the first LISTING, because
@@ -80,13 +69,13 @@ struct LibraryPane: View {
     }
 
     /// The pane, dressed: title, search, toolbar, inspector.
-    private var chrome: some View {
+    private func chrome(_ showing: LibraryShowing) -> some View {
         @Bindable var navigation = navigation
 
-        return content
+        return content(showing)
             .failureBanner(hosts)
             .navigationTitle(navigation.scope.title(in: library.shelves))
-            .navigationSubtitle(fullSubtitle)
+            .navigationSubtitle(fullSubtitle(showing))
             .searchable(text: $navigation.query.text, tokens: $navigation.query.tokens,
                         suggestedTokens: .constant(suggestedTokens),
                         prompt: "Search prompts, models and tags") { token in
@@ -94,7 +83,7 @@ struct LibraryPane: View {
             }
             .toolbar { toolbar }
             .inspector(isPresented: $showsInspector) {
-                LibraryInspector(entries: selected, host: selected.first.flatMap(host(of:)),
+                LibraryInspector(entries: showing.selected, host: showing.selected.first.flatMap(host(of:)),
                                  scope: navigation.scope, actions: actions,
                                  filterByTag: { navigation.query.tokens.append(.tag($0)) })
                     .inspectorColumnWidth(min: 260, ideal: 320, max: 420)
@@ -102,18 +91,18 @@ struct LibraryPane: View {
     }
 
     /// What is actually on screen: a print, the grid, or an explanation.
-    @ViewBuilder private var content: some View {
-        if let viewing, let entry = entry(viewing) {
+    @ViewBuilder private func content(_ showing: LibraryShowing) -> some View {
+        if let viewing, let entry = entry(viewing, in: showing.visible) {
             LibraryViewer(entry: entry, host: host(of: entry), actions: actions,
                           onClose: { self.viewing = nil },
-                          onStep: step)
-        } else if visible.isEmpty {
-            empty
+                          onStep: { step($0, in: showing.visible) })
+        } else if showing.visible.isEmpty {
+            empty(showing)
         } else {
             LibraryGrid(
-                sections: sections, hosts: hosts.hosts, edge: navigation.edge,
+                sections: showing.sections, hosts: hosts.hosts, edge: navigation.edge,
                 showsHostBadges: showsHostBadges,
-                scope: navigation.scope, actions: actions, entries: visible,
+                scope: navigation.scope, actions: actions, entries: showing.visible,
                 selection: $selection, onOpen: { viewing = $0 }
             )
         }

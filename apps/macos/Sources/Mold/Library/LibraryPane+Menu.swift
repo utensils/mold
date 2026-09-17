@@ -9,8 +9,8 @@ extension LibraryPane {
     /// Built from the same `actions` the contextual menu uses, so an item in
     /// the menu bar and the same item on a right-click are literally the same
     /// call -- there is no second path to keep in step.
-    var menuSelection: LibrarySelection {
-        let entries = selected
+    func menuSelection(_ showing: LibraryShowing) -> LibrarySelection {
+        let entries = showing.selected
         return LibrarySelection(
             count: entries.count,
             allFavorite: !entries.isEmpty && entries.allSatisfy(\.print.isFavorite),

@@ -12,7 +12,7 @@ struct CollectionRow: View {
 
     @Environment(LibraryStore.self) private var library
     @State private var isTargeted = false
-    @State private var isConfirmingDelete = false
+    @State private var pending: LibraryActions.Destruction?
 
     /// What opening this row would show, which is not the host's own `count`
     /// -- see `CollectionShelf.count(in:)`.
@@ -37,16 +37,9 @@ struct CollectionRow: View {
                 Task { await library.setShelfHidden(shelf, hidden: !shelf.hidden) }
             }
             Divider()
-            Button("Delete Collection…", role: .destructive) { isConfirmingDelete = true }
+            Button("Delete Collection…", role: .destructive) { confirmDelete() }
         }
-        .confirmationDialog("Delete “\(shelf.name)”?", isPresented: $isConfirmingDelete) {
-            Button("Delete Collection", role: .destructive) {
-                Task { await library.deleteShelf(shelf) }
-            }
-        } message: {
-            // Worth saying plainly: people hesitate over this exact question.
-            Text("The \(shown.formatted()) prints in it are kept. Only the collection goes.")
-        }
+        .destructionDialog($pending)
         .dropDestination(for: PrintID.self) { ids, _ in
             file(ids)
             return true
@@ -62,6 +55,15 @@ struct CollectionRow: View {
         let entries = library.items.filter { ids.contains($0.id) }
         guard !entries.isEmpty else { return }
         library.file(entries, into: shelf)
+    }
+
+    private func confirmDelete() {
+        pending = LibraryActions.Destruction(
+            title: "Delete “\(shelf.name)”?",
+            // Worth saying plainly: people hesitate over this exact question.
+            message: "The \(shown.formatted()) prints in it are kept. Only the collection goes.",
+            verb: "Delete Collection"
+        ) { Task { await library.deleteShelf(shelf) } }
     }
 }
 
