@@ -50,6 +50,39 @@ struct LibraryUndoTests {
         #expect(fired.names == ["field"])
     }
 
+    /// **Fails today**: a refusal calls `forget()`, which removes every
+    /// registration this store made -- so a rename the machine refuses also
+    /// disarms the favourite that succeeded a moment earlier, and its redo.
+    @Test func aRefusedEditTakesBackItsOwnInverseAndNoOthers() async {
+        let machine = host("plato")
+        let fake = FakeBackend(host: machine)
+        fake.prints = [FakeFixtures.print("star.png")]
+        let hosts = HostStore(hosts: [machine]) { _ in fake }
+        let library = LibraryStore(hosts: hosts)
+        let manager = manager()
+        library.undo.manager = manager
+        let rows = [LibraryEntry(host: machine, print: FakeFixtures.print("star.png"))]
+        library.perHost[machine.id] = rows
+
+        // One edit the machine takes…
+        manager.beginUndoGrouping()
+        library.setFavorite(true, on: rows)
+        manager.endUndoGrouping()
+        await settle(until: { fake.calls.contains("mutate") })
+
+        // …and one it refuses.
+        fake.refuses = ["patch"]
+        manager.beginUndoGrouping()
+        library.setTitle("Robot", on: rows[0])
+        manager.endUndoGrouping()
+        await settle(until: { fake.calls.contains("patch") })
+        await settle(until: { fake.calls.contains("gallery") })
+
+        // The favourite still happened, so undoing it is still offered.
+        #expect(manager.canUndo)
+        #expect(manager.undoActionName == "Favorite")
+    }
+
     @Test func aRefusedEditLeavesNoUndoEntryBehind() async {
         let machine = host("plato")
         let fake = FakeBackend(host: machine)

@@ -29,10 +29,12 @@ extension LibraryStore {
     func apply(_ edit: PrintEdit) {
         guard !edit.isEmpty else { return }
         mutate(edit)
-        undo.register(edit) { [weak self] inverse in
+        let token = undo.register(edit) { [weak self] inverse in
             self?.apply(inverse)
         }
-        send(edit)
+        // The registration travels with the entries carrying this edit, so a
+        // machine refusing ONE of them takes back exactly its own inverse.
+        undo.attach(token, to: send(edit))
     }
 
     /// The same change, applied to the rows on screen.

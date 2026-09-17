@@ -12,9 +12,13 @@ import MoldClient
 @MainActor
 extension LibraryStore {
 
-    func send(_ edit: PrintEdit) {
-        outbox.enqueue(edit)
+    /// Queues an edit for every machine it names, and answers with the ids of
+    /// the entries carrying it -- what `undo` ties its registration to.
+    @discardableResult
+    func send(_ edit: PrintEdit) -> [String] {
+        let queued = outbox.enqueue(edit)
         for host in outbox.waiting { drain(host) }
+        return queued.map(\.id)
     }
 
     private func drain(_ host: MoldHost.ID) {
@@ -88,6 +92,7 @@ extension LibraryStore {
         do {
             try await send(entry, to: client)
             outbox.succeeded(entry.id)
+            undo.settled(entry: entry.id)
             hosts.succeeded(on: host)
             return nil
         } catch {
@@ -102,9 +107,10 @@ extension LibraryStore {
                 // refused, and `relist` is about to put the row back, so "Undo
                 // Favorite" would offer to reverse a favourite that never
                 // happened: a local no-op and a redundant mutation, and worse
-                // the day a change is not idempotent. Only THIS store's
-                // entries go; a field editor's are its own.
-                undo.forget()
+                // the day a change is not idempotent. THIS entry's inverse
+                // goes, and only it -- a favourite that succeeded a moment ago
+                // is still undoable.
+                undo.forget(entry: entry.id)
                 await relist(host)
             }
             return error
