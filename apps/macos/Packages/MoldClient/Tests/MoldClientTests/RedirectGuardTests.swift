@@ -1,7 +1,12 @@
 import Foundation
 import Testing
 
-@testable import MoldClient
+// NOT `@testable`: the point of this suite is that the guard is reachable by
+// every caller that sets `X-Api-Key`, and `HTTPBackend` is not the only one.
+// `Sources/Mold/Library/ThumbnailCache.swift` holds its own `URLSession` and
+// sets the header itself -- the highest-volume request path in the app -- so
+// a guard that only the transport could reach was half a fix.
+import MoldClient
 
 // `URLSession` forwards custom headers across a redirect, cross-origin
 // included, and mold's default scheme is plain `http`. A compromised or
@@ -65,4 +70,29 @@ private func redirected(to target: String) -> URLRequest? {
     request.setValue("secret", forHTTPHeaderField: "X-Api-Key")
     let sanitized = try #require(RedirectGuard(origin: origin).sanitized(request))
     #expect(sanitized.value(forHTTPHeaderField: "X-Api-Key") == nil)
+}
+
+/// **Fails today**: the guard is internal, so a caller outside MoldClient
+/// cannot attach one -- and `ThumbnailCache` is exactly such a caller. This
+/// is the whole call-site form, compiled from outside the module: one
+/// argument on the request the caller already makes.
+@Test func anyCallerThatSetsTheKeyCanAttachTheGuard() async throws {
+    let host = MoldHost(name: "plato", baseURL: origin, apiKey: "secret")
+    var request = URLRequest(url: origin.appending(path: "/api/gallery/thumbnail/a.png"))
+    request.setValue(host.apiKey, forHTTPHeaderField: RedirectGuard.keyHeader)
+
+    // Built and not sent: what is under test is that it COMPILES against the
+    // public surface, the same precedent as
+    // `aBackendHeldAsTheProtocolReachesEveryRouteTheAppUses`.
+    let send: (URLSession) async throws -> Void = { session in
+        _ = try await session.data(
+            for: request, delegate: RedirectGuard(origin: host.baseURL))
+    }
+    _ = send
+
+    let guarded = RedirectGuard(origin: host.baseURL)
+    #expect(guarded.origin == origin)
+    var offMachine = request
+    offMachine.url = URL(string: "http://elsewhere/api/gallery/thumbnail/a.png")
+    #expect(guarded.sanitized(offMachine).value(forHTTPHeaderField: RedirectGuard.keyHeader) == nil)
 }
