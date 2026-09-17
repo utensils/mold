@@ -91,9 +91,17 @@ public extension Capabilities {
     /// identity runtime is actually available.
     var supportsIdentity: Bool { identity != nil }
 
-    /// How many photos one identity may be built from. One is the floor, not
-    /// zero -- a host advertising identity at all takes at least one.
-    var maxIdentityPhotos: Int { identity.map { $0.maxPhotos ?? 1 } ?? 0 }
+    /// How many photographs one identity may be built from.
+    ///
+    /// `multi_photo` is the gate, not `max_photos`: a host that does not
+    /// understand `id_images` takes exactly one however large its advertised
+    /// maximum (`types.rs:11563-11572`), and absence of the whole block is a
+    /// definitive no (`types.rs:11555-11557`).
+    var maxIdentityPhotos: Int {
+        guard let identity else { return 0 }
+        guard identity.multiPhoto == true else { return 1 }
+        return max(identity.maxPhotos ?? 1, 1)
+    }
 
     /// Advertised-but-off is real and common: the upload protocol needs
     /// API-key auth, so every keyless host reports `available: false`. That is

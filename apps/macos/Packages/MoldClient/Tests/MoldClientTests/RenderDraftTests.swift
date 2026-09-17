@@ -19,8 +19,11 @@ private func recipe(
         capabilities: RecipeCapabilities(
             prompt: PromptCapability(mode: prompt, reason: nil), negativePrompt: nil,
             output: nil, referenceImages: nil, supportsStrength: nil, supportsLora: nil,
-            supportsIdentity: nil, supportsSequence: nil, supportsExtend: nil,
-            supportsAudio: nil, sourceImage: nil)
+            supportsControlnet: nil, supportsIdentity: nil, supportsSequence: nil,
+            supportsExtend: nil, supportsAudio: nil, sourceImage: nil, lora: nil,
+            controlnet: nil, mask: nil, keyframes: nil, audio: nil, sourceVideo: nil,
+            schedulers: nil, wanRecipe: nil),
+        requestSelector: nil
     )
 }
 
@@ -102,8 +105,11 @@ private func clipRecipe(source: SourceImageCapability? = nil,
             prompt: nil, negativePrompt: FeatureControl(mode: negative, required: false,
                                                         reason: nil),
             output: nil, referenceImages: nil, supportsStrength: true, supportsLora: nil,
-            supportsIdentity: nil, supportsSequence: nil, supportsExtend: nil,
-            supportsAudio: nil, sourceImage: source))
+            supportsControlnet: nil, supportsIdentity: nil, supportsSequence: nil,
+            supportsExtend: nil, supportsAudio: nil, sourceImage: source, lora: nil,
+            controlnet: nil, mask: nil, keyframes: nil, audio: nil, sourceVideo: nil,
+            schedulers: nil, wanRecipe: nil),
+        requestSelector: nil)
 }
 
 @Test func adoptingAClipRecipeTakesItsLengthAndRate() {
@@ -222,9 +228,11 @@ private func referenceRecipe(_ mode: ControlMode, relation: ReferenceSourceRelat
             referenceImages: ReferenceImagesCapability(
                 mode: mode, required: false, maxCount: maxCount, primaryIsTarget: false,
                 sourceRelation: relation, reason: nil, weight: nil),
-            supportsStrength: true, supportsLora: nil, supportsIdentity: nil,
-            supportsSequence: nil, supportsExtend: nil, supportsAudio: nil,
-            sourceImage: source))
+            supportsStrength: true, supportsLora: nil, supportsControlnet: nil,
+            supportsIdentity: nil, supportsSequence: nil, supportsExtend: nil,
+            supportsAudio: nil, sourceImage: source, lora: nil, controlnet: nil, mask: nil,
+            keyframes: nil, audio: nil, sourceVideo: nil, schedulers: nil, wanRecipe: nil),
+        requestSelector: nil)
 }
 
 @Test func referencesAreDroppedWhereTheRecipeHidesThem() {
@@ -282,8 +290,11 @@ private func sizedRecipe(_ resolution: ResolutionProfile) -> GenerationRecipe {
         steps: wide, guidance: guidance, temporal: nil,
         capabilities: RecipeCapabilities(
             prompt: nil, negativePrompt: nil, output: nil, referenceImages: nil,
-            supportsStrength: nil, supportsLora: nil, supportsIdentity: nil,
-            supportsSequence: nil, supportsExtend: nil, supportsAudio: nil, sourceImage: nil)
+            supportsStrength: nil, supportsLora: nil, supportsControlnet: nil,
+            supportsIdentity: nil, supportsSequence: nil, supportsExtend: nil,
+            supportsAudio: nil, sourceImage: nil, lora: nil, controlnet: nil, mask: nil,
+            keyframes: nil, audio: nil, sourceVideo: nil, schedulers: nil, wanRecipe: nil),
+        requestSelector: nil
     )
 }
 

@@ -12,59 +12,32 @@ public enum PromptRequirement: String, OpenWireEnum {
     case unknown
 }
 
-public struct PromptCapability: Codable, Hashable, Sendable {
-    public let mode: PromptRequirement
-    public let reason: String?
-
-    /// Absence means `required` -- that is the server's own default, and it is
-    /// the safe reading: asking for a prompt that turns out to be optional
-    /// costs nothing, omitting one that was required fails the request.
-    public static let assumedRequired = PromptCapability(mode: .required, reason: nil)
-}
-
-public struct OutputCapabilities: Codable, Hashable, Sendable {
-    public let defaultFormat: String
-    public let formats: [String]
-    public let audioRequiresMp4: Bool?
-    /// Real, and the only thing that explains a one-entry `formats` list: a
-    /// mesh recipe delivers only GLB, an audio-only recipe only WAV.
-    /// `generation_profile.rs:495-502`.
-    public let deliveryReason: String?
-
-    /// A recipe with one deliverable container has nothing to pick between.
-    public var isFixed: Bool { formats.count <= 1 }
-}
-
-/// How reference images relate to a source image on this recipe.
-public enum ReferenceSourceRelation: String, OpenWireEnum {
-    /// The references ARE the conditioning: no strength, no mask, no source.
-    case replaces
-    /// The recipe keeps its source paths, but one render carries a source
-    /// image OR references, never both.
-    case exclusive
-    /// The references ride alongside img2img, inpaint and a LoRA.
-    case combines
-    case unknown
-}
-
-public struct ReferenceImagesCapability: Codable, Hashable, Sendable {
+/// A repeatable adapter input and its immutable stack limit.
+/// `generation_profile.rs:389-395`.
+public struct AdapterControl: Codable, Hashable, Sendable {
     public let mode: ControlMode
-    public let required: Bool
-    public let maxCount: Int?
-    public let primaryIsTarget: Bool
-    public let sourceRelation: ReferenceSourceRelation
+    public let maxCount: Int
     public let reason: String?
-    public let weight: FloatControl?
 }
 
-public struct GenerationDefaults: Codable, Hashable, Sendable {
-    public let width: Int
-    public let height: Int
-    public let steps: Int
-    public let guidance: Double
-    public let frames: Int?
-    public let fps: Int?
-    public let negativePrompt: String?
+/// Which pipeline a recipe asks the server to run.
+///
+/// `nil` on the `auto` recipe: the server picks. Never spelled `"auto"` --
+/// that string is a display key, not a wire value, and the app must not send
+/// it as though it were one.
+public struct RecipeSelector: Codable, Hashable, Sendable {
+    public let pipeline: String?
+}
+
+/// Wan's own sampler controls. Decoded so the block round-trips; nothing in
+/// M4 reads it. A later milestone that offers the distill-strength slider or
+/// the first/last-frame toggle reads this rather than adding a second copy.
+public struct WanRecipeCapabilities: Codable, Hashable, Sendable {
+    public let mode: ControlMode
+    public let supportsDistillStrength: Bool
+    public let supportsFirstLastFrame: Bool
+    public let firstLastFrameMinFrames: Int?
+    public let reason: String?
 }
 
 public struct RecipeCapabilities: Codable, Hashable, Sendable {
@@ -77,12 +50,26 @@ public struct RecipeCapabilities: Codable, Hashable, Sendable {
     /// host, and the caller falls back to its own legacy predicate.
     public let supportsStrength: Bool?
     public let supportsLora: Bool?
+    public let supportsControlnet: Bool?
     public let supportsIdentity: Bool?
     public let supportsSequence: Bool?
     public let supportsExtend: Bool?
     public let supportsAudio: Bool?
-    /// Absent means the recipe has no source path at all.
+    /// Absent means this recipe reads a source image -- the field is omitted
+    /// for image families. See `RecipeCapabilities.readsSourceImage`.
     public let sourceImage: SourceImageCapability?
+    public let lora: AdapterControl?
+    public let controlnet: AdapterControl?
+    public let mask: FeatureControl?
+    public let keyframes: FeatureControl?
+    public let audio: FeatureControl?
+    public let sourceVideo: FeatureControl?
+    /// Absent, never `[]`, on a recipe with no scheduler choice
+    /// (`skip_serializing_if = "Vec::is_empty"`).
+    public let schedulers: [String]?
+    /// Wan's sampler controls. Nothing in M4 reads this -- see the type's own
+    /// doc comment.
+    public let wanRecipe: WanRecipeCapabilities?
 
     public var promptRequirement: PromptRequirement {
         (prompt ?? .assumedRequired).mode
@@ -101,6 +88,8 @@ public struct GenerationRecipe: Codable, Hashable, Sendable, Identifiable {
     /// Present only for the families that make a clip.
     public let temporal: TemporalProfile?
     public let capabilities: RecipeCapabilities
+    /// What to send the server to pick this recipe. `nil` on `auto`.
+    public let requestSelector: RecipeSelector?
 }
 
 /// The set of recipes a model advertises, and which one is the default.
@@ -116,5 +105,10 @@ public struct GenerationProfileSet: Codable, Hashable, Sendable {
     /// mismatched id is the server's bug, not a reason to show no controls.
     public var defaultRecipe: GenerationRecipe? {
         recipes.first { $0.id == defaultRecipeId } ?? recipes.first
+    }
+
+    /// One named recipe, or nil when this profile does not advertise it.
+    public func recipe(named id: String) -> GenerationRecipe? {
+        recipes.first { $0.id == id }
     }
 }
