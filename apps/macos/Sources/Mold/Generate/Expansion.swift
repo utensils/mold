@@ -24,17 +24,11 @@ enum Expansion: Equatable {
     struct Offer: Equatable {
         let kind: Kind
         let original: String
-        /// The task this rewrite is provenance for.
-        ///
-        /// For a remix this is the server's own `RemixResponse.task`. An
-        /// `ExpandResponse` carries no task at all -- the server resolves one
-        /// internally (`ExpandTask::for_family`) but never echoes it back --
-        /// so an expand offer records the type's own backward-compatible
-        /// default (`ExpandTask.textToImage`) rather than this app
-        /// replicating the family-name table that resolves it server-side.
-        /// `prompt_transform.task` is provenance only (never read back for
-        /// behaviour, `types.rs:1993-2000`), so recording the honest default
-        /// here is a documented approximation, not a silent wrong answer.
+        /// The task this rewrite is provenance for. A remix takes the
+        /// server's own `RemixResponse.task`; an `ExpandResponse` carries
+        /// none at all, so an expand offer records the task the app SENT
+        /// (`ExpandTask.forRequest`, derived from the request this draft
+        /// would submit) rather than the type's default.
         let task: ExpandTask
         let choices: [Choice]
     }
@@ -56,6 +50,27 @@ enum ExpansionOffer: Equatable {
     case wand(canRemix: Bool)
     /// This host would expand locally but has not pulled the model.
     case needsModel(String)
+}
+
+extension ExpansionOffer {
+    /// Whether the wand is offered at all, and why not.
+    ///
+    /// Three questions, and only the first two are about the machine: no
+    /// model chosen is nothing to expand, absence of the whole `expand` block
+    /// is UNKNOWN and still offers the control (`mayExpandPrompts` is
+    /// `configured ?? true`), and a configured-but-uninstalled local model
+    /// names itself rather than being offered. `remix` absent narrows the
+    /// wand rather than hiding it. A recipe whose prompt mode is `.ignored`
+    /// is deliberately NOT a fourth question here -- that is refused by the
+    /// SERVER, at 200, with the family guide's own words
+    /// (`crates/mold-server/src/routes.rs:4064-4073`), and hiding the wand
+    /// first would mean the guide's sentences are never asked for.
+    static func resolve(recipe: GenerationRecipe?, capabilities: Capabilities?) -> ExpansionOffer {
+        guard recipe != nil else { return .hidden }
+        guard capabilities?.mayExpandPrompts ?? true else { return .hidden }
+        if let model = capabilities?.expanderModelToPull { return .needsModel(model) }
+        return .wand(canRemix: capabilities?.canRemixPrompts ?? false)
+    }
 }
 
 /// What `accept(_:)` puts back on `revertExpansion()`, and what it takes the

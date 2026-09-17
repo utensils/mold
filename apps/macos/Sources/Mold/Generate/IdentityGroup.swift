@@ -31,7 +31,8 @@ struct IdentityGroup: View {
                 if photos.count < maxPhotos { addWell }
             }
             LabeledSection("Weight") {
-                SliderControl(value: weightBinding, range: Identity.weightRange, step: Identity.weightStep) {
+                SliderControl(name: "Identity weight", value: weightBinding,
+                              range: Identity.weightRange, step: Identity.weightStep) {
                     Text(weightBinding.wrappedValue, format: .number.precision(.fractionLength(2)))
                 }
             }

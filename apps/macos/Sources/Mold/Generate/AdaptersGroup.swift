@@ -43,7 +43,8 @@ struct AdaptersGroup: View {
                 .buttonStyle(.plain)
                 .help("Remove this adapter")
             }
-            SliderControl(value: scaleBinding(for: choice), range: Lora.scaleRange, step: 0.05) {
+            SliderControl(name: "\(choice.name) strength", value: scaleBinding(for: choice),
+                          range: Lora.scaleRange, step: 0.05) {
                 Text(choice.scale, format: .number.precision(.fractionLength(2)))
             }
         }

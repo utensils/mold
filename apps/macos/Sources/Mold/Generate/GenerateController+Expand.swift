@@ -11,26 +11,6 @@ extension GenerateController {
     /// button.
     static let expansionChoices = 3
 
-    /// Whether the wand is offered at all, and why not.
-    ///
-    /// Three questions, and only the first two are about the machine: no
-    /// model chosen is nothing to expand, absence of the whole `expand` block
-    /// is UNKNOWN and still offers the control (`mayExpandPrompts` is
-    /// `configured ?? true`), and a configured-but-uninstalled local model
-    /// names itself rather than being offered. `remix` absent narrows the
-    /// wand rather than hiding it. A recipe whose prompt mode is `.ignored`
-    /// is deliberately NOT a fourth question here -- that is refused by the
-    /// SERVER, at 200, with the family guide's own words
-    /// (`crates/mold-server/src/routes.rs:4064-4073`), and hiding the wand
-    /// first would mean the guide's sentences are never asked for.
-    func expansionOffer(for recipe: GenerationRecipe?, on host: MoldHost) -> ExpansionOffer {
-        guard recipe != nil else { return .hidden }
-        let capabilities = hosts.capabilities(of: host)
-        guard capabilities?.mayExpandPrompts ?? true else { return .hidden }
-        if let model = capabilities?.expanderModelToPull { return .needsModel(model) }
-        return .wand(canRemix: capabilities?.canRemixPrompts ?? false)
-    }
-
     /// Rewrites the prompt into a generation-aware one.
     ///
     /// `modelFamily` is what `/api/models` reported for the chosen model --
@@ -38,6 +18,7 @@ extension GenerateController {
     /// resolves the family through the prompting registry on the server.
     func expand(on host: MoldHost, backend: any MoldBackend) async {
         guard let modelFamily else { return }
+        let asked = expansionSnapshot
         // Decided BEFORE any call: a 422 naming the model to pull is never
         // parsed, because it hard-codes `qwen3-expand` whatever this host
         // actually configured.
@@ -49,7 +30,11 @@ extension GenerateController {
         do {
             let response = try await backend.expand(ExpandRequest(
                 prompt: draft.prompt, modelFamily: modelFamily,
-                variations: Self.expansionChoices))
+                variations: Self.expansionChoices, task: asked.task))
+            if let stale = asked.refusalIfStale(against: expansionSnapshot) {
+                expansion = .refused(stale)
+                return
+            }
             // A family that reads no prompt is answered with exactly one
             // entry whatever `variations` asked for
             // (`crates/mold-server/src/routes.rs:4064-4073`); a real
@@ -58,7 +43,7 @@ extension GenerateController {
                 expansion = .advised(response.expanded[0])
             } else {
                 expansion = .offering(Expansion.Offer(
-                    kind: .expand, original: response.original, task: .textToImage,
+                    kind: .expand, original: response.original, task: asked.task,
                     choices: response.expanded.map { Expansion.Choice(prompt: $0, dimensions: []) }))
             }
         } catch is CancellationError {
@@ -76,6 +61,7 @@ extension GenerateController {
     /// prompt, which is how a second rewrite keeps the chain straight.
     func remix(on host: MoldHost, backend: any MoldBackend) async {
         guard let modelFamily else { return }
+        let asked = expansionSnapshot
         if let model = hosts.capabilities(of: host)?.expanderModelToPull {
             expansion = .needsModel(model)
             return
@@ -87,7 +73,11 @@ extension GenerateController {
                 rootPrompt: draft.originalPrompt,
                 sourceKind: draft.originalPrompt == nil ? .direct : .current,
                 modelFamily: modelFamily,
-                variations: Self.expansionChoices))
+                variations: Self.expansionChoices, task: asked.task))
+            if let stale = asked.refusalIfStale(against: expansionSnapshot) {
+                expansion = .refused(stale)
+                return
+            }
             expansion = .offering(Expansion.Offer(
                 kind: .remix, original: response.sourcePrompt, task: response.task,
                 choices: response.variants.map { Expansion.Choice(prompt: $0.prompt, dimensions: $0.dimensions) }))
@@ -144,5 +134,16 @@ extension GenerateController {
 
     func dismissExpansion() {
         expansion = .idle
+    }
+
+    /// The facts a rewrite is asked against. The task comes from the REQUEST
+    /// this draft would submit, not from the family alone (findings 01#13,
+    /// 02#12) -- `ExpandTask.forRequest`.
+    var expansionSnapshot: ExpansionSnapshot {
+        ExpansionSnapshot(
+            prompt: draft.prompt, model: modelName, family: modelFamily,
+            task: ExpandTask.forRequest(
+                family: modelFamily, request: draft.request(model: modelName ?? "")),
+            host: machineChoice ?? hostID)
     }
 }

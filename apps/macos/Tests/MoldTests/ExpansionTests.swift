@@ -167,7 +167,7 @@ struct ExpansionTests {
         let controller = makeController(backend, host: plato, capabilities: FakeFixtures.capabilities(events: false))
         controller.draft.prompt = "a cat"
 
-        let offer = controller.expansionOffer(for: FakeFixtures.recipe(), on: plato)
+        let offer = ExpansionOffer.resolve(recipe: FakeFixtures.recipe(), capabilities: controller.hosts.capabilities(of: plato))
         guard case .wand = offer else {
             Issue.record("expected .wand, got \(offer)")
             return
@@ -182,7 +182,7 @@ struct ExpansionTests {
         let backend = FakeBackend(host: plato)
         let controller = makeController(backend, host: plato, capabilities: FakeFixtures.expandCapabilities(remix: false))
 
-        let offer = controller.expansionOffer(for: FakeFixtures.recipe(), on: plato)
+        let offer = ExpansionOffer.resolve(recipe: FakeFixtures.recipe(), capabilities: controller.hosts.capabilities(of: plato))
         #expect(offer == .wand(canRemix: false))
     }
 

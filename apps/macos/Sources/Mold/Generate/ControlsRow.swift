@@ -57,7 +57,7 @@ struct ControlsRow: View {
             if draft.media.requestConditioning.carriesSource,
                recipe.capabilities.supportsStrength == true {
                 ControlLabel("Strength") {
-                    SliderControl(value: $draft.strength, range: 0...1, step: 0.05) {
+                    SliderControl(name: "Strength", value: $draft.strength, range: 0...1, step: 0.05) {
                         Text(draft.strength, format: .number.precision(.fractionLength(2)))
                     }
                 }
@@ -110,7 +110,10 @@ struct ControlLabel<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
+            // The control inside names ITSELF to VoiceOver (`SliderControl`'s
+            // `name`), so this caption would otherwise be read twice.
             Text(title).font(.caption).foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
             content.frame(height: Chrome.fieldHeight)
         }
     }

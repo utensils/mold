@@ -280,6 +280,20 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
     // MARK: - Create
 
     nonisolated(unsafe) var expandAnswer: ExpandResponse?
+    /// Every rewrite asked for, in call order -- WHICH task the app sent,
+    /// not merely that it asked (findings 01#13, 02#12).
+    nonisolated(unsafe) var expandRequests: [ExpandRequest] = []
+    nonisolated(unsafe) var remixRequests: [RemixRequest] = []
+    /// Set before an `expand` to hold it in the air until `releaseExpand()`,
+    /// so a test can move the box while a rewrite is in flight (02#13).
+    nonisolated(unsafe) var holdsExpand = false
+    nonisolated(unsafe) private var expandGate: (() -> Void)?
+    /// A release that arrived before the gate was installed. The test's
+    /// `settle` sees the call recorded before `expand` has suspended, so
+    /// without this -- and without the lock ordering the two -- a release can
+    /// land in the window between and hang for ever.
+    nonisolated(unsafe) private var expandReleased = false
+    private let expandLock = NSLock()
     nonisolated(unsafe) var remixAnswer: RemixResponse?
     /// `nil` throws as unplanted; `[]` is a real empty history, same rule as
     /// every other listing on this fake.
@@ -290,11 +304,36 @@ final class FakeBackend: MoldBackend, @unchecked Sendable {
 
     func expand(_ request: ExpandRequest) async throws -> ExpandResponse {
         try record("expand")
+        expandRequests.append(request)
+        if holdsExpand {
+            holdsExpand = false
+            await withCheckedContinuation { continuation in
+                expandLock.lock()
+                if expandReleased {
+                    expandReleased = false
+                    expandLock.unlock()
+                    continuation.resume()
+                } else {
+                    expandGate = { continuation.resume() }
+                    expandLock.unlock()
+                }
+            }
+        }
         guard let expandAnswer else { throw notPlanted() }
         return expandAnswer
     }
+    /// Lets a held-open `expand` answer, whether or not it has suspended yet.
+    func releaseExpand() {
+        expandLock.lock()
+        let gate = expandGate
+        expandGate = nil
+        if gate == nil { expandReleased = true }
+        expandLock.unlock()
+        gate?()
+    }
     func remix(_ request: RemixRequest) async throws -> RemixResponse {
         try record("remix")
+        remixRequests.append(request)
         guard let remixAnswer else { throw notPlanted() }
         return remixAnswer
     }

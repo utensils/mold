@@ -25,6 +25,12 @@ final class GenerateController {
     /// `modelName` rather than re-derived, because the controller does not
     /// otherwise hold the `Model` it was chosen from.
     var modelFamily: String?
+    /// Where the next render goes; `nil` is Auto. STORED, and mirrored to the
+    /// suite on write -- see `MachineChoiceStore` for why a computed property
+    /// reading `UserDefaults` was invisible to `@Observable`.
+    var machineChoice: MoldHost.ID? = MachineChoiceStore.load() {
+        didSet { MachineChoiceStore.save(machineChoice) }
+    }
 
     /// Where a render would run and roughly how long it would take. Its own
     /// type (`PlacementProbe`); the views read it directly.

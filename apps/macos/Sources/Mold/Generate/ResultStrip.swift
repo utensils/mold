@@ -56,15 +56,9 @@ struct ResultStrip: View {
         .accessibilityAddTraits(index == selected ? .isSelected : [])
     }
 
-    /// The left arrow belongs to the thumbnail one step back, the right
-    /// arrow to the one step forward -- so an arrow key always does exactly
-    /// what clicking that neighbour would, and a thumbnail at either end
-    /// simply carries no shortcut rather than wrapping around.
     private func shortcut(for index: Int) -> KeyboardShortcut? {
-        guard editingText != true else { return nil }
-        if index == selected - 1 { return KeyboardShortcut(.leftArrow, modifiers: []) }
-        if index == selected + 1 { return KeyboardShortcut(.rightArrow, modifiers: []) }
-        return nil
+        Self.key(for: index, selected: selected, editingText: editingText == true)
+            .map { KeyboardShortcut($0, modifiers: []) }
     }
 
     private func loadThumbnails() async {
@@ -75,5 +69,24 @@ struct ResultStrip: View {
             guard let data = try? await backend.media(filename, trashed: false) else { continue }
             thumbnails[index] = NSImage(data: data)
         }
+    }
+}
+
+extension ResultStrip {
+    /// The left arrow belongs to the thumbnail one step back, the right arrow
+    /// to the one step forward -- so an arrow key always does exactly what
+    /// clicking that neighbour would, and a thumbnail at either end simply
+    /// carries no shortcut rather than wrapping around.
+    ///
+    /// An UNMODIFIED arrow is a window-scoped key equivalent, which is checked
+    /// before a focused field sees the key, so it stands down entirely while
+    /// anything is being typed into -- the prompt and the negative prompt
+    /// publish `editingText` for exactly this. Pure, so that stand-down is
+    /// pinned by a test rather than by a view (finding 02#15).
+    static func key(for index: Int, selected: Int, editingText: Bool) -> KeyEquivalent? {
+        guard !editingText else { return nil }
+        if index == selected - 1 { return .leftArrow }
+        if index == selected + 1 { return .rightArrow }
+        return nil
     }
 }

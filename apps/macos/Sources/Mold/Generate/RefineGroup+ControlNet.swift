@@ -40,7 +40,8 @@ extension RefineGroup {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    SliderControl(value: controlScaleBinding, range: Control.scaleRange, step: 0.05) {
+                    SliderControl(name: "ControlNet strength", value: controlScaleBinding,
+                                  range: Control.scaleRange, step: 0.05) {
                         Text(controlScaleBinding.wrappedValue, format: .number.precision(.fractionLength(2)))
                     }
                 }

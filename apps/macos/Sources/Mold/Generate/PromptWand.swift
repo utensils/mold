@@ -21,7 +21,7 @@ struct PromptWand: View {
     @State private var optionHeld = false
 
     var body: some View {
-        let offer = controller.expansionOffer(for: recipe, on: host)
+        let offer = ExpansionOffer.resolve(recipe: recipe, capabilities: hosts.capabilities(of: host))
         let visibility = Visibility.resolve(
             offer: offer, promptMode: recipe.capabilities.promptRequirement, prompt: draft.prompt)
 
