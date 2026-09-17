@@ -18,15 +18,23 @@ enum EngineProbe {
     static let budget = Duration.seconds(120)
     static let interval = Duration.milliseconds(250)
 
+    /// A WALL-CLOCK deadline, not an attempt count. `budget / interval`
+    /// counted 480 attempts, and each attempt costs its own 2 s URL timeout
+    /// plus the sleep — so an engine that binds and then stalls (a long
+    /// `recover_storage`, a stuck artifact warm) pinned `.starting` for
+    /// roughly eighteen minutes rather than the two it advertised, which is
+    /// also the whole window in which quitting used to hard-kill it
+    /// (review F5).
     static func answer(
         port: UInt16,
         apiKey: String,
         budget: Duration = EngineProbe.budget,
         interval: Duration = EngineProbe.interval,
+        now: () -> ContinuousClock.Instant = { .now },
         ask: (UInt16, String) async -> Int? = EngineProbe.status
     ) async -> Answer {
-        let attempts = max(1, Int(budget / interval))
-        for _ in 0..<attempts {
+        let deadline = now() + budget
+        repeat {
             switch await ask(port, apiKey) {
             case 200:
                 return .answered
@@ -39,7 +47,7 @@ enum EngineProbe {
             default:
                 try? await Task.sleep(for: interval)
             }
-        }
+        } while now() < deadline
         return .refused(
             "The engine started but never answered on 127.0.0.1:\(port). Relaunch Mold to try "
                 + "again — Mold's log in ~/Library/Logs/Mold has the detail.")
