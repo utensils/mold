@@ -89,13 +89,6 @@ struct LibraryPane: View {
             .onChange(of: navigation.reveal) { _, _ in revealIfNeeded() }
     }
 
-    /// A new shelf is a new list, and a selection made in the old one names
-    /// prints that may not be in it.
-    private func clearSelection() {
-        selection = LibraryCursor.Selection.empty
-        viewing = nil
-    }
-
     /// The pane, dressed: title, search, toolbar, inspector.
     private func chrome(_ showing: LibraryShowing) -> some View {
         @Bindable var navigation = navigation
@@ -136,25 +129,5 @@ struct LibraryPane: View {
                 selection: $selection, onOpen: { viewing = $0 }
             )
         }
-    }
-
-    /// Leaving the viewer puts the cursor back on the print you were looking
-    /// at, so the arrow keys carry on from there rather than from nothing.
-    private func close(_ viewed: PrintID) {
-        selection = LibraryCursor.Selection(items: [viewed], anchor: viewed, lead: viewed)
-        viewing = nil
-    }
-
-    /// Seeds the Generate pane from a finished print and goes there.
-    ///
-    /// The model is adopted from the machine that MADE the print, because a
-    /// model installed on one host is not available on another.
-    private func reuse(_ entry: LibraryEntry) {
-        generate.draft = RenderDraft(reusing: entry.print.metadata)
-        if let name = entry.print.metadata.model,
-           let model = models.model(named: name, on: entry.hostID) {
-            generate.adopt(model: model, on: entry.hostID, keepingDraft: true)
-        }
-        destination = .generate
     }
 }

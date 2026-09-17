@@ -33,9 +33,10 @@ public final class LibraryShowingCache {
     }
 
     private var key: Key?
-    private var pool: [LibraryEntry] = []
-    private var visible: [LibraryEntry] = []
-    private var sections: [LibrarySection] = []
+    /// The derivation itself, with no selection applied -- `LibraryShowing` is
+    /// still the one definition of what filtering, sorting and grouping mean;
+    /// this only remembers the answer.
+    private var derived = LibraryShowing(pool: [], visible: [], sections: [], selected: [])
     /// Where each visible row sits, so a selection resolves in the order the
     /// grid draws without walking the whole list.
     private var positions: [PrintID: Int] = [:]
@@ -52,21 +53,17 @@ public final class LibraryShowingCache {
                       last: pool.last?.id, query: query)
         if key != self.key {
             self.key = key
-            self.pool = pool
-            visible = query.apply(to: pool)
-            sections = query.sort.groupsByDay
-                ? LibraryGrouping.byDay(visible)
-                : LibraryGrouping.ungrouped(visible)
-            positions = Dictionary(uniqueKeysWithValues: visible.enumerated()
+            derived = LibraryShowing(pool: pool, query: query, selection: [])
+            positions = Dictionary(uniqueKeysWithValues: derived.visible.enumerated()
                 .map { ($0.element.id, $0.offset) })
             derivations += 1
         }
-        return LibraryShowing(pool: self.pool, visible: visible, sections: sections,
-                              selected: selected(selection))
+        return LibraryShowing(pool: derived.pool, visible: derived.visible,
+                              sections: derived.sections, selected: selected(selection))
     }
 
     private func selected(_ selection: Set<PrintID>) -> [LibraryEntry] {
         guard !selection.isEmpty else { return [] }
-        return selection.compactMap { positions[$0] }.sorted().map { visible[$0] }
+        return selection.compactMap { positions[$0] }.sorted().map { derived.visible[$0] }
     }
 }

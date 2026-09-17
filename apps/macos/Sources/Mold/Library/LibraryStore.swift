@@ -13,7 +13,9 @@ final class LibraryStore {
     /// The one object that knows which machines exist and how to reach them.
     let hosts: HostStore
 
-    private(set) var items: [LibraryEntry] = []
+    /// `internal(set)` for the same reason `trashed` is: `rebuild()` lives in
+    /// `+Rows` and `private(set)` does not cross a file boundary.
+    internal(set) var items: [LibraryEntry] = []
     /// A count, not a flag: two overlapping refreshes (a manual ⌘R while an
     /// automatic one is still in flight, say) used to have the first one's
     /// `defer` turn this off while the second was still running.
@@ -47,6 +49,15 @@ final class LibraryStore {
     /// Which live frames are this app's own edit coming back, and which
     /// machines are owed a re-list because one was skipped. See `GalleryEcho`.
     var echo = GalleryEcho()
+
+    /// Bumped whenever the rows change, so anything derived from them knows to
+    /// rebuild without comparing thousands of entries -- two libraries of the
+    /// same size differ by one print's favourite star. Stored here because a
+    /// stored property cannot live in an extension, and `internal(set)` for
+    /// the same reason `trashed` is -- `rowsChanged()` lives in `+Rows` and
+    /// `private(set)` does not cross a file boundary. See
+    /// `LibraryShowingCache`.
+    internal(set) var revision = 0
 
     init(hosts: HostStore) {
         self.hosts = hosts
@@ -113,40 +124,4 @@ final class LibraryStore {
             hosts.report(error, on: host.id, doing: "list its prints")
         }
     }
-
-    /// Drops machines that are no longer in the list, so their prints don't
-    /// linger. Called from `refresh`, because removing a machine is exactly
-    /// when nobody thinks to reload the library.
-    func prune(to hostList: [MoldHost]) {
-        let live = Set(hostList.map(\.id))
-        guard perHost.contains(where: { !live.contains($0.key) })
-            || trashPerHost.contains(where: { !live.contains($0.key) })
-        else { return }
-        perHost = perHost.filter { live.contains($0.key) }
-        trashPerHost = trashPerHost.filter { live.contains($0.key) }
-        etags = etags.filter { live.contains($0.key) }
-        trashEtags = trashEtags.filter { live.contains($0.key) }
-        collectionsPerHost = collectionsPerHost.filter { live.contains($0.key) }
-        tagsPerHost = tagsPerHost.filter { live.contains($0.key) }
-        rebuild()
-        trashed = trashPerHost.values.flatMap(\.self)
-            .sorted { ($0.print.trashedAt ?? 0) > ($1.print.trashedAt ?? 0) }
-    }
-
-    /// Bumped whenever the rows change, so anything derived from them knows to
-    /// rebuild without comparing thousands of entries -- two libraries of the
-    /// same size differ by one print's favourite star. See
-    /// `LibraryShowingCache`.
-    private(set) var revision = 0
-
-    func rowsChanged() { revision &+= 1 }
-
-    func rebuild() {
-        items = perHost.values.flatMap(\.self)
-            .filter { $0.print.trashedAt == nil }
-            .sorted { $0.print.timestamp > $1.print.timestamp }
-        rowsChanged()
-    }
-
-    func count(for host: MoldHost.ID) -> Int { perHost[host]?.count ?? 0 }
 }

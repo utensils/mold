@@ -14,7 +14,9 @@ struct LibraryGrid: View {
     @Binding var selection: LibraryCursor.Selection
     let onOpen: (PrintID) -> Void
 
-    @State private var columns = 1
+    /// Not `private`: the cursor the keyboard drives is built in
+    /// `+Selection`, and `private` does not cross a file boundary.
+    @State var columns = 1
     /// The grid must HOLD key focus, or its arrows, Return and Space never
     /// reach it -- including when the viewer closes and hands the cursor back.
     @FocusState private var focused: Bool
@@ -75,7 +77,8 @@ struct LibraryGrid: View {
         [GridItem(.adaptive(minimum: edge, maximum: .infinity), spacing: 12)]
     }
 
-    private var cursor: LibraryCursor {
+    /// Not `private`: `+Selection` is what drives it.
+    var cursor: LibraryCursor {
         LibraryCursor(sections: sections, columns: columns)
     }
 
@@ -107,51 +110,5 @@ struct LibraryGrid: View {
         }
         .padding(.top, 8)
         .background(.bar)
-    }
-
-    // MARK: - Selection
-
-    /// Acts on the whole selection when the clicked print is in it.
-    private func targets(for entry: LibraryEntry) -> [LibraryEntry] {
-        selection.items.contains(entry.id)
-            ? entries.filter { selection.items.contains($0.id) }
-            : [entry]
-    }
-
-    private func click(_ entry: LibraryEntry) {
-        selection = cursor.clicking(entry.id, ClickModifiers.current, from: selection)
-    }
-
-    private func perform(_ action: LibraryGridAction?) -> KeyPress.Result {
-        switch action {
-        case let .move(move, modifier):
-            selection = cursor.moving(move, modifier, from: selection)
-            return .handled
-        case .open: return openLead()
-        case .quickLook: return quickLookSelection()
-        case .trash: return trashSelection()
-        case nil: return .ignored
-        }
-    }
-
-    private func openLead() -> KeyPress.Result {
-        guard let lead = selection.lead else { return .ignored }
-        onOpen(lead)
-        return .handled
-    }
-
-    private func quickLookSelection() -> KeyPress.Result {
-        let targets = entries.filter { selection.items.contains($0.id) }
-        guard !targets.isEmpty else { return .ignored }
-        actions.quickLook(targets)
-        return .handled
-    }
-
-    private func trashSelection() -> KeyPress.Result {
-        let targets = entries.filter { selection.items.contains($0.id) }
-        guard !targets.isEmpty else { return .ignored }
-        if scope.isTrash { actions.deleteForever(targets) } else { actions.moveToTrash(targets) }
-        selection = .empty
-        return .handled
     }
 }

@@ -67,7 +67,7 @@ extension PrintMaterializer {
         let size = ByteCountFormatStyle().format(Int64(bytes))
         let cap = ByteCountFormatStyle().format(Int64(capBytes))
         note = "“\(name)” is \(size) and the media cache holds \(cap), "
-            + "so Mold cannot keep a copy. Settings ▸ Storage sets the cap."
+            + "so Mold cannot keep a copy. Settings ▸ General sets the cap."
     }
 
     /// Marks a file as used now, so the least-recently-used rule has something
